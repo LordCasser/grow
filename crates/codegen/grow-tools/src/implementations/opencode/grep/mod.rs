@@ -10,12 +10,12 @@ use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::implementations::grow_build::grep::ripgrep::rg_path;
 use crate::types::output::{GrepFileMatch, GrepLineMatch, GrepSearchOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
 #[allow(unused_imports)]
 use crate::types::resources::{Cwd, SharedResources};
 use crate::types::tool::{ToolKind, ToolNamespace};
+use crate::util::ripgrep::rg_path;
 
 // ───────────────────────────────────────────────────────────────────────────
 // Constants

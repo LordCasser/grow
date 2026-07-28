@@ -36,7 +36,7 @@ const DEFAULT_MAX_FILES: usize = 100;
 const DEFAULT_MAX_MATCHES: usize = 1000;
 
 fn build_ripgrep_command(root: &Path, params: &ContentSearchParams) -> Command {
-    let rg_path = crate::util::ripgrep::rg_path();
+    let rg_path = grow_tools::util::ripgrep::rg_path();
 
     let mut cmd = Command::new(&rg_path);
     cmd.current_dir(root);

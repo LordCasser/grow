@@ -2583,14 +2583,14 @@ def build_binary():
 
     binary = os.path.join(repo, "target", "release", "grow-pager")
 
-    # Find rg for GROW_SHELL_BUNDLE_RG_PATH
+    # Bundle the same rg used by the test environment.
     rg = shutil.which("rg")
     if not rg:
         print(f"{R}rg (ripgrep) not found — required for build{N}")
         sys.exit(1)
 
     env = os.environ.copy()
-    env["GROW_SHELL_BUNDLE_RG_PATH"] = rg
+    env["GROW_TOOLS_BUNDLE_RG_PATH"] = rg
 
     print(f"{B}Building grow-pager (release + dev)...{N}")
     result = subprocess.run(

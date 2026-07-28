@@ -29,11 +29,9 @@ use crate::util::truncate::truncate_line;
 
 use serde::{Deserialize, Serialize};
 
-pub mod ripgrep;
-
 // Re-export the shared GrowIntegerSchema from types module
 pub use crate::types::GrowIntegerSchema;
-use ripgrep::rg_path;
+use crate::util::ripgrep::rg_path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]

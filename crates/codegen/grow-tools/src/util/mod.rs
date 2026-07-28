@@ -12,6 +12,7 @@ pub mod mcp_truncate;
 pub mod path_suggestions;
 pub(crate) mod query_tools;
 pub mod remap;
+pub mod ripgrep;
 pub mod serde_base64;
 pub mod shell_env_policy;
 pub mod spawn;

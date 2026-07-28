@@ -1,11 +1,11 @@
-//! Build script for bundling ripgrep for the grow-tools crate.
+//! Build script for bundling search tools for the grow-tools crate.
 //!
-//! - If `GROW_TOOLS_BUNDLE_RG_PATH` is set, always bundle it
-//! - Otherwise, only bundle in release builds
+//! Release packaging supplies prebuilt binaries explicitly. Ordinary source
+//! builds never access the network and fall back to tools available on PATH.
 use std::env;
 use std::fs;
-use std::io;
 use std::path::PathBuf;
+use std::process::Command;
 
 const RG_VER: &str = "15.0.0";
 const BFS_VER: &str = "4.1";
@@ -24,8 +24,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// pipeline). Emits
 /// `cfg(bundle_<name>)` so the crate's `include_bytes!` + self-extract engages.
 ///
-/// No auto-download (unlike ripgrep): bfs/ugrep publish no prebuilt static
-/// release assets, so the release pipeline supplies the path. Unset → not
+/// bfs/ugrep publish no prebuilt static release assets, so the release pipeline
+/// supplies the path. Unset → not
 /// bundled (the runtime resolver falls back to `~/.grow/vendor` / `$PATH`);
 /// never a hard failure, so an un-wired build still succeeds.
 fn bundle_search_tool(
@@ -61,121 +61,51 @@ fn bundle_search_tool(
     Ok(())
 }
 
-/// Download + embed ripgrep. Unchanged behavior; split out of `main` so the new
-/// search-tool bundling runs regardless of ripgrep's early returns.
+/// Embed a ripgrep binary supplied by the release pipeline.
+///
+/// Keeping acquisition outside Cargo's build script makes local builds
+/// deterministic and lets CI verify the downloaded asset before embedding it.
+/// When unset, runtime resolution falls back to `rg` on PATH.
 fn bundle_rg() -> Result<(), Box<dyn std::error::Error>> {
-    // Only bundle in release builds to avoid slowing down cargo check.
     println!("cargo:rerun-if-env-changed=GROW_TOOLS_BUNDLE_RG_PATH");
-    // Declare our custom cfg to the compiler so cfg(bundle_rg) is recognized by lints
     println!("cargo:rustc-check-cfg=cfg(bundle_rg)");
 
-    let gen_dir = PathBuf::from(env::var("OUT_DIR")?).join("bundle-rg");
-    fs::create_dir_all(&gen_dir)?;
-
-    // Decide whether to bundle: path override OR release build
-    let path_override = env::var("GROW_TOOLS_BUNDLE_RG_PATH").ok();
-    let is_release = env::var("PROFILE").as_deref() == Ok("release");
-    if path_override.is_none() && !is_release {
+    let Some(source) = env::var("GROW_TOOLS_BUNDLE_RG_PATH")
+        .ok()
+        .filter(|path| !path.is_empty())
+    else {
         return Ok(());
-    }
-
-    // Skip auto-bundling on Windows: ripgrep ships .zip on Windows (not
-    // .tar.gz) and we have no zip-extraction path. Returning here BEFORE
-    // emitting `cargo:rustc-cfg=bundle_rg` keeps include_bytes! macros gated
-    // on cfg(bundle_rg) compiled-out, so the runtime falls back to `rg` on
-    // PATH. Users install ripgrep separately (winget / scoop). An explicit
-    // GROW_TOOLS_BUNDLE_RG_PATH still bundles regardless of target.
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os == "windows" && path_override.is_none() {
-        return Ok(());
-    }
-
-    // Expose cfg so the crate can include the bundled bytes.
-    println!("cargo:rustc-cfg=bundle_rg");
-    println!("cargo:rustc-env=GROW_TOOLS_RG_VER={}", RG_VER);
-
-    // If a local rg binary is provided, copy it directly (skips target check).
-    if let Some(path) = path_override {
-        let dest = gen_dir.join(format!("rg-{}-override.bin", RG_VER));
-        println!("cargo:rustc-env=GROW_TOOLS_RG_TARGET=override");
-        let _ = fs::remove_file(&dest);
-        fs::copy(PathBuf::from(path.clone()), &dest).map_err(|e| {
-            format!(
-                "Failed copying GROW_TOOLS_BUNDLE_RG_PATH: {e} from path {path} to dest {}",
-                dest.display()
-            )
-        })?;
-        return Ok(());
-    }
-
-    // Determine supported ripgrep asset triple for auto-download.
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    let asset_triple = match (target_os.as_str(), target_arch.as_str()) {
-        ("macos", "aarch64") => "aarch64-apple-darwin",
-        ("macos", "x86_64") => "x86_64-apple-darwin",
-        ("linux", "x86_64") => "x86_64-unknown-linux-musl",
-        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
-        _ => {
-            return Err(format!(
-                "Unsupported target for ripgrep bundling: {os}-{arch}. Set GROW_TOOLS_BUNDLE_RG_PATH to a local rg binary for offline or unsupported builds.",
-                os = target_os,
-                arch = target_arch
-            ).into());
-        }
     };
 
-    println!("cargo:rustc-env=GROW_TOOLS_RG_TARGET={}", asset_triple);
-    let dest = gen_dir.join(format!("rg-{}-{}.bin", RG_VER, asset_triple));
-    let _ = fs::remove_file(&dest);
-
-    let url = format!(
-        "https://github.com/BurntSushi/ripgrep/releases/download/{v}/ripgrep-{v}-{t}.tar.gz",
-        v = RG_VER,
-        t = asset_triple
-    );
-
-    let bytes: Vec<u8> = {
-        let resp = reqwest::blocking::get(&url).map_err(|e| {
-            format!(
-                "Failed to download ripgrep: {}\nSet GROW_TOOLS_BUNDLE_RG_PATH to a local rg for offline builds.",
-                e
-            )
-        })?;
-        if !resp.status().is_success() {
+    let target = env::var("TARGET")?;
+    if env::var("HOST").as_deref() == Ok(target.as_str()) {
+        let output = Command::new(&source)
+            .arg("--version")
+            .env_clear()
+            .output()
+            .map_err(|error| format!("failed to execute bundled ripgrep at {source}: {error}"))?;
+        if !output.status.success() {
             return Err(format!(
-                "HTTP {} downloading ripgrep. Set GROW_TOOLS_BUNDLE_RG_PATH for offline builds.",
-                resp.status()
+                "bundled ripgrep at {source} is not runnable for target {target}: {}",
+                String::from_utf8_lossy(&output.stderr)
             )
             .into());
         }
-        resp.bytes()?.to_vec()
-    };
-
-    let gz = flate2::read::GzDecoder::new(&bytes[..]);
-    let mut ar = tar::Archive::new(gz);
-    let mut found = false;
-    for entry in ar.entries()? {
-        let mut e = entry?;
-        let p = e.path()?;
-        if p.file_name().is_some_and(|n| n == "rg") {
-            let data: Vec<u8> = {
-                let mut v = Vec::new();
-                io::copy(&mut e, &mut v)?;
-                v
-            };
-            fs::write(&dest, &data)?;
-            found = true;
-            break;
-        }
     }
 
-    if !found {
-        return Err(format!(
-            "Could not find 'rg' in ripgrep archive {}. Set GROW_TOOLS_BUNDLE_RG_PATH for offline builds.",
-            url
+    let gen_dir = PathBuf::from(env::var("OUT_DIR")?).join("bundle-rg");
+    fs::create_dir_all(&gen_dir)?;
+    let dest = gen_dir.join(format!("rg-{RG_VER}-{target}.bin"));
+    let _ = fs::remove_file(&dest);
+    fs::copy(&source, &dest).map_err(|error| {
+        format!(
+            "failed to copy GROW_TOOLS_BUNDLE_RG_PATH from {source} to {}: {error}",
+            dest.display()
         )
-        .into());
-    }
+    })?;
 
+    println!("cargo:rustc-cfg=bundle_rg");
+    println!("cargo:rustc-env=GROW_TOOLS_RG_VER={RG_VER}");
+    println!("cargo:rustc-env=GROW_TOOLS_RG_TARGET={target}");
     Ok(())
 }

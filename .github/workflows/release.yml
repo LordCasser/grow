@@ -59,14 +59,20 @@ jobs:
             target: x86_64-unknown-linux-gnu
             asset_platform: linux-x86_64
             binary: grow
+            rg_target: x86_64-unknown-linux-musl
+            rg_sha256: 253ad0fd5fef0d64cba56c70dccdacc1916d4ed70ad057cc525fcdb0c3bbd2a7
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             asset_platform: linux-aarch64
             binary: grow
+            rg_target: aarch64-unknown-linux-gnu
+            rg_sha256: 15f8cc2fab12d88491c54d49f38589922a9d6a7353c29b0a0856727bcdf80754
           - runner: macos-15
             target: aarch64-apple-darwin
             asset_platform: macos-aarch64
             binary: grow
+            rg_target: aarch64-apple-darwin
+            rg_sha256: 98bb2e61e7277ba0ea72d2ae2592497fd8d2940934a16b122448d302a6637e3b
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -85,6 +91,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+
+      - name: Prepare bundled ripgrep
+        shell: bash
+        env:
+          RG_VERSION: "15.0.0"
+          RG_TARGET: ${{ matrix.rg_target }}
+          RG_SHA256: ${{ matrix.rg_sha256 }}
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
+          bundle_dir="${RUNNER_TEMP}/ripgrep-${RG_VERSION}-${RG_TARGET}"
+          url="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            --connect-timeout 30 --max-time 300 \
+            --output "$archive" "$url"
+          actual_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          test "$actual_sha256" = "$RG_SHA256"
+
+          mkdir -p "$bundle_dir"
+          tar -xzf "$archive" --strip-components=1 -C "$bundle_dir"
+          test -x "$bundle_dir/rg"
+          echo "GROW_TOOLS_BUNDLE_RG_PATH=$bundle_dir/rg" >> "$GITHUB_ENV"
 
       - name: Build Grow
         shell: bash

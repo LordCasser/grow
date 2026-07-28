@@ -109,11 +109,6 @@ wiremock = { workspace = true }
 grow-test-support = { workspace = true }
 xai-test-utils = { workspace = true }
 
-[build-dependencies]
-reqwest = { workspace = true, features = ["blocking", "rustls-tls"] }
-flate2 = { workspace = true }
-tar = { workspace = true }
-
 [lints]
 workspace = true
 

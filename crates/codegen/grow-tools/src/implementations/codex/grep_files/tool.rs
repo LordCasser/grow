@@ -12,12 +12,12 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::implementations::grow_build::grep::ripgrep::rg_path;
 use crate::types::output::CodexGrepFilesOutput;
 use crate::types::requirements::Expr;
 #[allow(unused_imports)]
 use crate::types::resources::Cwd;
 use crate::types::tool::{ToolKind, ToolNamespace};
+use crate::util::ripgrep::rg_path;
 
 // ─── Constants ──────────────────────────────────────────────────────
 

@@ -241,12 +241,6 @@ required-features = ["test-support"]
 
 [lints]
 workspace = true
-[build-dependencies]
-# build.rs only downloads ripgrep — no rmcp involvement. Workspace reqwest
-# (0.12) is plenty.
-reqwest = { workspace = true, features = ["blocking"] }
-flate2 = { workspace = true }
-tar = { workspace = true }
 [[bin]]
 name = "chat-history-downgrade"
 path = "src/bin/chat-history-downgrade.rs"

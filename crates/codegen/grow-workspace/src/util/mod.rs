@@ -1,5 +1,3 @@
-pub mod ripgrep;
-
 use std::io;
 
 /// True if `e` reports that an advisory `flock` is held by another process.

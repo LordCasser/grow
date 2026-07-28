@@ -65,13 +65,15 @@ SOFTWARE.
 
 ## Bundled tool binaries
 
-Release builds of this crate embed unmodified, prebuilt binaries of the
-tools below (see `build.rs`); they are self-extracted to `~/.grow/vendor/`
-at runtime. Which tools are embedded in a given build depends on what the
-release pipeline supplies at build time:
+Official distribution builds of this crate embed unmodified, prebuilt
+binaries of the tools below (see `build.rs`); they are self-extracted to
+`~/.grow/vendor/` at runtime. Which tools are embedded in a given build
+depends on what the release pipeline supplies at build time:
 
-- **ripgrep** is embedded in every release build (downloaded from the
-  official GitHub release, or supplied via `GROW_TOOLS_BUNDLE_RG_PATH`).
+- **ripgrep** is embedded in official GitHub Release builds. The release
+  workflow downloads a pinned official asset, verifies its SHA-256 digest,
+  and supplies it via `GROW_TOOLS_BUNDLE_RG_PATH`. Ordinary source builds do
+  not download or embed it unless that variable is set explicitly.
 - **ugrep** and **bfs** are embedded only when the release pipeline supplies
   static binaries via `GROW_TOOLS_BUNDLE_UGREP_PATH` /
   `GROW_TOOLS_BUNDLE_BFS_PATH`. When those are unset the tools are not

@@ -127,25 +127,73 @@ path = "~/projects/plugins"
 provider 和 model 都属于 session，不属于 Agent 定义。格式见
 [grow-agent README](crates/codegen/grow-agent/README.md)。
 
-## 构建与运行
+## 从源码构建
 
-要求：
+当前支持 macOS arm64、Linux arm64 和 Linux amd64。构建前需要：
 
-- Rust 工具链（由 `rust-toolchain.toml` 固定）
-- [DotSlash](https://dotslash-cli.com)，用于运行 `bin/` 下的 hermetic 工具
-- `protoc`（优先通过 `bin/protoc` + DotSlash 解析，也可使用 `$PROTOC` / `PATH`）
+- Git 和可用的 C/C++ 编译工具链（macOS 使用 Xcode Command Line Tools，Linux 使用对应
+  发行版的基础构建工具）
+- [Rustup](https://rustup.rs/)；进入仓库后会根据 `rust-toolchain.toml` 自动安装并使用固定
+  的 Rust 工具链
+- Protocol Buffers 编译器：推荐安装 [DotSlash](https://dotslash-cli.com) 以使用仓库中的
+  `bin/protoc`；也可以通过 `$PROTOC` 指定本机 `protoc`，或确保 `protoc` 已在 `PATH` 中
+- [ripgrep](https://github.com/BurntSushi/ripgrep)：源码构建默认直接使用 `PATH` 中的 `rg`；
+  GitHub Release 产物已经内嵌固定版本，不要求终端用户另行安装
 
 ```sh
-cargo run -p grow-pager-bin --bin grow
-cargo build -p grow-pager-bin --release
-cargo check -p grow-pager-bin
+git clone https://github.com/LordCasser/grow.git
+cd grow
+
+# 使用仓库内固定版本的 protoc
+cargo install dotslash
+
+# 编译并直接启动开发版本
+cargo run --locked -p grow-pager-bin --bin grow
 ```
 
-release 二进制位于 `target/release/grow`。
+构建优化后的本机二进制：
+
+```sh
+cargo build --locked --release -p grow-pager-bin --bin grow
+./target/release/grow --version
+```
+
+产物位于 `target/release/grow`。如需安装到用户路径：
+
+```sh
+mkdir -p "$HOME/.local/bin"
+install -m 0755 target/release/grow "$HOME/.local/bin/grow"
+```
+
+确保 `$HOME/.local/bin` 已加入 `PATH`，之后可直接运行 `grow`。首次连接模型前还需要完成
+上面的 [LLM（BYOK）配置](#配置-llmbyok)。只检查代码能否通过编译时，可运行：
+
+```sh
+cargo check --locked -p grow-pager-bin
+```
+
+Cargo build script 不会联网下载 ripgrep。如果希望本地构建一个不依赖系统 `rg` 的自包含
+二进制，先用 `command -v rg` 找到本机绝对路径，再显式提供给构建：
+
+```sh
+env GROW_TOOLS_BUNDLE_RG_PATH=/absolute/path/to/rg \
+  cargo build --locked --release -p grow-pager-bin --bin grow
+```
+
+官方 GitHub Release 使用更激进的 `release-dist` profile。复现同样的自包含构建时也要
+显式提供目标平台的 `rg`：
+
+```sh
+env GROW_TOOLS_BUNDLE_RG_PATH=/absolute/path/to/rg \
+  cargo build --locked --profile release-dist -p grow-pager-bin --bin grow
+```
+
+对应产物位于 `target/release-dist/grow`。
 
 当前官方 release 只构建 macOS arm64、Linux arm64 和 Linux amd64。创建并发布
 `v<crate-version>` GitHub Release 后，[release workflow](.github/workflows/release.yml) 会构建
-这三个目标并上传 updater 所需的版本化资产与 `SHA256SUMS`。
+这三个目标。CI 会下载并校验与目标架构匹配的固定版本 ripgrep，确认该二进制可通过绝对
+路径在没有 `PATH` 的环境中运行后将其嵌入 Grow，最后上传版本化资产与 `SHA256SUMS`。
 
 自动更新只读取 [`LordCasser/grow` Releases](https://github.com/LordCasser/grow/releases)，且默认关闭：
 

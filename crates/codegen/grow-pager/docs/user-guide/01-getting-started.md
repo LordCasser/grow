@@ -8,7 +8,8 @@ You can use it interactively as a full-screen TUI, run it headlessly for scripti
 
 ## Build from source
 
-Install Rust, DotSlash, and `protoc`, then build the composition root:
+Install Rust, DotSlash, `protoc`, and `ripgrep`, then build the composition root. Source builds use
+`rg` from `PATH`; official GitHub Release binaries embed it:
 
 ```bash
 cargo build -p grow-pager-bin --release
