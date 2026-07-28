@@ -266,7 +266,7 @@ pub struct MonitorEvent {
     pub raw_text: String,
 }
 
-/// Snapshot of a background task's state. Identical shape to the Grok
+/// Snapshot of a background task's state. Identical shape to the Grow
 /// Build `TaskSnapshot` so subscribers can decode without per-source
 /// adapters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

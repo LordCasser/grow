@@ -33,7 +33,7 @@ impl CompactionMode {
     }
 
     /// Replace the detail level if this is `Segments`, else unchanged. Lets the
-    /// resolver attach the separately-resolved `GROK_COMPACTION_DETAIL`.
+    /// resolver attach the separately-resolved `GROW_COMPACTION_DETAIL`.
     pub fn with_segment_detail(self, detail: CompactionDetail) -> Self {
         match self {
             Self::Segments(_) => Self::Segments(detail),

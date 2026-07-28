@@ -2,9 +2,9 @@
 //!
 //! These are stateless functions that operate on conversation data only —
 //! no I/O, no actor state. They live in `xai-chat-state` so that both
-//! this crate and `xai-grok-shell` can share them without duplication.
+//! this crate and `grow-shell` can share them without duplication.
+use grow_sampling_types::{ContentPart, ConversationItem, ToolResultItem};
 use std::collections::BTreeSet;
-use xai_grok_sampling_types::{ContentPart, ConversationItem, ToolResultItem};
 /// Drops tool results and flattens assistant `tool_calls` into
 /// `[Called tools: ...]` text annotations.
 ///
@@ -302,7 +302,7 @@ pub fn extract_last_user_query(conversation: &[ConversationItem]) -> Option<Stri
 }
 /// The continuation prompt added to the conversation after auto-compaction.
 ///
-/// Stored here (rather than only in `xai-grok-shell`) so that query-extraction
+/// Stored here (rather than only in `grow-shell`) so that query-extraction
 /// helpers in this crate can recognise and exclude it from "real user prompt"
 /// lists without creating a circular dependency or hard-coding the text in two
 /// places.
@@ -466,8 +466,8 @@ pub fn extract_messages_since_last_real_user(
 /// Summary of a running subagent for compaction context.
 ///
 /// This is the compaction-layer type. The protocol-layer equivalent is
-/// `ActiveSubagentSummary` in xai-grok-tools. The mapping between them
-/// happens in `run_compact_inner()` (xai-grok-shell).
+/// `ActiveSubagentSummary` in grow-tools. The mapping between them
+/// happens in `run_compact_inner()` (grow-shell).
 #[derive(Clone)]
 pub struct RunningSubagentSummary {
     /// The subagent's unique ID.
@@ -496,7 +496,7 @@ pub struct CompactionServerSummary {
     pub tool_count: usize,
     pub description: Option<String>,
 }
-/// A dependency-free mirror of `TodoStatus` (xai-grok-tools), kept here so
+/// A dependency-free mirror of `TodoStatus` (grow-tools), kept here so
 /// this crate avoids that heavy dependency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TodoSummaryStatus {
@@ -509,7 +509,7 @@ impl TodoSummaryStatus {
     pub fn is_actionable(self) -> bool {
         matches!(self, Self::Pending | Self::InProgress)
     }
-    /// Mirrors `TodoStatus::tag()` in xai-grok-tools.
+    /// Mirrors `TodoStatus::tag()` in grow-tools.
     pub fn tag(self) -> &'static str {
         match self {
             Self::Pending => "[pending]",
@@ -520,7 +520,7 @@ impl TodoSummaryStatus {
     }
 }
 /// Compaction-layer summary of a todo item. Protocol-layer equivalent is
-/// `TodoItem` in xai-grok-tools.
+/// `TodoItem` in grow-tools.
 #[derive(Clone)]
 pub struct TodoSummary {
     pub id: String,
@@ -530,7 +530,7 @@ pub struct TodoSummary {
 /// Context captured at compaction time.
 ///
 /// This is a pure data struct — rendering into system-reminder format is
-/// handled by the consumer (e.g. `xai-grok-shell`), which has access to
+/// handled by the consumer (e.g. `grow-shell`), which has access to
 /// memory backends and other shell-specific dependencies.
 pub struct CompactionStateContext {
     /// Monotonic cwd generation; zero preserves the legacy compaction shape.
@@ -607,7 +607,7 @@ impl CompactionStateContext {
     /// For a sub-agent with
     /// a single real user turn, `recent_messages` is the ENTIRE working
     /// transcript, and keeping it frees almost nothing while re-cueing the
-    /// model to re-read the same files. grok-build retains
+    /// model to re-read the same files. grow-build retains
     /// `recent_messages` so the model keeps verbatim tool context.
     pub fn for_compaction(&self) -> Self {
         Self {
@@ -784,7 +784,7 @@ pub fn format_transcript_location(path: &str) -> String {
 ///
 /// This is the canonical wrapping used for user messages that contain
 /// a query or compaction summary. Centralised here so both
-/// `xai-chat-state` and `xai-grok-shell` share the same format.
+/// `xai-chat-state` and `grow-shell` share the same format.
 pub fn wrap_user_query(text: impl Into<String>) -> String {
     let text = text.into();
     format!("<user_query>\n{text}\n</user_query>")
@@ -814,17 +814,17 @@ pub struct CompactedHistoryInput<'a> {
     /// summary. `None` means no state reminder is appended.
     pub system_reminder: Option<String>,
     /// When `true`, emit the compaction summary *before* recent messages.
-    /// When `false` (the default), recent messages come first (grok-build
+    /// When `false` (the default), recent messages come first (grow-build
     /// ordering).
     pub summary_before_recent: bool,
     /// Pre-built transcript hint appended to the summary (caller builds it via
     /// [`crate::CompactionMode::transcript_hint`] or
     /// [`format_transcript_location`]). `None` to omit. Appended to BOTH the
-    /// carrier and the grok-build summary.
+    /// carrier and the grow-build summary.
     pub transcript_hint: Option<String>,
     /// Number of summaries generated so far for this user query, *including*
     /// the one being built. Rendered verbatim into the carrier's
-    /// "Total summaries generated so far …" footer. Ignored by the grok-build
+    /// "Total summaries generated so far …" footer. Ignored by the grow-build
     /// (`summary_before_recent == false`) path. Callers that don't track a
     /// counter pass `1`.
     pub summary_count: u64,
@@ -834,7 +834,7 @@ fn summary_before_recent_carrier(_input: &CompactedHistoryInput<'_>) -> Option<S
     None
 }
 /// This is a pure function with no I/O. It mirrors exactly what
-/// `run_compact_inner` in `xai-grok-shell` assembles inline, but is
+/// `run_compact_inner` in `grow-shell` assembles inline, but is
 /// independently testable.
 pub fn build_compacted_history(input: CompactedHistoryInput<'_>) -> Vec<ConversationItem> {
     let carrier = summary_before_recent_carrier(&input);
@@ -987,11 +987,11 @@ impl HistoryRepairReport {
 /// backfill synthetic results for calls the stripping left unanswered.
 /// Pure and idempotent.
 pub fn repair_history(items: &mut Vec<ConversationItem>) -> HistoryRepairReport {
-    let duplicates_removed = xai_grok_sampling_types::dedup_duplicate_tool_results(items);
+    let duplicates_removed = grow_sampling_types::dedup_duplicate_tool_results(items);
     let stripped_tool_result_ids = strip_displaced_tool_results(items);
-    let synthetic_results_inserted = xai_grok_sampling_types::repair_dangling_tool_calls(
+    let synthetic_results_inserted = grow_sampling_types::repair_dangling_tool_calls(
         items,
-        xai_grok_sampling_types::DanglingToolCallReason::HarnessHalted {
+        grow_sampling_types::DanglingToolCallReason::HarnessHalted {
             class: "history_repair",
         },
     );
@@ -1042,7 +1042,7 @@ pub fn strip_displaced_tool_results(items: &mut Vec<ConversationItem>) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xai_grok_sampling_types::SyntheticReason;
+    use grow_sampling_types::SyntheticReason;
     #[test]
     fn compaction_attempt_serde_roundtrip_and_skips_none() {
         let attempt = CompactionAttempt {
@@ -1539,7 +1539,7 @@ actual user question";
     }
     #[test]
     fn extract_messages_since_last_real_user_ignores_synthetic_boundary() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let conv = vec![
             ConversationItem::user("<user_query>\ndo stuff\n</user_query>"),
             ConversationItem::assistant_tool_calls(vec![ToolCall {
@@ -1593,7 +1593,7 @@ actual user question";
     }
     #[tokio::test]
     async fn compaction_state_context_build_uses_real_user_and_real_tail() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let conversation = vec![
             ConversationItem::system("sys"),
             ConversationItem::user(
@@ -1746,7 +1746,7 @@ actual user question";
     /// a no-op.
     #[tokio::test]
     async fn for_compaction_drops_recent_messages_preserves_query() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let conversation = vec![
             ConversationItem::system("sys"),
             ConversationItem::user(
@@ -2240,7 +2240,7 @@ actual user question";
     }
     #[test]
     fn sanitize_strips_orphaned_tool_result() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let items = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("prompt"),
@@ -2265,7 +2265,7 @@ actual user question";
     }
     #[test]
     fn sanitize_keeps_assistant_with_unanswered_tool_calls() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let items = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("prompt"),
@@ -2281,7 +2281,7 @@ actual user question";
     }
     #[test]
     fn sanitize_strips_result_before_call() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let items = vec![
             ConversationItem::system("sys"),
             ConversationItem::tool_result("call_X", "premature result"),
@@ -2301,7 +2301,7 @@ actual user question";
     }
     #[test]
     fn validate_detects_result_before_call() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let items = vec![
             ConversationItem::tool_result("call_X", "premature"),
             ConversationItem::assistant_tool_calls(vec![ToolCall {
@@ -2315,7 +2315,7 @@ actual user question";
     }
     #[test]
     fn validate_passes_valid_history() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let items = vec![
             ConversationItem::system("sys"),
             ConversationItem::assistant_tool_calls(vec![ToolCall {
@@ -2329,7 +2329,7 @@ actual user question";
     }
     #[test]
     fn sanitize_noop_on_valid_conversation() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let items = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("prompt"),
@@ -2345,8 +2345,8 @@ actual user question";
         assert!(result.stripped_tool_call_ids.is_empty());
         assert_eq!(result.items.len(), 5);
     }
-    fn call(id: &str) -> xai_grok_sampling_types::ToolCall {
-        xai_grok_sampling_types::ToolCall {
+    fn call(id: &str) -> grow_sampling_types::ToolCall {
+        grow_sampling_types::ToolCall {
             id: id.into(),
             name: "read_file".to_string(),
             arguments: "{}".into(),
@@ -2659,12 +2659,12 @@ actual user question";
             summary_count: 1,
         };
         let summary = build_compacted_history(input(Some(
-            "/home/user/.grok/sessions/abc/updates.jsonl".to_string(),
+            "/home/user/.grow/sessions/abc/updates.jsonl".to_string(),
         )))
         .last()
         .unwrap()
         .text_content();
-        assert!(summary.contains("/home/user/.grok/sessions/abc/updates.jsonl"));
+        assert!(summary.contains("/home/user/.grow/sessions/abc/updates.jsonl"));
         let summary = build_compacted_history(input(None))
             .last()
             .unwrap()
@@ -2673,7 +2673,7 @@ actual user question";
     }
     /// Full multi-turn conversation with parallel tool calls, then compaction.
     ///
-    /// Simulates the exact conversation shape produced by xai-grok-shell:
+    /// Simulates the exact conversation shape produced by grow-shell:
     ///
     /// Turn 1: user_query → assistant(2 tool calls) → 2 tool results
     /// Turn 2: user_query → assistant(2 tool calls) → 2 tool results
@@ -2684,7 +2684,7 @@ actual user question";
     /// are preserved or omitted.
     #[tokio::test]
     async fn build_compacted_history_multi_turn_with_parallel_tool_calls() {
-        use xai_grok_sampling_types::{AssistantItem, ToolCall};
+        use grow_sampling_types::{AssistantItem, ToolCall};
         let conversation = vec![
             // [0] System prompt
             ConversationItem::system("You are a helpful coding assistant."),
@@ -2712,7 +2712,7 @@ actual user question";
                         arguments: r#"{"target_file":"src/lib.rs"}"#.into(),
                     },
                 ],
-                model_id: Some("grok-3".to_string()),
+                model_id: Some("grow-3".to_string()),
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -2751,7 +2751,7 @@ actual user question";
                         arguments: r#"{"command":"cargo test"}"#.into(),
                     },
                 ],
-                model_id: Some("grok-3".to_string()),
+                model_id: Some("grow-3".to_string()),
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -3074,7 +3074,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     /// against this guarantee by chaining `strip_reasoning_blocks` after.
     #[test]
     fn conversation_item_preserves_reasoning_siblings() {
-        use xai_grok_sampling_types::{AssistantItem, rs};
+        use grow_sampling_types::{AssistantItem, rs};
         let result = strip_tool_messages_for_conversation_item(vec![
             ConversationItem::system("system"),
             ConversationItem::Reasoning(rs::ReasoningItem {
@@ -3097,7 +3097,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     }
     #[test]
     fn strip_reasoning_blocks_drops_reasoning_siblings() {
-        use xai_grok_sampling_types::{AssistantItem, rs};
+        use grow_sampling_types::{AssistantItem, rs};
         let result = strip_reasoning_blocks(vec![
             ConversationItem::Reasoning(rs::ReasoningItem {
                 id: "r_123".to_string(),
@@ -3138,7 +3138,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     /// the message must have no `reasoning` left for the provider to validate.
     #[test]
     fn prepare_for_summarization_drops_reasoning_sibling_on_mutated_assistant() {
-        use xai_grok_sampling_types::{AssistantItem, ToolCall, rs};
+        use grow_sampling_types::{AssistantItem, ToolCall, rs};
         let mk_reasoning = || {
             ConversationItem::Reasoning(rs::ReasoningItem {
                 id: "r_123".to_string(),
@@ -3190,7 +3190,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     }
     #[test]
     fn prepare_for_summarization_drops_standalone_reasoning_sibling() {
-        use xai_grok_sampling_types::{AssistantItem, rs};
+        use grow_sampling_types::{AssistantItem, rs};
         let result = prepare_conversation_for_summarization(vec![
             ConversationItem::Reasoning(rs::ReasoningItem {
                 id: "r_123".to_string(),
@@ -3218,7 +3218,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     /// Multi-assistant conversation with mixed reasoning/tool_calls states.
     #[test]
     fn prepare_for_summarization_handles_multi_assistant_mixed_conversation() {
-        use xai_grok_sampling_types::{AssistantItem, ToolCall, rs};
+        use grow_sampling_types::{AssistantItem, ToolCall, rs};
         let mk_reasoning = || {
             ConversationItem::Reasoning(rs::ReasoningItem {
                 id: "r".to_string(),
@@ -3308,7 +3308,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     /// layers (e.g. memory flush + compaction both routing through it).
     #[test]
     fn prepare_for_summarization_is_idempotent() {
-        use xai_grok_sampling_types::{AssistantItem, ToolCall, rs};
+        use grow_sampling_types::{AssistantItem, ToolCall, rs};
         let input = vec![
             ConversationItem::system("system prompt"),
             ConversationItem::user("hello"),
@@ -3399,7 +3399,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     /// it. Guards against anyone collapsing the two preps into one.
     #[test]
     fn prepare_conversation_for_segment_keeps_tool_io_unlike_summary() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let mut user = ConversationItem::user("read a.rs");
         user.add_image("data:image/png;base64,iVBORw0KGgo=");
         let conv = vec![
@@ -3442,7 +3442,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     /// Verbatim view keeps tool calls (with arguments) and results — no flattening, no dropped results.
     #[test]
     fn verbatim_keeps_tool_calls_args_and_results() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let conv = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("read a.rs"),
@@ -3479,7 +3479,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     /// Reasoning kept on non-Messages backends, stripped on Messages — tool I/O survives either way.
     #[test]
     fn verbatim_reasoning_kept_unless_messages_backend() {
-        use xai_grok_sampling_types::{ToolCall, rs};
+        use grow_sampling_types::{ToolCall, rs};
         let mk = || {
             vec![
                 ConversationItem::system("sys"),
@@ -3502,7 +3502,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
         assert!(
             kept.iter()
                 .any(|i| matches!(i, ConversationItem::Reasoning(_))),
-            "reasoning must be kept when strip_reasoning = false (Grok backends)"
+            "reasoning must be kept when strip_reasoning = false (Grow backends)"
         );
         let stripped = prepare_conversation_for_verbatim_summarization(mk(), true);
         assert!(
@@ -3521,7 +3521,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     /// A trailing incomplete `tool_calls` turn is dropped; an earlier complete run is preserved.
     #[test]
     fn verbatim_truncates_trailing_incomplete_tool_call() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let conv = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("go"),
@@ -3552,7 +3552,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     /// A conversation ending in a complete tool run (tail = `ToolResult`) is left untouched.
     #[test]
     fn verbatim_keeps_trailing_complete_tool_run() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let conv = vec![
             ConversationItem::system("sys"),
             ConversationItem::assistant_tool_calls(vec![ToolCall {
@@ -3604,7 +3604,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     /// Trimming must not leave a leading orphan `ToolResult` whose assistant turn was dropped.
     #[test]
     fn fit_drops_leading_orphan_tool_result() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let big = "y".repeat(2000);
         let conv = vec![
             ConversationItem::system("sys"),
@@ -3627,7 +3627,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     /// An oversized most-recent tool result is kept but truncated in place (with its `tool_use`), not dropped.
     #[test]
     fn fit_truncates_oversized_tail_result_in_place() {
-        use xai_grok_sampling_types::ToolCall;
+        use grow_sampling_types::ToolCall;
         let huge = "z".repeat(40_000);
         let conv = vec![
             ConversationItem::system("sys"),
@@ -3688,7 +3688,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     /// Incompactable-state regression: `fit` must charge images (765 each), so an image-heavy old turn is trimmed.
     #[test]
     fn fit_counts_user_images_against_budget() {
-        use xai_grok_sampling_types::ContentPart;
+        use grow_sampling_types::ContentPart;
         let mut img_user = ConversationItem::user("");
         for _ in 0..50 {
             img_user.add_image("data:image/png;base64,AAAA");
@@ -3716,7 +3716,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     /// Incompactable-state regression: `fit` must charge encrypted-reasoning bytes (enc/4), so the old turn is trimmed.
     #[test]
     fn fit_counts_encrypted_reasoning_against_budget() {
-        use xai_grok_sampling_types::rs;
+        use grow_sampling_types::rs;
         let big_enc = "Z".repeat(40_000);
         let reasoning = ConversationItem::Reasoning(rs::ReasoningItem {
             id: "r1".to_string(),

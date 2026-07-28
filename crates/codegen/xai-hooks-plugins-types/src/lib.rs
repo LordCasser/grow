@@ -1,8 +1,8 @@
 //! Shared DTO types for hooks/plugins ACP extensions.
 //!
-//! This crate defines the wire format for `x.ai/hooks/*` and `x.ai/plugins/*`
+//! This crate defines the wire format for `grow/hooks/*` and `grow/plugins/*`
 //! ACP extension methods. It is dependency-free (only `serde`) so both
-//! `xai-grok-shell` and `xai-grok-pager` can depend on it without pulling
+//! `grow-shell` and `grow-pager` can depend on it without pulling
 //! in domain logic.
 //!
 //! Conversion from domain types (`HookSpec`, `LoadedPlugin`) to these DTOs
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 /// Plugin scope.
 ///
-/// Maps from `PluginScope` in `xai-grok-agent`. Variant renames:
+/// Maps from `PluginScope` in `grow-agent`. Variant renames:
 /// - source `CliOverride` -> DTO `Cli` (matches Display output "cli")
 /// - source `ConfigPath` -> DTO `Config` (matches Display output "config")
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,19 +30,19 @@ pub enum PluginScope {
 
 /// The concrete discovery source a plugin came from.
 ///
-/// Maps from `PluginOrigin` in `xai-grok-agent`. Optional on [`PluginInfo`]
+/// Maps from `PluginOrigin` in `grow-agent`. Optional on [`PluginInfo`]
 /// so older shells (which don't send it) deserialize to `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PluginOrigin {
     /// CLI `--plugin-dir`.
     CliOverride,
-    /// Project `.grok/plugins/`.
-    ProjectGrok,
+    /// Project `.grow/plugins/`.
+    ProjectGrow,
     /// Project `.claude/plugins/`.
     ProjectClaude,
-    /// `$GROK_HOME/plugins/`.
-    UserGrok,
+    /// `$GROW_HOME/plugins/`.
+    UserGrow,
     /// `~/.claude/plugins/`.
     UserClaude,
     /// A compat marketplace clone.
@@ -56,7 +56,7 @@ pub enum PluginOrigin {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         marketplace: Option<String>,
     },
-    /// Grok's install registry (marketplace or direct git/local install).
+    /// Grow's install registry (marketplace or direct git/local install).
     MarketplaceInstall {
         /// Marketplace source display name (None for direct installs).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,7 +76,7 @@ pub enum PluginOrigin {
 
 /// Hook event type.
 ///
-/// Maps from `HookEventName` in `xai-grok-hooks`. The source type's
+/// Maps from `HookEventName` in `grow-hooks`. The source type's
 /// `SubagentEnd` variant (backward-compat alias) is collapsed into
 /// `SubagentStop` during conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,12 +202,12 @@ pub struct HookInfo {
     pub timeout_ms: u64,
     /// Source directory of the hook definition file.
     pub source_dir: String,
-    /// Whether this hook is disabled via ~/.grok/disabled-hooks.
+    /// Whether this hook is disabled via ~/.grow/disabled-hooks.
     #[serde(default)]
     pub disabled: bool,
 }
 
-/// Response for `x.ai/hooks/list`.
+/// Response for `grow/hooks/list`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HooksListResponse {
@@ -274,7 +274,7 @@ pub struct PluginInfo {
     pub conflict: Option<String>,
 }
 
-/// Response for `x.ai/plugins/list`.
+/// Response for `grow/plugins/list`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginsListResponse {
@@ -332,7 +332,7 @@ pub struct McpServerInfo {
     pub config_source: Option<String>,
 }
 
-/// Response for `x.ai/mcp/list` as consumed by the pager.
+/// Response for `grow/mcp/list` as consumed by the pager.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServersListResponse {
@@ -513,7 +513,7 @@ impl PluginComponents {
 // Action types
 // ---------------------------------------------------------------------------
 
-/// Request wrapper for `x.ai/hooks/action`.
+/// Request wrapper for `grow/hooks/action`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HooksActionRequest {
@@ -552,7 +552,7 @@ pub enum HooksAction {
     },
 }
 
-/// Request wrapper for `x.ai/plugins/action`.
+/// Request wrapper for `grow/plugins/action`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginsActionRequest {
@@ -593,7 +593,7 @@ pub enum PluginsAction {
     },
 }
 
-/// Shared action response for both `x.ai/hooks/action` and `x.ai/plugins/action`.
+/// Shared action response for both `grow/hooks/action` and `grow/plugins/action`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionOutcome {
@@ -618,7 +618,7 @@ mod tests {
     #[test]
     fn hooks_action_serde_roundtrip() {
         let action = HooksAction::Add {
-            path: "/home/user/.grok/hooks".into(),
+            path: "/home/user/.grow/hooks".into(),
         };
         let json = serde_json::to_string(&action).unwrap();
         let parsed: HooksAction = serde_json::from_str(&json).unwrap();
@@ -707,7 +707,7 @@ mod tests {
             command: Some("check.sh".into()),
             url: None,
             timeout_ms: 5000,
-            source_dir: "/home/user/.grok/hooks".into(),
+            source_dir: "/home/user/.grow/hooks".into(),
             disabled: false,
         };
         let json = serde_json::to_string(&hook).unwrap();
@@ -724,7 +724,7 @@ mod tests {
         let plugin = PluginInfo {
             name: "test-plugin".into(),
             id: "user/abc12345/test-plugin".into(),
-            root: "/home/user/.grok/plugins/test-plugin".into(),
+            root: "/home/user/.grow/plugins/test-plugin".into(),
             scope: PluginScope::User,
             trusted: true,
             enabled: true,
@@ -739,7 +739,7 @@ mod tests {
             mcp_server_count: 0,
             mcp_status: McpStatus::None,
             marketplace_source: None,
-            origin: Some(PluginOrigin::UserGrok),
+            origin: Some(PluginOrigin::UserGrow),
             conflict: None,
         };
         let json = serde_json::to_string(&plugin).unwrap();
@@ -756,9 +756,9 @@ mod tests {
     fn plugin_origin_serde_roundtrip_all_variants() {
         for origin in [
             PluginOrigin::CliOverride,
-            PluginOrigin::ProjectGrok,
+            PluginOrigin::ProjectGrow,
             PluginOrigin::ProjectClaude,
-            PluginOrigin::UserGrok,
+            PluginOrigin::UserGrow,
             PluginOrigin::UserClaude,
             PluginOrigin::ClaudeMarketplace {
                 marketplace: "mp".into(),
@@ -772,7 +772,7 @@ mod tests {
                 git_url: None,
             },
             PluginOrigin::MarketplaceInstall {
-                source_name: Some("xAI Official".into()),
+                source_name: Some("Featured Marketplace".into()),
                 git_url: Some("https://example.com/r.git".into()),
             },
             PluginOrigin::ConfigPath,
@@ -1094,10 +1094,10 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// Marketplace types (wire format for x.ai/marketplace/* ACP endpoints)
+// Marketplace types (wire format for grow/marketplace/* ACP endpoints)
 // ---------------------------------------------------------------------------
 
-/// Response for `x.ai/marketplace/list`.
+/// Response for `grow/marketplace/list`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketplaceListResponse {
@@ -1124,6 +1124,8 @@ impl MarketplaceListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct MarketplaceScanResult {
     pub source_name: String,
+    #[serde(default)]
+    pub featured: bool,
     pub source_kind: String,
     pub source_url_or_path: String,
     pub plugins: Vec<MarketplacePluginEntry>,
@@ -1170,7 +1172,7 @@ pub struct MarketplacePluginEntry {
     pub remote_subdir: Option<String>,
 }
 
-/// Request wrapper for `x.ai/marketplace/action`.
+/// Request wrapper for `grow/marketplace/action`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketplaceActionRequest {

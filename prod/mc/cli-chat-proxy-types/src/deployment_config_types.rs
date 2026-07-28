@@ -12,11 +12,11 @@ pub const SIGNED_PAYLOAD_VERSION: u32 = 2;
 
 /// Domain-separation tags inside the signed bytes: both message types share one
 /// signing key, so each verifier requires its own tag (no cross-substitution).
-pub const MANAGED_POLICY_TYP: &str = "grok.managed_policy.v1";
-pub const MANAGED_IDENTITY_TYP: &str = "grok.managed_identity.v1";
+pub const MANAGED_POLICY_TYP: &str = "grow.managed_policy.v1";
+pub const MANAGED_IDENTITY_TYP: &str = "grow.managed_identity.v1";
 
 /// Client echoes its persisted envelope `nonce` on this header for the server probe.
-pub const MANAGED_CONFIG_NONCE_ECHO_HEADER: &str = "x-grok-managed-config-nonce";
+pub const MANAGED_CONFIG_NONCE_ECHO_HEADER: &str = "x-grow-managed-config-nonce";
 
 /// Shape of a server-minted nonce (16 random bytes as hex): what `fresh_nonce`
 /// produces and the only shape the client echoes (hex is HTTP-header-safe).
@@ -201,7 +201,7 @@ mod tests {
         );
 
         let partial: ManagedIdentityClaim = serde_json::from_str(
-            r#"{"typ":"grok.managed_identity.v1","principal":"team-007","expires_at":1,"key_id":"v1"}"#,
+            r#"{"typ":"grow.managed_identity.v1","principal":"team-007","expires_at":1,"key_id":"v1"}"#,
         )
         .unwrap();
         assert!(!partial.fail_closed, "a partial claim parses permissive");

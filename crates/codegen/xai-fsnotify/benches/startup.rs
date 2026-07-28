@@ -18,7 +18,7 @@
 //!
 //! Run with `cargo bench -p xai-fsnotify --bench startup`. Medians land in
 //! `target/criterion/watcher_startup/<scenario>/new/estimates.json`.
-//! `GROK_FSNOTIFY_PER_DIR=0|1` pins the strategy for A/B runs.
+//! `GROW_FSNOTIFY_PER_DIR=0|1` pins the strategy for A/B runs.
 
 use std::fs;
 use std::path::Path;

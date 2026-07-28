@@ -1,0 +1,159 @@
+# LLM Providers and BYOK
+
+The application has no bundled model, inference endpoint, or inference credential. Before the
+first connection, configure at least one provider model and select a global default in
+`~/.grow/config.toml`.
+
+```toml
+[models]
+default = "zuozuo/claude-opus-5"
+
+[provider.zuozuo]
+api_backend = "messages"
+
+[provider.zuozuo.options]
+base_url = "https://cyber.85466110.xyz/v1"
+env_key = "ZUOZUO_API_KEY"
+
+[provider.zuozuo.models.claude-opus-5]
+name = "Claude Opus 5"
+context_window = 200000
+```
+
+`provider/model` is the stable catalog ID. The model table key is also the routing model sent to
+the API unless its `model` field overrides that value.
+
+## Architecture constraints
+
+- `[provider.<id>]` owns the wire protocol.
+- `[provider.<id>.options]` owns endpoint and credential settings shared by its models.
+- `[provider.<id>.models.<model>]` owns model metadata and per-model overrides.
+- `[models].default` seeds only newly created sessions.
+- A session persists its last selected `provider/model`; reopening it restores that exact model.
+- Changing a model inside one session never changes the global default or another session.
+- Session persistence stores model IDs and session options, never provider secrets or endpoint
+  snapshots.
+- Remote model lists and compiled presets are not catalog sources.
+- Product login credentials are not inference credentials.
+
+These constraints keep provider configuration global while model selection remains session-local.
+
+## API backends
+
+`api_backend` selects the request protocol, not a vendor name:
+
+| Value | Request path | Protocol |
+|---|---|---|
+| `chat_completions` | `/v1/chat/completions` | OpenAI-compatible Chat Completions |
+| `responses` | `/v1/responses` | OpenAI-compatible Responses |
+| `messages` | `/v1/messages` | Anthropic-compatible Messages |
+
+Choose the protocol exposed by the endpoint. A Claude model served by an OpenAI-compatible gateway
+still uses `chat_completions`; an Anthropic-compatible gateway uses `messages`.
+
+## Provider options
+
+Static keys are supported, but environment variables are preferred:
+
+```toml
+[provider.openai.options]
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+```
+
+```toml
+[provider.gateway.options]
+base_url = "https://gateway.example/v1"
+api_key = "sk-..."
+```
+
+Available shared options include:
+
+- `base_url`
+- `api_base_url`
+- `api_key`
+- `env_key` (a string or ordered array of environment-variable names)
+- `extra_headers`
+- `query_params`
+- `env_http_headers`
+- `auth_provider` or inline `auth`
+- `context_window`
+
+Endpoints that require no credential, such as a local Ollama-compatible server, may omit both
+`api_key` and `env_key`.
+
+### OAuth provider credentials
+
+OAuth is provider-scoped and optional. It is stored under the configured provider name and only
+used when that provider/model explicitly references the auth configuration:
+
+```toml
+[provider.example]
+api_backend = "responses"
+
+[provider.example.options]
+base_url = "https://api.example.com/v1"
+
+[provider.example.options.auth]
+type = "oauth"
+issuer = "https://auth.example.com"
+client_id = "public-client-id"
+scopes = ["openid", "profile", "offline_access"]
+
+[provider.example.models.model-a]
+name = "Model A"
+```
+
+Run `grow login example` and `grow logout example`. With exactly one configured OAuth provider,
+the name is optional. OAuth does not create models or change session selection. A configured
+`api_key` or resolved `env_key` takes precedence, keeping ordinary BYOK non-interactive.
+
+Command helpers remain available with `type = "command"` (the default) and `command`, `args`,
+`cwd`, `timeout_secs`, and `token_ttl_secs`.
+
+## Model options
+
+```toml
+[provider.local]
+api_backend = "chat_completions"
+
+[provider.local.options]
+base_url = "http://localhost:11434/v1"
+
+[provider.local.models.qwen3-coder]
+name = "Qwen 3 Coder"
+context_window = 131072
+temperature = 0.2
+max_completion_tokens = 8192
+```
+
+A model may override shared provider options when required. Common model fields include `model`,
+`name`, `description`, `context_window`, `temperature`, `top_p`, `max_completion_tokens`,
+`reasoning_effort`, `reasoning_efforts`, `extra_headers`, `query_params`, and
+`env_http_headers`.
+
+## Auxiliary models
+
+Session summaries and image descriptions inherit the active session model when their setting is
+absent. Web search and prompt suggestions are disabled unless explicitly assigned a configured
+catalog model:
+
+```toml
+[models]
+default = "primary/main"
+session_summary = "fast/summary"
+image_description = "vision/describe"
+web_search = "search/search-model"
+prompt_suggestion = "fast/suggest"
+```
+
+Every referenced value must be a configured `provider/model` ID.
+
+## Missing or invalid configuration
+
+Interactive startup validates the model catalog before authentication, model prefetch, or ACP
+connection. When configuration is absent, it prints a provider-neutral template and offers to open
+`~/.grow/config.toml` in `$VISUAL`, `$EDITOR`, or `vi`.
+
+Non-interactive and stdio modes return an actionable error instead. They never synthesize a model or
+connect to a bundled endpoint.

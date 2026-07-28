@@ -284,7 +284,7 @@ impl HunkRecordWriter for JsonlHunkRecordWriter {
 // ---------------------------------------------------------------------------
 
 /// Lightweight aggregate update emitted by the LOC sink for consumption by
-/// an external bridge (e.g., the signals system in `xai-grok-shell`).
+/// an external bridge (e.g., the signals system in `grow-shell`).
 ///
 /// The sink sends one of these per processed `HunkEvent` that affects LOC.
 /// The bridge task translates them into `SignalEvent` variants.

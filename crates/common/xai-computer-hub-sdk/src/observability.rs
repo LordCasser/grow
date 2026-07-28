@@ -98,7 +98,7 @@ mod tests {
         bridge
             .emit(SessionEvent::TurnStarted {
                 turn_number: 1,
-                model_id: "grok-3".into(),
+                model_id: "grow-3".into(),
                 yolo_mode: false,
             })
             .await;
@@ -136,13 +136,13 @@ mod tests {
     fn session_event_serializes_to_expected_json() {
         let event = SessionEvent::TurnStarted {
             turn_number: 1,
-            model_id: "grok-3".into(),
+            model_id: "grow-3".into(),
             yolo_mode: true,
         };
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["event_type"], "turn_started");
         assert_eq!(value["turn_number"], 1);
-        assert_eq!(value["model_id"], "grok-3");
+        assert_eq!(value["model_id"], "grow-3");
         assert_eq!(value["yolo_mode"], true);
     }
 
@@ -153,7 +153,7 @@ mod tests {
             outcome: TurnHookOutcome::Completed,
             duration_ms: 3200,
             tool_call_count: 12,
-            model_id: "grok-3".into(),
+            model_id: "grow-3".into(),
         };
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["event_type"], "turn_ended");
@@ -222,7 +222,7 @@ mod tests {
         let events = vec![
             SessionEvent::TurnStarted {
                 turn_number: 1,
-                model_id: "grok-3".into(),
+                model_id: "grow-3".into(),
                 yolo_mode: false,
             },
             SessionEvent::ToolCallStarted {
@@ -256,14 +256,14 @@ mod tests {
                 outcome: TurnHookOutcome::Completed,
                 duration_ms: 500,
                 tool_call_count: 3,
-                model_id: "grok-3".into(),
+                model_id: "grow-3".into(),
             },
             SessionEvent::TurnEnded {
                 turn_number: 2,
                 outcome: TurnHookOutcome::Error,
                 duration_ms: 100,
                 tool_call_count: 0,
-                model_id: "grok-3".into(),
+                model_id: "grow-3".into(),
             },
             SessionEvent::Unknown,
         ];

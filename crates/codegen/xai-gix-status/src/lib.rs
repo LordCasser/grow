@@ -11,7 +11,7 @@ const HARD_CAP: usize = 8;
 /// Reserve for non-gix threads; nproc tests use `used + OUTER_RESERVE - 2`.
 pub(crate) const OUTER_RESERVE: usize = 8;
 
-const ENV_THREADS: &str = "GROK_GIX_STATUS_THREADS";
+const ENV_THREADS: &str = "GROW_GIX_STATUS_THREADS";
 
 /// Pure produce-worker budget. Always `n >= 1`. Caps at 8; shrinks under tight
 /// soft nproc headroom (`headroom < 2` → 1).
@@ -35,7 +35,7 @@ pub fn compute_gix_status_thread_limit_from(
     limit.max(1)
 }
 
-/// Production budget (`n >= 1`). Honours `GROK_GIX_STATUS_THREADS=N` for `N >= 1`
+/// Production budget (`n >= 1`). Honours `GROW_GIX_STATUS_THREADS=N` for `N >= 1`
 /// (forced dial; bypasses nproc). Else cores + soft nproc + thread usage.
 pub fn compute_gix_status_thread_limit() -> usize {
     if let Ok(raw) = std::env::var(ENV_THREADS)

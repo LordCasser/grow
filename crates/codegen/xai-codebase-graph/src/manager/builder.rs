@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use crate::languages::LanguageRegistry;
 use crate::scope_graph::ScopeGraphIndex;
 use crate::types::{FileMeta, SymbolAlias, SymbolOccurrence};
-use xai_grok_paths::to_relative_path;
+use grow_paths::to_relative_path;
 
 /// Error type for index building operations.
 #[derive(Debug)]

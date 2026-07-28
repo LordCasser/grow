@@ -51,7 +51,7 @@ crates.io:  https://crates.io/crates/ordered_hashmap/0.0.3
 --------------------------------------------------------------------------------
 End of notices for vendored third_party/ crates.
 
-Full product notices (all crates.io / git dependencies shipped with the Grok
+Full product notices (all crates.io / git dependencies shipped with the Grow
 CLI, including MPL packages, Apache NOTICE files, libgit2 COPYING, and
 dual-license elections) live in:
 

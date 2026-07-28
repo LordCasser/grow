@@ -2017,14 +2017,6 @@ impl TextArea {
             k if is_undo_input(&k) => {
                 self.undo();
             }
-            KeyEvent {
-                code: KeyCode::Char('r'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.redo();
-            }
-
             // Ctrl-V → paste from clipboard provider.
             KeyEvent {
                 code: KeyCode::Char('v'),

@@ -14,6 +14,7 @@ use crate::storage_client::{Auth401AttributionCallback, HttpUploadError};
 use crate::{BlobCompression, TraceExportConfig, UploadMethod};
 use anyhow::Context;
 use async_compression::tokio::bufread::ZstdEncoder;
+use grow_auth::AuthCredentialProvider;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -25,7 +26,6 @@ use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::Instrument;
 use xai_circuit_breaker::{Disposition, RetryPolicy};
-use xai_grok_auth::AuthCredentialProvider;
 /// Resolves current upload credentials at upload time, plus optional
 /// hooks the queue worker uses to wire refresh-aware credentials and
 /// `auth_401_attribution` emission into the per-upload `StorageClient`.
@@ -166,16 +166,16 @@ pub struct UploadRetryPolicy {
     /// Minimum wall time between wire probe attempts while parked for auth
     /// recovery — the fallback for 401s that heal server-side without a
     /// client credential rotation. Env override:
-    /// `GROK_UPLOAD_QUEUE_AUTH_PROBE_SECS`.
+    /// `GROW_UPLOAD_QUEUE_AUTH_PROBE_SECS`.
     pub auth_park_probe_interval: Duration,
 }
 pub const DEFAULT_AUTH_PARK_PROBE_INTERVAL: Duration = Duration::from_secs(300);
-/// Smallest probe interval a `GROK_UPLOAD_QUEUE_AUTH_PROBE_SECS` override may
+/// Smallest probe interval a `GROW_UPLOAD_QUEUE_AUTH_PROBE_SECS` override may
 /// set. Probes can't fire faster than `AUTH_PARK_WAIT_INTERVAL` regardless, so
 /// this exists mainly to reject the degenerate `0` (whole-second granularity
 /// means a non-zero value already floors at one second).
 const MIN_AUTH_PARK_PROBE_INTERVAL: Duration = Duration::from_secs(1);
-/// Resolve a `GROK_UPLOAD_QUEUE_AUTH_PROBE_SECS` override (seconds) into a probe
+/// Resolve a `GROW_UPLOAD_QUEUE_AUTH_PROBE_SECS` override (seconds) into a probe
 /// interval. `0` is rejected (`None`) so a misconfiguration can't turn every
 /// parked upload into a per-wait-slice retry storm; other values are floored at
 /// [`MIN_AUTH_PARK_PROBE_INTERVAL`].
@@ -264,7 +264,7 @@ pub const QUEUE_ITEM_SIDECAR_SCHEMA_VERSION: u32 = 1;
 /// [`UploadQueue::enqueue_bytes_blocking`] (the fire-and-forget paths write the
 /// temp file alone). It carries everything a fresh process needs to re-enqueue
 /// the upload after a restart — the temp-file name alone is lossy (truncated
-/// `session_id`, no GCS path). Read by `xai_grok_workspace::recovery`.
+/// `session_id`, no GCS path). Read by `grow_workspace::recovery`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QueueItemSidecar {
     /// Manifest schema version (see [`QUEUE_ITEM_SIDECAR_SCHEMA_VERSION`]).
@@ -309,7 +309,7 @@ struct UploadQueueItem {
     enqueued_at: Instant,
     /// Optional completion signal for callers that need to block until done.
     completion_tx: Option<oneshot::Sender<anyhow::Result<UploadCompletion>>>,
-    /// Grok client version string, stamped on the `gcs_queue_upload` tracing span.
+    /// Grow client version string, stamped on the `gcs_queue_upload` tracing span.
     /// Copied from `UploadQueue::client_version` at enqueue time.
     client_version: Option<String>,
     /// When true, the upload worker compresses the file with zstd before uploading.
@@ -463,7 +463,7 @@ pub struct UploadQueue {
     resolver: Arc<dyn TraceExportSource>,
     stats: Arc<UploadQueueStats>,
     max_queue_bytes: u64,
-    /// Grok client version string stamped on every `gcs_queue_upload` tracing span.
+    /// Grow client version string stamped on every `gcs_queue_upload` tracing span.
     /// Enables per-version breakdown of upload failures in analytics dashboards.
     pub client_version: Option<String>,
     drain_state: Arc<Mutex<Option<DrainState>>>,
@@ -563,24 +563,24 @@ enum EnqueueAttempt {
 impl UploadQueue {
     /// Create the queue, initialize the temp directory, and spawn the background worker.
     pub fn spawn(
-        grok_home: &Path,
+        grow_home: &Path,
         resolver: Arc<dyn TraceExportSource>,
         retry_policy: UploadRetryPolicy,
     ) -> Self {
-        Self::spawn_with_concurrency(grok_home, resolver, retry_policy, DEFAULT_MAX_CONCURRENT)
+        Self::spawn_with_concurrency(grow_home, resolver, retry_policy, DEFAULT_MAX_CONCURRENT)
     }
     /// Create the queue with explicit concurrency limit for the background worker.
     pub fn spawn_with_concurrency(
-        grok_home: &Path,
+        grow_home: &Path,
         resolver: Arc<dyn TraceExportSource>,
         mut retry_policy: UploadRetryPolicy,
         max_concurrent: usize,
     ) -> Self {
-        let queue_dir = grok_home.join("upload_queue");
+        let queue_dir = grow_home.join("upload_queue");
         if let Err(e) = std::fs::create_dir_all(&queue_dir) {
             tracing::warn!(error = %e, "Failed to create upload queue dir");
         }
-        if let Some(raw_secs) = std::env::var("GROK_UPLOAD_QUEUE_AUTH_PROBE_SECS")
+        if let Some(raw_secs) = std::env::var("GROW_UPLOAD_QUEUE_AUTH_PROBE_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
         {
@@ -588,7 +588,7 @@ impl UploadQueue {
                 Some(interval) => retry_policy.auth_park_probe_interval = interval,
                 None => {
                     tracing::warn!(
-                        "Ignoring GROK_UPLOAD_QUEUE_AUTH_PROBE_SECS={raw_secs}: a zero probe \
+                        "Ignoring GROW_UPLOAD_QUEUE_AUTH_PROBE_SECS={raw_secs}: a zero probe \
                      interval would re-attempt every parked upload on every wait slice. \
                      Keeping the {}s default.",
                         DEFAULT_AUTH_PARK_PROBE_INTERVAL.as_secs(),
@@ -596,7 +596,7 @@ impl UploadQueue {
                 }
             }
         }
-        let max_queue_bytes = std::env::var("GROK_UPLOAD_QUEUE_MAX_BYTES")
+        let max_queue_bytes = std::env::var("GROW_UPLOAD_QUEUE_MAX_BYTES")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_MAX_QUEUE_BYTES);
@@ -653,7 +653,7 @@ impl UploadQueue {
             None
         }
     }
-    /// Set the grok client version to stamp on every `gcs_queue_upload` span.
+    /// Set the grow client version to stamp on every `gcs_queue_upload` span.
     pub fn with_client_version(mut self, version: impl Into<String>) -> Self {
         self.client_version = Some(version.into());
         self
@@ -2325,8 +2325,8 @@ pub fn last_orphans_cleaned() -> u64 {
 /// Called at agent startup to remove files and directories older than `max_age`
 /// that were left behind by crashes or ungraceful shutdowns. Returns the number
 /// of entries removed.
-pub fn cleanup_orphaned_uploads(grok_home: &Path, max_age: Duration) -> u64 {
-    let cleaned = cleanup_queue_dir(&grok_home.join("upload_queue"), max_age, None);
+pub fn cleanup_orphaned_uploads(grow_home: &Path, max_age: Duration) -> u64 {
+    let cleaned = cleanup_queue_dir(&grow_home.join("upload_queue"), max_age, None);
     LAST_ORPHANS_CLEANED.store(cleaned, Ordering::Relaxed);
     cleaned
 }

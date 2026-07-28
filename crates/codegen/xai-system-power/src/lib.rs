@@ -5,7 +5,7 @@
 //! the request, rotates/revokes the old refresh token, and the response is
 //! lost across the suspend). On wake the client is holding a dead refresh
 //! token and the user is forced to re-login. See
-//! `xai-grok-shell`'s `AuthManager` sleep gate, which consumes these events to
+//! `grow-shell`'s `AuthManager` sleep gate, which consumes these events to
 //! avoid *starting* a refresh just before sleep. An in-flight refresh is
 //! deliberately left to finish, never aborted (dropping it could discard a
 //! rotated-token response and cause the very revocation this guards against);

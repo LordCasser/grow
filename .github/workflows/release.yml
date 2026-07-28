@@ -1,0 +1,130 @@
+name: Build release assets
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build (for example v0.2.112)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_RELEASE_DIST_INCREMENTAL: "false"
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - id: version
+        name: Match tag to Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "grow-pager-bin") | .version')"
+          tag_version="${RELEASE_TAG#v}"
+          test -n "$version"
+          if [[ "$tag_version" != "$version" ]]; then
+            echo "Release tag $RELEASE_TAG does not match grow-pager-bin $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.asset_platform }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            asset_platform: linux-x86_64
+            binary: grow
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset_platform: linux-aarch64
+            binary: grow
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            asset_platform: macos-aarch64
+            binary: grow
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92.0"
+          targets: ${{ matrix.target }}
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build Grow
+        shell: bash
+        env:
+          GROW_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          cargo build --locked --profile release-dist \
+            -p grow-pager-bin --bin grow --target "${{ matrix.target }}"
+
+      - name: Stage release asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release-dist/${{ matrix.binary }}" \
+            "dist/grow-${{ needs.validate.outputs.version }}-${{ matrix.asset_platform }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grow-${{ matrix.asset_platform }}
+          path: dist/grow-*
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Publish release assets
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: grow-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: dist
+        run: sha256sum grow-* > SHA256SUMS
+
+      - name: Upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber

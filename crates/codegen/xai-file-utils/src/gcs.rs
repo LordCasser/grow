@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::Context;
 
 use crate::UploadMethod;
-use xai_grok_auth::{AuthCredentialProvider, StaticAuthCredentialProvider};
+use grow_auth::{AuthCredentialProvider, StaticAuthCredentialProvider};
 
 use crate::storage_client::{Auth401AttributionCallback, StaticGrokAuth, StorageClient};
 

@@ -787,7 +787,7 @@ impl ToolHarness {
     /// Tools are resolved exclusively from the `LocalRegistry`. Remote
     /// dispatch returns `ToolError::NotFound`. `default_extensions` are
     /// merged into every `ToolCallContext` before dispatch — use this
-    /// to inject `GrokSharedState`, `GrokAgentState`, etc.
+    /// to inject `GrowSharedState`, `GrowAgentState`, etc.
     pub fn local_only_with(
         registry: LocalRegistry,
         session: SessionId,
@@ -2368,7 +2368,7 @@ mod tests {
             outcome: TurnHookOutcome::Completed,
             duration_ms: 1,
             tool_call_count: 0,
-            model_id: "grok-3".to_string(),
+            model_id: "grow-3".to_string(),
             written_repo_paths: Vec::new(),
             cancellation_category: None,
             cancellation_context: None,
@@ -2753,7 +2753,7 @@ mod tests {
     fn session_event_frame_has_no_tool_correlation_ids() {
         let event = SessionEvent::TurnStarted {
             turn_number: 1,
-            model_id: "grok-3".into(),
+            model_id: "grow-3".into(),
             yolo_mode: false,
         };
         let frame = build_session_event_frame(&event);

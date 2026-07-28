@@ -304,16 +304,16 @@ mod tests {
         let registry = Registry::new();
 
         let counter =
-            IntCounterVec::new(Opts::new("grok_test_total", "help"), &["reason"]).unwrap();
+            IntCounterVec::new(Opts::new("grow_test_total", "help"), &["reason"]).unwrap();
         registry.register(Box::new(counter.clone())).unwrap();
         counter.with_label_values(&["zdr"]).inc_by(5);
 
-        let gauge = IntGauge::new("grok_test_pending", "help").unwrap();
+        let gauge = IntGauge::new("grow_test_pending", "help").unwrap();
         registry.register(Box::new(gauge.clone())).unwrap();
         gauge.set(7);
 
         let hist = Histogram::with_opts(
-            HistogramOpts::new("grok_test_seconds", "help").buckets(vec![0.5, 1.0]),
+            HistogramOpts::new("grow_test_seconds", "help").buckets(vec![0.5, 1.0]),
         )
         .unwrap();
         registry.register(Box::new(hist.clone())).unwrap();
@@ -326,7 +326,7 @@ mod tests {
             metrics.iter().map(|m| (m.name.clone(), m)).collect();
 
         // Counter -> Sum (monotonic, cumulative), label preserved.
-        let metric::Data::Sum(sum) = by_name["grok_test_total"].data.as_ref().unwrap() else {
+        let metric::Data::Sum(sum) = by_name["grow_test_total"].data.as_ref().unwrap() else {
             panic!("counter must convert to Sum");
         };
         assert!(sum.is_monotonic);
@@ -342,7 +342,7 @@ mod tests {
         );
 
         // Gauge -> Gauge.
-        let metric::Data::Gauge(g) = by_name["grok_test_pending"].data.as_ref().unwrap() else {
+        let metric::Data::Gauge(g) = by_name["grow_test_pending"].data.as_ref().unwrap() else {
             panic!("gauge must convert to Gauge");
         };
         assert_eq!(
@@ -352,7 +352,7 @@ mod tests {
 
         // Histogram -> Histogram with cumulative buckets differenced and
         // a +Inf bucket appended.
-        let metric::Data::Histogram(h) = by_name["grok_test_seconds"].data.as_ref().unwrap() else {
+        let metric::Data::Histogram(h) = by_name["grow_test_seconds"].data.as_ref().unwrap() else {
             panic!("histogram must convert to Histogram");
         };
         assert_eq!(

@@ -176,13 +176,13 @@ pub struct WorkspaceBindMetadata {
         skip_serializing_if = "Option::is_none"
     )]
     pub capability_mode: Option<String>,
-    /// Explicit toolset in the grok-tools gRPC wire shape. Empty = unset.
+    /// Explicit toolset in the grow-tools gRPC wire shape. Empty = unset.
     #[serde(
         default,
         deserialize_with = "ok_or_default",
         skip_serializing_if = "Vec::is_empty"
     )]
-    pub tools: Vec<xai_grok_tools_api::ToolConfigEntry>,
+    pub tools: Vec<grow_tools_api::ToolConfigEntry>,
     #[serde(
         default,
         deserialize_with = "ok_or_default",
@@ -252,8 +252,8 @@ mod bind_metadata_tests {
         let md = WorkspaceBindMetadata {
             preset: Some("explore".to_owned()),
             capability_mode: Some("read_only".to_owned()),
-            tools: vec![xai_grok_tools_api::ToolConfigEntry {
-                id: "GrokBuild:grep".to_owned(),
+            tools: vec![grow_tools_api::ToolConfigEntry {
+                id: "Grow:grep".to_owned(),
                 ..Default::default()
             }],
             viewer_ctx: Some(super::WorkspaceViewerContext {

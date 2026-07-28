@@ -308,7 +308,7 @@ struct VcsDirs {
     git_dir: Option<PathBuf>,
     /// `.sl` working-copy dir (ancestor walk), or `None` if absent.
     sl_dir: Option<PathBuf>,
-    /// Whether Sapling suppression is enabled (`GROK_FSNOTIFY_SAPLING`).
+    /// Whether Sapling suppression is enabled (`GROW_FSNOTIFY_SAPLING`).
     sapling: bool,
 }
 

@@ -13,7 +13,7 @@ schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio-util = { workspace = true }
-xai-grok-tools-api = { workspace = true }
+grow-tools-api = { workspace = true }
 xai-tool-protocol = { workspace = true }
 xai-tool-types = { workspace = true }
 

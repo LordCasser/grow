@@ -10,7 +10,7 @@
 # Why vendored: the Rust port of dagre.js (the same layout engine mermaid.js
 # uses). It is the layout core of the Warp `mermaid-to-svg` engine, which renders
 # untrusted model output, so vendoring gives a full audit surface and immunity to
-# upstream yanks. See third_party/mermaid-to-svg and crates/codegen/xai-grok-mermaid.
+# upstream yanks. See third_party/mermaid-to-svg and crates/codegen/grow-mermaid.
 #
 # ============================================================================
 # VENDORING NOTES — re-apply / re-bless ALL of the following on every upgrade:
@@ -51,6 +51,6 @@ ordered_hashmap = { path = "../ordered_hashmap" }
 
 # Clippy lints local/path crates (this vendored crate is one) under the
 # workspace's `-D warnings`. We do not restyle upstream third-party code, so
-# allow clippy here; our own crate (xai-grok-mermaid) is still fully linted.
+# allow clippy here; our own crate (grow-mermaid) is still fully linted.
 [lints.clippy]
 all = { level = "allow", priority = -1 }

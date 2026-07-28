@@ -2,7 +2,7 @@
 
 /// Parse a `usize` env knob, falling back to `default` when unset or
 /// unparseable. The perf-repro convention for sizing `#[ignore]` benches
-/// (e.g. `GROK_PERF_GIT_FILES`).
+/// (e.g. `GROW_PERF_GIT_FILES`).
 pub fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)
         .ok()

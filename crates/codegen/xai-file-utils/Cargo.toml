@@ -11,7 +11,7 @@ anyhow = { workspace = true }
 base64.workspace = true
 dunce = { workspace = true }
 xai-circuit-breaker = { workspace = true }
-xai-grok-version = { workspace = true }
+grow-version = { workspace = true }
 aws-sdk-s3 = { version = "1", default-features = false, features = [
     "rt-tokio",
 ] }
@@ -33,7 +33,7 @@ reqwest = { workspace = true }
 reqwest-middleware = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs"] }
 sha2 = { workspace = true, features = ["force-soft"] }
-xai-grok-auth = { path = "../xai-grok-auth", features = ["middleware"] }
+grow-auth = { path = "../grow-auth", features = ["middleware"] }
 prod-mc-cli-chat-proxy-types = { path = "../../../prod/mc/cli-chat-proxy-types" }
 async-compression = { workspace = true, features = ["tokio"] }
 gcloud-storage = { workspace = true }

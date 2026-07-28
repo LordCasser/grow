@@ -11,7 +11,7 @@ large-error-threshold = 256
 # destinations), leak into model prompt context, and poison path-equality
 # keys. Use `dunce::canonicalize` (identical to std on Unix/macOS; strips the
 # verbatim prefix on Windows when safely representable). For async contexts
-# in xai-grok-tools, use the blessed helpers in `crate::util::fs`.
+# in grow-tools, use the blessed helpers in `crate::util::fs`.
 #
 # Caveat: dunce keeps the verbatim form for paths it cannot safely simplify
 # (notably > 260 chars or reserved device names), so prefix checks between two
@@ -24,5 +24,5 @@ large-error-threshold = 256
 disallowed-methods = [
     { path = "std::fs::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use dunce::canonicalize" },
     { path = "std::path::Path::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use dunce::canonicalize" },
-    { path = "tokio::fs::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use xai_grok_tools::util::fs helpers or spawn_blocking + dunce::canonicalize" },
+    { path = "tokio::fs::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use grow_tools::util::fs helpers or spawn_blocking + dunce::canonicalize" },
 ]

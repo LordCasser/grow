@@ -26,7 +26,7 @@
 //!   dirs are pruned by prefix. `.git` is watched surgically (non-recursive
 //!   `.git` + `refs`, recursive `refs/heads` + `refs/tags`) instead of
 //!   recursively, so `objects/` and `modules/` (13k+ dirs on big repos) cost
-//!   nothing. `GROK_FSNOTIFY_PER_DIR=1|0` overrides the platform default.
+//!   nothing. `GROW_FSNOTIFY_PER_DIR=1|0` overrides the platform default.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -116,12 +116,12 @@ fn dir_named(p: &Path, name: &str) -> bool {
     p.file_name().is_some_and(|n| n == name)
 }
 
-/// Whether Sapling (`.sl`) support is enabled (default on; `GROK_FSNOTIFY_SAPLING=0`
+/// Whether Sapling (`.sl`) support is enabled (default on; `GROW_FSNOTIFY_SAPLING=0`
 /// or `false` disables it). Resolved once per watcher in `FsEventSource::start_on`
 /// and threaded down, so discovery, watching, and filtering can't disagree.
 pub(crate) fn sapling_enabled() -> bool {
     !matches!(
-        std::env::var("GROK_FSNOTIFY_SAPLING").ok().as_deref(),
+        std::env::var("GROW_FSNOTIFY_SAPLING").ok().as_deref(),
         Some("0") | Some("false")
     )
 }
@@ -138,12 +138,12 @@ pub(crate) enum WatchStrategy {
     PerDir,
 }
 
-/// Resolve the strategy: `GROK_FSNOTIFY_PER_DIR=1|true` forces per-dir,
+/// Resolve the strategy: `GROW_FSNOTIFY_PER_DIR=1|true` forces per-dir,
 /// `=0|false` forces fan-out, otherwise per-dir on Linux (inotify) and
 /// fan-out elsewhere. Resolved once in [`start_with_timeout`] like the
 /// Sapling switch, so selection and maintenance can't disagree.
 pub(crate) fn watch_strategy() -> WatchStrategy {
-    match std::env::var("GROK_FSNOTIFY_PER_DIR").ok().as_deref() {
+    match std::env::var("GROW_FSNOTIFY_PER_DIR").ok().as_deref() {
         Some("1") | Some("true") => WatchStrategy::PerDir,
         Some("0") | Some("false") => WatchStrategy::Fanout,
         _ if cfg!(target_os = "linux") => WatchStrategy::PerDir,
@@ -151,7 +151,7 @@ pub(crate) fn watch_strategy() -> WatchStrategy {
     }
 }
 
-/// Per-dir mode's total watch budget (`GROK_FSNOTIFY_MAX_WATCHES` overrides).
+/// Per-dir mode's total watch budget (`GROW_FSNOTIFY_MAX_WATCHES` overrides).
 ///
 /// Watches are added shallow-first, so hitting the budget sheds the *deepest*
 /// directories; a warning is logged once. The default stays within a typical
@@ -160,7 +160,7 @@ pub(crate) fn watch_strategy() -> WatchStrategy {
 const DEFAULT_MAX_WATCHES: usize = 49_152;
 
 pub(crate) fn max_watch_budget() -> usize {
-    std::env::var("GROK_FSNOTIFY_MAX_WATCHES")
+    std::env::var("GROW_FSNOTIFY_MAX_WATCHES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n > 0)
@@ -1068,7 +1068,7 @@ pub(crate) fn start_with_timeout(
                         if dirs.len() > budget {
                             tracing::warn!(
                                 "fs_notify: {} non-ignored dirs exceed watch budget {budget}; \
-                                 shedding the deepest (raise with GROK_FSNOTIFY_MAX_WATCHES)",
+                                 shedding the deepest (raise with GROW_FSNOTIFY_MAX_WATCHES)",
                                 dirs.len()
                             );
                             dirs.truncate(budget);
@@ -3767,7 +3767,7 @@ mod tests {
         #[test]
         fn external_ancestor_sl_arms_in_recursive_root_mode() {
             // Subdir cwd whose `.sl` lives in an ancestor *outside* watch_path
-            // (e.g. `grok` run in `crates/codegen`): the production guard must
+            // (e.g. `grow` run in `crates/codegen`): the production guard must
             // still attach the watch under a recursive root (fanout=false).
             let temp = TempDir::new().unwrap();
             let repo = dunce::canonicalize(temp.path()).unwrap();
@@ -3787,18 +3787,18 @@ mod tests {
             impl Drop for Restore {
                 fn drop(&mut self) {
                     // Safety: serialized test; no concurrent env access.
-                    unsafe { std::env::remove_var("GROK_FSNOTIFY_SAPLING") };
+                    unsafe { std::env::remove_var("GROW_FSNOTIFY_SAPLING") };
                 }
             }
             let _restore = Restore;
 
-            unsafe { std::env::remove_var("GROK_FSNOTIFY_SAPLING") };
+            unsafe { std::env::remove_var("GROW_FSNOTIFY_SAPLING") };
             assert!(sapling_enabled(), "default (unset) is enabled");
             for off in ["0", "false"] {
-                unsafe { std::env::set_var("GROK_FSNOTIFY_SAPLING", off) };
+                unsafe { std::env::set_var("GROW_FSNOTIFY_SAPLING", off) };
                 assert!(!sapling_enabled(), "{off:?} must disable Sapling");
             }
-            unsafe { std::env::set_var("GROK_FSNOTIFY_SAPLING", "1") };
+            unsafe { std::env::set_var("GROW_FSNOTIFY_SAPLING", "1") };
             assert!(sapling_enabled(), "any other value stays enabled");
         }
 

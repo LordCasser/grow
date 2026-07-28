@@ -38,7 +38,7 @@ pub struct BeforeTurnPayload {
     /// Per-session user-turn counter, 0-based. Not strictly monotonic: a tool-result continuation keeps the issuing turn's number, and
     /// editing or regenerating an earlier message reuses that turn's number (consumers deduping on it treat a regenerate as the same turn).
     pub turn_number: u64,
-    /// Model being used for this turn (e.g. "grok-3").
+    /// Model being used for this turn (e.g. "grow-3").
     pub model_id: String,
     /// Whether the session is in YOLO / auto-approve mode.
     #[serde(default)]
@@ -253,7 +253,7 @@ mod tests {
     fn before_turn_round_trip() {
         let payload = BeforeTurnPayload {
             turn_number: 42,
-            model_id: "grok-3".to_string(),
+            model_id: "grow-3".to_string(),
             yolo_mode: true,
             conversation_message_count: 9,
             session_relationship: "subagent".to_string(),
@@ -265,7 +265,7 @@ mod tests {
             serialized,
             json!({
                 "turn_number": 42,
-                "model_id": "grok-3",
+                "model_id": "grow-3",
                 "yolo_mode": true,
                 "conversation_message_count": 9,
                 "session_relationship": "subagent",
@@ -281,7 +281,7 @@ mod tests {
     fn before_turn_yolo_mode_defaults_false() {
         let json = json!({
             "turn_number": 1,
-            "model_id": "grok-3",
+            "model_id": "grow-3",
         });
         let payload: BeforeTurnPayload = serde_json::from_value(json).unwrap();
         assert!(!payload.yolo_mode);
@@ -296,7 +296,7 @@ mod tests {
             outcome: TurnHookOutcome::Completed,
             duration_ms: 1500,
             tool_call_count: 3,
-            model_id: "grok-3".to_string(),
+            model_id: "grow-3".to_string(),
             written_repo_paths: vec!["outputs/result.md".to_string()],
             cancellation_category: None,
             cancellation_context: None,
@@ -310,7 +310,7 @@ mod tests {
                 "outcome": "completed",
                 "duration_ms": 1500,
                 "tool_call_count": 3,
-                "model_id": "grok-3",
+                "model_id": "grow-3",
                 "written_repo_paths": ["outputs/result.md"],
             })
         );
@@ -326,7 +326,7 @@ mod tests {
             "outcome": "completed",
             "duration_ms": 10,
             "tool_call_count": 0,
-            "model_id": "grok-3",
+            "model_id": "grow-3",
         });
         let payload: AfterTurnPayload = serde_json::from_value(json).unwrap();
         assert!(payload.written_repo_paths.is_empty());
@@ -339,7 +339,7 @@ mod tests {
             outcome: TurnHookOutcome::Cancelled,
             duration_ms: 200,
             tool_call_count: 1,
-            model_id: "grok-4".to_string(),
+            model_id: "grow-4".to_string(),
             written_repo_paths: vec![],
             cancellation_category: Some("doom_loop_repetition".to_string()),
             cancellation_context: Some(json!({ "reason": "repetition" })),
@@ -411,7 +411,7 @@ mod tests {
             "turn_number": 1,
             "duration_ms": 100,
             "tool_call_count": 0,
-            "model_id": "grok-3",
+            "model_id": "grow-3",
         });
         assert!(serde_json::from_value::<AfterTurnPayload>(json).is_err());
     }
@@ -420,7 +420,7 @@ mod tests {
     fn extra_fields_ignored() {
         let json = json!({
             "turn_number": 1,
-            "model_id": "grok-3",
+            "model_id": "grow-3",
             "future_field": "should be ignored",
         });
         let payload: BeforeTurnPayload = serde_json::from_value(json).unwrap();
@@ -431,7 +431,7 @@ mod tests {
     fn before_turn_yolo_false_serialized() {
         let payload = BeforeTurnPayload {
             turn_number: 1,
-            model_id: "grok-3".to_string(),
+            model_id: "grow-3".to_string(),
             yolo_mode: false,
             conversation_message_count: 0,
             session_relationship: "primary".to_string(),
@@ -450,7 +450,7 @@ mod tests {
     fn turn_hook_request_before_round_trip() {
         let req = TurnHookRequest::Before(BeforeTurnPayload {
             turn_number: 7,
-            model_id: "grok-3".to_string(),
+            model_id: "grow-3".to_string(),
             yolo_mode: true,
             conversation_message_count: 0,
             session_relationship: "primary".to_string(),
@@ -462,7 +462,7 @@ mod tests {
             json!({
                 "phase": "before",
                 "turn_number": 7,
-                "model_id": "grok-3",
+                "model_id": "grow-3",
                 "yolo_mode": true,
                 "conversation_message_count": 0,
                 "session_relationship": "primary",
@@ -480,7 +480,7 @@ mod tests {
             outcome: TurnHookOutcome::Completed,
             duration_ms: 10,
             tool_call_count: 2,
-            model_id: "grok-3".to_string(),
+            model_id: "grow-3".to_string(),
             written_repo_paths: Vec::new(),
             cancellation_category: None,
             cancellation_context: None,
@@ -606,7 +606,7 @@ mod tests {
     fn before_turn_legacy_payload_defaults_new_fields() {
         let json = json!({
             "turn_number": 3,
-            "model_id": "grok-3",
+            "model_id": "grow-3",
             "yolo_mode": true,
         });
         let payload: BeforeTurnPayload = serde_json::from_value(json).unwrap();
@@ -624,7 +624,7 @@ mod tests {
             "outcome": "completed",
             "duration_ms": 10,
             "tool_call_count": 0,
-            "model_id": "grok-3",
+            "model_id": "grow-3",
         });
         let payload: AfterTurnPayload = serde_json::from_value(json).unwrap();
         assert_eq!(payload.cancellation_category, None);

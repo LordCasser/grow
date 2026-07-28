@@ -438,7 +438,7 @@ mod imp {
 
     /// Install the crash handler. Must be called early in `main()`, before any
     /// terminal initialization or async runtime setup.
-    pub fn install(crash_dir: &Path, grok_version: &str) -> bool {
+    pub fn install(crash_dir: &Path, grow_version: &str) -> bool {
         let crash_file = crash_dir.join("last-crash.bin");
 
         // Create the crash directory if it doesn't exist.
@@ -475,8 +475,8 @@ mod imp {
         unsafe {
             let version = &mut *std::ptr::addr_of_mut!(APP_VERSION);
             version.fill(0);
-            let copy_len = grok_version.len().min(format::VERSION_STRING_LEN);
-            version[..copy_len].copy_from_slice(&grok_version.as_bytes()[..copy_len]);
+            let copy_len = grow_version.len().min(format::VERSION_STRING_LEN);
+            version[..copy_len].copy_from_slice(&grow_version.as_bytes()[..copy_len]);
         }
 
         save_termios();
@@ -757,7 +757,7 @@ mod win {
         }
     }
 
-    pub fn install(crash_dir: &Path, grok_version: &str) -> bool {
+    pub fn install(crash_dir: &Path, grow_version: &str) -> bool {
         use std::os::windows::ffi::OsStrExt;
 
         let crash_file = crash_dir.join("last-crash.bin");
@@ -792,8 +792,8 @@ mod win {
         unsafe {
             let version = &mut *std::ptr::addr_of_mut!(APP_VERSION);
             version.fill(0);
-            let copy_len = grok_version.len().min(format::VERSION_STRING_LEN);
-            version[..copy_len].copy_from_slice(&grok_version.as_bytes()[..copy_len]);
+            let copy_len = grow_version.len().min(format::VERSION_STRING_LEN);
+            version[..copy_len].copy_from_slice(&grow_version.as_bytes()[..copy_len]);
         }
 
         unsafe {

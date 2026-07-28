@@ -3,7 +3,7 @@ edition.workspace = true
 license = "Apache-2.0"
 name = "xai-prompt-queue"
 version = "0.1.0"
-description = "Shared prompt-queue wire types for xai-grok-shell and xai-grok-pager"
+description = "Shared prompt-queue wire types for grow-shell and grow-pager"
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }

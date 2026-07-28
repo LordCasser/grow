@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::CleanupReport;
 use crate::api::gc::{GcOptions, GcReport, age_path_enabled, gc_worktrees};
-use crate::db::{ListFilter, WorktreeDb, WorktreeKind, now_epoch_secs, resolve_grok_home};
+use crate::db::{ListFilter, WorktreeDb, WorktreeKind, now_epoch_secs, resolve_grow_home};
 use crate::discovery::{RebuildReport, rebuild_worktree_db};
 use crate::git::checkout::git_command;
 
@@ -16,13 +16,13 @@ pub const META_LAST_AUTO_GC_AT: &str = "last_auto_gc_at";
 pub const META_LAST_AUTO_REBUILD_AT: &str = "last_auto_rebuild_at";
 
 /// `0` / `false` / `off` / empty disables auto-GC.
-pub const ENV_AUTO_GC: &str = "GROK_WORKTREE_AUTO_GC";
+pub const ENV_AUTO_GC: &str = "GROW_WORKTREE_AUTO_GC";
 /// `1` / `true` / `on` forces age-count without delete.
-pub const ENV_AUTO_GC_DRY_RUN: &str = "GROK_WORKTREE_AUTO_GC_DRY_RUN";
+pub const ENV_AUTO_GC_DRY_RUN: &str = "GROW_WORKTREE_AUTO_GC_DRY_RUN";
 /// Default max age in seconds (overrides TOML/remote when set and parseable).
-pub const ENV_AUTO_GC_MAX_AGE: &str = "GROK_WORKTREE_AUTO_GC_MAX_AGE";
+pub const ENV_AUTO_GC_MAX_AGE: &str = "GROW_WORKTREE_AUTO_GC_MAX_AGE";
 /// `1` / `true` / `on` enables optional discovery rebuild + stale git prune.
-pub const ENV_AUTO_GC_REBUILD: &str = "GROK_WORKTREE_AUTO_GC_REBUILD";
+pub const ENV_AUTO_GC_REBUILD: &str = "GROW_WORKTREE_AUTO_GC_REBUILD";
 
 pub const DEFAULT_MAX_AGE_SECS: i64 = 7 * 86400;
 pub const DEFAULT_MIN_INTERVAL_SECS: i64 = 6 * 3600;
@@ -310,7 +310,7 @@ pub fn env_auto_gc_rebuild() -> bool {
     env_var_truthy(ENV_AUTO_GC_REBUILD)
 }
 
-/// Parse `GROK_WORKTREE_AUTO_GC_MAX_AGE` as seconds; invalid/absent → None.
+/// Parse `GROW_WORKTREE_AUTO_GC_MAX_AGE` as seconds; invalid/absent → None.
 pub fn env_auto_gc_max_age() -> Option<u64> {
     match std::env::var(ENV_AUTO_GC_MAX_AGE) {
         Ok(v) => {
@@ -590,10 +590,10 @@ fn maybe_run_rebuild(
         RebuildMetaClass::Throttled | RebuildMetaClass::SkipFailed => return (None, false),
     }
 
-    let home = match resolve_grok_home() {
+    let home = match resolve_grow_home() {
         Ok(h) => h,
         Err(e) => {
-            tracing::warn!(error = %e, "auto worktree rebuild skipped: grok home unresolved");
+            tracing::warn!(error = %e, "auto worktree rebuild skipped: grow home unresolved");
             return (None, false);
         }
     };
@@ -1701,7 +1701,7 @@ mod tests {
     fn include_rebuild_false_skips_rebuild_and_does_not_stamp_rebuild_meta() {
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
 
         let wt = fx.home.join("worktrees/repo/untracked-sess");
@@ -1732,10 +1732,10 @@ mod tests {
     }
 
     #[test]
-    fn include_rebuild_true_registers_untracked_under_grok_home() {
+    fn include_rebuild_true_registers_untracked_under_grow_home() {
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
 
         let wt = fx.home.join("worktrees/repo/untracked-sess");
@@ -1766,7 +1766,7 @@ mod tests {
         );
         assert!(
             db.get(&wt.to_string_lossy()).unwrap().is_some(),
-            "untracked dir under grok_home/worktrees must be registered"
+            "untracked dir under grow_home/worktrees must be registered"
         );
     }
 
@@ -1774,7 +1774,7 @@ mod tests {
     fn rebuild_throttled_independently_of_gc() {
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
 
         let opts = AutoGcOptions {
@@ -1817,7 +1817,7 @@ mod tests {
         // dead-path GC still work so reclaim continues after rebuild Err.
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
 
         db.register(&make_rec(
@@ -1874,7 +1874,7 @@ mod tests {
     fn dry_run_skips_rebuild_and_prune() {
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
         let wt = fx.home.join("worktrees/repo/dry-sess");
         std::fs::create_dir_all(wt.join(".git")).unwrap();
@@ -1903,7 +1903,7 @@ mod tests {
     fn prune_removes_stale_git_worktree_registration() {
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
 
         let repo = fx.home.join("src-repo");
@@ -1946,7 +1946,7 @@ mod tests {
     fn prune_noop_when_no_stale_registrations() {
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
 
         let repo = fx.home.join("clean-repo");
@@ -1986,7 +1986,7 @@ mod tests {
     fn dry_run_skips_prune_even_with_stale_registration() {
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
         let repo = fx.home.join("dry-src");
         let wt = fx.home.join("dry-stale-wt");
@@ -2020,7 +2020,7 @@ mod tests {
     fn include_rebuild_false_skips_prune_even_with_stale_registration() {
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
         let repo = fx.home.join("off-src");
         let wt = fx.home.join("off-stale-wt");
@@ -2058,7 +2058,7 @@ mod tests {
         // still hit the snapshotted source_repo.
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
         let repo = fx.home.join("dead-src");
         let wt = fx.home.join("dead-stale-wt");
@@ -2099,7 +2099,7 @@ mod tests {
     fn rebuild_unparseable_stamp_fails_open() {
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
         db.set_meta(META_LAST_AUTO_REBUILD_AT, "not-a-number")
             .unwrap();
@@ -2130,7 +2130,7 @@ mod tests {
     fn rebuild_set_meta_failure_still_continues_gc() {
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
         db.register(&make_rec(
             "dead-stamp",
@@ -2177,7 +2177,7 @@ mod tests {
         // Rebuild meta must stay unset so the next pass can re-discover.
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
         db.register(&make_rec(
             "alive-missing-path",
@@ -2253,7 +2253,7 @@ mod tests {
         let _g = env_guard();
         clear_auto_gc_env();
         unsafe { std::env::set_var(ENV_AUTO_GC_REBUILD, "1") };
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
         let wt = fx.home.join("worktrees/repo/env-rebuild-sess");
         std::fs::create_dir_all(wt.join(".git")).unwrap();
@@ -2281,7 +2281,7 @@ mod tests {
     fn gc_throttled_short_circuits_rebuild() {
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
         // GC recently stamped; rebuild never stamped and would be due.
         db.set_meta(META_LAST_AUTO_GC_AT, &now_epoch_secs().to_string())
@@ -2314,7 +2314,7 @@ mod tests {
         let _g = env_guard();
         let _cwd_lock = crate::api::cwd_test_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
         let wt = fx.home.join("worktrees/repo/fresh-rebuild");
         std::fs::create_dir_all(wt.join(".git")).unwrap();
@@ -2346,7 +2346,7 @@ mod tests {
     fn rebuild_refuses_symlink_escape_then_age_safe() {
         let _g = env_guard();
         clear_auto_gc_env();
-        let fx = crate::db::GrokHomeFixture::new();
+        let fx = crate::db::GrowHomeFixture::new();
         let db = WorktreeDb::open(&fx.home).unwrap();
         let outside = fx.home.join("outside-escape");
         std::fs::create_dir_all(outside.join(".git")).unwrap();

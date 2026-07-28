@@ -1,0 +1,20 @@
+[package]
+license = "Apache-2.0"
+name = "grow-http"
+version = "0.1.0"
+edition.workspace = true
+description = "Shared reqwest HTTP clients and User-Agent construction for the grow CLI."
+
+[dependencies]
+reqwest = { workspace = true, features = ["blocking"] }
+reqwest-middleware = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+grow-auth = { workspace = true, features = ["middleware"] }
+grow-sampler = { path = "../grow-sampler" }
+grow-telemetry = { workspace = true }
+grow-version = { workspace = true }
+grow-workspace = { workspace = true }
+
+[lints]
+workspace = true

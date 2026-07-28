@@ -1,10 +1,10 @@
 //! Pure conversation-shape helpers, kept crate-neutral so both the session
-//! layer (`xai-grok-shell`) and the `ChatStateActor` can share one definition
+//! layer (`grow-shell`) and the `ChatStateActor` can share one definition
 //! of "align the leading System message with a prompt".
 
 use std::sync::Arc;
 
-use xai_grok_sampling_types::conversation::ConversationItem;
+use grow_sampling_types::conversation::ConversationItem;
 
 /// Equal after trimming trailing `\n`/`\r` from both sides. Used for attach
 /// idempotency so a stored head that differs from a client override only by a

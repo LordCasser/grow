@@ -8,8 +8,8 @@
 
 use std::sync::OnceLock;
 
+use grow_sampling_types::ConversationItem;
 use regex::Regex;
-use xai_grok_sampling_types::ConversationItem;
 
 /// Layout of the per-session segment store — single source of the path
 /// convention (writer, index parser, and transcript-hint builder all use these).
@@ -761,7 +761,7 @@ mod tests {
     /// role/tool/file/error stats (roles mapped User→Human, ToolResult→Function).
     #[test]
     fn parity_turn_stats_matches_basic_counts() {
-        use xai_grok_sampling_types::{AssistantItem, ToolCall};
+        use grow_sampling_types::{AssistantItem, ToolCall};
         let tc = |name: &str, args: &str| ToolCall {
             id: "t".into(),
             name: name.to_string(),

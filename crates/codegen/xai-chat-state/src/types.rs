@@ -3,11 +3,11 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 
+use grow_sampling_types::{ConversationItem, SamplingConfig};
 use serde::{Deserialize, Serialize};
-use xai_grok_sampling_types::{ConversationItem, SamplingConfig};
 
 /// Canonical marker for an injected memory-context block. Shared by the
-/// emitter in `xai-grok-shell` and the upsert/detection here — a drift would
+/// emitter in `grow-shell` and the upsert/detection here — a drift would
 /// silently break dedup and let blocks accumulate in the prompt prefix.
 /// Detection assumes the literal never appears in a system prompt except as
 /// an injected block.
@@ -102,17 +102,17 @@ impl Default for PruningConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthType {
-    /// From AuthManager (grok login, OIDC, external binary). Refreshable.
+    /// From AuthManager (grow login, OIDC, external binary). Refreshable.
     #[default]
     SessionToken,
-    /// From user config ([model.*] api_key, env_key, XAI_API_KEY). Not refreshable.
+    /// From user config ([model.*] api_key, env_key, GROW_API_KEY). Not refreshable.
     ApiKey,
 }
 
 /// Credential/secret fields that the actor stores opaquely.
 ///
 /// These are fields from the shell's full `Config` that aren't part of
-/// `xai_grok_sampling_types::SamplingConfig` (which is secret-free).
+/// `grow_sampling_types::SamplingConfig` (which is secret-free).
 /// The actor just stores and returns them — it never interprets them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Credentials {
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn snapshot_round_trips_with_data() {
-        use xai_grok_sampling_types::ConversationItem;
+        use grow_sampling_types::ConversationItem;
 
         let snapshot = ChatStateSnapshot {
             conversation: vec![
@@ -220,7 +220,7 @@ mod tests {
             ],
             sampling_config: SamplingConfig {
                 base_url: "https://api.example.com".to_string(),
-                model: "grok-3".to_string(),
+                model: "grow-3".to_string(),
                 max_completion_tokens: Some(4096),
                 temperature: Some(0.7),
                 top_p: None,

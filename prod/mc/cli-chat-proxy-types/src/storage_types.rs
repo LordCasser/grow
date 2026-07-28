@@ -1,4 +1,4 @@
-//! Signed upload URL types shared between cli-chat-proxy (server) and grok-shell (client).
+//! Signed upload URL types shared between cli-chat-proxy (server) and grow-shell (client).
 
 use serde::{Deserialize, Serialize};
 

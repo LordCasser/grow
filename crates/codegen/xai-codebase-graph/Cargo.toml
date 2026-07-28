@@ -23,7 +23,7 @@ path = "src/bin/bench_file_listing.rs"
 [dependencies]
 # Path utilities
 dunce = { workspace = true }
-xai-grok-paths = { path = "../xai-grok-paths" }
+grow-paths = { path = "../grow-paths" }
 # Graph generation
 petgraph = { workspace = true }
 serde = { workspace = true, features = ["rc"] }

@@ -2,11 +2,11 @@
 
 use std::collections::BTreeSet;
 
-use tokio::sync::oneshot;
-use xai_grok_sampling_types::{
+use grow_sampling_types::{
     ConversationItem, ConversationRequest, DanglingToolCallReason, SamplingConfig, TokenUsage,
     ToolSpec, TraceContext,
 };
+use tokio::sync::oneshot;
 
 use crate::types::{
     AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
@@ -136,7 +136,7 @@ pub enum ChatStateCommand {
         is_compaction: bool,
     },
 
-    /// Out-of-band history repair (`x.ai/session/repair`): run
+    /// Out-of-band history repair (`grow/session/repair`): run
     /// [`crate::compaction_utils::repair_history`] and persist when changed;
     /// `dry_run` only reports.
     ///

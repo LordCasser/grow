@@ -5719,12 +5719,12 @@ async fn hunks_survive_rebase_and_refresh_all_baselines() {
 /// scan/rebase wall costs; asserts only count/preservation invariants,
 /// never wall-clock.
 ///
-/// Knobs: GROK_PERF_GIT_FILES (default 5000), GROK_PERF_GIT_PICKS (default 10).
+/// Knobs: GROW_PERF_GIT_FILES (default 5000), GROW_PERF_GIT_PICKS (default 10).
 #[tokio::test]
 #[ignore = "perf repro; run with --ignored --nocapture"]
 async fn refresh_storm_scan_count_during_rebase() {
-    let files = env_usize("GROK_PERF_GIT_FILES", 5000);
-    let picks = env_usize("GROK_PERF_GIT_PICKS", 10);
+    let files = env_usize("GROW_PERF_GIT_FILES", 5000);
+    let picks = env_usize("GROW_PERF_GIT_PICKS", 10);
     let files_per_dir = 100;
     const AGENT_FILES: usize = 3;
 

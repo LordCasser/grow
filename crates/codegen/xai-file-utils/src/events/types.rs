@@ -83,7 +83,7 @@ pub enum Event {
     },
     /// Runtime TodoGate nudged the model because a content-only turn ended
     /// with pending or unbacked in_progress todos. `reason` is the
-    /// `TODO_GATE_*` discriminator constant in `xai-grok-shell::session::events`.
+    /// `TODO_GATE_*` discriminator constant in `grow-shell::session::events`.
     TodoGateFired {
         fires: u32,
         pending: usize,
@@ -99,7 +99,7 @@ pub enum Event {
     /// Fires even in observation-only mode (`max_nudges_per_session = 0`)
     /// so dashboards can validate classification quality before any nudges
     /// are injected. `category` is one of the `LAZINESS_*` discriminator
-    /// constants in `xai-grok-shell::session::events`.
+    /// constants in `grow-shell::session::events`.
     LazinessClassifierFired {
         model_id: String,
         category: &'static str,
@@ -115,7 +115,7 @@ pub enum Event {
     },
     /// Layer-3 LazinessDetector terminated without producing a verdict.
     /// `reason` is one of the `LAZINESS_ABORT_*` discriminator constants
-    /// in `xai-grok-shell::session::events`.
+    /// in `grow-shell::session::events`.
     LazinessClassifierAborted {
         reason: &'static str,
     },
@@ -192,7 +192,7 @@ pub enum Event {
     },
     /// Planner subagent failed and the harness paused the goal
     /// fail-closed. `reason` is one of the `GOAL_PLANNER_FAIL_CLOSED_*`
-    /// discriminator constants in `xai-grok-shell::session::events`.
+    /// discriminator constants in `grow-shell::session::events`.
     GoalPlannerFailClosed {
         reason: &'static str,
         attempt: u32,
@@ -221,7 +221,7 @@ pub enum Event {
     /// Strategist subagent failed; the harness logged it and continued
     /// the normal loop (fail-OPEN — the goal is NOT paused). `reason` is
     /// one of the `GOAL_STRATEGIST_FAILED_*` discriminator constants in
-    /// `xai-grok-shell::session::events`.
+    /// `grow-shell::session::events`.
     GoalStrategistFailed {
         reason: &'static str,
         attempt: u32,
@@ -233,7 +233,7 @@ pub enum Event {
     /// symlink was planted at the path). The contract may be corrupted —
     /// surfaced so it is observable rather than a silent `warn!`. `reason`
     /// is one of the `GOAL_STRATEGIST_RESTORE_*` discriminator constants in
-    /// `xai-grok-shell::session::events`.
+    /// `grow-shell::session::events`.
     GoalStrategistContractRestoreFailed {
         reason: &'static str,
         attempt: u32,
@@ -259,7 +259,7 @@ pub enum Event {
     /// harness skipped the closing summary and completed the goal normally
     /// (fail-OPEN — completion is never blocked). `reason` is one of the
     /// `GOAL_SUMMARIZER_FAIL_OPEN_*` discriminator constants in
-    /// `xai-grok-shell::session::events`.
+    /// `grow-shell::session::events`.
     GoalSummarizerFailOpen {
         reason: &'static str,
         attempt: u32,
@@ -287,7 +287,7 @@ pub enum Event {
     /// `planner|strategist|skeptic`; `skeptic_idx` is set only for the
     /// skeptic panel. `reason` is one of the
     /// `GOAL_ROLE_MODEL_FAIL_OPEN_*` discriminator constants in
-    /// `xai-grok-shell::session::events`. Fail-open never pauses the goal.
+    /// `grow-shell::session::events`. Fail-open never pauses the goal.
     GoalRoleModelFailOpen {
         role: &'static str,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -326,7 +326,7 @@ pub enum Event {
     /// label so dashboards can audit precision/recall of the regex
     /// panel. `pattern` is one of the stable labels
     /// enumerated by
-    /// `xai-grok-shell::session::goal_stop_detector::PATTERN_LABELS`;
+    /// `grow-shell::session::goal_stop_detector::PATTERN_LABELS`;
     /// the source-string provenance for each label is pinned by the
     /// adjacent `STOP_REGEX_SOURCES` table.
     ///
@@ -462,7 +462,7 @@ pub enum Event {
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InterjectionSource {
-    /// Direct `x.ai/interject` while a turn was running (Ctrl+Enter).
+    /// Direct `grow/interject` while a turn was running (Ctrl+Enter).
     Direct,
     /// A queued (not-yet-running) prompt promoted into the running turn via
     /// `InterjectQueuedPrompt` (queue "send now").
@@ -477,7 +477,7 @@ pub enum InterjectionSource {
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RedirectKind {
-    /// Mid-turn interjection — Ctrl+O / `x.ai/interject`, or "Send now" on a
+    /// Mid-turn interjection — Ctrl+O / `grow/interject`, or "Send now" on a
     /// queued row. The turn keeps running; nothing is cancelled.
     Interjection,
     /// The turn was aborted (Ctrl+C / Esc) and the user then typed and sent a
@@ -506,9 +506,9 @@ pub struct McpConfigServer {
     pub source: String,
 }
 
-/// Telemetry mirror of `xai-grok-shell`'s `GoalClassifierVerdict`. Two
+/// Telemetry mirror of `grow-shell`'s `GoalClassifierVerdict`. Two
 /// crates due to the orphan rule; the conversion lives in
-/// `xai-grok-shell/src/session/events.rs`.
+/// `grow-shell/src/session/events.rs`.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalClassifierVerdictTelemetry {
@@ -516,9 +516,9 @@ pub enum GoalClassifierVerdictTelemetry {
     NotAchieved,
 }
 
-/// Telemetry mirror of `xai-grok-shell`'s `GoalPauseReason`. The two types
+/// Telemetry mirror of `grow-shell`'s `GoalPauseReason`. The two types
 /// live in separate crates (orphan rule); the conversion lives in
-/// `xai-grok-shell/src/session/events.rs`.
+/// `grow-shell/src/session/events.rs`.
 ///
 /// **Invariant:** when adding a new variant to either side, add the
 /// matching variant here so the compiler-enforced `From` impl on the
@@ -613,7 +613,7 @@ pub enum CancellationCategory {
 
 // Note: `From<&permission::Decision> for PermissionDecision` crosses the
 // crate boundary (orphan rule) and lives in
-// `xai-grok-shell/src/session/events.rs`.
+// `grow-shell/src/session/events.rs`.
 
 #[cfg(test)]
 mod tests {
@@ -696,7 +696,7 @@ mod tests {
         let with_kind = serde_json::to_value(Event::TurnStarted {
             session_id: "s".into(),
             turn_number: 2,
-            model_id: "grok-4".into(),
+            model_id: "grow-4".into(),
             yolo_mode: false,
             conversation_message_count: 3,
             session_relationship: SessionRelationship::Primary,
@@ -710,7 +710,7 @@ mod tests {
         let normal = serde_json::to_value(Event::TurnStarted {
             session_id: "s".into(),
             turn_number: 1,
-            model_id: "grok-4".into(),
+            model_id: "grow-4".into(),
             yolo_mode: false,
             conversation_message_count: 0,
             session_relationship: SessionRelationship::Primary,
@@ -745,26 +745,26 @@ mod tests {
             attempt: 2,
             consecutive_failures: 6,
             every: 3,
-            model_id: "grok-4".to_string(),
+            model_id: "grow-4".to_string(),
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["type"], "goal_strategist_fired");
         assert_eq!(v["attempt"], 2);
         assert_eq!(v["consecutive_failures"], 6);
         assert_eq!(v["every"], 3);
-        assert_eq!(v["model_id"], "grok-4");
+        assert_eq!(v["model_id"], "grow-4");
     }
 
     #[test]
     fn goal_summarizer_events_serialize_tag_and_fields() {
         let fired = Event::GoalSummarizerFired {
             attempt: 2,
-            model_id: "grok-4".to_string(),
+            model_id: "grow-4".to_string(),
         };
         let v = serde_json::to_value(&fired).unwrap();
         assert_eq!(v["type"], "goal_summarizer_fired");
         assert_eq!(v["attempt"], 2);
-        assert_eq!(v["model_id"], "grok-4");
+        assert_eq!(v["model_id"], "grow-4");
 
         let completed = Event::GoalSummarizerCompleted {
             attempt: 2,
@@ -792,7 +792,7 @@ mod tests {
         let ev = Event::GoalRoleModelResolved {
             role: "skeptic",
             skeptic_idx: Some(2),
-            model_id: "grok-4".to_string(),
+            model_id: "grow-4".to_string(),
             agent_type: "general-purpose".to_string(),
             source: "remote",
         };
@@ -800,7 +800,7 @@ mod tests {
         assert_eq!(v["type"], "goal_role_model_resolved");
         assert_eq!(v["role"], "skeptic");
         assert_eq!(v["skeptic_idx"], 2);
-        assert_eq!(v["model_id"], "grok-4");
+        assert_eq!(v["model_id"], "grow-4");
         assert_eq!(v["agent_type"], "general-purpose");
         assert_eq!(v["source"], "remote");
     }
@@ -810,7 +810,7 @@ mod tests {
         let ev = Event::GoalRoleModelResolved {
             role: "planner",
             skeptic_idx: None,
-            model_id: "grok-4".to_string(),
+            model_id: "grow-4".to_string(),
             agent_type: "general-purpose".to_string(),
             source: "remote",
         };

@@ -56,7 +56,7 @@ pub use auto_gc::{
 #[cfg(feature = "metadata")]
 pub use db::{
     DbStats, ListFilter, WorktreeDb, WorktreeKind, WorktreeRecord, WorktreeStatus, id_from_path,
-    now_epoch_secs, repo_name_from_path, resolve_grok_home,
+    now_epoch_secs, repo_name_from_path, resolve_grow_home,
 };
 #[cfg(feature = "metadata")]
 pub use discovery::{RebuildReport, discover_worktrees, rebuild_worktree_db};

@@ -13,7 +13,7 @@ tracing = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
-# Same per-crate pin as xai-crash-handler / xai-system-power / xai-grok-pager
+# Same per-crate pin as xai-crash-handler / xai-system-power / grow-pager
 # (windows-sys has no workspace entry).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
