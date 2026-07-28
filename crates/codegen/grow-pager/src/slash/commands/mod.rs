@@ -57,6 +57,7 @@ pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
+pub mod shortcuts;
 pub mod tasks;
 pub mod theme;
 pub mod timeline;
@@ -78,6 +79,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
     vec![
         Arc::new(exit::ExitCommand),
         Arc::new(help::HelpCommand),
+        Arc::new(shortcuts::ShortcutsCommand),
         Arc::new(docs::DocsCommand),
         Arc::new(home::HomeCommand),
         Arc::new(new::NewCommand),
@@ -318,6 +320,7 @@ mod tests {
             "settings",
             "share",
             "show-plan",
+            "shortcuts",
             "skills",
             "summarize",
             "tasks",
@@ -339,6 +342,7 @@ mod tests {
             "welcome",
             "workflows",
             "yolo",
+            "?",
         ];
         for command in builtin_commands() {
             for key in std::iter::once(command.name()).chain(command.aliases().iter().copied()) {
@@ -355,6 +359,7 @@ mod tests {
         assert!(reg.get("welcome").is_some());
         assert!(reg.get("show-plan").is_some());
         assert!(reg.get("plan-view").is_some());
+        assert_eq!(reg.get("?").unwrap().name(), "shortcuts");
     }
     #[test]
     fn aliases_resolve_to_same_command() {

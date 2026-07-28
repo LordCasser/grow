@@ -187,6 +187,18 @@ impl ModelState {
         }
     }
 
+    /// Return the next configured reasoning-effort value for the current model.
+    /// Declaration order is the cycle order; an unset or stale current value
+    /// enters at the first option, and the final option wraps to the first.
+    pub fn next_reasoning_effort(&self) -> Option<ReasoningEffort> {
+        let options = self.reasoning_effort_options();
+        let next_index = self
+            .reasoning_effort
+            .and_then(|current| options.iter().position(|option| option.value == current))
+            .map_or(0, |index| (index + 1) % options.len());
+        options.get(next_index).map(|option| option.value)
+    }
+
     /// Menu for a specific catalog model id (used by `/model`'s effort phase).
     /// `parse_reasoning_efforts_meta` returns `None` for absent, non-array, or
     /// present-but-unusable lists, so all of those fall back to the built-in menu
@@ -470,6 +482,30 @@ mod tests {
         assert_eq!(opts[0].value, ReasoningEffort::Medium);
         assert_eq!(opts[1].id, "deep");
         assert_eq!(opts[1].description.as_deref(), Some("Max"));
+    }
+
+    #[test]
+    fn next_reasoning_effort_follows_declared_order_and_wraps() {
+        let mut state = state_with_meta(Some(serde_json::json!({
+            "supportsReasoningEffort": true,
+            "reasoningEfforts": [
+                { "value": "high", "label": "High" },
+                { "value": "max", "label": "Max" },
+            ],
+        })));
+
+        state.reasoning_effort = None;
+        assert_eq!(state.next_reasoning_effort(), Some(ReasoningEffort::High));
+        state.reasoning_effort = Some(ReasoningEffort::High);
+        assert_eq!(state.next_reasoning_effort(), Some(ReasoningEffort::Max));
+        state.reasoning_effort = Some(ReasoningEffort::Max);
+        assert_eq!(state.next_reasoning_effort(), Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn next_reasoning_effort_is_absent_when_model_does_not_support_it() {
+        assert_eq!(ModelState::default().next_reasoning_effort(), None);
+        assert_eq!(state_with_meta(None).next_reasoning_effort(), None);
     }
 
     #[test]

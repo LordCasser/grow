@@ -998,9 +998,12 @@ pub fn build_hints(
                         .pinned(),
                 );
             }
-            hints.push(HintItem::new(crate::key!(BackTab), "mode"));
+            if let Some(key) = registry.key_for(ActionId::CycleReasoningEffort) {
+                hints.push(HintItem::new(key, "effort"));
+            }
             for def in registry.hints(&[When::PromptFocused, When::AgentScreen, When::Always]) {
                 if def.id == ActionId::SendPrompt
+                    || def.id == ActionId::CycleReasoningEffort
                     || def.id == ActionId::CommandPalette
                     || def.id == ActionId::Quit
                 {
@@ -1564,7 +1567,7 @@ mod tests {
         }
     }
     #[test]
-    fn prompt_branch_excludes_exit_session_home_hint() {
+    fn prompt_branch_shows_effort_shortcut_and_excludes_home_hint() {
         let registry = ActionRegistry::defaults();
         let hints = build_hints(
             ActivePane::Prompt,
@@ -1596,6 +1599,11 @@ mod tests {
             !hints.iter().any(|h| h.label == "home"),
             "ExitSession (home) must not appear in prompt-focused bar"
         );
+        let effort = hints
+            .iter()
+            .find(|hint| hint.label == "effort")
+            .expect("prompt-focused bar must describe Shift+Tab as effort");
+        assert_eq!(effort.keys, vec![crate::key!(BackTab)]);
     }
     fn prompt_hints_with_text(
         multiline_mode: bool,

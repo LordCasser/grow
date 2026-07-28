@@ -20,7 +20,7 @@ You know enough to be productive. When you want more:
 - Automate anything: `grow -p "summarize new TODOs" --output-format json`
   runs headless — great for scripts and CI.
 - Stay current with `grow update`; see what changed with `/release-notes`.
-- Something feel off? `/feedback` goes straight to the team.
+- Something feel off? `/feedback` opens a new issue in the Grow GitHub repository.
 
 ## Reopen this tutorial
 

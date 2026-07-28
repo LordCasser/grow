@@ -3109,9 +3109,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 return InputOutcome::Action(Action::DismissClaudeImport);
             }
         }
-        if matches!(ctx.auth_state, AuthState::Done) && crate::input::key::is_shift_tab(key) {
-            return InputOutcome::ActionThenForward(Action::NewSession);
-        }
         if *ctx.prompt_focused
             && matches!(ctx.auth_state, AuthState::Done)
             && let KeyCode::Char(ch) = key.code
@@ -8693,6 +8690,15 @@ pub(crate) mod tests {
             outcome,
             InputOutcome::ActionThenForward(Action::NewSession)
         ));
+    }
+    #[test]
+    fn welcome_shift_tab_does_not_create_a_session() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        for shortcut in crate::input::key::shift_tab_keys() {
+            let outcome = app.handle_input(&key_event(shortcut.code, shortcut.modifiers));
+            assert!(matches!(outcome, InputOutcome::Unchanged));
+        }
     }
     #[test]
     fn welcome_done_ctrl_w_opens_new_worktree_dialog() {

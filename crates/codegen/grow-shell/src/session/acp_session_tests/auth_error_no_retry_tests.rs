@@ -160,12 +160,28 @@ async fn no_recovery_without_auth_manager() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _rx) = make_actor_with_auth_and_credentials(
+            let (actor, mut rx) = make_actor_with_auth_and_credentials(
                 None,
                 xai_chat_state::AuthType::ApiKey,
                 "xai-byok-key".to_string(),
             )
             .await;
+            let model_id = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .map(|config| config.model)
+                .unwrap_or_default();
+            actor
+                .model_auth_memo
+                .replace(Some(crate::session::acp_session::ModelAuthMemo {
+                    model_id,
+                    facts: crate::agent::config::ModelAuthFacts {
+                        byok: crate::agent::auth_method::ModelByok::Byok,
+                        auth_scheme: Default::default(),
+                    },
+                    provider: None,
+                }));
             crate::auth::attribution::reset_test_emit_count();
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
@@ -177,6 +193,25 @@ async fn no_recovery_without_auth_manager() {
                 0,
                 "auth arm must not emit attribution without auth manager"
             );
+            let mut terminal = None;
+            while let Ok(message) = rx.try_recv() {
+                if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(
+                    notification,
+                )) = message
+                    && let crate::extensions::notification::SessionUpdate::RetryState(
+                        crate::extensions::notification::RetryState::Failed {
+                            error_type,
+                            message,
+                        },
+                    ) = notification.update
+                {
+                    terminal = Some((error_type, message));
+                }
+            }
+            let (error_type, message) = terminal.expect("terminal retry state");
+            assert_eq!(error_type, "provider_credentials");
+            assert!(message.contains("api_key/env_key"), "message={message}");
+            assert!(!message.contains("/login"), "message={message}");
         })
         .await;
 }

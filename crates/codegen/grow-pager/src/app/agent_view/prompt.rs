@@ -520,9 +520,9 @@ impl AgentView {
             }
         }
 
-        // Ctrl+R (cycle session mode) is not special-cased here — the
-        // `CycleMode` ActionDef carries all encodings; the registry lookup
-        // below resolves it (same as `DashboardCycleMode`).
+        // Ctrl+R (cycle session mode) and Shift+Tab (cycle reasoning effort)
+        // are not special-cased here. Their ActionDefs are resolved by the
+        // prompt/agent registry lookups below.
 
         // 2. Multiline mode: Shift+Enter (or Alt+Enter) sends.
         //    This must come BEFORE the action registry lookup so that
@@ -979,10 +979,9 @@ impl AgentView {
             {
                 self.prompt.history_search.deactivate();
                 // Detect `! ` prefix to restore bash mode. Refined: only reset to Normal
-                // if currently in Bash (preserve Feedback/Remember if active). The ! prefix
-                // restore only applies when not in Feedback/Remember.
-                if self.prompt_input_mode != PromptInputMode::Feedback
-                    && self.prompt_input_mode != PromptInputMode::Remember
+                // if currently in Bash (preserve Remember if active). The ! prefix
+                // restore only applies when not in Remember mode.
+                if self.prompt_input_mode != PromptInputMode::Remember
                     && let Some(cmd) = text.strip_prefix("! ")
                 {
                     self.prompt_input_mode = PromptInputMode::Bash;
@@ -1093,6 +1092,21 @@ mod cycle_mode_tests {
         let outcome = agent.handle_prompt_key_for_test(&shortcut);
         assert!(matches!(outcome, InputOutcome::Action(Action::CycleMode)));
         assert_eq!(agent.prompt.text(), "draft text");
+    }
+
+    #[test]
+    fn shift_tab_encodings_cycle_reasoning_effort_without_editing_the_draft() {
+        for shortcut in crate::input::key::shift_tab_keys() {
+            let mut agent = super::test_fixtures::make_agent();
+            agent.prompt.set_text("draft text");
+            let key = KeyEvent::new(shortcut.code, shortcut.modifiers);
+            let outcome = agent.handle_prompt_key_for_test(&key);
+            assert!(matches!(
+                outcome,
+                InputOutcome::Action(Action::CycleReasoningEffort)
+            ));
+            assert_eq!(agent.prompt.text(), "draft text");
+        }
     }
 
     #[test]

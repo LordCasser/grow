@@ -351,7 +351,7 @@ pub enum PaletteCommand {
     SectionHeader(String),
     /// Open the how-to documentation picker.
     HowTo,
-    /// Open the keyboard shortcuts cheatsheet (Ctrl+.).
+    /// Open the keyboard shortcuts cheatsheet (Ctrl+. / `/?` fallback).
     KeyboardShortcuts,
     /// Open the memory browser modal.
     Memory,
@@ -541,7 +541,7 @@ pub(crate) fn default_palette_entries(
         PaletteEntry {
             label: "Keyboard Shortcuts".into(),
             shortcut: if crate::actions::ctrl_dot_unreliable() {
-                "Ctrl+X".into()
+                "/?".into()
             } else {
                 "Ctrl+.".into()
             },

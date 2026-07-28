@@ -13,7 +13,7 @@ A few worth knowing on day one:
 | `/btw` | Send Grow an aside *without* interrupting its current task |
 | `/rewind` | Restore your files and history to an earlier prompt |
 | `/docs` | Full How-to Guides, in the TUI or on the web |
-| `/feedback` | Send feedback to the team |
+| `/feedback` | Open a new Grow GitHub issue in your browser |
 
 Two of those deserve a second look:
 
@@ -27,8 +27,9 @@ Two of those deserve a second look:
 
 Press **`Ctrl+P`** (or `?` from the scrollback) to open the command palette —
 one searchable list of every command, shortcut, and skill. There's also a
-full shortcuts cheatsheet on `Ctrl+.` (use `Ctrl+X` if your terminal
-swallows it).
+full shortcuts cheatsheet on `Ctrl+.`. Grow displays `/?` instead when the
+terminal cannot deliver that extended key chord; `/shortcuts` and the command
+palette's **Keyboard Shortcuts** entry open the same modal.
 
 You don't need to memorize anything: `/` and `Ctrl+P` will always show you
 what's available.

@@ -45,7 +45,7 @@
             chip_elements: Vec::new(),
         });
         for error in [
-            "authentication problem — re-authenticate using /login and retry.",
+            "the model provider rejected its credentials. Check the provider authentication and retry.",
             "this conversation is too large to compact.",
         ] {
             let update = XaiSessionUpdate::AutoCompactFailed {
@@ -416,34 +416,22 @@
 
     #[test]
     fn is_reauthable_failure_matrix() {
-        assert!(is_reauthable_failure(Some("auth"), "Unauthorized (401)"));
-        assert!(is_reauthable_failure(
-            Some("api"),
-            "Unauthorized (401) from https://proxy/v1/responses"
-        ));
-        assert!(is_reauthable_failure(None, "Unauthorized (401)"));
-        // legacy_auth carries its own migration guidance — excluded.
-        assert!(!is_reauthable_failure(
-            Some("legacy_auth"),
-            "Unauthorized (401) ... deprecated authentication method"
-        ));
-        // Unrelated failures must not be treated as re-authable.
-        assert!(!is_reauthable_failure(
-            Some("server_error"),
-            "internal server error"
-        ));
-        assert!(!is_reauthable_failure(Some("api"), "model not found"));
+        assert!(is_reauthable_failure(Some("reauth_required")));
+        assert!(!is_reauthable_failure(Some("auth")));
+        assert!(!is_reauthable_failure(Some("provider_credentials")));
+        assert!(!is_reauthable_failure(Some("legacy_auth")));
+        assert!(!is_reauthable_failure(Some("server_error")));
+        assert!(!is_reauthable_failure(None));
     }
 
-    /// A 401 with `error_type == "auth"` surfaces the actionable re-auth
-    /// prompt instead of the raw "Retry failed: Unauthorized (401) …" dump.
+    /// Only an explicitly re-authable failure surfaces the login prompt.
     #[test]
-    fn apply_retry_state_auth_failure_pushes_reauth_prompt() {
+    fn apply_retry_state_reauth_required_pushes_reauth_prompt() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         apply_retry_state(
             &RetryState::Failed {
-                error_type: "auth".into(),
+                error_type: "reauth_required".into(),
                 message: "Unauthorized (401) from https://service.example.com/v1/messages: \
                           no auth context"
                     .into(),
@@ -455,7 +443,7 @@
                 last_session_event(&scrollback),
                 Some(SessionEvent::ReAuthRequired)
             ),
-            "auth 401 must surface the actionable re-auth prompt"
+            "a session-owned auth failure must surface the actionable re-auth prompt"
         );
         assert!(!session.credit_limit_blocked);
     }
@@ -463,7 +451,7 @@
     /// A recoverable auth failure preserves `in_flight_prompt` so the
     /// PromptResponse handler can stash it for auto-resubmit after re-auth.
     #[test]
-    fn apply_retry_state_auth_failure_preserves_in_flight_prompt() {
+    fn apply_retry_state_reauth_required_preserves_in_flight_prompt() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         session.in_flight_prompt = Some(InFlightPrompt {
@@ -475,7 +463,7 @@
         });
         apply_retry_state(
             &RetryState::Failed {
-                error_type: "auth".into(),
+                error_type: "reauth_required".into(),
                 message: "Unauthorized (401) from https://proxy/v1/messages".into(),
             },
             &mut session,
@@ -487,10 +475,10 @@
         assert_eq!(session.in_flight_prompt.unwrap().text, "retry after login");
     }
 
-    /// A 401 reported with a non-auth `error_type` but an "Unauthorized
-    /// (401)" message (the `SamplingErrorKind::Api` path) also prompts.
+    /// An untyped provider 401 must not be guessed to be recoverable through
+    /// Grow's login flow.
     #[test]
-    fn apply_retry_state_401_message_without_auth_type_prompts_reauth() {
+    fn apply_retry_state_401_message_without_reauth_type_keeps_provider_error() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         apply_retry_state(
@@ -503,8 +491,39 @@
             &mut scrollback, false);
         assert!(matches!(
             last_session_event(&scrollback),
-            Some(SessionEvent::ReAuthRequired)
+            Some(SessionEvent::RetryFailed { .. })
         ));
+    }
+
+    #[test]
+    fn apply_retry_state_byok_rejection_never_prompts_for_login() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        session.in_flight_prompt = Some(InFlightPrompt {
+            text: "failed BYOK request".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(7),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "provider_credentials".into(),
+                message: "The configured BYOK credential was rejected; check api_key/env_key"
+                    .into(),
+            },
+            &mut session,
+            &mut scrollback,
+            true,
+        );
+        assert!(matches!(
+            last_session_event(&scrollback),
+            Some(SessionEvent::RetryFailed { .. })
+        ));
+        assert!(
+            session.in_flight_prompt.is_none(),
+            "a BYOK failure cannot be auto-resubmitted by /login"
+        );
     }
 
     /// Legacy WebLogin auth keeps its verbose message (with `grow logout` /
@@ -883,4 +902,3 @@
             "non-encrypted_content error types must not set model_incompatible"
         );
     }
-

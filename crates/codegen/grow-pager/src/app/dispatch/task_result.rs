@@ -955,17 +955,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             &session_id,
             format!("Couldn't load session usage: {error}"),
         ),
-        TaskResult::FeedbackComplete { .. } => vec![],
-        TaskResult::FeedbackFailed { agent_id, error } => {
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Couldn't send feedback: {error}"
-                    )));
-            }
-            vec![]
-        }
         TaskResult::MemoryNoteSaved { agent_id, result } => {
             handle_memory_note_saved(app, agent_id, result)
         }

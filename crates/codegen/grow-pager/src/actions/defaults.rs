@@ -7,11 +7,12 @@ use crate::terminal::{TerminalName, terminal_context};
 
 use super::{ActionDef, ActionId, Category, When};
 
-/// True when `Ctrl+.` is not a reliable shortcuts-cheatsheet primary.
+/// True when `Ctrl+.` cannot be delivered reliably by the active terminal.
 ///
-/// Callers pick a deliverable alternate primary (`Ctrl+X` on the agent
-/// screen, `?` on the dashboard). Both keys stay registered either way;
-/// this only chooses which the UI advertises.
+/// The agent screen advertises the `/?` command in these environments; the
+/// dashboard promotes its always-deliverable `?` alternate. `Ctrl+.` remains
+/// registered so a terminal that can deliver it despite conservative detection
+/// still works.
 ///
 /// Driven by [`crate::terminal::TerminalContext::ctrl_dot_unreliable`]
 /// (any KKP skip — brand, tmux `extended-keys off`, screen, unknown host),
@@ -530,6 +531,22 @@ pub(super) fn default_actions(
                 "Steps the session mode: Normal -> Plan -> Always-Approve -> Normal.\nPlan keeps the agent planning first and writes no files; Always-Approve runs every tool call without asking.\nCtrl+O toggles auto-approve directly.",
             ),
         },
+        ActionDef {
+            id: ActionId::CycleReasoningEffort,
+            label: "effort",
+            description: "Cycle reasoning effort",
+            // All Shift+Tab encodings — see `input::key::shift_tab_keys()`.
+            default_key: crate::input::key::shift_tab_keys()[0],
+            alt_keys: crate::input::key::shift_tab_keys()[1..].to_vec(),
+            category: Category::GettingStarted,
+            context: When::AgentScreen,
+            hint_priority: None,
+            hint_key_display: Some("Shift+Tab"),
+            requires_confirmation: false,
+            long_help: Some(
+                "Cycles through the active model's configured reasoning-effort levels in declaration order.\nThe new level is persisted with this session and sent through the selected API backend.\nModels without configured effort support leave the current setting unchanged.",
+            ),
+        },
         // ── Panes (agent-level — toggle side panes) ─────────────────
         mode_ctrl_g_action(screen_mode),
         ActionDef {
@@ -767,10 +784,14 @@ pub(super) fn default_actions(
             category: Category::GettingStarted,
             context: When::AgentScreen,
             hint_priority: None,
-            hint_key_display: None,
+            hint_key_display: if ctrl_dot_unreliable {
+                Some("/?")
+            } else {
+                None
+            },
             requires_confirmation: false,
             long_help: Some(
-                "Opens this keyboard cheatsheet.\nBrowse with j/k, expand a row's inline help with e, or press Enter for a shortcut's full detail page.",
+                "Opens this keyboard cheatsheet.\nUse Ctrl+. when the terminal supports extended keys; otherwise enter /?.\nBrowse with j/k, expand a row's inline help with e, or press Enter for a shortcut's full detail page.",
             ),
         },
         ActionDef {
@@ -1181,9 +1202,8 @@ pub(super) fn default_actions(
         },
         // Dashboard-parity stop inside the session overlay — state
         // machine documented at `dispatch_dashboard_overlay_stop`.
-        // Intentionally shadows the agent view's `ShortcutsHelp` alt
-        // binding (Ctrl+X) inside the overlay; Ctrl+. still opens the
-        // cheatsheet there.
+        // Ctrl+X is the overlay's stop chord. Ctrl+. remains the distinct
+        // shortcuts-cheatsheet chord inherited from the agent screen.
         ActionDef {
             id: ActionId::DashboardOverlayStop,
             label: "stop",

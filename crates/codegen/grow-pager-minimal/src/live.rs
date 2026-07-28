@@ -599,7 +599,7 @@ fn render_idle_hint(buf: &mut Buffer, area: Rect, theme: &Theme) {
     buf.set_span(area.x, area.y, &Span::styled(hint, style), area.width);
 }
 /// Render the one-line info bar directly below the prompt: the selected model,
-/// the active session mode (the Shift+Tab cycle: plan / always-approve / auto),
+/// the active session mode (cycled with Ctrl+R),
 /// context usage (absolute + percentage), an `N queued` count when prompts
 /// are waiting behind a running turn, and the full-transcript shortcut hint
 /// (`transcript_hint`: "ctrl+o transcript", or "/transcript" where Ctrl+O is
@@ -607,8 +607,8 @@ fn render_idle_hint(buf: &mut Buffer, area: Rect, theme: &Theme) {
 /// label, mode flags, and context bar; the transcript hint stands in for the
 /// full TUI's shortcuts bar, which minimal never renders — without it the
 /// folded conversation has no visible way back to the full view. The mode flag
-/// keeps its accent color so the Shift+Tab cycle — otherwise invisible in
-/// minimal mode — is always shown. Drawn only when no menu/dropdown owns the
+/// keeps its accent color so the current mode is always shown. Drawn only when
+/// no menu/dropdown owns the
 /// band below the prompt (the caller gates on that). The elapsed-time / token
 /// count lives in the turn-status row above the prompt (see
 /// [`render_minimal_status`]), so it is not repeated here.
@@ -668,6 +668,7 @@ fn render_prompt_info(
         segs.push((format!("{queued} queued"), base));
         segs.push(("/queue".to_string(), base));
     }
+    segs.push(("shift+tab effort".to_string(), base));
     segs.push((transcript_hint.to_string(), base));
     if segs.is_empty() {
         return;

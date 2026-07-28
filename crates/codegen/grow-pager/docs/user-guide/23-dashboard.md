@@ -133,10 +133,9 @@ confirmation: the shortcuts bar flips to "press Ctrl+x again to
 close this session", and a second press within 2 seconds closes the
 session and returns you to the dashboard. Pressing any other key
 cancels the confirmation, and a turn that starts inside the window
-downgrades the confirmed press to a cancel instead of closing.
-(On terminals where `Ctrl+X` doubles as the shortcuts-cheatsheet
-binding, the cheatsheet stays reachable via `Ctrl+.` inside the
-details view.)
+downgrades the confirmed press to a cancel instead of closing. The
+shortcuts cheatsheet remains a separate `Ctrl+.` binding inside the
+details view.
 
 For the full behavioural specification (including the registry-lookup
 rules and the mouse-event intercept matrix) see plan

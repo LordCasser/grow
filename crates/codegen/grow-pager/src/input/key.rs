@@ -202,7 +202,7 @@ pub fn is_altgr(_modifiers: KeyModifiers) -> bool {
 
 /// Canonical Shift+Tab encodings: `BackTab` (most xterm-likes),
 /// `BackTab+SHIFT` (some terminals), `Tab+SHIFT` (kitty protocol, some
-/// Windows terminals). Single source of truth for the `CycleMode` /
+/// Windows terminals). Single source of truth for the `CycleReasoningEffort` /
 /// `DashboardCycleMode` ActionDefs and [`is_shift_tab`].
 pub fn shift_tab_keys() -> [KeyShortcut; 3] {
     [
@@ -216,6 +216,23 @@ pub fn shift_tab_keys() -> [KeyShortcut; 3] {
 /// [`shift_tab_keys`]. Release events never match.
 pub fn is_shift_tab(key: &KeyEvent) -> bool {
     shift_tab_keys().iter().any(|k| k.matches(key))
+}
+
+/// True when the event represents the physical Ctrl+. chord.
+///
+/// Kitty-style extended-key reporting normally emits `Char('.') + CONTROL`,
+/// but some terminal/layout combinations retain SHIFT and/or report the
+/// shifted glyph (`>`). Treat those encodings as the same physical shortcut
+/// without accepting any other modifier.
+pub fn is_ctrl_dot(key: &KeyEvent) -> bool {
+    if key.kind == KeyEventKind::Release
+        || !matches!(key.code, KeyCode::Char('.') | KeyCode::Char('>'))
+    {
+        return false;
+    }
+    let mut modifiers = key.modifiers;
+    modifiers.remove(KeyModifiers::SHIFT);
+    modifiers == KeyModifiers::CONTROL
 }
 
 pub fn is_text_input_key(key: &KeyEvent) -> bool {
@@ -400,6 +417,34 @@ mod tests {
         let k = key!('x', ALT);
         let event = k.to_key_event();
         assert!(k.matches(&event));
+    }
+
+    #[test]
+    fn ctrl_dot_accepts_extended_key_encoding_variants_only() {
+        for (code, modifiers) in [
+            (KeyCode::Char('.'), KeyModifiers::CONTROL),
+            (
+                KeyCode::Char('.'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            (
+                KeyCode::Char('>'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        ] {
+            assert!(is_ctrl_dot(&KeyEvent::new(code, modifiers)));
+        }
+        assert!(!is_ctrl_dot(&KeyEvent::new(
+            KeyCode::Char('.'),
+            KeyModifiers::NONE,
+        )));
+        assert!(!is_ctrl_dot(&KeyEvent::new(
+            KeyCode::Char('.'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        )));
+        let mut release = KeyEvent::new(KeyCode::Char('.'), KeyModifiers::CONTROL);
+        release.kind = KeyEventKind::Release;
+        assert!(!is_ctrl_dot(&release));
     }
 
     #[test]

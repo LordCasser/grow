@@ -1053,18 +1053,11 @@ pub enum RetryState {
     },
 }
 
-/// Whether a terminal retry failure is a recoverable authentication error
-/// (expired/invalid credentials, 401) that the user can fix by signing in
-/// again. Drives the actionable re-auth banner.
-///
-/// `legacy_auth` is intentionally excluded: those failures carry their own
-/// detailed migration guidance (`grow logout` / `grow login`) in the
-/// message, so we surface that verbatim instead of the generic prompt.
-pub fn is_reauthable_failure(error_type: Option<&str>, message: &str) -> bool {
-    if error_type == Some("legacy_auth") {
-        return false;
-    }
-    error_type == Some("auth") || message.contains("Unauthorized (401)")
+/// Whether a terminal failure can actually be repaired by Grow's interactive
+/// login flow. A provider 401 is not sufficient evidence: static BYOK keys and
+/// command-backed credentials must be fixed in provider configuration instead.
+pub fn is_reauthable_failure(error_type: Option<&str>) -> bool {
+    error_type == Some("reauth_required")
 }
 
 /// Status updates for relay sync (session sharing) feature.

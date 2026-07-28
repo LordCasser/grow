@@ -132,6 +132,50 @@ A model may override shared provider options when required. Common model fields 
 `reasoning_effort`, `reasoning_efforts`, `extra_headers`, `query_params`, and
 `env_http_headers`.
 
+### Reasoning effort
+
+Grow uses one internal set of effort values across providers: `none`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, and `max`. The selected API backend translates the session value to its wire
+format: Chat Completions sends top-level `reasoning_effort`, Responses sends `reasoning.effort`,
+and Messages uses its thinking/output-config fields.
+
+Provider APIs do not expose a common model-capability discovery mechanism. Declare the exact
+levels accepted by each configured model with `reasoning_efforts`; declaration order is also the
+`Shift+Tab` cycle order. A table entry can provide a display label and mark the initial session
+default:
+
+```toml
+[models]
+default = "deepseek/deepseek-v4-pro"
+
+[provider.deepseek]
+api_backend = "chat_completions"
+
+[provider.deepseek.options]
+base_url = "https://api.deepseek.com/v1"
+env_key = "DEEPSEEK_API_KEY"
+
+[provider.deepseek.models.deepseek-v4-pro]
+name = "DeepSeek V4 Pro"
+context_window = 1048576
+reasoning_efforts = [
+  { value = "high", label = "High", default = true },
+  { value = "max", label = "Max" },
+]
+```
+
+Bare strings are accepted when labels and an explicit default are unnecessary:
+
+```toml
+reasoning_efforts = ["none", "high", "max"]
+```
+
+`reasoning_effort = "high"` sets a default but does not by itself define a safe cycle menu. Prefer
+`reasoning_efforts` for BYOK models: it derives support and the default (the marked entry, or the
+first entry) without Grow guessing vendor capabilities. `Shift+Tab`, `/effort`, and `/model` all
+use the same model-declared list. The selected value is stored with the session, so reopening a
+session restores its last effort while a new session starts from the configured model default.
+
 ## Auxiliary models
 
 Session summaries and image descriptions inherit the active session model when their setting is

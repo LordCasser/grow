@@ -1,28 +1,30 @@
-//! `/feedback` -- open Grow's GitHub issue creation page.
+//! `/shortcuts` and `/?` -- open the context-appropriate shortcuts modal.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 
-pub const FEEDBACK_ISSUES_URL: &str = "https://github.com/LordCasser/grow/issues/new";
+/// Open the keyboard shortcuts cheatsheet.
+pub struct ShortcutsCommand;
 
-/// Open the public issue tracker in the system browser.
-pub struct FeedbackCommand;
-
-impl SlashCommand for FeedbackCommand {
+impl SlashCommand for ShortcutsCommand {
     fn name(&self) -> &str {
-        "feedback"
+        "shortcuts"
+    }
+
+    fn aliases(&self) -> &[&str] {
+        &["?"]
     }
 
     fn description(&self) -> &str {
-        "Report an issue or suggest an improvement on GitHub"
+        "Show keyboard shortcuts"
     }
 
     fn usage(&self) -> &str {
-        "/feedback"
+        "/shortcuts"
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        CommandResult::Action(Action::OpenUrl(FEEDBACK_ISSUES_URL.into()))
+        CommandResult::Action(Action::OpenShortcutsHelp)
     }
 }
 
@@ -45,22 +47,24 @@ mod tests {
     };
 
     #[test]
-    fn opens_grow_issue_creation_page() {
+    fn question_mark_alias_opens_shortcuts_help() {
+        let invocation = crate::slash::parse_invocation("/?").expect("/? must parse");
+        assert_eq!(invocation.token, "?");
+        assert!(invocation.args.is_empty());
+
         let models = ModelState::default();
         let mut ctx = CommandExecCtx {
             models: &models,
             session_id: None,
             bundle_state: &DEFAULT_BUNDLE_STATE,
-            screen_mode: crate::app::ScreenMode::Minimal,
+            screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
             pager_state: PagerLocalSnapshot::default(),
         };
-        match FeedbackCommand.run(&mut ctx, "") {
-            CommandResult::Action(Action::OpenUrl(url)) => {
-                assert_eq!(url, FEEDBACK_ISSUES_URL);
-            }
-            other => panic!("expected OpenUrl, got {other:?}"),
-        }
-        assert!(!FeedbackCommand.takes_args());
+        assert_eq!(ShortcutsCommand.aliases(), &["?"]);
+        assert!(matches!(
+            ShortcutsCommand.run(&mut ctx, ""),
+            CommandResult::Action(Action::OpenShortcutsHelp)
+        ));
     }
 }

@@ -676,7 +676,7 @@ impl SessionActor {
                     "out of credits or over your spending limit. Add credits and retry."
                 }
                 SuppressReason::Auth => {
-                    "authentication problem — re-authenticate using /login and retry."
+                    "the model provider rejected its credentials. Check the provider authentication and retry."
                 }
                 SuppressReason::Size => "this conversation is too large to compact.",
                 SuppressReason::Schema => "this conversation can't be summarized.",
@@ -732,43 +732,79 @@ impl SessionActor {
             SuppressReason::Auth
         )
     }
-    /// Terminal auth compact failure: emit RetryState auth (reauth stash) + auth_required.
-    /// Separate from `AutoCompactFailed` (user-facing); this aborts the turn.
+    /// Terminal auth compact failure. Only a session-owned credential is
+    /// labeled re-authable; configured model providers retain their own repair
+    /// path instead of being redirected to Grow's `/login` flow.
     pub(crate) async fn surface_compact_auth_failure(&self, err: acp::Error) -> acp::Error {
         use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
         let detailed = Self::acp_error_message(&err);
-        let message = if detailed.to_ascii_lowercase().contains("unauthorized") {
-            detailed
+        let (model_id, base_url) = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|config| (config.model, config.base_url))
+            .unwrap_or_default();
+        let auth_provider = self.model_auth_provider(&model_id);
+        let session_reauthable =
+            auth_provider.is_none() && self.session_auth_recovery_eligible(&model_id, &base_url);
+        let message = if session_reauthable {
+            format!(
+                "{detailed}\n\nAuthentication required — run /login to re-authenticate, then retry."
+            )
+        } else if let Some(provider) = auth_provider.as_ref() {
+            if provider.config.is_oauth() {
+                format!(
+                    "{detailed}\n\nThe OAuth credential for model `{model_id}` was rejected. Run `grow login {}` and retry.",
+                    provider.name
+                )
+            } else {
+                format!(
+                    "{detailed}\n\nThe credential for model `{model_id}` was rejected. Check [auth_provider.{}] and the debug log, then retry.",
+                    provider.name
+                )
+            }
         } else {
             format!(
-                "Unauthorized (401): compaction failed — re-authenticate with /login \
-                 and retry. ({detailed})"
+                "{detailed}\n\nThe configured BYOK credential for model `{model_id}` was rejected. Check its provider api_key/env_key and endpoint in ~/.grow/config.toml, then retry."
             )
+        };
+        let error_type = if session_reauthable {
+            "reauth_required"
+        } else {
+            "provider_credentials"
         };
         tracing::warn!(
             session_id = %self.session_info.id.0,
             error = %message,
-            "auto-compact auth failure: aborting turn for re-auth"
+            reauthable = session_reauthable,
+            "auto-compact auth failure: aborting turn"
         );
         grow_telemetry::unified_log::warn(
-            "auto-compact auth failure: aborting turn for re-auth",
+            "auto-compact auth failure: aborting turn",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
+                "error_type": error_type,
+                "model": model_id,
                 "message": crate::util::truncate(&message, 300),
             })),
         );
         self.send_xai_notification(XaiSessionUpdate::RetryState(
             crate::extensions::notification::RetryState::Failed {
-                error_type: "auth".to_string(),
+                error_type: error_type.to_string(),
                 message: message.clone(),
             },
         ))
         .await;
-        acp::Error::auth_required().data(crate::sampling::error::terminal_error_data(
+        let data = crate::sampling::error::terminal_error_data(
             message,
             Some(401),
             grow_sampler::SamplingErrorKind::Auth,
-        ))
+        );
+        if session_reauthable {
+            acp::Error::auth_required().data(data)
+        } else {
+            acp::Error::internal_error().data(data)
+        }
     }
     /// Clear [`SUPPRESS_AUTH`] on login/token refresh (credit suppress waits for a 200).
     pub(crate) fn clear_auth_compact_suppression(&self) {
@@ -2792,7 +2828,7 @@ mod inline_auto_compact_flow_tests {
         assert!(!SessionActor::is_auth_compact_error(&size));
     }
     #[tokio::test(flavor = "current_thread")]
-    async fn surface_compact_auth_failure_emits_reauthable_retry_state() {
+    async fn surface_compact_byok_auth_failure_emits_provider_error() {
         use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
         use crate::session::storage::SessionUpdate;
         let local = tokio::task::LocalSet::new();
@@ -2805,8 +2841,8 @@ mod inline_auto_compact_flow_tests {
                 let err = acp::Error::internal_error()
                     .data("compact failed: API error (status 401 Unauthorized)");
                 let out = actor.surface_compact_auth_failure(err).await;
-                assert_eq!(out.code, acp::Error::auth_required().code);
-                let mut saw_retry_auth = false;
+                assert_eq!(out.code, acp::Error::internal_error().code);
+                let mut saw_provider_error = false;
                 while let Ok(msg) = persistence_rx.try_recv() {
                     if let PersistenceMsg::Update(SessionUpdate::Xai(notif)) = msg
                         && let XaiSessionUpdate::RetryState(
@@ -2816,17 +2852,18 @@ mod inline_auto_compact_flow_tests {
                             },
                         ) = &notif.update
                     {
-                        assert_eq!(error_type, "auth");
+                        assert_eq!(error_type, "provider_credentials");
                         assert!(
                             message.contains("Unauthorized (401)") || message.contains("401"),
                             "message={message}"
                         );
-                        saw_retry_auth = true;
+                        assert!(message.contains("BYOK"), "message={message}");
+                        saw_provider_error = true;
                     }
                 }
                 assert!(
-                    saw_retry_auth,
-                    "expected RetryState::Failed auth notification"
+                    saw_provider_error,
+                    "expected RetryState::Failed provider credential notification"
                 );
             })
             .await;
@@ -2959,11 +2996,11 @@ mod inline_auto_compact_flow_tests {
                 assert_eq!(
                     actor.compaction.auto_compact_suppressed.load(Relaxed),
                     SUPPRESS_AUTH,
-                    "auth compact failure must use SUPPRESS_AUTH (cleared on re-login)"
+                    "auth compact failure remains suppressed until credentials change"
                 );
                 let surfaced = actor.surface_compact_auth_failure(err).await;
-                assert_eq!(surfaced.code, acp::Error::auth_required().code);
-                let mut saw_retry_auth = false;
+                assert_eq!(surfaced.code, acp::Error::internal_error().code);
+                let mut saw_provider_error = false;
                 let mut saw_auto_failed = false;
                 while let Ok(msg) = persistence_rx.try_recv() {
                     if let PersistenceMsg::Update(SessionUpdate::Xai(notif)) = msg {
@@ -2974,16 +3011,16 @@ mod inline_auto_compact_flow_tests {
                                     message,
                                 },
                             ) => {
-                                assert_eq!(error_type, "auth");
+                                assert_eq!(error_type, "provider_credentials");
                                 assert!(
                                     message.contains("Unauthorized") || message.contains("401"),
                                     "message={message}"
                                 );
-                                saw_retry_auth = true;
+                                saw_provider_error = true;
                             }
                             XaiSessionUpdate::AutoCompactFailed { error } => {
                                 assert!(
-                                    error.contains("/login") || error.contains("authentication"),
+                                    error.contains("provider") || error.contains("credentials"),
                                     "auto-failed={error}"
                                 );
                                 saw_auto_failed = true;
@@ -2994,8 +3031,8 @@ mod inline_auto_compact_flow_tests {
                 }
                 assert!(saw_auto_failed, "expected AutoCompactFailed notification");
                 assert!(
-                    saw_retry_auth,
-                    "expected RetryState::Failed auth so pager can stash + reauth"
+                    saw_provider_error,
+                    "expected provider credential failure without a login redirect"
                 );
                 actor.clear_auth_compact_suppression();
                 assert_eq!(
@@ -3038,20 +3075,20 @@ mod inline_auto_compact_flow_tests {
                 let err = actor
                     .maybe_compact_on_model_switch()
                     .await
-                    .expect_err("model-switch 401 compact must abort for reauth");
-                assert_eq!(err.code, acp::Error::auth_required().code);
+                    .expect_err("model-switch 401 compact must abort");
+                assert_eq!(err.code, acp::Error::internal_error().code);
                 assert!(
                     SessionActor::is_auth_compact_error(&err)
                         || err.message.to_ascii_lowercase().contains("unauthorized")
                         || format!("{err:?}").contains("401"),
-                    "surfaced error should be reauthable auth: {err:?}"
+                    "surfaced error should retain the provider 401: {err:?}"
                 );
                 assert_eq!(
                     actor.compaction.auto_compact_suppressed.load(Relaxed),
                     SUPPRESS_AUTH,
                     "auth compact failure must use SUPPRESS_AUTH"
                 );
-                let mut saw_retry_auth = false;
+                let mut saw_provider_error = false;
                 while let Ok(msg) = persistence_rx.try_recv() {
                     if let PersistenceMsg::Update(SessionUpdate::Xai(notif)) = msg
                         && let XaiSessionUpdate::RetryState(
@@ -3061,17 +3098,17 @@ mod inline_auto_compact_flow_tests {
                             },
                         ) = &notif.update
                     {
-                        assert_eq!(error_type, "auth");
+                        assert_eq!(error_type, "provider_credentials");
                         assert!(
                             message.contains("Unauthorized") || message.contains("401"),
                             "message={message}"
                         );
-                        saw_retry_auth = true;
+                        saw_provider_error = true;
                     }
                 }
                 assert!(
-                    saw_retry_auth,
-                    "expected RetryState::Failed auth so pager can stash + reauth"
+                    saw_provider_error,
+                    "expected provider credential failure without a login redirect"
                 );
             })
             .await;

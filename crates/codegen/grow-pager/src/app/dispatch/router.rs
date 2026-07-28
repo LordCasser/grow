@@ -33,8 +33,7 @@ use super::modes::{
     set_permission_mode, set_plan_mode, set_yolo_mode,
 };
 use super::notes::{
-    dispatch_enter_feedback_mode, dispatch_enter_remember_mode,
-    dispatch_save_remember_note_from_modal, dispatch_send_btw, dispatch_send_feedback,
+    dispatch_enter_remember_mode, dispatch_save_remember_note_from_modal, dispatch_send_btw,
     dispatch_send_recap, dispatch_send_remember_note,
 };
 use super::permissions::{
@@ -841,6 +840,33 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             }]
         }
         Action::NextModel => vec![],
+        Action::CycleReasoningEffort => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get_mut(&id) else {
+                return vec![];
+            };
+            if agent.session.model_switch_pending {
+                agent.show_toast("A model setting change is already in progress");
+                return vec![];
+            }
+            let Some(model_id) = agent.session.models.current.clone() else {
+                agent.show_toast("Reasoning effort is available after the model connects");
+                return vec![];
+            };
+            let Some(effort) = agent.session.models.next_reasoning_effort() else {
+                agent.show_toast("This model has no configured reasoning-effort levels");
+                return vec![];
+            };
+            dispatch(
+                Action::SwitchModel {
+                    model_id,
+                    effort: Some(effort),
+                },
+                app,
+            )
+        }
         Action::SwitchModel { model_id, effort } => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];
@@ -951,8 +977,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowPlan => dispatch_show_plan(app),
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
         Action::SetPlanMode(kind) => set_plan_mode(app, kind),
-        Action::EnterFeedbackMode => dispatch_enter_feedback_mode(app),
-        Action::SendFeedback(text) => dispatch_send_feedback(app, text),
         Action::EnterRememberMode => dispatch_enter_remember_mode(app),
         Action::SendRememberNote(text) => dispatch_send_remember_note(app, text),
         Action::SaveRememberNoteFromModal => dispatch_save_remember_note_from_modal(app),
@@ -1019,6 +1043,19 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PrivacyBannerAccept => dispatch_privacy_banner_accept(app),
         Action::PrivacyBannerCustomize => dispatch_privacy_banner_customize(app),
         Action::OpenCommandPalette => dispatch_open_command_palette(app),
+        Action::OpenShortcutsHelp => {
+            match app.active_view {
+                ActiveView::Agent(id) => {
+                    let registry = &app.registry;
+                    if let Some(agent) = app.agents.get_mut(&id) {
+                        let _ = agent.open_shortcuts_help(registry);
+                    }
+                }
+                ActiveView::AgentDashboard => dispatch_dashboard_open_shortcuts_help(app),
+                ActiveView::Welcome => {}
+            }
+            vec![]
+        }
         Action::OpenHowtoGuides => dispatch_open_howto_guides(app),
         Action::OpenResetConfirm { key } => dispatch_open_reset_confirm(app, key),
         Action::ConfirmResetSetting { choice } => dispatch_confirm_reset_setting(app, choice),

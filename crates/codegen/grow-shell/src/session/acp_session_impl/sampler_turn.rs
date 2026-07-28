@@ -348,6 +348,9 @@ impl SessionActor {
         let auth_method = self.auth_method_id.load();
         SessionTokenAuthGate::new(auth_method.as_deref(), byok, base_url)
     }
+    pub(crate) fn session_auth_recovery_eligible(&self, model_id: &str, base_url: &str) -> bool {
+        self.auth_gate(model_id, base_url).active()
+    }
     /// Emit a unified-log breadcrumb whenever the session-token refresh gate is
     /// evaluated with an **`Unknown`** per-model BYOK status on a session-based
     /// method — the condition that (pre-fix) silently demoted live sessions to
@@ -747,7 +750,7 @@ impl SessionActor {
             .auth_manager
             .as_ref()
             .and_then(|am| am.current_or_expired());
-        let reauthable = is_reauthable_failure(Some(error_type), message);
+        let reauthable = is_reauthable_failure(Some(error_type));
         grow_telemetry::unified_log::warn(
             "turn.terminal_failure",
             Some(self.session_info.id.0.as_ref()),
@@ -867,13 +870,12 @@ impl SessionActor {
             .await
             .map(|c| (c.model, c.base_url))
             .unwrap_or_default();
-        let auth_provider =
-            if matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401) {
-                self.model_auth_provider(&failed_model_id)
-            } else {
-                None
-            };
-        let auth_recovery_eligible = matches!(error.kind, SamplingErrorKind::Auth) && {
+        let is_auth_401 =
+            error.status_code == Some(401) || matches!(error.kind, SamplingErrorKind::Auth);
+        let auth_provider = is_auth_401
+            .then(|| self.model_auth_provider(&failed_model_id))
+            .flatten();
+        let auth_recovery_eligible = is_auth_401 && {
             let gate = self.auth_gate(&failed_model_id, &failed_base_url);
             let eligible = gate.active();
             self.log_auth_gate_unknown("handle_sampling_failure", gate, &failed_base_url);
@@ -906,6 +908,7 @@ impl SessionActor {
         if !matches!(error.kind, SamplingErrorKind::Auth)
             && error.status_code == Some(401)
             && auth_provider.is_none()
+            && !auth_recovery_eligible
         {
             grow_telemetry::unified_log::warn(
                 "auth recovery: sampler 401 not eligible (non-auth error kind)",
@@ -1000,15 +1003,29 @@ impl SessionActor {
             }
             self.signals_handle().record_error_typed("empty_response");
         }
-        let auth_mode = self
+        let session_auth_mode = self
             .auth_manager
             .as_ref()
             .and_then(|am| am.current())
             .map(|a| a.auth_mode)
             .unwrap_or(crate::auth::AuthMode::ApiKey);
-        let auth_mode_str = format!("{auth_mode:?}");
+        let model_auth_facts = self.model_auth_facts(&failed_model_id);
+        let auth_mode_str = if let Some(provider) = auth_provider.as_ref() {
+            if provider.config.is_oauth() {
+                format!("OAuth ([auth_provider.{}])", provider.name)
+            } else {
+                format!("Command ([auth_provider.{}])", provider.name)
+            }
+        } else if model_auth_facts.byok == crate::agent::auth_method::ModelByok::Byok {
+            "BYOK (api_key/env_key or keyless provider)".to_string()
+        } else {
+            format!("{session_auth_mode:?}")
+        };
         let client_version = grow_version::VERSION;
-        if auth_mode == crate::auth::AuthMode::WebLogin {
+        if model_auth_facts.byok != crate::agent::auth_method::ModelByok::Byok
+            && auth_provider.is_none()
+            && session_auth_mode == crate::auth::AuthMode::WebLogin
+        {
             let msg = format!(
                 "{detailed_message}\n\n\
                  You are using a deprecated authentication method (WebLogin).\n\
@@ -1028,8 +1045,6 @@ impl SessionActor {
         }
         let is_model_404 =
             error.status_code == Some(404) && detailed_message.contains("does not exist");
-        let is_auth_401 =
-            error.status_code == Some(401) || matches!(error.kind, SamplingErrorKind::Auth);
         let detailed_message = if is_model_404 || is_auth_401 {
             let current_model = self
                 .chat_state_handle
@@ -1047,11 +1062,22 @@ impl SessionActor {
             msg.push_str(&format!("\n  Model:     {current_model}"));
             msg.push_str(&format!("\n  Auth:      {auth_mode_str}"));
             if let Some(ref provider) = auth_provider {
+                if provider.config.is_oauth() {
+                    msg.push_str(&format!(
+                        "\n  Fix:       run `grow login {}` and retry",
+                        provider.name
+                    ));
+                } else {
+                    msg.push_str(&format!(
+                        "\n  Fix:       check [auth_provider.{}] and the debug log",
+                        provider.name
+                    ));
+                }
+            } else if is_auth_401
+                && model_auth_facts.byok == crate::agent::auth_method::ModelByok::Byok
+            {
                 msg.push_str(
-                    &format!(
-                    "\n  Provider:  [auth_provider.{}] (check the provider command and the debug log)",
-                    provider.name
-                ),
+                    "\n  Fix:       check this model's provider api_key/env_key and endpoint in ~/.grow/config.toml",
                 );
             }
             msg.push_str(&format!("\n  Version:   {client_version}"));
@@ -1073,6 +1099,10 @@ impl SessionActor {
         };
         let error_type = if grow_sampling_types::is_context_length_error(&error.message) {
             "context_length"
+        } else if is_auth_401 && auth_recovery_eligible {
+            "reauth_required"
+        } else if is_auth_401 {
+            "provider_credentials"
         } else {
             error.kind.as_str()
         };

@@ -64,6 +64,7 @@ pub enum ActionId {
 
     // Agent
     NextModel,
+    CycleReasoningEffort,
     CancelTurn,
     ToggleYolo,
     ToggleMultiline,
@@ -807,6 +808,19 @@ mod tests {
     }
 
     #[test]
+    fn shift_tab_encodings_cycle_reasoning_effort_on_agent_screen() {
+        let registry = ActionRegistry::defaults();
+        for shortcut in crate::input::key::shift_tab_keys() {
+            let key = KeyEvent::new(shortcut.code, shortcut.modifiers);
+            assert_eq!(
+                registry.lookup(&key, When::AgentScreen),
+                Some(ActionId::CycleReasoningEffort),
+                "encoding {key:?}"
+            );
+        }
+    }
+
+    #[test]
     fn toggle_mouse_capture_disabled_by_default() {
         // Opt-in via config.toml; default registry must not register it.
         let registry = ActionRegistry::defaults();
@@ -869,7 +883,7 @@ mod tests {
     }
 
     #[test]
-    fn shortcuts_help_registered_with_ctrl_dot_only() {
+    fn shortcuts_help_registers_ctrl_dot_without_f1_or_ctrl_x() {
         let registry = ActionRegistry::defaults();
         let def = registry
             .find(ActionId::ShortcutsHelp)
@@ -878,11 +892,13 @@ mod tests {
         assert!(!def.requires_confirmation);
 
         let ctrl_dot = KeyEvent::new(KeyCode::Char('.'), KeyModifiers::CONTROL);
+        let f1 = KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE);
         let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
         assert_eq!(
             registry.lookup(&ctrl_dot, When::AgentScreen),
             Some(ActionId::ShortcutsHelp)
         );
+        assert_eq!(registry.lookup(&f1, When::AgentScreen), None);
         assert_eq!(registry.lookup(&ctrl_x, When::AgentScreen), None);
     }
 }

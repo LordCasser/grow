@@ -5,13 +5,11 @@ description: >
   right arrow and collapse it with the left arrow (directional collapse),
   open the man-style detail screen with Enter (pattern B) showing the action's
   long_help, return to the browse list with Esc (not close), then dismiss the
-  modal with the global Ctrl+X close chord.
+  modal with Esc.
 
-  Open/close uses Ctrl+X rather than Ctrl+. : both are bound to ShortcutsHelp
-  (When::AgentScreen) and both are the in-modal global-close chord, but Ctrl+X
-  has a legacy byte (0x18) the PTY reliably delivers whereas Ctrl+. has no
-  Xterm-encodable byte. The prompt ignores Ctrl+X, so it bubbles to the
-  AgentScreen binding.
+  The legacy PTY cannot encode Ctrl+., so this scenario enters through the
+  command palette. Unit coverage verifies the extended Ctrl+. key encodings;
+  this scenario remains focused on the modal interaction flow.
 terminal:
   rows: 40
   cols: 110
@@ -29,9 +27,13 @@ steps:
   - action: wait_for_text
     text: MOCK_SHORTCUTS_E2E
     timeout_ms: 30000
-  # Open the cheatsheet via the reliably-encodable Ctrl+X (== Ctrl+. binding).
+  # Open the cheatsheet through the command palette; this PTY has no KKP.
   - action: keys
-    keys: "<C-x>"
+    keys: "<C-p>"
+  - action: type_text
+    text: "keyboard shortcuts"
+  - action: keys
+    keys: "<Enter>"
   - action: wait_for_text
     text: Keyboard Shortcuts
     timeout_ms: 15000
@@ -81,9 +83,9 @@ steps:
     timeout_ms: 15000
   - action: assert_contains
     text: Keyboard Shortcuts
-  # Global close: Ctrl+X dismisses the modal and restores the session.
+  # Browse-mode Esc dismisses the modal and restores the session.
   - action: keys
-    keys: "<C-x>"
+    keys: "<Esc>"
   - action: wait
     millis: 300
   - action: assert_not_contains
@@ -94,4 +96,4 @@ steps:
     text: panicked
   - action: screenshot
     name: shortcuts-help-detail-closed
-    note: Cheatsheet inline-expand / detail / collapse flow complete; modal dismissed via Ctrl+X.
+    note: Cheatsheet inline-expand / detail / collapse flow complete; modal dismissed via Esc.

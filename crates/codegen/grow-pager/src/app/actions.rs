@@ -361,6 +361,8 @@ pub enum Action {
     },
     /// Cycle to next model.
     NextModel,
+    /// Cycle through the active model's declared reasoning-effort options.
+    CycleReasoningEffort,
     /// Switch active model.
     SwitchModel {
         model_id: acp::ModelId,
@@ -567,6 +569,9 @@ pub enum Action {
     /// directly in `handle_agent_action`; this lets a slash command reach the
     /// same modal through dispatch.
     OpenCommandPalette,
+    /// Open the context-appropriate keyboard shortcuts modal (`/shortcuts`,
+    /// `/?`). Agent and dashboard surfaces share this slash-command action.
+    OpenShortcutsHelp,
     /// Open the in-TUI How-to Guides doc picker (`/docs`, palette "How-to Guides").
     OpenHowtoGuides,
     /// Open the onboarding tutorial overlay (`/tutorial` or the command
@@ -654,10 +659,6 @@ pub enum Action {
     /// to config.toml). `/plan <desc>` uses `EnterPlanMode` instead
     /// because it also starts a turn.
     SetPlanMode(PlanModeKind),
-    /// Enter feedback mode (visual prompt change, not a send).
-    EnterFeedbackMode,
-    /// Send feedback text collected in feedback mode.
-    SendFeedback(String),
     /// Enter remember mode (visual prompt change, not a send).
     EnterRememberMode,
     /// Send a remember note from # mode. Routes through LLM rewrite when a
@@ -1847,12 +1848,6 @@ pub enum Effect {
     FetchBundleStatus,
     /// Fetch a bundled entry's raw content via `grow/bundle/entry/get`.
     FetchCatalogEntry { kind: String, name: String },
-    /// Send feedback about the current session (fire-and-forget POST).
-    SendFeedback {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
-        feedback_text: String,
-    },
     /// Save a remember note to global MEMORY.md (async file write).
     SaveMemoryNote {
         agent_id: AgentId,
@@ -2569,15 +2564,6 @@ pub enum TaskResult {
     SessionUsageFailed {
         agent_id: AgentId,
         session_id: acp::SessionId,
-        error: String,
-    },
-    /// Feedback submitted successfully (fire-and-forget).
-    FeedbackComplete {
-        agent_id: AgentId,
-    },
-    /// Feedback submission failed.
-    FeedbackFailed {
-        agent_id: AgentId,
         error: String,
     },
     /// Memory note saved to global MEMORY.md.

@@ -4437,6 +4437,7 @@ fn dashboard_action_for_id(
         | ActionId::OpenBlockViewer
         | ActionId::OpenNextLink
         | ActionId::OpenPrevLink
+        | ActionId::CycleReasoningEffort
         | ActionId::ToggleTodos
         | ActionId::ToggleTasks
         | ActionId::EditPromptExternal

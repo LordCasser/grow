@@ -301,17 +301,18 @@ Open the live workflows **run** dashboard — active and retained runs, not a ca
 
 ## Other
 
+### `/shortcuts`
+
+Open the searchable keyboard-shortcuts modal. Alias: `/?`. Grow advertises `/?`
+instead of `Ctrl+.` when the terminal cannot reliably deliver that modified key.
+
 ### `/theme`
 
 Switch the TUI color theme. Alias: `/t`.
 
-### `/feedback [message]`
+### `/feedback`
 
-Report an issue or send feedback.
-
-```
-/feedback Something isn't working correctly
-```
+Open the [Grow GitHub issue creation page](https://github.com/LordCasser/grow/issues/new) in your browser.
 
 ### `/btw`
 

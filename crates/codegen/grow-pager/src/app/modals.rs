@@ -12,7 +12,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Widget;
 
 use super::actions::Action;
-use super::agent_view::{AgentView, active_contexts_for_pane, apply_settings_outcome};
+use super::agent_view::{AgentView, apply_settings_outcome};
 use super::app_view::InputOutcome;
 
 use crate::theme::Theme;
@@ -794,33 +794,7 @@ impl AgentView {
                                     Some(crate::views::modal::howto_list_modal(prev));
                                 InputOutcome::Changed
                             }
-                            PaletteCommand::KeyboardShortcuts => {
-                                use crate::views::shortcuts_help;
-                                let mut contexts = active_contexts_for_pane(self.active_pane);
-                                // Same overlay-context push as the Ctrl+.
-                                // path (`handle_agent_action`,
-                                // `ActionId::ShortcutsHelp`).
-                                if self.in_dashboard_overlay {
-                                    contexts.push(crate::actions::When::DashboardOverlay);
-                                }
-                                let entries = shortcuts_help::build_entries(
-                                    &contexts,
-                                    registry,
-                                    self.vim_mode,
-                                );
-                                let state = shortcuts_help::build_initial_picker_state(&entries);
-                                self.active_modal = Some(ActiveModal::ShortcutsHelp {
-                                    entries,
-                                    state,
-                                    window: Default::default(),
-                                    filter_active: false,
-                                    collapsed_sections:
-                                        crate::views::shortcuts_help::default_collapsed(),
-                                    expanded_ids: std::collections::HashSet::new(),
-                                    mode: crate::views::shortcuts_help::ShortcutsHelpMode::Browse,
-                                });
-                                InputOutcome::Changed
-                            }
+                            PaletteCommand::KeyboardShortcuts => self.open_shortcuts_help(registry),
                             PaletteCommand::Memory => {
                                 self.active_modal = None;
                                 InputOutcome::Action(Action::OpenMemoryModal)

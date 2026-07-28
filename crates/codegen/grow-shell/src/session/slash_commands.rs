@@ -530,6 +530,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "settings",
             "share",
             "show-plan",
+            "shortcuts",
             "skills",
             "tasks",
             "terminal-check",
@@ -550,6 +551,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "welcome",
             "workflows",
             "yolo",
+            "?",
         ];
         let mut taken: HashSet<String> = builtins
             .iter()

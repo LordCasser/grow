@@ -1297,9 +1297,6 @@ pub(super) fn apply_retry_state(
                 session.credit_limit_blocked = true;
             } else if is_free_usage {
                 session.free_usage_blocked = true;
-            } else if !*rate_limited && is_reauthable_failure(None, reason) {
-                is_reauth = true;
-                scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
             } else {
                 let error = if *rate_limited {
                     crate::app::effects::sanitize_user_error(&format_rate_limited_user_message(
@@ -1326,7 +1323,7 @@ pub(super) fn apply_retry_state(
             is_credit_limit = super::super::dispatch::is_credit_limit_error(None, message);
             if is_credit_limit {
                 session.credit_limit_blocked = true;
-            } else if is_reauthable_failure(Some(error_type.as_str()), message) {
+            } else if is_reauthable_failure(Some(error_type.as_str())) {
                 is_reauth = true;
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
             } else if error_type == "context_length" {

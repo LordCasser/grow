@@ -32,7 +32,6 @@ fn external_prompt_editor_arms_typed_request_and_preserves_composer_modes() {
     for mode in [
         PromptInputMode::Normal,
         PromptInputMode::Bash,
-        PromptInputMode::Feedback,
         PromptInputMode::Remember,
     ] {
         let mut app = test_app_with_agent();
@@ -312,23 +311,6 @@ fn seed_foreign_resume_hint(
             native_id: "native-id".into(),
             age: std::time::Duration::from_secs(60),
         }),
-    );
-}
-/// Sending feedback is a submit: it retires the active ephemeral tip.
-#[test]
-fn send_feedback_clears_active_ephemeral_tip() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    let _ = agent.ephemeral_tip.show(
-        crate::tips::EphemeralTip::new("t", ratatui::text::Line::from("hint")),
-        &mut std::collections::HashMap::new(),
-    );
-    assert!(agent.ephemeral_tip.is_active());
-    let _ = dispatch(Action::SendFeedback("it broke".into()), &mut app);
-    assert!(
-        !app.agents.get(&id).unwrap().ephemeral_tip.is_active(),
-        "feedback submit must clear the tip"
     );
 }
 /// Sending a remember note is a submit: it retires the active ephemeral tip.

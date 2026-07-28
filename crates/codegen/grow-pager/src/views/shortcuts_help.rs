@@ -1,4 +1,4 @@
-//! All-shortcuts cheatsheet modal (Ctrl+. / Ctrl+X).
+//! All-shortcuts cheatsheet modal (Ctrl+. / `/?` fallback).
 //!
 //! Registry-driven: `build_entries(registry)` pulls every `ActionDef` from
 //! `ActionRegistry`, groups them by `Category` in onboarding-friendly order
@@ -9,7 +9,7 @@
 //! Two ways to read a binding's help: pattern A expands an inline help line under
 //! the selected hint (e/Space/l/h/arrows); pattern B opens an in-modal man-style
 //! detail page on Enter, where Esc (or h/Left/Backspace) returns to the browse list.
-//! Section headers collapse/expand; close via Esc in browse or Ctrl+./Ctrl+X.
+//! Section headers collapse/expand; close via Esc in browse or `Ctrl+.`.
 //! Rendered via `ModalWindow` chrome (same appearance as the command palette).
 //!
 //! Entry points from `AgentView`:
@@ -135,8 +135,7 @@ pub fn build_entries(
     // Keys the dashboard session-overlay claims while it is up. The
     // overlay intercept consults `When::DashboardOverlay` before
     // forwarding a key to the agent, so a lit row from another context
-    // advertising one of these keys would be lying (e.g. the
-    // cheatsheet's Ctrl+X alt is shadowed by the overlay stop).
+    // advertising one of these keys would be lying.
     let overlay_claimed: std::collections::HashSet<KeyShortcut> =
         if active_contexts.contains(&When::DashboardOverlay) {
             registry
@@ -503,7 +502,7 @@ fn picker_config(non_sel: &[bool]) -> PickerConfig<'_> {
 /// modal, re-dispatching a synthesized key into `handle_input`, etc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutsHelpOutcome {
-    /// User asked to close the modal (Esc in browse, Ctrl+./Ctrl+X, [x] click).
+    /// User asked to close the modal (Esc in browse, Ctrl+., [x] click).
     Close,
     /// Toggle the filter (show all vs hide dimmed).
     ToggleFilter,
@@ -612,7 +611,11 @@ pub fn modal_footer_detail() -> Vec<crate::views::modal_window::Shortcut<'static
             id: 0,
         },
         Shortcut {
-            label: "Ctrl+./X close",
+            label: if crate::actions::ctrl_dot_unreliable() {
+                "Esc Esc close"
+            } else {
+                "Ctrl+. close"
+            },
             clickable: false,
             id: 0,
         },
@@ -792,11 +795,9 @@ pub fn handle_input(
     expanded_ids: &std::collections::HashSet<ExpandKey>,
     mode: &mut ShortcutsHelpMode,
 ) -> ShortcutsHelpOutcome {
-    use crossterm::event::{Event, KeyCode, KeyModifiers};
+    use crossterm::event::{Event, KeyCode};
 
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('.') | KeyCode::Char('x'))
-    {
+    if crate::input::key::is_ctrl_dot(key) {
         return ShortcutsHelpOutcome::Close;
     }
 
@@ -1358,7 +1359,7 @@ pub fn render_modal(
 /// chrome + picker pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalKeyOutcome {
-    /// User asked to close the modal (Esc in browse, Ctrl+./Ctrl+X,
+    /// User asked to close the modal (Esc in browse, Ctrl+.,
     /// or the close chrome button).
     Close,
     /// `f` was pressed — caller should flip `filter_active`.
@@ -2151,9 +2152,7 @@ mod tests {
     /// `DashboardStop` (list) and `DashboardOverlayStop` (overlay) share
     /// Ctrl+X and the Dashboard category. The per-category dedup must keep
     /// whichever matches the active surface — lit — instead of always
-    /// keeping the first-registered (list) def. And inside the overlay the
-    /// `ShortcutsHelp` row must drop its shadowed Ctrl+X alt (the overlay
-    /// stop owns the key there) while keeping its other binding.
+    /// keeping the first-registered (list) def.
     #[test]
     fn build_entries_overlay_stop_wins_dedup() {
         let registry = ActionRegistry::defaults();
@@ -2950,7 +2949,26 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_x_closes_from_browse_mode() {
+    fn f1_is_not_a_shortcuts_close_key() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let entries = vec![header("Nav", 0, 1), hint("send", key!(Enter))];
+        let mut state = build_initial_picker_state(&entries);
+        let mut mode = browse_mode();
+        let key = KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE);
+        let result = handle_input(
+            &key,
+            &entries,
+            &mut state,
+            false,
+            &no_collapsed(),
+            &no_expanded(),
+            &mut mode,
+        );
+        assert_eq!(result, ShortcutsHelpOutcome::Unchanged);
+    }
+
+    #[test]
+    fn ctrl_x_is_not_a_shortcuts_close_chord() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let entries = vec![header("Nav", 0, 1), hint("send", key!(Enter))];
         let mut state = build_initial_picker_state(&entries);
@@ -2965,7 +2983,7 @@ mod tests {
             &no_expanded(),
             &mut mode,
         );
-        assert_eq!(result, ShortcutsHelpOutcome::Close);
+        assert_eq!(result, ShortcutsHelpOutcome::Unchanged);
     }
 
     #[test]

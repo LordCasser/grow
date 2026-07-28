@@ -213,4 +213,4 @@ Byobu on GNU screen has limited support. `/doctor` reports
 
 ## Still Stuck?
 
-Run `/feedback` to report it.
+Run `/feedback` to open Grow's GitHub issue creation page.

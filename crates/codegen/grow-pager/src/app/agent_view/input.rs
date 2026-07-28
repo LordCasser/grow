@@ -1030,6 +1030,11 @@ impl AgentView {
             };
         }
         if let Event::Key(key) = ev
+            && crate::input::key::is_ctrl_dot(key)
+        {
+            return self.open_shortcuts_help(registry);
+        }
+        if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
         {
             if let Some(started_at) = self.leader_key_started_at.take()
@@ -1401,25 +1406,7 @@ impl AgentView {
                 });
                 InputOutcome::Changed
             }
-            ActionId::ShortcutsHelp => {
-                use crate::views::shortcuts_help;
-                let mut contexts = active_contexts_for_pane(self.active_pane);
-                if self.in_dashboard_overlay {
-                    contexts.push(crate::actions::When::DashboardOverlay);
-                }
-                let entries = shortcuts_help::build_entries(&contexts, registry, self.vim_mode);
-                let state = shortcuts_help::build_initial_picker_state(&entries);
-                self.active_modal = Some(crate::views::modal::ActiveModal::ShortcutsHelp {
-                    entries,
-                    state,
-                    window: Default::default(),
-                    filter_active: false,
-                    collapsed_sections: crate::views::shortcuts_help::default_collapsed(),
-                    expanded_ids: std::collections::HashSet::new(),
-                    mode: crate::views::shortcuts_help::ShortcutsHelpMode::Browse,
-                });
-                InputOutcome::Changed
-            }
+            ActionId::ShortcutsHelp => self.open_shortcuts_help(registry),
             ActionId::OpenSettings => InputOutcome::Action(Action::OpenSettings),
             ActionId::ToggleMouseCapture => {
                 crate::unified_log::info(
@@ -1433,6 +1420,29 @@ impl AgentView {
             }
             other => resolve_action(Some(other)).unwrap_or(InputOutcome::Unchanged),
         }
+    }
+
+    /// Open the cheatsheet from the live registry used by this app instance.
+    /// This keeps direct-key and command-palette entry points on the same
+    /// context-sensitive set of effective shortcuts.
+    pub(crate) fn open_shortcuts_help(&mut self, registry: &ActionRegistry) -> InputOutcome {
+        use crate::views::shortcuts_help;
+        let mut contexts = active_contexts_for_pane(self.active_pane);
+        if self.in_dashboard_overlay {
+            contexts.push(When::DashboardOverlay);
+        }
+        let entries = shortcuts_help::build_entries(&contexts, registry, self.vim_mode);
+        let state = shortcuts_help::build_initial_picker_state(&entries);
+        self.active_modal = Some(ActiveModal::ShortcutsHelp {
+            entries,
+            state,
+            window: Default::default(),
+            filter_active: false,
+            collapsed_sections: shortcuts_help::default_collapsed(),
+            expanded_ids: std::collections::HashSet::new(),
+            mode: shortcuts_help::ShortcutsHelpMode::Browse,
+        });
+        InputOutcome::Changed
     }
     /// Returns `true` if the switch happened immediately, `false` if blocked.
     pub(crate) fn set_active_pane(&mut self, target: AgentPane, force: bool) -> bool {
@@ -1742,6 +1752,71 @@ mod command_palette_input_default_tests {
             state.search_active,
             "command palette must open in input mode (search_active=true)"
         );
+    }
+}
+#[cfg(test)]
+mod shortcuts_help_input_tests {
+    use super::test_fixtures::make_agent;
+    use crate::actions::{ActionId, ActionRegistry};
+    use crate::app::app_view::InputOutcome;
+    use crate::views::modal::ActiveModal;
+    use crate::views::shortcuts_help::ShortcutsHelpEntry;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn ctrl_dot_opens_live_shortcuts_cheatsheet() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        let outcome = agent.handle_input(
+            &Event::Key(KeyEvent::new(
+                KeyCode::Char('>'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )),
+            &registry,
+        );
+        assert!(matches!(outcome, InputOutcome::Changed));
+        let Some(ActiveModal::ShortcutsHelp { entries, .. }) = &agent.active_modal else {
+            panic!("Ctrl+. must open the shortcuts cheatsheet");
+        };
+        let action_ids: Vec<_> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ShortcutsHelpEntry::Hint {
+                    action_id: Some(id),
+                    ..
+                } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert!(action_ids.contains(&ActionId::CycleMode));
+        assert!(action_ids.contains(&ActionId::CycleReasoningEffort));
+        assert!(action_ids.contains(&ActionId::ToggleTodos));
+        assert!(action_ids.contains(&ActionId::ShortcutsHelp));
+
+        let displayed_key = |id| {
+            let index = entries
+                .iter()
+                .position(|entry| {
+                    matches!(
+                        entry,
+                        ShortcutsHelpEntry::Hint {
+                            action_id: Some(entry_id),
+                            ..
+                        } if *entry_id == id
+                    )
+                })
+                .expect("registered action must have a cheatsheet row");
+            crate::views::shortcuts_help::entry_display(entries, index).1
+        };
+        assert_eq!(displayed_key(ActionId::CycleMode), "Ctrl+R");
+        assert_eq!(displayed_key(ActionId::CycleReasoningEffort), "Shift+Tab");
+        assert_eq!(displayed_key(ActionId::ToggleTodos), "Ctrl+t");
+        let shortcuts_key = if crate::actions::ctrl_dot_unreliable() {
+            "/?"
+        } else {
+            "Ctrl+."
+        };
+        assert_eq!(displayed_key(ActionId::ShortcutsHelp), shortcuts_key);
     }
 }
 #[cfg(test)]

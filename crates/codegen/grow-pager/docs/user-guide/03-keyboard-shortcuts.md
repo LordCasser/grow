@@ -110,7 +110,7 @@ Switch between the prompt input and scrollback pane.
 
 **Post-cancel grace:** for about a second after an Esc-triggered cancel, the idle rewind arm stays suppressed — mashing Esc to stop a turn cannot silently open the rewind picker. Only the rewind arm is held; every other Esc behavior is unaffected.
 
-**Steal-Esc (runs before mid-turn cancel / swallow and clear / rewind):** overlays, modals, slash/file/completion dropdowns, history search, scrollback search, text selection, link highlight, and **Bash / Remember / Feedback mode exit** when the prompt is empty (Esc leaves `!` / `#` / feedback mode and returns to the normal prompt — even while a turn is running).
+**Steal-Esc (runs before mid-turn cancel / swallow and clear / rewind):** overlays, modals, slash/file/completion dropdowns, history search, scrollback search, text selection, link highlight, and **Bash / Remember mode exit** when the prompt is empty (Esc leaves `!` / `#` mode and returns to the normal prompt — even while a turn is running).
 
 **Ctrl+C vs Esc:** with a non-empty draft while a turn is running, Ctrl+C clears the draft and keeps the turn; a second Ctrl+C on an empty prompt cancels. Esc cancels immediately and preserves the draft (in fullscreen vim mode it does not cancel — it only retries while already cancelling). Idle non-empty Ctrl+C clears in one press; Esc requires two presses within 800ms.
 
@@ -130,6 +130,7 @@ Actions that affect the agent session, available from the agent screen.
 | `Ctrl+S` | Agent screen | Open the session picker (resume a previous session) |
 | `Ctrl+;` (alt: `Ctrl+'`) | Agent screen | Toggle the prompt queue pane (when non-empty). **Local macOS** VS Code family only: primary **`Ctrl+4`** (`;` / `'` still alts). SSH and non-Mac keep **`Ctrl+;`** / **`Ctrl+'`**. |
 | `Ctrl+R` | Prompt focused | Cycle mode (Normal → Plan → Auto → Always-approve, subject to feature policy) |
+| `Shift+Tab` | Agent screen | Cycle through the active model's configured reasoning-effort levels |
 | `Ctrl+B` | Agent screen | Send the running foreground command to the background |
 | `Ctrl+T` | Agent screen | Toggle the todos pane |
 | `Ctrl+G` | Agent screen (full TUI) | Toggle the tasks pane |
@@ -139,16 +140,20 @@ Actions that affect the agent session, available from the agent screen.
 | `!` | Prompt focused | Enter shell mode (type `!` on an empty prompt) |
 | `Ctrl+X`, then `M` | Agent screen | Open the configured-model picker |
 | `Ctrl+X`, then `A` | Agent screen | Open the enabled-Agent picker |
-| `Ctrl+.` | Agent screen | Open the keyboard shortcuts help |
+| `Ctrl+.` / `/?` fallback | Agent screen | Open the keyboard shortcuts help |
 | `F2` (alt: `Ctrl+,` / `Cmd+,`) | Agent screen | Open the settings modal |
 
 **Note:** `Ctrl+X` is a two-key leader with a two-second timeout. An unknown continuation cancels the leader and is consumed. `/model` and `/agents` remain available.
+
+**Note:** `Shift+Tab` follows the model's `reasoning_efforts` declaration order and persists the
+new value with the current session. If the model has no configured effort support, Grow leaves the
+session unchanged and shows a short explanation. `/effort` remains available for direct selection.
 
 **Note:** Minimal-mode external editing resolves `$VISUAL`, then `$EDITOR`, then `vi`. Values may include quoted arguments. Saving replaces only the draft; an empty file clears it. Drafts with pasted/file/image chips must be edited in the composer so attachments are not flattened.
 
 **Note:** `Ctrl+'` is a Windows alt for `Ctrl+;` — some Windows consoles drop the `Ctrl` modifier on punctuation keys.
 
-**Note:** `Ctrl+.` needs the Kitty keyboard protocol (or tmux `extended-keys on` so that protocol can pass through). Run `/doctor` if modified keys misbehave in tmux; the command palette also exposes **Keyboard shortcuts**.
+**Note:** `Ctrl+.` needs the Kitty keyboard protocol (or tmux `extended-keys on` so that protocol can pass through). Grow displays `/?` when the terminal cannot deliver `Ctrl+.`; `/shortcuts` is its longer equivalent, and the command palette also exposes **Keyboard shortcuts**. Run `/doctor` if modified keys misbehave in tmux.
 
 ---
 

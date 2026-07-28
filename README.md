@@ -17,6 +17,7 @@ Grow 不是 xAI 官方产品，也不内置 Grok 模型、推理端点或推理�
 | 默认模型 | 产品默认值 | `[models].default` 只为新 session 提供初始值 |
 | session 恢复 | 受产品模型状态影响 | 打开已有 session 时恢复该 session 上次退出时的 Agent 和模型 |
 | 模型切换 | slash command / 旧式选择流程 | `Ctrl+X` 后按 `m` 打开已配置模型选单，同时保留 `/model` |
+| 思考强度 | 依赖产品模型能力 | 每个 BYOK 模型显式声明 `reasoning_efforts`；`Shift+Tab` 按声明顺序循环 |
 | Agent 切换 | 上游内置 Agent 流程 | `Ctrl+X` 后按 `a` 打开平级 Agent 选单，同时保留 `/agents` |
 | Agent 定义 | 上游格式 | 兼容 Harness/OpenCode 常见 Markdown frontmatter；忽略外部权限、mode 和 model 字段 |
 | Agent 关系 | 可包含产品特定模式 | 所有 Agent 平级；Agent 不绑定 provider/model，也不引入父/子 Agent 限定 |
@@ -72,6 +73,48 @@ context_window = 200000
 也可以在 `[provider.<id>.options]` 中使用 `api_key`，但推荐通过 `env_key` 从环境变量读取。
 完整字段和 session 继承规则见
 [LLM Providers and BYOK](crates/codegen/grow-pager/docs/user-guide/11-custom-models.md)。
+
+### 配置模型思考强度
+
+不同供应商没有统一的模型能力发现接口。需要切换思考强度时，在具体模型下用
+`reasoning_efforts` 显式声明该模型真正接受的档位；数组顺序就是 `Shift+Tab` 的循环顺序，
+`default = true` 标记新 session 的初始档位。以 DeepSeek 为例：
+
+```toml
+[models]
+default = "deepseek/deepseek-v4-pro"
+
+[provider.deepseek]
+api_backend = "chat_completions"
+
+[provider.deepseek.options]
+base_url = "https://api.deepseek.com/v1"
+env_key = "DEEPSEEK_API_KEY"
+
+[provider.deepseek.models.deepseek-v4-pro]
+name = "DeepSeek V4 Pro"
+context_window = 1048576
+reasoning_efforts = [
+  { value = "high", label = "High", default = true },
+  { value = "max", label = "Max" },
+]
+```
+
+Grow 内部支持 `none`、`minimal`、`low`、`medium`、`high`、`xhigh` 和 `max`，但配置时只应
+列出当前模型 API 实际支持的值。例如 [DeepSeek 思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)
+当前使用 `high`/`max`；[GLM 核心参数](https://docs.bigmodel.cn/cn/guide/start/concept-param)
+允许模型按其接口能力声明更多档位。也可以使用简写：
+
+```toml
+reasoning_efforts = ["none", "high", "max"]
+```
+
+请求时，Grow 会根据 `api_backend` 转换字段：`chat_completions` 发送顶层
+`reasoning_effort`，`responses` 发送 `reasoning.effort`，`messages` 使用对应的
+thinking/output-config 字段。`Shift+Tab`、`/effort` 和 `/model` 共用同一份模型档位配置。
+切换结果保存在当前 session；重新打开旧 session 时恢复其最后档位，新 session 使用模型配置
+的默认值。没有声明 `reasoning_efforts` 的模型不会被 Grow 猜测支持，按 `Shift+Tab` 时只会
+显示配置提示。
 
 OAuth 是 provider 的另一种可选凭据来源，不是 Grow 的全局登录态。模型仍然必须显式属于
 该 provider，也不会因为登录成功而自动添加模型：
@@ -210,6 +253,7 @@ Grow 不发布 npm 包，也不调用 npm 查询或安装更新；GitHub Release
 - `Ctrl+X`，然后 `m`：选择已经配置的模型
 - `Ctrl+X`，然后 `a`：选择 Agent
 - `Ctrl+R`：循环权限模式
+- `Shift+Tab`：按当前模型的 `reasoning_efforts` 顺序循环思考强度
 - `/model`、`/agents`：保留原命令行为
 - `Tab`：保留原有补全/导航行为
 
