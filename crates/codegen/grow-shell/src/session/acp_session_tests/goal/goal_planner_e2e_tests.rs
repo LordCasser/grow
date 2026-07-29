@@ -183,7 +183,7 @@ fn drain_goal_planning_flags(
 ) -> Vec<Option<bool>> {
     let mut out = Vec::new();
     while let Ok(msg) = rx.try_recv() {
-        if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n)) = msg
+        if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(n)) = msg
             && let crate::extensions::notification::SessionUpdate::GoalUpdated { planning, .. } =
                 n.update
         {

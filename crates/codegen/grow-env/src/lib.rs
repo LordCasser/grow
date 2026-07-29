@@ -157,7 +157,7 @@ mod tests {
     }
     #[test]
     fn env_var_guard_set_value_updates_then_restores_on_drop() {
-        const KEY: &str = "XAI_GROW_ENV_VAR_GUARD_SET_VALUE_PROBE";
+        const KEY: &str = "GROW_ENV_VAR_GUARD_SET_VALUE_PROBE";
         let before = std::env::var(KEY).ok();
         {
             let guard = EnvVarGuard::set(KEY, "initial");

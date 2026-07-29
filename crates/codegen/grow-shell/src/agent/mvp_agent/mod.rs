@@ -957,7 +957,7 @@ impl MvpAgent {
     /// Dispatches by on-disk method name:
     /// - ACP updates (`"session/update"`) → typed `SessionNotification` for correct
     ///   TUI dispatch (direct dispatch preserves Rust types, not method strings).
-    /// - xAI updates (`"_grow/session/update"`) → `ExtNotification`.
+    /// - Grow updates (`"_grow/session/update"`) → `ExtNotification`.
     ///
     /// When `mark_replay` is true, the notification is tagged with
     /// `_meta.isReplay: true` so the client knows it's historical data.
@@ -1012,7 +1012,7 @@ impl MvpAgent {
                 let Ok(mut params) = serde_json::from_str::<
                     serde_json::Value,
                 >(raw_params.get()) else {
-                    tracing::debug!("replay: skipping xAI update with unparseable params");
+                    tracing::debug!("replay: skipping Grow update with unparseable params");
                     return;
                 };
                 if let Some(obj) = params.as_object_mut() {

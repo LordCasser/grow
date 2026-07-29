@@ -227,7 +227,7 @@ pub(crate) mod chat_rebuild {
         fn process(&mut self, update: &SessionUpdate) -> Vec<ConversationItem> {
             match update {
                 SessionUpdate::Acp(n) => self.handle_acp(&n.update),
-                SessionUpdate::Xai(n) => self.handle_xai(&n.update),
+                SessionUpdate::Grow(n) => self.handle_grow(&n.update),
             }
         }
 
@@ -241,14 +241,14 @@ pub(crate) mod chat_rebuild {
             }
         }
 
-        fn handle_xai(
+        fn handle_grow(
             &mut self,
             update: &crate::extensions::notification::SessionUpdate,
         ) -> Vec<ConversationItem> {
-            use crate::extensions::notification::SessionUpdate as XaiUpdate;
+            use crate::extensions::notification::SessionUpdate as GrowUpdate;
 
             match update {
-                XaiUpdate::CompactionCheckpoint(_) => {
+                GrowUpdate::CompactionCheckpoint(_) => {
                     self.reset();
                     self.needs_truncate = true;
                     Vec::new()
@@ -538,10 +538,10 @@ impl Iterator for UpdatesIterator {
 /// Method name for standard ACP session/update notifications.
 const ACP_SESSION_UPDATE_METHOD: &str = "session/update";
 
-/// Method name for xAI extension session/update notifications.
-pub(crate) const XAI_SESSION_UPDATE_METHOD: &str = "_grow/session/update";
+/// Method name for Grow extension session/update notifications.
+pub(crate) const GROW_SESSION_UPDATE_METHOD: &str = "_grow/session/update";
 
-/// A unified session update that can be either an ACP notification or an xAI extension notification.
+/// A unified session update that can be either an ACP notification or a Grow extension notification.
 /// This allows storing all session updates in chronological order.
 ///
 /// Note: The `Serialize` implementation produces a format without timestamp.
@@ -550,8 +550,8 @@ pub(crate) const XAI_SESSION_UPDATE_METHOD: &str = "_grow/session/update";
 pub enum SessionUpdate {
     /// Standard ACP session/update notification (boxed due to large size)
     Acp(Box<acp::SessionNotification>),
-    /// xAI extension session notification (e.g., diff_review)
-    Xai(Box<SessionNotification>),
+    /// Grow extension session notification (e.g., diff_review)
+    Grow(Box<SessionNotification>),
 }
 
 impl serde::Serialize for SessionUpdate {
@@ -567,8 +567,8 @@ impl serde::Serialize for SessionUpdate {
                 map.serialize_entry("method", ACP_SESSION_UPDATE_METHOD)?;
                 map.serialize_entry("params", notification)?;
             }
-            SessionUpdate::Xai(notification) => {
-                map.serialize_entry("method", XAI_SESSION_UPDATE_METHOD)?;
+            SessionUpdate::Grow(notification) => {
+                map.serialize_entry("method", GROW_SESSION_UPDATE_METHOD)?;
                 map.serialize_entry("params", notification)?;
             }
         }
@@ -599,7 +599,7 @@ pub(crate) struct SessionUpdateEnvelope {
     #[serde(default)]
     pub timestamp: u64,
     /// The method name identifying the update type.
-    /// Either "session/update" for ACP or "_grow/session/update" for xAI extensions.
+    /// Either "session/update" for ACP or "_grow/session/update" for Grow extensions.
     pub method: String,
     /// The actual notification payload.
     pub params: serde_json::Value,
@@ -619,9 +619,9 @@ impl SessionUpdateEnvelope {
                 method: ACP_SESSION_UPDATE_METHOD.to_string(),
                 params: serde_json::to_value(notification)?,
             }),
-            SessionUpdate::Xai(notification) => Ok(Self {
+            SessionUpdate::Grow(notification) => Ok(Self {
                 timestamp,
-                method: XAI_SESSION_UPDATE_METHOD.to_string(),
+                method: GROW_SESSION_UPDATE_METHOD.to_string(),
                 params: serde_json::to_value(notification)?,
             }),
         }
@@ -629,9 +629,9 @@ impl SessionUpdateEnvelope {
 
     /// Convert this envelope back into a SessionUpdate.
     pub(crate) fn into_update(self) -> Result<SessionUpdate, serde_json::Error> {
-        if self.method == XAI_SESSION_UPDATE_METHOD {
+        if self.method == GROW_SESSION_UPDATE_METHOD {
             let notification: SessionNotification = serde_json::from_value(self.params)?;
-            Ok(SessionUpdate::Xai(Box::new(notification)))
+            Ok(SessionUpdate::Grow(Box::new(notification)))
         } else {
             // ACP notification (method == "session/update" or unknown)
             let notification: acp::SessionNotification = serde_json::from_value(self.params)?;
@@ -670,9 +670,9 @@ impl SessionUpdateEnvelope {
         // Try to parse as envelope first (has "method" + "params")
         if let Ok(envelope) = serde_json::from_str::<BorrowedEnvelope<'_>>(line) {
             let raw_params = envelope.params.get();
-            return if envelope.method == Some(XAI_SESSION_UPDATE_METHOD) {
+            return if envelope.method == Some(GROW_SESSION_UPDATE_METHOD) {
                 let notification: SessionNotification = serde_json::from_str(raw_params)?;
-                Ok(SessionUpdate::Xai(Box::new(notification)))
+                Ok(SessionUpdate::Grow(Box::new(notification)))
             } else {
                 let notification: acp::SessionNotification = serde_json::from_str(raw_params)?;
                 Ok(SessionUpdate::Acp(Box::new(notification)))
@@ -690,7 +690,7 @@ impl SessionUpdateEnvelope {
 pub struct PersistedData {
     pub summary: Summary,
     pub chat_history: Vec<ConversationItem>,
-    /// All session updates (ACP updates and xAI extension updates) in chronological order
+    /// All session updates (ACP updates and Grow extension updates) in chronological order
     pub updates: Vec<SessionUpdate>,
     pub plan_state: Option<TodoState>,
     /// Persisted plan mode lifecycle state (None for sessions created before plan mode)
@@ -1013,7 +1013,7 @@ pub trait StorageAdapter: Send + Sync {
         session_title: String,
     ) -> io::Result<bool>;
 
-    /// Append a session update (ACP update or xAI extension update) and increment counter
+    /// Append a session update (ACP update or Grow extension update) and increment counter
     async fn append_update(&self, info: &Info, update: &SessionUpdate) -> io::Result<()>;
 
     /// Append one update and report whether the replay record was committed before an error.
@@ -1331,9 +1331,9 @@ fn filter_rewind_by<T>(items: Vec<T>, classify: impl Fn(&T) -> RewindStep) -> Ve
 /// Classify a raw JSONL line by peeking at its tag and `_meta` without fully
 /// deserializing the payload.
 fn rewind_step_for_line(line: &str) -> RewindStep {
-    let (raw_params, is_xai) = if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(line) {
+    let (raw_params, is_grow) = if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(line) {
         let raw = env.params.map(|p| p.get()).unwrap_or(line);
-        (raw, env.method == Some(XAI_SESSION_UPDATE_METHOD))
+        (raw, env.method == Some(GROW_SESSION_UPDATE_METHOD))
     } else {
         (line, false)
     };
@@ -1345,7 +1345,7 @@ fn rewind_step_for_line(line: &str) -> RewindStep {
         return RewindStep::Other;
     };
 
-    if is_xai
+    if is_grow
         && u.session_update == *REWIND_MARKER
         && let Some(target) = u.target_prompt_index
     {
@@ -1353,7 +1353,7 @@ fn rewind_step_for_line(line: &str) -> RewindStep {
     }
 
     let is_host_turn = u.meta.as_ref().and_then(|m| m.host_turn).unwrap_or(false);
-    if !is_xai && !is_host_turn && u.session_update == *USER_MESSAGE_CHUNK {
+    if !is_grow && !is_host_turn && u.session_update == *USER_MESSAGE_CHUNK {
         let prompt_index = u
             .meta
             .as_ref()
@@ -1366,7 +1366,7 @@ fn rewind_step_for_line(line: &str) -> RewindStep {
 
 /// Classify a typed `SessionUpdate`.
 fn rewind_step_for_update(update: &SessionUpdate) -> RewindStep {
-    if let SessionUpdate::Xai(n) = update
+    if let SessionUpdate::Grow(n) = update
         && let crate::extensions::notification::SessionUpdate::RewindMarker {
             target_prompt_index,
             ..
@@ -1403,7 +1403,7 @@ pub fn filter_rewind_updates(updates: Vec<SessionUpdate>) -> Vec<SessionUpdate> 
     let has_rewinds = updates.iter().any(|u| {
         matches!(
             u,
-            SessionUpdate::Xai(n) if matches!(
+            SessionUpdate::Grow(n) if matches!(
                 n.update,
                 crate::extensions::notification::SessionUpdate::RewindMarker { .. }
             )
@@ -1582,9 +1582,9 @@ fn for_each_replay_update_in_file<F: FnMut(acp::SessionUpdate)>(
                 forwarded = true;
                 f(strip_context_wrappers(notif.update));
             }
-            // Xai extensions (rewind markers, compaction signals) are consumed
+            // Grow extensions (rewind markers, compaction signals) are consumed
             // by the filter and intentionally dropped (matching the typed load).
-            Ok(SessionUpdate::Xai(_)) => {}
+            Ok(SessionUpdate::Grow(_)) => {}
             // Best-effort: an unparseable line (e.g. a partially written trailing
             // line) is skipped rather than aborting replay; the typed load drops
             // it too. Logged for diagnostics.
@@ -1859,7 +1859,7 @@ pub enum PromptExtractEvent {
         prompt_index: Option<usize>,
     },
 
-    /// A `RewindMarker` xAI update: truncate accumulated prompts to this index.
+    /// A `RewindMarker` Grow update: truncate accumulated prompts to this index.
     ///
     /// Any in-progress user message should be flushed before truncating.
     RewindTo(usize),
@@ -1894,7 +1894,7 @@ impl PromptExtractEvent {
 /// for prompt reconstruction:
 ///
 /// - ACP `"user_message_chunk"` → `update.content.text`
-/// - xAI `"rewind_marker"`      → `update.target_prompt_index`
+/// - Grow `"rewind_marker"`      → `update.target_prompt_index`
 /// - everything else             → [`PromptExtractEvent::NotUserMessage`]
 ///
 /// Parse errors on individual lines are treated conservatively as
@@ -2131,7 +2131,7 @@ pub fn collect_assistant_text(
                     }
                 }
             }
-            SessionUpdate::Xai(_) => {
+            SessionUpdate::Grow(_) => {
                 if !current.is_empty() {
                     let t = current.trim().to_string();
                     if !t.is_empty() {
@@ -2222,7 +2222,7 @@ pub fn collect_tool_metadata(iter: impl Iterator<Item = io::Result<SessionUpdate
                     _ => {}
                 }
             }
-            SessionUpdate::Xai(_) => {}
+            SessionUpdate::Grow(_) => {}
         }
     }
     meta
@@ -2232,7 +2232,7 @@ pub fn collect_tool_metadata(iter: impl Iterator<Item = io::Result<SessionUpdate
 // Selective serde structs — only the fields we care about
 // ---------------------------------------------------------------------------
 
-/// Peek inside ACP or xAI `params` to read the `update.sessionUpdate` tag and
+/// Peek inside ACP or Grow `params` to read the `update.sessionUpdate` tag and
 /// any fields relevant to `user_message_chunk` or `rewind_marker`.
 ///
 /// Works for both method types because both use the same `update.sessionUpdate`
@@ -2296,10 +2296,10 @@ pub(crate) fn parse_prompt_extract_event(line: &str) -> PromptExtractEvent {
     }
 
     // Step 1: try to extract the envelope (method + raw params).
-    let (raw_params, is_xai) = if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(line) {
+    let (raw_params, is_grow) = if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(line) {
         let raw = env.params.map(|p| p.get()).unwrap_or(line);
-        let xai = env.method == Some(XAI_SESSION_UPDATE_METHOD);
-        (raw, xai)
+        let grow = env.method == Some(GROW_SESSION_UPDATE_METHOD);
+        (raw, grow)
     } else {
         // Not a valid envelope → try legacy format: the line IS the params.
         (line, false)
@@ -2313,7 +2313,7 @@ pub(crate) fn parse_prompt_extract_event(line: &str) -> PromptExtractEvent {
 
     let tag = peek.update.session_update;
 
-    if !is_xai && tag == *USER_MESSAGE_CHUNK {
+    if !is_grow && tag == *USER_MESSAGE_CHUNK {
         if let Some(content) = peek.update.content
             && content.content_type == Some("text")
             && let Some(text) = content.text
@@ -2348,7 +2348,7 @@ pub(crate) fn parse_prompt_extract_event(line: &str) -> PromptExtractEvent {
         return PromptExtractEvent::NotUserMessage;
     }
 
-    if is_xai && tag == *REWIND_MARKER {
+    if is_grow && tag == *REWIND_MARKER {
         if let Some(idx) = peek.update.target_prompt_index {
             return PromptExtractEvent::RewindTo(idx);
         }
@@ -2376,8 +2376,8 @@ mod tests {
         )
     }
 
-    /// Wrap a xAI notification as the envelope stored in updates.jsonl.
-    fn xai_envelope(session_update_json: &str) -> String {
+    /// Wrap a Grow notification as the envelope stored in updates.jsonl.
+    fn grow_envelope(session_update_json: &str) -> String {
         format!(
             r#"{{"timestamp":1,"method":"_grow/session/update","params":{{"sessionId":"s","update":{session_update_json}}}}}"#
         )
@@ -2441,8 +2441,8 @@ mod tests {
     }
 
     #[test]
-    fn xai_rewind_marker_yields_rewind_to() {
-        let line = xai_envelope(
+    fn grow_rewind_marker_yields_rewind_to() {
+        let line = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":3,"created_at":"2024-01-01"}"#,
         );
         assert_eq!(
@@ -2452,8 +2452,8 @@ mod tests {
     }
 
     #[test]
-    fn xai_rewind_to_zero_yields_rewind_to_zero() {
-        let line = xai_envelope(
+    fn grow_rewind_to_zero_yields_rewind_to_zero() {
+        let line = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":0,"created_at":"2024-01-01"}"#,
         );
         assert_eq!(
@@ -2463,8 +2463,8 @@ mod tests {
     }
 
     #[test]
-    fn xai_diff_review_yields_not_user() {
-        let line = xai_envelope(r#"{"sessionUpdate":"diff_review","content":[]}"#);
+    fn grow_diff_review_yields_not_user() {
+        let line = grow_envelope(r#"{"sessionUpdate":"diff_review","content":[]}"#);
         assert_eq!(
             parse_prompt_extract_event(&line),
             PromptExtractEvent::NotUserMessage
@@ -2503,7 +2503,7 @@ mod tests {
         );
     }
 
-    /// A valid JSON object that has no recognisable ACP/xAI shape — NotUserMessage.
+    /// A valid JSON object that has no recognisable ACP/Grow shape — NotUserMessage.
     #[test]
     fn unknown_json_object_yields_not_user() {
         assert_eq!(
@@ -2596,7 +2596,7 @@ mod tests {
         let end = acp_envelope(
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"a1"}}"#,
         );
-        let rewind = xai_envelope(
+        let rewind = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":0,"created_at":"2024-01-01"}"#,
         );
         let f = write_updates_file(&[&chunk, &end, &rewind]);
@@ -2664,7 +2664,7 @@ mod tests {
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answer2"}}"#,
         );
         // Rewind to before turn 2 (keep 1 prompt)
-        let rw = xai_envelope(
+        let rw = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
         );
         // Turn 2 (after rewind): "new second prompt"
@@ -2838,7 +2838,7 @@ mod tests {
             r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"new3"},"_meta":{"promptIndex":3}}"#,
         );
         // Rewind to target 2: keep turns 0,1 (old0, old1); drop new2+.
-        let rw = xai_envelope(
+        let rw = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":2,"created_at":"2024-01-01"}"#,
         );
         let after = acp_envelope(
@@ -2897,7 +2897,7 @@ mod tests {
         let p2 = acp_envelope(
             r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"P2"},"_meta":{"promptIndex":2}}"#,
         );
-        let rw = xai_envelope(
+        let rw = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":2,"created_at":"2024-01-01"}"#,
         );
         let after = acp_envelope(
@@ -2952,7 +2952,7 @@ mod tests {
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resp2"}}"#,
         );
         // Rewind to prompt 1 — kills u2, a2
-        let rw = xai_envelope(
+        let rw = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
         );
         let u3 = acp_envelope(
@@ -2995,7 +2995,7 @@ mod tests {
         let agent_message_2 = acp_envelope(
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resp2"}}"#,
         );
-        let rewind_to_1 = xai_envelope(
+        let rewind_to_1 = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
         );
         let torn = "{ torn, unparseable jsonl line";
@@ -3025,7 +3025,7 @@ mod tests {
         let a1 = acp_envelope(
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resp"}}"#,
         );
-        let rw = xai_envelope(
+        let rw = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":0,"created_at":"2024-01-01"}"#,
         );
         let u2 = acp_envelope(
@@ -3060,7 +3060,7 @@ mod tests {
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"r3"}}"#,
         );
         // Rewind to prompt 2 — kills p3/r3
-        let rw1 = xai_envelope(
+        let rw1 = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":2,"created_at":"2024-01-01"}"#,
         );
         let u4 = acp_envelope(
@@ -3070,7 +3070,7 @@ mod tests {
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"r4"}}"#,
         );
         // Rewind to prompt 1 — kills p2/r2/p4/r4
-        let rw2 = xai_envelope(
+        let rw2 = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
         );
         let u5 = acp_envelope(
@@ -3115,7 +3115,7 @@ mod tests {
         let a2 = acp_envelope(
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"r2"}}"#,
         );
-        let rw1 = xai_envelope(
+        let rw1 = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":2,"created_at":"2024-01-01"}"#,
         );
         let u3 = acp_envelope(
@@ -3124,7 +3124,7 @@ mod tests {
         let a3 = acp_envelope(
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"r3"}}"#,
         );
-        let rw2 = xai_envelope(
+        let rw2 = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
         );
         let u4 = acp_envelope(
@@ -3169,7 +3169,7 @@ mod tests {
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"r1"}}"#,
         );
         // Only prompt index 0 exists; target 5 is out of range.
-        let rw = xai_envelope(
+        let rw = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":5,"created_at":"2024-01-01"}"#,
         );
         let u2 = acp_envelope(
@@ -3235,7 +3235,7 @@ mod tests {
             r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"p2"}}"#,
         );
         // Rewind to prompt 1 drops p2.
-        let rw = xai_envelope(
+        let rw = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
         );
         let u3 = acp_envelope(
@@ -3260,7 +3260,7 @@ mod tests {
             .into_iter()
             .filter_map(|u| match u {
                 SessionUpdate::Acp(notif) => Some(strip_context_wrappers(notif.update)),
-                SessionUpdate::Xai(_) => None,
+                SessionUpdate::Grow(_) => None,
             })
             .collect();
 
@@ -3326,7 +3326,7 @@ mod tests {
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"seen"}}"#,
             r#"{"eventId":"ev1"}"#,
         );
-        // xAI-style line persisted by an older binary: no _meta at all.
+        // Grow-style line persisted by an older binary: no _meta at all.
         let old_xai = r#"{"timestamp":2,"method":"_grow/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"hook_annotation","message":"trailing"}}}"#;
         let raw = format!("{a1}\n{old_xai}\n");
 
@@ -3541,7 +3541,7 @@ mod tests {
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"a0"}}"#,
             r#"{"totalTokens":7}"#,
         );
-        let rw = xai_envelope(
+        let rw = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":0,"created_at":"2024-01-01"}"#,
         );
         let u1 = acp_envelope_with_meta(
@@ -3621,8 +3621,8 @@ mod tests {
             PromptExtractEvent::NotUserMessage
         );
 
-        // (b) an ACP (non-xai) update carrying rewind_marker in content is NOT a
-        // real xai rewind_marker → NotUserMessage (no RewindTo).
+        // (b) an ACP (non-grow) update carrying rewind_marker in content is NOT a
+        // real grow rewind_marker → NotUserMessage (no RewindTo).
         let acp_rewindish = acp_envelope(
             r#"{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"rewind_marker"}}"#,
         );
@@ -3702,7 +3702,7 @@ mod tests {
             r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"p0"}}"#,
             r#"{"totalTokens":5}"#,
         );
-        let rw = xai_envelope(
+        let rw = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":0,"created_at":"2024-01-01"}"#,
         );
         let raw = format!("{u0}\n{rw}\n");
@@ -3742,7 +3742,7 @@ mod tests {
         );
         let acu0 =
             acp_envelope(r#"{"sessionUpdate":"available_commands_update","availableCommands":[]}"#);
-        let rw = xai_envelope(
+        let rw = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":0,"created_at":"2024-01-01"}"#,
         );
         let u1 = acp_envelope_with_meta(
@@ -3786,7 +3786,7 @@ mod tests {
         let a2 = acp_envelope(
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"a2-dead"}}"#,
         );
-        let rw = xai_envelope(
+        let rw = grow_envelope(
             r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
         );
         let raw = format!("{u1}\n\n{acu}\n{a1}\n{u2}\n{a2}\n{rw}\n");
@@ -3960,31 +3960,31 @@ mod tests {
     fn from_str_unknown_xai_variant_deserializes_via_envelope() {
         // Simulates an updates.jsonl line containing a removed variant (e.g. git_branch_update).
         // SessionUpdateEnvelope::from_str must not error — the Unknown catch-all absorbs it.
-        let line = xai_envelope(r#"{"sessionUpdate":"git_branch_update","branch":"main"}"#);
+        let line = grow_envelope(r#"{"sessionUpdate":"git_branch_update","branch":"main"}"#);
         let update = SessionUpdateEnvelope::from_str(&line).unwrap();
         match update {
-            SessionUpdate::Xai(notif) => {
+            SessionUpdate::Grow(notif) => {
                 assert_eq!(
                     notif.update,
                     crate::extensions::notification::SessionUpdate::Unknown
                 );
             }
-            SessionUpdate::Acp(_) => panic!("expected Xai variant"),
+            SessionUpdate::Acp(_) => panic!("expected Grow variant"),
         }
     }
 
     #[test]
     fn from_str_known_xai_variant_still_works() {
-        let line = xai_envelope(r#"{"sessionUpdate":"memory_flush_started"}"#);
+        let line = grow_envelope(r#"{"sessionUpdate":"memory_flush_started"}"#);
         let update = SessionUpdateEnvelope::from_str(&line).unwrap();
         match update {
-            SessionUpdate::Xai(notif) => {
+            SessionUpdate::Grow(notif) => {
                 assert_eq!(
                     notif.update,
                     crate::extensions::notification::SessionUpdate::MemoryFlushStarted
                 );
             }
-            SessionUpdate::Acp(_) => panic!("expected Xai variant"),
+            SessionUpdate::Acp(_) => panic!("expected Grow variant"),
         }
     }
 }

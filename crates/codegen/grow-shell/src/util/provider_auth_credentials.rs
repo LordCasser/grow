@@ -9,7 +9,7 @@ use std::sync::Arc;
 ///   an `AuthManager` (visibility checks, bundle fetches, tests).
 ///
 /// Deployment key (enterprise) sends bare `Bearer`, routed to management key auth.
-/// User token (xAI users) sends `Bearer` + `X-Grow-Token-Auth: grow-cli`.
+/// User token sends `Bearer` + `X-Grow-Token-Auth: grow-cli`.
 /// Deployment key takes precedence when both are present.
 #[derive(Clone)]
 pub struct ProviderAuthCredentials {

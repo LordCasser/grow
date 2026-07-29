@@ -622,12 +622,12 @@ impl SessionActor {
             span.record("error", e.to_string().as_str());
             return Err(e);
         }
-        use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
+        use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
         let tokens_after = self.chat_state_handle.get_total_tokens().await;
         let span = tracing::Span::current();
         span.record("post_tokens", tokens_after as i64);
         span.record("success", true);
-        self.send_xai_notification(XaiSessionUpdate::AutoCompactCompleted {
+        self.send_grow_notification(GrowSessionUpdate::AutoCompactCompleted {
             tokens_before: Some(total_tokens),
             tokens_after,
             elapsed_ms: None,
@@ -684,7 +684,7 @@ impl SessionActor {
                     "it'll retry on the next turn, or start a new session using /new."
                 }
             };
-            self.send_xai_notification(
+            self.send_grow_notification(
                 crate::extensions::notification::SessionUpdate::AutoCompactFailed {
                     error: message.to_string(),
                 },
@@ -736,7 +736,7 @@ impl SessionActor {
     /// labeled re-authable; configured model providers retain their own repair
     /// path instead of being redirected to Grow's `/login` flow.
     pub(crate) async fn surface_compact_auth_failure(&self, err: acp::Error) -> acp::Error {
-        use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
+        use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
         let detailed = Self::acp_error_message(&err);
         let (model_id, base_url) = self
             .chat_state_handle
@@ -788,7 +788,7 @@ impl SessionActor {
                 "message": crate::util::truncate(&message, 300),
             })),
         );
-        self.send_xai_notification(XaiSessionUpdate::RetryState(
+        self.send_grow_notification(GrowSessionUpdate::RetryState(
             crate::extensions::notification::RetryState::Failed {
                 error_type: error_type.to_string(),
                 message: message.clone(),
@@ -2034,7 +2034,7 @@ impl SessionActor {
         self: &Arc<Self>,
         trigger_info: AutoCompactTriggerInfo,
     ) -> Result<(), acp::Error> {
-        use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
+        use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
         self.record_compaction_variant();
         let tokens_before = self.chat_state_handle.get_total_tokens().await;
         tracing::Span::current().record("pre_tokens", tokens_before as i64);
@@ -2044,7 +2044,7 @@ impl SessionActor {
         });
         self.signals_handle()
             .record_compaction(trigger_info.tokens_used);
-        self.send_xai_notification(XaiSessionUpdate::AutoCompactStarted {
+        self.send_grow_notification(GrowSessionUpdate::AutoCompactStarted {
             tokens_used: trigger_info.tokens_used,
             context_window: trigger_info.context_window,
             percentage: trigger_info.percentage,
@@ -2072,7 +2072,7 @@ impl SessionActor {
                 let span = tracing::Span::current();
                 span.record("post_tokens", tokens_after as i64);
                 span.record("success", true);
-                self.send_xai_notification(XaiSessionUpdate::AutoCompactCompleted {
+                self.send_grow_notification(GrowSessionUpdate::AutoCompactCompleted {
                     tokens_before: Some(trigger_info.tokens_used),
                     tokens_after,
                     elapsed_ms: Some(elapsed_ms),
@@ -2091,7 +2091,7 @@ impl SessionActor {
                     .load(std::sync::atomic::Ordering::Relaxed)
                     == SUPPRESS_NONE
                 {
-                    self.send_xai_notification(XaiSessionUpdate::AutoCompactFailed {
+                    self.send_grow_notification(GrowSessionUpdate::AutoCompactFailed {
                         error: String::new(),
                     })
                     .await;
@@ -2187,7 +2187,7 @@ impl SessionActor {
         original_user_info: Option<String>,
     ) {
         use crate::extensions::notification::{
-            CompactionCheckpointFile, CompactionCheckpointInfo, SessionUpdate as XaiSessionUpdate,
+            CompactionCheckpointFile, CompactionCheckpointInfo, SessionUpdate as GrowSessionUpdate,
         };
         let checkpoint_id = uuid::Uuid::new_v4().to_string();
         let checkpoint_file = format!("compaction_checkpoints/{checkpoint_id}.json");
@@ -2217,7 +2217,7 @@ impl SessionActor {
             schema_version: 1,
             created_at,
         };
-        self.persist_xai_update_only(XaiSessionUpdate::CompactionCheckpoint(Box::new(info)));
+        self.persist_grow_update_only(GrowSessionUpdate::CompactionCheckpoint(Box::new(info)));
         tracing::info!(
             prompt_index_at_compaction,
             "Persisted compaction checkpoint"
@@ -2813,7 +2813,7 @@ mod inline_auto_compact_flow_tests {
     }
     #[tokio::test(flavor = "current_thread")]
     async fn surface_compact_byok_auth_failure_emits_provider_error() {
-        use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
+        use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
         use crate::session::storage::SessionUpdate;
         let local = tokio::task::LocalSet::new();
         local
@@ -2828,8 +2828,8 @@ mod inline_auto_compact_flow_tests {
                 assert_eq!(out.code, acp::Error::internal_error().code);
                 let mut saw_provider_error = false;
                 while let Ok(msg) = persistence_rx.try_recv() {
-                    if let PersistenceMsg::Update(SessionUpdate::Xai(notif)) = msg
-                        && let XaiSessionUpdate::RetryState(
+                    if let PersistenceMsg::Update(SessionUpdate::Grow(notif)) = msg
+                        && let GrowSessionUpdate::RetryState(
                             crate::extensions::notification::RetryState::Failed {
                                 error_type,
                                 message,
@@ -2873,7 +2873,7 @@ mod inline_auto_compact_flow_tests {
                     let mut text = None;
                     while let Ok(msg) = persistence_rx.try_recv() {
                         if let PersistenceMsg::Update(
-                            crate::session::storage::SessionUpdate::Xai(notif),
+                            crate::session::storage::SessionUpdate::Grow(notif),
                         ) = msg
                             && let crate::extensions::notification::SessionUpdate::AutoCompactFailed {
                                 error,
@@ -2946,7 +2946,7 @@ mod inline_auto_compact_flow_tests {
     /// 401 auto-compact: SUPPRESS_AUTH + reauthable RetryState (abort for /login).
     #[tokio::test(flavor = "current_thread")]
     async fn e2e_auto_compact_401_suppresses_auth_and_surfaces_reauth() {
-        use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
+        use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
         use crate::session::compaction_config::SUPPRESS_AUTH;
         use crate::session::storage::SessionUpdate;
         use std::sync::atomic::Ordering::Relaxed;
@@ -2990,9 +2990,9 @@ mod inline_auto_compact_flow_tests {
                 let mut saw_provider_error = false;
                 let mut saw_auto_failed = false;
                 while let Ok(msg) = persistence_rx.try_recv() {
-                    if let PersistenceMsg::Update(SessionUpdate::Xai(notif)) = msg {
+                    if let PersistenceMsg::Update(SessionUpdate::Grow(notif)) = msg {
                         match &notif.update {
-                            XaiSessionUpdate::RetryState(
+                            GrowSessionUpdate::RetryState(
                                 crate::extensions::notification::RetryState::Failed {
                                     error_type,
                                     message,
@@ -3005,7 +3005,7 @@ mod inline_auto_compact_flow_tests {
                                 );
                                 saw_provider_error = true;
                             }
-                            XaiSessionUpdate::AutoCompactFailed { error } => {
+                            GrowSessionUpdate::AutoCompactFailed { error } => {
                                 assert!(
                                     error.contains("provider") || error.contains("credentials"),
                                     "auto-failed={error}"
@@ -3032,7 +3032,7 @@ mod inline_auto_compact_flow_tests {
     /// Model-switch compact 401 must surface reauth (same path as pre-sampling).
     #[tokio::test(flavor = "current_thread")]
     async fn e2e_model_switch_compact_401_surfaces_reauth() {
-        use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
+        use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
         use crate::session::compaction_config::{PreviousModelInfo, SUPPRESS_AUTH};
         use crate::session::storage::SessionUpdate;
         use std::sync::atomic::Ordering::Relaxed;
@@ -3077,8 +3077,8 @@ mod inline_auto_compact_flow_tests {
                 );
                 let mut saw_provider_error = false;
                 while let Ok(msg) = persistence_rx.try_recv() {
-                    if let PersistenceMsg::Update(SessionUpdate::Xai(notif)) = msg
-                        && let XaiSessionUpdate::RetryState(
+                    if let PersistenceMsg::Update(SessionUpdate::Grow(notif)) = msg
+                        && let GrowSessionUpdate::RetryState(
                             crate::extensions::notification::RetryState::Failed {
                                 error_type,
                                 message,
@@ -3370,7 +3370,7 @@ mod inline_auto_compact_flow_tests {
                 );
                 let mut saw_failure = false;
                 while let Ok(msg) = persistence_rx.try_recv() {
-                    if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(
+                    if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(
                         notif,
                     )) = msg
                         && matches!(

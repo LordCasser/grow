@@ -32,7 +32,7 @@ pub(super) fn is_auth_tool_error(err: &xai_tool_runtime::ToolError) -> bool {
 struct SessionTokenAuthGate {
     is_session_based: bool,
     model_byok: crate::agent::auth_method::ModelByok,
-    /// Whether the request targets an explicitly configured Grow proxy. Lets
+    /// Whether the request targets an explicitly configured service proxy. Lets
     /// an `Unknown` BYOK status still refresh without risking a session-token
     /// leak to an unrelated provider endpoint.
     endpoint_is_first_party: bool,
@@ -274,7 +274,7 @@ impl SessionActor {
     /// Gate inputs for `model_id` routed to `base_url`. See
     /// [`crate::agent::auth_method::session_token_auth_gate`] for the rationale
     /// (`base_url` keeps an `Unknown` BYOK status refreshable only
-    /// against first-party xAI hosts).
+    /// against configured trusted service hosts).
     fn auth_gate(&self, model_id: &str, base_url: &str) -> SessionTokenAuthGate {
         let byok = self.model_auth_facts(model_id).byok;
         let auth_method = self.auth_method_id.load();
@@ -738,7 +738,7 @@ impl SessionActor {
                             with the current model. Please start a new session."
                 .to_string();
             self.log_terminal_failure("encrypted_content_mismatch", error.status_code, &friendly);
-            self.send_xai_notification(XaiSessionUpdate::RetryState(
+            self.send_grow_notification(GrowSessionUpdate::RetryState(
                 crate::extensions::notification::RetryState::Failed {
                     error_type: "encrypted_content_mismatch".to_string(),
                     message: friendly.clone(),
@@ -749,7 +749,7 @@ impl SessionActor {
         }
         if matches!(error.kind, SamplingErrorKind::RateLimited) {
             self.log_terminal_failure("rate_limited", error.status_code, &detailed_message);
-            self.send_xai_notification(XaiSessionUpdate::RetryState(
+            self.send_grow_notification(GrowSessionUpdate::RetryState(
                 crate::extensions::notification::RetryState::Exhausted {
                     attempts: 0,
                     reason: detailed_message.clone(),
@@ -927,7 +927,7 @@ impl SessionActor {
                  Version: {client_version}"
             );
             self.log_terminal_failure("legacy_auth", error.status_code, &msg);
-            self.send_xai_notification(XaiSessionUpdate::RetryState(
+            self.send_grow_notification(GrowSessionUpdate::RetryState(
                 crate::extensions::notification::RetryState::Failed {
                     error_type: "legacy_auth".to_string(),
                     message: msg.clone(),
@@ -1000,7 +1000,7 @@ impl SessionActor {
             error.kind.as_str()
         };
         self.log_terminal_failure(error_type, error.status_code, &detailed_message);
-        self.send_xai_notification(XaiSessionUpdate::RetryState(
+        self.send_grow_notification(GrowSessionUpdate::RetryState(
             crate::extensions::notification::RetryState::Failed {
                 error_type: error_type.to_string(),
                 message: detailed_message.clone(),
@@ -1026,7 +1026,7 @@ impl SessionActor {
     /// * `Ok(SamplerTurnOutcome::RefreshAuthAndResubmit)` - auth 401
     ///    recovery succeeded, credentials refreshed, retry once.
     /// * `Err(acp::Error)` - terminal failure already reported via
-    ///    `send_xai_notification(RetryState::Failed)`.
+    ///    `send_grow_notification(RetryState::Failed)`.
     pub(crate) async fn run_turn_via_sampler(
         self: &Arc<Self>,
         request: ConversationRequest,

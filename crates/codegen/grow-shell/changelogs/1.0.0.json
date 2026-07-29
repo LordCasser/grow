@@ -30,6 +30,16 @@
     "breaking_change": false
   },
   {
+    "category": "features",
+    "description": "**Provider-scoped OAuth is vendor-neutral.** No issuer, client, vendor scopes, or implicit model catalog is built in; API keys remain the default BYOK path.",
+    "breaking_change": false
+  },
+  {
+    "category": "breaking",
+    "description": "**Grow protocol and local storage no longer carry upstream product remnants.** Grow ACP names use the `_grow/*` namespace and the orphaned GCS memory archive builder is removed.",
+    "breaking_change": true
+  },
+  {
     "category": "breaking",
     "description": "**GitHub Release is the only distribution channel.** Grow 1.0.0 supports macOS arm64, Linux arm64, and Linux amd64.",
     "breaking_change": true

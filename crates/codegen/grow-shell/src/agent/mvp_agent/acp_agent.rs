@@ -216,9 +216,9 @@ impl acp::Agent for MvpAgent {
             )
         {
             unsafe { std::env::set_var("GROW_API_KEY", &api_key) };
-            tracing::info!("auth: loaded API key from auth.json (xai::api_key scope)");
+            tracing::info!("auth: loaded API key from auth.json (grow::api_key scope)");
             grow_diagnostics::unified_log::info(
-                "auth: loaded API key from auth.json (xai::api_key scope)",
+                "auth: loaded API key from auth.json (grow::api_key scope)",
                 None,
                 None,
             );
@@ -728,7 +728,7 @@ impl acp::Agent for MvpAgent {
                     let _ = self.auth_manager.clear();
                 }
                 let cli_oauth = auth_meta.use_oauth.then_some(true);
-                let use_oidc = self.cfg.borrow().resolve_grok_oauth(cli_oauth);
+                let use_oidc = self.cfg.borrow().resolve_provider_oauth(cli_oauth);
                 tracing::debug!(resolved = use_oidc.value, source = ?use_oidc.source, "auth: method resolved");
                 grow_diagnostics::unified_log::debug(
                     "auth: method resolved",
@@ -2352,7 +2352,7 @@ impl acp::Agent for MvpAgent {
             }
             "grow/recap" => crate::extensions::recap::handle(self, &args).await,
             "grow/cloud/terminate" => {
-                crate::extensions::auth_gate::require_xai_auth(
+                crate::extensions::auth_gate::require_service_auth(
                     &self.auth_manager,
                     "Authentication required",
                     "Run `grow login` to authenticate.",
@@ -2384,7 +2384,7 @@ impl acp::Agent for MvpAgent {
                 crate::extensions::to_raw_response(&serde_json::json!({ "ok": true }))
             }
             "grow/cloud/env/list" => {
-                crate::extensions::auth_gate::require_xai_auth(
+                crate::extensions::auth_gate::require_service_auth(
                     &self.auth_manager,
                     "Authentication required",
                     "Run `grow login` to authenticate.",
@@ -2409,7 +2409,7 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "grow/cloud/env/create" => {
-                crate::extensions::auth_gate::require_xai_auth(
+                crate::extensions::auth_gate::require_service_auth(
                     &self.auth_manager,
                     "Authentication required",
                     "Run `grow login` to authenticate.",
@@ -2466,7 +2466,7 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "grow/cloud/env/update" => {
-                crate::extensions::auth_gate::require_xai_auth(
+                crate::extensions::auth_gate::require_service_auth(
                     &self.auth_manager,
                     "Authentication required",
                     "Run `grow login` to authenticate.",
@@ -2526,7 +2526,7 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "grow/cloud/env/delete" => {
-                crate::extensions::auth_gate::require_xai_auth(
+                crate::extensions::auth_gate::require_service_auth(
                     &self.auth_manager,
                     "Authentication required",
                     "Run `grow login` to authenticate.",
@@ -2848,7 +2848,7 @@ impl acp::Agent for MvpAgent {
                 SessionNotification,
             >(args.params.get()) {
                 tracing::info!(
-                    "Storing xAI session notification: session_id={}",
+                    "Storing Grow session notification: session_id={}",
                     notification.session_id.0
                 );
                 if let Some(handle) = self
@@ -2858,17 +2858,17 @@ impl acp::Agent for MvpAgent {
                 {
                     let _ = handle
                         .cmd_tx
-                        .send(crate::session::SessionCommand::XaiSessionNotification {
+                        .send(crate::session::SessionCommand::GrowSessionNotification {
                             notification,
                         });
                 } else {
                     tracing::warn!(
-                        "Received xAI session notification for unknown session: {}",
+                        "Received Grow session notification for unknown session: {}",
                         notification.session_id.0
                     );
                 }
             } else {
-                tracing::warn!("Failed to parse xAI session notification params");
+                tracing::warn!("Failed to parse Grow session notification params");
             }
         }
         if args.method.as_ref() == "grow/diagnostics/non_git_decision" {

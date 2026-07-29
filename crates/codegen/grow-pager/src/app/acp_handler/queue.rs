@@ -387,7 +387,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
 /// this session" is unambiguous even without the prompt id.
 ///
 /// This is the one-release compat rail (kept until every leader emits the
-/// durable [`XaiSessionUpdate::TurnCompleted`]): it parses the payload and
+/// durable [`GrowSessionUpdate::TurnCompleted`]): it parses the payload and
 /// delegates the turn-finalize to
 /// [`finalize_turn_from_terminal`](super::super::turn_completion::finalize_turn_from_terminal),
 /// which carries the driver-arm / viewer-finish behavior verbatim.

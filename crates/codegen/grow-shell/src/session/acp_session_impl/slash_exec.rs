@@ -723,7 +723,7 @@ impl SessionActor {
                     file_count = file_infos.len(),
                     "memory browse: listing files",
                 );
-                self.send_xai_notification(XaiSessionUpdate::MemoryFiles { files: file_infos })
+                self.send_grow_notification(GrowSessionUpdate::MemoryFiles { files: file_infos })
                     .await;
                 ok_end_turn(0, None)
             }
@@ -949,7 +949,7 @@ impl SessionActor {
                 self.goal_turn_task_ids.lock().clear();
                 self.subagent_token_records.lock().clear();
                 self.clear_pending_classifier_completions();
-                self.send_xai_notification(crate::session::goal_orchestrator::build_goal_cleared())
+                self.send_grow_notification(crate::session::goal_orchestrator::build_goal_cleared())
                     .await;
                 self.send_host_turn_slash_command_output("Goal cleared.")
                     .await;

@@ -448,7 +448,7 @@ pub fn cached_token_auth_method() -> acp::AuthMethod {
 
 pub const PROVIDER_OAUTH_METHOD_ID: &str = "provider.oauth";
 
-/// xAI OAuth2/OIDC auth. Method id `"provider.oauth"` kept for ACP wire-compat.
+/// Provider-scoped OAuth2/OIDC auth. The ACP method id is `"provider.oauth"`.
 pub fn provider_oauth_auth_method(
     label: Option<&str>,
     has_auth_provider_command: bool,
@@ -860,7 +860,7 @@ mod tests {
     #[test]
     #[serial]
     fn global_external_api_key_advertises_provider_api_key_first() {
-        let _set = EnvGuard::set(GROW_API_KEY_ENV_VAR, "xai-external-key");
+        let _set = EnvGuard::set(GROW_API_KEY_ENV_VAR, "provider-external-key");
         let cfg = Config::default();
         let models = resolve_model_list(&cfg, None);
         let has_external_api_key = should_advertise_provider_api_key(false, models.values());
@@ -882,7 +882,7 @@ mod tests {
     #[test]
     #[serial]
     fn disable_api_key_auth_suppresses_provider_api_key_method() {
-        let _set = EnvGuard::set(GROW_API_KEY_ENV_VAR, "xai-external-key");
+        let _set = EnvGuard::set(GROW_API_KEY_ENV_VAR, "provider-external-key");
         let cfg = Config::default();
         let models = resolve_model_list(&cfg, None);
 
@@ -984,7 +984,7 @@ mod tests {
         let has_cached_token = mgr.current().is_some();
         assert!(has_cached_token);
 
-        // With only this legacy token (no xai api key), first method must be
+        // With only this legacy token (no provider API key), first method must be
         // cached_token so pager skips login screen.
         let built = build_auth_methods(AuthMethodsBuildInputs {
             has_external_api_key: false,

@@ -1291,7 +1291,7 @@ pub struct RateLimitHit {
 }
 
 /// Model-API failure at the turn level (non-rate-limit). Category/class only
-/// — no message text (external `api_error` event; also a product event).
+/// — no message text. The event is retained only in local diagnostics.
 #[derive(Serialize)]
 pub struct ApiError {
     /// Fixed classification (`auth`, `server_error`, `timeout`, …).
@@ -1327,7 +1327,7 @@ pub enum ManualAuthReason {
 }
 
 /// User-facing surface where the manual re-auth was triggered. Background
-/// recoveries (storage/diagnostics uploads) do not emit this event.
+/// recoveries do not emit this event.
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ManualAuthSurface {
@@ -1349,10 +1349,10 @@ pub enum AuthTokenKind {
     None,
 }
 
-/// KPI: a user-facing 401 recovery (`Turn`/`Relay`) terminally failed, forcing a
-/// manual re-login. Product-events only (no external export).
+/// Local diagnostic event: a user-facing 401 recovery (`Turn`/`Relay`)
+/// terminally failed, forcing a manual re-login.
 ///
-/// Alerting contract: the event lands under the Shell-origin name
+/// Local event contract: the event lands under the Shell-origin name
 /// `grow-shell-manual_auth` (the `manual_auth` binding gets the `grow-shell-`
 /// prefix at emit). Count `distinct(principal)`, never raw events — the debounce
 /// is a single slot per process (repeats on the most-recent dead credential

@@ -402,14 +402,14 @@ pub fn read_token_by_scope(grow_home: &Path, scope: &str) -> anyhow::Result<Stri
     })
 }
 
-/// Read the API key from the `xai::api_key` scope in auth.json.
+/// Read the API key from the `grow::api_key` scope in auth.json.
 pub fn read_api_key(grow_home: &Path) -> Option<String> {
     let path = grow_home.join("auth.json");
     let map = read_auth_json(&path).ok()?;
     map.get(API_KEY_SCOPE).map(|a| a.key.clone())
 }
 
-/// Store a plain API key in auth.json under the `xai::api_key` scope.
+/// Store a plain API key in auth.json under the `grow::api_key` scope.
 ///
 /// Uses the corrupt-recovery reader so a malformed auth.json (e.g. from a
 /// previous crash) can be healed when the user sets an API key.
@@ -427,7 +427,7 @@ pub fn store_api_key(grow_home: &Path, api_key: &str) -> std::io::Result<()> {
     write_auth_json(&path, &map)
 }
 
-/// Remove the `xai::api_key` scope from auth.json.
+/// Remove the `grow::api_key` scope from auth.json.
 pub fn clear_api_key(grow_home: &Path) -> std::io::Result<()> {
     let path = grow_home.join("auth.json");
     if let Ok(mut map) = read_auth_json(&path) {

@@ -211,9 +211,6 @@ pub struct AgentArgs {
     /// Override the CLI chat proxy base URL.
     #[arg(long = "cli-chat-proxy-base-url")]
     pub cli_chat_proxy_base_url: Option<String>,
-    /// Override the public xAI API base URL.
-    #[arg(long = "xai-api-base-url")]
-    pub inference_base_url: Option<String>,
     /// Agent runtime mode
     #[command(subcommand)]
     pub mode: Option<AgentCmd>,

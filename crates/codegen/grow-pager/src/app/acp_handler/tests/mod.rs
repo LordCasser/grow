@@ -10,7 +10,7 @@ use crate::views::permission_view::SubagentInfo;
 use std::path::PathBuf;
 use std::time::Instant;
 use grow_shell::extensions::notification::RetryState;
-use grow_shell::extensions::notification::SessionUpdate as XaiSessionUpdate;
+use grow_shell::extensions::notification::SessionUpdate as GrowSessionUpdate;
 pub(super) fn make_session(session_id: Option<&str>) -> AgentSession {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     AgentSession {
@@ -538,7 +538,7 @@ pub(super) fn make_fired_notif(
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::ScheduledTaskFired {
+        update: GrowSessionUpdate::ScheduledTaskFired {
             task_id: task_id.into(),
             prompt: prompt.into(),
             human_schedule: human_schedule.into(),
@@ -557,7 +557,7 @@ pub(super) fn make_fired_notif_with_subagent(
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::ScheduledTaskFired {
+        update: GrowSessionUpdate::ScheduledTaskFired {
             task_id: task_id.into(),
             prompt: "p".into(),
             human_schedule: "every 1 minute".into(),
@@ -622,7 +622,7 @@ pub(super) fn make_created_ext_notif(
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::ScheduledTaskCreated {
+        update: GrowSessionUpdate::ScheduledTaskCreated {
             task_id: task_id.into(),
             prompt: prompt.into(),
             human_schedule: human_schedule.into(),
@@ -639,7 +639,7 @@ pub(super) fn make_deleted_ext_notif(
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::ScheduledTaskDeleted {
+        update: GrowSessionUpdate::ScheduledTaskDeleted {
             task_id: task_id.into(),
         },
         meta: None,
@@ -788,7 +788,7 @@ pub(super) fn xai_model_switch_notif(
 ) -> acp::ExtNotification {
     let payload = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::ModelAutoSwitched {
+        update: GrowSessionUpdate::ModelAutoSwitched {
             previous_model_id: "m-old".into(),
             new_model_id: "m-new".into(),
             reason: "gone".into(),
@@ -806,7 +806,7 @@ pub(super) fn xai_unhandled_notif(
 ) -> acp::ExtNotification {
     let payload = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::MemoryFlushStarted,
+        update: GrowSessionUpdate::MemoryFlushStarted,
         meta: Some(serde_json::json!({ "eventId": event_id })),
     };
     acp::ExtNotification::new(
@@ -940,7 +940,7 @@ pub(super) fn xai_turn_completed_notif(
 ) -> acp::ExtNotification {
     let payload = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::TurnCompleted {
+        update: GrowSessionUpdate::TurnCompleted {
             prompt_id: prompt_id.into(),
             stop_reason: stop_reason.into(),
             agent_result: None,
@@ -966,7 +966,7 @@ pub(super) fn xai_wake_turn_completed_notif(
     }
     let payload = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::TurnCompleted {
+        update: GrowSessionUpdate::TurnCompleted {
             prompt_id: prompt_id.into(),
             stop_reason: "end_turn".into(),
             agent_result: None,
@@ -1010,7 +1010,7 @@ pub(super) fn xai_hook_execution_notif_with_runs(
 ) -> acp::ExtNotification {
     let payload = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::HookExecution {
+        update: GrowSessionUpdate::HookExecution {
             event_name: event_name.into(),
             tool_name: None,
             prompt_id: prompt_id.map(str::to_string),
@@ -1204,7 +1204,7 @@ pub(super) fn make_bash_stdout_message(
 /// Build an `ExtNotification` envelope for `grow/session_notification`.
 pub(super) fn make_ext_session_notification(
     session_id: &str,
-    update: XaiSessionUpdate,
+    update: GrowSessionUpdate,
 ) -> AcpClientMessage {
     make_ext_session_notification_with_method(
         session_id,
@@ -1212,11 +1212,11 @@ pub(super) fn make_ext_session_notification(
         update,
     )
 }
-/// Build an `ExtNotification` envelope with an explicit xAI session method.
+/// Build an `ExtNotification` envelope with an explicit Grow session method.
 pub(super) fn make_ext_session_notification_with_method(
     session_id: &str,
     method: &str,
-    update: XaiSessionUpdate,
+    update: GrowSessionUpdate,
 ) -> AcpClientMessage {
     let (tx, _rx) = tokio::sync::oneshot::channel();
     let payload = SessionNotification {
@@ -1235,8 +1235,8 @@ use crate::scrollback::blocks::SubagentBlockKind;
 pub(super) fn test_subagent_spawned(
     parent_sid: &str,
     child_sid: &str,
-) -> XaiSessionUpdate {
-    XaiSessionUpdate::SubagentSpawned {
+) -> GrowSessionUpdate {
+    GrowSessionUpdate::SubagentSpawned {
         subagent_id: child_sid.into(),
         parent_session_id: parent_sid.into(),
         parent_prompt_id: None,
@@ -1253,8 +1253,8 @@ pub(super) fn test_subagent_spawned(
         resumed_from: None,
     }
 }
-pub(super) fn test_subagent_finished(child_sid: &str) -> XaiSessionUpdate {
-    XaiSessionUpdate::SubagentFinished {
+pub(super) fn test_subagent_finished(child_sid: &str) -> GrowSessionUpdate {
+    GrowSessionUpdate::SubagentFinished {
         subagent_id: child_sid.into(),
         child_session_id: child_sid.into(),
         status: "completed".into(),
@@ -1270,8 +1270,8 @@ pub(super) fn test_subagent_finished(child_sid: &str) -> XaiSessionUpdate {
 pub(super) fn test_subagent_progress(
     parent_sid: &str,
     child_sid: &str,
-) -> XaiSessionUpdate {
-    XaiSessionUpdate::SubagentProgress {
+) -> GrowSessionUpdate {
+    GrowSessionUpdate::SubagentProgress {
         subagent_id: child_sid.into(),
         parent_session_id: parent_sid.into(),
         child_session_id: child_sid.into(),
@@ -1589,7 +1589,7 @@ pub(super) fn interaction_resolved_ext(
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::InteractionResolved {
+        update: GrowSessionUpdate::InteractionResolved {
             tool_call_id: tool_call_id.into(),
         },
         meta: None,
@@ -1620,7 +1620,7 @@ pub(super) fn make_task_backgrounded_notif(
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::TaskBackgrounded {
+        update: GrowSessionUpdate::TaskBackgrounded {
             tool_call_id: tool_call_id.into(),
             task_id: task_id.into(),
             command: command.into(),
@@ -1645,7 +1645,7 @@ pub(super) fn make_replayed_task_backgrounded_notif(
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::TaskBackgrounded {
+        update: GrowSessionUpdate::TaskBackgrounded {
             tool_call_id: tool_call_id.into(),
             task_id: task_id.into(),
             command: command.into(),
@@ -1763,7 +1763,7 @@ pub(super) fn task_completed_notif(
     use grow_tools::types::TaskSnapshot;
     let notif = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::TaskCompleted {
+        update: GrowSessionUpdate::TaskCompleted {
             task_snapshot: TaskSnapshot {
                 task_id: task_id.into(),
                 command: command.into(),
@@ -1798,7 +1798,7 @@ pub(super) fn make_monitor_event_notif(
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::MonitorEvent {
+        update: GrowSessionUpdate::MonitorEvent {
             task_id: task_id.into(),
             description: "test monitor".into(),
             event_text: event_text.into(),
@@ -1867,7 +1867,7 @@ pub(super) fn model_changed_ext(
 ) -> acp::ExtNotification {
     let payload = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::ModelChanged {
+        update: GrowSessionUpdate::ModelChanged {
             model_id: model_id.to_string(),
             reasoning_effort: reasoning_effort.map(String::from),
         },
@@ -1883,7 +1883,7 @@ pub(super) fn model_changed_ext_with_event(
 ) -> acp::ExtNotification {
     let payload = SessionNotification {
         session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::ModelChanged {
+        update: GrowSessionUpdate::ModelChanged {
             model_id: model_id.to_string(),
             reasoning_effort: None,
         },

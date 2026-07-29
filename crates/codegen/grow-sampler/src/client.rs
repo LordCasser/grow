@@ -1,4 +1,4 @@
-//! HTTP client for the xAI sampling APIs.
+//! HTTP client for provider-neutral sampling APIs.
 //!
 //! Owns the `reqwest::Client`, default request headers, and per-method
 //! defaults. Talks to three backend shapes:
@@ -44,7 +44,7 @@ const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
 /// On `response.completed` / `response.incomplete`, this also rewrites
 /// `response.usage.total_tokens` in place to the live context length
 /// (`context_details.input_tokens + context_details.output_tokens`)
-/// when the API emits the xAI-specific `context_details` field.
+/// when the API emits the optional `context_details` extension.
 /// Async-openai's typed `ResponseUsage` doesn't model `context_details`,
 /// so we peek the raw JSON for it. The cumulative `input_tokens` /
 /// `output_tokens` / `cached_tokens` continue to flow from the typed
@@ -111,8 +111,8 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
     usage.total_tokens = total;
 }
 
-/// Metadata key for cost ticks past typed Response events.
-pub(crate) const COST_USD_TICKS_METADATA_KEY: &str = "xai.cost_usd_ticks";
+/// Grow-internal metadata key for cost ticks past typed Response events.
+pub(crate) const COST_USD_TICKS_METADATA_KEY: &str = "grow.cost_usd_ticks";
 
 /// Read `response.usage.context_details.{input_tokens, output_tokens}`
 /// from the parsed terminal-event JSON and return their sum. Returns `None`
@@ -1125,7 +1125,7 @@ impl SamplingClient {
             tracing::error!("Failed to serialize responses request: {}", e);
             SamplingError::Serialization(e)
         })?;
-        // Inject xAI-specific fields not in async-openai's CreateResponse type.
+        // Inject optional backend fields not in async-openai's CreateResponse type.
         if self.defaults.stream_tool_calls {
             request_body["stream_tool_calls"] = serde_json::json!(true);
         }
@@ -1901,7 +1901,7 @@ mod tests {
         cfg.extra_headers
             .insert("x-test-header".to_string(), "test-value".to_string());
         cfg.extra_headers
-            .insert("x-XAI-token-auth".to_string(), "grow-cli".to_string());
+            .insert("x-provider-token-auth".to_string(), "grow-cli".to_string());
         let _client = SamplingClient::new(cfg).expect("client with extra headers should construct");
     }
 

@@ -247,7 +247,7 @@ fn extract_target_client_id(json: &serde_json::Value) -> Option<ClientId> {
 /// lookup in [`extract_target_client_id`] (also checks the ExtNotification
 /// `params.params` nesting) and the suffix parse used by
 /// `session::storage` and the client's `acp::meta`. Returns `None` for
-/// notifications without an `eventId` (xAI one-shots / older shell).
+/// notifications without an `eventId` (Grow one-shots / older shell).
 fn event_seq_of(json: &serde_json::Value) -> Option<u64> {
     let params = json.get("params")?;
     let event_id = params
@@ -3560,11 +3560,11 @@ mod tests {
     #[test]
     fn patch_initialize_response_preserves_other_fields() {
         let mut json = pv(
-            r#"{"jsonrpc":"2.0","id":1,"result":{"meta":{"grokShell":true,"modelState":{"currentModelId":"grow-3","availableModels":[{"modelId":"grow-3"},{"modelId":"grow-3-fast"}]}}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"meta":{"growShell":true,"modelState":{"currentModelId":"grow-3","availableModels":[{"modelId":"grow-3"},{"modelId":"grow-3-fast"}]}}}}"#,
         );
         let default_model = Some("grow-3-fast".to_string());
         assert!(patch_initialize_response_model(&mut json, &default_model));
-        assert_eq!(json["result"]["meta"]["grokShell"], true);
+        assert_eq!(json["result"]["meta"]["growShell"], true);
         assert_eq!(
             json["result"]["meta"]["modelState"]["currentModelId"],
             "grow-3-fast"

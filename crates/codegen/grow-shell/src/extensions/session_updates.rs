@@ -31,7 +31,7 @@
 //! (with `timestamp`, `method`, and `params` wrapper), not just the inner
 //! notification params. Clients should parse the `method` field to determine
 //! the update type (`"session/update"` for ACP, `"_grow/session/update"` for
-//! xAI extensions) and extract the notification payload from `params`.
+//! Grow extensions) and extract the notification payload from `params`.
 //!
 //! Metadata columns and cross-host import live in [`crate::extensions::session_state`].
 
@@ -819,7 +819,7 @@ mod tests {
         )
     }
 
-    fn xai_rewind(target: usize) -> String {
+    fn grow_rewind(target: usize) -> String {
         format!(
             r#"{{"timestamp":0,"method":"_grow/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"rewind_marker","target_prompt_index":{target}}}}}}}"#
         )
@@ -915,7 +915,7 @@ mod tests {
             agent_chunk("r1"),
             user_chunk("dead"),
             agent_chunk("dead-r"),
-            xai_rewind(1),
+            grow_rewind(1),
             user_chunk("p2-new"),
             agent_chunk("r2-new"),
             user_chunk("p3"),

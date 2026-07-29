@@ -41,7 +41,7 @@ impl TurnBoundary {
             turn_number,
         }
     }
-    /// Turn-hook end (from `on_after_turn`): activity + upload + rootfs snapshot.
+    /// Turn-hook end (from `on_after_turn`): activity + local workspace snapshot.
     pub(crate) fn turn_end(
         turn_number: u64,
         duration_ms: u64,

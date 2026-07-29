@@ -2,7 +2,7 @@
 //!
 //! Routes incoming [`AcpClientMessage`] notifications to the appropriate
 //! agent's tracker, queues permission requests for interactive handling,
-//! and xAI session extension notifications (`grow/session_notification` and
+//! and Grow session extension notifications (`grow/session_notification` and
 //! replay-path `grow/session/update`).
 
 use std::collections::hash_map::Entry;
@@ -14,7 +14,7 @@ use xai_acp_lib::AcpClientMessage;
 
 use super::actions::Effect;
 use grow_shell::extensions::notification::{
-    SessionNotification, SessionUpdate as XaiSessionUpdate, is_reauthable_failure,
+    SessionNotification, SessionUpdate as GrowSessionUpdate, is_reauthable_failure,
 };
 use grow_shell::tools::todo::todo_item_from_plan_entry;
 use grow_workspace::permission::bash_command_splitting::BashCommandHighlights;
@@ -171,8 +171,8 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     // Premise: ACP-stream live delivery is in id order —
                     // actor ACP lines (chunks and the plan-mode
                     // `CurrentModeUpdate`s) are stamped at `event_tx` enqueue
-                    // time and drained FIFO. The xAI stream is direct-emitted
-                    // and keeps a SEPARATE highwater (see the xAI dedup in
+                    // time and drained FIFO. The Grow stream is direct-emitted
+                    // and keeps a SEPARATE highwater (see the Grow dedup in
                     // `handle_session_notification`). Residual class: ACP
                     // lines that skip `event_tx` — the bridge's bash stdout
                     // (no `event_tx` surface) and the turn-start user echo —
@@ -661,7 +661,7 @@ fn queue_open_workflows_modal_refresh(app: &mut AppView, agent_id: AgentId) {
     }
 }
 
-/// Handle an xAI extension notification.
+/// Handle an Grow extension notification.
 fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     match notif.method.as_ref() {
         "grow/session_notification" | "grow/session/update" => {

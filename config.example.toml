@@ -57,6 +57,15 @@ name = "Qwen3 Coder (local)"
 context_window = 131072
 output_limit = 16384
 
+# OAuth is provider-scoped and never adds models implicitly. To use it, attach
+# an inline auth table to a provider, then run `grow login <provider>`:
+#
+# [provider.example.options.auth]
+# type = "oauth"
+# issuer = "https://auth.example.com"
+# client_id = "public-client-id"
+# scopes = ["openid", "profile", "email", "offline_access"]
+
 # Grow does not download announcements. This local array completely replaces
 # the built-in default announcement; use `announcements = []` at the top level
 # instead if you want no announcements.

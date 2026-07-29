@@ -1,4 +1,4 @@
-//! grow-sampler - Actor-based sampling layer for xAI grow.
+//! grow-sampler - Provider-neutral actor-based sampling layer for Grow.
 //!
 //! This crate extracts the HTTP streaming + retry logic out of
 //! `grow-shell`'s session actor into a standalone, reusable

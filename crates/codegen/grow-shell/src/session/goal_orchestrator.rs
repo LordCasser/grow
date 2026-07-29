@@ -2,7 +2,7 @@
 //!
 
 use crate::extensions::notification::{
-    SessionNotification as XaiSessionNotification, SessionUpdate as XaiSessionUpdate,
+    SessionNotification as GrowSessionNotification, SessionUpdate as GrowSessionUpdate,
 };
 use crate::session::goal_tracker::{GoalOrchestration, GoalPhase, GoalStatus, GoalTracker};
 use crate::session::persistence::PersistenceMsg;
@@ -81,9 +81,9 @@ impl GoalNotifySender {
 
     /// Persist + fire-and-forget a notification to the gateway. Used for
     /// snapshot-derived payloads and for the "planning…" / "Verifying…"
-    /// latch updates that must not run the `send_xai_notification`
+    /// latch updates that must not run the `send_grow_notification`
     /// rewind-window-close side effect.
-    pub(crate) fn send_update(&self, update: XaiSessionUpdate) {
+    pub(crate) fn send_update(&self, update: GrowSessionUpdate) {
         self.dispatch_update(update, true);
     }
 
@@ -91,11 +91,11 @@ impl GoalNotifySender {
     /// `persist == false` ships the update to the gateway only (no JSONL
     /// append) for recurring/transient ticks — see
     /// [`Self::emit_goal_updated_ephemeral`].
-    fn dispatch_update(&self, update: XaiSessionUpdate, persist: bool) {
+    fn dispatch_update(&self, update: GrowSessionUpdate, persist: bool) {
         // Stamped before the persist/broadcast fork — see `ensure_event_id_meta`.
         let mut meta = None;
         crate::util::event_id::ensure_event_id_meta(&self.session_id.0, &mut meta);
-        let notification = XaiSessionNotification {
+        let notification = GrowSessionNotification {
             session_id: self.session_id.clone(),
             update,
             meta: meta.map(serde_json::Value::Object),
@@ -105,7 +105,7 @@ impl GoalNotifySender {
             .ok();
         if persist {
             let _ = self.persistence_tx.send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Xai(Box::new(notification)),
+                crate::session::storage::SessionUpdate::Grow(Box::new(notification)),
             ));
         }
         if let Some(raw) = raw {
@@ -148,7 +148,7 @@ pub(crate) fn build_goal_updated(
     o: &GoalOrchestration,
     tokens_used: i64,
     finished_subagent_tokens: i64,
-) -> XaiSessionUpdate {
+) -> GrowSessionUpdate {
     let last_entry = o.history.last();
 
     let status_str = match o.status {
@@ -169,7 +169,7 @@ pub(crate) fn build_goal_updated(
 
     let last_event = last_entry.map(|e| goal_event_as_str(&e.event).to_owned());
 
-    XaiSessionUpdate::GoalUpdated {
+    GrowSessionUpdate::GoalUpdated {
         goal_id: o.goal_id.clone(),
         objective: o.objective.clone(),
         status: status_str.to_owned(),
@@ -228,8 +228,8 @@ pub(crate) fn build_goal_updated(
 
 /// Build a `GoalUpdated` with `status: "cleared"` to tell the pager to
 /// drop its goal state.
-pub(crate) fn build_goal_cleared() -> XaiSessionUpdate {
-    XaiSessionUpdate::GoalUpdated {
+pub(crate) fn build_goal_cleared() -> GrowSessionUpdate {
+    GrowSessionUpdate::GoalUpdated {
         goal_id: String::new(),
         objective: String::new(),
         status: "cleared".to_owned(),
@@ -305,7 +305,7 @@ mod tests {
         let o = make_base_orchestration();
         let update = build_goal_updated(&o, 0, 0);
         match update {
-            XaiSessionUpdate::GoalUpdated {
+            GrowSessionUpdate::GoalUpdated {
                 total_deliverables,
                 completed_deliverables,
                 classifier_runs_attempted,
@@ -341,7 +341,7 @@ mod tests {
 
         let update = build_goal_updated(&o, 0, 0);
         match update {
-            XaiSessionUpdate::GoalUpdated {
+            GrowSessionUpdate::GoalUpdated {
                 classifier_runs_attempted,
                 classifier_max_runs,
                 last_classifier_verdict,
@@ -381,9 +381,9 @@ mod tests {
         );
     }
 
-    fn planning_field(update: &XaiSessionUpdate) -> Option<bool> {
+    fn planning_field(update: &GrowSessionUpdate) -> Option<bool> {
         match update {
-            XaiSessionUpdate::GoalUpdated { planning, .. } => *planning,
+            GrowSessionUpdate::GoalUpdated { planning, .. } => *planning,
             _ => panic!("expected GoalUpdated"),
         }
     }
@@ -394,8 +394,8 @@ mod tests {
         // mid-verification GoalUpdated fired. Sourced from the latch, every
         // snapshot-derived update keeps the "Verifying…" badge.
         let mut o = make_base_orchestration();
-        let verifying = |u: &XaiSessionUpdate| match u {
-            XaiSessionUpdate::GoalUpdated {
+        let verifying = |u: &GrowSessionUpdate| match u {
+            GrowSessionUpdate::GoalUpdated {
                 verifying_completion,
                 ..
             } => *verifying_completion,
@@ -416,7 +416,7 @@ mod tests {
         o.live_subagent_tokens = 5_000;
         let update = build_goal_updated(&o, 60_000, 40_000);
         match update {
-            XaiSessionUpdate::GoalUpdated {
+            GrowSessionUpdate::GoalUpdated {
                 tokens_used,
                 finished_subagent_tokens,
                 live_subagent_tokens,
@@ -440,7 +440,7 @@ mod tests {
         let mut o = make_base_orchestration();
         o.live_tokens_by_model = vec![("grow-4".into(), 5_000)];
         match build_goal_updated(&o, 0, 0) {
-            XaiSessionUpdate::GoalUpdated {
+            GrowSessionUpdate::GoalUpdated {
                 live_tokens_by_model,
                 ..
             } => assert!(
@@ -453,7 +453,7 @@ mod tests {
         // ≥2 distinct models are transmitted verbatim.
         o.live_tokens_by_model = vec![("grow-4".into(), 5_000), ("grow-3".into(), 3_000)];
         match build_goal_updated(&o, 0, 0) {
-            XaiSessionUpdate::GoalUpdated {
+            GrowSessionUpdate::GoalUpdated {
                 live_tokens_by_model,
                 ..
             } => assert_eq!(
@@ -468,7 +468,7 @@ mod tests {
     fn build_goal_cleared_is_cleared() {
         let update = build_goal_cleared();
         match update {
-            XaiSessionUpdate::GoalUpdated {
+            GrowSessionUpdate::GoalUpdated {
                 status,
                 classifier_runs_attempted,
                 classifier_max_runs,

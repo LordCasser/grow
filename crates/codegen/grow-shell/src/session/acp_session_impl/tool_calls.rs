@@ -2274,7 +2274,7 @@ impl SessionActor {
                 is_cursor_for_tool_result,
             ) {
                 deferred_followups.push(ConversationItem::user(notice));
-                self.send_xai_notification(XaiSessionUpdate::ImageDropped { notes })
+                self.send_grow_notification(GrowSessionUpdate::ImageDropped { notes })
                     .await;
             }
             for norm in norm_result.images {
@@ -2409,7 +2409,7 @@ impl SessionActor {
                 arguments_delta,
                 ..
             } => {
-                self.send_buffered_xai_update(XaiSessionUpdate::ToolCallDeltaChunk {
+                self.send_buffered_xai_update(GrowSessionUpdate::ToolCallDeltaChunk {
                     tool_call_id: id,
                     tool_index,
                     name,
@@ -2478,7 +2478,7 @@ impl SessionActor {
                         "reason": crate::util::truncate(&reason, 300),
                     })),
                 );
-                self.send_xai_notification(XaiSessionUpdate::RetryState(
+                self.send_grow_notification(GrowSessionUpdate::RetryState(
                     crate::extensions::notification::RetryState::Retrying {
                         attempt,
                         max_retries,

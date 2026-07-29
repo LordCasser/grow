@@ -1,5 +1,5 @@
 //! Outbound update emission concern for `SessionActor`: `send_update` and
-//! its buffered/transient/direct variants, xAI-notification handling, and
+//! its buffered/transient/direct variants, Grow-notification handling, and
 //! the gateway-bridge dispatch shims.
 use super::*;
 /// Result of applying a subagent fold into parent ledgers.
@@ -155,19 +155,19 @@ impl SessionActor {
             .event_tx
             .send(SessionEvent::Notification(notification.into()));
     }
-    /// Producer for the **high-frequency streaming path** with an xAI
+    /// Producer for the **high-frequency streaming path** with an Grow
     /// extension payload. Routes through `event_tx` -> `ReplayBuffer` ->
     /// `emit_buffered` so chunks get merged + debounced + emitted.
     ///
-    /// For one-shot xAI events (RetryState, ImageCompressed, HookExecution,
-    /// AutoCompactCompleted, etc.), use `send_xai_notification` instead.
+    /// For one-shot Grow events (RetryState, ImageCompressed, HookExecution,
+    /// AutoCompactCompleted, etc.), use `send_grow_notification` instead.
     ///
-    /// The frequency-based split (`send_buffered_xai_update` vs `send_xai_notification`)
+    /// The frequency-based split (`send_buffered_xai_update` vs `send_grow_notification`)
     /// mirrors the ACP-side split between `send_update` (high-frequency,
     /// buffered) and `emit_notification_direct` (low-frequency, direct).
-    pub(super) async fn send_buffered_xai_update(&self, update: XaiSessionUpdate) {
+    pub(super) async fn send_buffered_xai_update(&self, update: GrowSessionUpdate) {
         self.close_rewind_window().await;
-        let notification = XaiSessionNotification {
+        let notification = GrowSessionNotification {
             session_id: self.session_info.id.clone(),
             update,
             meta: None,
@@ -199,7 +199,7 @@ impl SessionActor {
     ///
     /// - **ACP** (`AgentMessageChunk`, `AgentThoughtChunk`) ->
     ///   delegates to `emit_notification_direct` (persists + gateway).
-    /// - **xAI** (`ToolCallDeltaChunk`) -> inlines a gateway
+    /// - **Grow** (`ToolCallDeltaChunk`) -> inlines a gateway
     ///   forward as `ExtNotification` only. Two deliberate omissions:
     ///   (1) no persistence -- per-chunk deltas have no replay value
     ///   because the canonical `acp::SessionUpdate::ToolCall` (with
@@ -210,8 +210,8 @@ impl SessionActor {
             SessionNotification::Acp(n) => {
                 self.emit_notification_direct(*n).await;
             }
-            SessionNotification::Xai(n) => {
-                self.log_outbound_xai_buffered(&n);
+            SessionNotification::Grow(n) => {
+                self.log_outbound_grow_buffered(&n);
                 if self
                     .notifications
                     .gateway_enabled
@@ -229,21 +229,21 @@ impl SessionActor {
             }
         }
     }
-    /// Tracing log for buffered xAI notifications emerging from
+    /// Tracing log for buffered Grow notifications emerging from
     /// emit_buffered. Mirrors `log_outbound_notification` for ACP.
     /// Visible with `RUST_LOG=acp_event=info`.
-    fn log_outbound_xai_buffered(&self, notification: &XaiSessionNotification) {
+    fn log_outbound_grow_buffered(&self, notification: &GrowSessionNotification) {
         if !matches!(
             notification.update,
-            XaiSessionUpdate::ToolCallDeltaChunk { .. }
+            GrowSessionUpdate::ToolCallDeltaChunk { .. }
         ) {
             return;
         }
         tracing::info!(
             target: "acp_event",
-            event = "xai_buffered_notification_sent",
+            event = "grow_buffered_notification_sent",
             session_id = %self.session_info.id,
-            "Sending buffered xAI session notification"
+            "Sending buffered Grow session notification"
         );
     }
     fn log_outbound_notification(&self, notification: &acp::SessionNotification) {
@@ -405,18 +405,18 @@ impl SessionActor {
             "agentTimestampMs": agent_timestamp_ms,
         })
     }
-    /// Handle xAI session notifications - store them in persistence
+    /// Handle Grow session notifications - store them in persistence
     /// These are client-side events (like diff reviews) that should be part of session history.
     /// Exception: `SubagentProgress` ticks are transient and return before the store.
-    pub(super) async fn handle_xai_session_notification(
+    pub(super) async fn handle_grow_session_notification(
         &self,
-        mut notification: XaiSessionNotification,
+        mut notification: GrowSessionNotification,
     ) {
         if !matches!(
             notification.update,
-            XaiSessionUpdate::SubagentProgress { .. }
+            GrowSessionUpdate::SubagentProgress { .. }
         ) {
-            tracing::debug!("storing xAI session notification");
+            tracing::debug!("storing Grow session notification");
         }
         {
             let mut meta_map = notification.meta.take().and_then(|v| match v {
@@ -427,7 +427,7 @@ impl SessionActor {
             notification.meta = meta_map.map(serde_json::Value::Object);
         }
         match &notification.update {
-            XaiSessionUpdate::SubagentSpawned {
+            GrowSessionUpdate::SubagentSpawned {
                 subagent_id,
                 subagent_type,
                 description,
@@ -509,7 +509,7 @@ impl SessionActor {
                     .await;
                 }
             }
-            XaiSessionUpdate::SubagentFinished {
+            GrowSessionUpdate::SubagentFinished {
                 subagent_id,
                 tokens_used,
                 ..
@@ -543,7 +543,7 @@ impl SessionActor {
                     );
                 }
             }
-            XaiSessionUpdate::SubagentProgress {
+            GrowSessionUpdate::SubagentProgress {
                 subagent_id,
                 turn_count,
                 tool_call_count,
@@ -616,14 +616,14 @@ impl SessionActor {
             .notifications
             .persistence_tx
             .send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Xai(Box::new(notification)),
+                crate::session::storage::SessionUpdate::Grow(Box::new(notification)),
             ));
     }
-    /// Persist an xAI extension notification to `updates.jsonl` **without** sending it
+    /// Persist an Grow extension notification to `updates.jsonl` **without** sending it
     /// to the gateway/UI. Used for internal bookkeeping updates like `CompactionCheckpoint`
     /// and `RewindMarker` that are only relevant during replay.
-    pub(super) fn persist_xai_update_only(&self, update: XaiSessionUpdate) {
-        let notification = XaiSessionNotification {
+    pub(super) fn persist_grow_update_only(&self, update: GrowSessionUpdate) {
+        let notification = GrowSessionNotification {
             session_id: self.session_info.id.clone(),
             update,
             meta: Some(self.build_notification_meta()),
@@ -632,11 +632,11 @@ impl SessionActor {
             .notifications
             .persistence_tx
             .send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Xai(Box::new(notification)),
+                crate::session::storage::SessionUpdate::Grow(Box::new(notification)),
             ))
             .is_err()
         {
-            tracing::warn!("Failed to send xAI update to persistence channel");
+            tracing::warn!("Failed to send Grow update to persistence channel");
         }
     }
     /// Dispatch a `Notification` hook for a user-attention event.
@@ -670,18 +670,18 @@ impl SessionActor {
         )
         .await;
     }
-    /// Send an xAI extension notification to the client
+    /// Send an Grow extension notification to the client
     #[tracing::instrument(skip_all)]
-    pub(super) async fn send_xai_notification(&self, update: XaiSessionUpdate) {
-        self.send_xai_notification_with_extra_meta(update, None)
+    pub(super) async fn send_grow_notification(&self, update: GrowSessionUpdate) {
+        self.send_grow_notification_with_extra_meta(update, None)
             .await;
     }
-    /// [`Self::send_xai_notification`] with caller-supplied `_meta` keys merged
+    /// [`Self::send_grow_notification`] with caller-supplied `_meta` keys merged
     /// into the standard eventId/timestamp meta. Caller keys win on collision.
     #[tracing::instrument(skip_all)]
-    pub(super) async fn send_xai_notification_with_extra_meta(
+    pub(super) async fn send_grow_notification_with_extra_meta(
         &self,
-        update: XaiSessionUpdate,
+        update: GrowSessionUpdate,
         extra_meta: Option<serde_json::Map<String, serde_json::Value>>,
     ) {
         self.close_rewind_window().await;
@@ -692,7 +692,7 @@ impl SessionActor {
             }
             meta
         };
-        let notification = XaiSessionNotification {
+        let notification = GrowSessionNotification {
             session_id: self.session_info.id.clone(),
             update,
             meta: Some(meta),
@@ -701,7 +701,7 @@ impl SessionActor {
             .notifications
             .persistence_tx
             .send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Xai(Box::new(notification.clone())),
+                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
             ));
         let params = serde_json::to_value(&notification)
             .and_then(|v| serde_json::value::to_raw_value(&v))
@@ -722,21 +722,21 @@ impl SessionActor {
     }
 }
 #[cfg(test)]
-mod xai_event_id_stamping_tests {
+mod grow_event_id_stamping_tests {
     use super::support::create_test_actor;
     use super::*;
     fn persisted_xai_event_id(
         prx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
     ) -> String {
         loop {
-            match prx.try_recv().expect("an xAI line must be persisted") {
-                PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(notif)) => {
+            match prx.try_recv().expect("an Grow line must be persisted") {
+                PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(notif)) => {
                     return notif
                         .meta
                         .as_ref()
                         .and_then(|m| m.get("eventId"))
                         .and_then(|v| v.as_str())
-                        .expect("persisted xAI lines must carry an eventId")
+                        .expect("persisted Grow lines must carry an eventId")
                         .to_string();
                 }
                 _ => continue,
@@ -744,8 +744,8 @@ mod xai_event_id_stamping_tests {
         }
     }
     /// Persisted⇒stamped chokepoint at the actor: both actor persist paths —
-    /// `send_xai_notification` (own emission) and
-    /// `handle_xai_session_notification` (inbound/forwarded, meta-less) —
+    /// `send_grow_notification` (own emission) and
+    /// `handle_grow_session_notification` (inbound/forwarded, meta-less) —
     /// must put an `eventId` on the persisted line. An id-less line degrades
     /// every later cursor reconnect of the session to a full replay.
     #[tokio::test]
@@ -759,16 +759,16 @@ mod xai_event_id_stamping_tests {
                     tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
                 let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
                 actor
-                    .send_xai_notification(XaiSessionUpdate::HookAnnotation {
+                    .send_grow_notification(GrowSessionUpdate::HookAnnotation {
                         message: "own emission".into(),
                     })
                     .await;
                 let own_id = persisted_xai_event_id(&mut prx);
                 assert!(own_id.starts_with("test-actor-"));
                 actor
-                    .handle_xai_session_notification(XaiSessionNotification {
+                    .handle_grow_session_notification(GrowSessionNotification {
                         session_id: acp::SessionId::new("test-actor"),
-                        update: XaiSessionUpdate::HookAnnotation {
+                        update: GrowSessionUpdate::HookAnnotation {
                             message: "inbound".into(),
                         },
                         meta: None,
@@ -777,7 +777,7 @@ mod xai_event_id_stamping_tests {
                 let inbound_id = persisted_xai_event_id(&mut prx);
                 assert!(inbound_id.starts_with("test-actor-"));
                 assert_ne!(own_id, inbound_id);
-                actor.persist_xai_update_only(XaiSessionUpdate::HookAnnotation {
+                actor.persist_grow_update_only(GrowSessionUpdate::HookAnnotation {
                     message: "persist-only".into(),
                 });
                 let persist_only_id = persisted_xai_event_id(&mut prx);

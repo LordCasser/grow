@@ -70,7 +70,7 @@ fn is_false(value: &bool) -> bool {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum PersistenceMsg {
-    /// A session update (ACP update or xAI extension update)
+    /// A session update (ACP update or Grow extension update)
     Update(SessionUpdate),
     AppendUpdateDurablyAndAck {
         update: SessionUpdate,
@@ -1436,8 +1436,8 @@ impl SessionPersistence {
                                 }
                             }
                         }
-                        SessionUpdate::Xai(_) => {
-                            // xAI notifications are written directly without merging
+                        SessionUpdate::Grow(_) => {
+                            // Grow notifications are written directly without merging
                             if let Err(error) = self.write_update(&update).await {
                                 tracing::warn!(%error, "failed to write update");
                             }
@@ -1907,7 +1907,7 @@ pub async fn new_with_explicit_dir(
 pub struct PersistedInfo {
     pub summary: Summary,
     pub chat_history: Vec<ConversationItem>,
-    /// All session updates (ACP updates and xAI extension updates) in chronological order
+    /// All session updates (ACP updates and Grow extension updates) in chronological order
     pub updates: Vec<SessionUpdate>,
     pub plan_state: Option<TodoState>,
     pub rewind_points: Vec<RewindPoint>,

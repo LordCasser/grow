@@ -455,18 +455,18 @@ async fn delete_session_removes_dir_and_is_idempotent() {
     adapter.delete_session(&info).await.expect("second delete must succeed");
 }
 #[tokio::test]
-async fn test_xai_session_update_round_trip() {
+async fn test_grow_session_update_round_trip() {
     use crate::extensions::notification::{
-        DiffContent, SessionNotification as XaiSessionNotification,
-        SessionUpdate as XaiSessionUpdateType,
+        DiffContent, SessionNotification as GrowSessionNotification,
+        SessionUpdate as GrowSessionUpdateType,
     };
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let info = create_test_info();
     adapter.init_session(&info, default_model_id()).await.unwrap();
-    let xai_notification = XaiSessionNotification {
+    let grow_notification = GrowSessionNotification {
         session_id: acp::SessionId::new("test-session-123"),
-        update: XaiSessionUpdateType::DiffReview {
+        update: GrowSessionUpdateType::DiffReview {
             content: vec![DiffContent {
                     diff: acp::Diff::new(
                         std::path::PathBuf::from("/test/file.rs"),
@@ -478,7 +478,7 @@ async fn test_xai_session_update_round_trip() {
         meta: None,
     };
     adapter
-        .append_update(&info, &SessionUpdate::Xai(Box::new(xai_notification.clone())))
+        .append_update(&info, &SessionUpdate::Grow(Box::new(grow_notification.clone())))
         .await
         .unwrap();
     let acp_notification = create_test_notification();
@@ -490,13 +490,13 @@ async fn test_xai_session_update_round_trip() {
     assert_eq!(
             loaded.updates.len(),
             2,
-            "Should have 2 updates (1 xAI + 1 ACP)"
+            "Should have 2 updates (1 Grow + 1 ACP)"
         );
     match &loaded.updates[0] {
-        SessionUpdate::Xai(notification) => {
+        SessionUpdate::Grow(notification) => {
             assert_eq!(notification.session_id.0.as_ref(), "test-session-123");
             match &notification.update {
-                XaiSessionUpdateType::DiffReview { content } => {
+                GrowSessionUpdateType::DiffReview { content } => {
                     assert_eq!(content.len(), 1);
                     assert_eq!(
                             content[0].diff.path,
@@ -508,7 +508,7 @@ async fn test_xai_session_update_round_trip() {
                 }
             }
         }
-        _ => panic!("Expected xAI update as first item"),
+        _ => panic!("Expected Grow update as first item"),
     }
     match &loaded.updates[1] {
         SessionUpdate::Acp(_) => {}
@@ -520,16 +520,16 @@ async fn test_xai_session_update_round_trip() {
 #[tokio::test]
 async fn test_subagent_notifications_round_trip() {
     use crate::extensions::notification::{
-        SessionNotification as XaiSessionNotification,
-        SessionUpdate as XaiSessionUpdateType,
+        SessionNotification as GrowSessionNotification,
+        SessionUpdate as GrowSessionUpdateType,
     };
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let info = create_test_info();
     adapter.init_session(&info, default_model_id()).await.unwrap();
-    let spawned = XaiSessionNotification {
+    let spawned = GrowSessionNotification {
         session_id: acp::SessionId::new("parent-session"),
-        update: XaiSessionUpdateType::SubagentSpawned {
+        update: GrowSessionUpdateType::SubagentSpawned {
             subagent_id: "child-001".to_string(),
             parent_session_id: "parent-session".to_string(),
             parent_prompt_id: Some("turn-123".to_string()),
@@ -547,10 +547,10 @@ async fn test_subagent_notifications_round_trip() {
         },
         meta: None,
     };
-    adapter.append_update(&info, &SessionUpdate::Xai(Box::new(spawned))).await.unwrap();
-    let finished = XaiSessionNotification {
+    adapter.append_update(&info, &SessionUpdate::Grow(Box::new(spawned))).await.unwrap();
+    let finished = GrowSessionNotification {
         session_id: acp::SessionId::new("parent-session"),
-        update: XaiSessionUpdateType::SubagentFinished {
+        update: GrowSessionUpdateType::SubagentFinished {
             subagent_id: "child-001".to_string(),
             child_session_id: "child-001".to_string(),
             status: "completed".to_string(),
@@ -564,13 +564,13 @@ async fn test_subagent_notifications_round_trip() {
         },
         meta: None,
     };
-    adapter.append_update(&info, &SessionUpdate::Xai(Box::new(finished))).await.unwrap();
+    adapter.append_update(&info, &SessionUpdate::Grow(Box::new(finished))).await.unwrap();
     let loaded = adapter.load_session(&info).await.unwrap();
     assert_eq!(loaded.updates.len(), 2);
     match &loaded.updates[0] {
-        SessionUpdate::Xai(notification) => {
+        SessionUpdate::Grow(notification) => {
             match &notification.update {
-                XaiSessionUpdateType::SubagentSpawned {
+                GrowSessionUpdateType::SubagentSpawned {
                     subagent_id,
                     child_session_id,
                     description,
@@ -585,12 +585,12 @@ async fn test_subagent_notifications_round_trip() {
                 other => panic!("Expected SubagentSpawned, got {other:?}"),
             }
         }
-        other => panic!("Expected Xai update, got {other:?}"),
+        other => panic!("Expected Grow update, got {other:?}"),
     }
     match &loaded.updates[1] {
-        SessionUpdate::Xai(notification) => {
+        SessionUpdate::Grow(notification) => {
             match &notification.update {
-                XaiSessionUpdateType::SubagentFinished {
+                GrowSessionUpdateType::SubagentFinished {
                     subagent_id,
                     status,
                     tool_calls,
@@ -609,7 +609,7 @@ async fn test_subagent_notifications_round_trip() {
                 other => panic!("Expected SubagentFinished, got {other:?}"),
             }
         }
-        other => panic!("Expected Xai update, got {other:?}"),
+        other => panic!("Expected Grow update, got {other:?}"),
     }
     let raw_jsonl = tokio::fs::read_to_string(
             adapter.session_dir(&info).join("updates.jsonl"),
@@ -638,16 +638,16 @@ async fn test_subagent_notifications_round_trip() {
 #[tokio::test]
 async fn test_subagent_spawned_resumed_roundtrip() {
     use crate::extensions::notification::{
-        SessionNotification as XaiSessionNotification,
-        SessionUpdate as XaiSessionUpdateType,
+        SessionNotification as GrowSessionNotification,
+        SessionUpdate as GrowSessionUpdateType,
     };
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let info = create_test_info();
     adapter.init_session(&info, default_model_id()).await.unwrap();
-    let spawned = XaiSessionNotification {
+    let spawned = GrowSessionNotification {
         session_id: acp::SessionId::new("resume-parent"),
-        update: XaiSessionUpdateType::SubagentSpawned {
+        update: GrowSessionUpdateType::SubagentSpawned {
             subagent_id: "child-resumed".to_string(),
             parent_session_id: "resume-parent".to_string(),
             parent_prompt_id: Some("turn-5".to_string()),
@@ -665,13 +665,13 @@ async fn test_subagent_spawned_resumed_roundtrip() {
         },
         meta: None,
     };
-    adapter.append_update(&info, &SessionUpdate::Xai(Box::new(spawned))).await.unwrap();
+    adapter.append_update(&info, &SessionUpdate::Grow(Box::new(spawned))).await.unwrap();
     let loaded = adapter.load_session(&info).await.unwrap();
     assert_eq!(loaded.updates.len(), 1);
     match &loaded.updates[0] {
-        SessionUpdate::Xai(notification) => {
+        SessionUpdate::Grow(notification) => {
             match &notification.update {
-                XaiSessionUpdateType::SubagentSpawned {
+                GrowSessionUpdateType::SubagentSpawned {
                     subagent_id,
                     effective_context_source,
                     persona,
@@ -690,7 +690,7 @@ async fn test_subagent_spawned_resumed_roundtrip() {
                 other => panic!("Expected SubagentSpawned, got {other:?}"),
             }
         }
-        other => panic!("Expected Xai update, got {other:?}"),
+        other => panic!("Expected Grow update, got {other:?}"),
     }
 }
 #[tokio::test]
@@ -765,13 +765,13 @@ fn checkpoint_record(id: &str) -> SessionUpdate {
 /// A `compaction_checkpoint` record with an arbitrary `checkpoint_file` path.
 fn checkpoint_record_with_path(id: &str, checkpoint_file: &str) -> SessionUpdate {
     use crate::extensions::notification::{
-        CompactionCheckpointInfo, SessionNotification as XaiSessionNotification,
-        SessionUpdate as XaiSessionUpdateType,
+        CompactionCheckpointInfo, SessionNotification as GrowSessionNotification,
+        SessionUpdate as GrowSessionUpdateType,
     };
-    SessionUpdate::Xai(
-        Box::new(XaiSessionNotification {
+    SessionUpdate::Grow(
+        Box::new(GrowSessionNotification {
             session_id: acp::SessionId::new("ckpt-src"),
-            update: XaiSessionUpdateType::CompactionCheckpoint(
+            update: GrowSessionUpdateType::CompactionCheckpoint(
                 Box::new(CompactionCheckpointInfo {
                     checkpoint_id: id.to_string(),
                     prompt_index_at_compaction: 1,
@@ -991,10 +991,10 @@ async fn checkpoint_record_with_non_checkpoint_path_is_not_copied() {
     let loaded = adapter.load_session(&target_info).await.unwrap();
     assert_eq!(loaded.updates.len(), 1);
     match &loaded.updates[0] {
-        SessionUpdate::Xai(notification) => {
+        SessionUpdate::Grow(notification) => {
             assert_eq!(notification.session_id.0.as_ref(), "ckpt-dst");
         }
-        other => panic!("Expected Xai update, got {other:?}"),
+        other => panic!("Expected Grow update, got {other:?}"),
     }
 }
 #[cfg(unix)]
@@ -1178,21 +1178,21 @@ async fn test_copy_session_data_without_plan() {
     assert!(loaded.plan_state.is_none());
 }
 #[tokio::test]
-async fn test_copy_session_data_transforms_xai_updates() {
+async fn test_copy_session_data_transforms_grow_updates() {
     use crate::extensions::notification::{
-        DiffContent, SessionNotification as XaiSessionNotification,
-        SessionUpdate as XaiSessionUpdateType,
+        DiffContent, SessionNotification as GrowSessionNotification,
+        SessionUpdate as GrowSessionUpdateType,
     };
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let source_info = Info {
-        id: acp::SessionId::new("source-xai"),
+        id: acp::SessionId::new("source-grow"),
         cwd: "/source".to_string(),
     };
     adapter.init_session(&source_info, default_model_id()).await.unwrap();
-    let xai_notification = XaiSessionNotification {
-        session_id: acp::SessionId::new("source-xai"),
-        update: XaiSessionUpdateType::DiffReview {
+    let grow_notification = GrowSessionNotification {
+        session_id: acp::SessionId::new("source-grow"),
+        update: GrowSessionUpdateType::DiffReview {
             content: vec![DiffContent {
                     diff: acp::Diff::new(
                         std::path::PathBuf::from("/test/file.rs"),
@@ -1204,11 +1204,11 @@ async fn test_copy_session_data_transforms_xai_updates() {
         meta: None,
     };
     adapter
-        .append_update(&source_info, &SessionUpdate::Xai(Box::new(xai_notification)))
+        .append_update(&source_info, &SessionUpdate::Grow(Box::new(grow_notification)))
         .await
         .unwrap();
     let target_info = Info {
-        id: acp::SessionId::new("fork-source-xai-abcd1234"),
+        id: acp::SessionId::new("fork-source-grow-abcd1234"),
         cwd: "/target".to_string(),
     };
     adapter
@@ -1217,13 +1217,13 @@ async fn test_copy_session_data_transforms_xai_updates() {
         .unwrap();
     let loaded = adapter.load_session(&target_info).await.unwrap();
     match &loaded.updates[0] {
-        SessionUpdate::Xai(notification) => {
+        SessionUpdate::Grow(notification) => {
             assert_eq!(
                     notification.session_id.0.as_ref(),
-                    "fork-source-xai-abcd1234"
+                    "fork-source-grow-abcd1234"
                 );
         }
-        _ => panic!("Expected xAI update"),
+        _ => panic!("Expected Grow update"),
     }
 }
 fn fork_user_chunk(session_id: &str, text: &str, prompt_index: usize) -> SessionUpdate {
@@ -1256,13 +1256,13 @@ fn fork_agent_chunk(session_id: &str, text: &str) -> SessionUpdate {
 }
 fn fork_rewind_marker(session_id: &str, target_prompt_index: usize) -> SessionUpdate {
     use crate::extensions::notification::{
-        SessionNotification as XaiSessionNotification,
-        SessionUpdate as XaiSessionUpdateType,
+        SessionNotification as GrowSessionNotification,
+        SessionUpdate as GrowSessionUpdateType,
     };
-    SessionUpdate::Xai(
-        Box::new(XaiSessionNotification {
+    SessionUpdate::Grow(
+        Box::new(GrowSessionNotification {
             session_id: acp::SessionId::new(session_id),
-            update: XaiSessionUpdateType::RewindMarker {
+            update: GrowSessionUpdateType::RewindMarker {
                 target_prompt_index,
                 created_at: "2026-01-01T00:00:00Z".to_string(),
             },
@@ -1519,7 +1519,7 @@ async fn test_load_prompts_only_merges_multi_chunk_prompt() {
 #[tokio::test]
 async fn test_load_prompts_only_applies_rewind_truncation() {
     use crate::extensions::notification::{
-        SessionNotification as XaiNotification, SessionUpdate as XaiSessionUpdate,
+        SessionNotification as GrowNotification, SessionUpdate as GrowSessionUpdate,
     };
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
@@ -1562,9 +1562,9 @@ async fn test_load_prompts_only_applies_rewind_truncation() {
             ),
         ),
     );
-    let rewind = XaiNotification {
+    let rewind = GrowNotification {
         session_id: info.id.clone(),
-        update: XaiSessionUpdate::RewindMarker {
+        update: GrowSessionUpdate::RewindMarker {
             target_prompt_index: 1,
             created_at: "2024-01-01T00:00:00Z".to_string(),
         },
@@ -1593,7 +1593,7 @@ async fn test_load_prompts_only_applies_rewind_truncation() {
         SessionUpdate::Acp(Box::new(agent1)),
         SessionUpdate::Acp(Box::new(user2)),
         SessionUpdate::Acp(Box::new(agent2)),
-        SessionUpdate::Xai(Box::new(rewind)),
+        SessionUpdate::Grow(Box::new(rewind)),
         SessionUpdate::Acp(Box::new(user3)),
         SessionUpdate::Acp(Box::new(agent3)),
     ] {

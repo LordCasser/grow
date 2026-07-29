@@ -4843,53 +4843,6 @@ fn default_selected_permission_mouse_click_on_indicator_opens_picker_in_one_clic
     }
 }
 
-/// The `/privacy` slash command's argument parser
-/// is case-insensitive and supports a deliberately-pared-down list of
-/// unambiguous-semantic aliases. The unit-level coverage lives in the
-/// slash command module; this e2e test pins the integration contract
-/// (the parser is reachable from the slash command and produces the
-/// expected `Action`).
-///
-/// Ambiguous aliases
-/// (`on/off/true/false/enable/disable`) were DROPPED because they
-/// could be read either as "turn on privacy" (=opt-out) or "turn on
-/// sharing" (=opt-in). For a privacy-critical setting we err on the
-/// side of explicit, unambiguous arguments. The test below verifies
-/// both the accept list AND the reject list.
-#[test]
-fn pr9_privacy_slash_command_parses_aliases() {
-    use grow_pager::slash::commands::privacy::parse_privacy_arg;
-
-    // Canonical names.
-    assert_eq!(parse_privacy_arg("opt-in"), Some(true));
-    assert_eq!(parse_privacy_arg("opt-out"), Some(false));
-
-    // Case-insensitive (sample).
-    assert_eq!(parse_privacy_arg("Opt-In"), Some(true));
-    assert_eq!(parse_privacy_arg("OPT-OUT"), Some(false));
-
-    // Unambiguous-semantic aliases (pruned list).
-    assert_eq!(parse_privacy_arg("in"), Some(true));
-    assert_eq!(parse_privacy_arg("out"), Some(false));
-    assert_eq!(parse_privacy_arg("share"), Some(true));
-    assert_eq!(parse_privacy_arg("private"), Some(false));
-
-    // Ambiguous aliases MUST be rejected. `/privacy on`
-    // could be read as "turn on privacy" (=opt-out, the OPPOSITE of
-    // what an earlier mapping returned). For a privacy
-    // setting, ambiguity = silent data-exfiltration risk.
-    for ambiguous in &["on", "off", "true", "false", "enable", "disable"] {
-        assert_eq!(
-            parse_privacy_arg(ambiguous),
-            None,
-            "ambiguous alias `{ambiguous}` MUST be rejected (PR 9 R1, Security Issue 10)",
-        );
-    }
-
-    // Unknown.
-    assert_eq!(parse_privacy_arg("maybe"), None);
-}
-
 // ---------------------------------------------------------------------------
 // `plan_mode` (Agent-category Enum, PAGER-owned + ACP-mediated,
 // supports_preview: false)

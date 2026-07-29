@@ -2285,13 +2285,12 @@ impl Config {
             .default(true)
             .resolve()
     }
-    /// Resolve whether to use grow's default OAuth2 (xAI login.example.com).
+    /// Resolve whether explicitly configured OAuth/OIDC login is enabled.
     ///
-    /// Enterprise OIDC (`oidc` in config.toml) always wins — this only gates
-    /// the default xAI OAuth2 fallback when no enterprise OIDC is configured.
-    ///
-    /// Priority: `--oauth` > GROW_OAUTH_ENABLED env > default (true = OAuth).
-    pub fn resolve_grok_oauth(&self, cli_oidc: Option<bool>) -> Resolved<bool> {
+    /// No issuer or client is built in; this flag only selects a provider
+    /// configured through local auth settings or environment variables.
+    /// Priority: `--oauth` > `GROW_OAUTH_ENABLED` > enabled.
+    pub fn resolve_provider_oauth(&self, cli_oidc: Option<bool>) -> Resolved<bool> {
         BoolFlag::env("GROW_OAUTH_ENABLED")
             .cli(cli_oidc)
             .default(true)
@@ -2936,7 +2935,7 @@ pub struct ModelEntryConfig {
     pub show_model_fingerprint: bool,
     /// Inject `stream_tool_calls: true` into the request body
     /// so the upstream emits per-chunk `function_call_arguments.delta`
-    /// Without this set, xAI API models send args as one delta
+    /// Without this set, backends using this extension send args as one delta
     /// event, defeating the purpose of streaming.
     ///
     /// Per-model opt-in -- BYOK endpoints that don't understand the
@@ -4449,7 +4448,7 @@ reasoning_effort = "low"
         assert_eq!(resolved.base_url, "https://vendor.example/v1");
         assert_eq!(resolved.api_key.as_deref(), Some("vendor-key"));
     }
-    /// Cold cache falls back to the session model, never the xAI proxy;
+    /// Cold cache falls back to the session model, never the configured service proxy;
     /// warm cache serves the provider token at the provider endpoint.
     #[tokio::test]
     async fn aux_model_with_auth_provider_never_reroutes() {
@@ -4479,7 +4478,7 @@ reasoning_effort = "low"
                 None,
             )
             .is_none(),
-            "cold provider cache must not reroute the aux model through the xAI proxy"
+            "cold provider cache must not reroute the aux model through the configured service proxy"
         );
         let _ = provider.ensure_fresh_token(None).await;
         let resolved = resolve_aux_model_sampling_config(
@@ -5309,7 +5308,7 @@ reasoning_effort = "low"
         use crate::agent::auth_method::GROW_API_KEY_ENV_VAR;
         use grow_test_support::EnvGuard;
         use xai_chat_state::AuthType;
-        let sentinel = "xai-global-sentinel-key";
+        let sentinel = "provider-global-sentinel-key";
         let primary = "GROW_TEST_EMPTY_ENV_GLOBAL_PRIMARY";
         let alias = "GROW_TEST_EMPTY_ENV_GLOBAL_ALIAS";
         let _primary = EnvGuard::set(primary, "");
@@ -5430,7 +5429,7 @@ reasoning_effort = "low"
     }
     fn api_key_creds(base_url: &str) -> ResolvedCredentials {
         ResolvedCredentials {
-            api_key: Some("xai-secret".to_string()),
+            api_key: Some("provider-secret".to_string()),
             base_url: base_url.to_string(),
             auth_type: xai_chat_state::AuthType::ApiKey,
             auth_scheme: Default::default(),
@@ -5443,7 +5442,7 @@ reasoning_effort = "low"
         let mut creds = api_key_creds("https://api.example.com/v1");
         enforce_disable_api_key_auth(&mut creds, false, Some("session-jwt"));
         assert_eq!(creds.auth_type, AuthType::ApiKey);
-        assert_eq!(creds.api_key.as_deref(), Some("xai-secret"));
+        assert_eq!(creds.api_key.as_deref(), Some("provider-secret"));
         let mut creds = api_key_creds("https://api.example.com/v1");
         enforce_disable_api_key_auth(&mut creds, true, Some("session-jwt"));
         assert_eq!(creds.auth_type, AuthType::SessionToken);
@@ -5455,7 +5454,7 @@ reasoning_effort = "low"
         let mut creds = api_key_creds("https://api.example.com/v1");
         enforce_disable_api_key_auth(&mut creds, true, Some("session-jwt"));
         assert_eq!(creds.auth_type, AuthType::ApiKey);
-        assert_eq!(creds.api_key.as_deref(), Some("xai-secret"));
+        assert_eq!(creds.api_key.as_deref(), Some("provider-secret"));
         let mut creds = ResolvedCredentials {
             auth_type: AuthType::SessionToken,
             ..api_key_creds("https://api.example.com/v1")
@@ -5463,11 +5462,11 @@ reasoning_effort = "low"
         enforce_disable_api_key_auth(&mut creds, true, Some("session-jwt"));
         assert_eq!(creds.auth_type, AuthType::SessionToken);
     }
-    /// Regression for the OVERRIDE_MODEL kill-switch bypass: a first-party model
+    /// Regression for the override-model kill-switch bypass: a managed model
     /// with its own api_key resolves to `ApiKey` (priority 1, beating the
     /// session), and the kill switch — now applied inside
     /// `try_resolve_model_credentials` — swaps it for the session token. BYOK
-    /// (non-x.ai) own keys are preserved. (`try_resolve_model_credentials`
+    /// BYOK credentials are preserved. (`try_resolve_model_credentials`
     /// loads global config, so this exercises its resolve + enforce core.)
     #[test]
     fn try_resolve_model_credentials_swaps_first_party_own_key_under_kill_switch() {
@@ -5475,7 +5474,7 @@ reasoning_effort = "low"
         let entry = test_model_entry(
             "m",
             "https://api.example.com/v1",
-            Some("xai-model-key"),
+            Some("provider-model-key"),
             None,
             None,
         );
@@ -5485,7 +5484,7 @@ reasoning_effort = "low"
             AuthType::ApiKey,
             "own key wins over session"
         );
-        assert_eq!(creds.api_key.as_deref(), Some("xai-model-key"));
+        assert_eq!(creds.api_key.as_deref(), Some("provider-model-key"));
         enforce_disable_api_key_auth(&mut creds, true, Some("session-jwt"));
         assert_eq!(
             creds.auth_type,
@@ -6856,7 +6855,7 @@ reasoning_effort = "low"
         let model = models.get(dm).expect("model should exist");
         let sampling = resolve_sampling(model, Some("session-tok"));
         assert_eq!(sampling.base_url, "https://inference.example.com/v1");
-        unsafe { std::env::set_var("GROW_API_KEY", "xai-key") };
+        unsafe { std::env::set_var("GROW_API_KEY", "provider-key") };
         let sampling = resolve_sampling(model, None);
         assert_eq!(sampling.base_url, "https://inference.example.com/v1");
         unsafe { std::env::remove_var("GROW_API_KEY") };
@@ -6965,9 +6964,9 @@ reasoning_effort = "low"
         let model = models
             .get(crate::models::default_model())
             .expect("default model should exist");
-        unsafe { std::env::set_var("GROW_API_KEY", "xai-external-key") };
+        unsafe { std::env::set_var("GROW_API_KEY", "provider-external-key") };
         let sampling = resolve_sampling(model, None);
-        assert_eq!(sampling.api_key.as_deref(), Some("xai-external-key"));
+        assert_eq!(sampling.api_key.as_deref(), Some("provider-external-key"));
         assert_eq!(
             sampling.base_url, "https://api.example.com/v1",
             "external API key should route to api.example.com via api_base_url"
@@ -7118,7 +7117,7 @@ reasoning_effort = "low"
         );
         assert!(
             !resolved.contains_key(crate::models::default_model()),
-            "xAI default must not leak into enterprise model list"
+            "Grow default must not leak into enterprise model list"
         );
         assert_eq!(resolved.len(), 1, "only the prefetched enterprise model");
     }
@@ -7250,7 +7249,7 @@ reasoning_effort = "low"
     #[serial]
     fn aux_endpoints_resolve_to_proxy_never_inference() {
         unset_endpoint_env_vars();
-        let inference = "https://inference.acme-corp.example/xai/v1";
+        let inference = "https://inference.acme-corp.example/provider/v1";
         let cfg = EndpointsConfig {
             inference_base_url: inference.to_string(),
             cli_chat_proxy_base_url: None,
@@ -7292,7 +7291,7 @@ reasoning_effort = "low"
         let cfg = Config::new_from_toml_cfg(
             &toml::from_str(
                 r#"[endpoints]
-                inference_base_url = "https://inference.acme-corp.example/xai/v1""#,
+                inference_base_url = "https://inference.acme-corp.example/provider/v1""#,
             )
             .unwrap(),
         )
@@ -8581,7 +8580,7 @@ agent_type = "cursor"
         let raw: toml::Value = toml::from_str(
             r#"
             [endpoint]
-            deployment_key = "xai-token-test"
+            deployment_key = "provider-token-test"
         "#,
         )
         .unwrap();
@@ -8590,7 +8589,7 @@ agent_type = "cursor"
         let unused = unused_keys_from_toml(
             r#"
             [endpoint]
-            deployment_key = "xai-token-test"
+            deployment_key = "provider-token-test"
         "#,
         );
         assert!(unused.iter().any(|k| k == "endpoint"), "got: {unused:?}");

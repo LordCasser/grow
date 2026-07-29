@@ -6,7 +6,6 @@ fn default_oidc_scopes() -> Vec<String> {
         "profile".into(),
         "email".into(),
         "offline_access".into(),
-        "api:access".into(),
     ]
 }
 /// Conservative OAuth scopes used only for an explicitly configured legacy
@@ -21,17 +20,7 @@ fn default_oauth2_scopes() -> Vec<String> {
     ]
 }
 fn default_team_oauth2_scopes() -> Vec<String> {
-    vec![
-        "profile".into(),
-        "offline_access".into(),
-        "grow-cli:access".into(),
-        "api:access".into(),
-        "team:read".into(),
-        "conversations:read".into(),
-        "conversations:write".into(),
-        "workspaces:read".into(),
-        "workspaces:write".into(),
-    ]
+    default_oauth2_scopes()
 }
 /// Pin automatic auth to one method (`[auth] preferred_method` in config.toml).
 ///
@@ -42,7 +31,7 @@ fn default_team_oauth2_scopes() -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreferredAuthMethod {
-    /// `GROW_API_KEY` / auth.json `xai::api_key` / per-model BYOK (`provider.api_key`).
+    /// `GROW_API_KEY` / locally stored API key / per-model BYOK (`provider.api_key`).
     ApiKey,
     /// OIDC / OAuth2 session (`cached_token`, interactive `service.example.com` / `oidc`,
     /// including devbox-minted OIDC).

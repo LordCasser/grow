@@ -949,17 +949,17 @@ fn transform_session_id_in_update(
             inner.session_id = new_id.clone();
             super::SessionUpdate::Acp(Box::new(inner))
         }
-        super::SessionUpdate::Xai(notification) => {
+        super::SessionUpdate::Grow(notification) => {
             let mut inner = (*notification).clone();
             inner.session_id = new_id.clone();
-            super::SessionUpdate::Xai(Box::new(inner))
+            super::SessionUpdate::Grow(Box::new(inner))
         }
     }
 }
 fn is_orchestration_projection_update(update: &super::SessionUpdate) -> bool {
     matches!(
         update,
-        super::SessionUpdate::Xai(notification)
+        super::SessionUpdate::Grow(notification)
             if matches!(
                 &notification.update,
                 crate::extensions::notification::SessionUpdate::WorkflowUpdated { .. }
@@ -1078,7 +1078,7 @@ impl JsonlStorageAdapter {
         let checkpoint_files: std::collections::BTreeSet<String> = updates_to_copy
             .iter()
             .filter_map(|update| {
-                let super::SessionUpdate::Xai(notification) = update else {
+                let super::SessionUpdate::Grow(notification) = update else {
                     return None;
                 };
                 let crate::extensions::notification::SessionUpdate::CompactionCheckpoint(info) =

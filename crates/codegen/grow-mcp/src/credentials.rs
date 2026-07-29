@@ -2,7 +2,7 @@
 //!
 //! Credentials are stored in `$GROW_HOME/mcp_credentials.json`, keyed by a
 //! composite key derived from the server name and URL. This keeps MCP OAuth
-//! tokens isolated from the user's xAI auth (`auth.json`).
+//! tokens isolated from the user's configured provider auth (`auth.json`).
 //!
 //! Stores rmcp's `StoredCredentials` type directly — the same type that
 //! rmcp's `AuthorizationManager` uses internally.

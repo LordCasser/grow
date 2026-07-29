@@ -510,7 +510,7 @@ pub(super) async fn run_session(
                                 );
                                 if let crate::session::memory::hooks::SessionEndResult::Written(ref path_str) = result {
                                     session.reindex_and_embed(std::path::Path::new(path_str), "session").await;
-                                    session.send_xai_notification(XaiSessionUpdate::MemorySessionSaved {
+                                    session.send_grow_notification(GrowSessionUpdate::MemorySessionSaved {
                                         path: path_str.clone(),
                                     }).await;
                                 }
@@ -777,8 +777,8 @@ pub(super) async fn run_session(
                         }
                         SessionCommand::NotifyPluginUpdates { updates } => {
                             session
-                                .send_xai_notification(
-                                    XaiSessionUpdate::PluginUpdatesInstalled { updates },
+                                .send_grow_notification(
+                                    GrowSessionUpdate::PluginUpdatesInstalled { updates },
                                 )
                                 .await;
                         }
@@ -1115,8 +1115,8 @@ pub(super) async fn run_session(
                         SessionCommand::ReconcileRewindTracker { target_prompt_index } => {
                             session.merge_rewind_tracker_from(target_prompt_index).await;
                         }
-                        SessionCommand::XaiSessionNotification { notification } => {
-                            session.handle_xai_session_notification(notification).await;
+                        SessionCommand::GrowSessionNotification { notification } => {
+                            session.handle_grow_session_notification(notification).await;
                         }
                         SessionCommand::RecordSubagentUsage {
                             by_model,
@@ -1997,7 +1997,7 @@ pub(super) async fn run_session(
                                     // Reindex + embed the written file so it's searchable next session
                                     if let crate::session::memory::hooks::SessionEndResult::Written(ref path_str) = result {
                                         session.reindex_and_embed(std::path::Path::new(path_str), "session").await;
-                                        session.send_xai_notification(XaiSessionUpdate::MemorySessionSaved {
+                                        session.send_grow_notification(GrowSessionUpdate::MemorySessionSaved {
                                             path: path_str.clone(),
                                         }).await;
                                     }

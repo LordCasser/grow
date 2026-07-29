@@ -294,8 +294,6 @@ pub async fn run_stdio_agent(
     // are identifiable by version in diagnostic logs.
     grow_diagnostics::unified_log::set_version(grow_version::VERSION);
 
-    // cleanup_orphaned_uploads removed — xai_file_utils::queue is gone
-
     // Log the client that launched us (set by grow-desktop when spawning `grow agent stdio`).
     // This appears early in unified.jsonl and is extremely useful for auth diagnostics.
     if let Ok(version) = std::env::var("GROW_CLIENT_VERSION") {
@@ -423,8 +421,6 @@ async fn run_headless_inner(
     // Headless's only transport is the relay (no IPC fallback), so a session is required.
     const HEADLESS_NO_SESSION: &str = "Headless mode requires a service.example.com session. \
         Run `grow login` to sign in, or use `grow agent stdio` for API-key access.";
-
-    // cleanup_orphaned_uploads removed — xai_file_utils::queue is gone
 
     let mut agent_config = agent_config.clone();
     agent_config.mode = crate::agent::config::AgentMode::Headless;
@@ -887,8 +883,8 @@ impl DeferredRelayArm {
     /// Arm the relay for a hot-reloaded session if it is relay-eligible.
     ///
     /// Consumes the parts and returns `None` when the relay was armed.
-    /// Returns `Some(self)` when the session is not relay-eligible (BYOK /
-    /// non-x.ai issuer — see
+    /// Returns `Some(self)` when the session is not relay-eligible (for example,
+    /// BYOK/API-key auth — see
     /// [`RelayConfig::for_session`](crate::agent::relay::RelayConfig::for_session))
     /// so a later eligible token can still arm.
     ///
@@ -1872,7 +1868,7 @@ mod tests {
     }
 
     /// A `RelayConfig` built via the production constructor (`for_session`) with
-    /// a relay-eligible x.ai OIDC session.
+    /// a relay-eligible provider OIDC session.
     fn test_relay_config(addr: std::net::SocketAddr) -> crate::agent::relay::RelayConfig {
         let auth = ProviderAuth {
             auth_mode: AuthMode::Oidc,
@@ -1885,7 +1881,7 @@ mod tests {
             ..Default::default()
         };
         crate::agent::relay::RelayConfig::for_session(&auth, &cfg, None, None)
-            .expect("x.ai OIDC session must be relay-eligible")
+            .expect("provider OIDC session must be relay-eligible")
     }
 
     /// Wait until at least one relay connection is accepted, or panic.
@@ -2032,7 +2028,7 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                // A non-relay-eligible token (no x.ai issuer) must not arm
+                // A non-relay-eligible token must not arm
                 // and must hand the parts back.
                 let ineligible = ProviderAuth::test_default();
                 let arm = arm
@@ -2045,7 +2041,7 @@ mod tests {
                     "non-eligible token must not connect the relay"
                 );
 
-                // A relay-eligible x.ai OIDC token arms the relay eagerly.
+                // A relay-eligible provider OIDC token arms the relay eagerly.
                 let eligible = ProviderAuth {
                     auth_mode: AuthMode::Oidc,
                     oidc_issuer: Some(crate::auth::TEST_OAUTH2_ISSUER.to_string()),

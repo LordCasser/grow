@@ -2,7 +2,7 @@
 //! [`OidcRefreshResult`] without touching [`AuthManager`].
 
 use super::super::ProviderAuth;
-use super::protocol::{OidcError, OidcUserInfo, build_grok_auth, discover, refresh_tokens};
+use super::protocol::{OidcError, OidcUserInfo, build_provider_auth, discover, refresh_tokens};
 use crate::auth::error::RefreshTokenFailedReason;
 
 /// Outcome of a pure OIDC token refresh (no AuthManager mutations).
@@ -204,7 +204,7 @@ pub(crate) async fn oidc_token_exchange(auth: &ProviderAuth) -> OidcRefreshResul
         user_blocked_reason: auth.user_blocked_reason.clone(),
         team_blocked_reasons: auth.team_blocked_reasons.clone(),
     };
-    let mut new_auth = build_grok_auth(tokens, user_info, issuer, client_id);
+    let mut new_auth = build_provider_auth(tokens, user_info, issuer, client_id);
     let idp_rotated = new_auth.refresh_token.is_some();
     // Keep old refresh token if IdP didn't rotate it
     if new_auth.refresh_token.is_none() {

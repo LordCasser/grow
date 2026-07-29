@@ -363,7 +363,7 @@ impl SessionActor {
             }
             return;
         }
-        self.send_xai_notification(
+        self.send_grow_notification(
             crate::extensions::notification::SessionUpdate::SessionRecap { summary, auto },
         )
         .await;
@@ -455,7 +455,7 @@ impl SessionActor {
     ///
     /// Only the manual path shows a spinner, so callers gate this on `!auto`.
     async fn emit_recap_unavailable(&self) {
-        self.send_xai_notification(
+        self.send_grow_notification(
             crate::extensions::notification::SessionUpdate::SessionRecapUnavailable,
         )
         .await;

@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 impl AgentView {
     /// Bind this view to a root session id, resetting the per-session
-    /// reconnect cursor and both dedup highwaters (ACP + xAI) when the id
+    /// reconnect cursor and both dedup highwaters (ACP + Grow) when the id
     /// actually changes — all three are meaningless against another session's
     /// event-id history (a stale cursor relies on exact-match failure for
     /// safety; a stale highwater could dedup-drop the new session's events

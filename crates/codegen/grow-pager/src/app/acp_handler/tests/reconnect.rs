@@ -248,7 +248,7 @@
         assert_eq!(
             app.agents[&id].last_applied_xai_event_seq,
             Some(30),
-            "the live xAI line advanced its highwater in-window"
+            "the live Grow line advanced its highwater in-window"
         );
         // Highest EntryId the discarded staging handed out (its last entry).
         let staged_max_id = {
@@ -274,7 +274,7 @@
         assert_eq!(
             agent.last_applied_xai_event_seq,
             Some(5),
-            "the xAI highwater reverts with the transcript — left at 30 it would \
+            "the Grow highwater reverts with the transcript — left at 30 it would \
              dedup-drop the next reload's re-delivery of the discarded blocks"
         );
         let next = agent.scrollback.push_block(RenderBlock::system("after"));
@@ -528,10 +528,10 @@
         );
     }
 
-    /// xAI updates dedup on their OWN per-session `eventId` highwater: a
+    /// Grow updates dedup on their OWN per-session `eventId` highwater: a
     /// re-delivered live copy (cursor-tail overlap when stamp order and file
     /// order diverge, leader fan-out) is dropped instead of re-applied — the
-    /// xAI arms have no other dedup. Replay stays exempt.
+    /// Grow arms have no other dedup. Replay stays exempt.
     #[test]
     fn xai_session_update_dedup_drops_already_applied_event() {
         let mut app = make_app_with_agent("sess-xdup");
@@ -552,7 +552,7 @@
         assert_eq!(
             app.agents[&id].scrollback.len(),
             1,
-            "a duplicate xAI event must not push a second block"
+            "a duplicate Grow event must not push a second block"
         );
         assert_eq!(
             app.agents[&id].last_seen_event_id.as_deref(),
@@ -577,12 +577,12 @@
         assert_eq!(
             app.agents[&id].scrollback.len(),
             2,
-            "a stale lower-id xAI event must not push a block"
+            "a stale lower-id Grow event must not push a block"
         );
         assert_eq!(app.agents[&id].last_applied_xai_event_seq, Some(11));
     }
 
-    /// An unhandled xAI kind (the default `_` arm) leaves no trace, so it must
+    /// An unhandled Grow kind (the default `_` arm) leaves no trace, so it must
     /// NOT advance the reconnect cursor or the dedup highwater — a cursor
     /// reconnect must still re-deliver it. An applied kind advances both.
     #[test]
@@ -596,11 +596,11 @@
         ));
         assert_eq!(
             app.agents[&id].last_seen_event_id, None,
-            "an unhandled xAI update must not advance the reconnect cursor"
+            "an unhandled Grow update must not advance the reconnect cursor"
         );
         assert_eq!(
             app.agents[&id].last_applied_xai_event_seq, None,
-            "an unhandled xAI update must not advance the dedup highwater"
+            "an unhandled Grow update must not advance the dedup highwater"
         );
 
         // An applied kind (ModelAutoSwitched) advances both.
@@ -615,8 +615,8 @@
         assert_eq!(app.agents[&id].last_applied_xai_event_seq, Some(8));
     }
 
-    /// Split-highwater regression: a fresh direct-emitted xAI id must NOT
-    /// make a queued lower-id ACP chunk look stale. xAI lines bypass the
+    /// Split-highwater regression: a fresh direct-emitted Grow id must NOT
+    /// make a queued lower-id ACP chunk look stale. Grow lines bypass the
     /// agent's FIFO pipeline, so this ordering happens routinely (goal mode,
     /// subagent progress while the parent streams) — a shared highwater
     /// would silently drop the late chunk (live-text loss).
@@ -625,7 +625,7 @@
         let mut app = make_app_with_agent("sess-split");
         let id = AgentId(0);
 
-        // Direct xAI emission stamped N+1 arrives first.
+        // Direct Grow emission stamped N+1 arrives first.
         assert!(handle_ext_notification(
             &xai_model_switch_notif("sess-split", "sess-split-21"),
             &mut app
@@ -659,7 +659,7 @@
         assert_eq!(
             app.agents[&id].last_applied_xai_event_seq,
             Some(21),
-            "…and the ACP apply must not clobber the xAI highwater either"
+            "…and the ACP apply must not clobber the Grow highwater either"
         );
     }
 
@@ -787,14 +787,14 @@
         );
     }
 
-    /// xAI extension session updates: replay-stamped ones are gated like ACP
+    /// Grow extension session updates: replay-stamped ones are gated like ACP
     /// updates, and applied ones advance the reconnect cursor.
     #[test]
     fn xai_session_update_replay_gating_and_cursor() {
         fn model_switch_notif(meta: Option<serde_json::Value>) -> acp::ExtNotification {
             let payload = SessionNotification {
                 session_id: acp::SessionId::new("sess-xai"),
-                update: XaiSessionUpdate::ModelAutoSwitched {
+                update: GrowSessionUpdate::ModelAutoSwitched {
                     previous_model_id: "m-old".into(),
                     new_model_id: "m-new".into(),
                     reason: "gone".into(),
@@ -818,7 +818,7 @@
         ));
         {
             let agent = app.agents.get_mut(&id).unwrap();
-            assert!(agent.scrollback.is_empty(), "unexpected xAI replay dropped");
+            assert!(agent.scrollback.is_empty(), "unexpected Grow replay dropped");
             assert!(agent.last_seen_event_id.is_none());
         }
 
@@ -839,17 +839,17 @@
         assert_eq!(
             agent.last_seen_event_id.as_deref(),
             Some("sess-xai-7"),
-            "applied xAI updates advance the reconnect cursor"
+            "applied Grow updates advance the reconnect cursor"
         );
         assert!(agent.finish_session_reload(1, true));
         assert!(
             !scrollback_has_system_text(agent, "pre-outage content"),
-            "an xAI replay line counts as replay for the swap decision"
+            "an Grow replay line counts as replay for the swap decision"
         );
         assert_eq!(
             agent.scrollback.len(),
             1,
-            "the staged xAI block is the new transcript"
+            "the staged Grow block is the new transcript"
         );
     }
 
@@ -985,7 +985,7 @@
         assert!(agent.session.state.is_idle());
     }
 
-    /// Apply-only cursor rule (xAI path): a `ModelChanged` the catalog can't
+    /// Apply-only cursor rule (Grow path): a `ModelChanged` the catalog can't
     /// resolve is ignored, so it must NOT advance the reconnect cursor or the
     /// dedup highwater — a later reconnect (catalog now has the model) must
     /// still replay it. An applied follower switch advances both. Mirrors the

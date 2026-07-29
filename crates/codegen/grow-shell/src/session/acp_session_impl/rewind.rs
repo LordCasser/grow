@@ -468,7 +468,7 @@ impl SessionActor {
 
             // Append a RewindMarker to updates.jsonl so the replay pipeline can
             // handle timeline branching (updates.jsonl is append-only).
-            self.persist_xai_update_only(XaiSessionUpdate::RewindMarker {
+            self.persist_grow_update_only(GrowSessionUpdate::RewindMarker {
                 target_prompt_index: target_index,
                 created_at: chrono::Utc::now().to_rfc3339(),
             });

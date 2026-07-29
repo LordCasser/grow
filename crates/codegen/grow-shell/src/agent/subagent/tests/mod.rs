@@ -91,7 +91,7 @@ async fn usage_ack_precedes_terminal_presentation() {
     );
     assert!(matches!(
             parent_cmd_rx.try_recv(),
-            Ok(SessionCommand::XaiSessionNotification {
+            Ok(SessionCommand::GrowSessionNotification {
                 notification: SessionNotification {
                     update: SessionUpdate::SubagentFinished { .. },
                     ..
@@ -159,7 +159,7 @@ async fn emit_subagent_notification_stamps_one_event_id_on_both_paths() {
         Some(&cmd_tx),
     );
     let persisted_id = match cmd_rx.try_recv().expect("persist hop must fire") {
-        SessionCommand::XaiSessionNotification { notification } => {
+        SessionCommand::GrowSessionNotification { notification } => {
             notification
                 .meta
                 .as_ref()
@@ -168,7 +168,7 @@ async fn emit_subagent_notification_stamps_one_event_id_on_both_paths() {
                 .expect("persisted subagent lines must carry an eventId")
                 .to_string()
         }
-        _ => panic!("expected XaiSessionNotification"),
+        _ => panic!("expected GrowSessionNotification"),
     };
     assert!(persisted_id.starts_with("parent-sess-"));
     let broadcast_id = match gateway_rx.try_recv().expect("broadcast must fire") {
@@ -1624,7 +1624,7 @@ async fn cancel_pending_shell_child_presents_one_cancelled_finish() {
     while let Ok(command) = parent_cmd_rx.try_recv() {
         if matches!(
                 command,
-                SessionCommand::XaiSessionNotification {
+                SessionCommand::GrowSessionNotification {
                     notification: SessionNotification {
                         update: SessionUpdate::SubagentFinished { status, .. },
                         ..

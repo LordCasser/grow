@@ -137,7 +137,7 @@ async fn handle_scheduled_task_removed(
         let params = serde_json::to_value(&notification)
             .and_then(|value| serde_json::value::to_raw_value(&value))
             .map_err(|error| format!("failed to serialize scheduled task deletion: {error}"))?;
-        let update = crate::session::storage::SessionUpdate::Xai(Box::new(notification));
+        let update = crate::session::storage::SessionUpdate::Grow(Box::new(notification));
         if acknowledgement.is_some() {
             durable_append_landed(config.persistence.append_update_durably(update).await)?;
         } else {
@@ -328,7 +328,7 @@ async fn handle_notification(
                 notification.meta = meta_map.map(serde_json::Value::Object);
             }
             let _ = config.persistence.tx.send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Xai(Box::new(notification.clone())),
+                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
             ));
             let params = serde_json::to_value(&notification)
                 .and_then(|v| serde_json::value::to_raw_value(&v))
@@ -531,7 +531,7 @@ async fn handle_notification(
                 notification.meta = meta_map.map(serde_json::Value::Object);
             }
             let _ = config.persistence.tx.send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Xai(Box::new(notification.clone())),
+                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
             ));
             let params = serde_json::to_value(&notification)
                 .and_then(|v| serde_json::value::to_raw_value(&v))
@@ -754,7 +754,7 @@ async fn handle_notification(
                 meta: meta.map(serde_json::Value::Object),
             };
             let _ = config.persistence.tx.send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Xai(Box::new(notification.clone())),
+                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
             ));
             if let Ok(params) = serde_json::to_value(&notification)
                 .and_then(|v| serde_json::value::to_raw_value(&v))
@@ -1097,7 +1097,7 @@ mod tests {
         ));
         let mut persisted = false;
         while let Ok(message) = persistence_rx.try_recv() {
-            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(update)) =
+            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(update)) =
                 message
                 && matches!(
                     &update.update,
@@ -1141,7 +1141,7 @@ mod tests {
         );
         let mut persisted_completion = false;
         while let Ok(message) = persistence_rx.try_recv() {
-            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(update)) =
+            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(update)) =
                 message
                 && matches!(
                     &update.update,
@@ -1369,7 +1369,7 @@ mod tests {
         assert!(cmd_rx.try_recv().is_err());
         let mut persisted_completion = false;
         while let Ok(message) = persistence_rx.try_recv() {
-            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(update)) =
+            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(update)) =
                 message
                 && matches!(
                     &update.update,
@@ -1493,7 +1493,7 @@ mod tests {
             .try_recv()
             .expect("scheduled_task_created must be persisted");
         match msg {
-            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(notif)) => {
+            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(notif)) => {
                 assert!(matches!(
                     &notif.update,
                     crate::extensions::notification::SessionUpdate::ScheduledTaskCreated { .. }
@@ -1508,10 +1508,10 @@ mod tests {
                         .and_then(|m| m.get("eventId"))
                         .and_then(|v| v.as_str())
                         .is_some_and(|id| id.starts_with("test-session-")),
-                    "persisted xAI bridge lines must carry an eventId"
+                    "persisted Grow bridge lines must carry an eventId"
                 );
             }
-            _ => panic!("expected PersistenceMsg::Update(Xai(ScheduledTaskCreated))"),
+            _ => panic!("expected PersistenceMsg::Update(Grow(ScheduledTaskCreated))"),
         }
     }
     /// Persisted⇒stamped contract at the bridge's highest-frequency emitter:
@@ -1573,20 +1573,20 @@ mod tests {
             .try_recv()
             .expect("scheduled_task_removed must be persisted");
         match msg {
-            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(notif)) => {
+            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(notif)) => {
                 assert!(matches!(
                     &notif.update,
                     crate::extensions::notification::SessionUpdate::ScheduledTaskDeleted { .. }
                 ));
                 assert!(
-                    xai_persisted_event_id(&notif).is_some(),
+                    grow_persisted_event_id(&notif).is_some(),
                     "the persisted deletion line must be stamped"
                 );
                 let meta = notif.meta.as_ref().expect("scheduler metadata");
                 assert_eq!(meta["grow/schedulerGeneration"], "generation-a");
                 assert_eq!(meta["grow/schedulerRevision"], 2);
             }
-            _ => panic!("expected PersistenceMsg::Update(Xai(ScheduledTaskDeleted))"),
+            _ => panic!("expected PersistenceMsg::Update(Grow(ScheduledTaskDeleted))"),
         }
     }
     #[tokio::test]
@@ -1600,7 +1600,7 @@ mod tests {
         let (acknowledgement, mut receipt) = tokio::sync::oneshot::channel::<Result<(), String>>();
         let persistence = async {
             let PersistenceMsg::AppendUpdateDurablyAndAck {
-                update: crate::session::storage::SessionUpdate::Xai(notification),
+                update: crate::session::storage::SessionUpdate::Grow(notification),
                 respond_to,
             } = persistence_rx.recv().await.expect("durable append")
             else {
@@ -1625,7 +1625,7 @@ mod tests {
             Ok(xai_acp_lib::AcpClientMessage::ExtNotification(_))
         ));
     }
-    fn xai_persisted_event_id(
+    fn grow_persisted_event_id(
         notif: &crate::extensions::notification::SessionNotification,
     ) -> Option<String> {
         notif
@@ -1661,10 +1661,10 @@ mod tests {
         let mut offsets = HashMap::new();
         handle_notification(&config, notification, &mut offsets).await;
         match persistence_rx.try_recv().expect("must persist") {
-            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(notif)) => {
-                assert!(xai_persisted_event_id(&notif).is_some());
+            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(notif)) => {
+                assert!(grow_persisted_event_id(&notif).is_some());
             }
-            _ => panic!("expected Xai update"),
+            _ => panic!("expected Grow update"),
         }
     }
     #[tokio::test]
@@ -1679,10 +1679,10 @@ mod tests {
         )
         .await;
         match persistence_rx.try_recv().expect("must persist") {
-            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(notif)) => {
-                assert!(xai_persisted_event_id(&notif).is_some());
+            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(notif)) => {
+                assert!(grow_persisted_event_id(&notif).is_some());
             }
-            _ => panic!("expected Xai update"),
+            _ => panic!("expected Grow update"),
         }
     }
     #[tokio::test]

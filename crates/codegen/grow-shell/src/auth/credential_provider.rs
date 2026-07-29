@@ -1,5 +1,5 @@
 use crate::auth::AuthManager;
-use crate::util::grok_auth_credentials::ProviderAuthCredentials;
+use crate::util::provider_auth_credentials::ProviderAuthCredentials;
 use grow_auth::{
     AuthCredentialProvider, CredentialSnapshot, HttpAuth, StaticAuthCredentialProvider,
 };
@@ -87,8 +87,8 @@ impl AuthCredentialProvider for ShellAuthCredentialProvider {
         self.static_credentials.deployment_key.is_none()
     }
 }
-/// Resolves the embedding credentials for `embed_base_url`, attaching the xAI
-/// session credential only to xAI-operated endpoints over `https`.
+/// Resolves embedding credentials for `embed_base_url`, attaching the optional
+/// service credential only to the explicitly configured trusted endpoint over HTTPS.
 pub(crate) fn embedding_session_credentials(
     embed_base_url: &str,
     auth_manager: Option<&Arc<AuthManager>>,
@@ -281,7 +281,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mgr = make_manager(
             &dir,
-            Some(make_auth("xai-session-token", ChronoDuration::hours(1))),
+            Some(make_auth(
+                "provider-session-token",
+                ChronoDuration::hours(1),
+            )),
         );
         let api_key_provider: grow_tools::types::SharedApiKeyProvider =
             Arc::new(crate::auth::manager::SharedAuthKeyProvider(mgr.clone()));
@@ -320,13 +323,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dep = ShellAuthCredentialProvider::new(
             make_manager(&dir, None),
-            Some("xai-token-EX".into()),
+            Some("provider-token-EX".into()),
             None,
         )
         .snapshot();
         assert_eq!(
             dep.deployment_id.as_deref(),
-            Some(deployment_id_from_key("xai-token-EX").as_str())
+            Some(deployment_id_from_key("provider-token-EX").as_str())
         );
         assert!(dep.api_key_id.is_none());
         let api_auth = ProviderAuth {

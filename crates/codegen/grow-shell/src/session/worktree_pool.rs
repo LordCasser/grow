@@ -40,7 +40,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use xai_fast_worktree::{WorktreeBuilder, WorktreeSync};
 
-const WORKTREE_POOL_LOG: &str = "xai_worktree_pool";
+const WORKTREE_POOL_LOG: &str = "grow_worktree_pool";
 use crate::util::config::PoolConfig;
 use crate::util::grow_home::grow_home;
 

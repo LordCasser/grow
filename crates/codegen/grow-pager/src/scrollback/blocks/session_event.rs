@@ -101,7 +101,7 @@ pub enum SessionEvent {
         elapsed: Duration,
     },
     /// Hook annotation — displayed inline after a tool call.
-    /// Message comes from agent via XaiSessionUpdate::HookAnnotation.
+    /// Message comes from agent via GrowSessionUpdate::HookAnnotation.
     HookAnnotation {
         /// The hook message
         message: String,

@@ -51,7 +51,7 @@ pub(crate) fn build_session_runtime() -> std::io::Result<tokio::runtime::Runtime
 mod runtime_containment_tests {
     use super::build_session_runtime;
     /// Env marker dispatching the re-exec'd test binary into child logic.
-    const CHILD_ENV: &str = "XAI_GROW_SHELL_RUNTIME_CONTAINMENT_CHILD";
+    const CHILD_ENV: &str = "GROW_SHELL_RUNTIME_CONTAINMENT_CHILD";
     const PASS_MARK: &str = "runtime-build-contained:";
     const SKIP_MARK: &str = "skip-child:";
     /// Child: lower RLIMIT_NOFILE, fill the fd table, assert `Err`.

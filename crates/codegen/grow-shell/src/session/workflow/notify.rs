@@ -1,5 +1,5 @@
 use crate::extensions::notification::{
-    SessionNotification as XaiSessionNotification, SessionUpdate as XaiSessionUpdate,
+    SessionNotification as GrowSessionNotification, SessionUpdate as GrowSessionUpdate,
     WorkflowAgentInfo, WorkflowPhaseInfo,
 };
 use crate::session::persistence::PersistenceMsg;
@@ -68,10 +68,10 @@ impl WorkflowNotifySender {
         );
     }
 
-    fn dispatch(&self, update: XaiSessionUpdate, persist: bool) {
+    fn dispatch(&self, update: GrowSessionUpdate, persist: bool) {
         let mut meta = None;
         crate::util::event_id::ensure_event_id_meta(&self.session_id.0, &mut meta);
-        let notification = XaiSessionNotification {
+        let notification = GrowSessionNotification {
             session_id: self.session_id.clone(),
             update,
             meta: meta.map(serde_json::Value::Object),
@@ -81,7 +81,7 @@ impl WorkflowNotifySender {
             .ok();
         if persist {
             let _ = self.persistence_tx.send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Xai(Box::new(notification)),
+                crate::session::storage::SessionUpdate::Grow(Box::new(notification)),
             ));
         }
         if let Some(raw) = raw {
@@ -98,7 +98,7 @@ pub(crate) fn build_workflow_updated(
     state: &WorkflowRunState,
     elapsed_ms: u64,
     _active_agents: u32,
-) -> XaiSessionUpdate {
+) -> GrowSessionUpdate {
     let last = state.history.last();
 
     let run_complete = state.status == super::tracker::WorkflowRunStatus::Complete;
@@ -151,7 +151,7 @@ pub(crate) fn build_workflow_updated(
         .agent_budget
         .map(|total| total.saturating_sub(state.agents_used.saturating_add(agents_reserved)));
 
-    XaiSessionUpdate::WorkflowUpdated {
+    GrowSessionUpdate::WorkflowUpdated {
         run_id: state.run_id.clone(),
         revision: state.revision,
         name: state.name.clone(),
@@ -209,7 +209,7 @@ mod tests {
         t.set_phase("wf_1", "Execute");
         let state = t.get("wf_1").unwrap();
         match build_workflow_updated(&state, 0, 0) {
-            XaiSessionUpdate::WorkflowUpdated { phases, .. } => {
+            GrowSessionUpdate::WorkflowUpdated { phases, .. } => {
                 let states: Vec<(String, String)> =
                     phases.into_iter().map(|p| (p.title, p.state)).collect();
                 assert_eq!(
@@ -254,7 +254,7 @@ mod tests {
         );
         let state = t.get("wf_2").unwrap();
         match build_workflow_updated(&state, 0, 0) {
-            XaiSessionUpdate::WorkflowUpdated { phases, status, .. } => {
+            GrowSessionUpdate::WorkflowUpdated { phases, status, .. } => {
                 assert_eq!(status, "complete");
                 let states: Vec<(String, String)> =
                     phases.into_iter().map(|p| (p.title, p.state)).collect();

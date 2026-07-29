@@ -1,8 +1,8 @@
-//! Pure data types for the xAI sampling / chat-completion API layer.
+//! Pure data types for the provider-neutral sampling / chat-completion API layer.
 //!
 //! This crate contains the API-agnostic conversation types, chat completion
 //! request/response types, streaming types, and error types used across the
-//! xAI agent stack.  It intentionally contains **no I/O** (no HTTP clients,
+//! Grow agent stack. It intentionally contains **no I/O** (no HTTP clients,
 //! no file system access) so it can be depended on by downstream crates
 //! (e.g., `xai-chat-state`) without pulling in the full `grow-shell`.
 

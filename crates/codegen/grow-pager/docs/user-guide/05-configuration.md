@@ -525,10 +525,10 @@ environment override that can only tighten the bound, for CI and testing.
 
 ```toml
 [cli]
-minimum_version = "0.2.109"          # updater won't downgrade below this
-maximum_version = "0.2.180"          # updater won't install above this
-required_minimum_version = "0.2.100" # refuse to start below this
-required_maximum_version = "0.2.200" # refuse to start above this
+minimum_version = "1.0.0"          # updater won't downgrade below this
+maximum_version = "1.9.0"          # updater won't install above this
+required_minimum_version = "1.0.0" # refuse to start below this
+required_maximum_version = "1.9.0" # refuse to start above this
 ```
 
 - `minimum_version` (`GROW_MINIMUM_VERSION`) is a soft anti-downgrade floor. The
@@ -556,22 +556,26 @@ A complete config for enterprise use:
 [cli]
 auto_update = false
 
-[auth]
-auth_provider_command = "/usr/local/bin/my-company-auth-provider"
-auth_provider_label = "Acme Corp"
-auth_token_ttl = 3600
-
 [models]
-default = "company-grow"
+default = "company/company-coder"
+output_limit = 65536
 
-[model.company-grow]
-model = "grow-build"
-base_url = "https://grow-proxy.acme.com/"
-name = "Grow Latest (Proxy)"
+[auth_provider.company]
+type = "command"
+command = "/usr/local/bin/my-company-auth-provider"
+token_ttl_secs = 3600
+
+[provider.company]
+api_backend = "responses"
+
+[provider.company.options]
+base_url = "https://llm-proxy.acme.com/v1"
+auth_provider = "company"
+
+[provider.company.models.company-coder]
+name = "Company Coder"
 context_window = 128000
-
-[features]
-diagnostics = false
+output_limit = 65536
 ```
 
 ---

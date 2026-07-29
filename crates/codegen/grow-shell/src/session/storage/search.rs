@@ -25,8 +25,8 @@ use tokio::time::Instant;
 
 use super::search_fts::{SessionDoc, SessionSearchIndex, SessionSearchRow};
 use super::{
-    ContentPeek, PromptExtractEvent, RawLinePeek, RawParamsPeek, StorageAdapter,
-    XAI_SESSION_UPDATE_METHOD, collect_prompts_from_events,
+    ContentPeek, GROW_SESSION_UPDATE_METHOD, PromptExtractEvent, RawLinePeek, RawParamsPeek,
+    StorageAdapter, collect_prompts_from_events,
 };
 use crate::session::info::Info;
 use crate::session::persistence::Summary;
@@ -938,14 +938,14 @@ fn collect_all_indexable_content_single_pass(updates_path: &Path) -> io::Result<
         }
 
         // Step 1: Peek at envelope to get method + raw params
-        let (raw_params, is_xai) = if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(trimmed)
-        {
-            let raw = env.params.map(|p| p.get()).unwrap_or(trimmed);
-            let xai = env.method == Some(XAI_SESSION_UPDATE_METHOD);
-            (raw, xai)
-        } else {
-            (trimmed, false)
-        };
+        let (raw_params, is_grow) =
+            if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(trimmed) {
+                let raw = env.params.map(|p| p.get()).unwrap_or(trimmed);
+                let grow = env.method == Some(GROW_SESSION_UPDATE_METHOD);
+                (raw, grow)
+            } else {
+                (trimmed, false)
+            };
 
         // Step 2: Peek at the sessionUpdate discriminant tag.
         // Preserve the full RawUpdatePeek so rewind_marker can read
@@ -957,9 +957,9 @@ fn collect_all_indexable_content_single_pass(updates_path: &Path) -> io::Result<
 
         // Content events (user messages, assistant responses, tool calls,
         // thoughts) come from the standard ACP protocol ("session/update").
-        // Control events (rewind markers) come from xAI extensions
+        // Control events (rewind markers) come from Grow extensions
         // ("_grow/session/update"). Dispatch on source first, then tag.
-        if !is_xai {
+        if !is_grow {
             // ── ACP content events ──────────────────────────────────
             match tag {
                 Some(t) if t == *USER_MESSAGE_CHUNK => {
@@ -1075,7 +1075,7 @@ fn collect_all_indexable_content_single_pass(updates_path: &Path) -> io::Result<
                 }
             }
         } else {
-            // ── xAI control events ──────────────────────────────────
+            // ── Grow control events ──────────────────────────────────
             match tag {
                 Some(t) if t == *REWIND_MARKER => {
                     flush_assistant(&mut current_assistant, &mut assistant_texts);
@@ -1198,14 +1198,14 @@ fn collect_delta_content(updates_path: &Path, offset: u64) -> io::Result<DeltaRe
             continue;
         }
 
-        let (raw_params, is_xai) = if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(trimmed)
-        {
-            let raw = env.params.map(|p| p.get()).unwrap_or(trimmed);
-            let xai = env.method == Some(XAI_SESSION_UPDATE_METHOD);
-            (raw, xai)
-        } else {
-            (trimmed, false)
-        };
+        let (raw_params, is_grow) =
+            if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(trimmed) {
+                let raw = env.params.map(|p| p.get()).unwrap_or(trimmed);
+                let grow = env.method == Some(GROW_SESSION_UPDATE_METHOD);
+                (raw, grow)
+            } else {
+                (trimmed, false)
+            };
 
         let tag = serde_json::from_str::<RawParamsPeek<'_>>(raw_params)
             .ok()
@@ -1213,10 +1213,10 @@ fn collect_delta_content(updates_path: &Path, offset: u64) -> io::Result<DeltaRe
             .map(|u| u.session_update);
 
         match tag {
-            Some(t) if is_xai && t == *REWIND_MARKER => {
+            Some(t) if is_grow && t == *REWIND_MARKER => {
                 return Ok(DeltaResult::NeedsFullReread);
             }
-            Some(t) if !is_xai && t == *USER_MESSAGE_CHUNK => {
+            Some(t) if !is_grow && t == *USER_MESSAGE_CHUNK => {
                 flush_assistant(&mut current_assistant, &mut assistant_texts);
                 if let Ok(peek) = serde_json::from_str::<UserContentPeek<'_>>(raw_params)
                     && let Some(content) = peek.update.content
@@ -1235,7 +1235,7 @@ fn collect_delta_content(updates_path: &Path, offset: u64) -> io::Result<DeltaRe
                     user_texts.push(text.into_owned());
                 }
             }
-            Some("agent_message_chunk") if !is_xai => {
+            Some("agent_message_chunk") if !is_grow => {
                 if let Ok(peek) = serde_json::from_str::<AgentContentPeek<'_>>(raw_params)
                     && let Some(content) = peek.update.content
                     && content.content_type == Some("text")
@@ -1248,7 +1248,7 @@ fn collect_delta_content(updates_path: &Path, offset: u64) -> io::Result<DeltaRe
                     current_assistant.push_str(&text);
                 }
             }
-            Some("tool_call") if !is_xai => {
+            Some("tool_call") if !is_grow => {
                 flush_assistant(&mut current_assistant, &mut assistant_texts);
                 if let Ok(peek) = serde_json::from_str::<ToolCallPeek<'_>>(raw_params) {
                     if let Some(title) = peek.update.title
@@ -1418,7 +1418,7 @@ mod tests {
         )
     }
 
-    fn xai_update(session_update_json: &str) -> String {
+    fn grow_update(session_update_json: &str) -> String {
         format!(
             r#"{{"timestamp":1,"method":"_grow/session/update","params":{{"sessionId":"s","update":{session_update_json}}}}}"#
         )
@@ -1533,7 +1533,7 @@ mod tests {
             acp_update(
                 r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second reply"}}"#,
             ),
-            xai_update(
+            grow_update(
                 r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
             ),
             acp_update(
@@ -1900,7 +1900,7 @@ mod tests {
 
         // Append a rewind marker in the delta window
         let delta = vec![
-            xai_update(
+            grow_update(
                 r#"{"sessionUpdate":"rewind_marker","target_prompt_index":0,"created_at":"2024-01-01"}"#,
             ),
             acp_update(

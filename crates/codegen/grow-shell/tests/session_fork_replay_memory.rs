@@ -80,7 +80,7 @@ fn reference_load_all(updates_path: &Path) -> Vec<acp::SessionUpdate> {
         .into_iter()
         .filter_map(|u| match u {
             SessionUpdate::Acp(notif) => Some(strip_context_wrappers(notif.update)),
-            SessionUpdate::Xai(_) => None,
+            SessionUpdate::Grow(_) => None,
         })
         .collect()
 }

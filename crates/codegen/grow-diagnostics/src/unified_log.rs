@@ -306,7 +306,7 @@ pub fn debug(msg: &str, sid: Option<&str>, ctx: Option<serde_json::Value>) {
 /// Read the current unified log file and return its contents.
 ///
 /// Returns `None` if the log file doesn't exist or can't be read.
-/// Used by diagnostic uploads to capture the log state at a point in time.
+/// Used by local diagnostic tooling to capture the log state at a point in time.
 pub fn snapshot_log() -> Option<Vec<u8>> {
     let path = log_path();
     // Flush pending writes before reading.

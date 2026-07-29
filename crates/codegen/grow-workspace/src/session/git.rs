@@ -3439,7 +3439,7 @@ pub fn short_sha(sha: &str) -> &str {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RestoreDegree {
-    /// HEAD checkout + staged/unstaged/untracked applied from GCS archive.
+    /// HEAD checkout + staged/unstaged/untracked applied from a supplied archive.
     Full,
     /// HEAD checkout only — no archive applied.
     HeadOnly,

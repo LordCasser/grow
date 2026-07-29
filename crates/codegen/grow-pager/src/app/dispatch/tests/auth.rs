@@ -308,7 +308,7 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
     use crate::app::agent::{AgentState, InFlightPrompt};
     use crate::scrollback::EntryId;
     use crate::scrollback::block::RenderBlock;
-    use grow_shell::extensions::notification::{RetryState, SessionUpdate as XaiSessionUpdate};
+    use grow_shell::extensions::notification::{RetryState, SessionUpdate as GrowSessionUpdate};
 
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -327,7 +327,7 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
         });
 
         apply_session_event_for_test(
-            &XaiSessionUpdate::AutoCompactStarted {
+            &GrowSessionUpdate::AutoCompactStarted {
                 tokens_used: 180_000,
                 context_window: 200_000,
                 percentage: 90,
@@ -351,7 +351,7 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
         );
 
         apply_session_event_for_test(
-            &XaiSessionUpdate::AutoCompactFailed {
+            &GrowSessionUpdate::AutoCompactFailed {
                 error: "authentication required — run /login and retry.".into(),
             },
             &mut agent.session,
@@ -360,7 +360,7 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
         assert!(agent.session.compact_held_prompt.is_some());
 
         apply_session_event_for_test(
-            &XaiSessionUpdate::RetryState(RetryState::Failed {
+            &GrowSessionUpdate::RetryState(RetryState::Failed {
                 error_type: "reauth_required".into(),
                 message: "Unauthorized (401): compaction failed".into(),
             }),

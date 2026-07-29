@@ -1842,7 +1842,7 @@ fn emit_subagent_notification(
         meta: meta.map(serde_json::Value::Object),
     };
     if let Some(cmd_tx) = parent_cmd_tx {
-        let _ = cmd_tx.send(SessionCommand::XaiSessionNotification {
+        let _ = cmd_tx.send(SessionCommand::GrowSessionNotification {
             notification: notification.clone(),
         });
     }
@@ -1967,7 +1967,7 @@ fn spawn_progress_publisher(
                 .and_then(|v| serde_json::value::to_raw_value(&v))
                 .ok();
             if let Some(ref cmd_tx) = parent_cmd_tx {
-                let _ = cmd_tx.send(SessionCommand::XaiSessionNotification { notification });
+                let _ = cmd_tx.send(SessionCommand::GrowSessionNotification { notification });
             }
             if let Some(params) = params {
                 let ext_notification =

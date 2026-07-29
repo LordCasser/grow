@@ -49,7 +49,7 @@ async fn add_bundle_fetch_headers(
         Some(am) => am.auth().await.ok(),
         None => None,
     };
-    let mut credentials = crate::util::grok_auth_credentials::ProviderAuthCredentials::new(
+    let mut credentials = crate::util::provider_auth_credentials::ProviderAuthCredentials::new(
         resolved_auth.as_ref().map(|auth| auth.key.clone()),
     );
     credentials.deployment_key = deployment_key.map(str::to_owned);
@@ -1013,7 +1013,6 @@ mod tests {
             organization_role: None,
             user_blocked_reason: None,
             team_blocked_reasons: vec![],
-            has_grok_code_access: None,
             refresh_token: None,
             expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
             oidc_issuer: None,
@@ -1587,7 +1586,7 @@ mod tests {
         let cfg = EndpointsConfig::from_config_value(
             &toml::from_str(
                 r#"[endpoints]
-                inference_base_url = "https://inference.acme-corp.example/xai/v1""#,
+                inference_base_url = "https://inference.acme-corp.example/provider/v1""#,
             )
             .unwrap(),
         );
@@ -1598,7 +1597,10 @@ mod tests {
         assert_eq!(deployment.url, "https://service.example.com/v1/models");
         assert_eq!(deployment.auth, EndpointAuth::Session);
         let api = ListModelsEndpoint::from_endpoints(&cfg, ModelFetchAuth::ApiKey);
-        assert_eq!(api.url, "https://inference.acme-corp.example/xai/v1/models");
+        assert_eq!(
+            api.url,
+            "https://inference.acme-corp.example/provider/v1/models"
+        );
         assert_eq!(api.auth, EndpointAuth::ApiKey);
         let default = EndpointsConfig::from_config_value(&toml::Value::Table(Default::default()));
         assert_eq!(
@@ -1629,11 +1631,11 @@ mod tests {
         ] {
             unsafe { std::env::remove_var(k) };
         }
-        unsafe { std::env::set_var("GROW_DEPLOYMENT_KEY", "xai-token-ENTERPRISE") };
+        unsafe { std::env::set_var("GROW_DEPLOYMENT_KEY", "provider-token-ENTERPRISE") };
         let managed: toml::Value = toml::from_str(
             r#"[endpoints]
-            deployment_key = "xai-token-ENTERPRISE"
-            inference_base_url = "https://inference.acme-corp.example/xai/v1""#,
+            deployment_key = "provider-token-ENTERPRISE"
+            inference_base_url = "https://inference.acme-corp.example/provider/v1""#,
         )
         .unwrap();
         let url = EndpointsConfig::from_config_value(&managed).resolve_managed_config_url();
@@ -1644,7 +1646,7 @@ mod tests {
         );
         let pinned: toml::Value = toml::from_str(
             r#"[endpoints]
-            inference_base_url = "https://inference.acme-corp.example/xai/v1"
+            inference_base_url = "https://inference.acme-corp.example/provider/v1"
             cli_chat_proxy_base_url = "https://proxy.acme-corp.example/v1""#,
         )
         .unwrap();

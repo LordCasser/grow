@@ -18,7 +18,7 @@
         let handled = handle(
             make_ext_session_notification(
                 "sess-plugins",
-                XaiSessionUpdate::PluginsChanged {
+                GrowSessionUpdate::PluginsChanged {
                     plugins: vec![crate::views::extensions_modal::test_plugin_info(
                         "user-tool",
                         Some(xai_hooks_plugins_types::PluginOrigin::UserGrow),
@@ -56,7 +56,7 @@
         let handled = handle(
             make_ext_session_notification(
                 "sess-plugins",
-                XaiSessionUpdate::PluginsChanged {
+                GrowSessionUpdate::PluginsChanged {
                     plugins: vec![
                         crate::views::extensions_modal::test_plugin_info(
                             "user-tool",
@@ -100,7 +100,7 @@
         let handled = handle(
             make_ext_session_notification(
                 "sess-plugins",
-                XaiSessionUpdate::PluginsChanged {
+                GrowSessionUpdate::PluginsChanged {
                     plugins: vec![crate::views::extensions_modal::test_plugin_info(
                         "user-tool",
                         Some(xai_hooks_plugins_types::PluginOrigin::UserGrow),

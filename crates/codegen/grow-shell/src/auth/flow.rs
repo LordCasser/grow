@@ -104,9 +104,10 @@ fn resolve_device_flow(
         .resolve()
 }
 
-/// Whether `run_cli_login` should use the device flow for `config`: only the
-/// xAI OAuth2 provider supports it. Enterprise OIDC (`oidc=Some`) always uses
-/// the loopback flow, mirroring `run_auth_flow_inner`'s precedence.
+/// Whether `run_cli_login` should use the device flow for `config`: only an
+/// explicitly configured OAuth2 provider supports it. Enterprise OIDC
+/// (`oidc=Some`) always uses the loopback flow, mirroring
+/// `run_auth_flow_inner`'s precedence.
 async fn cli_should_use_device(
     config: &ServiceAuthConfig,
     login_override: LoginTransportOverride,
@@ -114,7 +115,7 @@ async fn cli_should_use_device(
     !crate::auth::oidc::is_configured(config) && should_use_device_flow(login_override).await
 }
 
-/// Whether interactive xAI OAuth2 login uses the RFC 8628 device flow (vs loopback).
+/// Whether interactive provider OAuth2 login uses the RFC 8628 device flow (vs loopback).
 ///
 /// Precedence: CLI (`--oauth`/`--device-auth`) > `GROW_LOGIN_DEVICE_FLOW` env >
 /// `[auth] login_device_flow` config > `grow_build_login_device_flow` remote feature flag > loopback.
@@ -616,7 +617,7 @@ async fn run_auth_flow_inner(
     let mut channels = code_rx.map(|code_rx| AuthChannels { url_tx, code_rx });
 
     // Enterprise OIDC keeps loopback (customer IdPs may lack a device endpoint).
-    // xAI OAuth2 also defaults to loopback; the device flow (robust on
+    // Provider OAuth2 also defaults to loopback; the device flow (robust on
     // remote/SSH where the loopback redirect can't reach the CLI) is opt-in via
     // --device-auth / GROW_LOGIN_DEVICE_FLOW / [auth] login_device_flow.
     if crate::auth::oidc::is_configured(auth) {
@@ -658,7 +659,7 @@ async fn run_auth_flow_inner(
     }
 
     tracing::error!(
-        "auth: no OAuth2 configuration available (neither enterprise OIDC nor xAI OAuth2 configured)"
+        "auth: no OAuth2 configuration available (neither OIDC nor provider OAuth2 is configured)"
     );
     anyhow::bail!(
         "No OAuth2 configuration available. Run `grow login` to authenticate, or contact your administrator if you use enterprise SSO."
@@ -892,8 +893,8 @@ pub async fn run_cli_login(
     let login_override = LoginTransportOverride::from_flags(oauth, device_auth);
 
     // Mirror `run_auth_flow_inner`'s precedence: enterprise OIDC (oidc=Some,
-    // oauth2=None) always uses the loopback flow; only the xAI OAuth2 provider
-    // supports the device flow. Without this guard, `grow login` on an
+    // oauth2=None) always uses the loopback flow; only an explicitly configured
+    // OAuth2 provider supports the device flow. Without this guard, `grow login` on an
     // enterprise-OIDC deployment would wrongly enter the device branch (which
     // requires `oauth2`) and error.
     let authenticated = if devbox {
@@ -1153,7 +1154,7 @@ mod tests {
         f()
     }
 
-    // A service.example.com first-party (x.ai-issuer) OIDC session — `is_service_auth()` true.
+    // An explicitly configured OIDC session has `is_service_auth()` true.
     fn oidc_session(key: &str, refresh: Option<&str>) -> ProviderAuth {
         ProviderAuth {
             key: key.into(),
@@ -1202,14 +1203,17 @@ mod tests {
             Some("expired-external".to_string())
         );
 
-        // Third-party external (no x.ai issuer) stays excluded.
+        // External auth remains eligible without special issuer metadata.
         mgr.hot_swap(ProviderAuth {
             oidc_issuer: None,
             auth_mode: AuthMode::External,
             expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
             ..oidc_session("expired-external-3p", Some("rt"))
         });
-        assert!(expired_refreshable_session(&mgr).is_none());
+        assert_eq!(
+            expired_refreshable_session(&mgr).map(|a| a.key),
+            Some("expired-external-3p".to_string())
+        );
     }
 
     #[cfg(unix)]
@@ -1254,7 +1258,7 @@ mod tests {
     async fn mint_session_noninteractive_uses_external_provider() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = ServiceAuthConfig {
-            auth_provider_command: Some("printf '%s' xai-ext-token".to_string()),
+            auth_provider_command: Some("printf '%s' provider-ext-token".to_string()),
             ..ServiceAuthConfig::default()
         };
         let mgr = Arc::new(
@@ -1262,7 +1266,7 @@ mod tests {
         );
 
         let auth = mint_session_noninteractive(&mgr).await;
-        assert_eq!(auth.map(|a| a.key), Some("xai-ext-token".to_string()));
+        assert_eq!(auth.map(|a| a.key), Some("provider-ext-token".to_string()));
     }
 
     /// External-provider output is team-pinned before persist (parity with OIDC
@@ -1372,7 +1376,7 @@ mod tests {
         // pick up the provider instead of starting an interactive device login.
         let dir = tempfile::tempdir().unwrap();
         let cfg = ServiceAuthConfig {
-            auth_provider_command: Some("printf '%s' xai-ext-token".to_string()),
+            auth_provider_command: Some("printf '%s' provider-ext-token".to_string()),
             // oauth2=Some, oidc=None → the device flow is available (opt-in).
             ..ServiceAuthConfig::default()
         };
@@ -1394,7 +1398,7 @@ mod tests {
         .await
         .expect("external provider should satisfy login without device flow");
         assert_eq!(
-            auth.key, "xai-ext-token",
+            auth.key, "provider-ext-token",
             "external provider token must win"
         );
         assert!(did_auth);
@@ -1501,10 +1505,21 @@ mod tests {
             !cli_should_use_device(&cfg, LoginTransportOverride::ForceDevice).await,
             "enterprise OIDC must stay on loopback"
         );
-        // The xAI OAuth2 provider (oidc=None, oauth2=Some) does use device.
-        let xai = ServiceAuthConfig::default();
-        assert!(xai.oauth2.is_some() && xai.oidc.is_none());
-        assert!(cli_should_use_device(&xai, LoginTransportOverride::ForceDevice).await);
+        // An explicitly configured OAuth2 provider (oidc=None, oauth2=Some)
+        // does use device flow.
+        let provider = ServiceAuthConfig {
+            oidc: None,
+            oauth2: Some(crate::auth::OAuth2ProviderConfig {
+                issuer: "https://auth.example".into(),
+                client_id: "client".into(),
+                scopes: vec!["openid".into()],
+                principal_type: None,
+                principal_id: None,
+                referrer: None,
+            }),
+            ..ServiceAuthConfig::default()
+        };
+        assert!(cli_should_use_device(&provider, LoginTransportOverride::ForceDevice).await);
     }
 
     #[test]
@@ -1664,7 +1679,6 @@ mod tests {
             organization_role: None,
             user_blocked_reason: None,
             team_blocked_reasons: vec![],
-            has_grok_code_access: None,
             refresh_token: None,
             expires_at: None,
             oidc_issuer: None,
@@ -2137,7 +2151,7 @@ mod tests {
         );
         assert!(
             result.is_none(),
-            "a non-xAI expired session is no first-party fallback and no mint              runs on this path, so no auth is produced"
+            "an expired session without a completed refresh cannot be used, and no mint              runs on this path, so no auth is produced"
         );
 
         server.abort();

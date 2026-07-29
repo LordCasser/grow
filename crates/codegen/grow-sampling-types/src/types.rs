@@ -451,7 +451,7 @@ pub struct Usage {
     pub prompt_tokens_details: Option<PromptTokensDetails>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_tokens_details: Option<CompletionTokensDetails>,
-    /// xAI extension: request price in USD ticks (1 USD = 1e10 ticks).
+    /// Optional provider extension: request price in USD ticks (1 USD = 1e10 ticks).
     /// The REST mapper backfills `0` for unbilled requests; capture sites
     /// normalize `0` to "unreported" (see `stream/chat_completions.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]

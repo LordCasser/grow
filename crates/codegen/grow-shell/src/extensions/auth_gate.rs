@@ -2,8 +2,8 @@ use agent_client_protocol as acp;
 
 use crate::auth::{AuthManager, ProviderAuth};
 
-/// Require xAI auth from a sync context, accepting tokens in the client-side buffer window.
-pub(crate) fn require_xai_auth(
+/// Require configured service auth from a sync context, accepting tokens in the client-side buffer window.
+pub(crate) fn require_service_auth(
     auth_manager: &AuthManager,
     missing_message: &'static str,
     third_party_message: &'static str,

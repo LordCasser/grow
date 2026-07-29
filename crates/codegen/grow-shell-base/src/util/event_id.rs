@@ -39,8 +39,8 @@ pub fn generate_event_id(session_id: &str) -> String {
 ///
 /// Stamping chokepoints (stamp BEFORE the persist/broadcast fork, so both
 /// copies share one id): `SessionActor::emit_notification_direct` (all actor
-/// ACP notifications, incl. the buffered pipeline), `send_xai_notification` /
-/// `persist_xai_update_only` / `handle_xai_session_notification` (actor xAI),
+/// ACP notifications, including the buffered pipeline), `send_grow_notification` /
+/// `persist_grow_update_only` / `handle_grow_session_notification`,
 /// `notification_bridge::stamp_event_id` (bridge), `emit_subagent_notification`
 /// (subagent), `GoalNotifySender::send_update` (goal mode), plus the inline
 /// `build_notification_meta` user-echo persists. An emitter outside these is

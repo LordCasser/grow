@@ -195,7 +195,7 @@ impl SandboxClient {
         Self::parse_response(response, "get session logs").await
     }
 
-    /// Hibernate a sandbox session (snapshot rootfs to GCS and terminate).
+    /// Hibernate a sandbox session (snapshot its rootfs remotely and terminate).
     pub async fn hibernate_session(&self, session_id: &str) -> Result<SandboxHibernateResponse> {
         let url = format!(
             "{}/sandbox/sessions/{}/hibernate",

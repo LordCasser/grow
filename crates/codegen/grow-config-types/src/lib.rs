@@ -510,19 +510,6 @@ pub struct RemoteSettings {
     pub dream_min_sessions: Option<u64>,
     #[serde(default)]
     pub dream_check_interval_secs: Option<u64>,
-    /// OAuth2 provider issuer URL (e.g., "https://login.example.com"). When present
-    /// together with `oauth2_client_id`, the client uses OAuth2 authorization code
-    /// flow. Controlled via remote settings for gradual rollout.
-    #[serde(default)]
-    pub oauth2_issuer: Option<String>,
-    /// OAuth2 client_id for the CLI. Paired with `oauth2_issuer`.
-    #[serde(default)]
-    pub oauth2_client_id: Option<String>,
-    /// When `Some(true)`, enable grow's default OAuth2 (xAI login.example.com).
-    /// Enterprise OIDC (user's own IdP via `oidc` config) always wins.
-    /// Controlled via remote settings; `--oauth` CLI flag overrides.
-    #[serde(default)]
-    pub provider_oauth_enabled: Option<bool>,
     #[serde(default)]
     pub lsp_tools_enabled: Option<bool>,
     /// Folder-trust gate kill-switch / remote default. Gates whether repo-local
@@ -1097,7 +1084,7 @@ mod tests {
         assert_eq!(s.worktree_auto_gc, None);
     }
     #[test]
-    fn remote_settings_vendor_sessions_round_trip_and_default_absent() {
+    fn remote_settings_session_flags_round_trip_and_default_absent() {
         let session_flags = |settings: &RemoteSettings| {
             (
                 settings.cursor_sessions_enabled,

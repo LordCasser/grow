@@ -1,7 +1,7 @@
-//! Integration test for `_grow/session/update` notifications.
+//! Integration test for Grow `_grow/session/update` notifications.
 //!
 //! This test verifies that:
-//! 1. xAI session notifications (e.g., diff_review) can be sent via ext_notification
+//! 1. Grow session notifications (e.g., diff_review) can be sent via ext_notification
 //! 2. The notifications are persisted to storage
 //! 3. When a session is loaded, the notifications are replayed with `isReplay: true`
 
@@ -11,15 +11,15 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 use grow_shell::extensions::notification::{
-    DiffContent, SessionNotification, SessionUpdate as XaiSessionUpdate,
+    DiffContent, SessionNotification, SessionUpdate as GrowSessionUpdate,
 };
 use grow_shell::session::info::Info as SessionInfo;
 use grow_shell::session::persistence::default_model_id;
 use grow_shell::session::storage::{JsonlStorageAdapter, SessionUpdate, StorageAdapter};
 
-/// Test that xAI session notifications round-trip through storage correctly.
+/// Test that Grow session notifications round-trip through storage correctly.
 #[tokio::test]
-async fn test_xai_session_notification_storage_roundtrip() {
+async fn test_grow_session_notification_storage_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
 
@@ -36,9 +36,9 @@ async fn test_xai_session_notification_storage_roundtrip() {
         .unwrap();
 
     // Create a diff_review notification
-    let xai_notification = SessionNotification {
+    let grow_notification = SessionNotification {
         session_id: session_id.clone(),
-        update: XaiSessionUpdate::DiffReview {
+        update: GrowSessionUpdate::DiffReview {
             content: vec![DiffContent {
                 diff: acp::Diff::new(PathBuf::from("/test/file.rs"), "fn new() {}".to_string())
                     .old_text(Some("fn old() {}".to_string())),
@@ -51,7 +51,7 @@ async fn test_xai_session_notification_storage_roundtrip() {
     adapter
         .append_update(
             &info,
-            &SessionUpdate::Xai(Box::new(xai_notification.clone())),
+            &SessionUpdate::Grow(Box::new(grow_notification.clone())),
         )
         .await
         .unwrap();
@@ -75,15 +75,15 @@ async fn test_xai_session_notification_storage_roundtrip() {
     assert_eq!(
         loaded.updates.len(),
         2,
-        "Should have 2 updates (1 xAI + 1 ACP)"
+        "Should have 2 updates (1 Grow + 1 ACP)"
     );
 
-    // Verify xAI notification
+    // Verify Grow notification
     match &loaded.updates[0] {
-        SessionUpdate::Xai(notification) => {
+        SessionUpdate::Grow(notification) => {
             assert_eq!(notification.session_id, session_id);
             match &notification.update {
-                XaiSessionUpdate::DiffReview { content } => {
+                GrowSessionUpdate::DiffReview { content } => {
                     assert_eq!(content.len(), 1);
                     assert_eq!(content[0].diff.path, PathBuf::from("/test/file.rs"));
                     assert_eq!(content[0].diff.old_text, Some("fn old() {}".to_string()));
@@ -102,7 +102,7 @@ async fn test_xai_session_notification_storage_roundtrip() {
                 Some(&json!(1234))
             );
         }
-        _ => panic!("Expected xAI update as first item"),
+        _ => panic!("Expected Grow update as first item"),
     }
 
     // Verify ACP notification
@@ -142,9 +142,9 @@ async fn test_turn_completed_round_trips_through_storage() {
 
     // Persist a terminal carrying the prompt id + outcome the viewer keys on,
     // plus an optional agent result.
-    let xai_notification = SessionNotification {
+    let grow_notification = SessionNotification {
         session_id: session_id.clone(),
-        update: XaiSessionUpdate::TurnCompleted {
+        update: GrowSessionUpdate::TurnCompleted {
             prompt_id: "prompt-1".to_string(),
             stop_reason: "end_turn".to_string(),
             agent_result: Some("all done".to_string()),
@@ -153,7 +153,7 @@ async fn test_turn_completed_round_trips_through_storage() {
         meta: None,
     };
     adapter
-        .append_update(&info, &SessionUpdate::Xai(Box::new(xai_notification)))
+        .append_update(&info, &SessionUpdate::Grow(Box::new(grow_notification)))
         .await
         .unwrap();
 
@@ -167,10 +167,10 @@ async fn test_turn_completed_round_trips_through_storage() {
     );
 
     match &loaded.updates[0] {
-        SessionUpdate::Xai(notification) => {
+        SessionUpdate::Grow(notification) => {
             assert_eq!(notification.session_id, session_id);
             match &notification.update {
-                XaiSessionUpdate::TurnCompleted {
+                GrowSessionUpdate::TurnCompleted {
                     prompt_id,
                     stop_reason,
                     agent_result,
@@ -183,11 +183,11 @@ async fn test_turn_completed_round_trips_through_storage() {
                 _ => panic!("Expected TurnCompleted, got different update type"),
             }
         }
-        _ => panic!("Expected xAI update"),
+        _ => panic!("Expected Grow update"),
     }
 }
 
-/// Test that totalTokens can be extracted from both ACP and xAI notifications.
+/// Test that totalTokens can be extracted from both ACP and Grow notifications.
 #[tokio::test]
 async fn test_extract_total_tokens_from_mixed_updates() {
     let temp_dir = TempDir::new().unwrap();
@@ -217,14 +217,14 @@ async fn test_extract_total_tokens_from_mixed_updates() {
         .await
         .unwrap();
 
-    // Add xAI notification with totalTokens
-    let xai_notification = SessionNotification {
+    // Add Grow notification with totalTokens
+    let grow_notification = SessionNotification {
         session_id: session_id.clone(),
-        update: XaiSessionUpdate::DiffReview { content: vec![] },
+        update: GrowSessionUpdate::DiffReview { content: vec![] },
         meta: Some(json!({ "totalTokens": 200 })),
     };
     adapter
-        .append_update(&info, &SessionUpdate::Xai(Box::new(xai_notification)))
+        .append_update(&info, &SessionUpdate::Grow(Box::new(grow_notification)))
         .await
         .unwrap();
 
@@ -254,7 +254,7 @@ async fn test_extract_total_tokens_from_mixed_updates() {
                 .as_ref()
                 .and_then(|m| m.get("totalTokens"))
                 .and_then(|v| v.as_u64()),
-            SessionUpdate::Xai(n) => n
+            SessionUpdate::Grow(n) => n
                 .meta
                 .as_ref()
                 .and_then(|m| m.get("totalTokens"))
@@ -270,10 +270,10 @@ async fn test_extract_total_tokens_from_mixed_updates() {
 
 /// Test the serialization format of SessionNotification for wire compatibility.
 #[test]
-fn test_xai_session_notification_serialization() {
+fn test_grow_session_notification_serialization() {
     let notification = SessionNotification {
         session_id: acp::SessionId::new("sess-123"),
-        update: XaiSessionUpdate::DiffReview {
+        update: GrowSessionUpdate::DiffReview {
             content: vec![DiffContent {
                 diff: acp::Diff::new(PathBuf::from("src/main.rs"), "new".to_string())
                     .old_text(Some("old".to_string())),

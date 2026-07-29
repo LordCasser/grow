@@ -58,10 +58,9 @@ pub struct RelayConfig {
 }
 impl RelayConfig {
     /// Session gate: builds only for a service.example.com first-party session
-    /// (`is_service_auth`: x.ai-issuer OIDC or external credential) with a
-    /// non-empty bearer. BYOK/ApiKey, non-x.ai issuers (enterprise OIDC,
-    /// third-party external providers), and deprecated WebLogin get `None`
-    /// (relay-off; the leader still serves clients over IPC).
+    /// (`is_service_auth`: configured OIDC or external credential) with a
+    /// non-empty bearer. BYOK/API-key and legacy WebLogin credentials get
+    /// `None` (relay-off; the leader still serves clients over IPC).
     pub(crate) fn for_session(
         session: &ProviderAuth,
         ctx: &ServiceAuthConfig,
@@ -911,17 +910,17 @@ mod tests {
         }
     }
     #[test]
-    fn for_session_builds_only_for_xai_issuer() {
+    fn for_session_builds_for_configured_service_auth() {
         use crate::auth::TEST_OAUTH2_ISSUER;
         let cfg = ServiceAuthConfig::default();
         let builds = |a: &ProviderAuth| RelayConfig::for_session(a, &cfg, None, None).is_some();
-        let xai = ProviderAuth {
+        let provider = ProviderAuth {
             auth_mode: AuthMode::Oidc,
             oidc_issuer: Some(TEST_OAUTH2_ISSUER.to_string()),
-            ..test_auth("xai-bearer")
+            ..test_auth("provider-bearer")
         };
-        assert!(xai.is_service_auth(), "precondition: is_service_auth");
-        assert!(builds(&xai));
+        assert!(provider.is_service_auth(), "precondition: is_service_auth");
+        assert!(builds(&provider));
         let service_auth = ProviderAuth {
             auth_mode: AuthMode::External,
             oidc_issuer: Some(TEST_OAUTH2_ISSUER.to_string()),
@@ -934,7 +933,7 @@ mod tests {
         assert!(builds(&service_auth));
         assert!(!builds(&ProviderAuth {
             key: String::new(),
-            ..xai.clone()
+            ..provider.clone()
         }));
         assert!(!builds(&ProviderAuth {
             auth_mode: AuthMode::ApiKey,
@@ -1022,7 +1021,7 @@ mod tests {
             calls: calls.clone(),
         }));
         let mut config = RelayConfig::for_session(&expired_session, &cfg, None, Some(am.clone()))
-            .expect("x.ai OIDC session is relay-eligible");
+            .expect("provider OIDC session is relay-eligible");
         let cancel = CancellationToken::new();
         let recovered = attempt_auth_recovery(&mut config, &cancel, "test 401").await;
         assert!(recovered, "recovery must succeed via the shared refresher");
@@ -1065,7 +1064,7 @@ mod tests {
         am.hot_swap(fresh_session.clone());
         am.set_refresher(Arc::new(PanicRefresher));
         let mut config = RelayConfig::for_session(&fresh_session, &cfg, None, Some(am.clone()))
-            .expect("x.ai OIDC session is relay-eligible");
+            .expect("provider OIDC session is relay-eligible");
         let cancel = CancellationToken::new();
         let recovered = attempt_auth_recovery(&mut config, &cancel, "test 401").await;
         assert!(!recovered, "same-key recovery must take the backoff path");

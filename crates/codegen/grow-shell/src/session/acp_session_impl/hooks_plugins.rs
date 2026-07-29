@@ -702,7 +702,7 @@ impl SessionActor {
             };
             let load_errors = self.hook_load_errors.borrow().clone();
             let project_trusted = is_trusted;
-            self.send_xai_notification(XaiSessionUpdate::HooksChanged {
+            self.send_grow_notification(GrowSessionUpdate::HooksChanged {
                 hooks,
                 project_trusted,
                 load_errors,
@@ -992,7 +992,7 @@ impl SessionActor {
         // Notify pager about registry changes so the modal auto-refreshes.
         // Extract all RefCell borrows into locals before the .await so
         // no Ref guard is alive across the suspension point (prevents
-        // BorrowMutError panics when send_xai_notification dispatches
+        // BorrowMutError panics when send_grow_notification dispatches
         // Notification hooks that also borrow these RefCells).
         let t_notify = std::time::Instant::now();
         {
@@ -1014,7 +1014,7 @@ impl SessionActor {
             let project_trusted = crate::agent::folder_trust::project_scope_allowed(
                 std::path::Path::new(&self.session_info.cwd),
             );
-            self.send_xai_notification(XaiSessionUpdate::HooksChanged {
+            self.send_grow_notification(GrowSessionUpdate::HooksChanged {
                 hooks,
                 project_trusted,
                 load_errors,
@@ -1033,7 +1033,7 @@ impl SessionActor {
                     None => Vec::new(),
                 }
             };
-            self.send_xai_notification(XaiSessionUpdate::PluginsChanged { plugins })
+            self.send_grow_notification(GrowSessionUpdate::PluginsChanged { plugins })
                 .await;
         }
 

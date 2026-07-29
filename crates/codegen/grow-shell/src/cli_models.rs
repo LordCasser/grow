@@ -138,7 +138,7 @@ mod tests {
     #[serial]
     fn resolve_api_key_env() {
         let (_dir, _g) = isolate_auth_sources();
-        let _key = EnvGuard::set(GROW_API_KEY_ENV_VAR, "xai-test-key");
+        let _key = EnvGuard::set(GROW_API_KEY_ENV_VAR, "provider-test-key");
         assert_eq!(AuthStatus::resolve(&Config::default()), AuthStatus::ApiKey);
     }
 
@@ -228,7 +228,7 @@ mod tests {
     #[serial]
     fn resolve_priority_api_key_over_byok_and_deployment() {
         let (_dir, _g) = isolate_auth_sources();
-        let _key = EnvGuard::set(GROW_API_KEY_ENV_VAR, "xai-test-key");
+        let _key = EnvGuard::set(GROW_API_KEY_ENV_VAR, "provider-test-key");
         let dm = crate::models::default_model();
         let cfg = config_from_toml(&byok_and_deployment_toml(dm));
         assert_eq!(AuthStatus::resolve(&cfg), AuthStatus::ApiKey);

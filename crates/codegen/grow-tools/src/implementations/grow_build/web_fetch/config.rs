@@ -96,8 +96,6 @@ impl WebFetchParams {
 /// Default allowlist for web_fetch tool.
 /// Note: GET-only preapproved domains. Path-scoped entries (e.g. vercel.com/docs) are included as-is.
 pub static DEFAULT_ALLOWED_DOMAINS: &[&str] = &[
-    // xAI
-    "x.ai",
     "console.example.com",
     "docs.example.com",
     "api.example.com",

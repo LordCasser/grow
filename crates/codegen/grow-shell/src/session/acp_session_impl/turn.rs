@@ -171,7 +171,7 @@ impl SessionActor {
                 .iter()
                 .map(ImageCompressedEntry::from)
                 .collect();
-            self.send_xai_notification(XaiSessionUpdate::ImageCompressed { images, message })
+            self.send_grow_notification(GrowSessionUpdate::ImageCompressed { images, message })
                 .await;
         }
         if !norm_result.re_encode_fallbacks.is_empty() {
@@ -181,7 +181,7 @@ impl SessionActor {
                     is_cursor,
                 ),
             );
-            self.send_xai_notification(XaiSessionUpdate::ImageCompressed {
+            self.send_grow_notification(GrowSessionUpdate::ImageCompressed {
                 images: vec![],
                 message: norm_result.re_encode_fallbacks.join(" "),
             })
@@ -192,7 +192,7 @@ impl SessionActor {
             is_cursor,
         ) {
             text_out.push_str(&notice);
-            self.send_xai_notification(XaiSessionUpdate::ImageDropped { notes })
+            self.send_grow_notification(GrowSessionUpdate::ImageDropped { notes })
                 .await;
         }
         user_images
@@ -1517,7 +1517,7 @@ impl SessionActor {
                     "Auto-recovery exhausted after {attempt} attempts for session {}: {error_desc}",
                     self.session_info.id.0,
                 );
-                self.send_xai_notification(XaiSessionUpdate::AutoRecoveryExhausted {
+                self.send_grow_notification(GrowSessionUpdate::AutoRecoveryExhausted {
                     attempts: attempt,
                     error: error_desc,
                 })
@@ -1536,7 +1536,7 @@ impl SessionActor {
                 self.session_info.id.0,
                 delay.as_millis(),
             );
-            self.send_xai_notification(XaiSessionUpdate::AutoRecoveryStarted {
+            self.send_grow_notification(GrowSessionUpdate::AutoRecoveryStarted {
                 attempt,
                 max_retries: recovery.max_retries,
                 error: error_desc,
@@ -2038,7 +2038,7 @@ impl SessionActor {
                                 "delay_ms": delay_ms,
                             })),
                         );
-                        self.send_xai_notification(XaiSessionUpdate::RetryState(
+                        self.send_grow_notification(GrowSessionUpdate::RetryState(
                             crate::extensions::notification::RetryState::Retrying {
                                 attempt,
                                 max_retries: AuthRetrySchedule::MAX_RETRIES,

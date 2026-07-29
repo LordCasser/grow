@@ -3,7 +3,7 @@
 //! parses every persisted update back with the right per-kind counts.
 //!
 //! `load_updates_for_replay_at` is the typed reader and keeps every update
-//! (only `Xai` updates are dropped); the redundant-ACU skip is a later
+//! (only Grow extension updates are dropped); the redundant-ACU skip is a later
 //! line-based step in the client replay path, not asserted here.
 
 use agent_client_protocol as acp;

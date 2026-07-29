@@ -640,7 +640,7 @@ mod tests {
                 .upsert_doc(&test_doc("s1", "Rust debugging", "borrow checker"))
                 .unwrap();
             index.set_meta("last_bootstrap_at", "1700000000").unwrap();
-            index.set_meta("last_upload_at", "1700000001").unwrap();
+            index.set_meta("custom_marker", "1700000001").unwrap();
         }
 
         {
@@ -688,7 +688,7 @@ mod tests {
             "the completed-bootstrap marker must be invalidated by the drop"
         );
         assert_eq!(
-            reopened.get_meta("last_upload_at").unwrap().as_deref(),
+            reopened.get_meta("custom_marker").unwrap().as_deref(),
             Some("1700000001"),
             "unrelated meta keys must survive the drop"
         );

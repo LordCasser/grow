@@ -2763,11 +2763,11 @@ fn enterprise_two_file_merge_routes_deployment_key_to_proxy() {
     let managed = toml::from_str(
             r#"
 [endpoints]
-inference_base_url = "https://inference.acme-corp.example/xai/v1"
+inference_base_url = "https://inference.acme-corp.example/provider/v1"
 cli_chat_proxy_base_url = "https://service.example.com/v1"
 
 [model.grow-build]
-base_url = "https://inference.acme-corp.example/xai/v1"
+base_url = "https://inference.acme-corp.example/provider/v1"
 env_key = "ANTHROPIC_AUTH_TOKEN"
 model = "grow-4.5"
 
@@ -2779,8 +2779,8 @@ default = "grow-4.5"
     let requirements = toml::from_str(
             r#"
 [endpoints]
-deployment_key = "xai-token-ENTERPRISE"
-inference_base_url = "https://inference.acme-corp.example/xai/v1"
+deployment_key = "provider-token-ENTERPRISE"
+inference_base_url = "https://inference.acme-corp.example/provider/v1"
 "#,
         )
         .unwrap();

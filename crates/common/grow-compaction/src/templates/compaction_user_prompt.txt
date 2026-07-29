@@ -1,13 +1,13 @@
-Your task is to create a detailed summary of the Grow Chat conversation so far, paying close attention to the user's explicit requests and all previous actions as Grow (built by xAI).
+Your task is to create a detailed summary of the Grow conversation so far, paying close attention to the user's explicit requests and all previous actions as Grow.
 This summary should be thorough in capturing technical details, code patterns, architectural decisions, tool chains, and verification steps that would be essential for continuing development, research, or complex tasks without losing context.
 
 Important Clarification on Terminology (Broad File Definition):
 Throughout this prompt, the term "file", "files", "file IDs", "file names", and "Files and Code Sections / Artifacts" are defined broadly. They explicitly include:
 - Regular files and code files
 - Attachments
-- Images (uploaded images, generated images, viewed images, etc.)
+- Images (attachments, screenshots, viewed images, etc.)
 - rendered image or content outputs
-- Any other file-like content, media objects, visual artifacts, or structured content blocks that have appeared in the conversation history (including but not limited to uploads, generations, render components, or persistent references).
+- Any other file-like content, media objects, visual artifacts, or structured content blocks that have appeared in the conversation history (including but not limited to attachments, render components, or persistent references).
 
 Only include information that is visible in the direct user-Grow conversation history (user messages + Grow's responses, reasoning, tool calls, and tool outputs). Do not include any internal team communication, chatroom messages, or multi-agent interactions.
 

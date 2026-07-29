@@ -54,7 +54,6 @@ fn auth_with_mode(mode: crate::auth::AuthMode, key: &str) -> crate::auth::Provid
         organization_role: None,
         user_blocked_reason: None,
         team_blocked_reasons: vec![],
-        has_grok_code_access: None,
         refresh_token: None,
         expires_at: None,
         oidc_issuer: None,
@@ -522,7 +521,8 @@ async fn file_toolset_override_e2e_to_finalized_toolset() {
         memory_backend: None,
         web_fetch_config: Default::default(),
         lsp: None,
-        app_builder_deployer_config: grow_tools::implementations::grow_build::deploy_app::AppBuilderDeployerConfig::default(),
+        app_builder_deployer_config:
+            grow_tools::implementations::grow_build::deploy_app::AppBuilderDeployerConfig::default(),
         system_reminder_tag: grow_tools::reminders::DEFAULT_REMINDER_TAG,
     };
     let toolset = builder
@@ -1069,8 +1069,10 @@ fn build_minimal_agent_for_tests() -> MvpAgent {
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, ServiceAuthConfig};
     let temp_dir = tempfile::tempdir().unwrap();
-    let auth_manager =
-        std::sync::Arc::new(AuthManager::new(temp_dir.path(), ServiceAuthConfig::default()));
+    let auth_manager = std::sync::Arc::new(AuthManager::new(
+        temp_dir.path(),
+        ServiceAuthConfig::default(),
+    ));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = valid_agent_config();
@@ -1132,8 +1134,10 @@ fn build_agent_with_auth(auth: crate::auth::ProviderAuth) -> MvpAgent {
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, ServiceAuthConfig};
     let temp_dir = tempfile::tempdir().unwrap();
-    let auth_manager =
-        std::sync::Arc::new(AuthManager::new(temp_dir.path(), ServiceAuthConfig::default()));
+    let auth_manager = std::sync::Arc::new(AuthManager::new(
+        temp_dir.path(),
+        ServiceAuthConfig::default(),
+    ));
     auth_manager.hot_swap(auth);
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
@@ -1166,8 +1170,10 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
     )
     .unwrap();
     let auth_home = tempfile::tempdir().unwrap();
-    let auth_manager =
-        std::sync::Arc::new(AuthManager::new(auth_home.path(), ServiceAuthConfig::default()));
+    let auth_manager = std::sync::Arc::new(AuthManager::new(
+        auth_home.path(),
+        ServiceAuthConfig::default(),
+    ));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let mut cfg = valid_agent_config();
@@ -1356,8 +1362,10 @@ async fn push_roster_activity_delta_broadcasts_overridden_activity() {
     use crate::agent::roster::RosterActivity;
     use crate::auth::{AuthManager, ServiceAuthConfig};
     let temp_dir = tempfile::tempdir().unwrap();
-    let auth_manager =
-        std::sync::Arc::new(AuthManager::new(temp_dir.path(), ServiceAuthConfig::default()));
+    let auth_manager = std::sync::Arc::new(AuthManager::new(
+        temp_dir.path(),
+        ServiceAuthConfig::default(),
+    ));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = valid_agent_config();
@@ -2626,8 +2634,10 @@ fn build_agent_with_auth_and_proxy(
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, ServiceAuthConfig};
     let temp_dir = tempfile::tempdir().unwrap();
-    let auth_manager =
-        std::sync::Arc::new(AuthManager::new(temp_dir.path(), ServiceAuthConfig::default()));
+    let auth_manager = std::sync::Arc::new(AuthManager::new(
+        temp_dir.path(),
+        ServiceAuthConfig::default(),
+    ));
     auth_manager.hot_swap(auth);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
@@ -2712,14 +2722,14 @@ async fn settings_not_cached_when_identity_logs_out_during_fetch() {
         .await
         .unwrap();
     server.set_settings(serde_json::json!({}));
-    let xai_auth = ProviderAuth {
+    let provider_auth = ProviderAuth {
         oidc_issuer: Some(TEST_OAUTH2_ISSUER.to_string()),
         ..ProviderAuth::test_default()
     };
     let (agent, _rx) =
-        build_agent_with_auth_and_proxy(xai_auth.clone(), server.url(), AgentMode::Leader);
+        build_agent_with_auth_and_proxy(provider_auth.clone(), server.url(), AgentMode::Leader);
     agent.auth_manager.clear_in_memory();
-    agent.refresh_remote_settings(&xai_auth).await;
+    agent.refresh_remote_settings(&provider_auth).await;
     assert!(
         agent.cfg.borrow().remote_settings.is_none(),
         "settings fetched for a logged-out identity must not be cached"
@@ -2779,8 +2789,10 @@ fn build_agent_with_gateway_rx() -> (
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, ServiceAuthConfig};
     let temp_dir = tempfile::tempdir().unwrap();
-    let auth_manager =
-        std::sync::Arc::new(AuthManager::new(temp_dir.path(), ServiceAuthConfig::default()));
+    let auth_manager = std::sync::Arc::new(AuthManager::new(
+        temp_dir.path(),
+        ServiceAuthConfig::default(),
+    ));
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = valid_agent_config();
@@ -3420,14 +3432,14 @@ mod soft_default_settings_emit {
                 let gateway = GatewaySender::new(tx);
                 let mut cfg = valid_agent_config();
                 cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-                        permission_mode: Some("always-approve".into()),
-                        slash_command_tags: Some(
-                            [("workflows".to_string(), "new".to_string())]
-                                .into_iter()
-                                .collect(),
-                        ),
-                        ..Default::default()
-                    });
+                    permission_mode: Some("always-approve".into()),
+                    slash_command_tags: Some(
+                        [("workflows".to_string(), "new".to_string())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ..Default::default()
+                });
                 let agent =
                     MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
                 agent.cfg.borrow_mut().remote_settings = cfg.remote_settings.clone();

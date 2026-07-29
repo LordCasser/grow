@@ -5,9 +5,7 @@ use super::*;
 struct ShellChildRunner {
     agent_ref: LocalRef<MvpAgent>,
 }
-impl grow_tools::implementations::grow_build::task::coordinator::ChildRunner
-    for ShellChildRunner
-{
+impl grow_tools::implementations::grow_build::task::coordinator::ChildRunner for ShellChildRunner {
     type Control = crate::agent::subagent::ShellChildRuntime;
     type CompletionData = crate::agent::subagent::ShellCompletionData;
     type RunFuture = grow_tools::implementations::grow_build::task::coordinator::LocalBoxFuture<
@@ -175,11 +173,9 @@ impl MvpAgent {
             };
         tokio::task::spawn_local(
             grow_tools::implementations::grow_build::task::coordinator::SubagentCoordinator::new(
-                    rx,
-                    runner,
-                    config,
-                )
-                .run(),
+                rx, runner, config,
+            )
+            .run(),
         );
     }
     /// Lightweight context for the `SubagentEvent::ValidateType` drain arm;
@@ -468,8 +464,7 @@ impl MvpAgent {
                     .get(&parent_sid)
                     .map(|h| h.tool_context.task_output_tool_name.clone())
                     .unwrap_or_else(|| {
-                        grow_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL
-                            .to_string()
+                        grow_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string()
                     })
             },
             auto_wake_enabled: self.cfg.borrow().auto_wake_enabled,

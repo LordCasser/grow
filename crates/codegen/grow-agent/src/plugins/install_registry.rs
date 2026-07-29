@@ -72,7 +72,7 @@ pub struct MarketplaceProvenance {
     pub source_url_or_path: String,
     /// User-facing source name (display only, not used for matching).
     pub source_display_name: String,
-    /// Plugin subdirectory within marketplace (e.g., "plugins/xai-code-review").
+    /// Plugin subdirectory within marketplace (e.g., "plugins/code-review").
     pub plugin_subdir: String,
 }
 
@@ -168,7 +168,7 @@ impl InstallRegistry {
         let content = serde_json::to_string_pretty(self).map_err(|e| InstallError::Json {
             detail: e.to_string(),
         })?;
-        if std::env::var_os("XAI_GROW_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE").is_some() {
+        if std::env::var_os("GROW_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE").is_some() {
             return Err(InstallError::InstallFailed {
                 detail: "test-injected registry save failure".into(),
             });

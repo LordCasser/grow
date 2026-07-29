@@ -269,7 +269,7 @@ fn managed_found(
     )
 }
 
-/// Discover managed `grow_managed_*` servers if the user has xAI auth on disk.
+/// Discover configured managed `grow_managed_*` servers when service auth is available.
 async fn try_discover_managed_servers() -> (ConfigSourceStatus, Vec<DiscoveredServer>) {
     let grow_home = grow_tools::util::grow_home::grow_home();
     let auth = ServiceAuthConfig::default();
@@ -279,7 +279,10 @@ async fn try_discover_managed_servers() -> (ConfigSourceStatus, Vec<DiscoveredSe
         return managed_skipped("not logged in");
     };
     if !snapshot.is_managed_mcp_eligible() {
-        return managed_skipped(format!("{:?} auth (not xAI OIDC)", snapshot.auth_mode));
+        return managed_skipped(format!(
+            "{:?} auth (not eligible for managed MCP)",
+            snapshot.auth_mode
+        ));
     }
 
     let token = match auth_manager.get_valid_token().await {

@@ -38,7 +38,7 @@ impl TokenType {
         matches!(self, Self::OidcSession | Self::ExternalBinary)
     }
 
-    /// Stable diagnostics mirror for the `manual_auth` KPI.
+    /// Stable diagnostics mirror for the local `manual_auth` event.
     pub(crate) fn diagnostics_kind(self) -> grow_diagnostics::events::AuthTokenKind {
         use grow_diagnostics::events::AuthTokenKind as K;
         match self {

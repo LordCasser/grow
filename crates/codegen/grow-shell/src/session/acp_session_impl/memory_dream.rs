@@ -301,7 +301,7 @@ impl SessionActor {
             DreamStatus::Skipped(reason) => format!("skipped: {reason}"),
             DreamStatus::Failed(err) => format!("failed: {err}"),
         };
-        self.send_xai_notification(XaiSessionUpdate::MemoryDreamCompleted {
+        self.send_grow_notification(GrowSessionUpdate::MemoryDreamCompleted {
             result: dream_result_str,
             path: dream_path,
         })
@@ -370,7 +370,7 @@ impl SessionActor {
         tracing::info!(target: grow_diagnostics::memory_log::TARGET, "MEMORY_FLUSH: starting");
         let flush_start = std::time::Instant::now();
 
-        self.send_xai_notification(XaiSessionUpdate::MemoryFlushStarted)
+        self.send_grow_notification(GrowSessionUpdate::MemoryFlushStarted)
             .await;
 
         let result = async {
@@ -626,7 +626,7 @@ impl SessionActor {
         });
 
         self.memory.release_flush_lock();
-        self.send_xai_notification(XaiSessionUpdate::MemoryFlushCompleted {
+        self.send_grow_notification(GrowSessionUpdate::MemoryFlushCompleted {
             result: outcome,
             path: flush_path,
         })

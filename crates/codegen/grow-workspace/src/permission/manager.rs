@@ -34,7 +34,7 @@ use grow_tools::implementations::grow_build::web_fetch::{
 };
 use grow_tools::types::resources::resolve_model_path;
 
-/// Canonical `decision_reason` values for the uploaded artifact.
+/// Canonical `decision_reason` values for the local permission event.
 pub(crate) mod reasons {
     pub const YOLO: &str = "yolo";
     pub const POLICY_ALLOW: &str = "policy_allow";
@@ -1380,9 +1380,9 @@ fn spawn_permission_manager_with_pin(
                     // Tool name is the single source of truth shared with the
                     // prompter's `events.jsonl` Permission* events (so the two
                     // can never drift). access_kind / access_detail feed BOTH the
-                    // uploaded PermissionEvent and the auto-mode classifier
+                    // locally recorded PermissionEvent and the auto-mode classifier
                     // (`clf.classify(..., access_detail, ...)` below); access_detail
-                    // is uploaded with permission events and is length-bounded.
+                    // is recorded with permission events and is length-bounded.
                     let tool_name = crate::permission::prompter::tool_name_for_access(&access);
                     let (access_kind_str, access_detail) = match &access {
                         AccessKind::Read(_) => ("read".to_string(), None),

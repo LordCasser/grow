@@ -144,7 +144,7 @@ pub struct AuthManager {
     proxy_base_url: String,
     refresher: RwLock<Option<Arc<dyn TokenRefresher>>>,
     /// Idempotency guard for `configure_refresher` so double-calls
-    /// don't reset internal state (e.g. `OidcRefresher::upload_in_flight`).
+    /// don't reset internal state (for example, its transient failure budget).
     refresher_configured: std::sync::atomic::AtomicBool,
     /// Idempotency guard for `start_proactive_refresh` so we don't
     /// spawn competing refresh loops on the same Arc.
@@ -1208,8 +1208,8 @@ impl AuthManager {
 
     /// Set up refresh capability. Call once per `Arc<AuthManager>` at
     /// startup; subsequent calls are no-op via an atomic guard (so
-    /// per-session call sites don't reset refresher-internal state
-    /// like `OidcRefresher::upload_in_flight`). Returns `true` if
+    /// per-session call sites don't reset refresher-internal state such as the
+    /// transient failure budget. Returns `true` if
     /// this call installed the refresher.
     pub fn configure_refresher(self: &Arc<Self>, auth_provider_command: Option<String>) -> bool {
         use std::sync::atomic::Ordering;
@@ -2414,7 +2414,7 @@ fn auth_file_stamp(path: &Path) -> Option<AuthFileStamp> {
 }
 
 impl AuthManager {
-    /// `xai::api_key` from this manager's auth file, memoized on
+    /// `grow::api_key` from this manager's auth file, memoized on
     /// [`AuthFileStamp`]: bearer resolution runs per tool call, so this
     /// costs a `stat` instead of a read+parse on the hot path.
     fn cached_disk_api_key(&self) -> Option<String> {

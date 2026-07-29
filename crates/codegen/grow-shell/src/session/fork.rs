@@ -3,7 +3,7 @@
 //! Forks a saved session to a new working directory with a new session ID.
 //! This creates new session files but does not start the session.
 
-const FORK_LOG: &str = "xai_fork";
+const FORK_LOG: &str = "grow_fork";
 use crate::session::info::Info;
 use crate::session::storage::{CopySessionOptions, JsonlStorageAdapter};
 use crate::util::grow_home::grow_home;

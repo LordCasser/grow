@@ -2,7 +2,7 @@
 //!
 //! These drive the SHIPPED handlers (`handle_completion` for normal + error
 //! completions, `cancel_running_task` for cancellation) and assert on the
-//! notification the real `send_xai_notification` persists — not a
+//! notification the real `send_grow_notification` persists — not a
 //! re-implementation. The terminal is the persisted + replayed twin of the
 //! fire-and-forget `prompt_complete`, so a re-attaching viewer can finalize
 //! from replay.
@@ -24,8 +24,8 @@ fn drain_persistence(rx: &mut mpsc::UnboundedReceiver<PersistenceMsg>) -> Vec<Pe
 fn is_turn_completed(m: &PersistenceMsg) -> bool {
     matches!(
         m,
-        PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n))
-            if matches!(n.update, XaiSessionUpdate::TurnCompleted { .. })
+        PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(n))
+            if matches!(n.update, GrowSessionUpdate::TurnCompleted { .. })
     )
 }
 
@@ -41,15 +41,17 @@ fn is_agent_message_delta(m: &PersistenceMsg) -> bool {
 /// `TurnCompleted`, if any.
 fn turn_completed_fields(msgs: &[PersistenceMsg]) -> Option<(String, String, Option<String>)> {
     msgs.iter().find_map(|m| match m {
-        PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n)) => match &n.update {
-            XaiSessionUpdate::TurnCompleted {
-                prompt_id,
-                stop_reason,
-                agent_result,
-                ..
-            } => Some((prompt_id.clone(), stop_reason.clone(), agent_result.clone())),
-            _ => None,
-        },
+        PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(n)) => {
+            match &n.update {
+                GrowSessionUpdate::TurnCompleted {
+                    prompt_id,
+                    stop_reason,
+                    agent_result,
+                    ..
+                } => Some((prompt_id.clone(), stop_reason.clone(), agent_result.clone())),
+                _ => None,
+            }
+        }
         _ => None,
     })
 }
@@ -282,8 +284,8 @@ async fn cancellation_persists_turn_completed_cancelled() {
 /// Pull the first persisted `TurnCompleted`'s notification `_meta`, if any.
 fn turn_completed_meta(msgs: &[PersistenceMsg]) -> Option<serde_json::Value> {
     msgs.iter().find_map(|m| match m {
-        PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n))
-            if matches!(n.update, XaiSessionUpdate::TurnCompleted { .. }) =>
+        PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(n))
+            if matches!(n.update, GrowSessionUpdate::TurnCompleted { .. }) =>
         {
             n.meta.clone()
         }

@@ -211,7 +211,7 @@ impl IndexEntry {
 /// Attempt to load the marketplace index from the given root directory.
 ///
 /// Checks (in order):
-/// 1. `.grow-plugin/marketplace.json` (preferred xAI convention)
+/// 1. `.grow-plugin/marketplace.json` (preferred Grow convention)
 /// 2. `.grow-plugin/plugin.json`
 /// 3. `.claude-plugin/marketplace.json` (alternate layout compatibility)
 /// 4. `.claude-plugin/plugin.json`

@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use grow_workspace::session::git::find_git_root_from_path;
 pub use grow_workspace::worktree::*;
 use std::path::Path;
-const WORKTREE_LOG: &str = "xai_worktree";
+const WORKTREE_LOG: &str = "grow_worktree";
 impl From<ShellWorktreeType> for WorktreeType {
     fn from(t: ShellWorktreeType) -> Self {
         match t {

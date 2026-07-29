@@ -22,7 +22,6 @@
 //! `GROW_MEMORY=1` environment variable. When disabled, this crate
 //! is not initialized by the host.
 
-pub mod archive;
 pub mod backend;
 pub mod chunker;
 pub mod dream;

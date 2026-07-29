@@ -405,7 +405,7 @@ impl Sink {
 
     fn fire_threshold(&self, bucket: u64, footprint: u64) {
         // Full allocator dump next to the trace (rare: once per bucket per
-        // growth cycle), so the upload has arena-level detail to analyze.
+        // growth cycle), so the local trace has arena-level detail to analyze.
         let dump_rel = DUMP_PROVIDER.get().map(|dump| {
             let seq = DUMP_SEQ.fetch_add(1, Ordering::Relaxed);
             let stem = self

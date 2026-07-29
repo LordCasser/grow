@@ -15,9 +15,9 @@ use super::commands::{
 use super::handle::SessionHandle;
 use super::notifications::NotificationSender;
 use crate::agent::update_chunk_merge::{BufferingSettings, ReplayBuffer};
-use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
+use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
 use crate::extensions::notification::{
-    RetryState, SessionNotification as XaiSessionNotification, is_reauthable_failure,
+    RetryState, SessionNotification as GrowSessionNotification, is_reauthable_failure,
 };
 use crate::sampling::error::map_sampling_err_to_acp;
 use crate::sampling::types::{ChatRequestMessage, ToolCallResponse, ToolDefinition};
@@ -82,7 +82,7 @@ use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
 use tokio::time::{Duration, sleep};
 use tokio_retry::strategy::ExponentialBackoff;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
-const SESSION_LOG: &str = "xai_session";
+const SESSION_LOG: &str = "grow_session";
 #[path = "compaction.rs"]
 mod compaction;
 #[path = "compaction_segments.rs"]

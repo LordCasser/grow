@@ -1641,7 +1641,7 @@ fn handle_ext_notification(
 
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "snake_case", tag = "sessionUpdate")]
-    enum XaiUpdate {
+    enum GrowUpdate {
         AutoCompactStarted {
             percentage: u8,
         },
@@ -1666,16 +1666,16 @@ fn handle_ext_notification(
         Other,
     }
     #[derive(serde::Deserialize)]
-    struct XaiNotif {
-        update: XaiUpdate,
+    struct GrowNotif {
+        update: GrowUpdate,
     }
 
-    let Ok(xai_notif) = serde_json::from_str::<XaiNotif>(notif.request.params.get()) else {
+    let Ok(grow_notif) = serde_json::from_str::<GrowNotif>(notif.request.params.get()) else {
         return ExtEvent::None;
     };
 
-    match xai_notif.update {
-        XaiUpdate::AutoCompactStarted { percentage } => match format {
+    match grow_notif.update {
+        GrowUpdate::AutoCompactStarted { percentage } => match format {
             OutputFormat::StreamingJson => {
                 println!(
                     "{}",
@@ -1687,14 +1687,14 @@ fn handle_ext_notification(
             }
             OutputFormat::Json => {}
         },
-        XaiUpdate::AutoCompactCompleted {} => match format {
+        GrowUpdate::AutoCompactCompleted {} => match format {
             OutputFormat::StreamingJson => {
                 println!("{}", serde_json::json!({"type": "auto_compact_completed"}));
             }
             OutputFormat::Plain => eprintln!("Conversation compacted."),
             OutputFormat::Json => {}
         },
-        XaiUpdate::AutoCompactFailed { error } => match format {
+        GrowUpdate::AutoCompactFailed { error } => match format {
             OutputFormat::StreamingJson => {
                 println!(
                     "{}",
@@ -1710,14 +1710,14 @@ fn handle_ext_notification(
             }
             OutputFormat::Json => {}
         },
-        XaiUpdate::AutoCompactCancelled {} => match format {
+        GrowUpdate::AutoCompactCancelled {} => match format {
             OutputFormat::StreamingJson => {
                 println!("{}", serde_json::json!({"type": "auto_compact_cancelled"}));
             }
             OutputFormat::Plain => eprintln!("Auto-compact cancelled."),
             OutputFormat::Json => {}
         },
-        XaiUpdate::AutoContinueCompleted { total_tokens } => match format {
+        GrowUpdate::AutoContinueCompleted { total_tokens } => match format {
             OutputFormat::StreamingJson => {
                 println!(
                     "{}",
@@ -1727,7 +1727,7 @@ fn handle_ext_notification(
             OutputFormat::Plain => eprintln!("Resumed after compaction."),
             OutputFormat::Json => {}
         },
-        XaiUpdate::ImageCompressed { message } => match format {
+        GrowUpdate::ImageCompressed { message } => match format {
             OutputFormat::StreamingJson => {
                 println!(
                     "{}",
@@ -1737,13 +1737,13 @@ fn handle_ext_notification(
             OutputFormat::Plain => eprintln!("{message}"),
             OutputFormat::Json => {}
         },
-        XaiUpdate::SubagentSpawned { subagent_id } => {
+        GrowUpdate::SubagentSpawned { subagent_id } => {
             return ExtEvent::SubagentSpawned { subagent_id };
         }
-        XaiUpdate::SubagentFinished { subagent_id, .. } => {
+        GrowUpdate::SubagentFinished { subagent_id, .. } => {
             return ExtEvent::SubagentFinished { subagent_id };
         }
-        XaiUpdate::Other => {}
+        GrowUpdate::Other => {}
     }
     ExtEvent::None
 }

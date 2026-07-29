@@ -168,7 +168,7 @@ impl MvpAgent {
             .current_or_expired()
             .is_some_and(|a| a.is_managed_mcp_eligible())
     }
-    /// Requires feature flag AND xAI authentication (OIDC or legacy WebLogin).
+    /// Requires feature flag and explicitly configured service authentication.
     pub(super) fn can_fetch_managed_mcps(&self) -> bool {
         let cfg = self.cfg.borrow();
         cfg.managed_mcps_enabled && !cfg.managed_mcp_gateway_tools_enabled

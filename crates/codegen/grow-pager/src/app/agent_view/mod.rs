@@ -556,7 +556,7 @@ pub(crate) struct SessionReload {
     /// Reconnect cursor as of window open, restored with the stash so a
     /// later reload doesn't skip events the restored transcript never got.
     last_seen_event_id: Option<String>,
-    /// Live dedup highwaters (ACP + xAI) as of window open (same restore
+    /// Live dedup highwaters (ACP + Grow) as of window open (same restore
     /// rationale).
     last_applied_event_seq: Option<u64>,
     last_applied_xai_event_seq: Option<u64>,
@@ -713,18 +713,18 @@ pub struct AgentView {
     /// are dropped so each event renders exactly once. `None` until the first
     /// `eventId`-bearing update.
     ///
-    /// ACP stream only — the xAI stream keeps its own highwater
+    /// ACP stream only — the Grow stream keeps its own highwater
     /// ([`Self::last_applied_xai_event_seq`]) because the two streams are not
     /// delivered in one id order: ACP lines ride the agent's FIFO event
-    /// pipeline while xAI lines are emitted direct-to-gateway, so a fresh xAI
+    /// pipeline while Grow lines are emitted direct-to-gateway, so a fresh Grow
     /// id arriving ahead of queued lower-id ACP chunks must not make the
     /// chunks look stale (silent live-text loss).
     pub last_applied_event_seq: Option<u64>,
-    /// xAI-stream sibling of [`Self::last_applied_event_seq`] (see there for
+    /// Grow-stream sibling of [`Self::last_applied_event_seq`] (see there for
     /// why the highwaters are split). Same drop rule, replay-exempt.
     pub last_applied_xai_event_seq: Option<u64>,
     /// Raw `eventId` of the most recent update APPLIED to this root session —
-    /// replay or live, on both the ACP and xAI paths; dropped updates (dedup,
+    /// replay or live, on both the ACP and Grow paths; dropped updates (dedup,
     /// promptId gate, unexpected replay) don't move it. Sent as `_meta.cursor`
     /// on a reconnect `session/load` so the agent replays only the post-cursor
     /// tail. Why the full string: see

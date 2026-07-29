@@ -81,8 +81,8 @@ fn upsert_workflow_block(
     }
 }
 
-pub(super) fn ingest_workflow_update(agent: &mut AgentView, update: XaiSessionUpdate) -> bool {
-    let XaiSessionUpdate::WorkflowUpdated {
+pub(super) fn ingest_workflow_update(agent: &mut AgentView, update: GrowSessionUpdate) -> bool {
+    let GrowSessionUpdate::WorkflowUpdated {
         run_id,
         revision,
         name,

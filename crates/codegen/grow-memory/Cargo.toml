@@ -16,7 +16,6 @@ async-trait = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 dunce = { workspace = true }
-flate2 = { workspace = true }
 git2 = { version = "0.20", default-features = false, features = [
     "vendored-libgit2",
 ] }
@@ -28,7 +27,6 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = { workspace = true }
 # sqlite-vec: vec0 virtual table for KNN vector search.
 sqlite-vec = "=0.1.7-alpha.2"
-tar = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 tracing = { workspace = true }
 grow-auth = { workspace = true }

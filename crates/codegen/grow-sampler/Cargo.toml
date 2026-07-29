@@ -3,7 +3,7 @@ license = "Apache-2.0"
 name = "grow-sampler"
 version.workspace = true
 edition.workspace = true
-description = "Actor-based sampling/inference layer for xAI grow (HTTP streaming + retry, no shell coupling)"
+description = "Provider-neutral sampling/inference layer for Grow (HTTP streaming + retry, no shell coupling)"
 
 [dependencies]
 # Internal

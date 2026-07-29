@@ -1139,7 +1139,7 @@ mod tests {
                 .find(|p| p.relative_path == "plugins/demo")
                 .unwrap();
 
-            unsafe { std::env::set_var("XAI_GROW_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE", "1") };
+            unsafe { std::env::set_var("GROW_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE", "1") };
             let result = update_from_marketplace_entry_transactional(
                 marketplace.path(),
                 &entry,
@@ -1147,7 +1147,7 @@ mod tests {
                 registry,
                 false, // require_sha off: pin policy has its own tests
             );
-            unsafe { std::env::remove_var("XAI_GROW_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE") };
+            unsafe { std::env::remove_var("GROW_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE") };
 
             assert!(result.is_err());
             assert_eq!(

@@ -33,8 +33,8 @@ pub struct WorkflowAgentInfo {
     pub duration_ms: u64,
 }
 
-/// xAI-specific session notification (parallel to acp::SessionNotification)
-/// This wraps an XaiSessionUpdate with session context for persistence and replay.
+/// Grow-specific session notification (parallel to acp::SessionNotification)
+/// This wraps an GrowSessionUpdate with session context for persistence and replay.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionNotification {

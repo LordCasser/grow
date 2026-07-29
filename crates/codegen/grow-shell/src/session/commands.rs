@@ -321,8 +321,8 @@ pub enum SessionCommand {
     ReconcileRewindTracker {
         target_prompt_index: usize,
     },
-    /// xAI extension session notification - client-side events to store in persistence
-    XaiSessionNotification {
+    /// Grow extension session notification - client-side events to store in persistence
+    GrowSessionNotification {
         notification: SessionNotification,
     },
     /// Apply subagent usage into parent ledgers. Acks `()` once chat-state
@@ -501,7 +501,7 @@ pub enum SessionCommand {
         task_id: String,
     },
     /// Dispatch a compat `Notification` hook (e.g. `task_complete`
-    /// from the notification bridge, which does not go through `send_xai_notification`).
+    /// from the notification bridge, which does not go through `send_grow_notification`).
     DispatchNotificationHook {
         notification_type: String,
         message: Option<String>,

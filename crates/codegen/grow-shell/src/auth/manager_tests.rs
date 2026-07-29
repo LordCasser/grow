@@ -85,17 +85,11 @@ fn has_usable_token_covers_memory_and_disk() {
 }
 
 #[test]
-fn auth_scope_uses_oauth2_when_present() {
+fn default_auth_scope_has_no_built_in_oauth_provider() {
     let cfg = ServiceAuthConfig::default();
-    // Default config always has oauth2 set to the xAI defaults.
-    assert_eq!(
-        cfg.auth_scope(),
-        format!(
-            "{}::{}",
-            crate::auth::config::TEST_OAUTH2_ISSUER,
-            obfstr::obfstr!("b1a00492-073a-47ea-816f-4c329264a828"),
-        )
-    );
+    assert!(cfg.oidc.is_none());
+    assert!(cfg.oauth2.is_none());
+    assert_eq!(cfg.auth_scope(), crate::auth::config::LEGACY_AUTH_SCOPE);
 }
 
 #[test]
@@ -2609,8 +2603,7 @@ async fn enrichment_overlays_team_login_placeholder_user_id() {
 
 /// Type-system invariant: `apply_user_info_enrichment` must NEVER
 /// touch `key`, `refresh_token`, `expires_at`, `oidc_issuer`,
-/// `oidc_client_id`, `auth_mode`, `create_time`, or
-/// `has_grok_code_access`. The `&mut ProviderAuth` signature already
+/// `oidc_client_id`, `auth_mode`, or `create_time`. The `&mut ProviderAuth` signature already
 /// enforces this at the type level (you cannot construct a fresh
 /// auth from a `UserInfo` -- there's no `From` impl), but a unit
 /// test pins the exact list of preserved fields so a future
@@ -2626,7 +2619,6 @@ fn apply_user_info_enrichment_preserves_token_fields() {
         oidc_client_id: Some("client-xyz".into()),
         auth_mode: AuthMode::Oidc,
         create_time: Utc::now() - Duration::minutes(10),
-        has_grok_code_access: Some(true),
         user_id: "old-user".into(),
         email: Some("old@corp.com".into()),
         team_id: Some("old-team".into()),
@@ -2662,7 +2654,6 @@ fn apply_user_info_enrichment_preserves_token_fields() {
     assert_eq!(disk.oidc_client_id, snapshot.oidc_client_id);
     assert_eq!(disk.auth_mode, snapshot.auth_mode);
     assert_eq!(disk.create_time, snapshot.create_time);
-    assert_eq!(disk.has_grok_code_access, snapshot.has_grok_code_access);
 
     // Enrichment fields updated.
     assert_eq!(disk.user_id, "new-user");
@@ -3465,7 +3456,7 @@ async fn pin_matches_principal_id_without_principal_type() {
 #[tokio::test]
 async fn cached_api_key_session_rejected_when_api_key_auth_disabled() {
     let api_key_session = || ProviderAuth {
-        key: "xai-cached-key".into(),
+        key: "provider-cached-key".into(),
         auth_mode: AuthMode::ApiKey,
         expires_at: Some(Utc::now() + Duration::hours(1)),
         ..ProviderAuth::test_default()
@@ -3490,7 +3481,7 @@ async fn cached_api_key_session_rejected_when_api_key_auth_disabled() {
     mgr2.hot_swap(api_key_session());
     assert_eq!(
         mgr2.current().map(|a| a.key),
-        Some("xai-cached-key".to_string()),
+        Some("provider-cached-key".to_string()),
         "api-key session must work normally when the switch is off"
     );
 }

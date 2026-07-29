@@ -494,7 +494,7 @@ async fn initialize(
     let is_grow_shell = resp
         .meta
         .as_ref()
-        .and_then(|m| m.get("grokShell"))
+        .and_then(|m| m.get("growShell"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
@@ -818,7 +818,7 @@ mod tests {
 
     #[test]
     fn parse_available_commands_missing_key_returns_empty() {
-        let meta = serde_json::json!({ "grokShell": true });
+        let meta = serde_json::json!({ "growShell": true });
         let cmds = parse_available_commands(meta.as_object());
         assert!(cmds.is_empty());
     }
@@ -852,7 +852,7 @@ mod tests {
 
     #[test]
     fn parse_session_recap_available_defaults_off_when_missing() {
-        let meta = serde_json::json!({ "grokShell": true, "cancelRewind": true });
+        let meta = serde_json::json!({ "growShell": true, "cancelRewind": true });
         assert!(!parse_session_recap_available(meta.as_object()));
         assert!(!parse_session_recap_available(None));
     }

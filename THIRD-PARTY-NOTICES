@@ -2782,19 +2782,6 @@ Copyright notice:
 
 License text: see Part II — MIT
 
---------------------------------------------------------------------------------
-cryptify 3.2.1
---------------------------------------------------------------------------------
-Source:  https://github.com/dronavallipranav/rust-obfuscator/tree/main/cryptify
-License: MIT
-
-Copyright notice:
-  Copyright holders / authors (from package metadata):
-    - Pranav Dronavalli <dronavallipranav@gmail.com>
-
-License text: see Part II — MIT
-
---------------------------------------------------------------------------------
 crypto-bigint 0.5.5
 --------------------------------------------------------------------------------
 Source:  https://github.com/RustCrypto/crypto-bigint

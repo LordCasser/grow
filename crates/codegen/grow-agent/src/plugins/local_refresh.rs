@@ -275,7 +275,7 @@ fn recopy_local_install(
 fn promote_tmp_to_dest(tmp: &Path, dest: &Path) -> std::io::Result<()> {
     #[cfg(test)]
     {
-        if std::env::var_os("XAI_GROW_TEST_FAIL_REFRESH_PROMOTE").is_some() {
+        if std::env::var_os("GROW_TEST_FAIL_REFRESH_PROMOTE").is_some() {
             return Err(std::io::Error::other(
                 "test-injected refresh promote failure",
             ));
@@ -489,7 +489,7 @@ mod tests {
         write_agent_md(&source, "new");
         let trust = TrustStore::load_from(home.join(".grow").join("trusted-plugins"));
         let summary = {
-            let _fail = EnvVarGuard::set("XAI_GROW_TEST_FAIL_REFRESH_PROMOTE", "1");
+            let _fail = EnvVarGuard::set("GROW_TEST_FAIL_REFRESH_PROMOTE", "1");
             refresh_local_installs(&mut registry, &trust, false)
         };
 

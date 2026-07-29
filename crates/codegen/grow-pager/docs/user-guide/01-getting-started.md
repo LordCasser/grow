@@ -1,6 +1,6 @@
 # Getting Started
 
-Grow is a BYOK terminal AI coding assistant forked from xAI Grok Build. It runs as a TUI (Terminal User Interface) that understands your codebase, executes shell commands, edits files, searches the web, and manages tasks.
+Grow is a BYOK terminal AI coding assistant forked from xAI Grok Build. It runs as a TUI (Terminal User Interface) that understands your codebase, executes shell commands, edits files, and manages tasks. Web search can be added through a user-configured MCP server.
 
 You can use it interactively as a full-screen TUI, run it headlessly for scripting and CI/CD, or integrate it into editors via the Agent Client Protocol (ACP).
 

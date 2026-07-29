@@ -1,5 +1,5 @@
 /// Apply auth headers to outbound visibility requests.
-/// Implemented by `grow-shell::util::grok_auth_credentials::ProviderAuthCredentials`
+/// Implemented by `grow-shell::util::provider_auth_credentials::ProviderAuthCredentials`
 /// to keep credential construction owned by shell while letting data-collector
 /// build the request without reaching back into shell types.
 pub trait HttpAuth: Send + Sync {

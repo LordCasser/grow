@@ -24,7 +24,6 @@ use grow_tools::implementations::grow_build::task::types::{
 };
 use std::path::Path;
 use std::sync::Arc;
-// EventWriter removed — xai_file_utils::events is gone
 use xai_tool_types::SubagentCapabilityMode;
 
 // Constants

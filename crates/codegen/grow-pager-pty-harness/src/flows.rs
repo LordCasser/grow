@@ -67,7 +67,7 @@ pub fn inference_request_count(content: &ContentController) -> usize {
         .count()
 }
 
-/// Seed a fake xAI OAuth entry into the isolated home's `auth.json` so the
+/// Seed a fake provider OAuth entry into the isolated home's `auth.json` so the
 /// shell has session auth (the harness's `GROW_API_KEY` is ApiKey/BYOK mode
 /// and never enters the auth manager). Load-bearing details: the scope key
 /// must be `<issuer>::<client_id>`, `auth_mode` must be `oidc`,

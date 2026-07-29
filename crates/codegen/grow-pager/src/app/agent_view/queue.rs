@@ -419,7 +419,7 @@ impl AgentView {
         }
         for (pid, update, mut meta) in std::mem::take(&mut self.pending_adoption_updates) {
             if pid == prompt_id {
-                // Forward-only: the xAI rail shares this cursor and may have
+                // Forward-only: the Grow rail shares this cursor and may have
                 // applied later events during the buffering window — assigning
                 // a buffered (older) id would re-deliver those on reconnect.
                 let cur_seq = self

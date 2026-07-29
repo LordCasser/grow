@@ -212,7 +212,7 @@ async fn drop_recap_after_cancel_auto_silent_manual_unavailable() {
 fn drained_session_recap(rx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>) -> bool {
     let mut saw = false;
     while let Ok(msg) = rx.try_recv() {
-        if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n)) = msg
+        if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(n)) = msg
             && matches!(
                 n.update,
                 crate::extensions::notification::SessionUpdate::SessionRecap { .. }
@@ -301,13 +301,13 @@ async fn manual_recap_never_mutates_conversation() {
 }
 
 /// Drain the persistence channel and report whether a `SessionRecapUnavailable`
-/// xAI update was emitted.
+/// Grow update was emitted.
 fn drained_recap_unavailable(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
 ) -> bool {
     let mut saw = false;
     while let Ok(msg) = rx.try_recv() {
-        if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n)) = msg
+        if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(n)) = msg
             && matches!(
                 n.update,
                 crate::extensions::notification::SessionUpdate::SessionRecapUnavailable

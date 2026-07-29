@@ -13,7 +13,7 @@ pub struct ToolDescription {
     pub name: String,
 
     /// Optional namespace grouping (e.g. "github", "slack").
-    /// None for xAI native tools.
+    /// None for built-in tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
 

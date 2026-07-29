@@ -76,7 +76,7 @@ pub(crate) fn finalize_killed_subagent(
 
     let payload = SessionNotification {
         session_id: session_id.clone(),
-        update: XaiSessionUpdate::SubagentFinished {
+        update: GrowSessionUpdate::SubagentFinished {
             subagent_id: subagent_id.to_string(),
             child_session_id,
             // An already-finished orphan may be "failed", but the cancel response

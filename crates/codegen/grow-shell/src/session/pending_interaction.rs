@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol as acp;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 
-use crate::extensions::notification::{SessionNotification, SessionUpdate as XaiSessionUpdate};
+use crate::extensions::notification::{SessionNotification, SessionUpdate as GrowSessionUpdate};
 
 /// Shared per-session map of open reverse-requests, keyed by `tool_call_id`.
 ///
@@ -62,7 +62,7 @@ pub(crate) fn has_parked_plan_approval(pending: &PendingInteractions) -> bool {
 
 /// Fire-and-forget broadcast of a session notification carrying a `sessionId`
 /// (so the routing layer fans it out to every subscriber). Never persisted.
-fn broadcast(gateway: &GatewaySender, session_id: &acp::SessionId, update: XaiSessionUpdate) {
+fn broadcast(gateway: &GatewaySender, session_id: &acp::SessionId, update: GrowSessionUpdate) {
     let notification = SessionNotification {
         session_id: session_id.clone(),
         update,
@@ -108,7 +108,7 @@ impl PendingInteractionGuard {
         broadcast(
             &gateway,
             &session_id,
-            XaiSessionUpdate::PendingInteraction {
+            GrowSessionUpdate::PendingInteraction {
                 tool_call_id: tool_call_id.clone(),
                 kind,
             },
@@ -134,7 +134,7 @@ impl Drop for PendingInteractionGuard {
             broadcast(
                 &self.gateway,
                 &self.session_id,
-                XaiSessionUpdate::InteractionResolved {
+                GrowSessionUpdate::InteractionResolved {
                     tool_call_id: self.tool_call_id.clone(),
                 },
             );

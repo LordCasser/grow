@@ -30,7 +30,6 @@ pub(crate) fn parse_output(output: &std::process::Output) -> anyhow::Result<Prov
         organization_role: None,
         user_blocked_reason: None,
         team_blocked_reasons: vec![],
-        has_grok_code_access: None,
         refresh_token: parsed.refresh_token,
         expires_at: parsed.expires_at,
         oidc_issuer: parsed.issuer,
@@ -122,14 +121,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_output_issuer_claim_enables_xai_auth() {
+    fn parse_output_retains_optional_provider_issuer() {
         let ok = |stdout: &str| std::process::Output {
             status: std::process::Command::new("true").status().unwrap(),
             stdout: stdout.as_bytes().to_vec(),
             stderr: vec![],
         };
 
-        // x.ai issuer claim → first-party session (relay-eligible).
+        // An issuer claim is retained for provider refresh and scope isolation.
         let auth = parse_output(&ok(
             r#"{"access_token":"t","expires_in":900,"issuer":"https://login.example.com"}"#,
         ))
@@ -140,7 +139,7 @@ mod tests {
         );
         assert!(auth.is_service_auth());
 
-        // Non-x.ai issuer is stored but stays third-party.
+        // A different configured issuer is equally valid.
         let auth = parse_output(&ok(
             r#"{"access_token":"t","issuer":"https://idp.acme.example"}"#,
         ))
@@ -149,19 +148,19 @@ mod tests {
             auth.oidc_issuer.as_deref(),
             Some("https://idp.acme.example")
         );
-        assert!(!auth.is_service_auth());
+        assert!(auth.is_service_auth());
 
         // Missing / empty / whitespace issuer → None.
         let auth = parse_output(&ok(r#"{"access_token":"t"}"#)).unwrap();
         assert_eq!(auth.oidc_issuer, None);
-        assert!(!auth.is_service_auth());
+        assert!(auth.is_service_auth());
         let auth = parse_output(&ok(r#"{"access_token":"t","issuer":"  "}"#)).unwrap();
         assert_eq!(auth.oidc_issuer, None);
 
         // Bare-token output never carries an issuer.
         let auth = parse_output(&ok("bare-token")).unwrap();
         assert_eq!(auth.oidc_issuer, None);
-        assert!(!auth.is_service_auth());
+        assert!(auth.is_service_auth());
     }
 
     #[test]
@@ -180,7 +179,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sets_grok_auth_expired_env_on_refresh() {
+    async fn sets_grow_auth_expired_env_on_refresh() {
         let auth = run_external_refresh("echo $GROW_AUTH_EXPIRED")
             .await
             .unwrap();

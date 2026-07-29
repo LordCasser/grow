@@ -223,7 +223,7 @@ pub(super) struct OidcUserInfo {
     pub(super) user_blocked_reason: Option<String>,
     pub(super) team_blocked_reasons: Vec<String>,
 }
-pub(super) fn build_grok_auth(
+pub(super) fn build_provider_auth(
     tokens: TokenResponse,
     user_info: OidcUserInfo,
     issuer: &str,
@@ -249,7 +249,6 @@ pub(super) fn build_grok_auth(
         organization_role: user_info.organization_role,
         user_blocked_reason: user_info.user_blocked_reason,
         team_blocked_reasons: user_info.team_blocked_reasons,
-        has_grok_code_access: None,
         refresh_token: tokens.refresh_token,
         expires_at: tokens.expires_in.map(|s| now + Duration::seconds(s as i64)),
         oidc_issuer: Some(issuer.to_owned()),

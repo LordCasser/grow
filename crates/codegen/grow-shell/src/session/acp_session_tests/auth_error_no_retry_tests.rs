@@ -163,7 +163,7 @@ async fn no_recovery_without_auth_manager() {
             let (actor, mut rx) = make_actor_with_auth_and_credentials(
                 None,
                 xai_chat_state::AuthType::ApiKey,
-                "xai-byok-key".to_string(),
+                "provider-byok-key".to_string(),
             )
             .await;
             let model_id = actor
@@ -195,7 +195,7 @@ async fn no_recovery_without_auth_manager() {
             );
             let mut terminal = None;
             while let Ok(message) = rx.try_recv() {
-                if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(
+                if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(
                     notification,
                 )) = message
                     && let crate::extensions::notification::SessionUpdate::RetryState(
@@ -260,7 +260,7 @@ async fn sampler_401_with_api_key_auth_skips_refresh_and_surfaces_error() {
             let (actor, _rx) = make_actor_with_auth_and_credentials(
                 Some(am),
                 xai_chat_state::AuthType::ApiKey,
-                "xai-byok-key".to_string(),
+                "provider-byok-key".to_string(),
             )
             .await;
 
@@ -773,7 +773,7 @@ fn session_token_auth_gate_truth_table() {
         assert!(gate(true, ModelByok::NotByok, fp));
         assert!(!gate(true, ModelByok::Byok, fp));
     }
-    // Session method + Unknown BYOK: refresh only against a first-party xAI
+    // Session method + Unknown BYOK: refresh only against a configured trusted service
     // host, so a transiently-unclassifiable config can't demote a live session
     // (the stale-token 401 regression) yet the session token never leaks to a
     // third-party BYOK endpoint. This arm was unconditionally `false` pre-fix.
@@ -889,7 +889,7 @@ async fn reconstruct_full_config_no_bearer_resolver_for_api_key_method() {
                 Some(am),
                 "provider.api_key",
                 xai_chat_state::AuthType::ApiKey,
-                "xai-static-key".to_string(),
+                "provider-static-key".to_string(),
             )
             .await;
 

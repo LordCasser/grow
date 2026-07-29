@@ -311,7 +311,7 @@ impl SessionActor {
     /// (`cancel_running_task`) sites. Derives `(stop_reason, agent_result)`
     /// from the SAME source as the fire-and-forget `prompt_complete`
     /// (`prompt_complete_fields`), so the two signals never disagree, then
-    /// persists + forwards via `send_xai_notification`. Retiring
+    /// persists + forwards via `send_grow_notification`. Retiring
     /// `prompt_complete` later is then a one-line change at the call sites.
     ///
     /// `cancel_trigger` (when `Some`) rides the `_meta` as `cancelTrigger`;
@@ -329,7 +329,7 @@ impl SessionActor {
                 .into_iter()
                 .collect()
         });
-        self.send_xai_notification_with_extra_meta(
+        self.send_grow_notification_with_extra_meta(
             crate::session::turn_completion::build_turn_completed(
                 prompt_id,
                 stop_reason,

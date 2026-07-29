@@ -67,10 +67,6 @@ pub struct ProviderAuth {
     pub user_blocked_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub team_blocked_reasons: Vec<String>,
-    /// Deprecated. Kept for deserializing existing auth.json files.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub has_grok_code_access: Option<bool>,
-
     /// Refresh token (OIDC/OAuth2 or external provider).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
@@ -190,7 +186,6 @@ impl Default for ProviderAuth {
             organization_role: None,
             user_blocked_reason: None,
             team_blocked_reasons: vec![],
-            has_grok_code_access: None,
             refresh_token: None,
             expires_at: None,
             oidc_issuer: None,
@@ -333,7 +328,6 @@ mod tests {
             organization_role: None,
             user_blocked_reason: None,
             team_blocked_reasons: vec![],
-            has_grok_code_access: None,
             refresh_token: None,
             expires_at: None,
             oidc_issuer: None,
@@ -349,23 +343,23 @@ mod tests {
             ..make_auth(mode)
         };
 
-        // Only Oidc/External qualify, and only with an x.ai issuer.
+        // OIDC and explicitly configured external auth qualify regardless of issuer.
         assert!(with_issuer(AuthMode::Oidc, Some(TEST_OAUTH2_ISSUER)).is_service_auth());
         assert!(with_issuer(AuthMode::External, Some(TEST_OAUTH2_ISSUER)).is_service_auth());
-        assert!(!with_issuer(AuthMode::Oidc, None).is_service_auth());
-        assert!(!with_issuer(AuthMode::External, None).is_service_auth());
-        assert!(!with_issuer(AuthMode::Oidc, Some("https://idp.acme.example")).is_service_auth());
+        assert!(with_issuer(AuthMode::Oidc, None).is_service_auth());
+        assert!(with_issuer(AuthMode::External, None).is_service_auth());
+        assert!(with_issuer(AuthMode::Oidc, Some("https://idp.acme.example")).is_service_auth());
         assert!(
-            !with_issuer(AuthMode::External, Some("https://idp.acme.example")).is_service_auth()
+            with_issuer(AuthMode::External, Some("https://idp.acme.example")).is_service_auth()
         );
 
-        // ApiKey / WebLogin stay false even with an x.ai issuer set.
+        // API key and legacy WebLogin stay outside configured service auth.
         assert!(!with_issuer(AuthMode::ApiKey, Some(TEST_OAUTH2_ISSUER)).is_service_auth());
         assert!(!with_issuer(AuthMode::WebLogin, Some(TEST_OAUTH2_ISSUER)).is_service_auth());
     }
 
     #[test]
-    fn is_session_auth_requires_first_party_for_external() {
+    fn is_session_auth_accepts_configured_external_provider() {
         use crate::auth::TEST_OAUTH2_ISSUER;
         let with_issuer = |mode: AuthMode, issuer: Option<&str>| ProviderAuth {
             oidc_issuer: issuer.map(str::to_owned),
@@ -377,11 +371,11 @@ mod tests {
         assert!(with_issuer(AuthMode::Oidc, None).is_session_auth());
         assert!(with_issuer(AuthMode::Oidc, Some("https://idp.acme.example")).is_session_auth());
 
-        // External qualifies only when first-party (devbox-login parity).
+        // Explicit external providers qualify regardless of issuer metadata.
         assert!(with_issuer(AuthMode::External, Some(TEST_OAUTH2_ISSUER)).is_session_auth());
-        assert!(!with_issuer(AuthMode::External, None).is_session_auth());
+        assert!(with_issuer(AuthMode::External, None).is_session_auth());
         assert!(
-            !with_issuer(AuthMode::External, Some("https://idp.acme.example")).is_session_auth()
+            with_issuer(AuthMode::External, Some("https://idp.acme.example")).is_session_auth()
         );
 
         // Plain API keys never do.

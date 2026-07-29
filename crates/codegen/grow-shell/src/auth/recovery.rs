@@ -65,7 +65,7 @@ pub(crate) fn relay_should_cancel(err: &AuthError) -> bool {
 /// delay when the clock stepped back.
 const FRESH_MINT_GUARD_SECS: i64 = 120;
 
-/// Where a 401 recovery was initiated — drives the `manual_auth` KPI.
+/// Where a 401 recovery was initiated — drives the local `manual_auth` event.
 /// Required at every call site so suppressing the KPI is explicit, not default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecoverySource {
@@ -73,7 +73,7 @@ pub(crate) enum RecoverySource {
     Turn,
     /// The relay / leader connection handshake.
     Relay,
-    /// Uploads, diagnostics, tool calls. Never emits the KPI.
+    /// Background diagnostics and tool calls. Never emits the event.
     Background,
 }
 

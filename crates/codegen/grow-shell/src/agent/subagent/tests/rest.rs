@@ -785,7 +785,7 @@ fn subagent_session_metadata_backward_compat_deserialization() {
     assert!(!meta.context_normalized);
 }
 #[test]
-fn upload_lifecycle_spawn_then_completion_preserves_fields() {
+fn local_lifecycle_spawn_then_completion_preserves_fields() {
     let spawn_meta = SubagentMeta {
         subagent_id: "sa-lifecycle".into(),
         parent_session_id: "parent-1".into(),
@@ -810,7 +810,7 @@ fn upload_lifecycle_spawn_then_completion_preserves_fields() {
         snapshot_ref: None,
         effective_model_id: None,
     };
-    let spawn_gcs = SubagentSessionMetadata::from_meta(
+    let spawn_record = SubagentSessionMetadata::from_meta(
         &spawn_meta,
         Some("grow-4.5"),
         Some("/workspace"),
@@ -822,21 +822,21 @@ fn upload_lifecycle_spawn_then_completion_preserves_fields() {
         Some("prompt-42"),
         1,
     );
-    assert_eq!(spawn_gcs.status, "running");
-    assert!(spawn_gcs.completed_at.is_none());
-    assert!(spawn_gcs.duration_ms.is_none());
-    assert_eq!(spawn_gcs.model_id.as_deref(), Some("grow-4.5"));
-    assert_eq!(spawn_gcs.cwd.as_deref(), Some("/workspace"));
-    assert_eq!(spawn_gcs.role.as_deref(), Some("rust-dev"));
-    assert_eq!(spawn_gcs.parent_prompt_id.as_deref(), Some("prompt-42"));
-    assert_eq!(spawn_gcs.depth, 1);
+    assert_eq!(spawn_record.status, "running");
+    assert!(spawn_record.completed_at.is_none());
+    assert!(spawn_record.duration_ms.is_none());
+    assert_eq!(spawn_record.model_id.as_deref(), Some("grow-4.5"));
+    assert_eq!(spawn_record.cwd.as_deref(), Some("/workspace"));
+    assert_eq!(spawn_record.role.as_deref(), Some("rust-dev"));
+    assert_eq!(spawn_record.parent_prompt_id.as_deref(), Some("prompt-42"));
+    assert_eq!(spawn_record.depth, 1);
     let mut completed_meta = spawn_meta.clone();
     completed_meta.status = "completed".to_string();
     completed_meta.completed_at = Some(chrono::Utc::now());
     completed_meta.duration_ms = Some(5000);
     completed_meta.tool_calls = Some(12);
     completed_meta.turns = Some(3);
-    let completion_gcs = SubagentSessionMetadata::from_meta(
+    let completion_record = SubagentSessionMetadata::from_meta(
         &completed_meta,
         Some("grow-4.5"),
         Some("/workspace"),
@@ -848,27 +848,27 @@ fn upload_lifecycle_spawn_then_completion_preserves_fields() {
         Some("prompt-42"),
         1,
     );
-    assert_eq!(completion_gcs.status, "completed");
-    assert!(completion_gcs.completed_at.is_some());
-    assert_eq!(completion_gcs.duration_ms, Some(5000));
-    assert_eq!(completion_gcs.tool_calls, Some(12));
-    assert_eq!(completion_gcs.turns, Some(3));
-    assert_eq!(completion_gcs.model_id.as_deref(), Some("grow-4.5"));
-    assert_eq!(completion_gcs.cwd.as_deref(), Some("/workspace"));
-    assert_eq!(completion_gcs.role.as_deref(), Some("rust-dev"));
+    assert_eq!(completion_record.status, "completed");
+    assert!(completion_record.completed_at.is_some());
+    assert_eq!(completion_record.duration_ms, Some(5000));
+    assert_eq!(completion_record.tool_calls, Some(12));
+    assert_eq!(completion_record.turns, Some(3));
+    assert_eq!(completion_record.model_id.as_deref(), Some("grow-4.5"));
+    assert_eq!(completion_record.cwd.as_deref(), Some("/workspace"));
+    assert_eq!(completion_record.role.as_deref(), Some("rust-dev"));
     assert_eq!(
-            completion_gcs.parent_prompt_id.as_deref(),
+            completion_record.parent_prompt_id.as_deref(),
             Some("prompt-42")
         );
     assert_eq!(
-            completion_gcs.worktree_path.as_deref(),
+            completion_record.worktree_path.as_deref(),
             Some("/tmp/worktree-1")
         );
-    assert_eq!(completion_gcs.depth, 1);
-    assert_eq!(spawn_gcs.child_session_id, completion_gcs.child_session_id);
+    assert_eq!(completion_record.depth, 1);
+    assert_eq!(spawn_record.child_session_id, completion_record.child_session_id);
 }
 #[test]
-fn upload_lifecycle_failure_preserves_error() {
+fn local_lifecycle_failure_preserves_error() {
     let meta = SubagentMeta {
         subagent_id: "sa-fail".into(),
         parent_session_id: "p".into(),
@@ -893,7 +893,7 @@ fn upload_lifecycle_failure_preserves_error() {
         snapshot_ref: None,
         effective_model_id: None,
     };
-    let gcs = SubagentSessionMetadata::from_meta(
+    let record = SubagentSessionMetadata::from_meta(
         &meta,
         None,
         None,
@@ -905,9 +905,9 @@ fn upload_lifecycle_failure_preserves_error() {
         None,
         0,
     );
-    assert_eq!(gcs.status, "failed");
-    assert_eq!(gcs.error.as_deref(), Some("session spawn error"));
-    assert_eq!(gcs.session_kind, "subagent");
+    assert_eq!(record.status, "failed");
+    assert_eq!(record.error.as_deref(), Some("session spawn error"));
+    assert_eq!(record.session_kind, "subagent");
 }
 #[test]
 fn initial_context_source_resumed_variant() {
@@ -1291,7 +1291,7 @@ fn drain_cancelled_finish_cmds(
 ) -> usize {
     let mut count = 0;
     while let Ok(cmd) = cmd_rx.try_recv() {
-        if let SessionCommand::XaiSessionNotification { notification } = cmd
+        if let SessionCommand::GrowSessionNotification { notification } = cmd
             && let SessionUpdate::SubagentFinished { subagent_id, status, error, .. } = &notification
                 .update && subagent_id == id
         {
@@ -1492,7 +1492,7 @@ async fn reconcile_reemits_shared_actor_terminal_outcome() {
         .await;
     let finish = std::iter::from_fn(|| cmd_rx.try_recv().ok())
         .find_map(|command| {
-            let SessionCommand::XaiSessionNotification { notification } = command else {
+            let SessionCommand::GrowSessionNotification { notification } = command else {
                 return None;
             };
             let SessionUpdate::SubagentFinished { status, tool_calls, .. } = notification
@@ -2566,8 +2566,8 @@ async fn progress_publisher_delivers_ticks_to_parent_cmd_channel() {
                 .expect("a tick must arrive within the publish interval")
                 .expect("channel open");
             cancel.cancel();
-            let SessionCommand::XaiSessionNotification { notification } = cmd else {
-                panic!("expected XaiSessionNotification");
+            let SessionCommand::GrowSessionNotification { notification } = cmd else {
+                panic!("expected GrowSessionNotification");
             };
             let SessionUpdate::SubagentProgress {
                 subagent_id,

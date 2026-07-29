@@ -81,7 +81,7 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
     // Extract TaskBackgrounded fields
     let (tool_call_id, task_id, command, cwd, output_file, monitor_description, notif_description) =
         match session_notif.update {
-            XaiSessionUpdate::TaskBackgrounded {
+            GrowSessionUpdate::TaskBackgrounded {
                 tool_call_id,
                 task_id,
                 command,
@@ -238,7 +238,7 @@ pub(super) fn handle_monitor_event(notif: &acp::ExtNotification, app: &mut AppVi
         return false;
     };
     let (task_id, _description, event_text) = match session_notif.update {
-        XaiSessionUpdate::MonitorEvent {
+        GrowSessionUpdate::MonitorEvent {
             task_id,
             description,
             event_text,
@@ -279,7 +279,7 @@ pub(super) fn handle_scheduled_task_created(
         return false;
     };
     let (task_id, prompt, human_schedule, next_fire_at) = match session_notif.update {
-        XaiSessionUpdate::ScheduledTaskCreated {
+        GrowSessionUpdate::ScheduledTaskCreated {
             task_id,
             prompt,
             human_schedule,
@@ -332,7 +332,7 @@ pub(super) fn handle_scheduled_task_fired(notif: &acp::ExtNotification, app: &mu
         return false;
     };
     let (task_id, prompt, human_schedule, next_fire_at, subagent_id) = match session_notif.update {
-        XaiSessionUpdate::ScheduledTaskFired {
+        GrowSessionUpdate::ScheduledTaskFired {
             task_id,
             prompt,
             human_schedule,
@@ -390,7 +390,7 @@ pub(super) fn handle_scheduled_task_deleted(
         return false;
     };
     let task_id = match session_notif.update {
-        XaiSessionUpdate::ScheduledTaskDeleted { task_id } => task_id,
+        GrowSessionUpdate::ScheduledTaskDeleted { task_id } => task_id,
         _ => return false,
     };
     let matched = match find_session_match(app, &session_notif.session_id) {
@@ -560,7 +560,7 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
     };
 
     let task_snapshot = match session_notif.update {
-        XaiSessionUpdate::TaskCompleted { task_snapshot, .. } => task_snapshot,
+        GrowSessionUpdate::TaskCompleted { task_snapshot, .. } => task_snapshot,
         _ => return false,
     };
 
