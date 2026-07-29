@@ -9,20 +9,21 @@
 //! render engine — it provides placeholders and discovered sections.
 use crate::config::PromptMode;
 use crate::prompt::agents_md::{self, AgentConfigFile};
-use crate::prompt::template::{apply_patch_template, base_template, subagent_template};
+use crate::prompt::template::{
+    APPLY_PATCH_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT,
+};
 use serde::de;
 use serde::{Deserialize, Serialize};
 /// Selects which base template to use for `Extend` mode rendering.
 ///
-/// Built-in variants decrypt the template on demand and never store
-/// the plaintext persistently, ensuring it is zeroed after use.
+/// Built-in variants select one of the Markdown prompts embedded at compile time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TemplateOverride {
     /// Use the standard base template (or subagent template based on audience).
     #[default]
     None,
-    /// Use the apply-patch profile prompt template (decrypted on demand).
+    /// Use the apply-patch profile prompt template.
     Codex,
     /// A caller-provided custom template string.
     Custom(String),
@@ -97,7 +98,7 @@ pub struct PromptContext {
     pub prompt_body: Option<String>,
     /// Which base template to use for `Extend` mode.
     /// `TemplateOverride::None` = standard base/subagent template.
-    /// `TemplateOverride::Codex` = apply-patch profile template (decrypted on demand).
+    /// `TemplateOverride::Codex` = apply-patch profile template.
     /// `TemplateOverride::Custom` = caller-provided template string.
     #[serde(default, skip_serializing_if = "is_template_override_none")]
     pub system_prompt: TemplateOverride,
@@ -272,20 +273,15 @@ impl PromptContext {
         let render = |template: &str| renderer.render_with_extra(template, &placeholders).ok();
         let prompt = match self.prompt_mode {
             PromptMode::Extend => {
-                let decrypted;
                 let base = match &self.system_prompt {
                     TemplateOverride::Custom(template) => template.as_str(),
-                    TemplateOverride::Codex => {
-                        decrypted = apply_patch_template();
-                        &decrypted
-                    }
+                    TemplateOverride::Codex => APPLY_PATCH_SYSTEM_PROMPT,
                     TemplateOverride::None => {
-                        decrypted = if self.audience == PromptAudience::Subagent {
-                            subagent_template()
+                        if self.audience == PromptAudience::Subagent {
+                            SUBAGENT_SYSTEM_PROMPT
                         } else {
-                            base_template()
-                        };
-                        &decrypted
+                            DEFAULT_SYSTEM_PROMPT
+                        }
                     }
                 };
                 let mut prompt = render(base)?;
@@ -777,8 +773,8 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let tmpl = crate::prompt::template::subagent_template();
-        env.add_template("prompt", &tmpl).unwrap();
+        env.add_template("prompt", crate::prompt::template::SUBAGENT_SYSTEM_PROMPT)
+            .unwrap();
         env.get_template("prompt").unwrap().render(ctx).unwrap()
     }
     fn base_template_ctx() -> minijinja::Value {

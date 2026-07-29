@@ -4073,7 +4073,6 @@ dependencies = [
  "xai-token-estimation",
  "xai-tool-types",
  "xai-tty-utils",
- "zeroize",
 ]
 
 [[package]]

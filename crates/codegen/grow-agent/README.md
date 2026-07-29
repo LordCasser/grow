@@ -208,6 +208,10 @@ last Agent and model persisted for that session independently.
 
 ## Prompt Assembly
 
+Grow's built-in system prompts live as Markdown in `prompts/`. They are the
+single source of truth and are embedded into the binary at compile time; no
+prompt files or generation step are required at runtime.
+
 ```
 promptMode: extend                     promptMode: full
 ──────────────────                     ─────────────────
