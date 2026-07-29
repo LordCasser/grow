@@ -1120,7 +1120,6 @@ impl SessionActor {
                 cwd: Some(self.tool_context.cwd.as_str().to_owned()),
                 trace_sink: Some((self.chat_state_handle.clone(), task_tool_name)),
                 role_override,
-                events: Some(self.events.writer()),
             });
 
         // Surface the "planning…" badge while the subagent runs. Cleared
@@ -1141,7 +1140,6 @@ impl SessionActor {
                 tool_names: &tool_names,
                 inherit_tool_names: &inherit_tool_names,
             },
-            &|e| self.events.emit(e),
         )
         .await;
 
@@ -1292,7 +1290,6 @@ impl SessionActor {
                 cwd: Some(self.tool_context.cwd.as_str().to_owned()),
                 trace_sink: Some((self.chat_state_handle.clone(), task_tool_name)),
                 role_override,
-                events: Some(self.events.writer()),
             });
 
         let outcome = crate::session::goal_strategist::run_goal_strategist(
@@ -1313,7 +1310,6 @@ impl SessionActor {
                 tool_names: &tool_names,
                 inherit_tool_names: &inherit_tool_names,
             },
-            &|e| self.events.emit(e),
         )
         .await;
 
@@ -1396,7 +1392,6 @@ impl SessionActor {
                 parent_prompt_id,
                 cwd: Some(self.tool_context.cwd.as_str().to_owned()),
                 trace_sink: Some((self.chat_state_handle.clone(), task_tool_name)),
-                events: Some(self.events.writer()),
             });
 
         let outcome = crate::session::goal_summarizer::run_goal_summarizer(
@@ -1410,7 +1405,6 @@ impl SessionActor {
                 model_id: &model_id,
                 tool_names: &tool_names,
             },
-            &|e| self.events.emit(e),
         )
         .await;
 

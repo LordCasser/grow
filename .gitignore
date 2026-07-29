@@ -1,3 +1,4 @@
 /target
+.atlas/
 **/*.rs.bk
 .DS_Store

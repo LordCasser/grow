@@ -883,15 +883,7 @@ pub(crate) fn execute(
                         .with_alpha_test_key(alpha_test_key.clone())
                         .with_session_id(session_id.clone())
                         .with_auth(auth_manager.clone());
-                    let storage = grow_shell::auth::credential_provider::build_storage_client_for_proxy(
-                        &proxy_base,
-                        deployment_key,
-                        alpha_test_key,
-                        Some(auth_manager.clone()),
-                        None,
-                        Some(session_id.clone()),
-                        "grow-pager",
-                    );
+                    let storage = grow_shell::save::StorageClient;
                     Some((auth_manager, registry, storage))
                 });
             tracing::info!(

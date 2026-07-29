@@ -78,6 +78,7 @@ pub fn rg_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(bundle_rg)]
     use super::*;
 
     #[cfg(bundle_rg)]

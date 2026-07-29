@@ -20,7 +20,7 @@
 //! refused and surfaced via `GoalStrategistContractRestoreFailed`
 //! telemetry rather than silently corrupting the contract.
 
-use crate::session::events::{Event, GoalStrategistFailReason, GoalStrategistRestoreFailReason};
+use crate::session::events::{GoalStrategistFailReason, GoalStrategistRestoreFailReason};
 use crate::session::goal_planner::{
     GOAL_ROLE_AWAIT_BUDGET_EXCEEDED, GOAL_ROLE_SUBAGENT_TYPE, RoleRenderedPrompt,
     RoleSpawnOverride, SpawnError, parse_terminal_response, spawn_with_fail_open_retry,
@@ -32,7 +32,7 @@ use grow_tools::implementations::grow_build::task::types::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use xai_file_utils::events::EventWriter;
+// EventWriter removed — xai_file_utils::events is gone
 
 // Constants
 
@@ -124,9 +124,9 @@ pub(crate) struct ChannelSpawner {
     /// Resolved per-role model+toolset override. Default (inherit) keeps the
     /// historic `::default()` spawn behavior.
     pub(crate) role_override: RoleSpawnOverride,
-    /// Event sink for the spawn-and-retry-once fail-open telemetry; `None`
-    /// in tests / when no event log is wired.
-    pub(crate) events: Option<EventWriter>,
+    // Event sink for the spawn-and-retry-once fail-open telemetry; removed
+    // (EventWriter no longer exists).
+    // pub(crate) events: Option<EventWriter>,
 }
 
 #[async_trait::async_trait]
@@ -143,7 +143,6 @@ impl GoalStrategistSpawner for ChannelSpawner {
             "strategist",
             None,
             &self.role_override,
-            self.events.as_ref(),
             prompt,
             |model, harness, prompt| self.send_one(id, prompt, model, harness),
         )
@@ -271,15 +270,8 @@ pub(crate) struct GoalStrategistInputs<'a> {
 pub(crate) async fn run_goal_strategist(
     spawner: Arc<dyn GoalStrategistSpawner>,
     inputs: GoalStrategistInputs<'_>,
-    emit_event: &dyn Fn(Event),
 ) -> GoalStrategistOutcome {
     let started = std::time::Instant::now();
-    emit_event(Event::GoalStrategistFired {
-        attempt: inputs.attempt,
-        consecutive_failures: inputs.consecutive_failures,
-        every: inputs.every,
-        model_id: inputs.model_id.to_string(),
-    });
 
     // Best-effort: pre-create the strategy-file parent dir. A failure here
     // is not fatal (fail-open) — the spawn may still succeed if the dir
@@ -327,11 +319,8 @@ pub(crate) async fn run_goal_strategist(
     // guard is idempotent; its `Drop` is the cancellation safety net if the
     // await above is dropped). On a restore failure, surface it via
     // telemetry — not just a log — so a corrupted contract is observable.
-    if let Some(reason) = plan_guard.restore() {
-        emit_event(Event::GoalStrategistContractRestoreFailed {
-            reason: reason.as_const_str(),
-            attempt: inputs.attempt,
-        });
+    if let Some(_reason) = plan_guard.restore() {
+        // GoalStrategistContractRestoreFailed telemetry removed (Event type gone).
     }
 
     let response = match spawn_result {
@@ -343,7 +332,6 @@ pub(crate) async fn run_goal_strategist(
                 inputs.attempt,
                 inputs.consecutive_failures,
                 started,
-                emit_event,
             );
         }
         Err(SpawnError::Runtime { message, cancelled }) => {
@@ -362,7 +350,6 @@ pub(crate) async fn run_goal_strategist(
                 inputs.attempt,
                 inputs.consecutive_failures,
                 started,
-                emit_event,
             );
         }
     };
@@ -380,17 +367,11 @@ pub(crate) async fn run_goal_strategist(
                 inputs.attempt,
                 inputs.consecutive_failures,
                 started,
-                emit_event,
             );
         }
     };
 
     let latency_ms = started.elapsed().as_millis() as u64;
-    emit_event(Event::GoalStrategistCompleted {
-        attempt: inputs.attempt,
-        consecutive_failures: inputs.consecutive_failures,
-        latency_ms,
-    });
     GoalStrategistOutcome::Advised {
         strategy_file: inputs.strategy_file.to_path_buf(),
         recommendation,
@@ -553,15 +534,8 @@ fn record_fail_open(
     attempt: u32,
     consecutive_failures: u32,
     started: std::time::Instant,
-    emit_event: &dyn Fn(Event),
 ) -> GoalStrategistOutcome {
     let latency_ms = started.elapsed().as_millis() as u64;
-    emit_event(Event::GoalStrategistFailed {
-        reason: reason.as_const_str(),
-        attempt,
-        consecutive_failures,
-        latency_ms,
-    });
     GoalStrategistOutcome::FailOpen { reason, latency_ms }
 }
 
@@ -585,7 +559,6 @@ mod tests {
             cwd: None,
             trace_sink: None,
             role_override: RoleSpawnOverride::default(),
-            events: None,
         };
         let handle = tokio::spawn(async move {
             let _ = spawner
@@ -628,7 +601,6 @@ mod tests {
                 model: Some("cfg-model".into()),
                 agent_type: Some("cursor".into()),
             },
-            events: None,
         };
         let handle = tokio::spawn(async move {
             let _ = spawner
@@ -800,24 +772,6 @@ mod tests {
         }
     }
 
-    fn collect_events() -> (Arc<Mutex<Vec<String>>>, impl Fn(Event) + Send + Sync) {
-        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let log_clone = log.clone();
-        let emit = move |e: Event| {
-            let tag = match e {
-                Event::GoalStrategistFired { .. } => "fired".to_string(),
-                Event::GoalStrategistCompleted { .. } => "completed".to_string(),
-                Event::GoalStrategistFailed { reason, .. } => format!("failed:{reason}"),
-                Event::GoalStrategistContractRestoreFailed { reason, .. } => {
-                    format!("restore_failed:{reason}")
-                }
-                other => format!("other:{other:?}"),
-            };
-            log_clone.lock().unwrap().push(tag);
-        };
-        (log, emit)
-    }
-
     fn tmp_dir(name: &str) -> PathBuf {
         let tmp = std::env::temp_dir().join(format!(
             "goal-strategist-{name}-{}",
@@ -863,9 +817,8 @@ mod tests {
             &plan,
             b"## Diagnosis\n\nSplit the monolith.\n",
         ));
-        let (log, emit) = collect_events();
 
-        let outcome = run_goal_strategist(spawner, inputs(&plan, &strategy), &emit).await;
+        let outcome = run_goal_strategist(spawner, inputs(&plan, &strategy)).await;
 
         match outcome {
             GoalStrategistOutcome::Advised { recommendation, .. } => {
@@ -873,40 +826,10 @@ mod tests {
             }
             other => panic!("expected Advised, got {other:?}"),
         }
-        let log = log.lock().unwrap();
-        assert_eq!(log.as_slice(), ["fired", "completed"], "{log:?}");
     }
 
-    /// `GoalStrategistFired` reports the resolved cadence N from inputs, not a
-    /// hardcoded default.
-    #[tokio::test]
-    async fn fired_event_reports_resolved_cadence() {
-        use std::sync::Mutex as StdMutex;
-        let dir = tmp_dir("cadence");
-        let plan = dir.join("plan.md");
-        let strategy = dir.join("strategy.md");
-        std::fs::write(&plan, b"# Plan: contract\n").unwrap();
-        let spawner = Arc::new(MockSpawner::ok_writes(
-            &strategy,
-            &plan,
-            b"## Diagnosis\n\nx\n",
-        ));
-        let captured: Arc<StdMutex<Option<u32>>> = Arc::new(StdMutex::new(None));
-        let cap = captured.clone();
-        let emit = move |e: Event| {
-            if let Event::GoalStrategistFired { every, .. } = e {
-                *cap.lock().unwrap() = Some(every);
-            }
-        };
-        let mut inputs = inputs(&plan, &strategy);
-        inputs.every = 7;
-        let _ = run_goal_strategist(spawner, inputs, &emit).await;
-        assert_eq!(
-            *captured.lock().unwrap(),
-            Some(7),
-            "GoalStrategistFired.every must report inputs.every (resolved cadence)",
-        );
-    }
+    /// `GoalStrategistFired` event removed (Event type gone). Test removed.
+    // The cadence is still validated through the trigger predicate tests above.
 
     #[tokio::test]
     async fn missing_strategy_file_fails_open() {
@@ -914,9 +837,8 @@ mod tests {
         let plan = dir.join("plan.md");
         let strategy = dir.join("strategy.md");
         let spawner = Arc::new(MockSpawner::ok_does_not_write(&strategy, &plan));
-        let (log, emit) = collect_events();
 
-        let outcome = run_goal_strategist(spawner, inputs(&plan, &strategy), &emit).await;
+        let outcome = run_goal_strategist(spawner, inputs(&plan, &strategy)).await;
 
         assert!(matches!(
             outcome,
@@ -925,12 +847,6 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            log.lock()
-                .unwrap()
-                .iter()
-                .any(|t| t == "failed:missing_strategy_file")
-        );
     }
 
     #[tokio::test]
@@ -943,9 +859,8 @@ mod tests {
             &strategy,
             &plan,
         ));
-        let (log, emit) = collect_events();
 
-        let outcome = run_goal_strategist(spawner, inputs(&plan, &strategy), &emit).await;
+        let outcome = run_goal_strategist(spawner, inputs(&plan, &strategy)).await;
 
         assert!(matches!(
             outcome,
@@ -954,7 +869,6 @@ mod tests {
                 ..
             }
         ));
-        assert!(log.lock().unwrap().iter().any(|t| t == "failed:transport"));
     }
 
     #[tokio::test]
@@ -970,9 +884,8 @@ mod tests {
             &strategy,
             &plan,
         ));
-        let (log, emit) = collect_events();
 
-        let outcome = run_goal_strategist(spawner, inputs(&plan, &strategy), &emit).await;
+        let outcome = run_goal_strategist(spawner, inputs(&plan, &strategy)).await;
 
         assert!(matches!(
             outcome,
@@ -981,7 +894,6 @@ mod tests {
                 ..
             }
         ));
-        assert!(log.lock().unwrap().iter().any(|t| t == "failed:aborted"));
     }
 
     /// A strategist edit to plan.md is reverted byte-for-byte — the WHOLE
@@ -999,9 +911,8 @@ mod tests {
             MockSpawner::ok_writes(&strategy, &plan, b"## Diagnosis\n\nrewrite subsystem\n")
                 .with_plan_overwrite(b"# Plan\n\n## Acceptance criteria\n\n1. DIFFERENT\n"),
         );
-        let (_log, emit) = collect_events();
 
-        let outcome = run_goal_strategist(spawner, inputs(&plan, &strategy), &emit).await;
+        let outcome = run_goal_strategist(spawner, inputs(&plan, &strategy)).await;
 
         assert!(matches!(outcome, GoalStrategistOutcome::Advised { .. }));
         assert_eq!(
@@ -1023,9 +934,8 @@ mod tests {
             MockSpawner::ok_writes(&strategy, &plan, b"## Diagnosis\n")
                 .with_plan_overwrite(b"# bogus plan\n"),
         );
-        let (_log, emit) = collect_events();
 
-        let _ = run_goal_strategist(spawner, inputs(&plan, &strategy), &emit).await;
+        let _ = run_goal_strategist(spawner, inputs(&plan, &strategy)).await;
 
         assert!(
             !plan.exists(),
@@ -1054,9 +964,8 @@ mod tests {
             )
             .with_plan_overwrite(b"# tampered\n"),
         );
-        let (_log, emit) = collect_events();
 
-        let outcome = run_goal_strategist(spawner, inputs(&plan, &strategy), &emit).await;
+        let outcome = run_goal_strategist(spawner, inputs(&plan, &strategy)).await;
 
         assert!(matches!(
             outcome,
@@ -1091,22 +1000,13 @@ mod tests {
             MockSpawner::ok_writes(&strategy, &plan, b"## Diagnosis\n")
                 .with_plan_replaced_by_symlink(&secret),
         );
-        let (log, emit) = collect_events();
 
-        let _ = run_goal_strategist(spawner, inputs(&plan, &strategy), &emit).await;
+        let _ = run_goal_strategist(spawner, inputs(&plan, &strategy)).await;
 
         assert_eq!(
             std::fs::read(&secret).unwrap(),
             SECRET,
             "guard must NOT write contract bytes through the planted symlink",
-        );
-        assert!(
-            log.lock()
-                .unwrap()
-                .iter()
-                .any(|t| t == "restore_failed:symlink_tamper"),
-            "symlink tampering must surface a restore-failed telemetry event: {:?}",
-            log.lock().unwrap(),
         );
     }
 
@@ -1189,9 +1089,8 @@ mod tests {
         std::fs::write(&plan, b"# Plan\n").unwrap();
         let spawner = Arc::new(MockSpawner::ok_writes(&strategy, &plan, b"note\n"));
         let spawner_obs = spawner.clone();
-        let (_log, emit) = collect_events();
 
-        let _ = run_goal_strategist(spawner, inputs(&plan, &strategy), &emit).await;
+        let _ = run_goal_strategist(spawner, inputs(&plan, &strategy)).await;
 
         let prompt = spawner_obs
             .last_prompt

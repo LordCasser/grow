@@ -1,10 +1,10 @@
-//! Telemetry engine for Grow sessions: product events + Mixpanel emission +
+//! Telemetry engine for Grow sessions: product events +
 //! Sentry error reporting + OpenTelemetry tracing + structured unified log.
 //!
-//! Extracted from `xai-file-utils` per review feedback so telemetry has
+//! Extracted from a shared utility crate per review feedback so telemetry has
 //! its own ownership boundary (see CODEOWNERS) and so downstream consumers
 //! that only want event tracking + inference metrics no longer pull in
-//! Mixpanel/HTTP/identity dependencies.
+//! HTTP/identity dependencies.
 
 mod appender;
 pub mod client;

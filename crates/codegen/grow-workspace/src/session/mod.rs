@@ -517,7 +517,7 @@ pub struct WorkspaceShared {
     /// Owner identity, captured at construction; stamps
     /// `workspace_environment.json` and attributes uploads. Empty in test /
     /// local-only contexts.
-    pub(crate) identity: crate::upload::environment::WorkspaceIdentity,
+    pub(crate) identity: crate::upload_environment::WorkspaceIdentity,
     /// Workspace-level fuzzy search manager. Separate from the shell's
     /// own `FuzzySearchManager` — this instance serves remote (hub/RPC)
     /// clients.
@@ -532,37 +532,14 @@ pub struct WorkspaceShared {
     /// Resolved `$GROW_WORKSPACE_HOME` — the workspace-owned on-disk state root
     /// (`<grow_home>/workspace` by default). The upload queue spills here.
     pub(crate) workspace_home: std::path::PathBuf,
-    pub(crate) upload_queue: Option<std::sync::Arc<xai_file_utils::queue::UploadQueue>>,
     /// Whether collection is disabled (opt-out, or the fail-closed default).
     pub(crate) data_collection_disabled: bool,
-    /// Whether per-session `events.jsonl` recording is enabled
-    /// (`GROW_WORKSPACE_EVENTS_ENABLED=true`). When `false`, every
-    /// [`session_event_writer`](Self::session_event_writer) hands back an
-    /// [`EventWriter::noop()`](xai_file_utils::events::EventWriter::noop) and
-    /// no session directory or `events.jsonl` is ever created — the legacy
-    /// behaviour, preserved bit-for-bit.
-    pub(crate) events_enabled: bool,
     /// Whether per-session `workspace_tool_definitions.json` emission is
     /// enabled (`GROW_WORKSPACE_TOOL_DEFS_ENABLED=true`).
     pub(crate) tool_defs_enabled: bool,
     /// `session_id` → last `ToolsChanged` re-emit `Instant`, debouncing
     /// re-emits per session. The initial bind emission does not consult this map.
     pub(crate) tool_defs_last_emit: dashmap::DashMap<String, std::time::Instant>,
-    /// Per-session `events.jsonl` writers, keyed by `session_id`. Lazily opened
-    /// on first use under `workspace_home/sessions/{session_id}/`. Held in an
-    /// `Arc` shared with [`ActivityTracker`](crate::activity::ActivityTracker) so
-    /// `Tool*` events resolve the right writer without a back-reference to
-    /// `WorkspaceShared`. Stays empty whenever `events_enabled` is `false`.
-    pub(crate) session_event_writers:
-        Arc<dashmap::DashMap<String, xai_file_utils::events::EventWriter>>,
-    /// In-flight before-turn enqueue tasks, keyed by `(session_id, turn)`.
-    /// Stored by `on_before_turn`; evicted on every turn-end path. The `After`
-    /// turn-hook handler awaits the handle for its ack's `artifact_count`; the
-    /// fire-and-forget path just drops it (detach, not abort).
-    pub(crate) inflight_enqueues: dashmap::DashMap<
-        (String, u64),
-        tokio::task::JoinHandle<xai_file_utils::queue::EnqueueOutcome>,
-    >,
     /// Artifact-producer tasks, awaited by the drain and counted by the
     /// status publisher — see
     /// [`WorkspaceHandle::spawn_producer`](crate::handle::WorkspaceHandle).
@@ -587,48 +564,8 @@ impl WorkspaceShared {
     pub fn workspace_home(&self) -> &std::path::Path {
         &self.workspace_home
     }
-    /// The durable upload queue used for archives. `None` in tests and
-    /// local mode — see
-    /// [`WorkspaceShared::upload_queue`].
-    pub fn upload_queue(&self) -> Option<&std::sync::Arc<xai_file_utils::queue::UploadQueue>> {
-        self.upload_queue.as_ref()
-    }
-    /// Return the per-session `events.jsonl` writer for `session_id`, opening
-    /// (and caching) it on first use under
-    /// `workspace_home/sessions/{session_id}/`.
-    ///
-    /// When `events_enabled` is `false` this returns
-    /// [`EventWriter::noop()`](xai_file_utils::events::EventWriter::noop)
-    /// WITHOUT touching the cache or the filesystem, so the flag-off path stays
-    /// byte-for-byte identical to the legacy behaviour. The returned handle is
-    /// `Clone + Send + Sync`; callers emit through it directly.
-    pub(crate) fn session_event_writer(
-        &self,
-        session_id: &str,
-    ) -> xai_file_utils::events::EventWriter {
-        get_or_open_session_writer(
-            self.events_enabled,
-            &self.session_event_writers,
-            &self.workspace_home,
-            session_id,
-        )
-    }
-    /// Like `session_event_writer` but never opens a new writer. Returns `None`
-    /// if the session was never opened or already evicted.
-    #[allow(dead_code)]
-    pub(crate) fn session_event_writer_cached(
-        &self,
-        session_id: &str,
-    ) -> Option<xai_file_utils::events::EventWriter> {
-        if !self.events_enabled {
-            return None;
-        }
-        self.session_event_writers
-            .get(session_id)
-            .map(|w| w.value().clone())
-    }
     /// Resolved owner identity of this workspace.
-    pub(crate) fn identity(&self) -> &crate::upload::environment::WorkspaceIdentity {
+    pub(crate) fn identity(&self) -> &crate::upload_environment::WorkspaceIdentity {
         &self.identity
     }
     /// Stable hub server id (`--server-id`), if a hub config is present.
@@ -886,147 +823,4 @@ impl WorkspaceShared {
         rebuilt
     }
 }
-/// Core get-or-open logic for a session's `events.jsonl` writer, factored out of
-/// [`WorkspaceShared::session_event_writer`] so the `enabled` gate can be
-/// unit-tested without touching process environment.
-///
-/// - `enabled == false` → [`EventWriter::noop()`]; the `writers` map and the
-///   filesystem are left untouched (legacy behaviour preserved).
-/// - `enabled == true` → returns the cached writer for `session_id`, opening a
-///   fresh one (and creating `workspace_home/sessions/{session_id}/`) on first
-///   use. [`EventWriter::open`] uses `create(true).append(true)`, so a writer
-///   re-opened for the same directory after a workspace restart APPENDS to the
-///   existing `events.jsonl` rather than truncating it.
-pub(crate) fn get_or_open_session_writer(
-    enabled: bool,
-    writers: &dashmap::DashMap<String, xai_file_utils::events::EventWriter>,
-    workspace_home: &Path,
-    session_id: &str,
-) -> xai_file_utils::events::EventWriter {
-    use xai_file_utils::events::EventWriter;
-    if !enabled {
-        return EventWriter::noop();
-    }
-    if let Some(existing) = writers.get(session_id) {
-        return existing.value().clone();
-    }
-    let dir = workspace_home.join("sessions").join(session_id);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(
-            session_id = %session_id,
-            dir = %dir.display(),
-            error = %e,
-            "failed to create session event dir; events.jsonl disabled for this session (will retry on next use)"
-        );
-        return EventWriter::noop();
-    }
-    let writer = EventWriter::open(&dir);
-    writers
-        .entry(session_id.to_owned())
-        .or_insert(writer)
-        .clone()
-}
-#[cfg(test)]
-mod tests {
-    use super::get_or_open_session_writer;
-    use dashmap::DashMap;
-    use xai_file_utils::events::{Event, EventWriter};
-    fn count_lines(path: &std::path::Path) -> usize {
-        std::fs::read_to_string(path)
-            .unwrap()
-            .trim()
-            .lines()
-            .count()
-    }
-    #[test]
-    fn flag_off_returns_noop_and_creates_nothing() {
-        let home = tempfile::tempdir().unwrap();
-        let writers: DashMap<String, EventWriter> = DashMap::new();
-        let w = get_or_open_session_writer(false, &writers, home.path(), "sess-a");
-        w.emit(Event::ToolStarted {
-            tool_name: "read_file".into(),
-        });
-        assert!(writers.is_empty(), "flag-off must not cache a writer");
-        let sess_dir = home.path().join("sessions").join("sess-a");
-        assert!(
-            !sess_dir.exists(),
-            "flag-off must not create the session dir or events.jsonl"
-        );
-    }
-    #[test]
-    fn flag_on_opens_and_writes_real_content() {
-        let home = tempfile::tempdir().unwrap();
-        let writers: DashMap<String, EventWriter> = DashMap::new();
-        let w = get_or_open_session_writer(true, &writers, home.path(), "sess-b");
-        w.emit(Event::YoloToggled { enabled: true });
-        assert_eq!(writers.len(), 1, "flag-on must cache the opened writer");
-        let path = home
-            .path()
-            .join("sessions")
-            .join("sess-b")
-            .join("events.jsonl");
-        let text = std::fs::read_to_string(&path).unwrap();
-        let v: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
-        assert_eq!(v["type"], "yolo_toggled");
-        assert_eq!(v["enabled"], true);
-        assert!(v["ts"].as_str().is_some());
-    }
-    #[test]
-    fn second_call_reuses_one_cache_entry() {
-        let home = tempfile::tempdir().unwrap();
-        let writers: DashMap<String, EventWriter> = DashMap::new();
-        get_or_open_session_writer(true, &writers, home.path(), "sess-c").emit(
-            Event::ToolStarted {
-                tool_name: "a".into(),
-            },
-        );
-        get_or_open_session_writer(true, &writers, home.path(), "sess-c").emit(
-            Event::ToolStarted {
-                tool_name: "b".into(),
-            },
-        );
-        assert_eq!(writers.len(), 1, "same session must reuse one cache entry");
-        let path = home
-            .path()
-            .join("sessions")
-            .join("sess-c")
-            .join("events.jsonl");
-        assert_eq!(count_lines(&path), 2);
-    }
-    #[test]
-    fn reopen_after_restart_appends() {
-        let home = tempfile::tempdir().unwrap();
-        {
-            let writers: DashMap<String, EventWriter> = DashMap::new();
-            get_or_open_session_writer(true, &writers, home.path(), "sess-d").emit(
-                Event::ToolStarted {
-                    tool_name: "before-restart".into(),
-                },
-            );
-        }
-        {
-            let writers: DashMap<String, EventWriter> = DashMap::new();
-            get_or_open_session_writer(true, &writers, home.path(), "sess-d").emit(
-                Event::ToolStarted {
-                    tool_name: "after-restart".into(),
-                },
-            );
-        }
-        let path = home
-            .path()
-            .join("sessions")
-            .join("sess-d")
-            .join("events.jsonl");
-        let text = std::fs::read_to_string(&path).unwrap();
-        let lines: Vec<&str> = text.trim().lines().collect();
-        assert_eq!(
-            lines.len(),
-            2,
-            "re-open after restart must append, preserving the earlier line"
-        );
-        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(first["tool_name"], "before-restart");
-        let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(second["tool_name"], "after-restart");
-    }
-}
+

@@ -105,116 +105,25 @@ pub(crate) fn embedding_session_credentials(
         api_key_provider,
     )
 }
-/// Build a `StorageClient` for proxy uploads (including the high-volume
-/// `batch_upload` used for repo context / `repo_changes_dedup`).
+/// Build a storage client for proxy uploads.
 ///
-/// ### Client Identity (Important)
-///
-/// Every call site **must** pass the correct `client_identifier` so that
-/// the API proxy (and telemetry / metrics backends) can properly attribute requests:
-///
-/// - `"grow-shell"`   — classic Grow CLI / TUI (grow-shell)
-/// - `"grow-pager"`   — new Grow Pager / TUI (grow-pager)
-/// - `"grow-desktop"` — Grow Desktop app
-/// - `"grow-extension"` — VS Code / browser extension
-///
-/// The factory forwards both:
-/// - `x-grow-client-version`   (e.g. "0.1.210-alpha.5 (279ffacddb)")
-/// - `x-grow-client-identifier`
-///
-/// to the underlying `xai-file-utils::StorageClient` via
-/// `.with_client_identity(...)`. This is what powers the improved error
-/// logging on the request-attribution path.
-///
-/// - When `auth_manager` is `Some`, uses the live `ShellAuthCredentialProvider`
-///   (OIDC refresh, proactive refresh, 401 recovery via `unauthorized_recovery`).
-/// - When `auth_manager` is `None`, falls back to a static token:
-///   - `user_token` (normal OIDC users via com scope) → sends Bearer + `X-Grow-Token-Auth`
-///   - `deployment_key` (enterprise) → sends bare Bearer
-///   - the optional extra access key is added only for matching hosts when
-///     the non-production feature is enabled.
-///
-/// `user_token` is only for AuthManager-less one-shots; live paths (incl. pager
-/// restore) pass the AuthManager plus an optional deployment key.
+/// REMOVED — xai_file_utils::storage_client is gone.
+/// Previously returned `xai_file_utils::storage_client::StorageClient`.
+/// All upload functionality has been stripped from xai-file-utils.
 pub fn build_storage_client_for_proxy(
-    proxy_base_url: &str,
-    deployment_key: Option<String>,
-    alpha_test_key: Option<String>,
-    auth_manager: Option<Arc<AuthManager>>,
-    user_token: Option<String>,
-    session_id: Option<String>,
-    client_identifier: &str,
-) -> xai_file_utils::storage_client::StorageClient {
-    let http_client = crate::http::shared_upload_client();
-    if let Some(am) = auth_manager {
-        let provider: Arc<dyn AuthCredentialProvider> = Arc::new(ShellAuthCredentialProvider::new(
-            am.clone(),
-            deployment_key,
-            alpha_test_key,
-        ));
-        let bridge: Arc<dyn xai_file_utils::storage_client::Auth401AttributionCallback> =
-            Arc::new(StorageClientAttributionBridge::new(am, session_id));
-        xai_file_utils::storage_client::StorageClient::with_provider(
-            proxy_base_url,
-            http_client,
-            provider,
-        )
-        .with_client_identity(grow_version::VERSION, client_identifier)
-        .with_client_mode(crate::http::process_client_mode())
-        .with_attribution(bridge)
-    } else {
-        let mut creds = ProviderAuthCredentials::new(user_token);
-        creds.deployment_key = deployment_key;
-        creds.alpha_test_key = alpha_test_key;
-        let wire_bearer = creds
-            .deployment_key
-            .clone()
-            .or_else(|| creds.user_token.clone());
-        let provider: Arc<dyn AuthCredentialProvider> = Arc::new(
-            StaticAuthCredentialProvider::new(Box::new(creds), wire_bearer),
-        );
-        xai_file_utils::storage_client::StorageClient::with_provider(
-            proxy_base_url,
-            http_client,
-            provider,
-        )
-        .with_client_identity(grow_version::VERSION, client_identifier)
-        .with_client_mode(crate::http::process_client_mode())
-    }
+    _proxy_base_url: &str,
+    _deployment_key: Option<String>,
+    _alpha_test_key: Option<String>,
+    _auth_manager: Option<Arc<AuthManager>>,
+    _user_token: Option<String>,
+    _session_id: Option<String>,
+    _client_identifier: &str,
+) {
+    // StorageClient removed — xai_file_utils::storage_client is gone
+    tracing::warn!("build_storage_client_for_proxy: StorageClient removed, uploads disabled");
 }
-/// Bridge that lets `StorageClient` (which lives in xai-file-utils)
-/// emit shell's 401-attribution event without the data-collector crate
-/// having a direct dependency on shell. Holds a reference to the live
-/// `AuthManager` so attribution events carry the correct user_id.
-pub(crate) struct StorageClientAttributionBridge {
-    auth_manager: Arc<AuthManager>,
-    session_id: Option<String>,
-}
-impl std::fmt::Debug for StorageClientAttributionBridge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StorageClientAttributionBridge")
-            .finish_non_exhaustive()
-    }
-}
-impl StorageClientAttributionBridge {
-    pub(crate) fn new(auth_manager: Arc<AuthManager>, session_id: Option<String>) -> Self {
-        Self {
-            auth_manager,
-            session_id,
-        }
-    }
-}
-impl xai_file_utils::storage_client::Auth401AttributionCallback for StorageClientAttributionBridge {
-    fn record_401(&self, operation: &str, sent_bearer_prefix: Option<&str>) {
-        crate::auth::attribution::record_consumer_401(
-            self.auth_manager.as_ref(),
-            self.session_id.as_deref(),
-            crate::auth::attribution::ConsumerKind::StorageClient,
-            operation,
-            sent_bearer_prefix,
-        );
-    }
-}
+// StorageClientAttributionBridge removed — xai_file_utils::storage_client is gone
+
 /// Credential provider for the OTel layer's `RefreshableSpanExporter`.
 ///
 /// Starts with a bootstrap `AuthManager` (disk-read-only, no refresher)

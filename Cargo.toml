@@ -59,7 +59,6 @@ members = [
     "crates/codegen/grow-workspace-types",
     "crates/codegen/xai-hooks-plugins-types",
     "crates/codegen/xai-hunk-tracker",
-    "crates/codegen/xai-mixpanel",
     "crates/codegen/xai-prompt-queue",
     "crates/codegen/xai-ratatui-inline",
     "crates/codegen/xai-ratatui-textarea",
@@ -69,7 +68,6 @@ members = [
     "crates/codegen/xai-tracing-macros",
     "crates/codegen/xai-tty-utils",
     "crates/codegen/xai-workflow",
-    "crates/common/xai-circuit-breaker",
     "crates/common/xai-computer-hub-core",
     "crates/common/xai-computer-hub-mcp-adapter",
     "crates/common/xai-computer-hub-sdk",
@@ -148,7 +146,6 @@ fs2 = "0.4"
 futures = "0.3"
 futures-util = "0.3"
 fuzzy-matcher = "0.3.7"
-gcloud-storage = { version = "1.3.0", default-features = false, features = ["auth", "jwt-aws-lc-rs", "external-account"] }
 gethostname = "1"
 gix = { version = "0.83", default-features = false, features = ["sha1"] }
 glob = "0.3"
@@ -278,7 +275,6 @@ wiremock = "0.6"
 wl-clipboard-rs = "0.9"
 xai-acp-lib = { path = "crates/codegen/xai-acp-lib" }
 xai-agent-lifecycle = { path = "crates/codegen/xai-agent-lifecycle" }
-xai-circuit-breaker = { path = "crates/common/xai-circuit-breaker" }
 xai-computer-hub-core = { path = "crates/common/xai-computer-hub-core" }
 xai-computer-hub-sdk = { path = "crates/common/xai-computer-hub-sdk" }
 xai-gix-status = { path = "crates/codegen/xai-gix-status" }
@@ -310,7 +306,6 @@ grow-workspace = { path = "crates/codegen/grow-workspace" }
 grow-workspace-types = { path = "crates/codegen/grow-workspace-types" }
 xai-hooks-plugins-types = { path = "crates/codegen/xai-hooks-plugins-types" }
 xai-interjection-core = { path = "crates/common/xai-interjection-core" }
-xai-mixpanel = { path = "crates/codegen/xai-mixpanel" }
 xai-prompt-queue = { path = "crates/codegen/xai-prompt-queue" }
 xai-proto-build = { path = "crates/build/xai-proto-build" }
 xai-ratatui-inline = { path = "crates/codegen/xai-ratatui-inline" }

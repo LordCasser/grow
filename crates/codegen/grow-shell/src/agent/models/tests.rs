@@ -577,77 +577,126 @@ fn rebuild_updates_models_and_available() {
 }
 
 #[test]
-fn current_reasoning_effort_round_trip() {
-    let mgr = test_manager();
-    assert_eq!(mgr.current_reasoning_effort(), None);
-
-    mgr.set_current_reasoning_effort(Some(ReasoningEffort::High));
-    assert_eq!(mgr.current_reasoning_effort(), Some(ReasoningEffort::High));
-
-    mgr.set_current_reasoning_effort(None);
-    assert_eq!(mgr.current_reasoning_effort(), None);
-}
-
-#[test]
-fn current_reasoning_effort_seeded_from_config() {
-    let tmp = std::env::temp_dir().join("grow-test-models-manager-seed");
-    let auth_manager = Arc::new(AuthManager::new(&tmp, ServiceAuthConfig::default()));
-    let mut cfg = config::Config::default();
-    cfg.models.default_reasoning_effort = Some(ReasoningEffort::Xhigh);
-    let mgr = ModelsManager::new(
-        None,
-        IndexMap::new(),
-        acp::ModelId::new("default"),
-        auth_manager,
-        cfg,
-    );
-    assert_eq!(mgr.current_reasoning_effort(), Some(ReasoningEffort::Xhigh),);
-}
-
-#[test]
-fn default_reasoning_effort_only_stamps_supporting_model() {
+fn reasoning_effort_default_precedence_is_model_then_global_then_lowest() {
     use indexmap::IndexMap;
 
     let mut cfg = config::Config::default();
-    cfg.models.default = Some("reasoning-model".to_string());
-    cfg.models.default_reasoning_effort = Some(ReasoningEffort::High);
+    cfg.models.default_reasoning_effort = Some(ReasoningEffort::Max);
 
     let mut prefetched = IndexMap::new();
-    let mut reasoning_entry = ModelEntry {
-        info: config::ModelInfo::fallback("reasoning-model"),
+    let option = |value: ReasoningEffort, default| ReasoningEffortOption {
+        id: value.as_str().to_string(),
+        value,
+        label: value.as_str().to_string(),
+        description: None,
+        default,
+    };
+
+    let mut model_default = ModelEntry {
+        info: config::ModelInfo::fallback("model-default"),
         api_key: None,
         env_key: None,
         auth_provider: None,
         api_base_url: None,
     };
-    reasoning_entry.info.supports_reasoning_effort = true;
-    prefetched.insert("reasoning-model".to_string(), reasoning_entry);
+    model_default.info.reasoning_efforts = vec![
+        option(ReasoningEffort::High, true),
+        option(ReasoningEffort::Max, false),
+    ];
+    prefetched.insert("model-default".to_string(), model_default);
+
+    let mut global_default = ModelEntry {
+        info: config::ModelInfo::fallback("global-default"),
+        api_key: None,
+        env_key: None,
+        auth_provider: None,
+        api_base_url: None,
+    };
+    global_default.info.reasoning_efforts = vec![
+        option(ReasoningEffort::High, false),
+        option(ReasoningEffort::Max, false),
+    ];
+    prefetched.insert("global-default".to_string(), global_default);
+
+    let mut lowest_fallback = ModelEntry {
+        info: config::ModelInfo::fallback("lowest-fallback"),
+        api_key: None,
+        env_key: None,
+        auth_provider: None,
+        api_base_url: None,
+    };
+    lowest_fallback.info.reasoning_efforts = vec![option(ReasoningEffort::High, false)];
+    prefetched.insert("lowest-fallback".to_string(), lowest_fallback);
+
+    let mut legacy = ModelEntry {
+        info: config::ModelInfo::fallback("legacy"),
+        api_key: None,
+        env_key: None,
+        auth_provider: None,
+        api_base_url: None,
+    };
+    legacy.info.supports_reasoning_effort = true;
+    prefetched.insert("legacy".to_string(), legacy);
+
+    let plain = ModelEntry {
+        info: config::ModelInfo::fallback("plain"),
+        api_key: None,
+        env_key: None,
+        auth_provider: None,
+        api_base_url: None,
+    };
+    prefetched.insert("plain".to_string(), plain);
 
     let catalog = resolve_model_catalog(&cfg, Some(prefetched));
     assert_eq!(
-        catalog["reasoning-model"].info.reasoning_effort,
+        catalog["model-default"].info.reasoning_effort,
         Some(ReasoningEffort::High),
-        "reasoning-supporting default model should be stamped",
+        "the model-level marked default must override the global default",
     );
+    assert_eq!(
+        catalog["global-default"].info.reasoning_effort,
+        Some(ReasoningEffort::Max),
+        "a supported global default applies when the model has no default",
+    );
+    assert_eq!(
+        catalog["lowest-fallback"].info.reasoning_effort,
+        Some(ReasoningEffort::High),
+        "an unsupported global default falls back to the model's lowest effort",
+    );
+    assert_eq!(
+        catalog["legacy"].info.reasoning_effort,
+        Some(ReasoningEffort::Low),
+        "legacy reasoning support falls back to its lowest safe effort",
+    );
+    assert_eq!(catalog["plain"].info.reasoning_effort, None);
+}
 
-    let mut cfg = config::Config::default();
-    cfg.models.default = Some("plain-model".to_string());
-    cfg.models.default_reasoning_effort = Some(ReasoningEffort::High);
-
-    let mut prefetched = IndexMap::new();
-    let plain_entry = ModelEntry {
-        info: config::ModelInfo::fallback("plain-model"),
+#[test]
+fn reasoning_effort_lowest_fallback_uses_semantic_order() {
+    let mut entry = ModelEntry {
+        info: config::ModelInfo::fallback("out-of-order"),
         api_key: None,
         env_key: None,
         auth_provider: None,
         api_base_url: None,
     };
-    prefetched.insert("plain-model".to_string(), plain_entry);
-
-    let catalog = resolve_model_catalog(&cfg, Some(prefetched));
+    entry.info.reasoning_efforts = [ReasoningEffort::Max, ReasoningEffort::High]
+        .into_iter()
+        .map(|value| ReasoningEffortOption {
+            id: value.as_str().to_string(),
+            value,
+            label: value.as_str().to_string(),
+            description: None,
+            default: false,
+        })
+        .collect();
+    let catalog = resolve_model_catalog(
+        &config::Config::default(),
+        Some(IndexMap::from([("out-of-order".to_string(), entry)])),
+    );
     assert_eq!(
-        catalog["plain-model"].info.reasoning_effort, None,
-        "non-reasoning default model must NOT be stamped with persisted effort",
+        catalog["out-of-order"].info.reasoning_effort,
+        Some(ReasoningEffort::High),
     );
 }
 

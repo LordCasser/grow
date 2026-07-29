@@ -190,8 +190,8 @@ pub(crate) struct InputItem {
     pub(crate) prompt_id: String,
     pub(crate) prompt_blocks: Vec<ContentBlock>,
     pub(crate) prompt_mode: PromptMode,
-    pub(crate) trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
-    pub(crate) artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
+    pub(crate) trace_gcs_config: Option<crate::save::TraceExportConfig>,
+    pub(crate) artifact_tracker: Option<crate::save::ArtifactTracker>,
     /// Optional client identifier from the prompt request meta (overrides session-level one)
     pub(crate) client_identifier: Option<String>,
     /// See [`SessionCommand::Prompt::screen_mode`]. Telemetry-only.
@@ -714,7 +714,7 @@ pub(crate) struct SessionActor {
     /// Feedback manager for signal tracking and feedback request heuristics
     pub(crate) feedback_manager: Arc<FeedbackManager>,
     pub(crate) upload_queue:
-        std::sync::Arc<std::sync::OnceLock<xai_file_utils::queue::UploadQueue>>,
+        std::sync::Arc<std::sync::OnceLock<crate::save::UploadQueue>>,
     /// Cancellation token for the feedback sync loop (None if no feedback client)
     pub(crate) sync_loop_cancel: Option<tokio_util::sync::CancellationToken>,
     /// The fully-built Agent: owns the ToolBridge, system prompt, policies,
@@ -1082,7 +1082,7 @@ pub(crate) struct SessionActor {
 #[derive(Clone)]
 pub(crate) struct TraceConfigTemplate {
     pub(crate) bucket_url: Option<String>,
-    pub(crate) upload_method: crate::session::repo_changes::UploadMethod,
+    pub(crate) upload_method: crate::save::UploadMethod,
 }
 impl SessionActor {
     /// Get the signals handle for tracking session events.

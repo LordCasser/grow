@@ -588,7 +588,7 @@ pub(crate) async fn spawn_session_actor(
     let synthetic_trace_tx_shared: std::sync::Arc<
         std::sync::Mutex<
             Option<
-                tokio::sync::mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>,
+                tokio::sync::mpsc::UnboundedSender<crate::save::SyntheticTurnTraceRequest>,
             >,
         >,
     > = std::sync::Arc::new(std::sync::Mutex::new(None));

@@ -1,14 +1,16 @@
-//! Re-exports of the crate-internal event types that live in
-//! `xai-file-utils`. The orphan-rule items (`From<&permission::Decision>`
+//! Re-exports of event types (stub — cloud upload removed).
+//! The orphan-rule items (`From<&permission::Decision>`
 //! and the doom-loop categorizer) stay here since they need shell-local
 //! types.
 
-pub(crate) use xai_file_utils::events::tracker::EventTracker;
-pub(crate) use xai_file_utils::events::types::{
+// Re-exports from restored local stub modules (previously in xai-file-utils).
+pub(crate) use crate::session::event_tracker::EventTracker;
+pub(crate) use crate::session::event_types::{
     CancellationCategory, EVENT_SCHEMA_VERSION, Event, GoalClassifierVerdictTelemetry,
     GoalPauseReasonTelemetry, InterjectionSource, Phase, RedirectKind, SessionRelationship,
     ToolOutcome, TurnOutcomeLabel,
 };
+pub(crate) use crate::session::event_writer::EventWriter;
 
 // ── Laziness detector (Layer 3) discriminator vocabulary ─────────────
 //

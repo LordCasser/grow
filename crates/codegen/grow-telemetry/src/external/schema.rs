@@ -666,8 +666,8 @@ pub(crate) fn permission_mode_label(m: crate::enums::PermissionMode) -> &'static
     }
 }
 
-fn tool_outcome_label(o: &xai_file_utils::events::types::ToolOutcome) -> &'static str {
-    use xai_file_utils::events::types::ToolOutcome;
+fn tool_outcome_label(o: &crate::events::ToolOutcome) -> &'static str {
+    use crate::events::ToolOutcome;
     match o {
         ToolOutcome::Success => "success",
         ToolOutcome::Error => "error",
@@ -877,7 +877,7 @@ pub fn map_api_error(ev: &events::ApiError) -> Option<ExternalRecord> {
 
 /// `ToolCallCompleted` → `grow_code.tool_result` + `tool.usage`.
 pub fn map_tool_result(ev: &events::ToolCallCompleted) -> Option<ExternalRecord> {
-    use xai_file_utils::events::types::ToolOutcome;
+    use crate::events::ToolOutcome;
     let sanitized = sanitize_tool_name(&ev.tool_name);
     let outcome = tool_outcome_label(&ev.outcome);
     let mut rec = ExternalRecord::event(ExternalEventName::ToolResult)

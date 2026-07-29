@@ -418,22 +418,7 @@ impl SessionActor {
                             }
                             other => format!("{other:?}"),
                         };
-                        self.emit_event(xai_file_utils::events::Event::McpToolCallCompleted {
-                            server_name: server.to_string(),
-                            tool_name: tool.to_string(),
-                            call_id: format!(
-                                "{}{}{}",
-                                server,
-                                crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER,
-                                tool
-                            ),
-                            duration_ms: 0,
-                            success: false,
-                            is_timeout: false,
-                            error: Some(error_reason),
-                            reconnect_attempted: false,
-                            auth_retry_attempted: false,
-                        });
+                        // McpToolCallCompleted event removed — xai_file_utils::events is gone
                     }
                     if matches!(
                         tool_loop,
@@ -752,7 +737,7 @@ impl SessionActor {
             };
             grow_telemetry::session_ctx::log_event(grow_telemetry::events::ToolCallCompleted {
                 tool_name: prepared.tool_name.clone(),
-                outcome: tool_outcome,
+                outcome: tool_outcome.into(),
                 duration_ms,
                 file_path: ext_file_path,
                 parameters: ext_parameters,
@@ -1155,18 +1140,13 @@ impl SessionActor {
             };
             self.events.permission_resolved(
                 &call.function.name,
-                match &decision {
-                    Decision::Allow | Decision::Ask => {
-                        xai_file_utils::events::types::PermissionDecision::Allow
-                    }
-                    Decision::Reject(_) | Decision::PolicyDeny(_) => {
-                        xai_file_utils::events::types::PermissionDecision::Deny
-                    }
-                    Decision::Cancelled => {
-                        xai_file_utils::events::types::PermissionDecision::Cancelled
-                    }
-                    Decision::FollowupMessage(_) => {
-                        xai_file_utils::events::types::PermissionDecision::Followup
+                {
+                    use crate::session::event_types::PermissionDecision;
+                    match &decision {
+                        Decision::Allow | Decision::Ask => PermissionDecision::Allow,
+                        Decision::Reject(_) | Decision::PolicyDeny(_) => PermissionDecision::Deny,
+                        Decision::Cancelled => PermissionDecision::Cancelled,
+                        Decision::FollowupMessage(_) => PermissionDecision::Followup,
                     }
                 },
                 perm_start,

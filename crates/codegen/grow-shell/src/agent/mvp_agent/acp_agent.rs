@@ -1089,7 +1089,7 @@ impl acp::Agent for MvpAgent {
                         origin_client.clone(),
                     )
             });
-        if let Some(effort) = self.models_manager.current_reasoning_effort()
+        if let Some(effort) = self.models_manager.model_default_reasoning_effort(&session_sampling.model)
             && self
                 .models_manager
                 .model_supports_reasoning_effort(&session_sampling.model)
@@ -2561,7 +2561,7 @@ impl acp::Agent for MvpAgent {
                         None
                     }
                 };
-                let streaming_partial = crate::upload::turn::take_streaming_partial(
+                let streaming_partial = crate::save::take_streaming_partial(
                         &handle.cmd_tx,
                         prompt_id.clone(),
                         matches!(stop_reason, acp::StopReason::EndTurn),
@@ -2916,7 +2916,7 @@ impl acp::Agent for MvpAgent {
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to complete prompt trace: {e:?}");
-                                crate::upload::trace::flush_then_write_error_manifest(
+                                crate::save::flush_then_write_error_manifest(
                                         &err_ctx,
                                         deadline,
                                     )
@@ -3018,7 +3018,7 @@ impl acp::Agent for MvpAgent {
                     }
                 };
                 let err_kind_str = format!("{:?}", err.code);
-                let streaming_partial = crate::upload::turn::take_streaming_partial(
+                let streaming_partial = crate::save::take_streaming_partial(
                         &handle.cmd_tx,
                         prompt_id.clone(),
                         false,
@@ -3043,7 +3043,7 @@ impl acp::Agent for MvpAgent {
                     let upload_deadline = block_for_upload
                         .then(|| tokio::time::Instant::now() + upload_flush_timeout);
                     if let Some(deadline) = upload_deadline {
-                        let result = TurnResultMetadata {
+                        let result: TurnResultMetadata = TurnResultMetadata {
                             schema_version: GCS_SCHEMA_VERSION,
                             request_id,
                             completed: false,
@@ -3062,22 +3062,22 @@ impl acp::Agent for MvpAgent {
                             subagents_spawned: subagent_refs.clone(),
                         };
                         let wait = UploadWait::Defer { deadline };
-                        upload_turn_result(&ctx, &result, wait).await;
+                        upload_turn_result(&ctx, &result, wait.clone()).await;
                         if let Some(capture) = turn_messages {
-                            upload_turn_messages(&ctx, capture, wait).await;
+                            upload_turn_messages(&ctx, capture, wait.clone()).await;
                         }
                         if let Some(ref capture) = streaming_partial {
-                            crate::upload::trace::upload_streaming_partial(
+                            crate::save::upload_streaming_partial(
                                     &ctx,
                                     capture,
-                                    wait,
+                                    wait.clone(),
                                 )
                                 .await;
                         }
                         if upload_unified {
                             upload_unified_log(&ctx, wait).await;
                         }
-                        crate::upload::trace::flush_then_write_error_manifest(
+                        crate::save::flush_then_write_error_manifest(
                                 &ctx,
                                 deadline,
                             )
@@ -3087,7 +3087,7 @@ impl acp::Agent for MvpAgent {
                         spawn_upload_task(
                             "error_turn_result",
                             async move {
-                                let result = TurnResultMetadata {
+                                let result: TurnResultMetadata = TurnResultMetadata {
                                     schema_version: GCS_SCHEMA_VERSION,
                                     request_id,
                                     completed: false,
@@ -3112,7 +3112,7 @@ impl acp::Agent for MvpAgent {
                                         .await;
                                 }
                                 if let Some(ref capture) = streaming_partial {
-                                    crate::upload::trace::upload_streaming_partial(
+                                    crate::save::upload_streaming_partial(
                                             &ctx,
                                             capture,
                                             UploadWait::Confirm,

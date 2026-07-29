@@ -220,12 +220,14 @@ pub fn resolve_model_catalog(
         }
     }
 
-    if let Some(effort) = cfg.models.default_reasoning_effort
-        && let Some(default_id) = cfg.models.default.as_deref()
-        && let Some(entry) = catalog.get_mut(default_id)
-        && entry.info.supports_reasoning_effort
-    {
-        entry.info.reasoning_effort = Some(effort);
+    for entry in catalog.values_mut() {
+        if entry.info.supports_reasoning_effort && entry.info.reasoning_effort.is_none() {
+            entry.info.reasoning_effort = cfg
+                .models
+                .default_reasoning_effort
+                .filter(|effort| model_offers_reasoning_effort(&entry.info, *effort))
+                .or_else(|| lowest_reasoning_effort(&entry.info));
+        }
     }
 
     if let Some(effort) = cfg.reasoning_effort_override {
@@ -237,6 +239,33 @@ pub fn resolve_model_catalog(
     }
 
     catalog
+}
+
+/// Lowest effort a model declares it can accept. Models using the legacy
+/// support flag have the legacy `low..xhigh` menu, whose lowest value is low.
+fn lowest_reasoning_effort(info: &config::ModelInfo) -> Option<ReasoningEffort> {
+    if !info.supports_reasoning_effort {
+        return None;
+    }
+    if info.reasoning_efforts.is_empty() {
+        return Some(ReasoningEffort::Low);
+    }
+    info.reasoning_efforts
+        .iter()
+        .min_by_key(|opt| reasoning_effort_rank(opt.value))
+        .map(|opt| opt.value)
+}
+
+fn reasoning_effort_rank(effort: ReasoningEffort) -> u8 {
+    match effort {
+        ReasoningEffort::None => 0,
+        ReasoningEffort::Minimal => 1,
+        ReasoningEffort::Low => 2,
+        ReasoningEffort::Medium => 3,
+        ReasoningEffort::High => 4,
+        ReasoningEffort::Xhigh => 5,
+        ReasoningEffort::Max => 6,
+    }
 }
 
 /// Whether `effort` is a value this model will accept on the wire.

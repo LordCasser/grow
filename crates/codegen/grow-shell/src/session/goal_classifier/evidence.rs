@@ -49,6 +49,21 @@ use crate::util::subprocess::git_bin;
 /// Max wall-clock for git commands during evidence capture.
 const DIFF_COMMAND_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
+// SKIP_DIR_NAMES and SKIP_DIR_SET — local replacements for
+// xai_file_utils::skip_dir_set() and xai_file_utils::SKIP_DIR_NAMES
+// which were removed from xai-file-utils.
+const SKIP_DIR_NAMES: &[&str] = &[
+    ".git", "node_modules", "__pycache__", ".mypy_cache",
+    ".pytest_cache", ".ruff_cache", "target", ".venv", "venv",
+    ".tox", ".eggs", "build", "dist", ".gradle",
+];
+fn skip_dir_set() -> &'static std::collections::HashSet<String> {
+    static SET: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
+    SET.get_or_init(|| {
+        SKIP_DIR_NAMES.iter().map(|s| s.to_string()).collect()
+    })
+}
+
 /// Build a `tokio::process::Command` for `git` with `kill_on_drop(true)`
 /// so a `tokio::time::timeout` firing reaps the child instead of
 /// orphaning it.
@@ -785,7 +800,7 @@ fn walkdir_changes_blocking(
                 .to_str()
                 .map(|name| {
                     name != ".git"
-                        && !xai_file_utils::skip_dir_set().contains(name.to_lowercase().as_str())
+                        && !skip_dir_set().contains(name.to_lowercase().as_str())
                 })
                 .unwrap_or(true)
         });
@@ -1877,7 +1892,7 @@ mod tests {
     async fn capture_changes_diff_walkdir_skips_all_well_known_directories() {
         let tmp = tempfile::tempdir().unwrap();
         let goal_created_at = now_unix_seconds() - 60;
-        for sub in xai_file_utils::SKIP_DIR_NAMES {
+        for sub in SKIP_DIR_NAMES {
             let dir = tmp.path().join(sub);
             tokio::fs::create_dir_all(&dir).await.unwrap();
             tokio::fs::write(dir.join("blob.bin"), b"skipped\n")
@@ -1905,7 +1920,7 @@ mod tests {
             .expect("walkdir fallback must succeed")
             .diff;
         assert!(diff.contains("real.txt"));
-        for sub in xai_file_utils::SKIP_DIR_NAMES {
+        for sub in SKIP_DIR_NAMES {
             assert!(
                 !diff.contains(&format!("b/{sub}/blob.bin")),
                 "walkdir must skip {sub}/; diff was: {diff}"

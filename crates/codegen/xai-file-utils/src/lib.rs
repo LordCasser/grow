@@ -1,31 +1,9 @@
-#![allow(
-    unused_imports,
-    unused_variables,
-    unused_mut,
-    unreachable_code,
-    dead_code
-)]
-//! Local data collection: per-turn event tracking, upload queueing, and
-//! S3-compatible blob storage.
-pub(crate) mod circuit_breaker_observer;
-/// Wrap a raw client with [`grow_auth::AuthRetryMiddleware`] for automatic 401 retry.
-pub fn with_auth_retry(
-    client: reqwest::Client,
-    credentials: std::sync::Arc<dyn grow_auth::AuthCredentialProvider>,
-) -> reqwest_middleware::ClientWithMiddleware {
-    reqwest_middleware::ClientBuilder::new(client)
-        .with(grow_auth::AuthRetryMiddleware::new(credentials, 1))
-        .build()
-}
-pub mod events;
-pub mod gcs;
-pub mod queue;
-pub mod s3;
-pub mod storage_client;
+//! General utilities: SHA-256 hashing, W3C trace context propagation,
+//! and workspace classifier.
+
 pub mod trace_context;
-pub mod upload_config;
 pub mod workspace_classifier;
-pub use upload_config::*;
+
 /// Compute SHA256 hash of content as a hex string.
 pub fn sha256_hex(content: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -33,6 +11,7 @@ pub fn sha256_hex(content: &[u8]) -> String {
     hasher.update(content);
     format!("{:x}", hasher.finalize())
 }
+
 /// Compute SHA256 hash of a file by streaming, without loading entire file into memory.
 /// If `max_bytes` is set (> 0), only hash up to that many bytes.
 pub fn sha256_hex_from_file(

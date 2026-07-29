@@ -1275,17 +1275,7 @@ fn apply_requirements_inner(
         config.telemetry.events_api_key,
         redacted
     );
-    enforce_val!(
-        "telemetry",
-        "mixpanel_enabled",
-        config.telemetry.mixpanel_enabled
-    );
-    enforce_str!(
-        "telemetry",
-        "mixpanel_token",
-        config.telemetry.mixpanel_token,
-        redacted
-    );
+    // trace_upload enforce_val removed - cloud upload disabled
     enforce_str!(
         "endpoints",
         "trace_upload_bucket",

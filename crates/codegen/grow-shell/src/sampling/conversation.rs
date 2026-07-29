@@ -24,12 +24,12 @@ pub use grow_sampling_types::conversation::*;
 /// schema change.
 #[derive(Debug, Clone)]
 pub struct ConversationRequestTrace {
-    pub gcs_config: crate::session::repo_changes::TraceExportConfig,
+    pub gcs_config: crate::save::TraceExportConfig,
     #[expect(
         dead_code,
         reason = "retained for snapshot compat; wire when sampler path uploads traces"
     )]
-    pub(crate) artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
+    pub(crate) artifact_tracker: Option<crate::save::ArtifactTracker>,
 }
 
 // `ConversationRequestTrace` satisfies the `TraceContext` trait bounds

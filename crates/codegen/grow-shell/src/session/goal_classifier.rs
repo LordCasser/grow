@@ -14,7 +14,7 @@
 
 pub(crate) mod evidence;
 
-use crate::session::events::{Event, GoalClassifierFailOpenReason};
+use crate::session::events::GoalClassifierFailOpenReason;
 use crate::session::goal_planner::{
     GOAL_ROLE_AWAIT_BUDGET_EXCEEDED, GOAL_ROLE_SUBAGENT_TYPE, RoleRenderedPrompt,
     RoleSpawnOverride, spawn_with_fail_open_retry,
@@ -29,7 +29,7 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use xai_file_utils::events::EventWriter;
+// EventWriter removed — xai_file_utils::events is gone
 
 // Constants
 
@@ -529,9 +529,10 @@ pub(crate) struct ChannelSpawner {
     /// current model — round-robin expansion + auth/capability fail-open is
     /// resolved parent-side before the spawner is built.
     pub(crate) skeptic_overrides: Vec<RoleSpawnOverride>,
-    /// Event sink for the spawn-and-retry-once fail-open telemetry; `None`
-    /// in tests / when no event log is wired.
-    pub(crate) events: Option<EventWriter>,
+    // Event sink for the spawn-and-retry-once fail-open telemetry; `None`
+    // in tests / when no event log is wired.
+    // Event sink for telemetry; removed (EventWriter no longer exists).
+    // pub(crate) events: Option<EventWriter>,
 }
 
 #[async_trait::async_trait]
@@ -557,7 +558,6 @@ impl GoalClassifierSpawner for ChannelSpawner {
             "skeptic",
             Some(skeptic_idx),
             override_,
-            self.events.as_ref(),
             prompt,
             |model, harness, prompt| self.send_one(id, prompt, model, harness, resume_from),
         )
@@ -655,16 +655,10 @@ async fn record_fail_open(
     reason: GoalClassifierFailOpenReason,
     attempt: u32,
     started: std::time::Instant,
-    emit_event: &dyn Fn(Event),
     details_path: Option<&Path>,
     details_raw: String,
 ) -> GoalClassifierOutcome {
     let latency_ms = started.elapsed().as_millis() as u64;
-    emit_event(Event::GoalClassifierFailOpen {
-        reason: reason.as_const_str(),
-        attempt,
-        latency_ms,
-    });
     let resolved_path = match details_path {
         // Surface the path only when the placeholder is on disk — a failed
         // write would point the user at a missing file (empty = no details).
@@ -1954,14 +1948,8 @@ impl From<GoalClassifierOutcome> for VerificationStageResult {
 pub(crate) async fn run_verification_stage(
     spawner: Arc<dyn GoalClassifierSpawner>,
     inputs: VerificationStageInputs<'_>,
-    emit_event: &dyn Fn(Event),
 ) -> VerificationStageResult {
     let started = std::time::Instant::now();
-    emit_event(Event::GoalClassifierFired {
-        attempt: inputs.attempt,
-        max_runs: inputs.max_runs,
-        model_id: inputs.model_id.to_string(),
-    });
 
     let details_raw = format_details_path(inputs.verifier_id, inputs.attempt);
     let details_path = PathBuf::from(&details_raw);
@@ -1978,7 +1966,6 @@ pub(crate) async fn run_verification_stage(
             GoalClassifierFailOpenReason::FileWriteFailed,
             inputs.attempt,
             started,
-            emit_event,
             None,
             String::new(),
         )
@@ -1997,7 +1984,6 @@ pub(crate) async fn run_verification_stage(
             GoalClassifierFailOpenReason::FileWriteFailed,
             inputs.attempt,
             started,
-            emit_event,
             None,
             String::new(),
         )
@@ -2014,7 +2000,6 @@ pub(crate) async fn run_verification_stage(
             GoalClassifierFailOpenReason::FileWriteFailed,
             inputs.attempt,
             started,
-            emit_event,
             Some(&details_path),
             details_raw,
         )
@@ -2048,7 +2033,6 @@ pub(crate) async fn run_verification_stage(
                         GoalClassifierFailOpenReason::FileWriteFailed,
                         inputs.attempt,
                         started,
-                        emit_event,
                         Some(&details_path),
                         details_raw,
                     )
@@ -2204,25 +2188,13 @@ pub(crate) async fn run_verification_stage(
     };
 
     for r in &results {
-        emit_event(Event::GoalVerifierSkepticVerdict {
-            attempt: inputs.attempt,
-            skeptic_idx: r.skeptic_idx,
-            refuted: r.refuted,
-            confidence: r.confidence.as_const_str(),
-            latency_ms: r.latency_ms,
-        });
+        // GoalVerifierSkepticVerdict telemetry removed (Event type gone).
     }
     let (refuted_count, total, quorum_achieved) = aggregate_skeptic_verdicts(&results);
     // A decisive skeptic-0 refute overrides the quorum: a refuted+high
     // skeptic 0 can never approve, even when the blocking fan-out ran the
     // full panel (the fan-out only chooses Blocked vs NotAchieved).
     let achieved = quorum_achieved && !decisive_refute;
-    emit_event(Event::GoalVerifierAggregateVerdict {
-        attempt: inputs.attempt,
-        refuted_count,
-        total,
-        achieved,
-    });
 
     let body = render_skeptic_panel_details(
         &results,
@@ -2240,11 +2212,6 @@ pub(crate) async fn run_verification_stage(
     } else {
         GoalClassifierVerdict::NotAchieved
     };
-    emit_event(Event::GoalClassifierVerdict {
-        verdict: verdict.into(),
-        attempt: inputs.attempt,
-        latency_ms,
-    });
 
     if achieved {
         return VerificationStageResult {
@@ -2432,6 +2399,7 @@ fn parse_prompt_path(prompt: &str, marker: &str, suffix: &str) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::events::Event;
     use crate::session::goal_role_tools::tests::{assert_no_tool_placeholders, summary_with};
     use std::sync::{Arc, Mutex};
     use tokio::sync::Notify;
@@ -2462,7 +2430,6 @@ mod tests {
             cwd: None,
             trace_sink: None,
             skeptic_overrides: Vec::new(),
-            events: None,
         };
         let handle = tokio::spawn(async move {
             let _ = spawner
@@ -2517,7 +2484,6 @@ mod tests {
                 },
                 RoleSpawnOverride::default(),
             ],
-            events: None,
         };
         let handle = tokio::spawn(async move {
             // Skeptic 0 with a resume id: even on the cold path it carries
@@ -2580,7 +2546,6 @@ mod tests {
             cwd: None,
             trace_sink: None,
             skeptic_overrides: vec![RoleSpawnOverride::default()],
-            events: None,
         };
         let handle = tokio::spawn(async move {
             let _ = spawner
@@ -4151,7 +4116,6 @@ mod tests {
         ]));
         let observed = spawner.clone();
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
-        let (_log, emit) = collect_events();
         let wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let tns = vec![
@@ -4168,7 +4132,7 @@ mod tests {
         ];
         let mut inputs = stage_inputs("obj", "claim", wsp.path(), &vid, 1, 3);
         inputs.tool_names = &tns;
-        let _ = run_verification_stage(spawner, inputs, &emit).await;
+        let _ = run_verification_stage(spawner, inputs, ).await;
 
         let prompts = observed.prompts.lock().unwrap();
         let idxs = observed.skeptic_idxs.lock().unwrap();
@@ -4720,40 +4684,6 @@ mod tests {
         }
     }
 
-    /// Capture every emitted event with a stable tag so tests can
-    /// assert variant occurrence and counts. The tag vocabulary is a
-    /// superset of the earlier set so the legacy tests still match.
-    fn collect_events() -> (Arc<Mutex<Vec<String>>>, impl Fn(Event) + Send + Sync) {
-        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let log_clone = log.clone();
-        let emit = move |e: Event| {
-            let tag = match e {
-                Event::GoalClassifierFired { .. } => "fired".to_string(),
-                Event::GoalClassifierVerdict { verdict, .. } => format!("verdict:{verdict:?}"),
-                Event::GoalClassifierFailOpen { reason, .. } => format!("fail_open:{reason}"),
-                Event::GoalClassifierFailClosed { reason, .. } => {
-                    format!("fail_closed:{reason}")
-                }
-                Event::GoalClassifierCapReached { .. } => "cap_reached".to_string(),
-                Event::GoalVerifierSkepticVerdict {
-                    skeptic_idx,
-                    refuted,
-                    confidence,
-                    ..
-                } => format!("skeptic:{skeptic_idx}:{refuted}:{confidence}"),
-                Event::GoalVerifierAggregateVerdict {
-                    refuted_count,
-                    total,
-                    achieved,
-                    ..
-                } => format!("agg:{refuted_count}/{total}:{achieved}"),
-                other => format!("other:{other:?}"),
-            };
-            log_clone.lock().unwrap().push(tag);
-        };
-        (log, emit)
-    }
-
     fn unique_verifier_id() -> String {
         let mut s = uuid::Uuid::new_v4().simple().to_string();
         s.truncate(12);
@@ -4839,7 +4769,7 @@ mod tests {
         let vid = unique_verifier_id();
         let mut inputs = stage_inputs("obj", "claim", wsp.path(), &vid, 1, 1);
         inputs.max_runs = 4;
-        let _ = run_verification_stage(spawner, inputs, &emit).await;
+        let _ = run_verification_stage(spawner, inputs, ).await;
         assert_eq!(
             *captured.lock().unwrap(),
             Some(4),
@@ -4856,13 +4786,11 @@ mod tests {
         let spawner = Arc::new(MockSpawner::new([MockResponse::not_refuted()]));
         let observed = spawner.clone();
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
-        let (log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("do X", "done", _wsp.path(), &vid, 1, 1),
-            &emit,
         )
         .await
         .outcome;
@@ -4903,10 +4831,6 @@ mod tests {
         );
         assert!(p.contains("adversarial verifier"));
         drop(prompts);
-        let log = log.lock().unwrap();
-        assert!(log.iter().any(|t| t == "fired"));
-        assert!(log.iter().any(|t| t == "skeptic:0:false:medium"));
-        assert!(log.iter().any(|t| t == "agg:0/1:true"));
     }
 
     /// `prior_gaps` must reach the spawned skeptic prompts through the
@@ -4921,7 +4845,7 @@ mod tests {
         let vid = unique_verifier_id();
         let mut inputs = stage_inputs("do X", "done", _wsp.path(), &vid, 2, 1);
         inputs.prior_gaps = Some("gap · src/foo.rs:12 — no test for criterion 2");
-        let _ = run_verification_stage(spawner, inputs, &emit).await;
+        let _ = run_verification_stage(spawner, inputs, ).await;
         let prompts = observed.prompts.lock().unwrap();
         assert!(
             prompts[0].contains("gap · src/foo.rs:12 — no test for criterion 2"),
@@ -4945,13 +4869,11 @@ mod tests {
         ]));
         let observed = spawner.clone();
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
-        let (log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let result = run_verification_stage(
             spawner,
             stage_inputs("obj", "claim", _wsp.path(), &vid, 1, 2),
-            &emit,
         )
         .await;
         assert!(
@@ -4985,8 +4907,6 @@ mod tests {
             !body.contains("skeptic-1"),
             "short-circuit must not reference skeptic 1: {body}"
         );
-        let log = log.lock().unwrap();
-        assert!(log.iter().any(|t| t == "agg:1/1:false"));
     }
 
     #[tokio::test]
@@ -4998,13 +4918,11 @@ mod tests {
             MockResponse::refuted(),
             MockResponse::refuted(),
         ]));
-        let (log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "claim", _wsp.path(), &vid, 1, 3),
-            &emit,
         )
         .await
         .outcome;
@@ -5012,8 +4930,6 @@ mod tests {
             panic!("expected NotAchieved on 2-of-3 refute");
         };
         let _ = tokio::fs::remove_file(&details_path).await;
-        let log = log.lock().unwrap();
-        assert!(log.iter().any(|t| t == "agg:2/3:false"));
     }
 
     #[tokio::test]
@@ -5028,13 +4944,11 @@ mod tests {
             MockResponse::refuted(),
             MockResponse::not_refuted(),
         ]));
-        let (log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "claim", _wsp.path(), &vid, 1, 3),
-            &emit,
         )
         .await
         .outcome;
@@ -5042,8 +4956,6 @@ mod tests {
             panic!("expected NotAchieved: skeptic-0 not-refuted cannot carry the cold quorum");
         };
         let _ = tokio::fs::remove_file(&details_path).await;
-        let log = log.lock().unwrap();
-        assert!(log.iter().any(|t| t == "agg:1/3:false"));
     }
 
     #[tokio::test]
@@ -5053,13 +4965,11 @@ mod tests {
             std::iter::repeat_with(MockResponse::not_refuted).take(5),
         ));
         let observed = spawner.clone();
-        let (log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let _ = run_verification_stage(
             spawner,
             stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 99),
-            &emit,
         )
         .await
         .outcome;
@@ -5070,11 +4980,6 @@ mod tests {
             5,
             "skeptic_count must be clamped to GOAL_VERIFIER_SKEPTIC_MAX",
         );
-        let log = log.lock().unwrap();
-        assert!(
-            log.iter().any(|t| t == "agg:0/5:true"),
-            "aggregate must reflect the clamped total of 5",
-        );
     }
 
     #[tokio::test]
@@ -5084,13 +4989,11 @@ mod tests {
             MockResponse::not_refuted(),
         )));
         let observed = spawner.clone();
-        let (log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let _ = run_verification_stage(
             spawner,
             stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 0),
-            &emit,
         )
         .await
         .outcome;
@@ -5101,8 +5004,6 @@ mod tests {
             1,
             "skeptic_count must be clamped to GOAL_VERIFIER_SKEPTIC_MIN",
         );
-        let log = log.lock().unwrap();
-        assert!(log.iter().any(|t| t == "agg:0/1:true"));
     }
 
     #[tokio::test]
@@ -5114,13 +5015,11 @@ mod tests {
             MockResponse::not_refuted(),
             MockResponse::not_refuted(),
         ]));
-        let (log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 3),
-            &emit,
         )
         .await
         .outcome;
@@ -5128,11 +5027,6 @@ mod tests {
             panic!("expected Achieved (1 transport-fail + 2 not-refuted)");
         };
         let _ = tokio::fs::remove_file(&details_path).await;
-        let log = log.lock().unwrap();
-        assert!(
-            log.iter().any(|t| t == "skeptic:0:true:unknown"),
-            "transport-failed skeptic must surface as refuted=true with confidence=unknown",
-        );
     }
 
     #[tokio::test]
@@ -5141,13 +5035,11 @@ mod tests {
             MockResponse::cancelled(),
             MockResponse::not_refuted(),
         ]));
-        let (_log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2),
-            &emit,
         )
         .await
         .outcome;
@@ -5165,20 +5057,15 @@ mod tests {
             MockResponse::malformed_token(),
             MockResponse::refuted(),
         ]));
-        let (log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2),
-            &emit,
         )
         .await
         .outcome;
         assert!(matches!(outcome, GoalClassifierOutcome::NotAchieved { .. }));
-        let log = log.lock().unwrap();
-        assert!(log.iter().any(|t| t == "skeptic:0:true:unknown"));
-        assert!(log.iter().any(|t| t == "skeptic:1:true:high"));
     }
 
     #[tokio::test]
@@ -5190,13 +5077,11 @@ mod tests {
             MockResponse::runtime_error(),
             MockResponse::not_refuted(),
         ]));
-        let (log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2),
-            &emit,
         )
         .await
         .outcome;
@@ -5204,11 +5089,6 @@ mod tests {
             panic!("expected Achieved (N=2 tie: 1 synthetic refute + 1 not-refute)");
         };
         let _ = tokio::fs::remove_file(&details_path).await;
-        let log = log.lock().unwrap();
-        assert!(
-            log.iter().any(|t| t == "skeptic:0:true:unknown"),
-            "a runtime-crashed skeptic must synthesise a refute vote",
-        );
     }
 
     #[tokio::test]
@@ -5223,13 +5103,11 @@ mod tests {
             MockResponse::terminal_only("Not Refuted"),
             MockResponse::terminal_only("Refuted"),
         ]));
-        let (log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2),
-            &emit,
         )
         .await
         .outcome;
@@ -5238,12 +5116,6 @@ mod tests {
         };
         let body = tokio::fs::read_to_string(&details_path).await.unwrap();
         let _ = tokio::fs::remove_file(&details_path).await;
-        let log = log.lock().unwrap();
-        assert!(
-            log.iter().any(|t| t == "skeptic:0:false:unknown"),
-            "terminal-only skeptic must surface as confidence=unknown",
-        );
-        assert!(log.iter().any(|t| t == "skeptic:1:true:unknown"));
         assert!(body.contains("verdict JSON missing/malformed; used terminal token"));
     }
 
@@ -5254,13 +5126,11 @@ mod tests {
         // details file and render that instead.
         let spawner: Arc<dyn GoalClassifierSpawner> =
             Arc::new(MockSpawner::new([MockResponse::json_empty_details_md()]));
-        let (_log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 1),
-            &emit,
         )
         .await
         .outcome;
@@ -5290,13 +5160,11 @@ mod tests {
             MockResponse::not_refuted(),
             MockResponse::not_refuted(),
         ]));
-        let (log, emit) = collect_events();
         let wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "claim", wsp.path(), &vid, 1, 2),
-            &emit,
         )
         .await
         .outcome;
@@ -5304,16 +5172,6 @@ mod tests {
             panic!("expected Achieved on 2 not-refuted skeptics");
         };
         let _ = tokio::fs::remove_file(&details_path).await;
-        let log = log.lock().unwrap();
-        let pos = |needle: &str| log.iter().position(|t| t.starts_with(needle));
-        let i_fired = pos("fired").expect("fired emitted");
-        let i_s0 = pos("skeptic:0:").expect("skeptic 0 emitted");
-        let i_s1 = pos("skeptic:1:").expect("skeptic 1 emitted");
-        let i_agg = pos("agg:0/2:true").expect("aggregate 0/2 true emitted");
-        let i_v = pos("verdict:Achieved").expect("verdict emitted");
-        assert!(i_fired < i_s0.min(i_s1));
-        assert!(i_s0.max(i_s1) < i_agg);
-        assert!(i_agg < i_v);
     }
 
     /// Sibling to the happy path: the panel refutes by majority →
@@ -5324,13 +5182,11 @@ mod tests {
             MockResponse::refuted(),
             MockResponse::refuted(),
         ]));
-        let (log, emit) = collect_events();
         let wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "claim", wsp.path(), &vid, 1, 2),
-            &emit,
         )
         .await
         .outcome;
@@ -5338,10 +5194,7 @@ mod tests {
             panic!("expected NotAchieved on refuted skeptic 0");
         };
         let _ = tokio::fs::remove_file(&details_path).await;
-        let log = log.lock().unwrap();
         // Skeptic 0's high-confidence refute short-circuits the panel.
-        assert!(log.iter().any(|t| t == "agg:1/1:false"));
-        assert!(log.iter().any(|t| t == "verdict:NotAchieved"));
     }
 
     #[tokio::test]
@@ -5356,13 +5209,11 @@ mod tests {
         ]));
         let observed = spawner.clone();
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
-        let (log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 3),
-            &emit,
         )
         .await
         .outcome;
@@ -5377,8 +5228,6 @@ mod tests {
             3,
             "medium-confidence refute must NOT short-circuit the panel",
         );
-        let log = log.lock().unwrap();
-        assert!(log.iter().any(|t| t == "agg:1/3:true"));
     }
 
     #[tokio::test]
@@ -5388,13 +5237,11 @@ mod tests {
                 "high",
                 Some("unverifiable"),
             )]));
-        let (_log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "claim", _wsp.path(), &vid, 1, 1),
-            &emit,
         )
         .await
         .outcome;
@@ -5421,13 +5268,11 @@ mod tests {
             MockResponse::refuted_with("medium", Some("contradiction")),
             MockResponse::refuted_with("high", None),
         ]));
-        let (_log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "claim", _wsp.path(), &vid, 1, 2),
-            &emit,
         )
         .await
         .outcome;
@@ -5451,13 +5296,11 @@ mod tests {
         ]));
         let observed = spawner.clone();
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
-        let (log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "claim", _wsp.path(), &vid, 1, 2),
-            &emit,
         )
         .await
         .outcome;
@@ -5474,11 +5317,6 @@ mod tests {
         let _ = tokio::fs::remove_file(&details_path).await;
         // The aggregate verdict must reflect the decisive override (not the
         // raw 1-of-2 quorum that would read `achieved=true`).
-        let log = log.lock().unwrap();
-        assert!(
-            log.iter().any(|t| t == "agg:1/2:false"),
-            "decisive skeptic-0 refute must force the aggregate to not-achieved: {log:?}",
-        );
     }
 
     #[tokio::test]
@@ -5490,13 +5328,11 @@ mod tests {
             MockResponse::refuted_with("high", Some("contradiction")),
             MockResponse::refuted_with("high", None),
         ]));
-        let (_log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "claim", _wsp.path(), &vid, 1, 2),
-            &emit,
         )
         .await
         .outcome;
@@ -5517,13 +5353,11 @@ mod tests {
         ]));
         let observed = spawner.clone();
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
-        let (_log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let result = run_verification_stage(
             spawner,
             stage_inputs("obj", "claim", _wsp.path(), &vid, 1, 2),
-            &emit,
         )
         .await;
         assert_eq!(
@@ -5564,13 +5398,11 @@ mod tests {
         ]));
         let observed = spawner.clone();
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
-        let (_log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 3),
-            &emit,
         )
         .await
         .outcome;
@@ -5596,13 +5428,11 @@ mod tests {
         ]));
         let observed = spawner.clone();
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
-        let (_log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let outcome = run_verification_stage(
             spawner,
             stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2),
-            &emit,
         )
         .await
         .outcome;
@@ -5632,7 +5462,6 @@ mod tests {
             MockResponse::not_refuted().with_hold(Arc::clone(&hold2)),
         ]));
         let observed = spawner.clone();
-        let (_log, emit) = collect_events();
         let vid = unique_verifier_id();
         let _wsp = tempfile::tempdir().unwrap();
         let wait_for = |target: usize| {
@@ -5665,7 +5494,6 @@ mod tests {
         let stage_fut = run_verification_stage(
             spawner,
             stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 3),
-            &emit,
         );
         let (result, ()) = tokio::join!(stage_fut, watcher);
         let GoalClassifierOutcome::Achieved { details_path } = result.outcome else {
@@ -5679,12 +5507,10 @@ mod tests {
         // Embed traversal in verifier_id ⇒ details path is unsafe ⇒
         // stage short-circuits to fail-open Achieved.
         let spawner = Arc::new(MockSpawner::new(std::iter::empty::<MockResponse>()));
-        let (_log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let result = run_verification_stage(
             spawner,
             stage_inputs("obj", "claim", _wsp.path(), "../etc", 1, 2),
-            &emit,
         )
         .await;
         assert!(matches!(
@@ -5713,13 +5539,11 @@ mod tests {
         ]));
         let observed = spawner.clone();
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
-        let (_log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let result = run_verification_stage(
             spawner,
             stage_inputs_resume("obj", "ok", _wsp.path(), &vid, 2, 2, Some("prior-skeptic0")),
-            &emit,
         )
         .await;
         if let GoalClassifierOutcome::Achieved { details_path } = &result.outcome {
@@ -5754,13 +5578,11 @@ mod tests {
         ]));
         let observed = spawner.clone();
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
-        let (_log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let result = run_verification_stage(
             spawner,
             stage_inputs_resume("obj", "ok", _wsp.path(), &vid, 1, 2, Some("prior-skeptic0")),
-            &emit,
         )
         .await;
         if let GoalClassifierOutcome::Achieved { details_path } = &result.outcome {
@@ -5793,13 +5615,11 @@ mod tests {
         ]));
         let observed = spawner.clone();
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
-        let (_log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let result = run_verification_stage(
             spawner,
             stage_inputs_resume("obj", "ok", _wsp.path(), &vid, 2, 2, Some("stale-prior")),
-            &emit,
         )
         .await;
         let GoalClassifierOutcome::Achieved { details_path } = &result.outcome else {
@@ -5881,16 +5701,13 @@ mod tests {
                 },
                 RoleSpawnOverride::default(),
             ],
-            events: None,
         });
 
-        let (_log, emit) = collect_events();
         let wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let result = run_verification_stage(
             spawner,
             stage_inputs_resume("obj", "ok", wsp.path(), &vid, 2, 2, Some("stale-prior")),
-            &emit,
         )
         .await;
         if let GoalClassifierOutcome::Achieved { details_path }
@@ -5927,13 +5744,11 @@ mod tests {
         let spawner = Arc::new(MockSpawner::new([MockResponse::not_refuted()]));
         let observed = spawner.clone();
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
-        let (_log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let result = run_verification_stage(
             spawner,
             stage_inputs_resume("obj", "ok", _wsp.path(), &vid, 2, 1, Some("prior-skeptic0")),
-            &emit,
         )
         .await;
         if let GoalClassifierOutcome::Achieved { details_path } = &result.outcome {
@@ -6246,7 +6061,6 @@ mod tests {
             cwd: None,
             trace_sink: None,
             skeptic_overrides: Vec::new(),
-            events: None,
         };
         let spawn_task = tokio::spawn(async move {
             spawner
@@ -6307,12 +6121,10 @@ mod tests {
     async fn record_fail_open_writes_placeholder_details_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("goal-classifier-foo-1.md");
-        let (_log, emit) = collect_events();
         let outcome = record_fail_open(
             GoalClassifierFailOpenReason::Timeout,
             1,
             std::time::Instant::now(),
-            &emit,
             Some(&path),
             path.display().to_string(),
         )
@@ -6338,12 +6150,10 @@ mod tests {
         tokio::fs::write(&path, b"# Real subagent analysis\n")
             .await
             .unwrap();
-        let (_log, emit) = collect_events();
         let _ = record_fail_open(
             GoalClassifierFailOpenReason::Timeout,
             1,
             std::time::Instant::now(),
-            &emit,
             Some(&path),
             path.display().to_string(),
         )
@@ -6354,12 +6164,10 @@ mod tests {
 
     #[tokio::test]
     async fn record_fail_open_with_no_path_returns_empty_details_path() {
-        let (_log, emit) = collect_events();
         let outcome = record_fail_open(
             GoalClassifierFailOpenReason::FileWriteFailed,
             1,
             std::time::Instant::now(),
-            &emit,
             None,
             String::new(),
         )
@@ -6379,12 +6187,10 @@ mod tests {
         // never a dangling pointer to a nonexistent file.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("missing-subdir").join("details.md");
-        let (_log, emit) = collect_events();
         let outcome = record_fail_open(
             GoalClassifierFailOpenReason::Timeout,
             1,
             std::time::Instant::now(),
-            &emit,
             Some(&path),
             path.display().to_string(),
         )
@@ -6423,7 +6229,6 @@ mod tests {
         let spawner = Arc::new(MockSpawner::new([]));
         let observed = spawner.clone();
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
-        let (_log, emit) = collect_events();
         let wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
         let squat = RootSquat::plant(&vid);
@@ -6431,7 +6236,6 @@ mod tests {
         let result = run_verification_stage(
             spawner,
             stage_inputs("do X", "done", wsp.path(), &vid, 1, 1),
-            &emit,
         )
         .await;
 
@@ -6548,12 +6352,10 @@ mod tests {
             "classifier artifacts must not resolve to the bare-/tmp name",
         );
         super::super::goal_tracker::ensure_goal_scratch_root(&vid).unwrap();
-        let (_log, emit) = collect_events();
         let _ = record_fail_open(
             GoalClassifierFailOpenReason::SamplerError,
             1,
             std::time::Instant::now(),
-            &emit,
             Some(Path::new(&resolved)),
             resolved.clone(),
         )

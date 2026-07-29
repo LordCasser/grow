@@ -706,15 +706,7 @@ async fn restore_session_from_remote(
             .with_deployment_key(deployment_key.clone())
             .with_alpha_test_key(agent_config.endpoints.alpha_test_key.clone())
             .with_auth(auth_manager.clone());
-    let storage_client = grow_shell::auth::credential_provider::build_storage_client_for_proxy(
-        &agent_config.endpoints.proxy_url(),
-        deployment_key,
-        agent_config.endpoints.alpha_test_key.clone(),
-        Some(auth_manager),
-        None,
-        None,
-        "grow-pager",
-    );
+    let storage_client = grow_shell::save::StorageClient;
     let progress: grow_shell::session::restore::ProgressCallback =
         Box::new(|event| eprintln!("  {}", event.display_line()));
     let result = restore_session_with_storage(

@@ -30,6 +30,10 @@ the API unless its `model` field overrides that value.
 - `[provider.<id>.models.<model>]` owns model metadata and per-model overrides.
 - `[models].default` seeds only newly created sessions.
 - A session persists its last selected `provider/model`; reopening it restores that exact model.
+- The provider-qualified catalog ID is distinct from the optional provider-facing `model` wire
+  name; only the catalog ID may be persisted.
+- Reasoning defaults resolve from narrowest to broadest: persisted session choice, model default,
+  supported `[models].default_reasoning_effort`, then the model's lowest offered level.
 - Changing a model inside one session never changes the global default or another session.
 - Session persistence stores model IDs and session options, never provider secrets or endpoint
   snapshots.
@@ -147,6 +151,7 @@ default:
 ```toml
 [models]
 default = "deepseek/deepseek-v4-pro"
+default_reasoning_effort = "max"
 
 [provider.deepseek]
 api_backend = "chat_completions"
@@ -170,11 +175,13 @@ Bare strings are accepted when labels and an explicit default are unnecessary:
 reasoning_efforts = ["none", "high", "max"]
 ```
 
-`reasoning_effort = "high"` sets a default but does not by itself define a safe cycle menu. Prefer
-`reasoning_efforts` for BYOK models: it derives support and the default (the marked entry, or the
-first entry) without Grow guessing vendor capabilities. `Shift+Tab`, `/effort`, and `/model` all
-use the same model-declared list. The selected value is stored with the session, so reopening a
-session restores its last effort while a new session starts from the configured model default.
+`reasoning_effort = "high"` sets a model default but does not by itself define a safe cycle menu.
+Prefer `reasoning_efforts` for BYOK models: it derives support, and `default = true` marks the
+model-specific default. That model default overrides `[models].default_reasoning_effort`. When no
+model default is marked, Grow uses the global default if the model lists it; otherwise it uses the
+lowest listed effort. `Shift+Tab`, `/effort`, and `/model` all use the same model-declared list. The
+selected value is stored with the session, so reopening a session restores its last effort before
+any configured default is considered.
 
 ## Auxiliary models
 

@@ -1,7 +1,7 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use crate::test_support::lsp_runtime::{ctx_with_toggle, test_gateway};
-use crate::upload::trace::SubagentSpawnedRef;
+use crate::save::SubagentSpawnedRef;
 use grow_tools::implementations::grow_build::task::backend::ChannelBackend;
 #[test]
 fn normalize_forked_context_strips_project_layout() {
@@ -2221,7 +2221,7 @@ fn persona_injection_into_empty_conversation() {
 mod cancellation_error_message_tests {
     use super::super::cancellation_error_message;
     use crate::session::commands::CancellationContext;
-    use xai_file_utils::events::types::CancellationCategory;
+    use crate::session::events::CancellationCategory;
     #[test]
     fn permission_rejected_with_context() {
         let ctx = CancellationContext {

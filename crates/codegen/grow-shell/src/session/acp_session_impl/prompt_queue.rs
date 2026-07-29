@@ -19,8 +19,8 @@ impl SessionActor {
         prompt_blocks: Vec<acp::ContentBlock>,
         prompt_id: String,
         prompt_mode: PromptMode,
-        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
-        artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
+        trace_gcs_config: Option<crate::save::TraceExportConfig>,
+        artifact_tracker: Option<crate::save::ArtifactTracker>,
         client_identifier: Option<String>,
         screen_mode: Option<String>,
         verbatim: bool,
@@ -103,7 +103,7 @@ impl SessionActor {
         let (trace_gcs_config, artifact_tracker) =
             if origin.is_synthetic() && trace_gcs_config.is_none() {
                 if let Some(template) = self.trace_config_template.borrow().clone() {
-                    let cfg = crate::session::repo_changes::TraceExportConfig {
+                    let cfg = crate::save::TraceExportConfig {
                         bucket_url: template.bucket_url,
                         service_account_key: None,
                         prefix_dir: None,
@@ -118,7 +118,7 @@ impl SessionActor {
                     };
                     (
                         Some(cfg),
-                        Some(crate::upload::manifest::new_artifact_tracker()),
+                        Some(crate::save::new_artifact_tracker()),
                     )
                 } else {
                     (None, None)

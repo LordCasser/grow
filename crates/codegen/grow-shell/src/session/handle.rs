@@ -9,7 +9,7 @@ use agent_client_protocol as acp;
 use grow_sampling_types::ReasoningEffort;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc, oneshot};
-use xai_file_utils::queue::UploadQueue;
+use crate::save::UploadQueue;
 use xai_hunk_tracker::HunkTrackerHandle;
 /// Coarse lifecycle state of a session as known to the leader/agent.
 ///

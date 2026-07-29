@@ -611,7 +611,8 @@ fn disabled_server_placeholder_entry(name: &str) -> McpServerEntry {
 pub async fn build_mcp_status(
     mcp_state: &Arc<TokioMutex<McpState>>,
     tool_bridge: &Arc<grow_tools::bridge::ToolBridge>,
-    event_writer: Option<&xai_file_utils::events::EventWriter>,
+    event_writer: Option<&()>,
+    // EventWriter removed — xai_file_utils::events is gone
 ) -> McpStatusSnapshot {
     let _build_mcp_status_timer = crate::instrumentation::timer("build_mcp_status");
     let (
@@ -654,12 +655,8 @@ pub async fn build_mcp_status(
         let prefix = format!("{}{}", name, MCP_TOOL_NAME_DELIMITER);
 
         let healthy = client.is_healthy().await;
-        if let Some(ew) = event_writer {
-            ew.emit(xai_file_utils::events::Event::McpHealthCheck {
-                server_name: name.clone(),
-                healthy,
-                client_state: Some(if healthy { "ready" } else { "unavailable" }.to_string()),
-            });
+        if let Some(_ew) = event_writer {
+            // McpHealthCheck event removed — xai_file_utils::events is gone
         }
         // A server whose background init failed (handshake/`tools/list`
         // error or timeout) is reported as Unavailable even when the
@@ -784,14 +781,15 @@ pub async fn init_agent_mcp_pool(mcp_state: &Arc<TokioMutex<McpState>>, cwd: &st
         return;
     }
 
-    let noop = xai_file_utils::events::EventWriter::noop();
+    // EventWriter::noop() removed — xai_file_utils::events is gone
     let results = start_mcp_servers(
         configs,
         None,
         Some(cwd),
         &Default::default(),
         &Default::default(),
-        &noop,
+        &(),
+        // EventWriter removed — xai_file_utils::events is gone
         // Pass Interactive to preserve prior deferred-OAuth behavior. A session-less SDK agent can
         // reach this non-interactively; threading real non-interactivity here is a deliberate follow-up.
         crate::session::mcp_servers::OauthInteractivity::Interactive,

@@ -362,7 +362,7 @@ impl EndpointsConfig {
     /// Returns `None` if no bucket is configured or scheme is unrecognized.
     pub fn resolve_direct_upload_method(
         &self,
-    ) -> Option<crate::session::repo_changes::UploadMethod> {
+    ) -> Option<crate::save::UploadMethod> {
         let bucket_url = self.trace_upload_bucket.as_deref()?.trim();
         if bucket_url.is_empty() {
             return None;
@@ -375,7 +375,7 @@ impl EndpointsConfig {
                 .trace_upload_region
                 .clone()
                 .unwrap_or_else(|| "us-east-1".to_owned());
-            return Some(crate::session::repo_changes::UploadMethod::S3 {
+            return Some(crate::save::UploadMethod::S3 {
                 bucket: bucket_name.to_owned(),
                 region,
                 credentials_file: None,
@@ -384,7 +384,7 @@ impl EndpointsConfig {
             });
         }
         if bucket_url.starts_with("gs://") {
-            return Some(crate::session::repo_changes::UploadMethod::Direct {
+            return Some(crate::save::UploadMethod::Direct {
                 service_account_key: self.resolve_trace_credentials(),
             });
         }
@@ -402,12 +402,12 @@ impl EndpointsConfig {
     pub fn resolve_upload_method(
         &self,
         auth_token: Option<String>,
-    ) -> Option<crate::session::repo_changes::UploadMethod> {
+    ) -> Option<crate::save::UploadMethod> {
         if let Some(method) = self.resolve_direct_upload_method() {
             return Some(method);
         }
         if auth_token.is_some() || self.deployment_key.is_some() {
-            return Some(crate::session::repo_changes::UploadMethod::Proxy {
+            return Some(crate::save::UploadMethod::Proxy {
                 proxy_base_url: self.resolve_trace_upload_url(),
                 user_token: auth_token.unwrap_or_default(),
                 deployment_key: self.deployment_key.clone(),
@@ -416,7 +416,7 @@ impl EndpointsConfig {
         }
         let service_account_key = crate::util::config::load_gcs_service_account_key_sync();
         if service_account_key.is_some() {
-            return Some(crate::session::repo_changes::UploadMethod::Direct {
+            return Some(crate::save::UploadMethod::Direct {
                 service_account_key,
             });
         }
@@ -432,8 +432,7 @@ impl EndpointsConfig {
             None,
         )
         .or_else(|| {
-            crate::upload::gcs::SESSION_TRACES_BUCKET
-                .map(|b| Resolved::new(format!("gs://{b}"), ConfigSource::Default))
+            None
         })
     }
     /// `models_list_url` > `{models_base_url}/models` > `{proxy_base_url}/models`.
@@ -4080,11 +4079,10 @@ impl ModelInfo {
             laziness_detector: entry.laziness_detector.clone(),
         }
     }
-    /// Derive the legacy effort gate/default from `reasoning_efforts` so the
-    /// shell's internal reads (support gate, wire default, session modes) treat
-    /// a menu-only model as supported. The single derive site; `to_acp_model_info`
-    /// then just reads these fields. Idempotent (the remote/CCP path already sets
-    /// them); the empty-list path leaves both legacy fields untouched.
+    /// Derive the legacy effort gate and an explicitly marked model default
+    /// from `reasoning_efforts`. Broader fallbacks (global, then lowest offered)
+    /// are resolved later by the catalog so a model-level default always wins.
+    /// The empty-list path leaves both legacy fields untouched.
     fn derive_reasoning_effort_fields(&mut self) {
         if self.reasoning_efforts.is_empty() {
             return;
@@ -4095,7 +4093,6 @@ impl ModelInfo {
                 .reasoning_efforts
                 .iter()
                 .find(|opt| opt.default)
-                .or_else(|| self.reasoning_efforts.first())
                 .map(|opt| opt.value);
             self.reasoning_effort = default;
         }
@@ -7399,7 +7396,7 @@ reasoning_effort = "low"
         assert_eq!(meta["reasoningEffort"], "low");
     }
     #[test]
-    fn acp_model_meta_derives_first_option_when_no_default() {
+    fn acp_model_meta_leaves_default_unset_for_catalog_fallback() {
         let mut models = IndexMap::new();
         let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
         entry.info.reasoning_efforts = vec![
@@ -7428,7 +7425,7 @@ reasoning_effort = "low"
             .clone()
             .unwrap();
         assert_eq!(meta["supportsReasoningEffort"], true);
-        assert_eq!(meta["reasoningEffort"], "medium");
+        assert!(meta.get("reasoningEffort").is_none());
     }
     #[test]
     fn acp_model_meta_omits_reasoning_when_unsupported() {
@@ -7717,8 +7714,6 @@ reasoning_effort = "low"
             [telemetry]
             events_url     = "https://custom.example.com/events"
             events_api_key = "custom-key"
-            mixpanel_token = "custom-token"
-            mixpanel_enabled = false
             "#,
         )
         .unwrap();
@@ -7728,11 +7723,6 @@ reasoning_effort = "low"
             Some("https://custom.example.com/events")
         );
         assert_eq!(cfg.telemetry.events_api_key.as_deref(), Some("custom-key"));
-        assert_eq!(
-            cfg.telemetry.mixpanel_token.as_deref(),
-            Some("custom-token")
-        );
-        assert!(!cfg.telemetry.mixpanel_enabled);
     }
     /// Empty/whitespace values must become `None`, not reach the HTTP client as empty strings.
     #[test]
@@ -7742,14 +7732,12 @@ reasoning_effort = "low"
             [telemetry]
             events_url     = ""
             events_api_key = "  "
-            mixpanel_token = "\t"
             "#,
         )
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&raw).expect("should parse");
         assert!(cfg.telemetry.events_url.is_none());
         assert!(cfg.telemetry.events_api_key.is_none());
-        assert!(cfg.telemetry.mixpanel_token.is_none());
     }
     #[test]
     fn telemetry_partial_override_retains_defaults() {
@@ -7767,8 +7755,6 @@ reasoning_effort = "low"
         );
         let defaults = TelemetryConfig::default();
         assert_eq!(cfg.telemetry.events_api_key, defaults.events_api_key);
-        assert_eq!(cfg.telemetry.mixpanel_token, defaults.mixpanel_token);
-        assert_eq!(cfg.telemetry.mixpanel_enabled, defaults.mixpanel_enabled);
     }
     #[test]
     fn auth_alias_maps_to_auth() {
@@ -10254,7 +10240,7 @@ agent_type = "cursor"
     /// Regression: a deployment key with no OAuth token must resolve to Proxy.
     #[test]
     fn resolve_upload_method_accepts_deployment_key_without_oauth() {
-        use crate::session::repo_changes::UploadMethod;
+        use crate::save::UploadMethod;
         let endpoints = EndpointsConfig {
             deployment_key: Some("enterprise-key".to_string()),
             ..Default::default()

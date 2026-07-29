@@ -1095,7 +1095,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _rx) = make_actor_with_method_and_credentials(
+            let (actor, mut persistence_rx) = make_actor_with_method_and_credentials(
                 None,
                 "cached_token",
                 xai_chat_state::AuthType::SessionToken,
@@ -1154,9 +1154,24 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 doom_loop_recovery: None,
                 header_injector: None,
             };
-            let _ = actor
-                .handle_set_session_model(cfg, false, false, true, 85)
-                .await;
+            let catalog_model_id = acp::ModelId::new("deepseek/deepseek-v4-pro");
+            let updated_model_id = actor
+                .handle_set_session_model(catalog_model_id.clone(), cfg, false, false, true, 85)
+                .await
+                .unwrap();
+
+            assert_eq!(updated_model_id, catalog_model_id);
+            let mut persisted_model_id = None;
+            while let Ok(message) = persistence_rx.try_recv() {
+                if let PersistenceMsg::CurrentModel { model_id, .. } = message {
+                    persisted_model_id = Some(model_id);
+                }
+            }
+            assert_eq!(
+                persisted_model_id,
+                Some(catalog_model_id),
+                "model switches must persist the provider-qualified catalog identity",
+            );
 
             assert!(
                 actor.model_auth_memo.borrow().is_none(),
@@ -1248,7 +1263,14 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 header_injector: None,
             };
             let _ = actor
-                .handle_set_session_model(cfg, false, false, true, 85)
+                .handle_set_session_model(
+                    acp::ModelId::new("provider/test-model"),
+                    cfg,
+                    false,
+                    false,
+                    true,
+                    85,
+                )
                 .await;
 
             let creds = actor.chat_state_handle.get_credentials().await;

@@ -42,10 +42,10 @@ const VIDEO_POLL_REQUEST_TIMEOUT_SECS: u64 = 30;
 const VIDEO_DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_ZDR_VIDEO_PRESIGN_EXPIRES_SECS: u64 = 900;
 /// Presign at request start; must survive generation poll + local download.
+#[cfg(test)]
 const MIN_ZDR_VIDEO_PRESIGN_EXPIRES_SECS: u64 =
     VIDEO_GEN_TIMEOUT_SECS + VIDEO_DOWNLOAD_TIMEOUT_SECS + 60;
 const DEFAULT_ZDR_VIDEO_KEY_PREFIX: &str = "grow-videos/";
-const ZDR_VIDEO_CONTENT_TYPE: &str = "video/mp4";
 const DEFAULT_VIDEO_DIR: &str = "videos";
 const DEFAULT_RESOLUTION: &str = "480p";
 const DEFAULT_IMAGINE_VIDEO_DURATION_SECS: u32 = 6;
@@ -70,13 +70,6 @@ pub struct S3AccessCredentials {
 impl S3AccessCredentials {
     fn is_valid(&self) -> bool {
         !self.access_key_id.trim().is_empty() && !self.secret_access_key.trim().is_empty()
-    }
-
-    fn to_static(&self) -> xai_file_utils::s3::S3StaticCredentials {
-        xai_file_utils::s3::S3StaticCredentials {
-            access_key_id: self.access_key_id.clone(),
-            secret_access_key: self.secret_access_key.clone(),
-        }
     }
 }
 
@@ -519,54 +512,11 @@ impl VideoGenClient {
 
     async fn presign_zdr_output_urls(
         &self,
-        config: &ZdrVideoOutputS3Config,
+        _config: &ZdrVideoOutputS3Config,
     ) -> Result<ZdrPresignedUrls, xai_tool_runtime::ToolError> {
-        let object_key = zdr_video_object_key(&config.key_prefix);
-        let expires_in =
-            std::time::Duration::from_secs(zdr_presign_expires_secs(config.expires_secs));
-        let endpoint = Some(config.endpoint.as_str());
-
-        let upload_url = xai_file_utils::s3::presign_put_url(
-            &config.region,
-            endpoint,
-            &config.read_write.to_static(),
-            &config.bucket,
-            &object_key,
-            ZDR_VIDEO_CONTENT_TYPE,
-            expires_in,
-        )
-        .await
-        .map_err(|e| {
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to presign video upload URL: {e}"
-            ))
-        })?;
-
-        if !is_http_url(&upload_url) {
-            return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Presigned upload URL is not http(s): {upload_url}"
-            )));
-        }
-
-        let get_url = match self
-            .presign_zdr_get_url(config, &object_key, expires_in)
-            .await
-        {
-            Ok(url) => Some(url),
-            Err(e) => {
-                tracing::warn!(
-                    "Video GET presign failed before generation; will retry download after upload completes: {e}"
-                );
-                None
-            }
-        };
-
-        Ok(ZdrPresignedUrls {
-            object_key,
-            upload_url,
-            get_url,
-            expires_in,
-        })
+        Err(xai_tool_runtime::ToolError::invalid_arguments(
+            "S3 presigned URL upload is not available in this build",
+        ))
     }
 
     /// Re-presign a GET URL after generation and attempt a local download.
@@ -600,40 +550,22 @@ impl VideoGenClient {
 
     async fn presign_zdr_get_url(
         &self,
-        config: &ZdrVideoOutputS3Config,
-        object_key: &str,
-        expires_in: std::time::Duration,
+        _config: &ZdrVideoOutputS3Config,
+        _object_key: &str,
+        _expires_in: std::time::Duration,
     ) -> Result<String, xai_tool_runtime::ToolError> {
-        let endpoint = Some(config.endpoint.as_str());
-        let (creds, creds_source) = zdr_get_credentials(config);
-        let url = xai_file_utils::s3::presign_get_url(
-            &config.region,
-            endpoint,
-            &creds.to_static(),
-            &config.bucket,
-            object_key,
-            expires_in,
-        )
-        .await
-        .map_err(|e| {
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to presign video GET URL ({creds_source}): {e}"
-            ))
-        })?;
-
-        if !is_http_url(&url) {
-            return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Presigned GET URL is not http(s): {url}"
-            )));
-        }
-        Ok(url)
+        Err(xai_tool_runtime::ToolError::invalid_arguments(
+            "S3 presigned URL download is not available in this build",
+        ))
     }
 }
 
+#[cfg(test)]
 fn zdr_presign_expires_secs(configured: u64) -> u64 {
     configured.max(MIN_ZDR_VIDEO_PRESIGN_EXPIRES_SECS)
 }
 
+#[cfg(test)]
 fn zdr_get_credentials(config: &ZdrVideoOutputS3Config) -> (&S3AccessCredentials, &'static str) {
     if let Some(read_only) = config.read_only.as_ref() {
         if read_only.is_valid() {
@@ -646,6 +578,7 @@ fn zdr_get_credentials(config: &ZdrVideoOutputS3Config) -> (&S3AccessCredentials
     (&config.read_write, "read_write")
 }
 
+#[cfg(test)]
 fn zdr_video_object_key(prefix: &str) -> String {
     let prefix = prefix.trim();
     let object_id = uuid::Uuid::new_v4();

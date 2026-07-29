@@ -2,8 +2,8 @@ use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::time::Instant;
 
-use super::log::EventWriter;
-use super::types::{CancellationCategory, Event, RedirectKind, TurnOutcomeLabel};
+use super::event_writer::EventWriter;
+use super::event_types::{CancellationCategory, Event, RedirectKind, TurnOutcomeLabel};
 
 /// Per-session event state. `!Send` — lives on the session actor.
 /// Background tasks use `tracker.writer()` to get a `Clone + Send + Sync` handle.
@@ -57,9 +57,9 @@ impl std::fmt::Debug for EventTracker {
 }
 
 impl EventTracker {
-    pub fn new(session_dir: &Path) -> Self {
+    pub fn new(_session_dir: &Path) -> Self {
         Self {
-            writer: EventWriter::open(session_dir),
+            writer: EventWriter::open(),
             turn_ended_emitted: Cell::new(false),
             active_tool: RefCell::new(None),
             turn_tool_count: Cell::new(0),
@@ -128,7 +128,7 @@ impl EventTracker {
             self.emit(Event::ToolCompleted {
                 tool_name,
                 duration_ms: start.elapsed().as_millis() as u64,
-                outcome: super::types::ToolOutcome::Cancelled,
+                outcome: super::event_types::ToolOutcome::Cancelled,
             });
         }
     }
@@ -173,7 +173,7 @@ impl EventTracker {
     /// Returns the Instant for `permission_resolved()` to compute wait_ms.
     pub fn permission_requested(&self, tool_name: &str) -> Instant {
         self.emit(Event::PhaseChanged {
-            phase: super::types::Phase::PermissionPrompt,
+            phase: super::event_types::Phase::PermissionPrompt,
         });
         self.emit(Event::PermissionRequested {
             tool_name: tool_name.to_string(),
@@ -184,7 +184,7 @@ impl EventTracker {
     pub fn permission_resolved(
         &self,
         tool_name: &str,
-        decision: super::types::PermissionDecision,
+        decision: super::event_types::PermissionDecision,
         start: Instant,
     ) {
         self.emit(Event::PermissionResolved {
@@ -193,7 +193,7 @@ impl EventTracker {
             wait_ms: start.elapsed().as_millis() as u64,
         });
         self.emit(Event::PhaseChanged {
-            phase: super::types::Phase::ToolExecution,
+            phase: super::event_types::Phase::ToolExecution,
         });
     }
 }

@@ -10,7 +10,6 @@ use agent_client_protocol::{self as acp, Client as _};
 use grow_mcp::servers::parse_mcp_qualified_name;
 use grow_tools::implementations::grow_build::web_fetch::domain_from_url;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
-use xai_file_utils::events::{Event, EventWriter, PermissionDecision};
 
 const REJECT_ONCE_LABEL: &str = "No, and tell Grow what to do differently";
 
@@ -313,11 +312,6 @@ pub struct AcpPrompter {
     /// Generic bash options for non-TUI clients - shows complete command with approve/reject always
     generic_bash_options: IndexMap<acp::PermissionOptionId, acp::PermissionOption>,
     fallback_options: IndexMap<acp::PermissionOptionId, acp::PermissionOption>,
-    /// Per-session `events.jsonl` writer. [`request`](Self::request) emits a
-    /// `PermissionRequested` at prompt-start and a paired `PermissionResolved`
-    /// at decision-time through it. `EventWriter::noop()` when events recording
-    /// is disabled (the default for the permission scaffolding's own tests).
-    event_writer: EventWriter,
     /// Server permission transport: when set, [`request`](Self::request) asks chat for the
     /// decision over the server; `None` keeps the local prompt.
     hub_permission: Option<Arc<dyn crate::permission::PermissionHookTransport>>,
@@ -488,11 +482,6 @@ impl AcpPrompter {
             bash_options,
             generic_bash_options,
             fallback_options,
-            // Defaults to noop: in the live (shell) permission path the shell's
-            // own `EventTracker` already emits Permission* events, so the prompter
-            // must NOT double-emit. A workspace-server-side caller that owns the
-            // per-session `events.jsonl` opts in via [`with_event_writer`].
-            event_writer: EventWriter::noop(),
             hub_permission: None,
             // Fail-safe default; opt in via `with_remember_tool_approvals`.
             remember_tool_approvals: false,
@@ -517,15 +506,6 @@ impl AcpPrompter {
     }
 
     /// Attach a per-session `events.jsonl` writer so [`request`](Self::request)
-    /// records `PermissionRequested` / `PermissionResolved`. Used by the
-    /// workspace-server permission path (which owns the session log); the shell
-    /// path leaves the default noop in place to avoid double-emitting alongside
-    /// its own `EventTracker`.
-    pub fn with_event_writer(mut self, event_writer: EventWriter) -> Self {
-        self.event_writer = event_writer;
-        self
-    }
-
     fn build_options(
         &self,
         access: &AccessKind,
@@ -738,19 +718,7 @@ impl AcpPrompter {
         protected_edit: Option<crate::permission::ProtectedEditReason>,
     ) -> PromptOutcome {
         let tool_name = tool_name_for_access(access);
-        // events.jsonl: `PermissionRequested` at prompt-start. The `Instant`
-        // captured here is what makes the paired `PermissionResolved.wait_ms`
-        // truthful — it measures the user-facing prompt, not earlier manager
-        // bookkeeping.
-        self.event_writer.emit(Event::PermissionRequested {
-            tool_name: tool_name.clone(),
-        });
-        let prompt_start = Instant::now();
-        let mut resolved_guard = ResolvedOnDrop {
-            event_writer: &self.event_writer,
-            tool_name: Some(tool_name),
-            prompt_start,
-        };
+        let _prompt_start = Instant::now();
 
         let outcome = match &self.hub_permission {
             // Route the prompt to chat over the server (see
@@ -791,42 +759,11 @@ impl AcpPrompter {
             }
         };
 
-        // events.jsonl: `PermissionResolved` at decision-time, with the truthful
-        // user-facing wait derived from the prompt-start `Instant` above.
-        let tool_name = resolved_guard
-            .tool_name
-            .take()
-            .expect("guard is armed until normal completion");
-        self.event_writer.emit(Event::PermissionResolved {
-            tool_name,
-            decision: permission_decision_for_outcome(&outcome),
-            wait_ms: prompt_start.elapsed().as_millis() as u64,
-        });
-
         outcome
     }
 }
 
-struct ResolvedOnDrop<'a> {
-    event_writer: &'a EventWriter,
-    tool_name: Option<String>,
-    prompt_start: Instant,
-}
-
-impl Drop for ResolvedOnDrop<'_> {
-    fn drop(&mut self) {
-        if let Some(tool_name) = self.tool_name.take() {
-            self.event_writer.emit(Event::PermissionResolved {
-                tool_name,
-                decision: PermissionDecision::Cancelled,
-                wait_ms: self.prompt_start.elapsed().as_millis() as u64,
-            });
-        }
-    }
-}
-
-/// Tool name used for `events.jsonl` Permission* events AND for the
-/// `PermissionEvent.tool_name` telemetry field. Single source of truth: the
+/// Tool name used for telemetry. Single source of truth: the
 /// permission manager calls this for the `tool_name` component of its
 /// `(tool_name, access_kind, access_detail)` derivation, so the two cannot
 /// drift.
@@ -839,26 +776,6 @@ pub(crate) fn tool_name_for_access(access: &AccessKind) -> String {
         AccessKind::MCPTool { name, .. } => format!("mcp:{name}"),
         AccessKind::WebFetch(_) => "web_fetch".to_owned(),
         AccessKind::WebSearch(_) => "web_search".to_owned(),
-    }
-}
-
-/// Map a [`PromptOutcome`] to the `events.jsonl` [`PermissionDecision`]. One
-/// `match` so the allow/deny/cancel/followup mapping is the single source of
-/// truth and cannot drift across call sites.
-fn permission_decision_for_outcome(outcome: &PromptOutcome) -> PermissionDecision {
-    match outcome {
-        PromptOutcome::AllowOnce
-        | PromptOutcome::AllowAlways
-        | PromptOutcome::AllowEditsForSession
-        | PromptOutcome::AllowAlwaysBashCommand(_)
-        | PromptOutcome::AllowAlwaysDomain(_)
-        | PromptOutcome::AllowAlwaysMcpTool(_)
-        | PromptOutcome::AllowAlwaysMcpServer(_) => PermissionDecision::Allow,
-        PromptOutcome::RejectOnce
-        | PromptOutcome::RejectAlwaysBashCommand(_)
-        | PromptOutcome::Error(_) => PermissionDecision::Deny,
-        PromptOutcome::Cancelled => PermissionDecision::Cancelled,
-        PromptOutcome::FollowupMessage(_) => PermissionDecision::Followup,
     }
 }
 
@@ -1584,92 +1501,6 @@ mod tests {
         assert_eq!(
             tool_name_for_access(&AccessKind::WebSearch("rust lang".into())),
             "web_search"
-        );
-    }
-
-    #[test]
-    fn decision_mapping_covers_allow_deny_cancel_followup() {
-        // `PermissionDecision` has no `PartialEq`, so assert via `matches!`.
-        assert!(matches!(
-            permission_decision_for_outcome(&PromptOutcome::AllowOnce),
-            PermissionDecision::Allow
-        ));
-        assert!(matches!(
-            permission_decision_for_outcome(&PromptOutcome::AllowAlwaysMcpServer("s".into())),
-            PermissionDecision::Allow
-        ));
-        assert!(matches!(
-            permission_decision_for_outcome(&PromptOutcome::RejectOnce),
-            PermissionDecision::Deny
-        ));
-        assert!(matches!(
-            permission_decision_for_outcome(&PromptOutcome::Error("boom".into())),
-            PermissionDecision::Deny
-        ));
-        assert!(matches!(
-            permission_decision_for_outcome(&PromptOutcome::Cancelled),
-            PermissionDecision::Cancelled
-        ));
-        assert!(matches!(
-            permission_decision_for_outcome(&PromptOutcome::FollowupMessage("hi".into())),
-            PermissionDecision::Followup
-        ));
-    }
-
-    /// `request()` must emit a `PermissionRequested` at prompt-start and a paired
-    /// `PermissionResolved` at decision-time when an event writer is attached.
-    /// A dropped-receiver gateway makes `request_permission` fail fast (channel
-    /// closed → `PromptOutcome::Error`), which still exercises both emissions and
-    /// the Error→Deny decision mapping.
-    #[tokio::test]
-    async fn request_emits_permission_requested_and_resolved() {
-        use xai_file_utils::events::EventWriter;
-
-        let dir = tempfile::tempdir().unwrap();
-        let writer = EventWriter::open(dir.path());
-
-        let (tx, rx) = mpsc::unbounded_channel();
-        drop(rx); // channel closed → request_permission errors immediately
-        let gateway = GatewaySender::new(tx);
-
-        let prompter = AcpPrompter::new(
-            acp::SessionId::new(Arc::from("sess-perm")),
-            gateway,
-            ClientType::Generic,
-        )
-        .with_event_writer(writer);
-
-        let access = AccessKind::Bash("rm -rf /tmp/x".to_owned());
-        let tool_call_update = acp::ToolCallUpdate::new(
-            acp::ToolCallId::new(Arc::from("tc-1")),
-            acp::ToolCallUpdateFields::default(),
-        );
-
-        let outcome = prompter.request(&access, &tool_call_update, None).await;
-        assert!(
-            matches!(outcome, PromptOutcome::Error(_)),
-            "dropped gateway receiver should yield PromptOutcome::Error"
-        );
-
-        let text = std::fs::read_to_string(dir.path().join("events.jsonl")).unwrap();
-        let lines: Vec<serde_json::Value> = text
-            .trim()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-        assert_eq!(
-            lines.len(),
-            2,
-            "expected PermissionRequested + PermissionResolved"
-        );
-        assert_eq!(lines[0]["type"], "permission_requested");
-        assert_eq!(lines[0]["tool_name"], "run_terminal_command");
-        assert_eq!(lines[1]["type"], "permission_resolved");
-        assert_eq!(lines[1]["tool_name"], "run_terminal_command");
-        assert_eq!(lines[1]["decision"], "deny");
-        assert!(
-            lines[1]["wait_ms"].as_u64().is_some(),
-            "PermissionResolved must carry wait_ms"
         );
     }
 

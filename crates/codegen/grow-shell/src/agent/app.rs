@@ -298,12 +298,7 @@ pub async fn run_stdio_agent(
     // are identifiable by version in diagnostic logs.
     grow_telemetry::unified_log::set_version(grow_version::VERSION);
 
-    // Clean up orphaned upload queue temp files from previous sessions (best-effort).
-    // Uses DEFAULT_MAX_AGE to stay in sync with the upload queue's retry policy.
-    xai_file_utils::queue::cleanup_orphaned_uploads(
-        &grow_home::grow_home(),
-        xai_file_utils::queue::DEFAULT_MAX_AGE,
-    );
+    // cleanup_orphaned_uploads removed — xai_file_utils::queue is gone
 
     // Log the client that launched us (set by grow-desktop when spawning `grow agent stdio`).
     // This appears early in unified.jsonl and is extremely useful for auth diagnostics.
@@ -442,12 +437,7 @@ async fn run_headless_inner(
     const HEADLESS_NO_SESSION: &str = "Headless mode requires a service.example.com session. \
         Run `grow login` to sign in, or use `grow agent stdio` for API-key access.";
 
-    // Clean up orphaned upload queue temp files from previous sessions (best-effort).
-    // Uses DEFAULT_MAX_AGE to stay in sync with the upload queue's retry policy.
-    xai_file_utils::queue::cleanup_orphaned_uploads(
-        &grow_home::grow_home(),
-        xai_file_utils::queue::DEFAULT_MAX_AGE,
-    );
+    // cleanup_orphaned_uploads removed — xai_file_utils::queue is gone
 
     let mut agent_config = agent_config.clone();
     agent_config.mode = crate::agent::config::AgentMode::Headless;
@@ -1031,11 +1021,9 @@ pub async fn run_leader(
     // the sweep walks/stats/deletes the whole tree synchronously. Running it
     // inline here blocked the socket bind and lock acquisition below, so clients
     // could not connect until the sweep finished.
+    // cleanup_orphaned_uploads removed — xai_file_utils::queue is gone
     tokio::task::spawn_blocking(|| {
-        xai_file_utils::queue::cleanup_orphaned_uploads(
-            &grow_home::grow_home(),
-            xai_file_utils::queue::DEFAULT_MAX_AGE,
-        );
+        // (was: xai_file_utils::queue::cleanup_orphaned_uploads(...))
     });
 
     let mut agent_config = agent_config.clone();

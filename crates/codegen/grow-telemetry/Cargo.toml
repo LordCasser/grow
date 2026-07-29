@@ -3,7 +3,7 @@ license = "Apache-2.0"
 name = "grow-telemetry"
 version = "0.1.0"
 edition.workspace = true
-description = "Telemetry engine: product events + Mixpanel emission + Sentry error reporting for Grow sessions"
+description = "Telemetry engine: product events + Sentry error reporting for Grow sessions"
 authors = ["Grow contributors"]
 
 [features]
@@ -33,7 +33,6 @@ reqwest = { workspace = true }
 url = { workspace = true }
 grow-env = { workspace = true }
 grow-secrets = { workspace = true }
-xai-mixpanel = { workspace = true }
 grow-config = { workspace = true }
 grow-sampler = { workspace = true }
 xai-token-estimation = { workspace = true }
@@ -48,14 +47,6 @@ sentry = { version = "0.42.0", default-features = false, features = [
     "rustls",
     "debug-images",
 ] }
-# Single cross-edge: `events::ToolCallCompleted.outcome` reuses
-# `xai_file_utils::events::types::ToolOutcome` so the local event log and
-# the product telemetry event share the same enum surface. Semantically this enum
-# lives with the events module in data-collector; not worth a third crate.
-xai-file-utils = { path = "../xai-file-utils" }
-# `session_metrics::TraceUploadReason::from_upload_method` matches on the shared
-# `UploadMethod` enum (small, dependency-light types crate) so the reason->wire
-# mapping lives next to the trace-upload lifecycle events it labels.
 whoami = { workspace = true }
 uuid = { workspace = true, features = ["v5", "v7"] }
 obfstr = { workspace = true, optional = true }

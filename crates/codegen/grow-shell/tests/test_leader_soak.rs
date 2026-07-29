@@ -180,7 +180,7 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
                 );
                 tokio::task::spawn_local(
                     GatewayReceiver::new(gw_rx, conn)
-                        .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
+                        .with_on_meta(grow_shell::trace_context::span_from_meta_traceparent)
                         .run(),
                 );
                 let _ = handle_io.await;

@@ -361,15 +361,14 @@ async fn check_server_start(
     acp_server: agent_client_protocol::McpServer,
     cwd: &Path,
 ) -> Result<(mcp_servers::McpClient, Check), Check> {
+    // EventWriter::noop() removed — xai_file_utils::events is gone
     let start = std::time::Instant::now();
-    let noop = xai_file_utils::events::EventWriter::noop();
     match mcp_servers::start_mcp_server(
         acp_server,
         None,
         Some(cwd),
         None,
         None,
-        &noop,
         mcp_servers::OauthInteractivity::Interactive,
     )
     .await

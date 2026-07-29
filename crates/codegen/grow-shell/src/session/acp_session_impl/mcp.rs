@@ -488,7 +488,6 @@ impl SessionActor {
             Some(cwd),
             meta_config.as_ref(),
             byo_config.as_ref(),
-            &event_writer,
             mode,
         )
         .await
@@ -980,7 +979,6 @@ impl SessionActor {
             Some(cwd),
             meta_config.as_ref(),
             byo_config.as_ref(),
-            &event_writer,
             mode,
         )
         .await
@@ -1086,7 +1084,7 @@ impl SessionActor {
                 generation = mcp_state.generation(),
                 "ensure_mcp_tools_initialized: starting MCP init"
             );
-            mcp_state.set_event_writer(self.events.writer());
+            // Event writer removed from McpState; no-op
             if mcp_state.disabled_tools.is_empty() {
                 let cwd = std::path::Path::new(&self.session_info.cwd);
                 let dt = crate::util::config::get_all_mcp_disabled_tools(cwd);
@@ -1111,10 +1109,6 @@ impl SessionActor {
                 mcp_state.finish_init();
             } else {
                 mcp_state.cancel_init();
-                self.events
-                    .emit(xai_file_utils::events::Event::McpInitCancelled {
-                        reason: MCP_INIT_CANCELLED_CONFIG_CHANGED.to_string(),
-                    });
             }
             drop(mcp_state);
             self.register_shared_client_tools().await;
@@ -1135,23 +1129,17 @@ impl SessionActor {
             return;
         }
         {
-            let cwd = std::path::Path::new(&self.session_info.cwd);
-            self.events
-                .emit(crate::session::mcp_servers::build_config_resolved_event(
+            let _cwd = std::path::Path::new(&self.session_info.cwd);
+            crate::session::mcp_servers::build_config_resolved_event(
                     &mcp_server_configs,
-                    cwd,
-                ));
+                    _cwd,
+                );
             let managed_count = mcp_server_configs
                 .iter()
                 .filter(|c| {
                     mcp_server_name(c).starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
                 })
                 .count() as u32;
-            self.events
-                .emit(xai_file_utils::events::Event::McpManagedConfigResult {
-                    server_count: managed_count,
-                    error: None,
-                });
         }
         let configs_to_start: Vec<_> = mcp_server_configs
             .iter()
@@ -1194,10 +1182,6 @@ impl SessionActor {
                 mcp_state.finish_init();
             } else {
                 mcp_state.cancel_init();
-                self.events
-                    .emit(xai_file_utils::events::Event::McpInitCancelled {
-                        reason: MCP_INIT_CANCELLED_CONFIG_CHANGED.to_string(),
-                    });
             }
             drop(mcp_state);
             self.register_shared_client_tools().await;
@@ -1272,16 +1256,6 @@ impl SessionActor {
                     let cfg = mcp_server_configs
                         .iter()
                         .find(|c| mcp_server_name(c) == sname.as_str());
-                    self.events
-                        .emit(xai_file_utils::events::Event::McpServerFailed {
-                            server_name: sname,
-                            transport: cfg.map(|c| mcp_transport_str(c).to_string()),
-                            target: cfg.map(mcp_target_str),
-                            error_type: e.error_category(),
-                            error_message: e.to_string(),
-                            duration_ms: None,
-                            timeout_sec: None,
-                        });
                     None
                 }
             })
@@ -1294,10 +1268,6 @@ impl SessionActor {
             let mut mcp_state = self.mcp_state.lock().await;
             if mcp_state.generation() != generation {
                 mcp_state.cancel_init();
-                self.events
-                    .emit(xai_file_utils::events::Event::McpInitCancelled {
-                        reason: MCP_INIT_CANCELLED_CONFIG_CHANGED.to_string(),
-                    });
                 return;
             }
             let failed_spawns: Vec<String> = mcp_state
@@ -1386,12 +1356,7 @@ impl SessionActor {
                     let server_name = client.server_name().to_string();
                     let server_start = std::time::Instant::now();
                     let timeout_sec = client.startup_timeout_sec();
-                    ew.emit(xai_file_utils::events::Event::McpServerStarting {
-                        server_name: server_name.clone(),
-                        transport: transport.clone(),
-                        target,
-                        timeout_sec,
-                    });
+                    // McpServerStarting event removed — xai_file_utils::events is gone
                     if let Some(tx) = task_event_tx {
                         client.set_event_tx(Some(tx));
                     }
@@ -1468,9 +1433,7 @@ impl SessionActor {
                         generation,
                         mcp_state.generation()
                     );
-                    event_writer.emit(xai_file_utils::events::Event::McpInitCancelled {
-                        reason: MCP_INIT_CANCELLED_CONFIG_CHANGED.to_string(),
-                    });
+                    // McpInitCancelled event removed — xai_file_utils::events is gone
                     return;
                 }
                 let mut servers_succeeded: u32 = 0;
@@ -1559,12 +1522,7 @@ impl SessionActor {
                                             server_name,
                                             e
                                         );
-                                        event_writer
-                                            .emit(xai_file_utils::events::Event::McpToolRegistrationFailed {
-                                                server_name: server_name.clone(),
-                                                tool_name: qualified_name.clone(),
-                                                error: e.to_string(),
-                                            });
+                                        // McpToolRegistrationFailed event removed — xai_file_utils::events is gone
                                     } else {
                                         tracing::debug!(
                                             "Registered MCP tool '{}' from server '{}'",
@@ -1595,13 +1553,7 @@ impl SessionActor {
                                 .get(server_name.as_str())
                                 .copied()
                                 .unwrap_or("unknown");
-                            event_writer.emit(xai_file_utils::events::Event::McpServerConnected {
-                                server_name: server_name.clone(),
-                                transport: transport_str.to_string(),
-                                tool_count,
-                                duration_ms: elapsed.as_millis() as u64,
-                                tools: registered_tool_names,
-                            });
+                            // McpServerConnected event removed — xai_file_utils::events is gone
                             crate::session::telemetry::emit_mcp_connection_span(
                                 "connected",
                                 server_name.as_str(),
@@ -1619,19 +1571,22 @@ impl SessionActor {
                             mcp_state.mark_server_ready(&server_name);
                         }
                         Err((server_name, ref e, needs_auth, elapsed, timeout_sec)) => {
+                            // McpErrorCategory removed — xai_file_utils::events is gone
+                            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+                            enum McpErrorCategory { AuthRequired, Timeout, Other }
                             let error_cat = if needs_auth {
-                                xai_file_utils::events::McpErrorCategory::AuthRequired
+                                McpErrorCategory::AuthRequired
                             } else {
-                                e.error_category()
+                                McpErrorCategory::Other
                             };
                             let error_type_label = match error_cat {
-                                xai_file_utils::events::McpErrorCategory::AuthRequired => {
+                                McpErrorCategory::AuthRequired => {
                                     grow_telemetry::events::McpErrorType::Auth
                                 }
-                                xai_file_utils::events::McpErrorCategory::Timeout => {
+                                McpErrorCategory::Timeout => {
                                     grow_telemetry::events::McpErrorType::Timeout
                                 }
-                                _ => grow_telemetry::events::McpErrorType::HandshakeFailed,
+                                McpErrorCategory::Other => grow_telemetry::events::McpErrorType::HandshakeFailed,
                             };
                             grow_telemetry::session_ctx::log_event(
                                 grow_telemetry::events::McpServerFailed {
@@ -1657,15 +1612,7 @@ impl SessionActor {
                                 None,
                                 Some(error_type_label.as_str()),
                             );
-                            event_writer.emit(xai_file_utils::events::Event::McpServerFailed {
-                                server_name: server_name.clone(),
-                                transport: Some(transport_str.to_string()),
-                                target: server_target_map.get(server_name.as_str()).cloned(),
-                                error_type: error_cat,
-                                error_message: e.to_string(),
-                                duration_ms: Some(elapsed.as_millis() as u64),
-                                timeout_sec: Some(timeout_sec),
-                            });
+                            // McpServerFailed event removed — xai_file_utils::events is gone
                             servers_failed += 1;
                             failed_server_names.push(server_name.clone());
                             if needs_auth {
@@ -1712,16 +1659,7 @@ impl SessionActor {
                     strategy: mcp_strategy,
                     is_reinit,
                 });
-                event_writer.emit(xai_file_utils::events::Event::McpInitCompleted {
-                    total_servers: server_count,
-                    succeeded: servers_succeeded,
-                    failed: servers_failed,
-                    auth_required: servers_auth_required,
-                    total_tools: total_tools_registered,
-                    duration_ms: handshake_start.elapsed().as_millis() as u64,
-                    is_reinit,
-                    failed_servers: failed_server_names,
-                });
+                // McpInitCompleted event removed — xai_file_utils::events is gone
             }
             for (server_name, client) in &shared_clients_for_bg {
                 let regs = match client

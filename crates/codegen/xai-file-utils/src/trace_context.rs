@@ -33,15 +33,6 @@ pub fn inject_trace_context_into_request(
     builder
 }
 
-/// Return trace-context headers (traceparent, tracestate) for the current
-/// span.  Used by callers that hold a `reqwest_middleware::RequestBuilder`
-/// (which is a different type from `reqwest::RequestBuilder`).
-pub(crate) fn trace_context_headers() -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    inject_trace_context(&mut headers);
-    headers
-}
-
 pub(crate) fn inject_trace_context(headers: &mut HeaderMap) {
     // Prefer the context from the current tracing span (set by OpenTelemetryLayer).
     // Fall back to opentelemetry::Context::current() (thread-local) for code paths

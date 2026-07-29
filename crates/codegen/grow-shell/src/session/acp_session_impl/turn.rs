@@ -242,8 +242,8 @@ impl SessionActor {
         prompt_id: &str,
         prompt_blocks: Vec<acp::ContentBlock>,
         prompt_mode: PromptMode,
-        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
-        artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
+        trace_gcs_config: Option<crate::save::TraceExportConfig>,
+        artifact_tracker: Option<crate::save::ArtifactTracker>,
         prompt_client_identifier: Option<String>,
         prompt_screen_mode: Option<String>,
         verbatim: bool,
@@ -1502,8 +1502,8 @@ impl SessionActor {
     pub(super) async fn process_conversation_turn_with_recovery(
         self: &Arc<Self>,
         req_id: &str,
-        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
-        artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
+        trace_gcs_config: Option<crate::save::TraceExportConfig>,
+        artifact_tracker: Option<crate::save::ArtifactTracker>,
         json_schema: Option<serde_json::Value>,
     ) -> Result<TurnOutcome, acp::Error> {
         let _ = self.compaction.auto_compact_suppressed.compare_exchange(
@@ -1873,8 +1873,8 @@ impl SessionActor {
     async fn process_conversation_turn(
         self: &Arc<Self>,
         req_id: &str,
-        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
-        artifact_tracker: Option<&crate::upload::manifest::ArtifactTracker>,
+        trace_gcs_config: Option<crate::save::TraceExportConfig>,
+        artifact_tracker: Option<&crate::save::ArtifactTracker>,
         json_schema: Option<serde_json::Value>,
     ) -> Result<TurnOutcome, acp::Error> {
         let conv_turn_start = std::time::Instant::now();
@@ -1932,7 +1932,7 @@ impl SessionActor {
             let manifest_clone = artifact_tracker.cloned();
             let auth_manager = self.auth_manager.clone();
             tokio::spawn(async move {
-                crate::upload::trace::upload_tool_definitions(
+                crate::save::upload_tool_definitions(
                     gcs_cfg,
                     auth_manager,
                     &tool_defs,

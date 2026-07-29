@@ -20,11 +20,12 @@ use crate::session::{
 };
 use crate::terminal::AsyncTerminalRunner;
 use crate::tools::ToolContext;
-use crate::upload::trace::{
-    GCS_SCHEMA_VERSION, PromptMetadata, TurnResultMetadata, local_sandbox_telemetry,
-    upload_metadata, upload_session_state, upload_subagent_metadata, upload_turn_result,
+use crate::save::{
+    GCS_SCHEMA_VERSION, PromptMetadata, TurnResultMetadata, UploadOutcome,
+    local_sandbox_telemetry, upload_metadata, upload_session_state, upload_subagent_metadata,
+    upload_turn_result,
 };
-use crate::upload::turn::{PromptTraceContext, complete_prompt_trace};
+use crate::save::{PromptTraceContext, complete_prompt_trace};
 use agent_client_protocol as acp;
 use grow_agent::config::McpInheritance;
 use grow_sampling_types::conversation::ConversationItem;
@@ -43,7 +44,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
-use xai_file_utils::events::types::CancellationCategory;
+use crate::session::events::CancellationCategory;
 use xai_hunk_tracker::HunkTrackerHandle;
 mod handle_request;
 pub(crate) use handle_request::run_shell_child;
@@ -247,7 +248,7 @@ pub(crate) struct SubagentSpawnContext {
     /// is determined by the proxy from user ACLs.
     pub gcs_bucket_url: Option<String>,
     /// GCS upload method (direct or proxy).
-    pub gcs_upload_method: Option<crate::session::repo_changes::UploadMethod>,
+    pub gcs_upload_method: Option<crate::save::UploadMethod>,
     pub hook_registry: Option<std::sync::Arc<grow_hooks::discovery::HookRegistry>>,
     pub permission_handle: Option<grow_workspace::permission::PermissionHandle>,
     pub worktree_type: crate::util::config::WorktreeType,
@@ -294,7 +295,7 @@ pub(crate) struct SubagentSpawnContext {
         Option<grow_tools::reminders::task_completion::TaskCompletionReservations>,
     /// Channel for requesting trace uploads for synthetic auto-wake turns.
     pub synthetic_trace_tx:
-        Option<tokio::sync::mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
+        Option<tokio::sync::mpsc::UnboundedSender<crate::save::SyntheticTurnTraceRequest>>,
     /// Resolved name of the `BackgroundTaskAction` tool in the parent's toolset.
     pub task_output_tool_name: String,
     /// Whether auto-wake is enabled. When `false`, subagent completions
@@ -447,7 +448,7 @@ pub(crate) struct ShellCompletionData {
     parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
     task_output_tool_name: String,
     synthetic_trace_tx:
-        Option<mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
+        Option<mpsc::UnboundedSender<crate::save::SyntheticTurnTraceRequest>>,
     goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
     telemetry_tokens: u64,
     spawned_notification_emitted: bool,
@@ -477,7 +478,7 @@ impl ShellCompletionData {
 pub(crate) struct SubagentPresentation {
     is_turn_active: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) synthetic_trace_tx:
-        Option<mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
+        Option<mpsc::UnboundedSender<crate::save::SyntheticTurnTraceRequest>>,
 }
 impl SubagentPresentation {
     pub(crate) fn new() -> Self {
@@ -1670,7 +1671,7 @@ async fn signals_snapshot_counts(child_handle: &SessionHandle) -> (u32, u32) {
         .unwrap_or((0, 0))
 }
 fn cancellation_error_message(
-    category: Option<xai_file_utils::events::types::CancellationCategory>,
+    category: Option<CancellationCategory>,
     context: Option<&crate::session::commands::CancellationContext>,
 ) -> String {
     let detail = context.and_then(|ctx| {
@@ -1756,7 +1757,7 @@ fn inject_subagent_completed_prompt(
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
     task_output_tool_name: &str,
     synthetic_trace_tx: &Option<
-        mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>,
+        mpsc::UnboundedSender<crate::save::SyntheticTurnTraceRequest>,
     >,
 ) {
     let Some(cmd_tx) = parent_cmd_tx else {
@@ -1810,7 +1811,7 @@ fn inject_subagent_completed_prompt(
         return;
     }
     if let Some(trace_tx) = synthetic_trace_tx {
-        let _ = trace_tx.send(crate::upload::turn::SyntheticTurnTraceRequest {
+        let _ = trace_tx.send(crate::save::SyntheticTurnTraceRequest {
             session_id: acp::SessionId::new(request.parent_session_id.clone()),
             prompt_id,
             completion_rx,
@@ -2312,7 +2313,7 @@ pub(crate) fn read_subagent_output(dir: &Path) -> Option<String> {
 #[derive(Clone)]
 struct GcsUploadContext {
     bucket_url: Option<String>,
-    upload_method: Option<crate::session::repo_changes::UploadMethod>,
+    upload_method: Option<crate::save::UploadMethod>,
     model_id: Option<String>,
     cwd: Option<String>,
     isolation_mode: Option<String>,

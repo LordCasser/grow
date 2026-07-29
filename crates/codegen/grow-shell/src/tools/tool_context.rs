@@ -184,7 +184,7 @@ pub struct ToolContext {
     pub task_wake_suppressed: Option<grow_tools::reminders::task_completion::TaskWakeSuppressed>,
     /// Channel for requesting trace uploads for synthetic auto-wake turns.
     pub(crate) synthetic_trace_tx:
-        Option<tokio::sync::mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
+        Option<tokio::sync::mpsc::UnboundedSender<crate::save::SyntheticTurnTraceRequest>>,
     /// Shared slot for the synthetic trace channel. Populated by
     /// `start_subagent_coordinator` after the notification bridge is spawned.
     /// The notification bridge reads from this slot on each completion event.
@@ -193,7 +193,7 @@ pub struct ToolContext {
             std::sync::Mutex<
                 Option<
                     tokio::sync::mpsc::UnboundedSender<
-                        crate::upload::turn::SyntheticTurnTraceRequest,
+                        crate::save::SyntheticTurnTraceRequest,
                     >,
                 >,
             >,

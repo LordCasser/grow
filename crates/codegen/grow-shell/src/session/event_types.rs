@@ -564,6 +564,21 @@ pub enum ToolOutcome {
     Cancelled,
 }
 
+impl From<ToolOutcome> for grow_telemetry::events::ToolOutcome {
+    fn from(o: ToolOutcome) -> Self {
+        match o {
+            ToolOutcome::Success => Self::Success,
+            ToolOutcome::Error => Self::Error,
+            ToolOutcome::PermissionRejected => Self::PermissionRejected,
+            ToolOutcome::PermissionCancelled => Self::PermissionCancelled,
+            ToolOutcome::Followup => Self::Followup,
+            ToolOutcome::HookDenied => Self::HookDenied,
+            ToolOutcome::InvalidTool => Self::InvalidTool,
+            ToolOutcome::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {

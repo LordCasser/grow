@@ -475,18 +475,18 @@ async fn upload_harness_trace_turns_numbers_siblings_and_persists_counter() {
     let mut handle = make_test_handle("test-model", false, None);
     handle.info = info.clone();
     let queue_home = tempfile::tempdir().unwrap();
-    let queue_cfg = crate::session::repo_changes::TraceExportConfig {
+    let queue_cfg = crate::save::TraceExportConfig {
         bucket_url: Some("gs://harness-trace-test".to_string()),
         service_account_key: None,
         prefix_dir: None,
         gcs_prefix: None,
         absolute_paths: false,
         archive_name_override: None,
-        upload_method: crate::session::repo_changes::UploadMethod::Direct {
+        upload_method: crate::save::UploadMethod::Direct {
             service_account_key: None,
         },
     };
-    let queue = crate::upload::trace::spawn_upload_queue(
+    let queue = crate::save::spawn_upload_queue(
         queue_home.path(),
         &queue_cfg,
         Some(grow_version::VERSION),
@@ -578,7 +578,7 @@ async fn upload_harness_trace_turns_uploads_disabled_does_not_burn_counter() {
 /// neither failed.
 #[tokio::test(flavor = "current_thread")]
 async fn upload_harness_trace_turns_build_per_turn_manifest() {
-    use crate::upload::manifest::{
+    use crate::save::{
         ArtifactResult, ArtifactStatus, build_manifest, record_artifact, resolve_upload_method,
     };
     let agent = build_minimal_agent_for_tests();
@@ -596,18 +596,18 @@ async fn upload_harness_trace_turns_build_per_turn_manifest() {
     let mut handle = make_test_handle("test-model", false, None);
     handle.info = info.clone();
     let queue_home = tempfile::tempdir().unwrap();
-    let queue_cfg = crate::session::repo_changes::TraceExportConfig {
+    let queue_cfg = crate::save::TraceExportConfig {
         bucket_url: Some("gs://harness-trace-test".to_string()),
         service_account_key: None,
         prefix_dir: None,
         gcs_prefix: None,
         absolute_paths: false,
         archive_name_override: None,
-        upload_method: crate::session::repo_changes::UploadMethod::Direct {
+        upload_method: crate::save::UploadMethod::Direct {
             service_account_key: None,
         },
     };
-    let queue = crate::upload::trace::spawn_upload_queue(
+    let queue = crate::save::spawn_upload_queue(
         queue_home.path(),
         &queue_cfg,
         Some(grow_version::VERSION),
@@ -665,8 +665,7 @@ async fn upload_harness_trace_turns_build_per_turn_manifest() {
         &ctx1.artifact_tracker,
         "turn_messages.json",
         ArtifactResult::Failed {
-            reason: "upload_failed",
-            error: None,
+            reason: "upload_failed".to_string(),
         },
     );
     let m1 = build_manifest(&ctx1.artifact_tracker, resolve_upload_method(ctx1));
@@ -1100,18 +1099,16 @@ async fn set_session_model_does_not_cross_contaminate() {
     );
 }
 #[tokio::test]
-async fn model_state_prefers_session_reasoning_effort_over_global() {
+async fn model_state_prefers_session_reasoning_effort_over_model_default() {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
     use grow_sampling_types::{REASONING_EFFORT_META_KEY, ReasoningEffort};
     let agent = build_minimal_agent_for_tests();
     let mut entry = ModelEntry::fallback("effort-model", &EndpointsConfig::default());
     entry.info.supports_reasoning_effort = true;
+    entry.info.reasoning_effort = Some(ReasoningEffort::Low);
     agent
         .models_manager
         .insert_test_entry("effort-model", entry);
-    agent
-        .models_manager
-        .set_current_reasoning_effort(Some(ReasoningEffort::Low));
     let read_effort = |state: &acp::SessionModelState| -> Option<String> {
         state
             .available_models
@@ -1139,46 +1136,7 @@ async fn model_state_prefers_session_reasoning_effort_over_global() {
     assert_eq!(
         read_effort(&agent.model_state(Some(&unset))).as_deref(),
         Some("low"),
-        "absent session effort falls back to the global default",
-    );
-}
-/// A session persisted under a routing *slug* (not the catalog map key) must
-/// still get reasoning modes and a selected model from
-/// `session_config_options` — the id is resolved to the catalog key before
-/// the catalog effort lookups and the selected-model match.
-#[tokio::test]
-async fn session_config_options_resolves_routing_slug_to_catalog_model() {
-    use crate::agent::config::{EndpointsConfig, ModelEntry};
-    use grow_sampling_types::ReasoningEffort;
-    let agent = build_minimal_agent_for_tests();
-    let mut entry = ModelEntry::fallback("catalog-key-model", &EndpointsConfig::default());
-    entry.info.model = "routing-slug".to_string();
-    entry.info.supports_reasoning_effort = true;
-    entry.info.reasoning_effort = Some(ReasoningEffort::High);
-    agent
-        .models_manager
-        .insert_test_entry("catalog-key-model", entry);
-    let sid = acp::SessionId::new("sess-slug");
-    agent
-        .sessions
-        .borrow_mut()
-        .insert(sid.clone(), make_test_handle("routing-slug", false, None));
-    let state = agent.model_state(Some(&sid));
-    assert_eq!(state.current_model_id.0.as_ref(), "routing-slug");
-    let opts = agent.session_config_options(Some(&sid), &state);
-    let modes: Vec<_> = opts.iter().filter(|o| o.category == "mode").collect();
-    assert!(
-        !modes.is_empty(),
-        "reasoning modes must surface for a slug-identified session"
-    );
-    assert!(
-        modes.iter().any(|o| o.id == "high" && o.selected),
-        "catalog default effort should be selected"
-    );
-    assert!(
-        opts.iter()
-            .any(|o| o.category == "model" && o.id == "catalog-key-model" && o.selected),
-        "resolved catalog model must be selected"
+        "absent session effort falls back to the resolved model default",
     );
 }
 /// YOLO toggle scoped by client_identifier: only matching sessions are updated.

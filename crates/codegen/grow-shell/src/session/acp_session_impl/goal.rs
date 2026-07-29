@@ -645,7 +645,6 @@ impl SessionActor {
                 cwd: Some(self.tool_context.cwd.as_str().to_owned()),
                 trace_sink: Some((self.chat_state_handle.clone(), task_tool_name)),
                 skeptic_overrides,
-                events: Some(self.events.writer()),
             });
 
         let implementer_scratch =
@@ -672,7 +671,7 @@ impl SessionActor {
             inherit_tool_names: &inherit_tool_names,
         };
 
-        let result = run_verification_stage(spawner, inputs, &|e| self.events.emit(e)).await;
+        let result = run_verification_stage(spawner, inputs).await;
         self.chat_state_handle.flush_harness_trace_turn();
         if result.panel_ran
             && let Some(o) = self.goal_tracker.lock().snapshot_mut()

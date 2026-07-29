@@ -1178,8 +1178,8 @@ pub(crate) async fn run_shell_child(
         prompt_mode: crate::session::plan_mode::PromptMode::Agent,
         artifact_upload_ctx: ctx.gcs_bucket_url.as_ref().and_then(|_| {
             ctx.gcs_upload_method.as_ref().map(|method| {
-                crate::upload::manifest::ArtifactUploadContext {
-                    gcs_config: crate::session::repo_changes::TraceExportConfig {
+                crate::save::ArtifactUploadContext {
+                    gcs_config: crate::save::TraceExportConfig {
                         bucket_url: ctx.gcs_bucket_url.clone(),
                         service_account_key: None,
                         prefix_dir: None,
@@ -1188,7 +1188,7 @@ pub(crate) async fn run_shell_child(
                         archive_name_override: None,
                         upload_method: method.clone(),
                     },
-                    artifact_tracker: crate::upload::manifest::new_artifact_tracker(),
+                    artifact_tracker: crate::save::new_artifact_tracker(),
                 }
             })
         }),
@@ -1411,7 +1411,7 @@ pub(crate) async fn run_shell_child(
         }
     };
     if let Some(trace_gcs_config) = gcs_upload_ctx.upload_method.as_ref().map(|method| {
-        crate::session::repo_changes::TraceExportConfig {
+        crate::save::TraceExportConfig {
             bucket_url: gcs_upload_ctx.bucket_url.clone(),
             service_account_key: None,
             prefix_dir: None,
@@ -1437,7 +1437,7 @@ pub(crate) async fn run_shell_child(
                 None
             }
         };
-        let streaming_partial = crate::upload::turn::take_streaming_partial(
+        let streaming_partial = crate::save::take_streaming_partial(
             &child_handle.cmd_tx,
             child_prompt_id.clone(),
             result.success,
@@ -1463,13 +1463,13 @@ pub(crate) async fn run_shell_child(
             session_handle: child_handle.clone(),
             session_registry_enabled: false,
             upload_queue: None,
-            artifact_tracker: crate::upload::manifest::new_artifact_tracker(),
+            artifact_tracker: crate::save::new_artifact_tracker(),
             auth_manager: ctx.auth_manager.clone(),
         };
         let session_dir = crate::session::persistence::session_dir(&child_handle.info);
         if let Ok(prompt_bytes) = std::fs::read(session_dir.join("system_prompt.txt")) {
             let gcs_path = format!("{}/system_prompt.txt", child_session_id.0);
-            crate::upload::trace::upload_trace_artifact(
+            crate::save::upload_trace_artifact(
                 &trace_ctx,
                 &prompt_bytes,
                 &gcs_path,
@@ -1480,7 +1480,7 @@ pub(crate) async fn run_shell_child(
         }
         if let Ok(ctx_bytes) = std::fs::read(session_dir.join("prompt_context.json")) {
             let gcs_path = format!("{}/prompt_context.json", child_session_id.0);
-            crate::upload::trace::upload_trace_artifact(
+            crate::save::upload_trace_artifact(
                 &trace_ctx,
                 &ctx_bytes,
                 &gcs_path,
@@ -1493,7 +1493,7 @@ pub(crate) async fn run_shell_child(
             &trace_ctx,
             "before",
             before_copy_rx,
-            crate::upload::turn::UploadWait::Confirm,
+            crate::save::UploadWait::Confirm,
         )
         .await;
         let subagent_auth = ctx.auth_manager.current();
@@ -1532,7 +1532,7 @@ pub(crate) async fn run_shell_child(
             .await
             .resolved_model_id
             .or_else(|| gcs_upload_ctx.model_id.clone());
-        let turn_result_meta = TurnResultMetadata {
+        let turn_result_meta: TurnResultMetadata = TurnResultMetadata {
             schema_version: "1",
             request_id: child_prompt_id,
             completed: result.success,
@@ -1553,7 +1553,7 @@ pub(crate) async fn run_shell_child(
         upload_turn_result(
             &trace_ctx,
             &turn_result_meta,
-            crate::upload::turn::UploadWait::Confirm,
+            crate::save::UploadWait::Confirm,
         )
         .await;
         match complete_prompt_trace(
@@ -1562,7 +1562,7 @@ pub(crate) async fn run_shell_child(
             session_copy_rx,
             turn_messages,
             streaming_partial,
-            crate::upload::turn::UploadWait::Confirm,
+            crate::save::UploadWait::Confirm,
         )
         .await
         {

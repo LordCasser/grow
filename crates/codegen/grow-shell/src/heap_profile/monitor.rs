@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::auth::AuthManager;
-use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
-use crate::upload::gcs::WithAuth as _;
+use crate::save::{TraceExportConfig, UploadMethod};
+// WithAuth removed — xai_file_utils::gcs is gone
 
 /// Hard skip-cap for dump uploads (K4). Allowed sizes are `1..=HARD_DUMP_SIZE_CAP_BYTES`.
 pub const HARD_DUMP_SIZE_CAP_BYTES: u64 = 128 * 1024 * 1024;
@@ -538,7 +538,7 @@ fn log_upload_result(heap_object: &str, file_size: u64, ok: bool, err: Option<&s
         tracing::info!(
             object_path = %heap_object,
             bytes = file_size,
-            multipart = file_size > xai_file_utils::gcs::MULTIPART_UPLOAD_THRESHOLD,
+            // multipart removed — xai_file_utils::gcs::MULTIPART_UPLOAD_THRESHOLD is gone
             "heap_profile: upload_ok"
         );
         true
@@ -593,16 +593,15 @@ async fn upload_pair(
         archive_name_override: None,
         upload_method: handles.upload_method.clone(),
     };
-    let config = gcs_config.with_auth(Some(Arc::clone(&handles.auth_manager)));
-
-    if let Err(e) = xai_file_utils::gcs::upload_file(&config, heap_object, heap_path, heap_ct).await
-    {
-        return log_upload_result(heap_object, file_size, false, Some(&e.to_string()));
-    }
-    match xai_file_utils::gcs::upload_file(&config, meta_object, meta_path, meta_ct).await {
-        Ok(_) => log_upload_result(heap_object, file_size, true, None),
-        Err(e) => log_upload_result(heap_object, file_size, false, Some(&e.to_string())),
-    }
+    let config = gcs_config;
+    // GCS upload removed — xai_file_utils::gcs is gone
+    // with_auth() and upload_file() no longer exist
+    tracing::warn!(
+        object_path = %heap_object,
+        reason = "gcs_module_removed",
+        "heap_profile: upload skipped (gcs module removed)"
+    );
+    return log_upload_result(heap_object, file_size, false, Some("gcs_module_removed"));
 }
 
 struct PrivateTempDir {

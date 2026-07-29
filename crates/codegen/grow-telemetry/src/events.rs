@@ -3,8 +3,8 @@
 //! lives in shell's integration layer).
 //!
 //! These structs were extracted from `grow-shell` so they can be
-//! reused across binaries (TUI, sampler) without dragging the shell HTTP /
-//! Mixpanel client along. The `CompactionScope` helper that drives paired
+//! reused across binaries (TUI, sampler) without dragging the shell HTTP
+//! client along. The `CompactionScope` helper that drives paired
 //! `compaction_triggered`/`compaction_completed` emission stays in shell --
 //! it calls `super::log_event` directly.
 
@@ -172,6 +172,23 @@ pub enum McpTransport {
 
 pub use super::enums::McpInitStrategy as McpStrategy;
 
+/// Outcome of a tool call: the shared enum surface that the local event log and
+/// the product telemetry event both carry. Formerly re-exported from a shared
+/// utility module; now defined locally since that module has been stripped of
+/// its `events` exports.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutcome {
+    Success,
+    Error,
+    PermissionRejected,
+    PermissionCancelled,
+    Followup,
+    HookDenied,
+    InvalidTool,
+    Cancelled,
+}
+
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum McpErrorType {
@@ -333,7 +350,7 @@ pub struct PlanModeToggled {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// One contextual-hint impression or acceptance: per tip, how often it is
-/// shown vs. acted on (the `action` property drives the Mixpanel funnel).
+/// shown vs. acted on (the `action` property drives the analytics funnel).
 #[derive(Serialize)]
 pub struct ContextualTip {
     pub tip: ContextualTipKind,
@@ -862,7 +879,7 @@ pub struct PromptSubmitted {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screen_mode: Option<String>,
     /// Raw prompt text for the external stream's `OTEL_LOG_USER_PROMPTS`
-    /// gate **only**. `#[serde(skip)]`: never serialized to product events/Mixpanel;
+    /// gate **only**. `#[serde(skip)]`: never serialized to product events;
     /// dropped at external emit time unless the gate is on (then capped at
     /// 60 KB and secret-scrubbed).
     #[serde(skip)]
@@ -1023,16 +1040,16 @@ pub struct ActionStationarityStop {
 #[derive(Serialize)]
 pub struct ToolCallCompleted {
     pub tool_name: String,
-    pub outcome: xai_file_utils::events::types::ToolOutcome,
+    pub outcome: ToolOutcome,
     pub duration_ms: u64,
     /// Primary file path of the call, for the external stream only
-    /// (`#[serde(skip)]`: never serialized to product events/Mixpanel). Always reduced to
+    /// (`#[serde(skip)]`: never serialized to product events). Always reduced to
     /// `file_extension`; the full path rides the `OTEL_LOG_TOOL_DETAILS` gate.
     #[serde(skip)]
     pub file_path: Option<String>,
     /// Tool parameters for the external stream's `OTEL_LOG_TOOL_DETAILS`
     /// gate **only** (`#[serde(skip)]`; reduced to 4 KB / depth 2 / 20 items
-    /// at emit time).
+    /// at emit time). Never serialized to product events.
     #[serde(skip)]
     pub parameters: Option<serde_json::Value>,
 }

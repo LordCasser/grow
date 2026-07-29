@@ -83,6 +83,7 @@ context_window = 200000
 ```toml
 [models]
 default = "deepseek/deepseek-v4-pro"
+default_reasoning_effort = "max"
 
 [provider.deepseek]
 api_backend = "chat_completions"
@@ -112,9 +113,10 @@ reasoning_efforts = ["none", "high", "max"]
 请求时，Grow 会根据 `api_backend` 转换字段：`chat_completions` 发送顶层
 `reasoning_effort`，`responses` 发送 `reasoning.effort`，`messages` 使用对应的
 thinking/output-config 字段。`Shift+Tab`、`/effort` 和 `/model` 共用同一份模型档位配置。
-切换结果保存在当前 session；重新打开旧 session 时恢复其最后档位，新 session 使用模型配置
-的默认值。没有声明 `reasoning_efforts` 的模型不会被 Grow 猜测支持，按 `Shift+Tab` 时只会
-显示配置提示。
+切换结果保存在当前 session。有效默认值按精确程度解析：已有 session 的最后选择、模型上的
+`reasoning_effort` 或 `default = true`、模型支持的全局 `default_reasoning_effort`，最后是该
+模型声明档位中的最低值。没有声明 `reasoning_efforts` 的 BYOK 模型不会被 Grow 猜测支持，
+按 `Shift+Tab` 时只会显示配置提示。
 
 OAuth 是 provider 的另一种可选凭据来源，不是 Grow 的全局登录态。模型仍然必须显式属于
 该 provider，也不会因为登录成功而自动添加模型：

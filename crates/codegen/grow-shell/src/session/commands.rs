@@ -28,7 +28,7 @@ pub enum PromptCompletionKind {
     /// Completed so goal continuation is not re-queued under an active goal.
     StationarityEnded,
     Cancelled {
-        category: Option<xai_file_utils::events::types::CancellationCategory>,
+        category: Option<crate::session::events::CancellationCategory>,
         context: Option<CancellationContext>,
     },
     MaxTurnsReached {
@@ -153,7 +153,7 @@ pub enum SessionCommand {
         /// Prompt mode parsed from request `_meta.mode`.
         prompt_mode: PromptMode,
         #[allow(private_interfaces)]
-        artifact_upload_ctx: Option<crate::upload::manifest::ArtifactUploadContext>,
+        artifact_upload_ctx: Option<crate::save::ArtifactUploadContext>,
         /// Optional client identifier from the prompt request meta (overrides session-level one)
         client_identifier: Option<String>,
         /// Optional screen mode from the prompt request meta (`_meta.screenMode`,
@@ -190,6 +190,10 @@ pub enum SessionCommand {
         responds_to: oneshot::Sender<()>,
     },
     SetSessionModel {
+        /// Stable `provider/model` catalog identity used by the UI and
+        /// persistence. This is intentionally distinct from
+        /// `sampling_config.model`, which is the provider-facing wire name.
+        model_id: acp::ModelId,
         sampling_config: grow_sampler::SamplerConfig,
         use_concise: bool,
         /// When `false`, skip the system prompt rewrite (concise/default swap).

@@ -113,7 +113,6 @@ struct CatalogState {
 struct Inner {
     catalog: RwLock<CatalogState>,
     current_model_id: RwLock<acp::ModelId>,
-    current_reasoning_effort: RwLock<Option<ReasoningEffort>>,
     // ── Owned context for self-contained refresh ────────────────
     auth_manager: Arc<AuthManager>,
     cfg: RwLock<config::Config>,
@@ -205,7 +204,6 @@ impl ModelsManagerBuilder {
     pub(crate) fn build(self) -> ModelsManager {
         let has_session = self.auth_manager.current_or_expired().is_some();
         let fetch_auth = ModelFetchAuth::resolve(&self.cfg.endpoints, has_session);
-        let current_reasoning_effort = self.cfg.models.default_reasoning_effort;
         ModelsManager {
             inner: Arc::new(Inner {
                 catalog: RwLock::new(CatalogState {
@@ -214,7 +212,6 @@ impl ModelsManagerBuilder {
                     ..Default::default()
                 }),
                 current_model_id: RwLock::new(self.current_model_id),
-                current_reasoning_effort: RwLock::new(current_reasoning_effort),
                 auth_manager: self.auth_manager,
                 cfg: RwLock::new(self.cfg),
                 fetch_auth: RwLock::new(fetch_auth),
@@ -441,14 +438,6 @@ impl ModelsManager {
     #[cfg(test)]
     pub(crate) fn insert_test_entry(&self, id: impl Into<String>, entry: ModelEntry) {
         self.inner.catalog.write().models.insert(id.into(), entry);
-    }
-
-    pub fn current_reasoning_effort(&self) -> Option<ReasoningEffort> {
-        *self.inner.current_reasoning_effort.read()
-    }
-
-    pub fn set_current_reasoning_effort(&self, effort: Option<ReasoningEffort>) {
-        *self.inner.current_reasoning_effort.write() = effort;
     }
 
     /// Whether the given model supports reasoning effort according to the catalog.

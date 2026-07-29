@@ -400,7 +400,6 @@ struct CallCompletedGuard {
     tracker: Arc<crate::activity::ActivityTracker>,
     call_id: String,
     session_id: Option<String>,
-    outcome: xai_file_utils::events::ToolOutcome,
 }
 impl CallCompletedGuard {
     fn new(
@@ -412,17 +411,13 @@ impl CallCompletedGuard {
             tracker,
             call_id,
             session_id,
-            outcome: xai_file_utils::events::ToolOutcome::Cancelled,
         }
-    }
-    fn set_outcome(&mut self, outcome: xai_file_utils::events::ToolOutcome) {
-        self.outcome = outcome;
     }
 }
 impl Drop for CallCompletedGuard {
     fn drop(&mut self) {
         self.tracker
-            .tool_call_completed(&self.call_id, self.session_id.as_deref(), self.outcome);
+            .tool_call_completed(&self.call_id, self.session_id.as_deref());
     }
 }
 #[async_trait]
@@ -548,7 +543,6 @@ impl ToolServerHandler for SessionRoutedToolHandler {
                     }
                     ToolStreamItem::Terminal(Ok(run_result)) => {
                         // Background-task accounting lives in the activity feed, not here.
-                        _guard.set_outcome(xai_file_utils::events::ToolOutcome::Success);
                         yield ToolStreamItem::Terminal(Ok(
                             run_result.into_typed_tool_output(tool_id),
                         ));
@@ -562,7 +556,6 @@ impl ToolServerHandler for SessionRoutedToolHandler {
                             kind = %e.variant_name(),
                             "tool call failed"
                         );
-                        _guard.set_outcome(xai_file_utils::events::ToolOutcome::Error);
                         // Forward the inner ToolError verbatim so the harness
                         // and dashboards keep its kind + structured details
                         // (e.g. invalid-argument vs crashed subprocess).

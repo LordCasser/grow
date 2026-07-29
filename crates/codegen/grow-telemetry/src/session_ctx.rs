@@ -1,4 +1,4 @@
-//! Ambient session context for telemetry — product events + Mixpanel via
+//! Ambient session context for telemetry — product events via
 //! [`log_event`]. `session_id` and `turn_number` are injected from the
 //! task-local [`TelemetryCtx`] active for the duration of a session.
 //!
@@ -143,7 +143,7 @@ pub fn log_event<T: TelemetryEvent>(data: T) {
 }
 
 /// Emit one event to the external stream always (no-op unless the stream is
-/// active) and to the product events/Mixpanel funnel only when `internal_enabled`.
+/// active) and to the product events funnel only when `internal_enabled`.
 ///
 /// Used by call sites whose internal sink is gated by a *stricter* predicate
 /// than [`log_event`]'s own `TelemetryMode::Enabled` check (the shell's

@@ -2,6 +2,7 @@
 //! enforces the `allowed_models` gate before delegating here; internal callers
 //! (`new_session`, `load_session`) call `apply` directly.
 use crate::agent::config;
+use crate::agent::models::resolve_catalog_key;
 use crate::agent::mvp_agent::MvpAgent;
 use crate::session::SessionCommand;
 use agent_client_protocol::{self as acp};
@@ -30,6 +31,8 @@ pub(crate) async fn apply(
         .await
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
     let model = agent.resolve_model_id(&model_id)?;
+    let model_id = resolve_catalog_key(&agent.models_manager.models(), &model_id)
+        .expect("resolve_model_id accepted a model missing from the catalog");
     let use_concise = false;
     let previous_model_id = handle.model_id.0.clone();
     let mut model_sampling =
@@ -68,6 +71,7 @@ pub(crate) async fn apply(
     };
     let (tx, rx) = oneshot::channel();
     let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
+        model_id: model_id.clone(),
         sampling_config: model_sampling,
         use_concise,
         apply_prompt_override: false,

@@ -307,6 +307,9 @@ pub mod acp_mcp;
 pub(crate) mod acp_session;
 pub(crate) mod agent_rebuild;
 pub mod chat_persistence;
+pub(crate) mod event_tracker;
+pub(crate) mod event_types;
+pub(crate) mod event_writer;
 pub(crate) mod events;
 pub mod export;
 pub mod feedback;
@@ -345,7 +348,6 @@ pub mod prompt_history;
 pub mod prompt_parser;
 pub(crate) mod prompt_timing;
 pub(crate) mod replay_events;
-pub mod repo_changes;
 #[path = "restore_stub.rs"]
 pub mod restore;
 pub mod result;

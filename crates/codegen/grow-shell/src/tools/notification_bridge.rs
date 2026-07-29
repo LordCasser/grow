@@ -61,7 +61,7 @@ pub struct NotificationBridgeConfig {
     pub(crate) synthetic_trace_tx: Arc<
         std::sync::Mutex<
             Option<
-                tokio::sync::mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>,
+                tokio::sync::mpsc::UnboundedSender<crate::save::SyntheticTurnTraceRequest>,
             >,
         >,
     >,
@@ -510,7 +510,7 @@ async fn handle_notification(
                                 task_id = %task_id,
                                 "auto-wake: sending synthetic turn trace request"
                             );
-                            let _ = trace_tx.send(crate::upload::turn::SyntheticTurnTraceRequest {
+                            let _ = trace_tx.send(crate::save::SyntheticTurnTraceRequest {
                                 session_id: config.session_id.clone(),
                                 prompt_id,
                                 completion_rx,

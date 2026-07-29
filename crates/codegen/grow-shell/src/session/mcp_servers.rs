@@ -38,29 +38,12 @@ fn resolve_overrides(
 }
 
 /// Build the config-resolved event data from a list of MCP server configs.
+// Event system removed — returns () instead.
 pub fn build_config_resolved_event(
-    configs: &[acp::McpServer],
-    cwd: &Path,
-) -> xai_file_utils::events::Event {
-    let disabled: Vec<String> = crate::util::config::disabled_mcp_server_names(cwd)
-        .into_iter()
-        .collect();
-    let servers = configs
-        .iter()
-        .map(|c| xai_file_utils::events::McpConfigServer {
-            name: inner::mcp_server_name(c).to_string(),
-            transport: inner::mcp_transport_str(c).to_string(),
-            source: if inner::mcp_server_name(c)
-                .starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-            {
-                "managed"
-            } else {
-                "local"
-            }
-            .to_string(),
-        })
-        .collect();
-    xai_file_utils::events::Event::McpConfigResolved { servers, disabled }
+    _configs: &[acp::McpServer],
+    _cwd: &Path,
+) -> () {
+    ()
 }
 
 pub async fn start_mcp_server(
@@ -69,7 +52,6 @@ pub async fn start_mcp_server(
     cwd: Option<&Path>,
     meta_config: Option<&inner::McpServerMetaConfig>,
     byo_config: Option<&McpOAuthConfig>,
-    event_writer: &xai_file_utils::events::EventWriter,
     mode: OauthInteractivity,
 ) -> Result<inner::McpClient, inner::McpError> {
     let overrides = resolve_overrides(inner::mcp_server_name(&mcp_server), cwd);
@@ -79,7 +61,6 @@ pub async fn start_mcp_server(
         overrides.as_ref(),
         meta_config,
         byo_config,
-        event_writer,
         mode,
     )
     .await
@@ -97,7 +78,7 @@ pub async fn build_pending_clients(
     cwd: Option<&Path>,
     meta_config_map: &inner::McpMetaConfigMap,
     oauth_config_map: &McpOAuthConfigMap,
-    event_writer: &xai_file_utils::events::EventWriter,
+    _event_writer: impl Send,
     mode: OauthInteractivity,
 ) -> Vec<Result<inner::McpClient, inner::McpError>> {
     let mut results = start_mcp_servers(
@@ -106,7 +87,7 @@ pub async fn build_pending_clients(
         cwd,
         meta_config_map,
         oauth_config_map,
-        event_writer,
+        _event_writer,
         mode,
     )
     .await;
@@ -135,7 +116,7 @@ pub async fn start_mcp_servers(
     cwd: Option<&Path>,
     meta_config_map: &inner::McpMetaConfigMap,
     oauth_config_map: &McpOAuthConfigMap,
-    event_writer: &xai_file_utils::events::EventWriter,
+    _event_writer: impl Send,
     mode: OauthInteractivity,
 ) -> Vec<Result<inner::McpClient, inner::McpError>> {
     let overrides_map: HashMap<String, inner::McpClientTimeoutOverrides> = mcp_servers
@@ -151,7 +132,6 @@ pub async fn start_mcp_servers(
         &overrides_map,
         meta_config_map,
         oauth_config_map,
-        event_writer,
         mode,
     )
     .await

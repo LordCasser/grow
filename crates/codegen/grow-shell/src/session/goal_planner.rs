@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use crate::session::events::{Event, GoalPlannerFailClosedReason, GoalRoleModelFailOpenReason};
+use crate::session::events::{GoalPlannerFailClosedReason, GoalRoleModelFailOpenReason};
 use crate::session::goal_role_tools::RoleToolNames;
 use grow_tools::implementations::grow_build::task::backend::{ChannelBackend, SubagentBackend};
 use grow_tools::implementations::grow_build::task::types::{
@@ -14,7 +14,7 @@ use grow_tools::implementations::grow_build::task::types::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use xai_file_utils::events::EventWriter;
+// EventWriter removed — xai_file_utils::events is gone
 
 // Shared per-role model override + spawn-and-retry-once fail-open wrapper
 
@@ -141,7 +141,6 @@ pub(crate) async fn spawn_with_fail_open_retry<E, F, Fut>(
     role: &'static str,
     skeptic_idx: Option<u32>,
     override_: &RoleSpawnOverride,
-    events: Option<&EventWriter>,
     prompt: RoleRenderedPrompt,
     mut spawn: F,
 ) -> Result<String, E>
@@ -168,13 +167,7 @@ where
     if !should_retry {
         return first;
     }
-    if let Some(ev) = events {
-        ev.emit(Event::GoalRoleModelFailOpen {
-            role,
-            skeptic_idx,
-            reason: GoalRoleModelFailOpenReason::SpawnFailed.as_const_str(),
-        });
-    }
+    // GoalRoleModelFailOpen telemetry removed (Event type gone).
     // Retry on the session harness — use the matching `fallback` render so the
     // prompt names the toolset the retry actually runs on.
     spawn(None, None, prompt.fallback).await
@@ -275,9 +268,10 @@ pub(crate) struct ChannelSpawner {
     /// Resolved per-role model+toolset override. Default (inherit) keeps the
     /// historic `::default()` spawn behavior.
     pub(crate) role_override: RoleSpawnOverride,
-    /// Event sink for the spawn-and-retry-once fail-open telemetry; `None`
-    /// in tests / when no event log is wired.
-    pub(crate) events: Option<EventWriter>,
+    // Event sink for the spawn-and-retry-once fail-open telemetry; `None`
+    // in tests / when no event log is wired.
+    // Event sink for telemetry; removed (EventWriter no longer exists).
+    // pub(crate) events: Option<EventWriter>,
 }
 
 #[async_trait::async_trait]
@@ -294,7 +288,6 @@ impl GoalPlannerSpawner for ChannelSpawner {
             "planner",
             None,
             &self.role_override,
-            self.events.as_ref(),
             prompt,
             |model, harness, prompt| self.send_one(id, prompt, model, harness),
         )
@@ -408,14 +401,8 @@ pub(crate) struct GoalPlannerInputs<'a> {
 pub(crate) async fn run_goal_planner(
     spawner: Arc<dyn GoalPlannerSpawner>,
     inputs: GoalPlannerInputs<'_>,
-    emit_event: &dyn Fn(Event),
 ) -> GoalPlannerOutcome {
     let started = std::time::Instant::now();
-    emit_event(Event::GoalPlannerFired {
-        attempt: inputs.attempt,
-        max_runs: GOAL_PLANNER_MAX_RUNS,
-        model_id: inputs.model_id.to_string(),
-    });
 
     if let Some(parent) = inputs.plan_file.parent()
         && let Err(err) = tokio::fs::create_dir_all(parent).await
@@ -429,7 +416,6 @@ pub(crate) async fn run_goal_planner(
             GoalPlannerFailClosedReason::FileWriteFailed,
             inputs.attempt,
             started,
-            emit_event,
         );
     }
 
@@ -462,7 +448,6 @@ pub(crate) async fn run_goal_planner(
                 GoalPlannerFailClosedReason::Transport,
                 inputs.attempt,
                 started,
-                emit_event,
             );
         }
         Err(SpawnError::Runtime { message, cancelled }) => {
@@ -476,7 +461,7 @@ pub(crate) async fn run_goal_planner(
                 cancelled,
                 "goal planner: subagent runtime error; failing closed",
             );
-            return record_fail_closed(reason, inputs.attempt, started, emit_event);
+            return record_fail_closed(reason, inputs.attempt, started);
         }
     };
 
@@ -496,15 +481,10 @@ pub(crate) async fn run_goal_planner(
             GoalPlannerFailClosedReason::MissingPlan,
             inputs.attempt,
             started,
-            emit_event,
         );
     }
 
     let latency_ms = started.elapsed().as_millis() as u64;
-    emit_event(Event::GoalPlannerCompleted {
-        attempt: inputs.attempt,
-        latency_ms,
-    });
     GoalPlannerOutcome::Planned {
         plan_file: inputs.plan_file.to_path_buf(),
         latency_ms,
@@ -515,14 +495,8 @@ fn record_fail_closed(
     reason: GoalPlannerFailClosedReason,
     attempt: u32,
     started: std::time::Instant,
-    emit_event: &dyn Fn(Event),
 ) -> GoalPlannerOutcome {
     let latency_ms = started.elapsed().as_millis() as u64;
-    emit_event(Event::GoalPlannerFailClosed {
-        reason: reason.as_const_str(),
-        attempt,
-        latency_ms,
-    });
     GoalPlannerOutcome::FailClosed { reason, latency_ms }
 }
 
@@ -650,7 +624,6 @@ mod tests {
             cwd: None,
             trace_sink: None,
             role_override: RoleSpawnOverride::default(),
-            events: None,
         };
         let handle = tokio::spawn(async move {
             let _ = spawner
@@ -746,21 +719,6 @@ mod tests {
         }
     }
 
-    fn collect_events() -> (Arc<Mutex<Vec<String>>>, impl Fn(Event) + Send + Sync) {
-        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let log_clone = log.clone();
-        let emit = move |e: Event| {
-            let tag = match e {
-                Event::GoalPlannerFired { .. } => "fired".to_string(),
-                Event::GoalPlannerCompleted { .. } => "completed".to_string(),
-                Event::GoalPlannerFailClosed { reason, .. } => format!("fail_closed:{reason}"),
-                other => format!("other:{other:?}"),
-            };
-            log_clone.lock().unwrap().push(tag);
-        };
-        (log, emit)
-    }
-
     fn tmp_plan_file(name: &str) -> std::path::PathBuf {
         let tmp = std::env::temp_dir().join(format!(
             "goal-planner-{name}-{}",
@@ -777,8 +735,6 @@ mod tests {
             &plan_file,
             b"# Plan: foo\n\n## Goal kind\n\ncode-change\n",
         ));
-        let (log, emit) = collect_events();
-
         let outcome = run_goal_planner(
             spawner,
             GoalPlannerInputs {
@@ -790,15 +746,10 @@ mod tests {
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
-            &emit,
         )
         .await;
 
         assert!(matches!(outcome, GoalPlannerOutcome::Planned { .. }));
-        let log = log.lock().unwrap();
-        assert_eq!(log.len(), 2, "{log:?}");
-        assert_eq!(log[0], "fired");
-        assert_eq!(log[1], "completed");
         let _ = std::fs::remove_file(&plan_file);
     }
 
@@ -806,7 +757,6 @@ mod tests {
     async fn missing_plan_file_fails_closed() {
         let plan_file = tmp_plan_file("missing");
         let spawner = Arc::new(MockSpawner::ok_does_not_write(&plan_file));
-        let (log, emit) = collect_events();
 
         let outcome = run_goal_planner(
             spawner,
@@ -819,7 +769,6 @@ mod tests {
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
-            &emit,
         )
         .await;
 
@@ -830,8 +779,6 @@ mod tests {
                 ..
             }
         ));
-        let log = log.lock().unwrap();
-        assert!(log.iter().any(|t| t == "fail_closed:missing_plan_file"));
     }
 
     #[tokio::test]
@@ -841,7 +788,6 @@ mod tests {
             SpawnError::Transport("channel closed".to_string()),
             &plan_file,
         ));
-        let (log, emit) = collect_events();
 
         let outcome = run_goal_planner(
             spawner,
@@ -854,7 +800,6 @@ mod tests {
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
-            &emit,
         )
         .await;
 
@@ -865,12 +810,6 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            log.lock()
-                .unwrap()
-                .iter()
-                .any(|t| t == "fail_closed:transport")
-        );
     }
 
     #[tokio::test]
@@ -883,7 +822,6 @@ mod tests {
             },
             &plan_file,
         ));
-        let (log, emit) = collect_events();
 
         let outcome = run_goal_planner(
             spawner,
@@ -896,7 +834,6 @@ mod tests {
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
-            &emit,
         )
         .await;
 
@@ -907,12 +844,6 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            log.lock()
-                .unwrap()
-                .iter()
-                .any(|t| t == "fail_closed:aborted")
-        );
     }
 
     #[tokio::test]
@@ -925,7 +856,6 @@ mod tests {
             },
             &plan_file,
         ));
-        let (log, emit) = collect_events();
 
         let outcome = run_goal_planner(
             spawner,
@@ -938,7 +868,6 @@ mod tests {
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
-            &emit,
         )
         .await;
 
@@ -949,12 +878,6 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            log.lock()
-                .unwrap()
-                .iter()
-                .any(|t| t == "fail_closed:runtime")
-        );
     }
 
     #[tokio::test]
@@ -964,7 +887,6 @@ mod tests {
         let mut spawner = MockSpawner::ok_writes(&plan_file, b"# Plan: foo\n");
         spawner.response = Ok("done.".to_string());
         let spawner = Arc::new(spawner);
-        let (_, emit) = collect_events();
 
         let outcome = run_goal_planner(
             spawner,
@@ -977,7 +899,6 @@ mod tests {
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
-            &emit,
         )
         .await;
 
@@ -990,7 +911,6 @@ mod tests {
         // Existence isn't enough; the file must be non-empty.
         let plan_file = tmp_plan_file("empty");
         let spawner = Arc::new(MockSpawner::ok_writes(&plan_file, b""));
-        let (log, emit) = collect_events();
 
         let outcome = run_goal_planner(
             spawner,
@@ -1003,7 +923,6 @@ mod tests {
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
-            &emit,
         )
         .await;
 
@@ -1014,12 +933,6 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            log.lock()
-                .unwrap()
-                .iter()
-                .any(|t| t.starts_with("fail_closed:"))
-        );
     }
 
     #[tokio::test]
@@ -1027,7 +940,6 @@ mod tests {
         let plan_file = tmp_plan_file("prompt");
         let spawner = Arc::new(MockSpawner::ok_writes(&plan_file, b"# Plan\n"));
         let spawner_obs = spawner.clone();
-        let (_, emit) = collect_events();
 
         let _ = run_goal_planner(
             spawner,
@@ -1040,7 +952,6 @@ mod tests {
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
-            &emit,
         )
         .await;
 
@@ -1256,7 +1167,6 @@ mod tests {
                 model: Some("cfg-model".into()),
                 agent_type: Some("cursor".into()),
             },
-            events: None,
         };
         let handle = tokio::spawn(async move {
             let _ = spawner
@@ -1331,8 +1241,7 @@ mod tests {
             "planner",
             None,
             &ov,
-            None,
-            role_prompt("PROMPT"),
+                        role_prompt("PROMPT"),
             |model, harness, prompt| {
                 let c = c.clone();
                 async move {
@@ -1376,8 +1285,7 @@ mod tests {
             "planner",
             None,
             &ov,
-            None,
-            RoleRenderedPrompt {
+                        RoleRenderedPrompt {
                 primary: "PRIMARY".to_string(),
                 fallback: "FALLBACK".to_string(),
             },
@@ -1412,8 +1320,7 @@ mod tests {
             "planner",
             None,
             &ov,
-            None,
-            role_prompt("PROMPT"),
+                        role_prompt("PROMPT"),
             |model, harness, _prompt| {
                 let c = c.clone();
                 async move {
@@ -1445,8 +1352,7 @@ mod tests {
             "skeptic",
             Some(2),
             &ov,
-            None,
-            role_prompt("PROMPT"),
+                        role_prompt("PROMPT"),
             |_m, _h, _prompt| {
                 let c = c.clone();
                 async move {
@@ -1475,8 +1381,7 @@ mod tests {
             "planner",
             None,
             &ov,
-            None,
-            role_prompt("PROMPT"),
+                        role_prompt("PROMPT"),
             |_m, _h, _prompt| {
                 let c = c.clone();
                 async move {
@@ -1508,32 +1413,20 @@ mod tests {
 
     #[tokio::test]
     async fn fail_open_retry_emits_spawn_failed_event() {
-        let dir = tempfile::tempdir().unwrap();
-        let writer = xai_file_utils::events::EventWriter::open(dir.path());
         let ov = RoleSpawnOverride {
             model: Some("m".into()),
             agent_type: Some("t".into()),
         };
-        // Both attempts fail: wrapper still emits the SpawnFailed reason once.
-        let _: Result<String, SpawnError> = spawn_with_fail_open_retry(
+        // Both attempts fail; wrapper propagates the error.
+        let result: Result<String, SpawnError> = spawn_with_fail_open_retry(
             "skeptic",
             Some(1),
             &ov,
-            Some(&writer),
             role_prompt("PROMPT"),
             |_m, _h, _prompt| async move { Err::<String, _>(SpawnError::Transport("x".into())) },
         )
         .await;
-        let mut body = String::new();
-        for entry in std::fs::read_dir(dir.path()).unwrap() {
-            body.push_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap_or_default());
-        }
-        assert!(
-            body.contains("goal_role_model_fail_open"),
-            "must emit fail-open event: {body}",
-        );
-        assert!(body.contains("spawn_failed"), "reason must be spawn_failed");
-        assert!(body.contains("\"skeptic_idx\":1"), "skeptic_idx carried");
+        assert!(result.is_err(), "both-attempt fail must propagate error");
     }
 
     /// Load-bearing (Key Decision #13): a bad configured pair must NOT
@@ -1580,9 +1473,7 @@ mod tests {
                 model: Some("cfg-model".into()),
                 agent_type: Some("general-purpose".into()),
             },
-            events: None,
         });
-        let (_log, emit) = collect_events();
         let outcome = run_goal_planner(
             spawner,
             GoalPlannerInputs {
@@ -1594,7 +1485,6 @@ mod tests {
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
-            &emit,
         )
         .await;
         assert!(
@@ -1643,9 +1533,7 @@ mod tests {
                 model: Some("cfg-model".into()),
                 agent_type: Some("general-purpose".into()),
             },
-            events: None,
         });
-        let (_log, emit) = collect_events();
         let outcome = run_goal_planner(
             spawner,
             GoalPlannerInputs {
@@ -1657,7 +1545,6 @@ mod tests {
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
-            &emit,
         )
         .await;
         assert!(

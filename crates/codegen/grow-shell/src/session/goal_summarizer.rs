@@ -12,7 +12,7 @@
 //! Read-only: the summary IS the subagent's terminal output (no file
 //! read-back), and the spawn pins a read-only capability mode.
 
-use crate::session::events::{Event, GoalSummarizerFailReason};
+use crate::session::events::GoalSummarizerFailReason;
 use crate::session::goal_planner::{
     GOAL_ROLE_AWAIT_BUDGET_EXCEEDED, GOAL_ROLE_SUBAGENT_TYPE, RoleRenderedPrompt,
     RoleSpawnOverride, SpawnError, spawn_with_fail_open_retry,
@@ -24,7 +24,7 @@ use grow_tools::implementations::grow_build::task::types::{
 };
 use std::path::Path;
 use std::sync::Arc;
-use xai_file_utils::events::EventWriter;
+// EventWriter removed — xai_file_utils::events is gone
 use xai_tool_types::SubagentCapabilityMode;
 
 // Constants
@@ -97,9 +97,9 @@ pub(crate) struct ChannelSpawner {
     /// Trace-artifact sink + resolved `task` tool name; `None` disables
     /// recording. See [`crate::session::goal_classifier::record_subagent_trace`].
     pub(crate) trace_sink: Option<(xai_chat_state::ChatStateHandle, String)>,
-    /// Event sink for the spawn-and-retry-once fail-open telemetry; `None` in
-    /// tests / when no event log is wired.
-    pub(crate) events: Option<EventWriter>,
+    // Event sink for the spawn-and-retry-once fail-open telemetry; removed
+    // (EventWriter no longer exists).
+    // pub(crate) events: Option<EventWriter>,
 }
 
 #[async_trait::async_trait]
@@ -118,7 +118,6 @@ impl GoalSummarizerSpawner for ChannelSpawner {
             "summarizer",
             None,
             &override_,
-            self.events.as_ref(),
             prompt,
             |model, harness, prompt| self.send_one(id, prompt, model, harness),
         )
@@ -234,13 +233,8 @@ pub(crate) struct GoalSummarizerInputs<'a> {
 pub(crate) async fn run_goal_summarizer(
     spawner: Arc<dyn GoalSummarizerSpawner>,
     inputs: GoalSummarizerInputs<'_>,
-    emit_event: &dyn Fn(Event),
 ) -> GoalSummarizerOutcome {
     let started = std::time::Instant::now();
-    emit_event(Event::GoalSummarizerFired {
-        attempt: inputs.attempt,
-        model_id: inputs.model_id.to_string(),
-    });
 
     let plan_file_str = inputs.plan_file.to_string_lossy();
     let details_str = inputs.details_file.unwrap_or("(unavailable)");
@@ -271,7 +265,6 @@ pub(crate) async fn run_goal_summarizer(
                 GoalSummarizerFailReason::Transport,
                 inputs.attempt,
                 started,
-                emit_event,
             );
         }
         Err(SpawnError::Runtime { message, cancelled }) => {
@@ -285,7 +278,7 @@ pub(crate) async fn run_goal_summarizer(
                 cancelled,
                 "goal summarizer: subagent runtime error; failing open",
             );
-            return record_fail_open(reason, inputs.attempt, started, emit_event);
+            return record_fail_open(reason, inputs.attempt, started);
         }
     };
 
@@ -296,7 +289,6 @@ pub(crate) async fn run_goal_summarizer(
             GoalSummarizerFailReason::EmptySummary,
             inputs.attempt,
             started,
-            emit_event,
         );
     }
 
@@ -312,10 +304,6 @@ pub(crate) async fn run_goal_summarizer(
     }
 
     let latency_ms = started.elapsed().as_millis() as u64;
-    emit_event(Event::GoalSummarizerCompleted {
-        attempt: inputs.attempt,
-        latency_ms,
-    });
     GoalSummarizerOutcome::Summarized {
         summary,
         latency_ms,
@@ -326,14 +314,8 @@ fn record_fail_open(
     reason: GoalSummarizerFailReason,
     attempt: u32,
     started: std::time::Instant,
-    emit_event: &dyn Fn(Event),
 ) -> GoalSummarizerOutcome {
     let latency_ms = started.elapsed().as_millis() as u64;
-    emit_event(Event::GoalSummarizerFailOpen {
-        reason: reason.as_const_str(),
-        attempt,
-        latency_ms,
-    });
     GoalSummarizerOutcome::FailOpen { reason, latency_ms }
 }
 
@@ -422,21 +404,6 @@ mod tests {
         }
     }
 
-    fn collect_events() -> (Arc<Mutex<Vec<String>>>, impl Fn(Event) + Send + Sync) {
-        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let log_clone = log.clone();
-        let emit = move |e: Event| {
-            let tag = match e {
-                Event::GoalSummarizerFired { .. } => "fired".to_string(),
-                Event::GoalSummarizerCompleted { .. } => "completed".to_string(),
-                Event::GoalSummarizerFailOpen { reason, .. } => format!("fail_open:{reason}"),
-                other => format!("other:{other:?}"),
-            };
-            log_clone.lock().unwrap().push(tag);
-        };
-        (log, emit)
-    }
-
     fn tmp_dir(name: &str) -> PathBuf {
         let tmp = std::env::temp_dir().join(format!(
             "goal-summarizer-{name}-{}",
@@ -466,9 +433,8 @@ mod tests {
         let spawner = Arc::new(MockSpawner::ok(
             "  Shipped the feature.\n\n- did a thing\n  ",
         ));
-        let (log, emit) = collect_events();
 
-        let outcome = run_goal_summarizer(spawner, inputs(&plan, &tn), &emit).await;
+        let outcome = run_goal_summarizer(spawner, inputs(&plan, &tn)).await;
 
         match outcome {
             GoalSummarizerOutcome::Summarized { summary, .. } => {
@@ -477,7 +443,6 @@ mod tests {
             }
             other => panic!("expected Summarized, got {other:?}"),
         }
-        assert_eq!(log.lock().unwrap().as_slice(), ["fired", "completed"]);
     }
 
     #[tokio::test]
@@ -486,9 +451,8 @@ mod tests {
         let plan = dir.join("plan.md");
         let tn = RoleToolNames::inherit_defaults();
         let spawner = Arc::new(MockSpawner::ok("   \n  \t "));
-        let (log, emit) = collect_events();
 
-        let outcome = run_goal_summarizer(spawner, inputs(&plan, &tn), &emit).await;
+        let outcome = run_goal_summarizer(spawner, inputs(&plan, &tn)).await;
 
         assert!(matches!(
             outcome,
@@ -497,12 +461,6 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            log.lock()
-                .unwrap()
-                .iter()
-                .any(|t| t == "fail_open:empty_summary")
-        );
     }
 
     #[tokio::test]
@@ -511,9 +469,8 @@ mod tests {
         let plan = dir.join("plan.md");
         let tn = RoleToolNames::inherit_defaults();
         let spawner = Arc::new(MockSpawner::fails(SpawnError::Transport("closed".into())));
-        let (log, emit) = collect_events();
 
-        let outcome = run_goal_summarizer(spawner, inputs(&plan, &tn), &emit).await;
+        let outcome = run_goal_summarizer(spawner, inputs(&plan, &tn)).await;
 
         assert!(matches!(
             outcome,
@@ -522,12 +479,6 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            log.lock()
-                .unwrap()
-                .iter()
-                .any(|t| t == "fail_open:transport")
-        );
     }
 
     #[tokio::test]
@@ -539,9 +490,7 @@ mod tests {
             message: "user aborted".into(),
             cancelled: true,
         }));
-        let (log, emit) = collect_events();
-
-        let outcome = run_goal_summarizer(spawner, inputs(&plan, &tn), &emit).await;
+        let outcome = run_goal_summarizer(spawner, inputs(&plan, &tn)).await;
 
         assert!(matches!(
             outcome,
@@ -550,7 +499,6 @@ mod tests {
                 ..
             }
         ));
-        assert!(log.lock().unwrap().iter().any(|t| t == "fail_open:aborted"));
     }
 
     #[tokio::test]
@@ -562,9 +510,7 @@ mod tests {
             message: "subagent crashed".into(),
             cancelled: false,
         }));
-        let (log, emit) = collect_events();
-
-        let outcome = run_goal_summarizer(spawner, inputs(&plan, &tn), &emit).await;
+        let outcome = run_goal_summarizer(spawner, inputs(&plan, &tn)).await;
 
         assert!(matches!(
             outcome,
@@ -573,8 +519,6 @@ mod tests {
                 ..
             }
         ));
-        // Pins the `"runtime"` wire const emitted on `GoalSummarizerFailOpen`.
-        assert!(log.lock().unwrap().iter().any(|t| t == "fail_open:runtime"));
     }
 
     #[tokio::test]
@@ -585,9 +529,8 @@ mod tests {
         // A runaway wall of text well past the cap.
         let wall = "x".repeat(GOAL_SUMMARIZER_SUMMARY_MAX_CHARS + 500);
         let spawner = Arc::new(MockSpawner::ok(&wall));
-        let (_log, emit) = collect_events();
 
-        let outcome = run_goal_summarizer(spawner, inputs(&plan, &tn), &emit).await;
+        let outcome = run_goal_summarizer(spawner, inputs(&plan, &tn)).await;
 
         let GoalSummarizerOutcome::Summarized { summary, .. } = outcome else {
             panic!("expected Summarized");
@@ -606,9 +549,8 @@ mod tests {
         let plan = dir.join("plan.md");
         let tn = RoleToolNames::inherit_defaults();
         let spawner = Arc::new(MockSpawner::ok("Shipped X.\n- a\n- b\nVerified by tests."));
-        let (_log, emit) = collect_events();
 
-        let outcome = run_goal_summarizer(spawner, inputs(&plan, &tn), &emit).await;
+        let outcome = run_goal_summarizer(spawner, inputs(&plan, &tn)).await;
 
         let GoalSummarizerOutcome::Summarized { summary, .. } = outcome else {
             panic!("expected Summarized");
@@ -624,9 +566,8 @@ mod tests {
         let tn = RoleToolNames::inherit_defaults();
         let spawner = Arc::new(MockSpawner::ok("ok"));
         let captured = spawner.clone();
-        let (_log, emit) = collect_events();
 
-        let _ = run_goal_summarizer(spawner, inputs(&plan, &tn), &emit).await;
+        let _ = run_goal_summarizer(spawner, inputs(&plan, &tn)).await;
 
         let prompt = captured.last_prompt.lock().unwrap().clone().unwrap();
         assert!(prompt.contains("OBJECTIVE:\ndo X"));
@@ -645,7 +586,6 @@ mod tests {
             parent_prompt_id: None,
             cwd: None,
             trace_sink: None,
-            events: None,
         };
         let handle = tokio::spawn(async move {
             let _ = spawner

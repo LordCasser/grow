@@ -81,17 +81,17 @@ use crate::session::{
 };
 use crate::terminal::{AcpTerminalRunner, TerminalRunner};
 use crate::tools::ToolContext;
-use crate::upload::manifest::write_error_manifest;
-use crate::upload::trace::{
+use crate::save::write_error_manifest;
+use crate::save::{
     GCS_SCHEMA_VERSION, PromptMetadata, TurnResultMetadata,
     build_chat_history_session_state, local_sandbox_telemetry, upload_full_prompt_txt,
     upload_harness_session_archive, upload_images, upload_metadata, upload_plugin_state,
     upload_session_state, upload_turn_messages, upload_turn_result, upload_unified_log,
 };
-use crate::upload::turn::{
+use crate::save::{
     PromptTraceContext, UploadWait, complete_prompt_trace, spawn_upload_task,
 };
-use crate::upload::turn::{
+use crate::save::{
     apply_yolo_mode_to_matching_sessions, lookup_session_model,
     parse_agent_profile_from_meta,
 };
@@ -2175,10 +2175,10 @@ impl MvpAgent {
 /// trace context, await turn completion, then upload the trace.
 async fn handle_synthetic_turn_trace(
     agent_ref: LocalRef<MvpAgent>,
-    request: crate::upload::turn::SyntheticTurnTraceRequest,
+    request: crate::save::SyntheticTurnTraceRequest,
 ) {
     use crate::session::SessionCommand;
-    use crate::upload::turn::{UploadWait, complete_prompt_trace, spawn_upload_task};
+    use crate::save::{UploadWait, complete_prompt_trace, spawn_upload_task};
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     let (info, turn_number, user_id, user_email, client_source, client_version, model) = {
         let this = agent_ref.get();
@@ -2289,7 +2289,7 @@ async fn handle_synthetic_turn_trace(
     match &prompt_result {
         Ok(turn_ok) => {
             let completed = matches!(turn_ok.stop_reason, acp::StopReason::EndTurn);
-            let turn_result_metadata = TurnResultMetadata {
+            let turn_result_metadata: TurnResultMetadata = TurnResultMetadata {
                 schema_version: GCS_SCHEMA_VERSION,
                 request_id: request.prompt_id.clone(),
                 completed,
@@ -2309,8 +2309,8 @@ async fn handle_synthetic_turn_trace(
                     .map(|s| s.turn_output_tokens),
                 error: None,
                 finished_at: chrono::Utc::now().to_rfc3339(),
-                signals: turn_ok.turn_snapshot.as_ref().map(|s| s.current.clone()),
-                turn_delta: turn_ok.turn_snapshot.as_ref().map(|s| s.delta.clone()),
+                signals: turn_ok.turn_snapshot.as_ref().and_then(|s| serde_json::to_value(s.current.clone()).ok()),
+                turn_delta: turn_ok.turn_snapshot.as_ref().and_then(|s| serde_json::to_value(s.delta.clone()).ok()),
                 start_prompt_mode: None,
                 end_prompt_mode: None,
                 resolved_model: Some(model.clone()),
@@ -2319,7 +2319,7 @@ async fn handle_synthetic_turn_trace(
             upload_turn_result(&ctx, &turn_result_metadata, UploadWait::Confirm).await;
         }
         Err(e) => {
-            let turn_result_metadata = TurnResultMetadata {
+            let turn_result_metadata: TurnResultMetadata = TurnResultMetadata {
                 schema_version: GCS_SCHEMA_VERSION,
                 request_id: request.prompt_id.clone(),
                 completed: false,
@@ -2367,7 +2367,7 @@ async fn handle_synthetic_turn_trace(
             respond_to: session_copy_tx,
         });
     let synthetic_committed = matches!(&prompt_result, Ok(ok) if matches!(ok.stop_reason, acp::StopReason::EndTurn));
-    let streaming_partial = crate::upload::turn::take_streaming_partial(
+    let streaming_partial = crate::save::take_streaming_partial(
             &ctx.session_handle.cmd_tx,
             request.prompt_id.clone(),
             synthetic_committed,

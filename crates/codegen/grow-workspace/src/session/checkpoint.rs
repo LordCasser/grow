@@ -239,7 +239,7 @@ impl WorkspaceHandle {
         &self,
         session_id: &str,
         boundary: TurnBoundary,
-    ) -> Option<tokio::task::JoinHandle<xai_file_utils::queue::EnqueueOutcome>> {
+    ) {
         match boundary {
             TurnBoundary::Start {
                 prompt_index: Some(idx),
@@ -258,7 +258,6 @@ impl WorkspaceHandle {
                         }
                     }
                 }
-                None
             }
             TurnBoundary::Start {
                 prompt_index: None,
@@ -267,7 +266,6 @@ impl WorkspaceHandle {
                 self.shared
                     .activity_tracker
                     .turn_started(session_id, turn_number);
-                None
             }
             TurnBoundary::End {
                 prompt_index: Some(idx),
@@ -306,7 +304,6 @@ impl WorkspaceHandle {
                         }
                     }
                 }
-                None
             }
             TurnBoundary::End {
                 prompt_index: None,
@@ -318,10 +315,6 @@ impl WorkspaceHandle {
                 self.shared
                     .activity_tracker
                     .turn_completed(session_id, turn_number, duration_ms);
-                let handle = {
-                    let _ = written;
-                    None
-                };
                 if self.shared.workspace_rewind_all_outcomes
                     && outcome != TurnHookOutcome::Completed
                     && let Some(session) = self.session(session_id)
@@ -357,7 +350,6 @@ impl WorkspaceHandle {
                         crate::handle::record_non_completed_finalize_canary(outcome);
                     }
                 }
-                handle
             }
         }
     }

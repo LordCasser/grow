@@ -1708,7 +1708,7 @@ impl MvpAgent {
                     byok_from_models(&models, None, current.0.as_ref()),
                 );
         }
-        crate::upload::trace::spawn_purge_stale_upload_scratch();
+        crate::save::spawn_purge_stale_upload_scratch();
         let storage_mode = cfg.storage_mode;
         let default_yolo_mode = cfg.default_yolo_mode;
         let default_auto_mode = cfg.default_auto_mode;
@@ -2175,14 +2175,14 @@ impl MvpAgent {
         &self,
         parent_session_id: &str,
         prompt_id: &str,
-    ) -> Vec<crate::upload::trace::SubagentSpawnedRef> {
+    ) -> Vec<crate::save::SubagentSpawnedRef> {
         grow_tools::implementations::grow_build::task::backend::ChannelBackend::new(
                 self.subagent_event_tx.clone(),
             )
             .spawned_refs_for_prompt(parent_session_id, prompt_id)
             .await
             .into_iter()
-            .map(|child| crate::upload::trace::SubagentSpawnedRef {
+            .map(|child| crate::save::SubagentSpawnedRef {
                 subagent_id: child.subagent_id,
                 child_session_id: child.child_session_id,
                 subagent_type: child.subagent_type,
@@ -2390,13 +2390,13 @@ impl MvpAgent {
     /// Returns an upload method, or `None` when trace uploads are disabled.
     pub async fn trace_upload_config(
         &self,
-    ) -> Option<crate::session::repo_changes::UploadMethod> {
+    ) -> Option<crate::save::UploadMethod> {
         let (method, _reason) = self.trace_upload_config_with_reason().await;
         method
     }
     pub(super) fn trace_upload_config_snapshot(
         &self,
-    ) -> Option<crate::session::repo_changes::UploadMethod> {
+    ) -> Option<crate::save::UploadMethod> {
         if self.is_data_collection_disabled()
             || !self.cfg.borrow().is_trace_upload_enabled()
         {
@@ -2446,13 +2446,13 @@ impl MvpAgent {
                         );
                         return;
                     }
-                    let upload_method = crate::session::repo_changes::UploadMethod::Proxy {
+                    let upload_method = crate::save::UploadMethod::Proxy {
                         proxy_base_url,
                         user_token: auth_token,
                         deployment_key,
                         alpha_test_key,
                     };
-                    crate::upload::gcs::upload_to_auth_diagnostics(
+                    crate::save::upload_to_auth_diagnostics(
                             &log_bytes,
                             &user_id,
                             &upload_method,
@@ -2468,12 +2468,12 @@ impl MvpAgent {
     async fn trace_upload_config_with_reason(
         &self,
     ) -> (
-        Option<crate::session::repo_changes::UploadMethod>,
-        crate::upload::turn::TraceUploadReason,
+        Option<crate::save::UploadMethod>,
+        crate::save::TraceUploadReason,
     ) {
-        use crate::upload::turn::TraceUploadReason;
+        use crate::save::TraceUploadReason;
         if self.is_data_collection_disabled() {
-            crate::upload::trace::spawn_startup_spill_reconcile(
+            crate::save::spawn_startup_spill_reconcile(
                 crate::util::grow_home::grow_home(),
                 None,
             );
@@ -2512,14 +2512,14 @@ impl MvpAgent {
             if auth_token.is_some() || has_deployment_key {
                 endpoints.resolve_upload_method(auth_token)
             } else if service_account_key.is_some() {
-                Some(crate::session::repo_changes::UploadMethod::Direct {
+                Some(crate::save::UploadMethod::Direct {
                     service_account_key,
                 })
             } else {
                 None
             }
         };
-        let reason = crate::upload::turn::TraceUploadReason::from_upload_method(&method);
+        let reason = crate::save::TraceUploadReason::from_upload_method(&method);
         (method, reason)
     }
     /// Resolve client version: prefer the value from the initialize request _meta,
@@ -2580,7 +2580,10 @@ impl MvpAgent {
         let override_effort = session_id
             .and_then(|sid| self.sessions.borrow().get(sid).map(|h| h.reasoning_effort))
             .flatten()
-            .or_else(|| self.models_manager.current_reasoning_effort());
+            .or_else(|| {
+                self.models_manager
+                    .model_default_reasoning_effort(model_id.0.as_ref())
+            });
         if let Some(override_effort) = override_effort
             && let Some(info) = available_models
                 .iter_mut()
@@ -2627,7 +2630,6 @@ impl MvpAgent {
                     self.sessions.borrow().get(sid).map(|h| h.reasoning_effort)
                 })
                 .flatten()
-                .or_else(|| self.models_manager.current_reasoning_effort())
                 .or_else(|| {
                     self
                         .models_manager
@@ -2718,12 +2720,12 @@ impl MvpAgent {
     pub(crate) async fn build_gcs_config(
         &self,
         gcs_prefix: String,
-    ) -> Option<crate::session::repo_changes::TraceExportConfig> {
+    ) -> Option<crate::save::TraceExportConfig> {
         let upload_method = self.trace_upload_config().await?;
         let bucket_url = {
             let cfg = self.cfg.borrow();
             match &upload_method {
-                crate::session::repo_changes::UploadMethod::Direct { .. } => {
+                crate::save::UploadMethod::Direct { .. } => {
                     match cfg.endpoints.resolve_trace_bucket_url() {
                         Some(resolved) => Some(resolved.value),
                         None => {
@@ -2734,13 +2736,13 @@ impl MvpAgent {
                         }
                     }
                 }
-                crate::session::repo_changes::UploadMethod::S3 { bucket, .. } => {
+                crate::save::UploadMethod::S3 { bucket, .. } => {
                     Some(format!("s3://{bucket}"))
                 }
-                crate::session::repo_changes::UploadMethod::Proxy { .. } => None,
+                crate::save::UploadMethod::Proxy { .. } => None,
             }
         };
-        Some(crate::session::repo_changes::TraceExportConfig {
+        Some(crate::save::TraceExportConfig {
             bucket_url,
             service_account_key: None,
             prefix_dir: None,
@@ -2796,7 +2798,7 @@ impl MvpAgent {
         model: &str,
         turns: Vec<Vec<grow_sampling_types::conversation::ConversationItem>>,
     ) {
-        use crate::upload::manifest::{
+        use crate::save::{
             build_manifest, resolve_upload_method, write_upload_manifest,
         };
         let base = self.peek_turn_number(session_id);
@@ -2946,7 +2948,7 @@ impl MvpAgent {
         let bucket_url = {
             let cfg = self.cfg.borrow();
             match &upload_method {
-                crate::session::repo_changes::UploadMethod::Direct { .. } => {
+                crate::save::UploadMethod::Direct { .. } => {
                     match cfg.endpoints.resolve_trace_bucket_url() {
                         Some(resolved) => Some(resolved.value),
                         None => {
@@ -2959,13 +2961,13 @@ impl MvpAgent {
                         }
                     }
                 }
-                crate::session::repo_changes::UploadMethod::S3 { bucket, .. } => {
+                crate::save::UploadMethod::S3 { bucket, .. } => {
                     Some(format!("s3://{bucket}"))
                 }
-                crate::session::repo_changes::UploadMethod::Proxy { .. } => None,
+                crate::save::UploadMethod::Proxy { .. } => None,
             }
         };
-        let gcs_config = crate::session::repo_changes::TraceExportConfig {
+        let gcs_config = crate::save::TraceExportConfig {
             bucket_url,
             service_account_key: None,
             prefix_dir: None,
@@ -2984,13 +2986,13 @@ impl MvpAgent {
             .upload_queue
             .get_or_init(|| {
                 let grow_home = crate::util::grow_home::grow_home();
-                let queue = crate::upload::trace::spawn_upload_queue(
+                let queue = crate::save::spawn_upload_queue(
                     &grow_home,
                     &gcs_config,
                     Some(grow_version::VERSION),
                     self.auth_manager.clone(),
                 );
-                crate::upload::trace::spawn_startup_spill_reconcile(
+                crate::save::spawn_startup_spill_reconcile(
                     grow_home,
                     Some(queue.clone()),
                 );
@@ -3008,7 +3010,7 @@ impl MvpAgent {
             session_handle,
             session_registry_enabled,
             upload_queue,
-            artifact_tracker: crate::upload::manifest::new_artifact_tracker(),
+            artifact_tracker: crate::save::new_artifact_tracker(),
             auth_manager: self.auth_manager.clone(),
         })
     }
@@ -3601,7 +3603,7 @@ impl MvpAgent {
         let background_workflows_enabled = self.cfg.borrow().resolve_workflows().value;
         let subagents_enabled = self.cfg.borrow().subagents_enabled;
         let subagents_max_depth = self.cfg.borrow().subagents_max_depth;
-        let ask_user_question_enabled = crate::upload::turn::parse_ask_user_question_from_meta(
+        let ask_user_question_enabled = crate::save::parse_ask_user_question_from_meta(
                 session_meta,
             )
             .unwrap_or_else(|| self.cfg.borrow().resolve_ask_user_question().value);

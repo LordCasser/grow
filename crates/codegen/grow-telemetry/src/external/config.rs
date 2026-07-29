@@ -41,7 +41,7 @@ impl OtlpTransport {
 
 /// Master switch env var. Deliberately *not* `GROW_ENABLE_TELEMETRY`: that
 /// would be a word-order typo away from the long-standing
-/// `GROW_TELEMETRY_ENABLED` (product events/Mixpanel mode), and the two control
+/// `GROW_TELEMETRY_ENABLED` (product events mode), and the two control
 /// opposite-pointing data flows (to xAI vs. to the customer's collector).
 pub const ENV_MASTER_SWITCH: &str = "GROW_EXTERNAL_OTEL";
 

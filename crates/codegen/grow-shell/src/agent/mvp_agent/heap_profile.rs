@@ -35,7 +35,7 @@ impl MvpAgent {
         if bucket_url.is_none()
             && matches!(
                 method,
-                crate::session::repo_changes::UploadMethod::Direct { .. }
+                crate::save::UploadMethod::Direct { .. }
             )
         {
             tracing::debug!("no trace bucket configured; heap-profile uploads disabled");

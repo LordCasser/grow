@@ -18,7 +18,8 @@ use super::search_fts::SessionSearchIndex;
 
 /// GCS bucket for session search index sync (same as session traces);
 /// `None` makes remote sync a no-op.
-const SEARCH_INDEX_BUCKET: Option<&str> = crate::upload::gcs::SESSION_TRACES_BUCKET;
+// SESSION_TRACES_BUCKET removed — xai_file_utils::gcs is gone
+const SEARCH_INDEX_BUCKET: Option<&str> = None;
 
 /// GCS object name for the compressed index.
 const REMOTE_INDEX_OBJECT: &str = "session_search.sqlite.zst";
@@ -182,7 +183,8 @@ fn gcs_object_path(config: &RemoteSyncConfig) -> String {
 pub async fn maybe_upload_index(
     db_path: PathBuf,
     config: RemoteSyncConfig,
-    gcs_config: xai_file_utils::TraceExportConfig,
+    gcs_config: (),
+    // TraceExportConfig removed — xai_file_utils is gone
     auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
 ) {
     if !config.enabled {
@@ -207,7 +209,8 @@ pub async fn maybe_upload_index(
 async fn upload_index_inner(
     db_path: &Path,
     config: &RemoteSyncConfig,
-    gcs_config: &xai_file_utils::TraceExportConfig,
+    gcs_config: &(),
+    // TraceExportConfig removed — xai_file_utils is gone
     auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
 ) -> io::Result<()> {
     let db_path = db_path.to_path_buf();
@@ -227,30 +230,10 @@ async fn upload_index_inner(
     let compressed_bytes = tokio::fs::read(&compressed_path).await?;
     let compressed_size = compressed_bytes.len() as u64;
 
-    // Upload to GCS
-    let object_path = gcs_object_path(config);
-    let upload_config = crate::upload::gcs::WithAuth::with_auth(gcs_config, auth_manager);
-    match xai_file_utils::gcs::upload_bytes(
-        &upload_config,
-        &object_path,
-        &compressed_bytes,
-        "application/zstd",
-    )
-    .await
-    {
-        Ok(_url) => {
-            record_upload();
-            tracing::info!(
-                original_bytes = original_size,
-                compressed_bytes = compressed_size,
-                object_path = %object_path,
-                "search index uploaded to GCS"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "GCS upload_bytes failed for search index");
-        }
-    }
+    // Upload to GCS removed — xai_file_utils::gcs is gone
+    let _object_path = gcs_object_path(config);
+    // with_auth() and upload_bytes() no longer exist
+    tracing::warn!(object_path = %_object_path, "search index GCS upload skipped (gcs module removed)");
 
     // Clean up temp file
     let _ = tokio::fs::remove_file(&compressed_path).await;
@@ -269,7 +252,8 @@ async fn upload_index_inner(
 pub async fn maybe_download_index(
     db_path: &Path,
     config: &RemoteSyncConfig,
-    gcs_config: &xai_file_utils::TraceExportConfig,
+    gcs_config: &(),
+    // TraceExportConfig removed — xai_file_utils is gone
     auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
 ) -> bool {
     if !config.enabled {
@@ -288,7 +272,8 @@ pub async fn maybe_download_index(
 async fn download_index_inner(
     db_path: &Path,
     config: &RemoteSyncConfig,
-    gcs_config: &xai_file_utils::TraceExportConfig,
+    gcs_config: &(),
+    // TraceExportConfig removed — xai_file_utils is gone
     auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
 ) -> io::Result<bool> {
     let object_path = gcs_object_path(config);
@@ -330,12 +315,12 @@ async fn download_index_inner(
         urlencoding::encode(&object_path),
     );
 
-    let upload_config = crate::upload::gcs::WithAuth::with_auth(gcs_config, auth_manager);
-
-    // Try download via reqwest with proxy credentials if available.
+    // with_auth removed — xai_file_utils::gcs is gone
+    // Try download via reqwest.
     // This is a best-effort path — if the bucket requires auth and
     // we don't have the right credentials, it will fail gracefully.
-    let client = upload_config.proxy_http_client().unwrap_or_default();
+    // proxy_http_client removed — xai_file_utils::gcs is gone
+    let client = reqwest::Client::new();
 
     let response = client
         .get(&download_url)
@@ -385,20 +370,7 @@ async fn download_index_inner(
     Ok(true)
 }
 
-// Proxy helpers
-
-/// Extension trait on `TraceExportConfigWithAuth` to expose `proxy_http_client`
-/// for download. This works because the upload gcs module already implements
-/// `StorageConfig` for the wrapper type.
-trait ProxyHttpClient {
-    fn proxy_http_client(&self) -> Option<reqwest::Client>;
-}
-
-impl ProxyHttpClient for crate::upload::gcs::TraceExportConfigWithAuth {
-    fn proxy_http_client(&self) -> Option<reqwest::Client> {
-        <Self as xai_file_utils::gcs::StorageConfig>::proxy_http_client(self)
-    }
-}
+// ProxyHttpClient removed — xai_file_utils::gcs::StorageConfig is gone
 
 // Tests
 

@@ -677,8 +677,8 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
-                        SessionCommand::SetSessionModel { sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
+                        SessionCommand::SetSessionModel { model_id, sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
+                            let updated_model_id = session.handle_set_session_model(model_id, sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
                             let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
@@ -1363,10 +1363,7 @@ pub(super) async fn run_session(
                             });
                         }
                         SessionCommand::ToggleMcpServer { server_name, enabled, server_config, respond_to } => {
-                            session.events.emit(xai_file_utils::events::Event::McpServerToggled {
-                                server_name: server_name.clone(),
-                                enabled,
-                            });
+                            // McpServerToggled event removed — xai_file_utils::events is gone
                             let mut mcp_state = session.mcp_state.lock().await;
                             let mut configs = mcp_state.configs.clone();
 
@@ -1686,7 +1683,7 @@ pub(super) async fn run_session(
                                 let snapshot = crate::extensions::mcp::build_mcp_status(
                                     &mcp_state,
                                     &tool_bridge,
-                                    Some(&writer),
+                                    None,
                                 ).await;
                                 let _ = respond_to.send(snapshot);
                             });

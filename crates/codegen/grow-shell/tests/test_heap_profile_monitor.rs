@@ -21,7 +21,7 @@ use grow_shell::heap_profile::{
     JemallocHeapProfileConfig, JemallocStats, build_upload_handles, is_valid_session_id,
     object_paths, resolve_jemalloc_heap_profile, sanitize_version,
 };
-use grow_shell::session::repo_changes::UploadMethod;
+use grow_shell::save::UploadMethod;
 use grow_shell::util::config::RemoteSettings;
 use grow_test_support::{EnvGuard, MockInferenceServer};
 use grow_version::TEST_VERSION_ENV;

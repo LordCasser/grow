@@ -2,7 +2,7 @@
 //! The shared coordinator actor lives in `grow-tools`; this module plugs
 //! its `!Send` local-session runner into `spawn_local`.
 use super::*;
-use crate::session::repo_changes::UploadMethod;
+use crate::save::UploadMethod;
 struct ShellChildRunner {
     agent_ref: LocalRef<MvpAgent>,
 }
@@ -183,7 +183,7 @@ impl MvpAgent {
                 .run(),
         );
         let (trace_tx, mut trace_rx) = tokio::sync::mpsc::unbounded_channel::<
-            crate::upload::turn::SyntheticTurnTraceRequest,
+            crate::save::SyntheticTurnTraceRequest,
         >();
         self.subagent_presentation.borrow_mut().synthetic_trace_tx = Some(trace_tx);
         tokio::task::spawn_local({
