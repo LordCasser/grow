@@ -696,11 +696,11 @@ impl SessionActor {
     /// [`SuppressReason`] (drives diagnostics + sticky-vs-per-turn scope).
     fn classify_suppress_reason(error_msg: &str) -> SuppressReason {
         let m = error_msg.to_ascii_lowercase();
-        if m.contains("spending-limit")
-            || m.contains("spending limit")
-            || m.contains("out of credits")
-            || m.contains("usage balance exhausted")
-            || m.contains("usage limit reached")
+        if m.contains("status 402")
+            || m.contains("payment required")
+            || m.contains("quota exhausted")
+            || m.contains("quota limit reached")
+            || m.contains("account limit reached")
         {
             SuppressReason::ProviderLimit
         } else if is_context_length_error(&m) {
@@ -2805,8 +2805,8 @@ mod inline_auto_compact_flow_tests {
         let auth = acp::Error::internal_error()
             .data("compact failed: API error (status 401 Unauthorized)");
         assert!(SessionActor::is_auth_compact_error(&auth));
-        let credit = acp::Error::internal_error().data("compact failed: out of credits");
-        assert!(!SessionActor::is_auth_compact_error(&credit));
+        let quota = acp::Error::internal_error().data("compact failed: provider quota exhausted");
+        assert!(!SessionActor::is_auth_compact_error(&quota));
         let size = acp::Error::internal_error()
             .data("compact failed: The prompt is too long for this model's context window.");
         assert!(!SessionActor::is_auth_compact_error(&size));
@@ -3394,19 +3394,19 @@ mod inline_auto_compact_flow_tests {
     fn classify_suppress_reason_maps_error_text() {
         let classify = SessionActor::classify_suppress_reason;
         assert_eq!(
-            classify("caller does not have permission … spending-limit reached"),
+            classify("caller does not have permission: account limit reached"),
             SuppressReason::ProviderLimit
         );
         assert_eq!(
-            classify("you have run out of credits"),
+            classify("provider quota exhausted"),
             SuppressReason::ProviderLimit
         );
         assert_eq!(
-            classify("API error (status 402 Payment Required): Grow usage balance exhausted"),
+            classify("API error (status 402 Payment Required): provider account limit reached"),
             SuppressReason::ProviderLimit
         );
         assert_eq!(
-            classify("Grow usage limit reached"),
+            classify("provider quota limit reached"),
             SuppressReason::ProviderLimit
         );
         assert_eq!(

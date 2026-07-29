@@ -114,7 +114,7 @@ fn non_json_empty_body_falls_back_to_status() {
 
 #[test]
 fn structured_json_is_not_replaced_by_status_copy() {
-    let bytes = br#"{"error":{"message":"credits exhausted","type":"server_error"}}"#;
+    let bytes = br#"{"error":{"message":"quota exhausted","type":"server_error"}}"#;
     let msg = user_facing_api_error_message(reqwest::StatusCode::PAYMENT_REQUIRED, bytes);
-    assert_eq!(msg, "credits exhausted");
+    assert_eq!(msg, "quota exhausted");
 }
