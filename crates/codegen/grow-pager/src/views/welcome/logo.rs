@@ -103,7 +103,7 @@ fn render_into(area: Rect, buf: &mut Buffer, theme: &Theme, logo: &str) {
     let secs = anim_phase_secs();
 
     // Blend each glyph from the resting gray toward the bright text color by its
-    // shine opacity, so a sheen sweeps across the braille art. Adjacent glyphs
+    // shine opacity, so a sheen sweeps across the character art. Adjacent glyphs
     // that land on the same blended color share one Span to hold down the
     // per-frame allocation.
     let base = theme.gray;
@@ -211,6 +211,25 @@ mod tests {
         assert_eq!(compact_logo_line_count(), count_lines(LOGO_SMALL));
         assert!(compact_logo_line_count() < count_lines(LOGO));
         assert!(compact_logo_line_count() > 0);
+    }
+
+    #[test]
+    fn logo_assets_are_compact_ascii_world_tree_emblems() {
+        for logo in [LOGO, LOGO_SMALL] {
+            assert!(logo.is_ascii());
+            assert!(logo.contains("<>"), "missing the emblem's diamond motif");
+            assert!(logo.contains("||"), "missing the world tree trunk");
+            assert!(logo.lines().all(|line| !line.ends_with(' ')));
+        }
+
+        assert!(LOGO.contains("**"), "missing the living half of the crown");
+        assert!(
+            LOGO.contains("/\\"),
+            "missing the branching half of the crown"
+        );
+        assert_eq!(LOGO.matches("<>").count(), 2, "missing an emblem ornament");
+        assert!(full_logo_visual_width() <= 44);
+        assert!(full_logo_line_count() <= 10);
     }
 
     #[test]
