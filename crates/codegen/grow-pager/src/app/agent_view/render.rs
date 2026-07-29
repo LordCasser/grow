@@ -691,8 +691,6 @@ impl AgentView {
             height: banner_height,
             announcements: banner_announcements,
             hidden_ids: hidden_announcement_ids,
-            privacy_banner,
-            mouse_pos,
             tip,
         } = banner;
         self.session_banner_active = crate::views::announcements::first_session_announcement(
@@ -700,7 +698,6 @@ impl AgentView {
             hidden_announcement_ids,
         )
         .is_some();
-        self.privacy_banner.active = privacy_banner;
         self.pinned_upgrade_cta_live =
             crate::views::announcements::promo_cta(banner_announcements, hidden_announcement_ids)
                 .is_some_and(|(owner, _, _)| !crate::views::announcements::is_dismissible(owner));
@@ -747,7 +744,6 @@ impl AgentView {
             self.hit_announcement_hide.clear();
             self.hit_announcement_cta.clear();
             self.hit_upgrade_cta.clear();
-            self.privacy_banner.clear_hits();
             return self.draw_subagent_fullscreen(
                 &child_sid.clone(),
                 area,
@@ -1112,7 +1108,6 @@ impl AgentView {
         let btw_height =
             crate::views::btw_overlay::btw_panel_height(self.btw_state.as_ref(), inner_width);
         let cta_height = match &self.plugin_cta.phase {
-            _ if privacy_banner => 0,
             CtaPhase::Hidden => 0,
             CtaPhase::Matched { .. } if self.prompt.text().trim().is_empty() => 0,
             _ => 1,
@@ -2046,24 +2041,7 @@ impl AgentView {
             self.hit_watching_cue.clear();
             self.hit_plan_approval_status.clear();
         }
-        let privacy_banner_owns_slot = privacy_banner && layout.banner.height >= 2;
-        if !privacy_banner_owns_slot {
-            self.privacy_banner.clear_hits();
-        }
-        if privacy_banner_owns_slot {
-            self.hit_announcement_hide.clear();
-            self.hit_announcement_cta.clear();
-            let rects = crate::views::privacy_banner::render(layout.banner, buf, &theme, mouse_pos);
-            self.privacy_banner
-                .hit_accept
-                .set_unless_dropdown(Some(rects.accept), dropdown_open);
-            self.privacy_banner
-                .hit_customize
-                .set_unless_dropdown(Some(rects.customize), dropdown_open);
-            self.privacy_banner
-                .hit_legal
-                .set_unless_dropdown(Some(rects.legal), dropdown_open);
-        } else if let Some((ref msg, remaining)) = self.mode_switch_banner {
+        if let Some((ref msg, remaining)) = self.mode_switch_banner {
             self.hit_announcement_hide.clear();
             self.hit_announcement_cta.clear();
             if layout.banner.height > 0 && layout.banner.width > 4 {

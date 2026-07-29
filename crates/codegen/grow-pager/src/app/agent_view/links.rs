@@ -489,16 +489,6 @@ mod link_click_tests {
         banner_height: u16,
         cols: u16,
     ) -> Buffer {
-        draw_frame_privacy(agent, reg, announcements, banner_height, cols, false)
-    }
-    fn draw_frame_privacy(
-        agent: &mut AgentView,
-        reg: &ActionRegistry,
-        announcements: &[grow_announcements::Announcement],
-        banner_height: u16,
-        cols: u16,
-        privacy_banner: bool,
-    ) -> Buffer {
         let area = Rect::new(0, 0, cols, 30);
         let bundle = crate::app::bundle::BundleState::default();
         let mut buf = Buffer::empty(area);
@@ -514,8 +504,6 @@ mod link_click_tests {
                 height: banner_height,
                 announcements,
                 hidden_ids: &std::collections::BTreeSet::new(),
-                privacy_banner,
-                mouse_pos: None,
                 tip: None,
             },
             &bundle,
@@ -566,77 +554,6 @@ mod link_click_tests {
             !matches!(outcome, InputOutcome::Action(Action::AnnouncementsHide)),
             "click where [hide] used to be must not hide-and-persist under a dropdown"
         );
-    }
-    /// Privacy upsell banner: when the caller passes `privacy_banner: true`,
-    /// the render layer gives it the slot (even over an announcement — the
-    /// critical-outranks-privacy ranking lives in `AppView::draw`, which
-    /// never passes `true` while a critical announcement is live), arms its
-    /// three rects, and clicks dispatch the banner actions. Turning it off
-    /// clears the rects.
-    #[test]
-    fn privacy_banner_owns_slot_and_clicks_dispatch() {
-        let reg = ActionRegistry::defaults();
-        let mut agent = make_agent();
-        agent.last_terminal_size = (80, 30);
-        let critical = [grow_announcements::Announcement {
-            severity: Some("critical".into()),
-            title: Some("ZZCRIT".into()),
-            message: Some("outage".into()),
-            ..Default::default()
-        }];
-        let buf = draw_frame_privacy(&mut agent, &reg, &critical, 2, 80, true);
-        let text: String = (0..buf.area.height)
-            .map(|y| {
-                (0..buf.area.width)
-                    .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
-                    .collect::<String>()
-            })
-            .collect();
-        assert!(text.contains("Help improve Grow"), "banner copy painted");
-        assert!(
-            !text.contains("ZZCRIT"),
-            "critical announcement yields the slot to the privacy banner"
-        );
-        assert!(
-            agent.hit_announcement_hide.rect.is_none(),
-            "announcement [hide] must not be clickable under the privacy banner"
-        );
-        let rect = agent
-            .privacy_banner
-            .hit_accept
-            .rect
-            .expect("accept rect armed");
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::PrivacyBannerAccept)
-        ));
-        let rect = agent
-            .privacy_banner
-            .hit_customize
-            .rect
-            .expect("customize rect armed");
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::PrivacyBannerCustomize)
-        ));
-        let rect = agent
-            .privacy_banner
-            .hit_legal
-            .rect
-            .expect("legal rect armed");
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::OpenUrl(ref url))
-                if url == crate::views::privacy_banner::PRIVACY_BANNER_LEGAL_URL
-        ));
-        draw_frame_privacy(&mut agent, &reg, &critical, 2, 80, false);
-        assert!(agent.privacy_banner.hit_accept.rect.is_none());
-        assert!(agent.privacy_banner.hit_customize.rect.is_none());
-        assert!(agent.privacy_banner.hit_legal.rect.is_none());
-        assert!(agent.hit_announcement_hide.rect.is_some());
     }
     /// Promo twin of the [hide] suppression test: the [label] CTA rect must
     /// also drop under an open dropdown so a dropdown click cannot open a URL
@@ -2386,8 +2303,6 @@ mod link_click_tests {
                 height: 2,
                 announcements: &critical,
                 hidden_ids: &std::collections::BTreeSet::new(),
-                privacy_banner: false,
-                mouse_pos: None,
                 tip: Some(long_tip.as_str()),
             },
             &bundle,

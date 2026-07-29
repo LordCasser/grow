@@ -45,9 +45,7 @@ pub use error::{AuthError, RefreshTokenError, RefreshTokenFailedReason};
 pub use manager::{AuthManager, shared_api_key_provider};
 pub use meta::AuthMeta;
 pub use model::{AuthMode, ProviderAuth, lookup_auth};
-pub(crate) use model::{
-    TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired, token_suffix,
-};
+pub(crate) use model::{TOKEN_TTL, UserInfo, is_expired, token_suffix};
 pub use storage::{
     clear_api_key, read_api_key, read_auth_json, read_token_by_scope, store_api_key,
 };

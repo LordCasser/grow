@@ -1664,7 +1664,6 @@ mod tests {
             organization_role: None,
             user_blocked_reason: None,
             team_blocked_reasons: vec![],
-            coding_data_retention_opt_out: false,
             has_grok_code_access: None,
             refresh_token: None,
             expires_at: None,

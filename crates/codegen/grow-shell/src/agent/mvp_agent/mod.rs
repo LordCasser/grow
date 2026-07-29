@@ -344,8 +344,6 @@ pub(crate) fn build_prompt_response_meta(
 #[derive(serde::Serialize)]
 struct SettingsUpdateNotification {
     show_resolved_model: Option<bool>,
-    privacy_notice_rollout: Option<bool>,
-    privacy_banner_reshow_days: Option<u64>,
     session_picker_grouped: Option<bool>,
     tips: Option<Vec<String>>,
     slash_command_tags: Option<std::collections::BTreeMap<String, String>>,
@@ -1445,7 +1443,6 @@ impl MvpAgent {
                 team_name: auth.team_name.clone(),
                 is_zdr: auth.is_zdr_team(),
                 team_role: auth.team_role.clone(),
-                coding_data_retention_opt_out: auth.coding_data_retention_opt_out,
                 show_resolved_model,
             };
             serde_json::to_value(auth_meta)
@@ -1493,9 +1490,6 @@ impl MvpAgent {
             let rs = cfg.remote_settings.as_ref();
             SettingsUpdateNotification {
                 show_resolved_model: rs.and_then(|s| s.show_resolved_model),
-                privacy_notice_rollout: rs.and_then(|s| s.privacy_notice_rollout),
-                privacy_banner_reshow_days: rs
-                    .and_then(|s| s.privacy_banner_reshow_days),
                 session_picker_grouped: rs.and_then(|s| s.session_picker_grouped),
                 tips: rs.and_then(|s| s.tips.clone()),
                 slash_command_tags: rs.and_then(|s| s.slash_command_tags.clone()),

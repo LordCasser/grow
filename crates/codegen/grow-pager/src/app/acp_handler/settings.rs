@@ -121,22 +121,6 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
     if let Some(v) = update.show_resolved_model {
         app.show_resolved_model = v;
     }
-    // Env overrides win over live updates too, mirroring the startup
-    // resolution in event_loop — otherwise the proxy's explicit `false`
-    // (sent for kill-switch semantics) clobbers a local test override
-    // moments after launch.
-    if let Some(v) = update.privacy_notice_rollout {
-        app.privacy_notice_rollout =
-            grow_config::env_bool("GROW_PRIVACY_NOTICE_ROLLOUT").unwrap_or(v);
-    }
-    if let Some(v) = update.privacy_banner_reshow_days {
-        app.privacy_banner_reshow_days = Some(
-            std::env::var("GROW_PRIVACY_BANNER_RESHOW_DAYS")
-                .ok()
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(v),
-        );
-    }
     // TODO: extract resolve_session_picker_grouped helper (duplicates event_loop.rs:143-160)
     // Respect env var > config > remote precedence (mirrors event_loop.rs startup).
     if let Some(remote_val) = update.session_picker_grouped {
@@ -388,10 +372,6 @@ pub(super) fn handle_announcements_update(notif: &acp::ExtNotification, app: &mu
 pub(super) struct PagerSettingsUpdate {
     #[serde(default)]
     show_resolved_model: Option<bool>,
-    #[serde(default)]
-    privacy_notice_rollout: Option<bool>,
-    #[serde(default)]
-    privacy_banner_reshow_days: Option<u64>,
     #[serde(default)]
     session_picker_grouped: Option<bool>,
     #[serde(default)]

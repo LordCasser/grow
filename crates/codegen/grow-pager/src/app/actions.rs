@@ -549,14 +549,10 @@ pub enum Action {
     /// Open the settings modal (F2, `/settings`, command palette).
     /// If already open, closes it instead of stacking.
     OpenSettings,
-    /// Open settings focused on a registry key (e.g. privacy banner Customize).
+    /// Open settings focused on a registry key.
     OpenSettingsFocus {
         key: &'static str,
     },
-    /// Welcome privacy banner Accept (opt-in; ack after ACP success).
-    PrivacyBannerAccept,
-    /// Welcome privacy banner Customize (ack + open settings on coding_data_sharing).
-    PrivacyBannerCustomize,
     /// Open the command palette (`/help`). The keybinding path (Ctrl+P) opens it
     /// directly in `handle_agent_action`; this lets a slash command reach the
     /// same modal through dispatch.
@@ -686,11 +682,6 @@ pub enum Action {
     TriggerDeepSearch,
     /// Force an immediate deep content search, skipping the debounce.
     ForceDeepSearch,
-    /// Show privacy and data retention status.
-    ShowPrivacyInfo,
-    SetCodingDataSharing {
-        opted_in: bool,
-    },
     /// `/fork` slash command: parsed args produced by
     /// [`crate::slash::commands::fork::parse_fork_args`]. The dispatcher
     /// resolves the worktree question (via flag or the local
@@ -1500,8 +1491,6 @@ pub enum Effect {
     PersistAnnouncementsHidden {
         hidden_ids: std::collections::BTreeSet<String>,
     },
-    /// Persist `[privacy].privacy_banner_acked` (RFC 3339 dismiss time).
-    PersistPrivacyBannerAcked { acked_at: String },
     /// Persist memory modal fullscreen preference to `[hints]` in config.toml.
     PersistMemoryFullscreen { fullscreen: bool },
     /// Persist the project-picker opt-out to `[hints] project_picker_disabled`.
@@ -1897,13 +1886,6 @@ pub enum Effect {
     UnregisterActiveSession { session_id: acp::SessionId },
     /// Quit the application.
     Quit,
-    /// Toggle coding data sharing via ACP.
-    SetCodingDataSharing {
-        agent_id: AgentId,
-        opted_in: bool,
-        /// Pre-toggle value to revert to on failure.
-        rollback_to_opted_in: bool,
-    },
     /// Rename the current session.
     RenameSession {
         agent_id: AgentId,
@@ -2433,17 +2415,6 @@ pub enum TaskResult {
     SessionInfoFailed {
         agent_id: AgentId,
         error: String,
-    },
-    /// Coding data sharing preference updated.
-    CodingDataSharingUpdated {
-        agent_id: AgentId,
-        opted_in: bool,
-    },
-    /// Coding data sharing update failed.
-    CodingDataSharingFailed {
-        agent_id: AgentId,
-        error: String,
-        rollback_to_opted_in: bool,
     },
     /// Session rename completed successfully.
     RenameSessionComplete {

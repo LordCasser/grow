@@ -2561,9 +2561,6 @@ impl acp::Agent for MvpAgent {
                 crate::extensions::to_raw_response(&serde_json::json!({ "ok": true }))
             }
             "grow/share_session" => crate::extensions::share::handle(self, &args).await,
-            "grow/privacy/setCodingDataRetention" => {
-                crate::extensions::privacy::handle(self, &args).await
-            }
             "grow/prompt_history" => {
                 crate::extensions::prompt_history::handle(self, &args).await
             }

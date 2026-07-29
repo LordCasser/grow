@@ -635,9 +635,8 @@ fn dispatch_open_settings_opens_then_close_on_reentry() {
         );
     }
 }
-/// A focused open (privacy banner Customize) landing on an agent whose
-/// settings modal is already open must reopen focused on the requested
-/// row — not toggle the modal closed.
+/// A focused open landing on an agent whose settings modal is already open
+/// must reopen focused on the requested row rather than toggling it closed.
 #[test]
 fn dispatch_open_settings_focus_reopens_when_already_open() {
     use crate::views::modal::ActiveModal;
@@ -650,7 +649,7 @@ fn dispatch_open_settings_focus_reopens_when_already_open() {
     ));
     let _ = dispatch(
         Action::OpenSettingsFocus {
-            key: "coding_data_sharing",
+            key: "permission_mode",
         },
         &mut app,
     );
@@ -660,7 +659,7 @@ fn dispatch_open_settings_focus_reopens_when_already_open() {
     };
     assert_eq!(
         state.focused_setting().map(|(k, _)| k),
-        Some("coding_data_sharing"),
+        Some("permission_mode"),
         "focused re-entry must land on the requested row"
     );
 }
@@ -1304,9 +1303,6 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
         "max_thoughts_width" => {
             let _ = dispatch(Action::SetMaxThoughtsWidth(200), app);
-        }
-        "coding_data_sharing" => {
-            let _ = dispatch(Action::SetCodingDataSharing { opted_in: true }, app);
         }
         "plan_mode" => {
             let _ = dispatch(

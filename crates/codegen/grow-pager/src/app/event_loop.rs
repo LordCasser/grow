@@ -861,27 +861,6 @@ pub(crate) async fn run(
         .as_ref()
         .and_then(|s| s.show_resolved_model)
         .unwrap_or(true);
-    app.privacy_notice_rollout = grow_config::env_bool("GROW_PRIVACY_NOTICE_ROLLOUT")
-        .or_else(|| {
-            remote_settings
-                .as_ref()
-                .and_then(|s| s.privacy_notice_rollout)
-        })
-        .unwrap_or(false);
-    app.privacy_banner_reshow_days = std::env::var("GROW_PRIVACY_BANNER_RESHOW_DAYS")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .or_else(|| {
-            remote_settings
-                .as_ref()
-                .and_then(|s| s.privacy_banner_reshow_days)
-        });
-    // Local dismiss timestamp for the coding-data privacy banner.
-    app.privacy_banner_acked = grow_shell::config::load_from_disk().ok().and_then(|root| {
-        grow_shell::util::config::load_config_from_toml(&root)
-            .privacy
-            .privacy_banner_acked
-    });
     app.plugin_cta_enabled = grow_config::env_bool("GROW_PLUGIN_CTA")
         .or_else(|| remote_settings.as_ref().and_then(|s| s.plugin_cta))
         .unwrap_or(false);

@@ -120,30 +120,6 @@ const PERMISSION_MODE_CHOICES: &[EnumChoice] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Coding-data-sharing catalog.
-//
-// Persisted in auth metadata (`AuthEntry::coding_data_retention_opt_out`),
-// NOT config.toml. Two choices only — the pager has no `Option`/`Unset`
-// representation for this field.
-//
-// `supports_preview: false` — toggling fires an async ACP call that
-// can fail. Commit on Enter only.
-// ---------------------------------------------------------------------------
-
-const CODING_DATA_SHARING_CHOICES: &[EnumChoice] = &[
-    EnumChoice {
-        canonical: "opt-in",
-        display: "Opt in",
-        description: "Allow SpaceXAI to retain coding session data for model training and product improvement.",
-    },
-    EnumChoice {
-        canonical: "opt-out",
-        display: "Opt out",
-        description: "Do not retain coding session data for training. Does not disable product analytics.",
-    },
-];
-
-// ---------------------------------------------------------------------------
 // Plan-mode catalog.
 //
 // PAGER-owned, per-session, ACP-mediated via `session/set_mode`.
@@ -976,39 +952,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
             kind: SettingKind::Enum {
                 default: TextSelection::Flash.as_canonical(),
                 choices: TEXT_SELECTION_CHOICES,
-                supports_preview: false,
-            },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        // SHELL-owned. Persisted in auth metadata (not config.toml).
-        // Reads from `PagerLocalSnapshot.coding_data_sharing_opt_out`.
-        // Default "opt-out" matches `AuthEntry::coding_data_retention_opt_out = true`
-        // (safer consumer default; server enrichment may still opt the user in).
-        // ZDR / non-admin guards are enforced at dispatch time.
-        // Do not put "diagnostics" in keywords — that word is the config-file
-        // analytics toggle (Monitoring / Configuration docs).
-        SettingMeta {
-            key: "coding_data_sharing",
-            category: SettingCategory::Privacy,
-            owner: SettingOwner::Shell,
-            label: "Coding data sharing",
-            description: "Controls whether SpaceXAI may retain and train on coding session \
-                          data. Does not affect product analytics; see Configuration and \
-                          Monitoring docs.",
-            keywords: &[
-                "privacy",
-                "data",
-                "sharing",
-                "coding",
-                "retention",
-                "training",
-                "opt-in",
-                "opt-out",
-            ],
-            kind: SettingKind::Enum {
-                default: "opt-out",
-                choices: CODING_DATA_SHARING_CHOICES,
                 supports_preview: false,
             },
             restart_required: false,

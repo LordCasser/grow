@@ -1739,19 +1739,6 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::PersistPrivacyBannerAcked { acked_at } => {
-            tasks
-                .spawn(async move {
-                    if let Err(e) = grow_shell::util::config::set_privacy_banner_acked(
-                            acked_at,
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %e, "failed to persist privacy_banner_acked");
-                    }
-                    TaskResult::CancelComplete
-                });
-        }
         Effect::PersistMemoryFullscreen { fullscreen } => {
             persist_hint(
                 tasks,
@@ -3099,66 +3086,6 @@ pub(crate) fn execute(
                                 error: sanitize_user_error(
                                     &format!("couldn't delete session: {e}"),
                                 ),
-                            }
-                        }
-                    }
-                });
-        }
-        Effect::SetCodingDataSharing { agent_id, opted_in, rollback_to_opted_in } => {
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    let request = acp::ExtRequest::new(
-                        "grow/privacy/setCodingDataRetention",
-                        serde_json::value::to_raw_value(
-                                &serde_json::json!({ "codingDataRetentionOptOut": !opted_in }),
-                            )
-                            .expect("serialize params")
-                            .into(),
-                    );
-                    match acp_send(request, &tx).await {
-                        Ok(resp) => {
-                            let wrapper: serde_json::Value = match serde_json::from_str(
-                                resp.0.get(),
-                            ) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    return TaskResult::CodingDataSharingFailed {
-                                        agent_id,
-                                        error: format!("malformed response: {e}"),
-                                        rollback_to_opted_in,
-                                    };
-                                }
-                            };
-                            if let Some(err) = wrapper
-                                .get("error")
-                                .filter(|v| !v.is_null())
-                            {
-                                let msg = err
-                                    .as_str()
-                                    .map(String::from)
-                                    .unwrap_or_else(|| err.to_string());
-                                return TaskResult::CodingDataSharingFailed {
-                                    agent_id,
-                                    error: msg,
-                                    rollback_to_opted_in,
-                                };
-                            }
-                            let confirmed_opted_in = wrapper
-                                .get("codingDataRetentionOptOut")
-                                .and_then(|v| v.as_bool())
-                                .map(|opt_out| !opt_out)
-                                .unwrap_or(opted_in);
-                            TaskResult::CodingDataSharingUpdated {
-                                agent_id,
-                                opted_in: confirmed_opted_in,
-                            }
-                        }
-                        Err(e) => {
-                            TaskResult::CodingDataSharingFailed {
-                                agent_id,
-                                error: format!("{e}"),
-                                rollback_to_opted_in,
                             }
                         }
                     }

@@ -7,9 +7,9 @@ use ratatui::layout::Rect;
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
 use crate::settings::{
-    CodingDataSharingLock, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory,
-    SettingKey, SettingKind, SettingMeta, SettingValue, SettingsRegistry, StringValidator,
-    current_value_for, dynamic_enum_choices,
+    EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey, SettingKind,
+    SettingMeta, SettingValue, SettingsRegistry, StringValidator, current_value_for,
+    dynamic_enum_choices,
 };
 use crate::views::modal_window::ModalWindowState;
 
@@ -240,16 +240,6 @@ impl SettingsModalState {
             breadcrumb_hovered: false,
             expanded_keys: std::collections::HashSet::new(),
             hover_row: None,
-        }
-    }
-
-    /// Why a Browse row cannot be edited (`None` = editable). Consulted by
-    /// both render and input.
-    pub fn row_lock(&self, key: SettingKey) -> Option<CodingDataSharingLock> {
-        if key == "coding_data_sharing" {
-            self.pager_snapshot.coding_data_sharing_lock
-        } else {
-            None
         }
     }
 
@@ -561,9 +551,6 @@ impl SettingsModalState {
             let Some((key, meta)) = self.focused_setting() else {
                 return false;
             };
-            if self.row_lock(key).is_some() {
-                return false;
-            }
             // Handles both static `Enum` and `DynamicEnum` catalogs.
             let (supports_preview, resolved): (bool, Vec<OwnedEnumChoice>) = match &meta.kind {
                 SettingKind::Enum {
@@ -886,7 +873,6 @@ pub(super) fn action_for_enum(key: SettingKey, choice: &'static str) -> Option<A
         "auto_light_theme" => Some(Action::PreviewAutoLightTheme(choice.to_string())),
         // No preview for settings with irreversible side effects.
         "permission_mode" => None,
-        "coding_data_sharing" => None,
         "plan_mode" => None,
         "render_mermaid" => None,
         "keep_text_selection" => None,
@@ -920,11 +906,6 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
             "default" => Some(Action::SetPermissionMode(
                 crate::app::actions::PermissionModeKind::Default,
             )),
-            _ => None,
-        },
-        "coding_data_sharing" => match choice {
-            "opt-in" => Some(Action::SetCodingDataSharing { opted_in: true }),
-            "opt-out" => Some(Action::SetCodingDataSharing { opted_in: false }),
             _ => None,
         },
         "plan_mode" => match choice {

@@ -34,8 +34,7 @@ use super::session::load::{
 };
 use super::settings::ui::apply_setting_rollback;
 use super::status::{
-    commit_session_usage_block, handle_coding_data_sharing_failed,
-    handle_coding_data_sharing_updated, handle_context_info_complete, scrub_error_for_toast,
+    commit_session_usage_block, handle_context_info_complete, scrub_error_for_toast,
 };
 use super::transcript::{
     handle_hooks_list_loaded, handle_marketplace_list_loaded, handle_marketplace_updates_available,
@@ -814,14 +813,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::CodingDataSharingUpdated { agent_id, opted_in } => {
-            handle_coding_data_sharing_updated(app, agent_id, opted_in)
-        }
-        TaskResult::CodingDataSharingFailed {
-            agent_id,
-            error,
-            rollback_to_opted_in,
-        } => handle_coding_data_sharing_failed(app, agent_id, error, rollback_to_opted_in),
         TaskResult::RenameSessionComplete { agent_id, title } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 let safe = crate::views::session_title::sanitize_display_text(&title);

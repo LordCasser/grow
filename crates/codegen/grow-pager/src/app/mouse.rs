@@ -136,32 +136,6 @@ impl AgentView {
                     self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Mouse);
                     return InputOutcome::Action(Action::CancelTurn);
                 }
-                if self
-                    .privacy_banner
-                    .hit_accept
-                    .contains(mouse.column, mouse.row)
-                    && !self.pos_occluded(mouse.column, mouse.row)
-                {
-                    return InputOutcome::Action(Action::PrivacyBannerAccept);
-                }
-                if self
-                    .privacy_banner
-                    .hit_customize
-                    .contains(mouse.column, mouse.row)
-                    && !self.pos_occluded(mouse.column, mouse.row)
-                {
-                    return InputOutcome::Action(Action::PrivacyBannerCustomize);
-                }
-                if self
-                    .privacy_banner
-                    .hit_legal
-                    .contains(mouse.column, mouse.row)
-                    && !self.pos_occluded(mouse.column, mouse.row)
-                {
-                    return InputOutcome::Action(Action::OpenUrl(
-                        crate::views::privacy_banner::PRIVACY_BANNER_LEGAL_URL.to_string(),
-                    ));
-                }
                 if self.hit_watching_cue.contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
@@ -1047,18 +1021,6 @@ impl AgentView {
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .hit_announcement_cta
-                    .update_hover(mouse.column, mouse.row);
-                changed |= self
-                    .privacy_banner
-                    .hit_accept
-                    .update_hover(mouse.column, mouse.row);
-                changed |= self
-                    .privacy_banner
-                    .hit_customize
-                    .update_hover(mouse.column, mouse.row);
-                changed |= self
-                    .privacy_banner
-                    .hit_legal
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .plugin_cta

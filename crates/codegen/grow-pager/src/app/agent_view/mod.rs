@@ -232,28 +232,6 @@ pub struct HitArea {
     pub rect: Option<Rect>,
     pub hovered: bool,
 }
-/// Privacy upsell banner state on the agent view: whether the banner owns
-/// the banner slot this frame (`active`, set at draw start like
-/// `session_banner_active`; persists until acted on, so it is a tip
-/// occluder AND a tip-tick freezer) plus the three click targets.
-#[derive(Debug, Default)]
-pub struct PrivacyBannerState {
-    pub(crate) active: bool,
-    /// `[Accept]` (opt in; ack after ACP success).
-    pub(crate) hit_accept: HitArea,
-    /// `[Customize in settings]` (ack + open settings on coding_data_sharing).
-    pub(crate) hit_customize: HitArea,
-    /// Legal links line (opens the legal URL).
-    pub(crate) hit_legal: HitArea,
-}
-impl PrivacyBannerState {
-    /// Drop all click targets (slot not painted this frame).
-    pub fn clear_hits(&mut self) {
-        self.hit_accept.clear();
-        self.hit_customize.clear();
-        self.hit_legal.clear();
-    }
-}
 /// Banner-slot inputs to [`AgentView::draw`]. Slot precedence is computed
 /// by the caller (`AppView::draw`).
 pub struct BannerSlotParams<'a> {
@@ -261,11 +239,6 @@ pub struct BannerSlotParams<'a> {
     pub(crate) height: u16,
     pub(crate) announcements: &'a [grow_announcements::Announcement],
     pub(crate) hidden_ids: &'a std::collections::BTreeSet<String>,
-    /// Privacy upsell banner owns the slot (highest banner precedence
-    /// below critical announcements; gated by the caller).
-    pub(crate) privacy_banner: bool,
-    /// Last mouse position, for mouse-pos-driven hover styling.
-    pub(crate) mouse_pos: Option<(u16, u16)>,
     /// Session tip, only when it owns the slot.
     pub(crate) tip: Option<&'a str>,
 }
@@ -277,8 +250,6 @@ impl BannerSlotParams<'static> {
             height: 0,
             announcements: &[],
             hidden_ids: &EMPTY_IDS,
-            privacy_banner: false,
-            mouse_pos: None,
             tip: None,
         }
     }
@@ -1027,9 +998,6 @@ pub struct AgentView {
     pub hit_announcement_hide: HitArea,
     /// `[label]` CTA button on the promo banner row (click opens its link).
     pub hit_announcement_cta: HitArea,
-    /// Privacy upsell banner state: slot ownership + click targets
-    /// (packaged like [`Self::plugin_cta`]).
-    pub privacy_banner: PrivacyBannerState,
     /// `[label]` upgrade CTA appended after the cwd path in the status bar
     /// (click opens its link; nulled under dropdowns / occluders like the
     /// banner CTA).

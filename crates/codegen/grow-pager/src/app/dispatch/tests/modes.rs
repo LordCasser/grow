@@ -2141,7 +2141,7 @@ fn set_theme_auto_enables_auto_mode_and_persists_auto() {
 // ────────────────────────────────────────────────────────────────────
 // set_plan_mode dispatch-level coverage.
 //
-// Mirrors the `coding_data_sharing` and `yolo` test
+// Mirrors the `yolo` test
 // patterns. These exercise the dispatch path directly (not the
 // modal Enter path or the slash-command parser path), so they cover
 // the same plumbing every entry point ultimately funnels through.
@@ -2149,7 +2149,7 @@ fn set_theme_auto_enables_auto_mode_and_persists_auto() {
 
 /// Idempotent ON: dispatcher sees `prev == new`,
 /// toasts but emits NO Effect (saves a wasted ACP round-trip).
-/// State stays unchanged. Mirrors `set_coding_data_sharing_idempotent_opt_in`.
+/// State stays unchanged.
 #[test]
 fn set_plan_mode_idempotent_on() {
     let mut app = test_app_with_agent();
@@ -2193,7 +2193,7 @@ fn set_plan_mode_idempotent_on() {
 }
 
 /// Idempotent OFF: dispatcher sees `prev == new`,
-/// toasts but emits NO Effect. Mirrors `set_coding_data_sharing_idempotent_opt_out`.
+/// toasts but emits NO Effect.
 #[test]
 fn set_plan_mode_idempotent_off() {
     let mut app = test_app_with_agent();

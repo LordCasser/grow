@@ -203,7 +203,6 @@ pub(crate) async fn oidc_token_exchange(auth: &ProviderAuth) -> OidcRefreshResul
         organization_role: auth.organization_role.clone(),
         user_blocked_reason: auth.user_blocked_reason.clone(),
         team_blocked_reasons: auth.team_blocked_reasons.clone(),
-        coding_data_retention_opt_out: auth.coding_data_retention_opt_out,
     };
     let mut new_auth = build_grok_auth(tokens, user_info, issuer, client_id);
     let idp_rotated = new_auth.refresh_token.is_some();

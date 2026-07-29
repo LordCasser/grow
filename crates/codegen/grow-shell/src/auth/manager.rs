@@ -755,29 +755,6 @@ impl AuthManager {
         self.vet_cached(auth)
     }
 
-    /// `true` when data collection must be suppressed — the team has ZDR or
-    /// the user opted out of coding data retention. Reads
-    /// [`Self::current_or_expired`] because neither flag changes on token
-    /// expiry and `current()` returns `None` during the refresh window.
-    ///
-    /// Fail-open: no credential ⇒ `false` (not disabled). Collection paths
-    /// that must not act on unknown privacy state should use the fail-closed
-    /// [`Self::allows_data_collection`] instead.
-    pub(crate) fn is_data_collection_disabled(&self) -> bool {
-        self.current_or_expired()
-            .is_some_and(|a| a.is_data_collection_disabled())
-    }
-
-    /// Fail-closed collection predicate: `true` only when a credential
-    /// exists and carries no ZDR / retention-opt-out flag. Missing or
-    /// cleared auth (e.g. after a mid-session `/logout`) counts as
-    /// disabled — nothing may leave the machine while the privacy state is
-    /// unknown.
-    pub(crate) fn allows_data_collection(&self) -> bool {
-        self.current_or_expired()
-            .is_some_and(|a| !a.is_data_collection_disabled())
-    }
-
     /// Expired in-memory entry (for its `refresh_token`).
     pub(crate) fn expired_auth(&self) -> Option<ProviderAuth> {
         let auth = self

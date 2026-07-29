@@ -72,61 +72,13 @@ pub fn inference_request_count(content: &ContentController) -> usize {
 /// and never enters the auth manager). Load-bearing details: the scope key
 /// must be `<issuer>::<client_id>`, `auth_mode` must be `oidc`,
 /// `expires_at` must be far-future so no network refresh is attempted, and
-/// `coding_data_retention_opt_out` must be `false` so collection/upload-path
-/// e2es (e.g. storage park-on-401) still enqueue traces — missing that field
-/// now deserializes as opted-out via
-/// `default_coding_data_retention_opt_out()`. The mock server accepts any
-/// bearer. Pair with [`oauth_credential_ops`].
+/// The mock server accepts any bearer. Pair with [`oauth_credential_ops`].
 pub fn seed_fake_oauth(content: &ContentController, user: &str) {
-    seed_fake_oauth_with_opt_out(content, user, false);
+    seed_fake_oauth_raw(content, user);
 }
 
-/// Like [`seed_fake_oauth`], but with `coding_data_retention_opt_out: true` —
-/// the auth-side precondition for the coding-data privacy upsell banner.
-pub fn seed_fake_oauth_coding_data_opted_out(content: &ContentController, user: &str) {
-    seed_fake_oauth_with_opt_out(content, user, true);
-}
-
-/// Like [`seed_fake_oauth_coding_data_opted_out`], but on a Zero Data
-/// Retention team (`team_blocked_reasons` carries `BLOCKED_REASON_NO_LOGS`,
-/// the shell's `ProviderAuth::is_zdr_team` trigger) — locks the settings modal's
-/// `coding_data_sharing` row to `ZDR` and suppresses the privacy banner.
-pub fn seed_fake_oauth_zdr_team(content: &ContentController, user: &str) {
-    seed_fake_oauth_raw(
-        content,
-        user,
-        true,
-        ",\n    \"team_name\": \"PTY ZDR Team\",\n    \"team_role\": \"MEMBER\",\n    \
-         \"team_blocked_reasons\": [\"BLOCKED_REASON_NO_LOGS\"]",
-    );
-}
-
-/// Like [`seed_fake_oauth_coding_data_opted_out`], but as a non-admin member
-/// of a (non-ZDR) team — locks the settings modal's `coding_data_sharing`
-/// row to `Opt out · Admin Managed` and suppresses the privacy banner.
-pub fn seed_fake_oauth_team_member(content: &ContentController, user: &str) {
-    seed_fake_oauth_raw(
-        content,
-        user,
-        true,
-        ",\n    \"team_name\": \"PTY Team\",\n    \"team_role\": \"MEMBER\"",
-    );
-}
-
-fn seed_fake_oauth_with_opt_out(content: &ContentController, user: &str, opted_out: bool) {
-    seed_fake_oauth_raw(content, user, opted_out, "");
-}
-
-/// Shared auth.json template writer. `team_fields` is a raw JSON fragment
-/// spliced after `coding_data_retention_opt_out` (empty = no team; field
-/// names must match the shell's `ProviderAuth` serde names in
-/// `grow-shell/src/auth/model.rs`).
-fn seed_fake_oauth_raw(
-    content: &ContentController,
-    user: &str,
-    opted_out: bool,
-    team_fields: &str,
-) {
+/// Shared auth.json template writer.
+fn seed_fake_oauth_raw(content: &ContentController, user: &str) {
     let grow_home = content.home().join(".grow");
     std::fs::create_dir_all(&grow_home).expect("create temp .grow");
     std::fs::write(
@@ -142,8 +94,7 @@ fn seed_fake_oauth_raw(
     "expires_at": "2030-01-01T00:00:00Z",
     "refresh_token": "pty-test-refresh-token",
     "oidc_issuer": "https://login.example.com",
-    "oidc_client_id": "b1a00492-073a-47ea-816f-4c329264a828",
-    "coding_data_retention_opt_out": {opted_out}{team_fields}
+    "oidc_client_id": "b1a00492-073a-47ea-816f-4c329264a828"
   }}
 }}"#
         ),

@@ -820,17 +820,6 @@ pub struct RemoteSettings {
     /// Controlled via remote settings. Default `false` (blocked) during beta.
     #[serde(default)]
     pub zdr_access_enabled: Option<bool>,
-    /// When `Some(true)`, the client may show the coding-data sharing upsell
-    /// banner. Controlled via remote settings (`privacy_notice_rollout`).
-    /// Absent/`None` means off so older servers and missing flags keep the
-    /// banner hidden.
-    #[serde(default)]
-    pub privacy_notice_rollout: Option<bool>,
-    /// Days after a privacy-banner dismiss before it may re-show for users who
-    /// remain coding-data opted-out. From `grow_build_settings`.
-    /// `None` / `0` = never re-show after dismiss.
-    #[serde(default)]
-    pub privacy_banner_reshow_days: Option<u64>,
     /// remote settings tier of the `remember_tool_approvals` gate (whether per-tool
     /// "Always allow …" prompt options are shown). Lowest precedence; typically
     /// targeted per-org. Default `false`.
@@ -1666,30 +1655,6 @@ mod tests {
             serde_json::from_str::<RemoteSettings>(json).is_err(),
             "expected parse error for {json}"
         );
-    }
-    #[test]
-    fn remote_settings_privacy_notice_rollout_absent_null_true_false() {
-        assert_eq!(parse_remote("{}").privacy_notice_rollout, None);
-        assert_eq!(
-            parse_remote(r#"{"privacy_notice_rollout": null}"#).privacy_notice_rollout,
-            None
-        );
-        let on = parse_remote(r#"{"privacy_notice_rollout": true}"#);
-        assert_eq!(on.privacy_notice_rollout, Some(true));
-        assert_eq!(round_trip_remote(&on).privacy_notice_rollout, Some(true));
-        let off = parse_remote(r#"{"privacy_notice_rollout": false}"#);
-        assert_eq!(off.privacy_notice_rollout, Some(false));
-        assert_eq!(round_trip_remote(&off).privacy_notice_rollout, Some(false));
-    }
-    #[test]
-    fn remote_settings_privacy_banner_reshow_days() {
-        assert_eq!(parse_remote("{}").privacy_banner_reshow_days, None);
-        assert_eq!(
-            parse_remote(r#"{"privacy_banner_reshow_days": 30}"#).privacy_banner_reshow_days,
-            Some(30)
-        );
-        let s = parse_remote(r#"{"privacy_banner_reshow_days": 7}"#);
-        assert_eq!(round_trip_remote(&s).privacy_banner_reshow_days, Some(7));
     }
     #[test]
     fn remote_settings_jemalloc_heap_profile_fields_absent_and_null() {

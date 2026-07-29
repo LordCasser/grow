@@ -222,7 +222,6 @@ pub(super) struct OidcUserInfo {
     pub(super) organization_role: Option<String>,
     pub(super) user_blocked_reason: Option<String>,
     pub(super) team_blocked_reasons: Vec<String>,
-    pub(super) coding_data_retention_opt_out: bool,
 }
 pub(super) fn build_grok_auth(
     tokens: TokenResponse,
@@ -250,7 +249,6 @@ pub(super) fn build_grok_auth(
         organization_role: user_info.organization_role,
         user_blocked_reason: user_info.user_blocked_reason,
         team_blocked_reasons: user_info.team_blocked_reasons,
-        coding_data_retention_opt_out: user_info.coding_data_retention_opt_out,
         has_grok_code_access: None,
         refresh_token: tokens.refresh_token,
         expires_at: tokens.expires_in.map(|s| now + Duration::seconds(s as i64)),
@@ -695,7 +693,6 @@ pub(super) async fn validate_and_extract_user_info(
         organization_role: None,
         user_blocked_reason: None,
         team_blocked_reasons: vec![],
-        coding_data_retention_opt_out: crate::auth::default_coding_data_retention_opt_out(),
     })
 }
 pub(super) async fn extract_user_info(
@@ -726,7 +723,6 @@ pub(super) async fn extract_user_info(
             organization_role: None,
             user_blocked_reason: None,
             team_blocked_reasons: vec![],
-            coding_data_retention_opt_out: crate::auth::default_coding_data_retention_opt_out(),
         });
     }
     let token = id_token.ok_or_else(|| anyhow::Error::new(OidcError::MissingIdToken))?;

@@ -14,13 +14,6 @@ pub const API_KEY_SCOPE: &str = "grow::api_key";
 const BLOCKED_REASON_NO_LOGS: &str = "BLOCKED_REASON_NO_LOGS";
 const BLOCKED_REASON_NO_LOGS_MODERATED: &str = "BLOCKED_REASON_NO_LOGS_MODERATED";
 
-/// Fresh-credential / missing-field default: opted out until the user or
-/// server enrichment opts in. Single source for `ProviderAuth`, `AuthMeta`, and
-/// every login-path constructor so the sides cannot drift.
-pub(crate) fn default_coding_data_retention_opt_out() -> bool {
-    true
-}
-
 /// Token provenance (debugging/auth.json only -- no code branches on this).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -74,11 +67,6 @@ pub struct ProviderAuth {
     pub user_blocked_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub team_blocked_reasons: Vec<String>,
-    /// Defaults to `true` (opted out) for safer consumer privacy until the
-    /// user explicitly shares or server enrichment sets the team preference.
-    #[serde(default = "default_coding_data_retention_opt_out")]
-    pub coding_data_retention_opt_out: bool,
-
     /// Deprecated. Kept for deserializing existing auth.json files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub has_grok_code_access: Option<bool>,
@@ -164,14 +152,6 @@ impl ProviderAuth {
             .any(|r| r == BLOCKED_REASON_NO_LOGS || r == BLOCKED_REASON_NO_LOGS_MODERATED)
     }
 
-    /// `true` when the team has ZDR or the user opted out of coding data
-    /// retention. Use this for trace-upload and research-data gates.
-    /// Product analytics (`diagnostics_enabled`) and user-facing sync
-    /// features should use `is_zdr_team()` directly.
-    pub fn is_data_collection_disabled(&self) -> bool {
-        self.is_zdr_team() || self.coding_data_retention_opt_out
-    }
-
     /// Carry `/user`-derived fields from a previous auth so refresh rebuilds don't drop them.
     pub(crate) fn carry_user_profile_from(&mut self, prev: &ProviderAuth) {
         self.user_id = prev.user_id.clone();
@@ -186,7 +166,6 @@ impl ProviderAuth {
         self.organization_role = prev.organization_role.clone();
         self.user_blocked_reason = prev.user_blocked_reason.clone();
         self.team_blocked_reasons = prev.team_blocked_reasons.clone();
-        self.coding_data_retention_opt_out = prev.coding_data_retention_opt_out;
     }
 }
 
@@ -211,7 +190,6 @@ impl Default for ProviderAuth {
             organization_role: None,
             user_blocked_reason: None,
             team_blocked_reasons: vec![],
-            coding_data_retention_opt_out: default_coding_data_retention_opt_out(),
             has_grok_code_access: None,
             refresh_token: None,
             expires_at: None,
@@ -232,9 +210,6 @@ impl ProviderAuth {
         Self {
             key: "test-key".into(),
             user_id: "test-user".into(),
-            // Tests that exercise collection gates need sharing enabled by
-            // default; opt out explicitly when asserting the privacy path.
-            coding_data_retention_opt_out: false,
             ..Default::default()
         }
     }
@@ -275,8 +250,6 @@ pub(crate) struct UserInfo {
     pub(super) user_blocked_reason: Option<String>,
     #[serde(default)]
     pub(super) team_blocked_reasons: Option<Vec<String>>,
-    #[serde(default)]
-    pub(super) coding_data_retention_opt_out: Option<bool>,
 }
 
 /// Last 12 chars of a token string, safe for diagnostic logging.
@@ -360,7 +333,6 @@ mod tests {
             organization_role: None,
             user_blocked_reason: None,
             team_blocked_reasons: vec![],
-            coding_data_retention_opt_out: false,
             has_grok_code_access: None,
             refresh_token: None,
             expires_at: None,
@@ -442,24 +414,5 @@ mod tests {
         let mut map = AuthStore::new();
         map.insert("scope".into(), make_auth(AuthMode::ApiKey));
         assert!(lookup_auth(&map, "scope").is_some());
-    }
-
-    /// Pre-default auth.json (no coding_data_retention_opt_out key) must
-    /// deserialize as opted-out, not the old fail-open false.
-    #[test]
-    fn missing_coding_data_retention_opt_out_deserializes_opted_out() {
-        let json = r#"{
-            "key": "k",
-            "auth_mode": "oidc",
-            "create_time": "2020-01-01T00:00:00Z",
-            "user_id": "u"
-        }"#;
-        let auth: ProviderAuth = serde_json::from_str(json).unwrap();
-        assert!(
-            auth.coding_data_retention_opt_out,
-            "missing field must default to opted-out"
-        );
-        assert!(default_coding_data_retention_opt_out());
-        assert!(ProviderAuth::default().coding_data_retention_opt_out);
     }
 }

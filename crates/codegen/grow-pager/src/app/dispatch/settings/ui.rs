@@ -45,8 +45,6 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     }
     let ui_snapshot = app.current_ui.clone();
     // Capture app-level fields before the mut-borrow loop.
-    let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
-    let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
@@ -79,8 +77,6 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                     .iter()
                     .map(|(id, info)| (info.name.clone(), id.clone()))
                     .collect(),
-                coding_data_sharing_opt_out: coding_data_sharing_opt_out_from_app,
-                coding_data_sharing_lock: coding_data_sharing_lock_from_app,
                 // Prefer optimistic pending over confirmed active.
                 plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
                 show_tips: show_tips_from_app,
@@ -147,7 +143,7 @@ pub(in crate::app::dispatch) fn dispatch_open_howto_guides(app: &mut AppView) ->
 /// Open the settings modal. Reads the live `UiConfig` snapshot
 /// (sans-IO). Single-instance: `debug_assert!` catches routing bugs.
 ///
-/// `focus_key` selects a settings row after open (e.g. `coding_data_sharing`).
+/// `focus_key` selects a settings row after open.
 /// When not on an agent view, switches to an existing agent or creates a
 /// placeholder session so the modal can mount.
 pub(in crate::app::dispatch) fn dispatch_open_settings(
@@ -183,8 +179,6 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let registry = app.settings_registry.clone();
     let ui_snapshot = app.current_ui.clone();
     // Capture app-level fields before the mut-borrow on the agent.
-    let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
-    let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
@@ -226,8 +220,6 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
             .iter()
             .map(|(id, info)| (info.name.clone(), id.clone()))
             .collect(),
-        coding_data_sharing_opt_out: coding_data_sharing_opt_out_from_app,
-        coding_data_sharing_lock: coding_data_sharing_lock_from_app,
         // Prefer optimistic pending over confirmed active.
         plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
         show_tips: show_tips_from_app,
@@ -721,8 +713,6 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         auto_mode: agent_auto_mode(app),
         current_model_name: agent_current_model_name(app),
         available_models: agent_available_models(app),
-        coding_data_sharing_opt_out: app.coding_data_retention_opt_out,
-        coding_data_sharing_lock: app.coding_data_sharing_lock(),
         plan_mode_active: agent_plan_mode(app),
         show_tips: app.show_tips,
         auto_update: app.auto_update,
@@ -866,14 +856,6 @@ pub(in crate::app::dispatch) fn action_for_reset(
         }
         // max_thoughts_width: direct round-trip.
         ("max_thoughts_width", SettingValue::Int(i)) => Some(Action::SetMaxThoughtsWidth(*i)),
-        // coding_data_sharing: "opt-in" / "opt-out" → bool.
-        // Both arms needed (registry default is "opt-out").
-        ("coding_data_sharing", SettingValue::Enum("opt-in")) => {
-            Some(Action::SetCodingDataSharing { opted_in: true })
-        }
-        ("coding_data_sharing", SettingValue::Enum("opt-out")) => {
-            Some(Action::SetCodingDataSharing { opted_in: false })
-        }
         // plan_mode: "on" / "off" → PlanModeKind.
         // "on" arm is a skew guard (default is "off").
         ("plan_mode", SettingValue::Enum("off")) => {

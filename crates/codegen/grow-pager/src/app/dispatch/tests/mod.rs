@@ -46,7 +46,6 @@ use super::session::load::reanchor_grouped_selection;
 use super::session::modal::{dispatch_rename_session, dispatch_sessions_confirm_close};
 use super::settings::setters::set_default_model_inner;
 use super::settings::ui::{action_for_reset, apply_setting_rollback};
-use super::status::scrub_error_for_toast;
 use super::task_result::dispatch_task_result;
 use super::*;
 use crate::acp::model_state::ModelState;
@@ -146,11 +145,6 @@ fn test_app() -> AppView {
         team_name: None,
         is_zdr: false,
         team_role: None,
-        coding_data_retention_opt_out: false,
-        privacy_notice_rollout: false,
-        privacy_banner_reshow_days: None,
-        privacy_banner_acked: None,
-        privacy_banner_accept_inflight: false,
         show_tips: None,
         auto_update: None,
         ask_user_question_timeout_enabled: None,
@@ -180,11 +174,7 @@ fn test_app() -> AppView {
         welcome_auth_fallback_rect: None,
         welcome_changelog_cta_rect: None,
         welcome_upgrade_cta_rect: None,
-        welcome_privacy_banner_accept_rect: None,
-        welcome_privacy_banner_customize_rect: None,
-        welcome_privacy_banner_legal_rect: None,
         welcome_toast: None,
-        welcome_on_privacy_banner: false,
         welcome_on_upgrade_cta: false,
         auth_show_raw_url: false,
         auth_mouse_disabled: false,

@@ -195,7 +195,6 @@ impl AgentView {
             watching_cue_toast_shown: false,
             hit_announcement_hide: Default::default(),
             hit_announcement_cta: Default::default(),
-            privacy_banner: Default::default(),
             hit_upgrade_cta: Default::default(),
             hit_scrollbar: Default::default(),
             scrollbar_dragging: false,

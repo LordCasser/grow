@@ -12,8 +12,8 @@ use super::state::*;
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
 use crate::settings::{
-    CodingDataSharingLock, EnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey,
-    SettingKind, SettingMeta, SettingOwner, SettingValue, SettingsRegistry, StringValidator,
+    EnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey, SettingKind, SettingMeta,
+    SettingOwner, SettingValue, SettingsRegistry, StringValidator,
 };
 use crate::theme::Theme;
 use grow_shell::agent::config::UiConfig;
@@ -247,8 +247,8 @@ fn every_preview_enum_setting_has_action_for_enum_arm() {
 /// **Vacuous-passing note**: today no
 /// production setting uses `SettingKind::String` — both
 /// `default_model` and `fork_secondary_model` use
-/// `DynamicEnum`, and `coding_data_sharing` / `permission_mode`
-/// / `plan_mode` are `Enum`. The loop body skips every meta, so
+/// `DynamicEnum`, and `permission_mode` / `plan_mode` are `Enum`.
+/// The loop body skips every meta, so
 /// this assertion passes vacuously today. It STILL fires as a
 /// CI guard the first time a future change registers a String
 /// setting without an action arm. Renamed in spirit to
@@ -433,7 +433,6 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
         &theme,
         false, // is_expanded
         false, // is_hovered
-        None,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -455,8 +454,7 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
 /// The default registry contains Appearance settings
 /// (3 bools + 3 enums + 1 int = 7 entries), the Editor entry
 /// `multiline_mode`, the Agent entries `permission_mode` and
-/// `plan_mode`, the Privacy entry `coding_data_sharing`, the
-/// Models entry `default_model`, and the Advanced entries
+/// `plan_mode`, the Models entry `default_model`, and the Advanced entries
 /// `show_tips` and `auto_update`. `default_reasoning_effort` and
 /// `auto_compact_threshold_percent` are not exposed in the modal.
 #[test]
@@ -480,7 +478,6 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             &SettingCategory::Mouse,
             &SettingCategory::Editor,
             &SettingCategory::Agent,
-            &SettingCategory::Privacy,
             &SettingCategory::Models,
             // The Session category has no registered settings, so its
             // header is not emitted.
@@ -565,8 +562,6 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             // PAGER-owned plan_mode (Agent category).
             "plan_mode",
-            // SHELL-owned coding_data_sharing (Privacy category).
-            "coding_data_sharing",
             // SHELL-owned default_model (Models category).
             "default_model",
             // Models category. `default_reasoning_effort` and `session_summary_model` are
@@ -862,7 +857,6 @@ fn selected_browse_row_label_is_bold() {
         &theme,
         false,
         false,
-        None,
     );
 
     assert!(
@@ -1320,7 +1314,6 @@ fn render_setting_row_emits_restart_pill_when_required() {
         &theme,
         true,  // is_expanded — gate on
         false, // is_hovered
-        None,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -1345,7 +1338,6 @@ fn render_setting_row_emits_restart_pill_when_required() {
         &theme,
         false, // is_expanded — off
         false, // is_hovered
-        None,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -1394,7 +1386,6 @@ fn render_setting_row_hides_restart_pill_when_at_default_and_collapsed() {
         &theme,
         false, // is_expanded
         false, // is_hovered
-        None,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -2862,11 +2853,7 @@ fn render_picker_long_description_wraps_no_ellipsis() {
 /// continuation lines are indented to the description column
 /// (column 0 holds whitespace, NOT a marker glyph).
 ///
-/// Uses the production `coding_data_sharing` "Opt out" choice
-/// (a long description that wraps at width=60). Pinning against
-/// the real catalog keeps the test honest about the bug report
-/// — the screenshot in the user-feedback PR showed exactly this
-/// choice clipped with `…`.
+/// Uses a synthetic enum choice with a long description that wraps at width=60.
 /// Visual smoke debugging helper. Renders the wrap fixture and
 /// prints the buffer so a human can eyeball the layout. Ignored
 /// by default; run with `cargo test -- --ignored picker_visual_smoke_debug
@@ -2876,10 +2863,10 @@ fn render_picker_long_description_wraps_no_ellipsis() {
 fn picker_visual_smoke_debug() {
     let entries = vec![SettingMeta {
         key: "wrap_enum",
-        category: SettingCategory::Privacy,
+        category: SettingCategory::Advanced,
         owner: SettingOwner::Shared,
-        label: "Coding data sharing",
-        description: "Controls whether SpaceXAI may retain and train on coding data.",
+        label: "Long enum",
+        description: "Exercises a long enum description in the settings picker.",
         keywords: &["test"],
         kind: SettingKind::Enum {
             default: "opt-out",
@@ -2887,7 +2874,7 @@ fn picker_visual_smoke_debug() {
                 EnumChoice {
                     canonical: "opt-in",
                     display: "Opt in",
-                    description: "Allow SpaceXAI to retain and use coding session data for training and product improvement.",
+                    description: "Allow the synthetic option and preserve every word while wrapping across multiple terminal rows.",
                 },
                 EnumChoice {
                     canonical: "opt-out",
@@ -2933,10 +2920,10 @@ fn picker_visual_smoke_debug() {
 fn picker_long_description_wraps_to_multiple_lines() {
     let entries = vec![SettingMeta {
         key: "wrap_enum",
-        category: SettingCategory::Privacy,
+        category: SettingCategory::Advanced,
         owner: SettingOwner::Shared,
-        label: "Coding data sharing",
-        description: "Controls whether SpaceXAI may retain and train on coding data.",
+        label: "Long enum",
+        description: "Exercises a long enum description in the settings picker.",
         keywords: &["test"],
         kind: SettingKind::Enum {
             default: "opt-out",
@@ -2944,7 +2931,7 @@ fn picker_long_description_wraps_to_multiple_lines() {
                 EnumChoice {
                     canonical: "opt-in",
                     display: "Opt in",
-                    description: "Allow SpaceXAI to retain and use coding session data for training and product improvement.",
+                    description: "Allow the synthetic option and preserve every word while wrapping across multiple terminal rows.",
                 },
                 EnumChoice {
                     canonical: "opt-out",
@@ -3001,7 +2988,7 @@ fn picker_long_description_wraps_to_multiple_lines() {
         "choice 0 line 1 must contain the `·` separator, got: {r3:?}"
     );
     assert!(
-        r3.contains("Allow SpaceXAI"),
+        r3.contains("Allow the synthetic"),
         "choice 0 line 1 must start the description, got: {r3:?}"
     );
 
@@ -3041,14 +3028,7 @@ fn picker_long_description_wraps_to_multiple_lines() {
         !opt_in_full.contains('\u{2026}'),
         "wrapped Opt-in description must NOT contain `…`, got:\n{opt_in_full}"
     );
-    for word in [
-        "Allow",
-        "SpaceXAI",
-        "retain",
-        "session",
-        "training",
-        "improvement",
-    ] {
+    for word in ["Allow", "synthetic", "preserve", "wrapping", "terminal", "rows"] {
         assert!(
             opt_in_full.contains(word),
             "Opt-in description must include word {word:?}, got:\n{opt_in_full}"
@@ -3203,10 +3183,10 @@ fn picker_multi_line_choice_hit_rect_spans_all_lines() {
     // Reuse the wrap fixture: long descriptions on both choices.
     let entries = vec![SettingMeta {
         key: "wrap_enum",
-        category: SettingCategory::Privacy,
+        category: SettingCategory::Advanced,
         owner: SettingOwner::Shared,
-        label: "Coding data sharing",
-        description: "Controls whether SpaceXAI may retain coding data.",
+        label: "Long enum",
+        description: "Exercises a long enum description.",
         keywords: &["test"],
         kind: SettingKind::Enum {
             default: "opt-in",
@@ -3214,7 +3194,7 @@ fn picker_multi_line_choice_hit_rect_spans_all_lines() {
                 EnumChoice {
                     canonical: "opt-in",
                     display: "Opt in",
-                    description: "Allow SpaceXAI to retain and use coding session data for training and product improvement.",
+                    description: "Allow the synthetic option and preserve every word while wrapping across multiple terminal rows.",
                 },
                 EnumChoice {
                     canonical: "opt-out",
@@ -4263,9 +4243,9 @@ fn synthetic_long_label_meta() -> SettingMeta {
 fn synthetic_enum_chevron_meta() -> SettingMeta {
     SettingMeta {
         key: "test-enum-with-chevron",
-        category: SettingCategory::Privacy,
+        category: SettingCategory::Advanced,
         owner: SettingOwner::Shared,
-        label: "Coding data sharing",
+        label: "Test enum",
         description: "Enum row that opens a picker — chevron suffix applies.",
         keywords: &["test"],
         kind: SettingKind::Enum {
@@ -4307,7 +4287,6 @@ fn narrow_terminal_drops_value_to_second_line() {
         &theme,
         false,
         false, // is_hovered
-        None,
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
@@ -4371,7 +4350,6 @@ fn wide_terminal_keeps_value_on_first_line() {
         &theme,
         false,
         false, // is_hovered
-        None,
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
@@ -4413,7 +4391,6 @@ fn pathologically_narrow_truncates_label_with_ellipsis() {
         &theme,
         false,
         false, // is_hovered
-        None,
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
@@ -4424,129 +4401,6 @@ fn pathologically_narrow_truncates_label_with_ellipsis() {
     assert!(
         line2.contains("off"),
         "value `off` must still drop to line 2 even when label is truncated: {line2:?}"
-    );
-}
-
-/// Two-line rows expand `state.row_rects` to span BOTH lines so
-/// mouse clicks on either line trigger the same default action.
-///
-/// `coding_data_sharing`: label 19 + value "Opt out" 7 + chevron
-/// 2 + chrome 4 = 32 cells one-line. We render at width=28 so
-/// the row drops to two lines.
-#[test]
-fn two_line_row_hit_rect_spans_both_lines() {
-    let mut s = make_state();
-    let row_idx = s
-        .rows
-        .iter()
-        .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "coding_data_sharing"))
-        .expect("coding_data_sharing must be registered");
-    // Render at a narrow width so coding_data_sharing forces a
-    // two-line layout.
-    let area = Rect {
-        x: 0,
-        y: 0,
-        width: 28,
-        height: 60,
-    };
-    let mut buf = Buffer::empty(area);
-    let theme = Theme::current();
-    s.selected = row_idx;
-    render_rows(&mut buf, area, &mut s, &theme);
-
-    let rect = s.row_rects[row_idx];
-    assert!(
-        rect.height >= 2,
-        "two-line row hit-rect must span ≥2 lines, got height={}",
-        rect.height
-    );
-
-    // Synthesize a click on line 2 of the row. The mouse handler
-    // should fire the default action (open the enum picker for
-    // coding_data_sharing).
-    s.list_area = area;
-    let click_y = rect.y + 1;
-    // Click somewhere in the middle of line 2.
-    let click_x = rect.x + rect.width / 2;
-    // First click: only selects (since selection might not match).
-    // Force selection on first to make it a direct activation.
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        click_x,
-        click_y,
-    );
-    // Selection already matches, so click activates: enum picker
-    // opens (mode flips to PickingEnum).
-    match outcome {
-        SettingsKeyOutcome::Changed => {
-            assert!(
-                matches!(s.mode(), SettingsModalMode::PickingEnum { .. }),
-                "click on line 2 of a two-line Enum row must open the picker, \
-                 got mode {:?}",
-                s.mode()
-            );
-        }
-        other => panic!(
-            "click on line 2 must produce Changed (selection or activation), \
-             got {other:?}"
-        ),
-    }
-}
-
-/// Expanded two-line rows render label (line 1), value (line 2),
-/// and the wrapped description on subsequent lines.
-#[test]
-fn two_line_row_with_expansion_renders_three_segments() {
-    let mut s = make_state();
-    // Coding data sharing's label + value (with chevron) won't
-    // fit on a 28-col line, forcing two-line layout.
-    let row_idx = s
-        .rows
-        .iter()
-        .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "coding_data_sharing"))
-        .expect("coding_data_sharing must be registered");
-    s.selected = row_idx;
-    s.expanded_keys.insert("coding_data_sharing");
-
-    let area = Rect {
-        x: 0,
-        y: 0,
-        width: 28,
-        height: 60,
-    };
-    let mut buf = Buffer::empty(area);
-    let theme = Theme::current();
-    render_rows(&mut buf, area, &mut s, &theme);
-
-    let rect = s.row_rects[row_idx];
-    assert!(
-        rect.height >= 2,
-        "expanded two-line row must allocate ≥2 lines for the row itself, got height={}",
-        rect.height
-    );
-    // The row label is on line 1.
-    let label_line = buf_row_text(&buf, rect.y, area.x, area.width);
-    assert!(
-        label_line.contains("Coding data sharing"),
-        "line 1 must contain the row label: {label_line:?}"
-    );
-    // The value (display: "Opt out" or similar) is on line 2.
-    let value_line = buf_row_text(&buf, rect.y + 1, area.x, area.width);
-    // Value comes from displaying the canonical → display mapping,
-    // which uses the synthetic enum's "Third Option" canonical of
-    // "opt-out". The display fallback returns the canonical when
-    // the lookup misses — registry has the real `CodingDataSharing`
-    // choices, so display should be "Opt out".
-    assert!(
-        value_line.contains("Opt") || value_line.contains("opt") || value_line.contains("out"),
-        "line 2 must contain the value text: {value_line:?}"
-    );
-    // The expanded description renders on line 3 and below.
-    let desc_line = buf_row_text(&buf, rect.y + 2, area.x, area.width);
-    assert!(
-        !desc_line.chars().all(|c| c == ' '),
-        "line 3 must contain wrapped description text (non-blank): {desc_line:?}"
     );
 }
 
@@ -5162,7 +5016,6 @@ fn bool_off_value_renders_in_dim_color() {
         &theme,
         false,
         false,
-        None,
     );
     // Use `find_text_col` so the
     // column index is the actual buffer position, not a byte
@@ -5195,7 +5048,6 @@ fn bool_off_value_renders_in_dim_color() {
         &theme,
         false,
         false,
-        None,
     );
     let on_col = find_text_col(&buf_on, 0, "on").expect("must find `on` substring");
     let on_cell = buf_on.cell((on_col, 0)).expect("on cell");
@@ -5267,7 +5119,6 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
-        None,
     );
 
     // Enum row — chevron column contains the `›` glyph.
@@ -5282,7 +5133,6 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
-        None,
     );
 
     // The chevron column is a 2-cell block at
@@ -5354,7 +5204,6 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
-        None,
     );
     let _ = render_setting_row(
         &mut buf_multi,
@@ -5366,7 +5215,6 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
-        None,
     );
     // Bool row's `off` ends at column N; Enum row's `›` glyph
     // lands at column M. The contract: N == M's column
@@ -5423,7 +5271,6 @@ fn chevron_column_aligns_across_one_and_two_line_layouts() {
         &theme,
         false,
         false,
-        None,
     );
     let area_one = Rect {
         x: 0,
@@ -5442,7 +5289,6 @@ fn chevron_column_aligns_across_one_and_two_line_layouts() {
         &theme,
         false,
         false,
-        None,
     );
     // The column offset from the area's right edge is constant:
     // `area.right - ROW_RIGHT_PAD_W - 1` is the `›` glyph
@@ -7302,178 +7148,3 @@ fn preview_remains_clamped_when_pending_exceeds_widened_width() {
 }
 
 // ---------------------------------------------------------------------------
-// Locked coding_data_sharing row (ZDR / team non-admin)
-// ---------------------------------------------------------------------------
-
-fn make_locked_state(lock: CodingDataSharingLock) -> SettingsModalState {
-    SettingsModalState::new(
-        Arc::new(SettingsRegistry::defaults()),
-        UiConfig::default(),
-        PagerLocalSnapshot {
-            coding_data_sharing_lock: Some(lock),
-            ..PagerLocalSnapshot::default()
-        },
-    )
-}
-
-fn coding_data_sharing_row_idx(s: &SettingsModalState) -> usize {
-    s.rows
-        .iter()
-        .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "coding_data_sharing"))
-        .expect("coding_data_sharing must be registered")
-}
-
-/// A locked `coding_data_sharing` row must NOT open the enum picker —
-/// neither via `try_enter_picking_enum` directly (the shared entry point
-/// for Enter, mouse value clicks, and the `focus_key` auto-open path) nor
-/// via the Browse Enter key. With no lock, the same row opens the picker.
-#[test]
-fn locked_coding_data_sharing_row_does_not_open_picker() {
-    for lock in [
-        CodingDataSharingLock::Zdr,
-        CodingDataSharingLock::TeamManaged,
-    ] {
-        let mut s = make_locked_state(lock);
-        s.selected = coding_data_sharing_row_idx(&s);
-        assert!(
-            !s.try_enter_picking_enum(),
-            "try_enter_picking_enum must return false for a locked row ({lock:?})"
-        );
-        assert!(
-            matches!(s.mode(), SettingsModalMode::Browse),
-            "mode must stay Browse for a locked row ({lock:?}), got {:?}",
-            s.mode()
-        );
-        let out = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            matches!(out, SettingsKeyOutcome::Unchanged),
-            "Enter on a locked row must be a no-op ({lock:?}), got {out:?}"
-        );
-        assert!(matches!(s.mode(), SettingsModalMode::Browse));
-    }
-
-    // Control arm: no lock → the picker opens (existing behavior).
-    let mut s = make_state();
-    s.selected = coding_data_sharing_row_idx(&s);
-    assert!(s.try_enter_picking_enum());
-    assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
-}
-
-/// Locked rows drop the `›` enter-affordance and render a per-variant
-/// value: ZDR replaces opt-in/out with "ZDR"; team-managed keeps the
-/// value with an " · Admin Managed" suffix. Unlocked rows keep the plain
-/// value + chevron.
-#[test]
-fn locked_coding_data_sharing_row_renders_locked_value_without_chevron() {
-    let area = Rect {
-        x: 0,
-        y: 0,
-        width: 80,
-        height: 60,
-    };
-    let theme = Theme::current();
-    let chevron = crate::glyphs::chevron();
-
-    let mut s = make_locked_state(CodingDataSharingLock::Zdr);
-    let idx = coding_data_sharing_row_idx(&s);
-    s.selected = idx;
-    let mut buf = Buffer::empty(area);
-    render_rows(&mut buf, area, &mut s, &theme);
-    let rect = s.row_rects[idx];
-    let line = buf_row_text(&buf, rect.y, area.x, area.width);
-    assert!(
-        line.contains("ZDR") && !line.contains("Opt"),
-        "ZDR lock must replace the opt-in/out value with `ZDR`: {line:?}"
-    );
-    assert!(
-        !line.contains(chevron),
-        "locked row must not render the `{chevron}` enter affordance: {line:?}"
-    );
-
-    let mut s = make_locked_state(CodingDataSharingLock::TeamManaged);
-    s.selected = idx;
-    let mut buf = Buffer::empty(area);
-    render_rows(&mut buf, area, &mut s, &theme);
-    let rect = s.row_rects[idx];
-    let line = buf_row_text(&buf, rect.y, area.x, area.width);
-    assert!(
-        line.contains("Opt out \u{00B7} Admin Managed"),
-        "team-managed lock must append ` · Admin Managed`: {line:?}"
-    );
-    assert!(
-        !line.contains(chevron),
-        "locked row must not render the `{chevron}` enter affordance: {line:?}"
-    );
-
-    // Control arm: unlocked row shows the plain value + chevron.
-    let mut s = make_state();
-    s.selected = idx;
-    let mut buf = Buffer::empty(area);
-    render_rows(&mut buf, area, &mut s, &theme);
-    let rect = s.row_rects[idx];
-    let line = buf_row_text(&buf, rect.y, area.x, area.width);
-    assert!(
-        line.contains("Opt out") && !line.contains("locked"),
-        "unlocked row must show the plain value: {line:?}"
-    );
-    assert!(
-        line.contains(chevron),
-        "unlocked row must keep the `{chevron}` enter affordance: {line:?}"
-    );
-}
-
-/// Expanding a locked row replaces the registry description with the lock
-/// reason; the unlocked expansion shows the description.
-#[test]
-fn locked_coding_data_sharing_expanded_description_replaces_with_reason() {
-    let area = Rect {
-        x: 0,
-        y: 0,
-        width: 80,
-        height: 60,
-    };
-    let theme = Theme::current();
-    // Word-wrap may split the reason across lines; normalize the whole
-    // buffer to a single whitespace-collapsed string before matching.
-    let flatten = |buf: &Buffer| -> String {
-        (0..area.height)
-            .map(|y| buf_row_text(buf, y, area.x, area.width))
-            .collect::<Vec<_>>()
-            .join(" ")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-
-    let mut s = make_locked_state(CodingDataSharingLock::TeamManaged);
-    let idx = coding_data_sharing_row_idx(&s);
-    s.selected = idx;
-    s.expanded_keys.insert("coding_data_sharing");
-    let mut buf = Buffer::empty(area);
-    render_rows(&mut buf, area, &mut s, &theme);
-    let text = flatten(&buf);
-    assert!(
-        text.contains("Managed by your team admin."),
-        "expanded locked row must show the lock reason: {text:?}"
-    );
-    assert!(
-        !text.contains("Controls whether"),
-        "locked expansion must replace the description, not append to it: {text:?}"
-    );
-
-    // Control arm: unlocked expansion shows the description only.
-    let mut s = make_state();
-    s.selected = idx;
-    s.expanded_keys.insert("coding_data_sharing");
-    let mut buf = Buffer::empty(area);
-    render_rows(&mut buf, area, &mut s, &theme);
-    let text = flatten(&buf);
-    assert!(
-        text.contains("Controls whether"),
-        "expanded row must render the registry description: {text:?}"
-    );
-    assert!(
-        !text.contains("Managed by your team admin."),
-        "unlocked expansion must not mention the team-admin lock: {text:?}"
-    );
-}

@@ -245,9 +245,6 @@ pub(super) fn apply_user_info_enrichment(disk: &mut ProviderAuth, user_info: Use
     if let Some(reasons) = user_info.team_blocked_reasons {
         disk.team_blocked_reasons = reasons;
     }
-    if let Some(opt_out) = user_info.coding_data_retention_opt_out {
-        disk.coding_data_retention_opt_out = opt_out;
-    }
     if let Some(ref email) = user_info.email
         && !email.is_empty()
     {

@@ -139,7 +139,7 @@ Each update names its type, so a client can render distinct panels for reasoning
 
 ## Extension methods
 
-Beyond the base ACP protocol, Grow defines extension methods under the `grow/` prefix for SpaceXAI-specific functionality. These cover:
+Beyond the base ACP protocol, Grow defines extension methods under the `grow/` prefix for local client functionality. These cover:
 
 | Category                   | Prefix               | Examples                                         |
 | -------------------------- | -------------------- | ------------------------------------------------ |
@@ -153,7 +153,7 @@ Beyond the base ACP protocol, Grow defines extension methods under the `grow/` p
 | **Authentication**         | `grow/auth/*`        | `get_url`, `submit_code`                         |
 | **Feedback & Diagnostic**   | `grow/*`             | `feedback`, `diagnostics/*`                        |
 
-The tables here show representative methods in each category. The `grow/*` set is SpaceXAI-specific and may expand across releases, so treat it as non-exhaustive and discover the available methods from the agent's `initialize` response.
+The tables here show representative methods in each category. The `grow/*` set may expand across releases, so treat it as non-exhaustive and discover the available methods from the agent's `initialize` response.
 
 ### Notifications (agent to client)
 

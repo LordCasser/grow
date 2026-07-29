@@ -16,9 +16,6 @@ pub struct AuthMeta {
     pub is_zdr: bool,
     #[serde(default)]
     pub team_role: Option<String>,
-    /// Defaults to opted-out (safer) until auth meta is populated.
-    #[serde(default = "crate::auth::default_coding_data_retention_opt_out")]
-    pub coding_data_retention_opt_out: bool,
     #[serde(default)]
     pub show_resolved_model: Option<bool>,
 }
@@ -32,7 +29,6 @@ impl Default for AuthMeta {
             team_name: None,
             is_zdr: false,
             team_role: None,
-            coding_data_retention_opt_out: crate::auth::default_coding_data_retention_opt_out(),
             show_resolved_model: None,
         }
     }

@@ -53,7 +53,6 @@ pub fn load_config_from_toml(root: &TomlValue) -> Config {
             .and_then(|t| t.get("ask_user_question"))
             .and_then(|v| v.clone().try_into().ok())
             .unwrap_or_default(),
-        privacy: section(table, "privacy"),
     }
 }
 /// Resolve permission config with project override semantics.
