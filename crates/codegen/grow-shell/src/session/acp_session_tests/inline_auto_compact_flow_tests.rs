@@ -386,6 +386,43 @@ async fn test_response_header_context_window_downgrade_rejected() {
         })
         .await;
 }
+/// Provider metadata fills a missing output limit but never overrides an
+/// explicit model/global value already resolved into the sampling config.
+#[tokio::test(flavor = "current_thread")]
+async fn test_response_header_output_limit_respects_local_configuration() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 500_000, 85, gateway_tx, persistence_tx).await;
+
+            actor
+                .handle_model_metadata_update(crate::sampling::ResponseModelMetadata {
+                    context_window: None,
+                    output_limit: Some(16_384),
+                    models_etag: None,
+                })
+                .await;
+            let discovered = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            assert_eq!(discovered.output_limit, Some(16_384));
+
+            let mut explicit = discovered;
+            explicit.output_limit = Some(8_192);
+            actor.chat_state_handle.update_sampling_config(explicit);
+            actor
+                .handle_model_metadata_update(crate::sampling::ResponseModelMetadata {
+                    context_window: None,
+                    output_limit: Some(32_768),
+                    models_etag: None,
+                })
+                .await;
+            let preserved = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            assert_eq!(preserved.output_limit, Some(8_192));
+        })
+        .await;
+}
 #[test]
 fn initial_injection_backend_params_use_override_min_score() {
     let params = crate::session::memory::MemoryBackendParams {
@@ -1176,8 +1213,8 @@ async fn test_compact_on_error_no_trigger_when_tokens_within_new_window() {
 /// End-to-end test for `maybe_refresh_model_metadata_on_resume`.
 ///
 /// Simulates a session idle for >10 minutes, then verifies the function
-/// fetches `/models-v2`, parses the response, and updates `context_window`
-/// and `output_limit` in the sampling config.
+/// fetches `/models-v2`, updates `context_window`, and preserves an explicitly
+/// configured `output_limit`.
 #[tokio::test(flavor = "current_thread")]
 async fn test_e2e_idle_resume_refreshes_model_metadata() {
     use axum::routing::get;
@@ -1467,8 +1504,8 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             );
             assert_eq!(
                 cfg_after.output_limit,
-                Some(16384),
-                "output_limit should be updated to 16384 from /models-v2"
+                Some(8192),
+                "configured output_limit must not be replaced by /models-v2"
             );
         })
         .await;

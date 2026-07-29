@@ -449,13 +449,15 @@ impl SessionActor {
             updated_config.context_window = new_context_window;
             config_changed = true;
         }
-        if let Some(new_limit) = new_output_limit
-            && current_config.output_limit != Some(new_limit)
+        // Local configuration is authoritative. Provider metadata may fill an
+        // unspecified limit, but it must never replace a model- or global-level
+        // `output_limit` already resolved into the sampling config.
+        if current_config.output_limit.is_none()
+            && let Some(new_limit) = new_output_limit
         {
             tracing::info!(
-                old_output_limit = current_config.output_limit,
                 new_output_limit = new_limit,
-                "Output limit updated on session resume"
+                "Output limit discovered on session resume"
             );
             updated_config.output_limit = Some(new_limit);
             config_changed = true;
@@ -500,13 +502,14 @@ impl SessionActor {
                 config_changed = true;
             }
         }
-        if let Some(new_limit) = metadata.output_limit
-            && current_config.output_limit != Some(new_limit)
+        // Response headers are advisory. Only use them when the effective local
+        // configuration left `output_limit` unset.
+        if current_config.output_limit.is_none()
+            && let Some(new_limit) = metadata.output_limit
         {
             tracing::info!(
-                old_output_limit = current_config.output_limit,
                 new_output_limit = new_limit,
-                "Model output_limit changed via response header"
+                "Model output_limit discovered via response header"
             );
             new_output_limit = Some(new_limit);
             config_changed = true;

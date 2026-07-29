@@ -332,8 +332,8 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             );
             assert_eq!(
                 cfg_after.output_limit,
-                Some(16384),
-                "output_limit should be updated to 16384 from /models-v2"
+                Some(8192),
+                "configured output_limit must not be replaced by /models-v2"
             );
         })
         .await;
