@@ -82,6 +82,7 @@ members = [
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
+version = "1.0.0"
 
 [workspace.dependencies]
 agent-client-protocol = { version = "0.10.4", features = ["unstable"] }

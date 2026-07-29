@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "grow-shell-session-support"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 description = "Session-support modules for the grow shell crate family: managed MCP credential/catalog caching and file-access tracking."
 

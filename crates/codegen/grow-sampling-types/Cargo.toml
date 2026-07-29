@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "grow-sampling-types"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 description = "Pure data types for the xAI sampling / chat-completion API layer"
 

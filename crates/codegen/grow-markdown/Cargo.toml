@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "grow-markdown"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 authors = ["Grow contributors"]
 description = "Streaming markdown renderer for terminal UIs"

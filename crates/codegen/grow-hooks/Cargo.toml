@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "grow-hooks"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 description = "Runtime hook system for Grow — file-based discovery, command execution, and policy enforcement"
 

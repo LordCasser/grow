@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "grow-compaction"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 description = "Shared, transport-agnostic compaction engine for Grow chat and Grow."
 

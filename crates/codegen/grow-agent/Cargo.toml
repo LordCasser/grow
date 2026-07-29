@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "grow-agent"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 description = "Agent builder, definition parsing, and system prompt assembly"
 

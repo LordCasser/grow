@@ -2,6 +2,7 @@
 license = "Apache-2.0"
 name = "grow-shared"
 edition.workspace = true
+version.workspace = true
 
 [dependencies]
 agent-client-protocol = { workspace = true }

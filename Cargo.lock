@@ -4047,7 +4047,7 @@ dependencies = [
 
 [[package]]
 name = "grow-agent"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4077,7 +4077,7 @@ dependencies = [
 
 [[package]]
 name = "grow-announcements"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "grow-tools",
@@ -4090,7 +4090,7 @@ dependencies = [
 
 [[package]]
 name = "grow-auth"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "http",
@@ -4103,7 +4103,7 @@ dependencies = [
 
 [[package]]
 name = "grow-compaction"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4116,7 +4116,7 @@ dependencies = [
 
 [[package]]
 name = "grow-config"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64",
  "blake3",
@@ -4140,7 +4140,7 @@ dependencies = [
 
 [[package]]
 name = "grow-config-types"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agent-client-protocol",
  "grow-config",
@@ -4154,7 +4154,7 @@ dependencies = [
 
 [[package]]
 name = "grow-diagnostics"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4177,7 +4177,7 @@ dependencies = [
 
 [[package]]
 name = "grow-env"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "tracing",
  "url",
@@ -4185,7 +4185,7 @@ dependencies = [
 
 [[package]]
 name = "grow-hooks"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "fastrand",
  "grow-config",
@@ -4205,7 +4205,7 @@ dependencies = [
 
 [[package]]
 name = "grow-http"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "grow-auth",
  "grow-diagnostics",
@@ -4220,7 +4220,7 @@ dependencies = [
 
 [[package]]
 name = "grow-markdown"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anstyle",
  "anstyle-lossy",
@@ -4244,14 +4244,14 @@ dependencies = [
 
 [[package]]
 name = "grow-markdown-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "pulldown-cmark",
 ]
 
 [[package]]
 name = "grow-mcp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -4287,7 +4287,7 @@ dependencies = [
 
 [[package]]
 name = "grow-memory"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4321,7 +4321,7 @@ dependencies = [
 
 [[package]]
 name = "grow-mermaid"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "fontdb",
  "image",
@@ -4339,7 +4339,7 @@ dependencies = [
 
 [[package]]
 name = "grow-models"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4347,7 +4347,7 @@ dependencies = [
 
 [[package]]
 name = "grow-pager"
-version = "0.2.112"
+version = "1.0.0"
 dependencies = [
  "agent-client-protocol",
  "ansi-to-tui",
@@ -4436,7 +4436,7 @@ dependencies = [
 
 [[package]]
 name = "grow-pager-bin"
-version = "0.2.112"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4471,7 +4471,7 @@ dependencies = [
 
 [[package]]
 name = "grow-pager-minimal"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "crossterm",
@@ -4488,7 +4488,7 @@ dependencies = [
 
 [[package]]
 name = "grow-pager-pty-harness"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4513,7 +4513,7 @@ dependencies = [
 
 [[package]]
 name = "grow-pager-render"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agent-client-protocol",
  "anstyle",
@@ -4565,7 +4565,7 @@ dependencies = [
 
 [[package]]
 name = "grow-paths"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "camino",
  "serde",
@@ -4575,7 +4575,7 @@ dependencies = [
 
 [[package]]
 name = "grow-plugin-marketplace"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -4596,7 +4596,7 @@ dependencies = [
 
 [[package]]
 name = "grow-sampler"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-openai",
  "async-stream",
@@ -4619,7 +4619,7 @@ dependencies = [
 
 [[package]]
 name = "grow-sampling-types"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "assert_matches",
  "async-openai",
@@ -4637,7 +4637,7 @@ dependencies = [
 
 [[package]]
 name = "grow-sandbox"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4661,7 +4661,7 @@ dependencies = [
 
 [[package]]
 name = "grow-shared"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4690,7 +4690,7 @@ dependencies = [
 
 [[package]]
 name = "grow-shell"
-version = "0.2.112"
+version = "1.0.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4831,7 +4831,7 @@ dependencies = [
 
 [[package]]
 name = "grow-shell-base"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4856,7 +4856,7 @@ dependencies = [
 
 [[package]]
 name = "grow-shell-session-support"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agent-client-protocol",
  "axum",
@@ -4876,7 +4876,7 @@ dependencies = [
 
 [[package]]
 name = "grow-subagent-resolution"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "grow-agent",
@@ -4894,7 +4894,7 @@ dependencies = [
 
 [[package]]
 name = "grow-test-support"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4920,7 +4920,7 @@ dependencies = [
 
 [[package]]
 name = "grow-tools"
-version = "0.1.220-alpha.4"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4998,7 +4998,7 @@ dependencies = [
 
 [[package]]
 name = "grow-tools-api"
-version = "0.1.220-alpha.4"
+version = "1.0.0"
 dependencies = [
  "prost",
  "serde",
@@ -5011,7 +5011,7 @@ dependencies = [
 
 [[package]]
 name = "grow-update"
-version = "0.1.220-alpha.4"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "dunce",
@@ -5035,14 +5035,14 @@ dependencies = [
 
 [[package]]
 name = "grow-version"
-version = "0.2.112"
+version = "1.0.0"
 dependencies = [
  "semver",
 ]
 
 [[package]]
 name = "grow-workspace"
-version = "0.1.220-alpha.4"
+version = "1.0.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -5121,7 +5121,7 @@ dependencies = [
 
 [[package]]
 name = "grow-workspace-types"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64",
  "chrono",
