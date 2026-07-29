@@ -25,7 +25,7 @@ impl ToolConsumer {
     }
 }
 
-/// 401 attribution callback. Shell wires this to emit telemetry.
+/// 401 attribution callback. Shell wires this to emit diagnostics.
 pub trait Auth401AttributionCallback: Send + Sync + std::fmt::Debug {
     /// `sent_bearer_prefix` is truncated to [`SENT_BEARER_PREFIX_LEN`]
     /// before crossing this boundary. `None` = no bearer was sent.

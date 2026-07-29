@@ -101,7 +101,7 @@ fn print_serve_startup_info(bind_addr: SocketAddr, secret: &str) {
 const HEADLESS_ENTRYPOINT: &str = "headless";
 /// Initialize simple tracing for non-TUI agent modes.
 fn init_tracing_simple(app_entrypoint: &'static str) {
-    use grow_telemetry::debug_log::RMCP_SSE_NOISE_TARGET;
+    use grow_diagnostics::debug_log::RMCP_SSE_NOISE_TARGET;
     use tracing_subscriber::{EnvFilter, Layer as _, fmt, layer::SubscriberExt as _};
     let default_filter = if app_entrypoint == HEADLESS_ENTRYPOINT {
         "off"
@@ -122,26 +122,10 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
         .with_writer(std::io::stderr);
     let registry = tracing_subscriber::registry()
         .with(fmt_layer.with_filter(env_filter))
-        .with(grow_telemetry::sampling_log::layer())
-        .with(grow_telemetry::instrumentation::layer())
-        .with(grow_telemetry::hooks_log::layer())
-        .with(grow_telemetry::otel_layer::build_otel_layer(
-            grow_telemetry::otel_layer::OtelClientInfo {
-                client_name: "grow-pager",
-                client_version: grow_version::VERSION,
-                service_version: env!("VERSION_WITH_COMMIT"),
-                app_entrypoint,
-            },
-            grow_shell::auth::credential_provider::build_default_otel_layer_config(),
-        ));
-    grow_telemetry::debug_log::install_firehose(registry, app_entrypoint);
-    grow_telemetry::external::init(grow_shell::agent::config::resolve_external_otel_config(
-        grow_telemetry::external::config::ExternalClientInfo {
-            service_version: env!("VERSION_WITH_COMMIT").to_owned(),
-            client_version: grow_version::VERSION.to_owned(),
-            app_entrypoint: app_entrypoint.to_owned(),
-        },
-    ));
+        .with(grow_diagnostics::sampling_log::layer())
+        .with(grow_diagnostics::instrumentation::layer())
+        .with(grow_diagnostics::hooks_log::layer());
+    grow_diagnostics::debug_log::install_firehose(registry, app_entrypoint);
 }
 /// `grow setup`: rendering + exit codes only; fetch logic lives in `grow_shell::managed_config`.
 /// `json` prints the served configuration instead of installing it.
@@ -966,10 +950,8 @@ async fn replay_acp_state_after_reconnect(
 /// Does NOT write terminal escape codes — agent mode never enables TUI modes.
 /// The TUI has its own signal handler (`app::signal_handler`) that does the
 /// full crossterm teardown.
-fn shutdown_and_flush_telemetry(exit_code: i32) -> ! {
-    grow_telemetry::sentry::flush_on_shutdown();
-    grow_telemetry::otel_layer::shutdown_otel();
-    grow_telemetry::debug_log::flush();
+fn shutdown_and_flush_diagnostics(exit_code: i32) -> ! {
+    grow_diagnostics::debug_log::flush();
     std::process::exit(exit_code);
 }
 async fn forward_stdio_line_to_leader(
@@ -1028,24 +1010,17 @@ async fn run_agent_command(
             let mut term = signal(SignalKind::terminate()).ok();
             let mut hup = signal(SignalKind::hangup()).ok();
             let code = next_signal_code(&mut term, &mut hup).await;
-            shutdown_and_flush_telemetry(code);
+            shutdown_and_flush_diagnostics(code);
         }
         #[cfg(not(unix))]
         {
             if tokio::signal::ctrl_c().await.is_ok() {
-                shutdown_and_flush_telemetry(130);
+                shutdown_and_flush_diagnostics(130);
             }
         }
     });
-    if matches!(
-        agent_args.mode,
-        Some(AgentCmd::Leader(_) | AgentCmd::Stdio | AgentCmd::Headless(_) | AgentCmd::Serve(_))
-    ) {
-        grow_shell::agent::app::suppress_otel();
-    }
     init_tracing_simple("agent");
-    let _otel_guard = grow_telemetry::otel_layer::otel_guard();
-    grow_telemetry::instrumentation::install_panic_hook();
+    grow_diagnostics::instrumentation::install_panic_hook();
     if trust {
         match std::env::current_dir() {
             Ok(cwd) => grow_shell::agent::folder_trust::grant_folder_trust(&cwd),
@@ -1584,10 +1559,9 @@ fn jemalloc_allocator_stats() -> Option<grow_pager::memory_trace::AllocatorStats
         })
     }
 }
-/// Full jemalloc statistics dump for threshold snapshots
+/// Full jemalloc statistics dump for local threshold snapshots
 /// (`malloc_stats_print` default human-readable format, arena detail
-/// included) — the artifact the GCS memory-trace upload ships for offline
-/// analysis. Raw `tikv_jemalloc_sys` because jemalloc-ctl has no
+/// included). Raw `tikv_jemalloc_sys` because jemalloc-ctl has no
 /// callback-form stats_print.
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_stats_dump() -> String {
@@ -1707,12 +1681,6 @@ fn main() {
         );
         std::process::exit(2);
     }
-    let _sentry_guard = grow_telemetry::sentry::init(grow_telemetry::sentry::Config {
-        client: "grow-pager",
-        client_version: PAGER_CLIENT_VERSION,
-        release: env!("VERSION_WITH_COMMIT"),
-        disabled: grow_shell::agent::config::is_error_reporting_disabled_sync(),
-    });
     grow_pager::docs::extract_user_guide_docs(&grow_shell::util::grow_home::grow_home());
     xai_crash_handler::install_terminal_restore_only();
     if grow_shell::util::config::load_crash_handler_enabled_sync() {
@@ -1746,11 +1714,10 @@ fn main() {
         .build()
         .unwrap_or_else(|e| panic!("failed to start tokio runtime: {e}"));
     let result = run_and_shutdown(runtime, async_main(args), RUNTIME_SHUTDOWN_GRACE);
-    grow_telemetry::debug_log::flush();
+    grow_diagnostics::debug_log::flush();
     if let Err(e) = result {
         xai_tty_utils::restore_native_stderr();
         eprintln!("Error: {e:#}");
-        drop(_sentry_guard);
         std::process::exit(1);
     }
 }
@@ -1865,7 +1832,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             }
             Command::Setup { json } => {
                 init_tracing_simple("cli");
-                let _otel_guard = grow_telemetry::otel_layer::otel_guard();
                 run_setup_command(json).await;
                 return Ok(());
             }
@@ -1875,12 +1841,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             }
             Command::Plugin(plugin_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = grow_telemetry::otel_layer::otel_guard();
                 return grow_pager::plugin_cmd::run(plugin_args).await;
             }
             Command::Models => {
                 init_tracing_simple("cli");
-                let _otel_guard = grow_telemetry::otel_layer::otel_guard();
                 let config = grow_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let agent_config = AgentConfig::new_from_toml_cfg(&config)
@@ -1889,12 +1853,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             }
             Command::Leader(leader_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = grow_telemetry::otel_layer::otel_guard();
                 return run_leader_mgmt(leader_args).await;
             }
             Command::Worktree(worktree_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = grow_telemetry::otel_layer::otel_guard();
                 let config = grow_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let agent_config = AgentConfig::new_from_toml_cfg(&config)
@@ -1903,12 +1865,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             }
             Command::Workspace(workspace_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = grow_telemetry::otel_layer::otel_guard();
                 return run_workspace_mgmt(workspace_args).await;
             }
             Command::Sessions(sessions_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = grow_telemetry::otel_layer::otel_guard();
                 let config = grow_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let agent_config = AgentConfig::new_from_toml_cfg(&config)
@@ -1917,7 +1877,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             }
             Command::Share(ref share_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = grow_telemetry::otel_layer::otel_guard();
                 let config = grow_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let agent_config = AgentConfig::new_from_toml_cfg(&config)
@@ -1930,7 +1889,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             }
             Command::Trace(trace_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = grow_telemetry::otel_layer::otel_guard();
                 let config = grow_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let agent_config = AgentConfig::new_from_toml_cfg(&config)
@@ -1950,7 +1908,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 enterprise,
             } => {
                 init_tracing_simple("cli");
-                let _otel_guard = grow_telemetry::otel_layer::otel_guard();
                 let channel_switch = get_channel_switch(alpha, stable, enterprise);
                 return run_update_command(
                     check,
@@ -1964,7 +1921,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             }
             Command::Login { provider } => {
                 init_tracing_simple("cli");
-                let _otel_guard = grow_telemetry::otel_layer::otel_guard();
                 let config = grow_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let config = AgentConfig::new_from_toml_cfg(&config)
@@ -2002,7 +1958,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     )?;
     if let Some(prompt) = headless_prompt {
         init_tracing_simple(HEADLESS_ENTRYPOINT);
-        let _otel_guard = grow_telemetry::otel_layer::otel_guard();
         enforce_version_policy_or_exit();
         let launch_yolo = grow_shell::util::config::effective_yolo_for_launch(
             args.yolo,
@@ -2059,7 +2014,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
         .await;
     }
     enforce_version_policy_or_exit();
-    let _otel_guard = grow_telemetry::otel_layer::otel_guard();
     type UpdateWaitHandle = tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>;
     let bg_update_wait: std::sync::Arc<tokio::sync::Mutex<Option<UpdateWaitHandle>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));

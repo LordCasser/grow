@@ -25,7 +25,7 @@ grow-pager-minimal = { path = "../grow-pager-minimal" }
 grow-shell = { workspace = true }
 grow-update = { path = "../grow-update" }
 grow-version = { workspace = true }
-grow-telemetry = { workspace = true }
+grow-diagnostics = { workspace = true }
 grow-workspace = { workspace = true }
 xai-crash-handler = { path = "../xai-crash-handler" }
 xai-acp-lib = { workspace = true }

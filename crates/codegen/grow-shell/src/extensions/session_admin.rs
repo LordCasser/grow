@@ -31,7 +31,7 @@ use crate::session::storage::StorageAdapter;
 use crate::session::storage::jsonl::JsonlStorageAdapter;
 use crate::session::unified_list::SessionKind;
 use crate::session::{ExtMethodResult, SessionCommand};
-use grow_telemetry::id::agent_id;
+use grow_diagnostics::id::agent_id;
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {

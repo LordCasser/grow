@@ -1,5 +1,5 @@
 //! Atomic file writes, shared by the managed-cache marker, the signature
-//! sidecar, and downstream identifier caches (e.g. the telemetry agent id).
+//! sidecar, and downstream identifier caches (e.g. the diagnostics agent id).
 
 use std::path::Path;
 

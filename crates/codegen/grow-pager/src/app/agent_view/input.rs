@@ -1189,7 +1189,7 @@ impl AgentView {
         {
             return InputOutcome::Action(Action::OpenExtensionsModal {
                 tab: crate::views::extensions_modal::ExtensionsTab::Plugins,
-                trigger: grow_telemetry::events::ExtensionsModalTrigger::KeyboardShortcut,
+                trigger: grow_diagnostics::events::ExtensionsModalTrigger::KeyboardShortcut,
             });
         }
         if let Event::Key(key) = ev
@@ -1292,7 +1292,7 @@ impl AgentView {
             ActionId::ToggleYolo => {
                 if self.pinned_upgrade_cta_live {
                     InputOutcome::Action(Action::AnnouncementsOpenCta(
-                        grow_telemetry::events::AnnouncementCtaSurface::Keyboard,
+                        grow_diagnostics::events::AnnouncementCtaSurface::Keyboard,
                     ))
                 } else {
                     InputOutcome::Action(Action::SetYoloMode(!self.session.is_yolo()))

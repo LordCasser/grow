@@ -167,7 +167,7 @@ where
     if !should_retry {
         return first;
     }
-    // GoalRoleModelFailOpen telemetry removed (Event type gone).
+    // GoalRoleModelFailOpen diagnostics removed (Event type gone).
     // Retry on the session harness — use the matching `fallback` render so the
     // prompt names the toolset the retry actually runs on.
     spawn(None, None, prompt.fallback).await
@@ -175,7 +175,7 @@ where
 
 // Constants
 
-/// Telemetry value on `GoalPlannerFired`. Does not cap user-initiated
+/// Diagnostic value on `GoalPlannerFired`. Does not cap user-initiated
 /// `/goal resume` retries, which re-run the planner unbounded.
 pub(crate) const GOAL_PLANNER_MAX_RUNS: u32 = 1;
 
@@ -195,7 +195,7 @@ const GOAL_PLANNER_PROMPT_TEMPLATE: &str = include_str!("templates/goal_planner_
 /// planner wrote (always the input `plan_file`). `FailClosed` carries
 /// the reason — every variant pauses the goal at the call site.
 #[derive(Debug, Clone)]
-#[expect(dead_code, reason = "`latency_ms` is consumed by future telemetry")]
+#[expect(dead_code, reason = "`latency_ms` is consumed by future diagnostics")]
 pub(crate) enum GoalPlannerOutcome {
     Planned {
         plan_file: PathBuf,
@@ -268,9 +268,9 @@ pub(crate) struct ChannelSpawner {
     /// Resolved per-role model+toolset override. Default (inherit) keeps the
     /// historic `::default()` spawn behavior.
     pub(crate) role_override: RoleSpawnOverride,
-    // Event sink for the spawn-and-retry-once fail-open telemetry; `None`
+    // Event sink for the spawn-and-retry-once fail-open diagnostics; `None`
     // in tests / when no event log is wired.
-    // Event sink for telemetry; removed (EventWriter no longer exists).
+    // Event sink for diagnostics; removed (EventWriter no longer exists).
     // pub(crate) events: Option<EventWriter>,
 }
 
@@ -1241,7 +1241,7 @@ mod tests {
             "planner",
             None,
             &ov,
-                        role_prompt("PROMPT"),
+            role_prompt("PROMPT"),
             |model, harness, prompt| {
                 let c = c.clone();
                 async move {
@@ -1285,7 +1285,7 @@ mod tests {
             "planner",
             None,
             &ov,
-                        RoleRenderedPrompt {
+            RoleRenderedPrompt {
                 primary: "PRIMARY".to_string(),
                 fallback: "FALLBACK".to_string(),
             },
@@ -1320,7 +1320,7 @@ mod tests {
             "planner",
             None,
             &ov,
-                        role_prompt("PROMPT"),
+            role_prompt("PROMPT"),
             |model, harness, _prompt| {
                 let c = c.clone();
                 async move {
@@ -1352,7 +1352,7 @@ mod tests {
             "skeptic",
             Some(2),
             &ov,
-                        role_prompt("PROMPT"),
+            role_prompt("PROMPT"),
             |_m, _h, _prompt| {
                 let c = c.clone();
                 async move {
@@ -1381,7 +1381,7 @@ mod tests {
             "planner",
             None,
             &ov,
-                        role_prompt("PROMPT"),
+            role_prompt("PROMPT"),
             |_m, _h, _prompt| {
                 let c = c.clone();
                 async move {

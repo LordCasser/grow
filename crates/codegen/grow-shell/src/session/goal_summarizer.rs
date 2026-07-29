@@ -54,7 +54,7 @@ const GOAL_SUMMARIZER_SUMMARY_MAX_CHARS: usize = 1200;
 #[derive(Debug, Clone)]
 #[expect(
     dead_code,
-    reason = "`latency_ms` is consumed by telemetry / future use"
+    reason = "`latency_ms` is consumed by diagnostics / future use"
 )]
 pub(crate) enum GoalSummarizerOutcome {
     Summarized {
@@ -97,7 +97,7 @@ pub(crate) struct ChannelSpawner {
     /// Trace-artifact sink + resolved `task` tool name; `None` disables
     /// recording. See [`crate::session::goal_classifier::record_subagent_trace`].
     pub(crate) trace_sink: Option<(xai_chat_state::ChatStateHandle, String)>,
-    // Event sink for the spawn-and-retry-once fail-open telemetry; removed
+    // Event sink for the spawn-and-retry-once fail-open diagnostics; removed
     // (EventWriter no longer exists).
     // pub(crate) events: Option<EventWriter>,
 }
@@ -261,11 +261,7 @@ pub(crate) async fn run_goal_summarizer(
         Ok(text) => text,
         Err(SpawnError::Transport(detail)) => {
             tracing::warn!(error = %detail, "goal summarizer: transport error; failing open");
-            return record_fail_open(
-                GoalSummarizerFailReason::Transport,
-                inputs.attempt,
-                started,
-            );
+            return record_fail_open(GoalSummarizerFailReason::Transport, inputs.attempt, started);
         }
         Err(SpawnError::Runtime { message, cancelled }) => {
             let reason = if cancelled {

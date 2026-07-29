@@ -177,15 +177,11 @@ pub async fn spawn_grow_shell(
 ) -> Result<SpawnedAgent> {
     let auth_manager =
         std::sync::Arc::new(AuthManager::new(&grow_home(), agent_config.auth.clone()));
-    auth_manager.configure_refresher(agent_config.auth.auth_provider_command.clone(), None);
+    auth_manager.configure_refresher(agent_config.auth.auth_provider_command.clone());
     // Pause token refreshes across system sleep so an OIDC refresh can't
     // straddle a suspend (which can revoke the refresh token and force
     // re-login). No-op where the OS listener is unavailable.
     auth_manager.start_system_power_listener();
-
-    // Both embedded-agent paths (`--no-leader` and leader fallback) converge
-    // here, so the agent's external-OTEL gate is applied exactly once, before boot.
-    grow_shell::agent::app::apply_otel_config(&auth_manager, &agent_config.auth);
 
     // Best-effort refresh of managed policy before bootstrap reads it (repairs a wrong-identity/missing
     // cache). Never errors — the OS-protected system/MDM layers still apply, and every network step

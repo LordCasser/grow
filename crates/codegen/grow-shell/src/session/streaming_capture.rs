@@ -207,7 +207,7 @@ impl StreamingTurnCapture {
     }
 
     /// Stamp the in-progress generation with a doom-loop recovery action.
-    /// Telemetry only — the stamp rides into this generation's
+    /// Diagnostic only — the stamp rides into this generation's
     /// [`StreamSegment`] when it is folded.
     pub(crate) fn stamp_doom_loop(&mut self, stamp: DoomLoopSegmentStamp) {
         self.doom_loop = Some(stamp);

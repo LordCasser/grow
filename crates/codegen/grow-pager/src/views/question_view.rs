@@ -107,18 +107,18 @@ pub enum LocalQuestionKind {
     NewSession,
     /// Modal shown when the user hits the credit/rate limit (403).
     /// Options map to upsell URLs: upgrade tier or enable on-demand.
-    /// `choices` maps each option index to a telemetry choice variant.
+    /// `choices` maps each option index to a diagnostics choice variant.
     CreditLimitUpsell {
-        choices: Vec<grow_telemetry::events::CreditLimitChoice>,
+        choices: Vec<grow_diagnostics::events::CreditLimitChoice>,
     },
     /// Provider Plan upsell modal: the free-usage paywall (429 +
     /// `subscription:free-usage-exhausted`) or a tier-restricted slash
     /// command invocation. Upgrade options carry their URL in the option
     /// `id`.
     FreeUsageUpsell {
-        /// Telemetry source for `SubscriptionUpsellClicked` — distinguishes
+        /// Diagnostic source for `SubscriptionUpsellClicked` — distinguishes
         /// the paywall from the restricted-command upsell.
-        source: grow_telemetry::events::SubscriptionUpsell,
+        source: grow_diagnostics::events::SubscriptionUpsell,
     },
     DoctorFix {
         target: crate::app::actions::DoctorFixTarget,

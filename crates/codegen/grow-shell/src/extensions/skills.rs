@@ -305,7 +305,7 @@ pub async fn handle(
             })
             .await
             {
-                grow_telemetry::session_ctx::log_event(grow_telemetry::events::SkillAdded {
+                grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::SkillAdded {
                     added_count: 0,
                     total_skills: 0,
                     success: false,
@@ -329,7 +329,7 @@ pub async fn handle(
                 total,
             );
 
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::SkillAdded {
+            grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::SkillAdded {
                 added_count: added_count as u32,
                 total_skills: total as u32,
                 success: true,
@@ -356,7 +356,7 @@ pub async fn handle(
             })
             .await
             {
-                grow_telemetry::session_ctx::log_event(grow_telemetry::events::SkillRemoved {
+                grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::SkillRemoved {
                     success: false,
                 });
                 return super::to_ext_response(Err::<SkillsRemoveResponse, _>(anyhow::anyhow!(
@@ -373,7 +373,7 @@ pub async fn handle(
                 if total == 1 { "" } else { "s" },
             );
 
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::SkillRemoved {
+            grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::SkillRemoved {
                 success: true,
             });
             super::to_ext_response(Ok(SkillsRemoveResponse {

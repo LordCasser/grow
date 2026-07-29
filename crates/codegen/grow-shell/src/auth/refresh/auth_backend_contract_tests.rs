@@ -7,7 +7,7 @@ use crate::auth::error::RefreshTokenFailedReason;
 use crate::auth::recovery::RecoverySource;
 use crate::auth::{ProviderAuth, ServiceAuthConfig};
 use chrono::{Duration, Utc};
-use grow_telemetry::events::{AuthTokenKind, ManualAuthReason};
+use grow_diagnostics::events::{AuthTokenKind, ManualAuthReason};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -220,7 +220,7 @@ async fn auth_backend_contract_concurrent_401s_hit_idp_once() {
 /// rejected principal; a refreshable token auto-refreshes and emits nothing.
 #[tokio::test]
 async fn auth_backend_contract_dead_token_emits_typed_manual_auth_event() {
-    use grow_telemetry::events::ManualAuthSurface;
+    use grow_diagnostics::events::ManualAuthSurface;
 
     // A dead refresh token on each user-facing source emits the typed event
     // with the surface that produced it.

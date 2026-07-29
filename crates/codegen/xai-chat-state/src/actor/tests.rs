@@ -1409,24 +1409,14 @@ async fn build_request_includes_all_messages() {
     // Sync point
     let _ = h.handle.get_conversation().await;
 
-    let request = h
-        .handle
-        .build_request(vec![], None, false, None, "conv-1".into(), "req-1".into())
-        .await
-        .unwrap();
+    let request = h.handle.build_request(vec![], None, false).await.unwrap();
     assert_eq!(request.items.len(), 2);
-    assert_eq!(request.x_grok_conv_id, Some("conv-1".to_string()));
-    assert_eq!(request.x_grok_req_id, Some("req-1".to_string()));
 }
 
 #[tokio::test]
 async fn build_request_with_empty_conversation() {
     let h = TestHarness::new();
-    let request = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r".into())
-        .await
-        .unwrap();
+    let request = h.handle.build_request(vec![], None, false).await.unwrap();
     assert!(request.items.is_empty());
 }
 
@@ -1436,11 +1426,7 @@ async fn build_request_preserves_system_message() {
         ConversationItem::system("You are a coding assistant."),
         ConversationItem::user("hi"),
     ]);
-    let request = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r".into())
-        .await
-        .unwrap();
+    let request = h.handle.build_request(vec![], None, false).await.unwrap();
     assert_eq!(request.items.len(), 2);
     if let ConversationItem::System(ref sys) = request.items[0] {
         assert_eq!(sys.content.as_ref(), "You are a coding assistant.");
@@ -1461,9 +1447,6 @@ async fn build_request_injects_memory_reminder() {
             vec![],
             Some("Remember: user prefers Rust".to_string()),
             false,
-            None,
-            "c".into(),
-            "r".into(),
         )
         .await
         .unwrap();
@@ -1481,14 +1464,7 @@ async fn build_request_injects_memory_when_no_system() {
     let h = TestHarness::with_conversation(vec![ConversationItem::user("hi")]);
     let request = h
         .handle
-        .build_request(
-            vec![],
-            Some("Remember this".to_string()),
-            false,
-            None,
-            "c".into(),
-            "r".into(),
-        )
+        .build_request(vec![], Some("Remember this".to_string()), false)
         .await
         .unwrap();
 
@@ -1513,11 +1489,7 @@ async fn build_request_repairs_dangling_tool_calls() {
         // No ToolResult for call_1 — repaired by ChatState::new() before any command.
     ]);
 
-    let request = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r".into())
-        .await
-        .unwrap();
+    let request = h.handle.build_request(vec![], None, false).await.unwrap();
 
     // Synthetic ToolResult present (inserted at construction, not at request time).
     assert_eq!(request.items.len(), 4);
@@ -1539,11 +1511,7 @@ async fn build_request_with_tool_definitions() {
         parameters: serde_json::json!({"type": "object"}),
     }];
 
-    let request = h
-        .handle
-        .build_request(tools, None, false, None, "c".into(), "r".into())
-        .await
-        .unwrap();
+    let request = h.handle.build_request(tools, None, false).await.unwrap();
 
     assert_eq!(request.tools.len(), 1);
     assert_eq!(request.tools[0].name, "read_file");
@@ -1567,11 +1535,7 @@ async fn build_request_uses_sampling_config() {
     };
     let h = TestHarness::with_config(vec![ConversationItem::user("hi")], config);
 
-    let request = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r".into())
-        .await
-        .unwrap();
+    let request = h.handle.build_request(vec![], None, false).await.unwrap();
 
     assert_eq!(request.model, Some("grow-3".to_string()));
     assert_eq!(request.temperature, Some(0.7));
@@ -1589,14 +1553,7 @@ async fn build_request_does_not_mutate_actor_state() {
     // Build request (which clones + potentially mutates the clone)
     let _ = h
         .handle
-        .build_request(
-            vec![],
-            Some("injected memory".to_string()),
-            false,
-            None,
-            "c".into(),
-            "r".into(),
-        )
+        .build_request(vec![], Some("injected memory".to_string()), false)
         .await
         .unwrap();
 
@@ -1621,9 +1578,6 @@ async fn build_request_can_persist_memory_into_actor_state() {
             vec![],
             Some("<memory-context>\nRemember this\n</memory-context>".to_string()),
             true,
-            None,
-            "c".into(),
-            "r".into(),
         )
         .await
         .unwrap();
@@ -1673,11 +1627,7 @@ async fn build_request_with_multiple_tool_calls_and_results() {
         ConversationItem::assistant("Done!"),
     ]);
 
-    let request = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r".into())
-        .await
-        .unwrap();
+    let request = h.handle.build_request(vec![], None, false).await.unwrap();
 
     // All items should pass through (no dangling calls, no pruning needed)
     assert_eq!(request.items.len(), 6);
@@ -1902,11 +1852,7 @@ async fn parallel_tool_calls_with_rejection_has_no_dangling_calls() {
     ));
 
     // Build request — should NOT add any synthetic ToolResults
-    let request = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r".into())
-        .await
-        .unwrap();
+    let request = h.handle.build_request(vec![], None, false).await.unwrap();
 
     // 2 (sys+user) + 1 (assistant) + 3 (tool results) = 6
     assert_eq!(
@@ -2098,11 +2044,7 @@ async fn dangling_tool_calls_after_crash_are_repaired_on_load() {
     );
 
     // build_request should also see 6 items (no double-repair)
-    let request = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r".into())
-        .await
-        .unwrap();
+    let request = h.handle.build_request(vec![], None, false).await.unwrap();
     assert_eq!(
         request.items.len(),
         6,
@@ -2146,11 +2088,7 @@ async fn dangling_tool_calls_repair_is_consistent_between_state_and_request() {
     );
 
     // build_request should match (no extra synthetic results)
-    let request = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r".into())
-        .await
-        .unwrap();
+    let request = h.handle.build_request(vec![], None, false).await.unwrap();
     assert_eq!(
         request.items.len(),
         5,
@@ -2223,11 +2161,7 @@ async fn all_tool_calls_dangling_after_crash() {
     }
 
     // build_request should also see 6 items — no double-repair
-    let request = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r".into())
-        .await
-        .unwrap();
+    let request = h.handle.build_request(vec![], None, false).await.unwrap();
     assert_eq!(request.items.len(), 6);
 }
 
@@ -2340,11 +2274,7 @@ async fn live_cancel_before_any_tool_execution_repairs_on_next_user_message() {
     );
 
     // build_request should work cleanly — no dangling calls, no double-repair
-    let request = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r".into())
-        .await
-        .unwrap();
+    let request = h.handle.build_request(vec![], None, false).await.unwrap();
     assert_eq!(request.items.len(), 9);
 }
 
@@ -2868,14 +2798,7 @@ async fn turn_capture_survives_persisted_memory_reminder_prepend() {
     // tail over-reads past the turn boundary (the len check below catches it).
     let request = h
         .handle
-        .build_request(
-            vec![],
-            Some("Remember this".to_string()),
-            true,
-            None,
-            "c".into(),
-            "r".into(),
-        )
+        .build_request(vec![], Some("Remember this".to_string()), true)
         .await
         .unwrap();
     assert!(matches!(&request.items[0], ConversationItem::System(_)));
@@ -4037,22 +3960,14 @@ async fn prefix_stable_across_user_assistant_turns() {
         ConversationItem::user("Hello"),
     ]);
 
-    let req1 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r1".into())
-        .await
-        .unwrap();
+    let req1 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("Hi there!"));
     h.handle
         .push_user_message(ConversationItem::user("How are you?"));
 
-    let req2 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r2".into())
-        .await
-        .unwrap();
+    let req2 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     assert_prefix_stable_pair(&req1, &req2, "turn 1 -> turn 2");
 
@@ -4060,11 +3975,7 @@ async fn prefix_stable_across_user_assistant_turns() {
         .push_assistant_response(ConversationItem::assistant("I'm well!"));
     h.handle.push_user_message(ConversationItem::user("Great"));
 
-    let req3 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r3".into())
-        .await
-        .unwrap();
+    let req3 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     assert_prefix_stable_pair(&req2, &req3, "turn 2 -> turn 3");
 }
@@ -4081,14 +3992,7 @@ async fn prefix_stable_with_consistent_memory_injection() {
 
     let req1 = h
         .handle
-        .build_request(
-            vec![],
-            Some("Remember: user likes Rust".to_string()),
-            false,
-            None,
-            "c".into(),
-            "r1".into(),
-        )
+        .build_request(vec![], Some("Remember: user likes Rust".to_string()), false)
         .await
         .unwrap();
 
@@ -4099,14 +4003,7 @@ async fn prefix_stable_with_consistent_memory_injection() {
 
     let req2 = h
         .handle
-        .build_request(
-            vec![],
-            Some("Remember: user likes Rust".to_string()),
-            false,
-            None,
-            "c".into(),
-            "r2".into(),
-        )
+        .build_request(vec![], Some("Remember: user likes Rust".to_string()), false)
         .await
         .unwrap();
 
@@ -4126,11 +4023,7 @@ async fn prefix_stable_with_reasoning_siblings_through_build_request() {
         ConversationItem::user("u1"),
     ]);
 
-    let req1 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r1".into())
-        .await
-        .unwrap();
+    let req1 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     // Push Reasoning sibling + Assistant (the new ordering produced by
     // `response_to_conversation_items`: Reasoning before Assistant).
@@ -4140,11 +4033,7 @@ async fn prefix_stable_with_reasoning_siblings_through_build_request() {
         .push_assistant_response(ConversationItem::assistant("response 1"));
     h.handle.push_user_message(ConversationItem::user("u2"));
 
-    let req2 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r2".into())
-        .await
-        .unwrap();
+    let req2 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     assert_prefix_stable_pair(&req1, &req2, "Reasoning sibling turn 1 -> turn 2");
 
@@ -4155,11 +4044,7 @@ async fn prefix_stable_with_reasoning_siblings_through_build_request() {
         .push_assistant_response(ConversationItem::assistant("response 2"));
     h.handle.push_user_message(ConversationItem::user("u3"));
 
-    let req3 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r3".into())
-        .await
-        .unwrap();
+    let req3 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     assert_prefix_stable_pair(
         &req2,
@@ -4185,11 +4070,7 @@ async fn prefix_stable_after_tool_schema_change() {
         parameters: serde_json::json!({"type": "object"}),
     }];
 
-    let req1 = h
-        .handle
-        .build_request(tools_v1, None, false, None, "c".into(), "r1".into())
-        .await
-        .unwrap();
+    let req1 = h.handle.build_request(tools_v1, None, false).await.unwrap();
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("read it"));
@@ -4209,11 +4090,7 @@ async fn prefix_stable_after_tool_schema_change() {
         },
     ];
 
-    let req2 = h
-        .handle
-        .build_request(tools_v2, None, false, None, "c".into(), "r2".into())
-        .await
-        .unwrap();
+    let req2 = h.handle.build_request(tools_v2, None, false).await.unwrap();
 
     assert_prefix_stable_pair(&req1, &req2, "tool schema v1 -> v2");
 }
@@ -4227,11 +4104,7 @@ async fn prefix_stable_after_model_switch() {
         ConversationItem::user("hello"),
     ]);
 
-    let req1 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r1".into())
-        .await
-        .unwrap();
+    let req1 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("hi"));
@@ -4244,11 +4117,7 @@ async fn prefix_stable_after_model_switch() {
     };
     h.handle.update_sampling_config(new_config);
 
-    let req2 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r2".into())
-        .await
-        .unwrap();
+    let req2 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     assert_prefix_stable_pair(&req1, &req2, "model switch");
 }
@@ -4263,11 +4132,7 @@ async fn prefix_stable_with_synthetic_user_messages() {
         ConversationItem::user("hello"),
     ]);
 
-    let req1 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r1".into())
-        .await
-        .unwrap();
+    let req1 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("hi"));
@@ -4279,11 +4144,7 @@ async fn prefix_stable_with_synthetic_user_messages() {
     h.handle
         .push_user_message(ConversationItem::auto_continue("keep going"));
 
-    let req2 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r2".into())
-        .await
-        .unwrap();
+    let req2 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     assert_prefix_stable_pair(&req1, &req2, "with synthetic user messages");
 }
@@ -4321,11 +4182,7 @@ async fn prefix_stable_after_image_pruning() {
         ConversationItem::user("u2"),
     ]);
 
-    let req1 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r1".into())
-        .await
-        .unwrap();
+    let req1 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("a2"));
@@ -4343,11 +4200,7 @@ async fn prefix_stable_after_image_pruning() {
             ..Default::default()
         }));
 
-    let req2 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r2".into())
-        .await
-        .unwrap();
+    let req2 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     // Image stripping mutates the old user turn's content, so full
     // byte-level prefix stability cannot hold at that item. We verify:
@@ -4421,11 +4274,7 @@ async fn build_request_preserves_small_old_images() {
         ConversationItem::user("follow up question"),
     ]);
 
-    let req = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r".into())
-        .await
-        .unwrap();
+    let req = h.handle.build_request(vec![], None, false).await.unwrap();
 
     // The old user turn's image must survive (small payload, far under 50 MB),
     // so the KV-cache prefix stays byte-stable instead of being rewritten.
@@ -4455,11 +4304,7 @@ async fn prefix_stable_after_tool_result_pruning() {
         .push_tool_result(ConversationItem::tool_result("c1", "x".repeat(500)));
     h.handle.push_user_message(ConversationItem::user("q2"));
 
-    let req1 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r1".into())
-        .await
-        .unwrap();
+    let req1 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("a2"));
@@ -4468,11 +4313,7 @@ async fn prefix_stable_after_tool_result_pruning() {
     h.handle.push_user_message(ConversationItem::user("q3"));
     h.handle.record_token_usage(6000); // > 50% of 10k context
 
-    let req2 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r2".into())
-        .await
-        .unwrap();
+    let req2 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     let body1 = serialize_via_public_api(&req1);
     let body2 = serialize_via_public_api(&req2);
@@ -4527,11 +4368,7 @@ async fn prefix_stable_with_backend_tool_calls() {
         ConversationItem::user("search for capybaras"),
     ]);
 
-    let req1 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r1".into())
-        .await
-        .unwrap();
+    let req1 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("Found info about capybaras"));
@@ -4549,11 +4386,7 @@ async fn prefix_stable_with_backend_tool_calls() {
     h.handle
         .push_user_message(ConversationItem::user("tell me more"));
 
-    let req2 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r2".into())
-        .await
-        .unwrap();
+    let req2 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     assert_prefix_stable_pair(&req1, &req2, "with backend tool calls");
 
@@ -4561,11 +4394,7 @@ async fn prefix_stable_with_backend_tool_calls() {
         .push_assistant_response(ConversationItem::assistant("More capybara info"));
     h.handle.push_user_message(ConversationItem::user("thanks"));
 
-    let req3 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r3".into())
-        .await
-        .unwrap();
+    let req3 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     assert_prefix_stable_pair(&req2, &req3, "backend tool call stable across 3 turns");
 }
@@ -4580,21 +4409,13 @@ async fn prefix_stable_after_session_resume() {
         ConversationItem::user("hello"),
     ]);
 
-    let req1 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r1".into())
-        .await
-        .unwrap();
+    let req1 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("hi"));
     h.handle.push_user_message(ConversationItem::user("q2"));
 
-    let req2 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r2".into())
-        .await
-        .unwrap();
+    let req2 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     let snapshot = h.handle.snapshot().await.unwrap();
 
@@ -4603,11 +4424,7 @@ async fn prefix_stable_after_session_resume() {
 
     h.handle.restore_snapshot(snapshot);
 
-    let req3 = h
-        .handle
-        .build_request(vec![], None, false, None, "c".into(), "r3".into())
-        .await
-        .unwrap();
+    let req3 = h.handle.build_request(vec![], None, false).await.unwrap();
 
     assert_prefix_stable_pair(&req1, &req3, "after session resume");
 

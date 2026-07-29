@@ -706,7 +706,6 @@ mod tests {
             ],
         );
         assert_eq!(block.skill_token_ranges, vec![7..13]);
-
     }
 
     #[test]

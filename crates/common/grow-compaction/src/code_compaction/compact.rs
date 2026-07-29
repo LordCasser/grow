@@ -118,7 +118,7 @@ pub struct FullReplaceSummary {
 ///   summarizes. Empty ⇒ [`FullReplaceError::NothingToCompact`].
 /// - `user_context` — optional `/compact <text>` context spliced into the prompt.
 /// - `ctx` — the assembly inputs the harness extracted from its state.
-/// - `observer` — per-attempt + terminal telemetry seam (pass `&()` for none).
+/// - `observer` — per-attempt + terminal diagnostics seam (pass `&()` for none).
 ///
 /// The **input ladder** (verbatim → fitted → lossy) stays in the product host: on a
 /// context-length overflow this returns

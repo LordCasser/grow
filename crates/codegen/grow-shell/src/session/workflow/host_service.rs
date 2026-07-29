@@ -20,7 +20,7 @@ use super::tracker::WorkflowTracker;
 
 pub(crate) const WORKFLOW_MAX_AGENT_RUNS: u32 =
     (xai_workflow::MAX_AGENT_BUDGET as u32) * (SCHEMA_CONTRACT_RETRIES + 1);
-pub(crate) const WORKFLOW_MAX_SCRIPT_TELEMETRY_EVENTS: u32 = 64;
+pub(crate) const WORKFLOW_MAX_SCRIPT_DIAGNOSTICS_EVENTS: u32 = 64;
 pub(crate) const WORKFLOW_MAX_SCRATCH_FILES: usize = 64;
 pub(crate) const WORKFLOW_MAX_SCRATCH_FILE_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) const WORKFLOW_MAX_SCRATCH_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
@@ -32,7 +32,7 @@ const WORKFLOW_CHILD_DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
 const WORKFLOW_MAX_SCRATCH_NAME_BYTES: usize = 255;
 const SCRATCH_ARTIFACT_ROOT: &str = "scratch";
 
-pub(crate) type TelemetryHook = Arc<dyn Fn(&str, &serde_json::Value, bool) + Send + Sync>;
+pub(crate) type DiagnosticHook = Arc<dyn Fn(&str, &serde_json::Value, bool) + Send + Sync>;
 
 pub(crate) struct WorkflowHostParams {
     pub run_id: String,
@@ -46,7 +46,7 @@ pub(crate) struct WorkflowHostParams {
     pub parent_session_id: String,
     pub allow_fork_context: bool,
     pub templates: std::collections::HashMap<String, String>,
-    pub telemetry: TelemetryHook,
+    pub diagnostics: DiagnosticHook,
     pub cancel: CancellationToken,
 }
 
@@ -68,7 +68,7 @@ pub(crate) fn spawn_workflow_host_service(
         let service = Arc::new(HostService {
             active_agents: AtomicU32::new(0),
             agent_runs: AtomicU32::new(0),
-            script_telemetry_events: AtomicU32::new(0),
+            script_diagnostics_events: AtomicU32::new(0),
             scratch_io: tokio::sync::Mutex::new(()),
             params,
         });
@@ -111,14 +111,14 @@ fn reply_cancelled(req: WorkflowHostRequest) {
         | R::GitDiffSince { reply, .. } => {
             let _ = reply.send(Err(HostError::Cancelled));
         }
-        R::Phase { .. } | R::Log { .. } | R::Telemetry { .. } => {}
+        R::Phase { .. } | R::Log { .. } | R::Diagnostic { .. } => {}
     }
 }
 
 struct HostService {
     active_agents: AtomicU32,
     agent_runs: AtomicU32,
-    script_telemetry_events: AtomicU32,
+    script_diagnostics_events: AtomicU32,
     scratch_io: tokio::sync::Mutex<()>,
     params: WorkflowHostParams,
 }
@@ -253,21 +253,23 @@ impl HostService {
                     }
                 }
             }
-            WorkflowHostRequest::Telemetry {
+            WorkflowHostRequest::Diagnostic {
                 name,
                 fields,
                 replayed,
             } => {
                 if !replayed
-                    && self.script_telemetry_events.fetch_add(1, Ordering::Relaxed)
-                        < WORKFLOW_MAX_SCRIPT_TELEMETRY_EVENTS
+                    && self
+                        .script_diagnostics_events
+                        .fetch_add(1, Ordering::Relaxed)
+                        < WORKFLOW_MAX_SCRIPT_DIAGNOSTICS_EVENTS
                 {
                     let host_fields = serde_json::json!({
                         "run_id": &self.params.run_id,
                         "script_event_name_bytes": name.len().min(64 * 1024),
                         "script_event_field_count": fields.as_object().map_or(0, serde_json::Map::len),
                     });
-                    (self.params.telemetry)(
+                    (self.params.diagnostics)(
                         "workflow_script_event_suppressed",
                         &host_fields,
                         false,
@@ -883,7 +885,7 @@ mod tests {
             parent_session_id: "parent".into(),
             allow_fork_context: false,
             templates: Default::default(),
-            telemetry: Arc::new(|_, _, _| {}),
+            diagnostics: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
         };
 
@@ -955,7 +957,7 @@ mod tests {
             parent_session_id: "parent".into(),
             allow_fork_context: false,
             templates: Default::default(),
-            telemetry: Arc::new(|_, _, _| {}),
+            diagnostics: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
         };
 

@@ -21,7 +21,7 @@ use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
 use crate::slash::command::DoctorRequest;
 use agent_client_protocol as acp;
-use grow_telemetry::session_ctx::log_event;
+use grow_diagnostics::session_ctx::log_event;
 
 /// Chat kind for the next create: CLI `--chat` (`app.chat_mode`) or one-shot
 /// `/chat` (`deferred_startup.pending_chat`, consumed here).
@@ -221,9 +221,9 @@ pub(super) fn dispatch_show_undo_tip(app: &mut AppView) -> Vec<Effect> {
         crate::tips::clear_detector::undo_tip(),
         &mut app.tip_seen_counts,
     ) {
-        log_event(grow_telemetry::events::ContextualTip {
-            tip: grow_telemetry::events::ContextualTipKind::Undo,
-            action: grow_telemetry::events::ContextualTipAction::Shown,
+        log_event(grow_diagnostics::events::ContextualTip {
+            tip: grow_diagnostics::events::ContextualTipKind::Undo,
+            action: grow_diagnostics::events::ContextualTipAction::Shown,
         });
     }
     vec![]
@@ -252,9 +252,9 @@ pub(in crate::app) fn show_small_screen_tip(app: &mut AppView) {
         crate::tips::small_screen::small_screen_tip(),
         &mut app.tip_seen_counts,
     ) {
-        log_event(grow_telemetry::events::ContextualTip {
-            tip: grow_telemetry::events::ContextualTipKind::SmallScreen,
-            action: grow_telemetry::events::ContextualTipAction::Shown,
+        log_event(grow_diagnostics::events::ContextualTip {
+            tip: grow_diagnostics::events::ContextualTipKind::SmallScreen,
+            action: grow_diagnostics::events::ContextualTipAction::Shown,
         });
     }
 }
@@ -274,9 +274,9 @@ pub(in crate::app) fn show_ssh_wrap_tip(app: &mut AppView) {
         crate::tips::ssh_wrap::ssh_wrap_tip(),
         &mut app.tip_seen_counts,
     ) {
-        log_event(grow_telemetry::events::ContextualTip {
-            tip: grow_telemetry::events::ContextualTipKind::SshWrap,
-            action: grow_telemetry::events::ContextualTipAction::Shown,
+        log_event(grow_diagnostics::events::ContextualTip {
+            tip: grow_diagnostics::events::ContextualTipKind::SshWrap,
+            action: grow_diagnostics::events::ContextualTipAction::Shown,
         });
     }
 }
@@ -297,9 +297,9 @@ pub(super) fn dispatch_show_plan_nudge(app: &mut AppView) -> Vec<Effect> {
         crate::tips::plan_nudge::plan_nudge_tip(),
         &mut app.tip_seen_counts,
     ) {
-        log_event(grow_telemetry::events::ContextualTip {
-            tip: grow_telemetry::events::ContextualTipKind::PlanMode,
-            action: grow_telemetry::events::ContextualTipAction::Shown,
+        log_event(grow_diagnostics::events::ContextualTip {
+            tip: grow_diagnostics::events::ContextualTipKind::PlanMode,
+            action: grow_diagnostics::events::ContextualTipAction::Shown,
         });
     }
     vec![]
@@ -325,9 +325,9 @@ pub(super) fn dispatch_show_word_select_tip(app: &mut AppView) -> Vec<Effect> {
         crate::tips::word_select::word_select_tip(),
         &mut app.tip_seen_counts,
     ) {
-        log_event(grow_telemetry::events::ContextualTip {
-            tip: grow_telemetry::events::ContextualTipKind::WordSelect,
-            action: grow_telemetry::events::ContextualTipAction::Shown,
+        log_event(grow_diagnostics::events::ContextualTip {
+            tip: grow_diagnostics::events::ContextualTipKind::WordSelect,
+            action: grow_diagnostics::events::ContextualTipAction::Shown,
         });
     }
     // Snapshot the prompt as of this double-click (also on a same-key TTL
@@ -359,9 +359,9 @@ pub(super) fn dispatch_accept_word_select_tip(app: &mut AppView) -> Vec<Effect> 
         .ephemeral_tip
         .clear(crate::tips::word_select::WORD_SELECT_TIP_KEY);
     agent.word_select_tip_prompt_snapshot = None;
-    log_event(grow_telemetry::events::ContextualTip {
-        tip: grow_telemetry::events::ContextualTipKind::WordSelect,
-        action: grow_telemetry::events::ContextualTipAction::Accepted,
+    log_event(grow_diagnostics::events::ContextualTip {
+        tip: grow_diagnostics::events::ContextualTipKind::WordSelect,
+        action: grow_diagnostics::events::ContextualTipAction::Accepted,
     });
     super::settings::setters::set_keep_text_selection(
         app,
@@ -387,9 +387,9 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
         crate::tips::send_now::send_now_tip(),
         &mut app.tip_seen_counts,
     ) {
-        log_event(grow_telemetry::events::ContextualTip {
-            tip: grow_telemetry::events::ContextualTipKind::SendNow,
-            action: grow_telemetry::events::ContextualTipAction::Shown,
+        log_event(grow_diagnostics::events::ContextualTip {
+            tip: grow_diagnostics::events::ContextualTipKind::SendNow,
+            action: grow_diagnostics::events::ContextualTipAction::Shown,
         });
     }
 }
@@ -578,8 +578,8 @@ pub(super) fn dispatch_send_prompt_inner(
                     (is_builtin, command)
                 };
                 {
-                    use grow_telemetry::events::{PagerCommandSource, PagerSlashCommand};
-                    use grow_telemetry::session_ctx::log_event;
+                    use grow_diagnostics::events::{PagerCommandSource, PagerSlashCommand};
+                    use grow_diagnostics::session_ctx::log_event;
                     let source = if is_builtin {
                         PagerCommandSource::Builtin
                     } else {

@@ -4,12 +4,11 @@
 //! internal channel. Extracted from `acp_session.rs` to keep the actor
 //! implementation focused on behaviour.
 use super::commands::SessionCommand;
-use super::persistence::{LocalFeedbackEntry, PersistenceMsg};
+use super::persistence::PersistenceMsg;
 use agent_client_protocol as acp;
 use grow_sampling_types::ReasoningEffort;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc, oneshot};
-use crate::save::UploadQueue;
 use xai_hunk_tracker::HunkTrackerHandle;
 /// Coarse lifecycle state of a session as known to the leader/agent.
 ///
@@ -93,19 +92,6 @@ pub struct SessionHandle {
     /// in API responses to this path so the client UI shows the original
     /// project path, not the worktree path.
     pub display_cwd: Option<String>,
-    /// Feedback manager for periodic signal sync. Exposed so callers can
-    /// attach GCS upload queue stats for snapshotting into signals.
-    pub feedback_manager: std::sync::Arc<crate::session::feedback_manager::FeedbackManager>,
-    /// Session-scoped upload queue. Lazily initialized on the first turn that
-    /// enables trace uploads. `Arc<OnceLock<_>>` ensures all `SessionHandle`
-    /// clones share the same underlying queue instance.
-    pub(crate) upload_queue: std::sync::Arc<std::sync::OnceLock<UploadQueue>>,
-    /// Consecutive upload failures with no confirmed upload in between,
-    /// driving this session's upload-failure log suppression. Shared across
-    /// handle clones; per-session so one session's bucket outage cannot mute
-    /// another session's first-failure log (its unified_log artifact must
-    /// carry evidence of its own failures).
-    pub(crate) upload_failures_since_success: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Session context captured at spawn time so callers can inherit shared runtime state.
     pub tool_context: crate::tools::ToolContext,
     /// The model this session was created with (or switched to via setModel).
@@ -582,18 +568,5 @@ impl SessionHandle {
         let _ = self
             .cmd_tx
             .send(SessionCommand::NotifyPluginUpdates { updates });
-    }
-    /// Send a feedback entry to the persistence actor; logs on a closed channel.
-    pub fn persist_feedback(&self, entry: LocalFeedbackEntry) {
-        if self
-            .persistence_tx
-            .send(PersistenceMsg::Feedback(entry))
-            .is_err()
-        {
-            tracing::warn!(
-                session_id = %self.info.id.0,
-                "feedback persistence channel closed; entry dropped",
-            );
-        }
     }
 }

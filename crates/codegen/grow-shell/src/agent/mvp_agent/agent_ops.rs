@@ -83,13 +83,9 @@ impl MvpAgent {
         let session_key = self.auth_manager.current_or_expired().map(|a| a.key.clone());
         let models = self.models_manager.models();
         let endpoints = self.models_manager.endpoints();
-        let (disable_api_key_auth, alpha_test_key, client_version) = {
+        let (disable_api_key_auth, alpha_test_key) = {
             let cfg = self.cfg.borrow();
-            (
-                cfg.auth.api_key_auth_disabled(),
-                cfg.endpoints.alpha_test_key.clone(),
-                cfg.client_version.clone(),
-            )
+            (cfg.auth.api_key_auth_disabled(), cfg.endpoints.alpha_test_key.clone())
         };
         let config = match crate::agent::config::resolve_aux_model_sampling_config(
             &slug,
@@ -98,13 +94,11 @@ impl MvpAgent {
             session_key.as_deref(),
             disable_api_key_auth,
             alpha_test_key,
-            client_version,
         ) {
             Some(mut cfg) => {
                 crate::agent::config::stamp_session_local_sampler_fields(
                     &mut cfg,
                     primary,
-                    primary.client_identifier.clone(),
                     primary.max_retries,
                 );
                 cfg
@@ -157,7 +151,7 @@ impl MvpAgent {
                 if self.is_session_based_auth() {
                     let auth = self.auth_manager.expired_auth();
                     if auth.is_some() {
-                        grow_telemetry::unified_log::info(
+                        grow_diagnostics::unified_log::info(
                             "auth buffered token fallback",
                             None,
                             None,
@@ -540,78 +534,6 @@ impl MvpAgent {
             );
         }
     }
-    /// Extract feedback credentials when proxy credentials are available.
-    ///
-    /// Returns `(base_url, user_token, optional_extra_access_key, deployment_key)`.
-    /// Used by both [`feedback_client`] and session spawning to avoid
-    /// duplicating the credential assembly logic.
-    #[allow(clippy::type_complexity)]
-    fn feedback_credentials(
-        &self,
-    ) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
-        if !self.has_proxy_credentials() {
-            return None;
-        }
-        let user_token = self
-            .auth_manager
-            .current_or_expired()
-            .filter(|a| a.is_service_auth())
-            .map(|a| a.key.clone());
-        let cfg = self.cfg.borrow();
-        let base_url = cfg.endpoints.resolve_feedback_base_url();
-        let alpha_test_key = cfg.endpoints.alpha_test_key.clone();
-        let deployment_key = cfg.endpoints.deployment_key.clone();
-        Some((base_url, user_token, alpha_test_key, deployment_key))
-    }
-    pub(super) fn ensure_telemetry_client(&self) {
-        crate::auth::credential_provider::sync_external_otel_identity();
-        let cfg = self.cfg.borrow();
-        let mode = cfg.resolve_telemetry_mode().value;
-        if !mode.is_disabled() {
-            let Some(auth) = self
-                .auth_manager
-                .current()
-                .filter(|a| {
-                    a.is_service_auth() || a.auth_mode == crate::auth::AuthMode::ApiKey
-                }) else {
-                return;
-            };
-            let subscription_tier = resolve_subscription_tier_for_telemetry(
-                cfg
-                    .remote_settings
-                    .as_ref()
-                    .and_then(|rs| rs.subscription_tier_display.clone()),
-                Some(&auth),
-            );
-            let (user_id, team_id) = if auth.is_service_auth() {
-                (Some(auth.user_id), auth.team_id)
-            } else {
-                (None, auth.team_id)
-            };
-            grow_telemetry::client::init_if_needed(
-                cfg.telemetry.clone(),
-                mode,
-                user_id,
-                team_id,
-                cfg.endpoints.deployment_key.clone(),
-                self.origin_client_info_from_meta(None),
-                grow_version::VERSION.to_owned(),
-                subscription_tier,
-                crate::http::shared_client(),
-            );
-        }
-    }
-    /// Build a `FeedbackClient` with resolved feedback URL and credentials.
-    pub(crate) fn feedback_client(&self) -> Option<FeedbackClient> {
-        let (base_url, user_token, alpha_test_key, deployment_key) = self
-            .feedback_credentials()?;
-        Some(
-            FeedbackClient::new(base_url, user_token)
-                .with_alpha_test_key(alpha_test_key)
-                .with_deployment_key(deployment_key)
-                .with_auth_manager(self.auth_manager.clone()),
-        )
-    }
     /// Build a `RegistryConfig` if the feature is enabled (for passing to persistence actor).
     pub(super) fn build_registry_config(
         &self,
@@ -686,28 +608,6 @@ impl MvpAgent {
             ..crate::session::slash_commands::CommandAvailability::default()
         }
     }
-    /// `true` when data collection should be suppressed (team ZDR or
-    /// coding-data-retention opt-out). Delegates to
-    /// [`AuthManager::is_data_collection_disabled`].
-    pub(crate) fn is_data_collection_disabled(&self) -> bool {
-        self.auth_manager.is_data_collection_disabled()
-    }
-    /// Telemetry enabled and not ZDR. Same gate as session `telemetry_enabled`.
-    pub(crate) fn product_analytics_enabled(&self) -> bool {
-        self.cfg.borrow().is_telemetry_enabled()
-            && !self.auth_manager.current_or_expired().is_some_and(|a| a.is_zdr_team())
-    }
-    /// Re-sync the `Send` mirror of `cfg.is_trace_upload_enabled()` that the
-    /// per-session collection gates read (`cfg` is `!Send`; the gates run on
-    /// the tokio pool). Must be called after any mid-session config change
-    /// that can flip the switch — i.e. every `remote_settings` rewrite.
-    pub(super) fn sync_collection_config_gate(&self) {
-        self.trace_upload_live
-            .store(
-                self.cfg.borrow().is_trace_upload_enabled(),
-                std::sync::atomic::Ordering::Relaxed,
-            );
-    }
     /// Current client type as set by the most recent `initialize()` call.
     pub(crate) fn client_type(&self) -> ClientType {
         *self.client_type.borrow()
@@ -716,6 +616,12 @@ impl MvpAgent {
     /// session has not started a turn yet.
     pub(crate) fn session_turn_number(&self, sid: &acp::SessionId) -> Option<u64> {
         self.session_turn_numbers.borrow().get(sid).copied()
+    }
+    pub(crate) fn allocate_turn_number(&self, session_id: &acp::SessionId) -> u64 {
+        let mut turns = self.session_turn_numbers.borrow_mut();
+        let turn = turns.get(session_id).copied().unwrap_or(0);
+        turns.insert(session_id.clone(), turn.saturating_add(1));
+        turn
     }
     /// Return the current ProviderAuth credentials, if authenticated and not expired.
     pub(crate) fn current_auth(&self) -> Option<crate::auth::ProviderAuth> {
@@ -851,7 +757,7 @@ impl MvpAgent {
                 _ => auth_method::PREFERRED_OIDC_UNAVAILABLE,
             };
             tracing::info!(%msg, "cached_token unavailable; preferred_method forbids fallthrough");
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "auth cached_token fallthrough blocked by preferred_method",
                 None,
                 Some(
@@ -868,7 +774,7 @@ impl MvpAgent {
             arguments.meta
         };
         tracing::info!(fallback = %method_id.0, "cached_token fallthrough");
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "auth cached_token fallthrough",
             None,
             Some(serde_json::json!({ "fallback": method_id.0.as_ref() })),
@@ -911,10 +817,8 @@ impl MvpAgent {
                 self.models_manager.apply_config(cfg_snapshot);
             }
         }
-        self.sync_collection_config_gate();
         self.emit_settings_update_notification();
         self.emit_announcements(AnnouncementsPushMode::IfChanged);
-        self.reconfigure_heap_profile_monitor();
     }
     /// Upgrade storage mode from newly-arrived remote settings. Mirrors the
     /// `resolve_config` gate: only upgrades from `Local`, writeback needs xai auth.
@@ -972,22 +876,23 @@ impl MvpAgent {
             }
         }
     }
-    /// Fetch remote settings for `auth` and drive the external-OTEL gate from
-    /// the outcome. Re-closes the gate first only on an account switch, then
-    /// hands the outcome to [`OtelGate::resolve`], which returns the settings
-    /// only on a successful fetch for the still-live identity. Single seam for
-    /// both post-auth callers.
+    /// Fetch remote settings for `auth`, returning them only when the same
+    /// identity is still active after the request completes.
     ///
-    /// [`OtelGate::resolve`]: crate::agent::otel_gate::OtelGate::resolve
     pub(super) async fn fetch_settings_resolving_gate(
         &self,
         auth: &crate::auth::ProviderAuth,
     ) -> Option<crate::util::config::RemoteSettings> {
         let identity = auth.user_id.clone();
-        self.otel_gate.rearm_on_switch(&identity);
         let outcome = self.fetch_settings_self_healing_401(auth).await;
         let live = self.auth_manager.current_or_expired().map(|a| a.user_id);
-        self.otel_gate.resolve(&identity, outcome, live.as_deref())
+        if live.as_deref() != Some(identity.as_str()) {
+            return None;
+        }
+        match outcome {
+            crate::remote::SettingsFetch::Fetched(settings) => Some(*settings),
+            crate::remote::SettingsFetch::Rejected | crate::remote::SettingsFetch::Retry => None,
+        }
     }
     /// Fetch settings; on a `401` try one self-healing [`AuthManager::auth`]
     /// refresh and re-fetch if it yields a *different* token (recovers a 401
@@ -1028,9 +933,7 @@ impl MvpAgent {
         }
     }
     /// Stores settings and fans out side effects via
-    /// [`Self::on_remote_settings_changed`]. Shared tail for callers that do
-    /// not also re-init the telemetry client (those use
-    /// [`Self::refresh_remote_settings`]).
+    /// [`Self::on_remote_settings_changed`].
     pub(super) fn install_remote_settings(
         &self,
         settings: crate::util::config::RemoteSettings,
@@ -1038,8 +941,8 @@ impl MvpAgent {
         self.store_remote_settings(settings);
         self.on_remote_settings_changed();
     }
-    /// Re-fetch remote settings, re-init the telemetry client, apply side
-    /// effects, and push `grow/settings/update` to clients. Called from both
+    /// Re-fetch remote settings, apply side effects, and push
+    /// `grow/settings/update` to clients. Called from both
     /// auth handlers (first install + reauth/account switch).
     ///
     /// Agent-level fields materialised at startup (`worktree_type`,
@@ -1050,67 +953,18 @@ impl MvpAgent {
             tracing::debug!("post-auth settings refresh skipped: remote_fetch disabled");
             return;
         }
-        let is_xai = auth.is_service_auth();
-        let user_id = auth.user_id.clone();
-        let team_id = auth.team_id.clone();
         let remote_was_absent = self.cfg.borrow().remote_settings.is_none();
         let Some(settings) = self.fetch_settings_resolving_gate(auth).await else {
             return;
         };
         tracing::info!("post-auth settings refreshed");
         self.store_remote_settings(settings);
-        let (
-            telemetry_config,
-            telemetry_mode,
-            grow_user_id,
-            grow_team_id,
-            deployment_key,
-            subscription_tier,
-        ) = {
+        {
             let cfg = self.cfg.borrow();
             crate::util::config::cache_remote_mcp_startup_timeout_secs(
                 cfg.remote_settings.as_ref().and_then(|s| s.mcp_startup_timeout_secs),
             );
-            let telemetry_mode = cfg.resolve_telemetry_mode();
-            let trace_upload = cfg.resolve_trace_upload();
-            tracing::info!(
-                telemetry = %telemetry_mode,
-                trace_upload = %trace_upload,
-                "post-auth data capture config re-resolved",
-            );
-            let grow_user_id = is_xai.then(|| user_id.clone());
-            let grow_team_id = is_xai.then(|| team_id.clone()).flatten();
-            let telemetry_config = cfg.telemetry.clone();
-            let deployment_key = cfg.endpoints.deployment_key.clone();
-            let subscription_tier_display = cfg
-                .remote_settings
-                .as_ref()
-                .and_then(|rs| rs.subscription_tier_display.clone());
-            (
-                telemetry_config,
-                telemetry_mode.value,
-                grow_user_id,
-                grow_team_id,
-                deployment_key,
-                subscription_tier_display,
-            )
-        };
-        let subscription_tier = resolve_subscription_tier_for_telemetry(
-            subscription_tier,
-            self.auth_manager.current_or_expired().as_ref(),
-        );
-        grow_telemetry::client::init(
-            telemetry_config,
-            telemetry_mode,
-            grow_user_id,
-            grow_team_id,
-            deployment_key,
-            self.origin_client_info_from_meta(None),
-            grow_version::VERSION.to_owned(),
-            subscription_tier,
-            crate::http::shared_client(),
-        );
-        crate::auth::credential_provider::sync_external_otel_identity();
+        }
         self.on_remote_settings_changed();
         if remote_was_absent {
             self.spawn_auto_worktree_gc();
@@ -1139,10 +993,8 @@ impl MvpAgent {
                 });
             cfg.re_resolve_runtime_fields(&raw_config);
         }
-        self.sync_collection_config_gate();
         self.emit_settings_update_notification();
         self.emit_announcements(AnnouncementsPushMode::Force);
-        self.reconfigure_heap_profile_monitor();
     }
     /// Spawns a background task coalesced on `in_flight`: a request while one
     /// is in flight is dropped. The task is bounded by
@@ -1200,8 +1052,7 @@ impl MvpAgent {
     }
     /// Resolve post-auth remote settings in the background so a slow or hung
     /// `/settings` can't gate `authenticate` (and thus the client's first draw).
-    /// The external-OTEL gate stays fail-closed until this resolves; the result
-    /// reaches clients via `grow/settings/update`. Its own guard keeps an
+    /// The result reaches clients via `grow/settings/update`. Its own guard keeps an
     /// in-flight reapply from coalescing away the authenticated identity.
     pub(super) fn spawn_post_auth_settings(&self, auth: crate::auth::ProviderAuth) {
         let agent_ref = LocalRef::new(self);
@@ -1401,7 +1252,7 @@ impl MvpAgent {
                 model = model.info().model.as_str(),
                 "auth: overriding auth_type to SessionToken (session-based auth method)",
             );
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "auth auth_type override to SessionToken",
                 None,
                 Some(serde_json::json!({ "model": model.info().model.as_str() })),
@@ -1420,7 +1271,7 @@ impl MvpAgent {
                 auth_type = ?credentials.auth_type,
                 "auth: prepare_sampling_config has no session key",
             );
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "auth: prepare_sampling_config has no session key",
                 None,
                 Some(
@@ -1434,24 +1285,9 @@ impl MvpAgent {
         }
         let cfg = self.cfg.borrow();
         let alpha_test_key = cfg.endpoints.alpha_test_key.clone();
-        let client_version = cfg.client_version.clone();
-        let deployment_id = crate::managed_config::resolve_deployment_id(
-            cfg.endpoints.deployment_key.as_deref(),
-        );
         drop(cfg);
-        let user_id = self
-            .auth_manager
-            .current_or_expired()
-            .filter(|a| a.is_service_auth())
-            .map(|a| a.user_id);
-        let mut config = crate::agent::config::sampling_config_for_model(
-            model,
-            credentials,
-            alpha_test_key,
-            client_version,
-            deployment_id,
-            user_id,
-        );
+        let mut config =
+            crate::agent::config::sampling_config_for_model(model, credentials, alpha_test_key);
         config.origin_client = origin_client;
         config
     }
@@ -1602,19 +1438,17 @@ impl MvpAgent {
         let models = self.models_manager.models();
         let session = self.current_or_buffered_auth();
         let alpha_test_key = self.cfg.borrow().endpoints.alpha_test_key.clone();
-        let client_version = self.cfg.borrow().client_version.clone();
         let mut cfg = config::resolve_web_search_sampling_config(
             &model_id,
             &models,
             session.as_ref().map(|a| a.key.as_str()),
             self.cfg.borrow().auth.api_key_auth_disabled(),
             alpha_test_key.clone(),
-            client_version,
             &self.cfg.borrow().endpoints,
         )?;
         inject_proxy_headers(
             &mut cfg.extra_headers,
-            cfg.client_version.as_deref(),
+            self.cfg.borrow().client_version.as_deref(),
             alpha_test_key.as_deref(),
             &cfg.base_url,
         );
@@ -1691,7 +1525,6 @@ impl MvpAgent {
                     byok_from_models(&models, None, current.0.as_ref()),
                 );
         }
-        crate::save::spawn_purge_stale_upload_scratch();
         let storage_mode = cfg.storage_mode;
         let default_yolo_mode = cfg.default_yolo_mode;
         let default_auto_mode = cfg.default_auto_mode;
@@ -1728,13 +1561,6 @@ impl MvpAgent {
             tracing::debug!("Relay sync: DISABLED (not configured in config.toml or env)");
         } else {
             tracing::debug!("Relay sync: DISABLED (not in TUI mode)");
-        }
-        if cfg.telemetry.trace_upload == Some(false) {
-            tracing::info!(
-                enabled = false,
-                reason = "feature_off",
-                "trace_upload_status"
-            );
         }
         let (subagent_event_tx, subagent_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let activity = crate::agent::activity::AgentActivity::default();
@@ -1779,12 +1605,8 @@ impl MvpAgent {
             tier_allowed: std::cell::Cell::new(true),
             allow_access_resolved_for: std::cell::RefCell::new(None),
             storage_mode: std::cell::Cell::new(storage_mode),
-            otel_gate: crate::agent::otel_gate::OtelGate::default(),
             default_yolo_mode,
             default_auto_mode,
-            trace_upload_live: Arc::new(
-                std::sync::atomic::AtomicBool::new(cfg.is_trace_upload_enabled()),
-            ),
             memory_config: None,
             config_watcher_path_tx: None,
             relay_sync_enabled,
@@ -1826,10 +1648,6 @@ impl MvpAgent {
             post_auth_settings_in_flight: std::rc::Rc::new(std::cell::Cell::new(false)),
             announcements_gen: std::cell::Cell::new(0),
             last_emitted_announcements: RefCell::new(Vec::new()),
-            heap_profile_monitor: RefCell::new(
-                crate::heap_profile::HeapProfileMonitor::new(),
-            ),
-            heap_profile_started: std::cell::Cell::new(false),
             #[cfg(test)]
             finalize_spy: RefCell::new(Vec::new()),
             #[cfg(test)]
@@ -1845,14 +1663,7 @@ impl MvpAgent {
             .auth_manager
             .configure_refresher(
                 instance.cfg.borrow().auth.auth_provider_command.clone(),
-                instance.diagnostic_upload_config(),
             );
-        crate::auth::credential_provider::wire_otel_auth_manager(
-            instance.auth_manager.clone(),
-        );
-        if let Some(ref dk) = instance.cfg.borrow().endpoints.deployment_key {
-            crate::auth::credential_provider::wire_otel_deployment_key(dk.clone());
-        }
         instance
     }
     /// Handle `grow/internal/evict_sessions` — the leader server tells us a
@@ -2154,27 +1965,6 @@ impl MvpAgent {
             .query(subagent_id, block, timeout_ms)
             .await
     }
-    pub(super) async fn spawned_subagent_refs_for_prompt(
-        &self,
-        parent_session_id: &str,
-        prompt_id: &str,
-    ) -> Vec<crate::save::SubagentSpawnedRef> {
-        grow_tools::implementations::grow_build::task::backend::ChannelBackend::new(
-                self.subagent_event_tx.clone(),
-            )
-            .spawned_refs_for_prompt(parent_session_id, prompt_id)
-            .await
-            .into_iter()
-            .map(|child| crate::save::SubagentSpawnedRef {
-                subagent_id: child.subagent_id,
-                child_session_id: child.child_session_id,
-                subagent_type: child.subagent_type,
-                description: child.description,
-                persona: child.persona,
-                resumed_from: child.resumed_from,
-            })
-            .collect()
-    }
     /// List all background tasks for a session.
     /// Routes through the session's tool bridge to the TerminalBackend.
     pub async fn list_tasks(
@@ -2370,141 +2160,6 @@ impl MvpAgent {
     }
     /// Run content search at agent level.
     /// This allows content search to work with just a cwd, without requiring a session.
-    /// Returns an upload method, or `None` when trace uploads are disabled.
-    pub async fn trace_upload_config(
-        &self,
-    ) -> Option<crate::save::UploadMethod> {
-        let (method, _reason) = self.trace_upload_config_with_reason().await;
-        method
-    }
-    pub(super) fn trace_upload_config_snapshot(
-        &self,
-    ) -> Option<crate::save::UploadMethod> {
-        if self.is_data_collection_disabled()
-            || !self.cfg.borrow().is_trace_upload_enabled()
-        {
-            return None;
-        }
-        let cfg = self.cfg.borrow();
-        let auth_token = if cfg.endpoints.deployment_key.is_none() {
-            self.auth_manager
-                .current_or_expired()
-                .filter(|auth| auth.is_service_auth())
-                .map(|auth| auth.key)
-        } else {
-            None
-        };
-        cfg.endpoints.resolve_upload_method(auth_token)
-    }
-    pub(super) fn diagnostic_upload_config(
-        &self,
-    ) -> Option<crate::auth::DiagnosticUploader> {
-        self.sync_collection_config_gate();
-        let cfg = self.cfg.borrow();
-        if !cfg.is_trace_upload_enabled() {
-            return None;
-        }
-        let proxy_base_url = cfg.endpoints.resolve_trace_upload_url();
-        let deployment_key = cfg.endpoints.deployment_key.clone();
-        let alpha_test_key = cfg.endpoints.alpha_test_key.clone();
-        let auth_manager = self.auth_manager.clone();
-        let trace_upload_live = self.trace_upload_live.clone();
-        Some(
-            std::sync::Arc::new(move |
-                log_bytes: Vec<u8>,
-                auth_token: String,
-                user_id: String|
-            {
-                let proxy_base_url = proxy_base_url.clone();
-                let deployment_key = deployment_key.clone();
-                let alpha_test_key = alpha_test_key.clone();
-                let auth_manager = auth_manager.clone();
-                let trace_upload_live = trace_upload_live.clone();
-                Box::pin(async move {
-                    if !auth_manager.allows_data_collection()
-                        || !trace_upload_live.load(std::sync::atomic::Ordering::Relaxed)
-                    {
-                        tracing::debug!(
-                            "skipping auth-diagnostics upload: data collection disabled"
-                        );
-                        return;
-                    }
-                    let upload_method = crate::save::UploadMethod::Proxy {
-                        proxy_base_url,
-                        user_token: auth_token,
-                        deployment_key,
-                        alpha_test_key,
-                    };
-                    crate::save::upload_to_auth_diagnostics(
-                            &log_bytes,
-                            &user_id,
-                            &upload_method,
-                            auth_manager,
-                        )
-                        .await;
-                })
-            }),
-        )
-    }
-    /// Like `trace_upload_config`, but also returns the reason why uploads
-    /// are enabled or disabled for structured session events.
-    async fn trace_upload_config_with_reason(
-        &self,
-    ) -> (
-        Option<crate::save::UploadMethod>,
-        crate::save::TraceUploadReason,
-    ) {
-        use crate::save::TraceUploadReason;
-        if self.is_data_collection_disabled() {
-            crate::save::spawn_startup_spill_reconcile(
-                crate::util::grow_home::grow_home(),
-                None,
-            );
-            return (None, TraceUploadReason::ZdrTeam);
-        }
-        if self.cfg.borrow().remote_settings.is_none()
-            && let Ok(auth) = self.auth_manager.auth().await
-        {
-            self.refresh_remote_settings(&auth).await;
-        }
-        let (direct_method, has_deployment_key, endpoints) = {
-            let cfg = self.cfg.borrow();
-            if !cfg.is_trace_upload_enabled() {
-                return (None, TraceUploadReason::FeatureOff);
-            }
-            (
-                cfg.endpoints.resolve_direct_upload_method(),
-                cfg.endpoints.deployment_key.is_some(),
-                cfg.endpoints.clone(),
-            )
-        };
-        let service_account_key = crate::util::config::load_gcs_service_account_key_sync();
-        let method = if let Some(method) = direct_method {
-            Some(method)
-        } else {
-            let auth_token = if has_deployment_key {
-                None
-            } else {
-                self.auth_manager
-                        .auth()
-                        .await
-                        .ok()
-                        .filter(|auth| auth.is_service_auth())
-                        .map(|auth| auth.key)
-            };
-            if auth_token.is_some() || has_deployment_key {
-                endpoints.resolve_upload_method(auth_token)
-            } else if service_account_key.is_some() {
-                Some(crate::save::UploadMethod::Direct {
-                    service_account_key,
-                })
-            } else {
-                None
-            }
-        };
-        let reason = crate::save::TraceUploadReason::from_upload_method(&method);
-        (method, reason)
-    }
     /// Resolve client version: prefer the value from the initialize request _meta,
     /// fall back to the agent's own version (VERSION_WITH_COMMIT set by the TUI launcher).
     pub(super) fn client_version(&self) -> Option<String> {
@@ -2676,7 +2331,7 @@ impl MvpAgent {
             if let Some(auth) = self.auth_manager.current_or_expired() {
                 sampling_config.api_key = Some(auth.key);
                 tracing::debug!("auth: seed_client_config set auth (SessionToken)");
-                grow_telemetry::unified_log::debug(
+                grow_diagnostics::unified_log::debug(
                     "auth: seed_client_config set auth (SessionToken)",
                     None,
                     None,
@@ -2688,314 +2343,13 @@ impl MvpAgent {
                 .any(|m| m.has_own_credentials())
             {
                 tracing::warn!("No credentials found: no login token and no model api_key/env_key");
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "No credentials found: no login token and no model api_key/env_key",
                     None,
                     None,
                 );
             }
         }
-    }
-    /// Build a `TraceExportConfig` for uploading JSON artifacts under a given prefix.
-    ///
-    /// Shared by comment uploads (`{session_id}/comments/...`),
-    /// comparison metadata (`{session_id}/turn_{N}/...`), etc.
-    pub(crate) async fn build_gcs_config(
-        &self,
-        gcs_prefix: String,
-    ) -> Option<crate::save::TraceExportConfig> {
-        let upload_method = self.trace_upload_config().await?;
-        let bucket_url = {
-            let cfg = self.cfg.borrow();
-            match &upload_method {
-                crate::save::UploadMethod::Direct { .. } => {
-                    match cfg.endpoints.resolve_trace_bucket_url() {
-                        Some(resolved) => Some(resolved.value),
-                        None => {
-                            tracing::debug!(
-                                "no trace bucket configured; skipping direct GCS upload"
-                            );
-                            return None;
-                        }
-                    }
-                }
-                crate::save::UploadMethod::S3 { bucket, .. } => {
-                    Some(format!("s3://{bucket}"))
-                }
-                crate::save::UploadMethod::Proxy { .. } => None,
-            }
-        };
-        Some(crate::save::TraceExportConfig {
-            bucket_url,
-            service_account_key: None,
-            prefix_dir: None,
-            gcs_prefix: Some(gcs_prefix),
-            absolute_paths: false,
-            archive_name_override: None,
-            upload_method,
-        })
-    }
-    /// Allocate the next monotonic telemetry turn number for a session.
-    ///
-    /// Returns the current turn number and advances the counter. The counter is
-    /// intentionally monotonic even across rewinds to avoid overwriting older
-    /// telemetry docs in cloud storage.
-    ///
-    /// For sessions sharing a parent's trace counter, call this once with the
-    /// **root session ID** and reuse the result so the root's counter does not
-    /// advance more than once per logical turn. The cloud storage layout writes to
-    /// `{session_id}/turn_{N}/`.
-    pub(crate) fn allocate_turn_number(&self, session_id: &acp::SessionId) -> u64 {
-        let turn = self.peek_turn_number(session_id);
-        self.set_turn_number(session_id, turn.saturating_add(1));
-        turn
-    }
-    /// Read a session's next trace turn number without advancing the counter.
-    fn peek_turn_number(&self, session_id: &acp::SessionId) -> u64 {
-        self.session_turn_numbers.borrow().get(session_id).copied().unwrap_or(0u64)
-    }
-    /// Set a session's next trace turn number. The sole writer of the
-    /// `session_turn_numbers` counter, shared by `allocate_turn_number` and the
-    /// batched harness-sibling allocation so both honor the same storage.
-    fn set_turn_number(&self, session_id: &acp::SessionId, next: u64) {
-        self.session_turn_numbers.borrow_mut().insert(session_id.clone(), next);
-    }
-    /// Upload each drained harness trace turn (the goal planner at setup, and
-    /// each verifier skeptic panel) as its OWN sibling `turn_{N}` artifact.
-    ///
-    /// These phases run inside the single user-facing goal turn but are
-    /// recorded out-of-band (synthetic `task` pairs in a side buffer), so the
-    /// normal per-round `turn_messages.json` never references them. Giving each
-    /// phase its own monotonic turn number — from the SAME `session_turn_numbers`
-    /// counter the model turns use (see [`Self::allocate_turn_number`]), via
-    /// [`Self::get_trace_context`] + [`upload_turn_messages`] — makes the
-    /// subagents discoverable in remote/web clients
-    /// via the `<subagent_result>` footer each synthetic `task` result carries.
-    /// The advanced counter is persisted via `SetNextTraceTurn` so the siblings
-    /// survive a restart. Best-effort and non-blocking.
-    pub(super) async fn upload_harness_trace_turns(
-        &self,
-        session_id: &acp::SessionId,
-        info: &crate::session::info::Info,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
-        model: &str,
-        turns: Vec<Vec<grow_sampling_types::conversation::ConversationItem>>,
-    ) {
-        use crate::save::{
-            build_manifest, resolve_upload_method, write_upload_manifest,
-        };
-        let base = self.peek_turn_number(session_id);
-        let uploads = self
-            .build_harness_trace_uploads(session_id, info, model, base, turns)
-            .await;
-        if uploads.is_empty() {
-            return;
-        }
-        let next_trace_turn = base.saturating_add(uploads.len() as u64);
-        self.set_turn_number(session_id, next_trace_turn);
-        let _ = cmd_tx
-            .send(crate::session::SessionCommand::SetNextTraceTurn {
-                next_trace_turn,
-                request_id: None,
-            });
-        for (ctx, metadata, capture) in uploads {
-            spawn_upload_task(
-                "harness_trace_turn",
-                async move {
-                    let session_state = build_chat_history_session_state(
-                        &capture.messages,
-                    );
-                    futures::join!(
-                    upload_metadata(&ctx, metadata),
-                    upload_turn_messages(&ctx, capture, UploadWait::Confirm),
-                    upload_harness_session_archive(&ctx, session_state),
-                );
-                    let upload_method = resolve_upload_method(&ctx);
-                    write_upload_manifest(
-                            &ctx,
-                            &build_manifest(&ctx.artifact_tracker, upload_method),
-                        )
-                        .await;
-                },
-            );
-        }
-    }
-    /// Number the drained harness turns `base, base+1, …` and build their
-    /// `(trace context, metadata, capture)` upload payloads. Stops at the first
-    /// turn whose trace context is `None` — uploads are disabled (or the session
-    /// is gone), a state uniform across the batch since all turns share one
-    /// `session_id`. A `None` *after* a `Some` would be a broken invariant, so
-    /// it is logged rather than dropped silently.
-    pub(super) async fn build_harness_trace_uploads(
-        &self,
-        session_id: &acp::SessionId,
-        info: &crate::session::info::Info,
-        model: &str,
-        base: u64,
-        turns: Vec<Vec<grow_sampling_types::conversation::ConversationItem>>,
-    ) -> Vec<(PromptTraceContext, PromptMetadata, xai_chat_state::TurnCapture)> {
-        let mut uploads = Vec::with_capacity(turns.len());
-        for (offset, items) in turns.into_iter().enumerate() {
-            let turn_number = base.saturating_add(offset as u64);
-            let Some(ctx) = self.get_trace_context(info, turn_number).await else {
-                if offset > 0 {
-                    tracing::warn!(
-                        turn_number,
-                        "harness trace: trace context unexpectedly None mid-batch; \
-                         dropping the remaining drained turns"
-                    );
-                }
-                break;
-            };
-            let metadata = PromptMetadata {
-                schema_version: GCS_SCHEMA_VERSION.to_string(),
-                session_id: session_id.0.to_string(),
-                turn_number,
-                request_id: format!("harness-trace-{turn_number}"),
-                turn_started_at: chrono::Utc::now().to_rfc3339(),
-                repo_root: None,
-                remote_url: None,
-                user_id: None,
-                user_email: None,
-                team_id: None,
-                client_source: None,
-                client_version: None,
-                model: model.to_string(),
-                reasoning_effort: ctx
-                    .session_handle
-                    .reasoning_effort
-                    .map(|e| e.as_str().to_string()),
-                experiment_id: None,
-                host_os: std::env::consts::OS.to_string(),
-                host_arch: std::env::consts::ARCH.to_string(),
-                prompt_has_image: Some(false),
-                prompt_was_truncated: Some(false),
-                prompt_verbatim: Some(true),
-                cwd: Some(info.cwd.clone()),
-                agent_type: None,
-                shell_version: Some(grow_version::VERSION.to_string()),
-                workspace_type: None,
-                sandbox: local_sandbox_telemetry(),
-            };
-            let capture = xai_chat_state::TurnCapture {
-                messages: items,
-                compaction_occurred: false,
-            };
-            uploads.push((ctx, metadata, capture));
-        }
-        uploads
-    }
-    /// Gets the trace context for a prompt using cloud storage.
-    pub(crate) async fn get_trace_context(
-        &self,
-        session_info: &crate::session::info::Info,
-        turn_number: u64,
-    ) -> Option<PromptTraceContext> {
-        let (upload_method, upload_reason) = self
-            .trace_upload_config_with_reason()
-            .await;
-        {
-            let mut decision = self.cfg.borrow().trace_upload_decision_debug();
-            if let Some(obj) = decision.as_object_mut() {
-                obj.insert(
-                    "uploads_enabled".into(),
-                    serde_json::json!(upload_method.is_some()),
-                );
-                obj.insert(
-                    "upload_reason".into(),
-                    serde_json::json!(upload_reason.as_str()),
-                );
-                obj.insert(
-                    "data_collection_disabled".into(),
-                    serde_json::json!(self.is_data_collection_disabled()),
-                );
-                obj.insert("turn_number".into(), serde_json::json!(turn_number));
-            }
-            grow_telemetry::unified_log::info(
-                "trace.upload.decision",
-                Some(session_info.id.0.as_ref()),
-                Some(decision),
-            );
-        }
-        let upload_method = match upload_method {
-            Some(method) => method,
-            None => {
-                grow_telemetry::session_ctx::log_session_event(crate::agent::session_metrics::TraceUploadSkipped {
-                    session_id: session_info.id.0.to_string(),
-                    turn_number,
-                    reason: upload_reason.as_str().to_owned(),
-                });
-                return None;
-            }
-        };
-        let bucket_url = {
-            let cfg = self.cfg.borrow();
-            match &upload_method {
-                crate::save::UploadMethod::Direct { .. } => {
-                    match cfg.endpoints.resolve_trace_bucket_url() {
-                        Some(resolved) => Some(resolved.value),
-                        None => {
-                            grow_telemetry::session_ctx::log_session_event(crate::agent::session_metrics::TraceUploadSkipped {
-                                session_id: session_info.id.0.to_string(),
-                                turn_number,
-                                reason: "no_trace_bucket_configured".to_owned(),
-                            });
-                            return None;
-                        }
-                    }
-                }
-                crate::save::UploadMethod::S3 { bucket, .. } => {
-                    Some(format!("s3://{bucket}"))
-                }
-                crate::save::UploadMethod::Proxy { .. } => None,
-            }
-        };
-        let gcs_config = crate::save::TraceExportConfig {
-            bucket_url,
-            service_account_key: None,
-            prefix_dir: None,
-            gcs_prefix: Some(format!("{}/turn_{}", session_info.id.0, turn_number)),
-            absolute_paths: false,
-            archive_name_override: None,
-            upload_method,
-        };
-        let session_handle = match self.sessions.borrow().get(&session_info.id) {
-            Some(h) => h.clone(),
-            None => {
-                return None;
-            }
-        };
-        let queue = session_handle
-            .upload_queue
-            .get_or_init(|| {
-                let grow_home = crate::util::grow_home::grow_home();
-                let queue = crate::save::spawn_upload_queue(
-                    &grow_home,
-                    &gcs_config,
-                    Some(grow_version::VERSION),
-                    self.auth_manager.clone(),
-                );
-                crate::save::spawn_startup_spill_reconcile(
-                    grow_home,
-                    Some(queue.clone()),
-                );
-                session_handle
-                    .feedback_manager
-                    .set_upload_queue_stats(queue.stats_arc());
-                queue
-            });
-        let upload_queue = Some(queue.clone());
-        let session_registry_enabled = self.build_registry_config().is_some();
-        Some(PromptTraceContext {
-            gcs_config,
-            session_info: session_info.clone(),
-            turn_number,
-            session_handle,
-            session_registry_enabled,
-            upload_queue,
-            artifact_tracker: crate::save::new_artifact_tracker(),
-            auth_manager: self.auth_manager.clone(),
-        })
     }
     /// Resolve the agent definition for a session.
     ///
@@ -3269,10 +2623,10 @@ impl MvpAgent {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let hunk_tracking_enabled = hunk_plan.enabled();
-        let (hunk_tracker_handle, hunk_event_rx) = match hunk_plan.actor_mode {
+        let hunk_tracker_handle = match hunk_plan.actor_mode {
             Some(mode) => {
                 let cancel = CancellationToken::new();
-                let (hunk_event_tx, hunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (hunk_event_tx, mut hunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
                 let handle = HunkTrackerActor::spawn(
                     session_info.id.0.to_string(),
                     cwd.as_path().to_path_buf(),
@@ -3280,55 +2634,12 @@ impl MvpAgent {
                     mode,
                     cancel.clone(),
                 );
-                (handle, Some((hunk_event_rx, cancel)))
+                tokio::spawn(async move {
+                    while hunk_event_rx.recv().await.is_some() {}
+                });
+                handle
             }
-            None => (xai_hunk_tracker::HunkTrackerHandle::noop(), None),
-        };
-        let has_service_auth = self.auth_manager.current().is_some_and(|a| a.is_service_auth());
-        let loc_tracking_enabled = hunk_tracking_enabled && has_service_auth
-            && (self
-                .cfg
-                .borrow()
-                .remote_settings
-                .as_ref()
-                .and_then(|s| s.loc_tracking)
-                .unwrap_or(false)
-                || std::env::var("GROW_LOC_TRACKING")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false));
-        let (feedback_resolved, feedback_flags) = {
-            let cfg = self.cfg.borrow();
-            let resolved = cfg.resolve_feedback();
-            let flags = crate::session::feedback_manager::FeedbackFlags {
-                enabled: resolved.value,
-                user: cfg.feedback.user.clone(),
-            };
-            (resolved, flags)
-        };
-        tracing::info!(feedback = %feedback_resolved, "resolved feedback feature flag");
-        let loc_aggregate_rx = match hunk_event_rx {
-            Some((hunk_event_rx, loc_cancel)) if loc_tracking_enabled => {
-                let (loc_agg_tx, loc_agg_rx) = tokio::sync::mpsc::unbounded_channel();
-                let loc_path = crate::session::persistence::session_dir(&session_info)
-                    .join("hunk_records.jsonl");
-                let loc_writer = xai_hunk_tracker::JsonlHunkRecordWriter::new(loc_path);
-                let loc_ctx = xai_hunk_tracker::LocSinkContext {
-                    session_id: session_info.id.0.to_string(),
-                    agent_id: agent_id(),
-                    user_id: self.auth_manager.current().map(|a| a.user_id.clone()),
-                    aggregate_tx: Some(loc_agg_tx),
-                };
-                tokio::spawn(
-                    xai_hunk_tracker::run_loc_sink(
-                        hunk_event_rx,
-                        loc_writer,
-                        loc_ctx,
-                        loc_cancel,
-                    ),
-                );
-                Some(loc_agg_rx)
-            }
-            _ => None,
+            None => xai_hunk_tracker::HunkTrackerHandle::noop(),
         };
         let project_env_trusted = folder_trust::project_scope_allowed(cwd.as_path());
         let mut session_env = grow_workspace::permission::claude_settings::load_claude_env_with_project(
@@ -3370,18 +2681,6 @@ impl MvpAgent {
                     )
             })?;
         tool_ctx.subagent_event_tx = Some(self.subagent_event_tx.clone());
-        tool_ctx.synthetic_trace_tx = self
-            .subagent_presentation
-            .borrow()
-            .synthetic_trace_tx
-            .clone();
-        if let Some(ref shared) = tool_ctx.synthetic_trace_tx_shared {
-            *shared.lock().unwrap_or_else(|e| e.into_inner()) = self
-                .subagent_presentation
-                .borrow()
-                .synthetic_trace_tx
-                .clone();
-        }
         tool_ctx.is_turn_active = Some(
             self.subagent_presentation.borrow().turn_active_flag(),
         );
@@ -3389,7 +2688,7 @@ impl MvpAgent {
         tool_ctx.subagent_depth = 0;
         tool_ctx.auto_wake_enabled = self.cfg.borrow().auto_wake_enabled;
         let support_permission = self.cfg.borrow().features.support_permission;
-        let telemetry_enabled = self.product_analytics_enabled();
+        let diagnostics_enabled = true;
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());
         let sampling_config = self
             .resolve_sampling_config_for_model(&session_model_id, origin_client.clone());
@@ -3432,22 +2731,6 @@ impl MvpAgent {
         let auto_update = self.cfg.borrow().cli.auto_update;
         let client_type = *self.client_type.borrow();
         let buffering_settings = self.buffering_settings.borrow().clone();
-        let (
-            feedback_proxy_url,
-            feedback_user_token,
-            feedback_alpha_test_key,
-            deployment_key,
-        ) = if let Some((url, token, alpha, deploy)) = self.feedback_credentials() {
-            (Some(url), token, alpha, deploy)
-        } else {
-            (None, None, None, None)
-        };
-        tracing::info!(
-            session_id = %session_info.id.0,
-            feedback_url = ?feedback_proxy_url,
-            authenticated = feedback_user_token.is_some(),
-            "Initializing feedback manager for session"
-        );
         let skills = self.cfg.borrow().skills.clone();
         let compat = self.cfg.borrow().compat_resolved;
         let acp_agent_profile = parse_agent_profile_from_meta(session_meta);
@@ -3586,9 +2869,7 @@ impl MvpAgent {
         let background_workflows_enabled = self.cfg.borrow().resolve_workflows().value;
         let subagents_enabled = self.cfg.borrow().subagents_enabled;
         let subagents_max_depth = self.cfg.borrow().subagents_max_depth;
-        let ask_user_question_enabled = crate::save::parse_ask_user_question_from_meta(
-                session_meta,
-            )
+        let ask_user_question_enabled = parse_ask_user_question_from_meta(session_meta)
             .unwrap_or_else(|| self.cfg.borrow().resolve_ask_user_question().value);
         let client_hooks = crate::extensions::hooks::parse_client_hooks(session_meta);
         let disable_web_search = self.cfg.borrow().disable_web_search;
@@ -3670,7 +2951,6 @@ impl MvpAgent {
                     self.auth_type(),
                 ),
                 alpha_test_key: self.alpha_test_key(),
-                client_version: sampling_config.client_version.clone(),
             };
             let attribution_callback: Option<
                 grow_sampler::SharedAttributionCallback,
@@ -3764,7 +3044,6 @@ impl MvpAgent {
                     None,
                     acp_mcp_servers,
                     support_permission,
-                    telemetry_enabled,
                     auto_update,
                     persistence,
                     chat_history.clone(),
@@ -3784,10 +3063,6 @@ impl MvpAgent {
                     self.codebase_indexes.clone(),
                     client_code_nav_enabled,
                     fs_watch_caps,
-                    feedback_proxy_url,
-                    feedback_user_token,
-                    feedback_alpha_test_key,
-                    deployment_key,
                     client_terminal,
                     client_fs_read && client_fs_write,
                     gateway_enabled,
@@ -3802,8 +3077,6 @@ impl MvpAgent {
                     persisted_workflow_runs,
                     persisted_announcement_state,
                     self.memory_config.clone(),
-                    loc_tracking_enabled,
-                    feedback_flags,
                     self.managed_mcp_cache.clone(),
                     managed_mcp_expires_at,
                     managed_mcp_proxy_url,
@@ -3852,7 +3125,6 @@ impl MvpAgent {
                     Some(self.plugin_registry_handle.clone()),
                     self.models_manager.clone(),
                     None,
-                    None,
                     Some(
                         Arc::new(
                             crate::auth::manager::SharedAuthKeyProvider(
@@ -3883,7 +3155,6 @@ impl MvpAgent {
         tracing::debug!(session_id = %session_info.id.0, "spawn_session_on_thread complete");
         self.set_session_live_state(&session_info.id, SessionLiveState::IdleResident);
         self.ensure_session_supervisor();
-        self.heap_profile_set_session_id(&session_info.id.0);
         self.push_roster_delta_upserted(&session_info.id);
         if chat_history.is_empty() {
             let _timer = crate::instrumentation_timer!("session.system_prompt_inject");
@@ -3904,41 +3175,6 @@ impl MvpAgent {
             tracing::debug!(session_id = %session_info.id.0, "enqueued SessionCommand::Initialize");
         }
         let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
-        if let Some(mut loc_rx) = loc_aggregate_rx {
-            let signals = handle.signals_handle.clone();
-            tokio::spawn(async move {
-                while let Some(agg) = loc_rx.recv().await {
-                    match agg {
-                        xai_hunk_tracker::LocAggregate::LinesChanged {
-                            author_type,
-                            lines_added,
-                            lines_removed,
-                            file_path,
-                        } => {
-                            let is_agent = author_type
-                                == xai_hunk_tracker::AuthorType::Agent;
-                            signals
-                                .record_loc_change(
-                                    is_agent,
-                                    lines_added,
-                                    lines_removed,
-                                    file_path,
-                                );
-                        }
-                        xai_hunk_tracker::LocAggregate::LinesReverted {
-                            lines_added_reverted,
-                            lines_removed_reverted,
-                        } => {
-                            signals
-                                .record_loc_revert(
-                                    lines_added_reverted,
-                                    lines_removed_reverted,
-                                );
-                        }
-                    }
-                }
-            });
-        }
         self.permission_event_receivers
             .borrow_mut()
             .insert(session_info.id.clone(), permission_events_rx);

@@ -80,7 +80,7 @@ pub enum CommandResult {
     /// 2. Unknown commands (pager doesn't know them, shell might)
     ///
     /// Both are sent identically today. If behavior ever needs to diverge
-    /// (e.g., different UX confidence, error messaging, or telemetry),
+    /// (e.g., different UX confidence, error messaging, or diagnostics),
     /// split into `AcpPassThrough` and `UnknownPassThrough` variants.
     PassThrough(String),
 }

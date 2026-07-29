@@ -311,7 +311,7 @@ pub enum Action {
     /// Open the extensions modal dialog on a specific tab.
     OpenExtensionsModal {
         tab: crate::views::extensions_modal::ExtensionsTab,
-        trigger: grow_telemetry::events::ExtensionsModalTrigger,
+        trigger: grow_diagnostics::events::ExtensionsModalTrigger,
     },
     /// Open the agents modal (listing all agent definitions).
     /// Optionally opens directly on a specific tab.
@@ -396,8 +396,8 @@ pub enum Action {
     AnnouncementsShow,
     /// Open the promo CTA link (url resolved from current state at dispatch
     /// time, mirroring how `AnnouncementsHide` resolves its target). The
-    /// payload records which surface activated it, for telemetry.
-    AnnouncementsOpenCta(grow_telemetry::events::AnnouncementCtaSurface),
+    /// payload records which surface activated it, for diagnostics.
+    AnnouncementsOpenCta(grow_diagnostics::events::AnnouncementCtaSurface),
     /// Cycle session mode (Ctrl+R): Normal → Plan → Always-Approve → Normal.
     /// Plan mode sends a signal to the shell; always-approve is local.
     CycleMode,
@@ -1098,7 +1098,7 @@ impl PlanModeKind {
 /// the result is wrapped in [`TaskResult`] and fed back through
 /// `Action::TaskComplete`.
 /// What user gesture triggered a turn cancel. Recorded on `session/cancel`'s
-/// `_meta.cancelTrigger` so the agent's `mid_turn_abort` telemetry can tell
+/// `_meta.cancelTrigger` so the agent's `mid_turn_abort` diagnostics can tell
 /// ESC from Ctrl+C (and a mouse click on the cancel button) apart. Free-form
 /// on the wire (the agent stores it in `cancellation_context`), so adding a
 /// variant needs no agent/schema change.
@@ -1142,7 +1142,7 @@ pub enum ClipboardPasteTarget {
     },
 }
 impl ClipboardPasteTarget {
-    /// Telemetry surface label for the empty-clipboard paste-key event.
+    /// Diagnostic surface label for the empty-clipboard paste-key event.
     pub fn surface_str(&self) -> &'static str {
         match self {
             Self::AgentPrompt { .. } => "agent",
@@ -1467,7 +1467,7 @@ pub enum Effect {
         cancel_subagents: bool,
         /// What user gesture triggered the cancel (ESC / Ctrl+C / mouse), sent
         /// on `session/cancel` as `_meta.cancelTrigger` so the agent's
-        /// `mid_turn_abort` telemetry can distinguish them. `None` for
+        /// `mid_turn_abort` diagnostics can distinguish them. `None` for
         /// programmatic cancels (login/reauth flows).
         trigger: Option<CancelTrigger>,
         /// Ask the shell to trim the in-flight prompt from session history when

@@ -58,19 +58,9 @@ pub(crate) struct GitHeadPatch {
     pub branch: Option<String>,
 }
 
-/// Telemetry trace bookkeeping. `next_trace_turn` is monotonic; `request_id`
-/// is applied only when this turn wins, so a stale lower-turn write cannot
-/// leave a high `next_trace_turn` paired with an older `request_id` (these
-/// were set together in the legacy read-modify-write path).
-#[derive(Debug, Clone)]
-pub(crate) struct TraceTurnPatch {
-    pub next_trace_turn: u64,
-    pub request_id: Option<String>,
-}
-
 /// A typed, partial mutation of a `Summary`. Only the set fields change; the
 /// rest are read fresh under the lock and preserved. Per-field merge rules
-/// (see [`Summary::apply_patch`]): `last_active_at` / `next_trace_turn` /
+/// (see [`Summary::apply_patch`]): `last_active_at` /
 /// `chat_format_version` are monotonic (never lowered), counters apply to the
 /// fresh read, everything else is last-writer-wins on that field alone.
 #[derive(Debug, Clone, Default)]
@@ -79,10 +69,8 @@ pub(crate) struct SummaryPatch {
     pub messages: Option<CounterOp>,
     pub chat_messages: Option<CounterOp>,
     pub chat_format_version: Option<u8>,
-    pub trace_turn: Option<TraceTurnPatch>,
     pub model: Option<ModelPatch>,
     pub git_head: Option<GitHeadPatch>,
-    pub collection_id: Option<String>,
     /// Set the session title unconditionally (last-writer-wins). Used by the
     /// manual `/rename` (`/title`) path, which must always win. Also marks the
     /// title manual (`Summary::title_is_manual`).
@@ -131,16 +119,6 @@ impl Summary {
                 self.num_chat_messages = self.num_chat_messages.saturating_add(1);
             }
         }
-        if let Some(trace_turn) = &patch.trace_turn {
-            // next_trace_turn is monotonic; keep request_id paired with the
-            // winning turn so a stale lower-turn write can't re-pair them.
-            if trace_turn.next_trace_turn >= self.next_trace_turn {
-                self.next_trace_turn = trace_turn.next_trace_turn;
-                if let Some(request_id) = &trace_turn.request_id {
-                    self.request_id = Some(request_id.clone());
-                }
-            }
-        }
         if let Some(model) = &patch.model {
             self.current_model_id = model.model_id.clone();
             if let Some(agent_name) = &model.agent_name {
@@ -153,9 +131,6 @@ impl Summary {
         if let Some(git_head) = &patch.git_head {
             self.head_commit = git_head.commit.clone();
             self.head_branch = git_head.branch.clone();
-        }
-        if let Some(collection_id) = &patch.collection_id {
-            self.collection_id = Some(collection_id.clone());
         }
         let mut absent_title_applied = false;
         if let Some(title) = &patch.generated_title {
@@ -312,9 +287,9 @@ mod tests {
                     .apply_summary_patch(
                         &info_b,
                         SummaryPatch {
-                            trace_turn: Some(TraceTurnPatch {
-                                next_trace_turn: turn as u64,
-                                request_id: None,
+                            git_head: Some(GitHeadPatch {
+                                commit: Some(format!("commit-{turn}")),
+                                branch: Some("main".to_string()),
                             }),
                             ..Default::default()
                         },
@@ -332,11 +307,7 @@ mod tests {
             summary.num_messages, N,
             "lost an append increment to a racing metadata write",
         );
-        assert_eq!(
-            summary.next_trace_turn,
-            (N - 1) as u64,
-            "monotonic next_trace_turn regressed under contention",
-        );
+        assert_eq!(summary.head_branch.as_deref(), Some("main"));
         assert!(
             summary.last_active_at.is_some(),
             "activity timestamp was lost",

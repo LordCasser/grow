@@ -1737,57 +1737,6 @@ async fn test_load_prompts_only_large_session() {
         );
 }
 #[tokio::test]
-async fn test_append_feedback_creates_file_and_persists() {
-    use crate::session::persistence::{LocalFeedbackEntry, UserFeedbackEntry};
-    use prod_mc_cli_chat_proxy_types::feedback_types::{
-        ClientType, FeedbackSubmission, FeedbackType, RatingType,
-    };
-    let temp_dir = TempDir::new().unwrap();
-    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let info = create_test_info();
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    let user_entry = LocalFeedbackEntry::UserFeedback(UserFeedbackEntry {
-        submitted_at: chrono::Utc::now(),
-        session_id: "test-session-123".into(),
-        turn_number: Some(3),
-        solicited: false,
-        request_id: None,
-        dismissed: false,
-        submission: Some(FeedbackSubmission {
-            session_id: "test-session-123".into(),
-            client_type: ClientType::Tui,
-            feedback_type: FeedbackType::Rating,
-            turn_number: Some(3),
-            rating_type: Some(RatingType::Thumbs),
-            rating_value: Some(1),
-            model_id: Some("grow-3-fast".into()),
-            resolved_model_id: Some("grow-4.5".into()),
-            ..Default::default()
-        }),
-    });
-    adapter.append_feedback(&info, &user_entry).await.unwrap();
-    let dismiss_entry = LocalFeedbackEntry::UserFeedback(UserFeedbackEntry {
-        submitted_at: chrono::Utc::now(),
-        session_id: "test-session-123".into(),
-        turn_number: None,
-        solicited: true,
-        request_id: Some("req-dismiss-1".into()),
-        dismissed: true,
-        submission: None,
-    });
-    adapter.append_feedback(&info, &dismiss_entry).await.unwrap();
-    let feedback_path = adapter.feedback_file(&info);
-    let content = tokio::fs::read_to_string(&feedback_path).await.unwrap();
-    let lines: Vec<&str> = content.lines().collect();
-    assert_eq!(lines.len(), 2, "Expected 2 JSONL lines");
-    let parsed0: LocalFeedbackEntry = serde_json::from_str(lines[0]).unwrap();
-    assert!(matches!(parsed0, LocalFeedbackEntry::UserFeedback(_)));
-    let parsed1: LocalFeedbackEntry = serde_json::from_str(lines[1]).unwrap();
-    let LocalFeedbackEntry::UserFeedback(ref uf) = parsed1;
-    assert!(uf.dismissed);
-    assert!(uf.submission.is_none());
-}
-#[tokio::test]
 async fn test_copy_session_data_copies_tool_state() {
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
@@ -2597,8 +2546,6 @@ fn write_test_summary(
         current_model_id: default_model_id(),
         parent_session_id: None,
         forked_at: None,
-        collection_id: None,
-        next_trace_turn: 0,
         chat_format_version: 0,
         prompt_display_cwd: None,
         session_kind: session_kind.map(|s| s.to_string()),
@@ -2611,7 +2558,6 @@ fn write_test_summary(
         git_remotes: Vec::new(),
         head_commit: None,
         head_branch: None,
-        request_id: None,
         grow_home: None,
         last_active_at,
         generated_title: None,

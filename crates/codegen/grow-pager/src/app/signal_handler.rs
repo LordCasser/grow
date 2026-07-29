@@ -11,7 +11,7 @@
 //! in normal Rust context (not actual signal-handler context), so it can use
 //! the full [`super::emit_terminal_teardown_sequences`] path
 //! (`with_locked_stderr`, conditional cursor-style reset, multiplexer flush) plus
-//! `disable_raw_mode`, then flush Sentry/OpenTelemetry, then exit.
+//! `disable_raw_mode`, flush local logs, then exit.
 //!
 //! SIGPIPE is intentionally left alone. The current disposition is `SIG_IGN`
 //! (Rust's stdlib default), which means writes to a closed pipe return
@@ -39,7 +39,7 @@ pub(crate) fn set_current_session_id(id: Option<acp::SessionId>) {
 }
 
 /// Lets the signal handler route SIGINT/SIGTERM/SIGHUP into the same graceful
-/// quit as `/exit` (running teardown + history/telemetry flushes) instead of a
+/// quit as `/exit` (running teardown + history/diagnostics flushes) instead of a
 /// hard exit. Registered by the event loop before it starts.
 static QUIT_NOTIFY: parking_lot::Mutex<Option<std::sync::Arc<tokio::sync::Notify>>> =
     parking_lot::Mutex::new(None);
@@ -205,16 +205,16 @@ fn request_graceful_or_exit(code: i32) {
 
 /// Restore the terminal first, then flush observability, then exit.
 ///
-/// Restore must precede the (up to 2-second) Sentry flush; otherwise the
+/// Restore must precede local log flushing; otherwise the
 /// user stares at a raw-mode + alt-screen + mouse-SGR terminal for that
 /// whole window. Best-effort: a frame queued on the writer thread microseconds
 /// before the signal can still land after our teardown writes -- the writer
 /// thread is not reachable from here without a deadlock risk.
 fn shutdown_with_terminal_restore(exit_code: i32) -> ! {
     // The graceful quit (or a prior teardown) already restored the terminal;
-    // skip teardown and just flush telemetry before exiting.
+    // skip teardown and just flush diagnostics before exiting.
     if !TERMINAL_OWNED.load(Ordering::Acquire) {
-        flush_telemetry_and_exit(exit_code);
+        flush_diagnostics_and_exit(exit_code);
     }
     let mode = if SCREEN_MODE_FULLSCREEN.load(Ordering::Acquire) {
         ScreenMode::Fullscreen
@@ -232,22 +232,20 @@ fn shutdown_with_terminal_restore(exit_code: i32) -> ! {
     if let Some(ref sid) = *CURRENT_SESSION_ID.lock() {
         let _ = grow_shell::active_sessions::try_unregister(sid);
     }
-    flush_telemetry_and_exit(exit_code);
+    flush_diagnostics_and_exit(exit_code);
 }
 
 /// Shared `-> !` exit tail of `shutdown_with_terminal_restore`'s early-return
 /// and full-teardown paths.
-fn flush_telemetry_and_exit(exit_code: i32) -> ! {
+fn flush_diagnostics_and_exit(exit_code: i32) -> ! {
     // Reap detached (setsid) background children before the hard exit. This tail
     // runs on the force/second-signal and agent-mode paths that skip the
     // graceful quit; the graceful path reaps them in `app::run`'s teardown.
     xai_tty_utils::global_process_scope().kill_all();
-    // Restore fd 2 so Sentry/OTEL flushes reach the terminal.
+    // Restore fd 2 before flushing the local debug log.
     xai_tty_utils::restore_native_stderr();
-    grow_telemetry::sentry::flush_on_shutdown();
-    grow_telemetry::otel_layer::shutdown_otel();
     // Flush the --debug firehose on TUI signal exit (this path bypasses main's flush).
-    grow_telemetry::debug_log::flush();
+    grow_diagnostics::debug_log::flush();
     std::process::exit(exit_code);
 }
 

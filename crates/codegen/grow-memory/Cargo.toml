@@ -34,7 +34,7 @@ tracing = { workspace = true }
 grow-auth = { workspace = true }
 grow-config-types = { workspace = true }
 grow-http = { workspace = true }
-grow-telemetry = { workspace = true }
+grow-diagnostics = { workspace = true }
 grow-tools = { workspace = true }
 grow-version = { workspace = true }
 xai-sqlite-journal = { workspace = true }

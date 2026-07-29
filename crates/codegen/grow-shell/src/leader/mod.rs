@@ -1162,7 +1162,7 @@ async fn request_leader_vacate(conn: &LeaderConnection, pid: Option<u32>) {
         };
         ("sigterm", outcome)
     };
-    grow_telemetry::unified_log::warn(
+    grow_diagnostics::unified_log::warn(
         "leader.evict.vacate_requested",
         None,
         Some(serde_json::json!({
@@ -1202,7 +1202,7 @@ async fn evict_leader(conn: LeaderConnection, lock: &LeaderLock) {
     } else {
         "exited"
     };
-    grow_telemetry::unified_log::warn(
+    grow_diagnostics::unified_log::warn(
         "leader.evict.completed",
         None,
         Some(serde_json::json!({
@@ -1409,7 +1409,7 @@ async fn evict_zombie_leader(pid: u32, sock_path: &Path, waited: Duration) {
             "sigkilled"
         }
     };
-    grow_telemetry::unified_log::warn(
+    grow_diagnostics::unified_log::warn(
         "leader.zombie.evicted",
         None,
         Some(serde_json::json!({
@@ -1503,7 +1503,7 @@ pub async fn connect_or_spawn(
                             elapsed_ms,
                             "Adopted sibling-spawned leader after eviction race"
                         );
-                        grow_telemetry::unified_log::info(
+                        grow_diagnostics::unified_log::info(
                             "leader.spawn.sibling_adopted",
                             None,
                             Some(serde_json::json!({
@@ -1554,7 +1554,7 @@ pub async fn connect_or_spawn(
                 let elapsed_ms = start.elapsed().as_millis() as u64;
                 info!(elapsed_ms, "Spawned and connected to leader");
                 if replacing_stale {
-                    grow_telemetry::unified_log::info(
+                    grow_diagnostics::unified_log::info(
                         "leader.spawn.replacement",
                         None,
                         Some(serde_json::json!({

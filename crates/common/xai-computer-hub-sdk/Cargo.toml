@@ -28,29 +28,18 @@ prometheus = { workspace = true, optional = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }
 parking_lot = { workspace = true }
-
 fastrace = { workspace = true }
-# Trace donation: spans convert via the stock fastrace -> OTel reporter
-# and ship as standard OTLP payloads.
-fastrace-opentelemetry = { workspace = true }
-opentelemetry = { workspace = true }
-opentelemetry_sdk = { workspace = true }
-opentelemetry-proto = { workspace = true }
-prost = { workspace = true }
-base64 = { workspace = true }
 
 xai-tool-protocol = { workspace = true }
 xai-tool-runtime = { workspace = true }
 xai-tool-types = { workspace = true }
 xai-computer-hub-core = { workspace = true }
-xai-tracing = { workspace = true }
 
 # Integration tests that need heavier backend deps live in a separate sibling crate to keep this dev-dep set minimal.
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 axum = { workspace = true, features = ["ws", "macros"] }
 chrono = { workspace = true }
-base64 = { workspace = true }
 schemars = { workspace = true }
 
 [lints]

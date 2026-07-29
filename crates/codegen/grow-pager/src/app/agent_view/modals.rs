@@ -181,7 +181,7 @@ impl AgentView {
     fn log_extensions_modal_action(
         &self,
         action: &str,
-        input_method: grow_telemetry::events::ExtensionsInputMethod,
+        input_method: grow_diagnostics::events::ExtensionsInputMethod,
     ) {
         self.log_extensions_modal_action_with(action, input_method, None, None);
     }
@@ -189,18 +189,20 @@ impl AgentView {
     fn log_extensions_modal_action_with(
         &self,
         action: &str,
-        input_method: grow_telemetry::events::ExtensionsInputMethod,
+        input_method: grow_diagnostics::events::ExtensionsInputMethod,
         target: Option<String>,
         enabled: Option<bool>,
     ) {
         if let Some(ref state) = self.extensions_modal {
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::ExtensionsModalAction {
-                tab: state.active_tab.telemetry_tab(),
-                action: action.into(),
-                input_method,
-                target,
-                enabled,
-            });
+            grow_diagnostics::session_ctx::log_event(
+                grow_diagnostics::events::ExtensionsModalAction {
+                    tab: state.active_tab.diagnostics_tab(),
+                    action: action.into(),
+                    input_method,
+                    target,
+                    enabled,
+                },
+            );
         }
     }
 
@@ -208,11 +210,11 @@ impl AgentView {
         &self,
         ch: char,
         action: &crate::views::extensions_modal::ButtonAction,
-        input_method: grow_telemetry::events::ExtensionsInputMethod,
+        input_method: grow_diagnostics::events::ExtensionsInputMethod,
     ) {
         if let Some(ref state) = self.extensions_modal
             && let Some(label) =
-                crate::views::extensions_modal::action_telemetry_label(state.active_tab, ch)
+                crate::views::extensions_modal::action_diagnostics_label(state.active_tab, ch)
         {
             let (target, enabled) = Self::extensions_action_target(state, action);
             self.log_extensions_modal_action_with(&label, input_method, target, enabled);
@@ -506,7 +508,7 @@ impl AgentView {
                     {
                         self.log_extensions_modal_action(
                             "collapse",
-                            grow_telemetry::events::ExtensionsInputMethod::Keyboard,
+                            grow_diagnostics::events::ExtensionsInputMethod::Keyboard,
                         );
                     }
                     return InputOutcome::Changed;
@@ -526,7 +528,7 @@ impl AgentView {
                             );
                             self.log_extensions_modal_action_with(
                                 "auth",
-                                grow_telemetry::events::ExtensionsInputMethod::Keyboard,
+                                grow_diagnostics::events::ExtensionsInputMethod::Keyboard,
                                 target,
                                 enabled,
                             );
@@ -537,7 +539,7 @@ impl AgentView {
                         if self.extensions_modal_set_collapsed(sel, &gk, false) {
                             self.log_extensions_modal_action(
                                 "expand",
-                                grow_telemetry::events::ExtensionsInputMethod::Keyboard,
+                                grow_diagnostics::events::ExtensionsInputMethod::Keyboard,
                             );
                         }
                     }
@@ -549,7 +551,7 @@ impl AgentView {
                     state.picker_state.scroll_offset = None;
                     self.log_extensions_modal_action(
                         "collapse",
-                        grow_telemetry::events::ExtensionsInputMethod::Keyboard,
+                        grow_diagnostics::events::ExtensionsInputMethod::Keyboard,
                     );
                     return InputOutcome::Changed;
                 }
@@ -559,7 +561,7 @@ impl AgentView {
                     state.picker_state.scroll_offset = None;
                     self.log_extensions_modal_action(
                         "expand",
-                        grow_telemetry::events::ExtensionsInputMethod::Keyboard,
+                        grow_diagnostics::events::ExtensionsInputMethod::Keyboard,
                     );
                     return InputOutcome::Changed;
                 }
@@ -693,7 +695,7 @@ impl AgentView {
                 if cycled {
                     self.log_extensions_modal_action(
                         "filter",
-                        grow_telemetry::events::ExtensionsInputMethod::Keyboard,
+                        grow_diagnostics::events::ExtensionsInputMethod::Keyboard,
                     );
                 }
                 InputOutcome::Changed
@@ -707,7 +709,7 @@ impl AgentView {
                     self.log_extensions_modal_resolved_action(
                         ch,
                         &action,
-                        grow_telemetry::events::ExtensionsInputMethod::Keyboard,
+                        grow_diagnostics::events::ExtensionsInputMethod::Keyboard,
                     );
                     self.execute_modal_button_action(action)
                 } else {
@@ -717,18 +719,18 @@ impl AgentView {
             crate::views::picker::PickerOutcome::Selected(_)
             | crate::views::picker::PickerOutcome::Expand(_) => self
                 .extensions_modal_expand_or_auth(
-                    grow_telemetry::events::ExtensionsInputMethod::Keyboard,
+                    grow_diagnostics::events::ExtensionsInputMethod::Keyboard,
                 ),
             crate::views::picker::PickerOutcome::Collapse(_) => {
                 self.extensions_modal_toggle_fold(
-                    grow_telemetry::events::ExtensionsInputMethod::Keyboard,
+                    grow_diagnostics::events::ExtensionsInputMethod::Keyboard,
                 );
                 InputOutcome::Changed
             }
             crate::views::picker::PickerOutcome::NonSelectableClick(idx) => {
                 self.extensions_modal_toggle_mcp_section_at(
                     idx,
-                    grow_telemetry::events::ExtensionsInputMethod::Keyboard,
+                    grow_diagnostics::events::ExtensionsInputMethod::Keyboard,
                 );
                 InputOutcome::Changed
             }
@@ -930,7 +932,7 @@ impl AgentView {
                 self.log_extensions_modal_resolved_action(
                     ch,
                     &action,
-                    grow_telemetry::events::ExtensionsInputMethod::Mouse,
+                    grow_diagnostics::events::ExtensionsInputMethod::Mouse,
                 );
                 return self.execute_modal_button_action(action);
             }
@@ -1074,7 +1076,7 @@ impl AgentView {
                 if cycled {
                     self.log_extensions_modal_action(
                         "filter",
-                        grow_telemetry::events::ExtensionsInputMethod::Mouse,
+                        grow_diagnostics::events::ExtensionsInputMethod::Mouse,
                     );
                 }
                 InputOutcome::Changed
@@ -1082,12 +1084,12 @@ impl AgentView {
             crate::views::picker::PickerOutcome::Selected(_)
             | crate::views::picker::PickerOutcome::Expand(_) => self
                 .extensions_modal_expand_or_auth(
-                    grow_telemetry::events::ExtensionsInputMethod::Mouse,
+                    grow_diagnostics::events::ExtensionsInputMethod::Mouse,
                 ),
             crate::views::picker::PickerOutcome::NonSelectableClick(idx) => {
                 self.extensions_modal_toggle_mcp_section_at(
                     idx,
-                    grow_telemetry::events::ExtensionsInputMethod::Mouse,
+                    grow_diagnostics::events::ExtensionsInputMethod::Mouse,
                 );
                 InputOutcome::Changed
             }
@@ -1102,7 +1104,7 @@ impl AgentView {
     fn extensions_modal_toggle_mcp_section_at(
         &mut self,
         entry_idx: usize,
-        input_method: grow_telemetry::events::ExtensionsInputMethod,
+        input_method: grow_diagnostics::events::ExtensionsInputMethod,
     ) {
         let Some(ref mut state) = self.extensions_modal else {
             return;
@@ -1175,7 +1177,7 @@ impl AgentView {
     /// Expand/collapse the selected row, or trigger MCP OAuth when the server needs auth.
     fn extensions_modal_expand_or_auth(
         &mut self,
-        input_method: grow_telemetry::events::ExtensionsInputMethod,
+        input_method: grow_diagnostics::events::ExtensionsInputMethod,
     ) -> InputOutcome {
         if self
             .extensions_modal
@@ -1207,7 +1209,7 @@ impl AgentView {
     /// toggle their collapsed state; leaf items toggle detail-field expansion.
     fn extensions_modal_toggle_fold(
         &mut self,
-        input_method: grow_telemetry::events::ExtensionsInputMethod,
+        input_method: grow_diagnostics::events::ExtensionsInputMethod,
     ) {
         let Some(ref mut state) = self.extensions_modal else {
             return;
@@ -2194,7 +2196,7 @@ mod extensions_action_target_tests {
         modal.entry_group_keys = vec![None];
         modal.picker_state.selected = 0;
 
-        // Telemetry target resolves to the selected plugin (parity with toggle/uninstall).
+        // Diagnostic target resolves to the selected plugin (parity with toggle/uninstall).
         let (target, enabled) =
             AgentView::extensions_action_target(&modal, &ButtonAction::UpdateSelectedPlugin);
         assert_eq!(target.as_deref(), Some("my-plugin"));

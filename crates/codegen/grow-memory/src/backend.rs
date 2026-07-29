@@ -65,7 +65,7 @@ impl EndpointScopedCredentials {
         }
         if auth_credentials.is_some() || api_key_provider.is_some() {
             tracing::info!(
-                target: grow_telemetry::memory_log::TARGET,
+                target: grow_diagnostics::memory_log::TARGET,
                 endpoint,
                 "memory embeddings: session credentials withheld for non-first-party endpoint; its own key, if any, still applies"
             );
@@ -97,7 +97,7 @@ impl EndpointScopedCredentials {
 /// `[memory.search]` config because no single place applied all builder methods.
 #[derive(Clone)]
 pub struct MemoryBackendParams {
-    /// Session ID for telemetry events.
+    /// Session ID for diagnostics events.
     pub session_id: String,
     /// Embedding provider config — `None` forces FTS-only fallback everywhere.
     pub embed_config: Option<grow_config_types::MemoryEmbeddingConfig>,
@@ -112,7 +112,7 @@ pub struct MemoryBackendParams {
     pub watcher: Option<Arc<MemoryFileWatcher>>,
     /// Seconds before a stale reindex claim is forcibly released.
     pub stale_claim_secs: i64,
-    /// Telemetry label emitted with every search event from this backend.
+    /// Diagnostic label emitted with every search event from this backend.
     ///
     /// Differentiates the three runtime search paths in dashboards and logs:
     /// - `"tool"` — model-initiated `memory_search` tool call (ToolBridge)
@@ -152,7 +152,7 @@ async fn build_embedding_provider(
     let credentials_approved = credentials.approved_for(base_url);
     if !credentials_approved {
         tracing::error!(
-            target: grow_telemetry::memory_log::TARGET,
+            target: grow_diagnostics::memory_log::TARGET,
             base_url,
             approved = ?credentials.endpoint,
             "memory embeddings: scoped credentials do not match the request URL; dropping them"
@@ -196,11 +196,11 @@ pub struct MemoryBackendImpl {
     watcher: Option<Arc<MemoryFileWatcher>>,
     /// Stale claim threshold for reindex coordination.
     stale_claim_secs: i64,
-    /// Session ID for telemetry events.
+    /// Session ID for diagnostics events.
     session_id: String,
-    /// Telemetry label for search events — mirrors [`MemoryBackendParams::search_source`].
+    /// Diagnostic label for search events — mirrors [`MemoryBackendParams::search_source`].
     search_source: &'static str,
-    /// Shared search counter — read by session summary telemetry.
+    /// Shared search counter — read by session summary diagnostics.
     ///
     /// Only the ToolBridge backend's counter is shared back to the session actor;
     /// injection and compaction-recovery backends use their own local counters.
@@ -228,7 +228,7 @@ impl MemoryBackendImpl {
         }
     }
 
-    /// Set the session ID for telemetry.
+    /// Set the session ID for diagnostics.
     pub fn with_session_id(mut self, session_id: String) -> Self {
         self.session_id = session_id;
         self
@@ -358,7 +358,7 @@ impl MemoryBackend for MemoryBackendImpl {
         // ── Sync phase 1: reindex dirty files, collect chunks needing embeddings ──
         let mut reindex_chunks: Vec<(String, String)> = Vec::new();
         let mut needs_release = false;
-        // Watcher-sync telemetry data (populated inside the claim guard below).
+        // Watcher-sync diagnostics data (populated inside the claim guard below).
         let mut watcher_sync_stats: Option<(usize, usize, std::time::Instant)> = None;
         if let Some(ref watcher) = self.watcher
             && watcher.is_dirty()
@@ -370,7 +370,7 @@ impl MemoryBackend for MemoryBackendImpl {
             let dirty_count = dirty_files.len();
             // Sum of all index-chunk changes this cycle: chunks added/updated/
             // removed during reindex_file, plus chunks removed by delete_path.
-            // Using one counter rather than two prevents telemetry from
+            // Using one counter rather than two prevents diagnostics from
             // under-reporting delete-only syncs (where reindex_file is never
             // called and the old `reindexed_count` would stay at 0).
             let mut changed_chunk_count: usize = 0;
@@ -414,7 +414,7 @@ impl MemoryBackend for MemoryBackendImpl {
                     }
                     Err(e) => {
                         tracing::warn!(
-                            target: grow_telemetry::memory_log::TARGET,
+                            target: grow_diagnostics::memory_log::TARGET,
                             error = %e,
                             "embedding batch failed during sync-on-search, skipping"
                         );
@@ -429,10 +429,10 @@ impl MemoryBackend for MemoryBackendImpl {
         }
         if needs_release {
             index.release_claim();
-            // Fire watcher-sync telemetry now that we know the embedded count.
+            // Fire watcher-sync diagnostics now that we know the embedded count.
             if let Some((dirty_count, reindexed_count, sync_start)) = watcher_sync_stats {
-                grow_telemetry::session_ctx::log_event(
-                    grow_telemetry::memory_telemetry::MemoryWatcherSync {
+                grow_diagnostics::session_ctx::log_event(
+                    grow_diagnostics::memory_events::MemoryWatcherSync {
                         session_id: self.session_id.clone(),
                         dirty_file_count: dirty_count,
                         claimed: true,
@@ -513,8 +513,8 @@ impl MemoryBackend for MemoryBackendImpl {
         let top_score = results.first().map_or(0.0, |r| r.score);
 
         if results.is_empty() {
-            grow_telemetry::session_ctx::log_event(
-                grow_telemetry::memory_telemetry::MemorySearchEmpty {
+            grow_diagnostics::session_ctx::log_event(
+                grow_diagnostics::memory_events::MemorySearchEmpty {
                     session_id: self.session_id.clone(),
                     query_length: query.len(),
                     keyword_count,
@@ -526,8 +526,8 @@ impl MemoryBackend for MemoryBackendImpl {
                 },
             );
         } else {
-            grow_telemetry::session_ctx::log_event(
-                grow_telemetry::memory_telemetry::MemorySearch {
+            grow_diagnostics::session_ctx::log_event(
+                grow_diagnostics::memory_events::MemorySearch {
                     session_id: self.session_id.clone(),
                     query_length: query.len(),
                     keyword_count,
@@ -801,11 +801,11 @@ mod factory_tests {
         assert_eq!(cloned.search_source, "injection");
     }
 
-    /// Watcher startup telemetry reflects actual runtime state.
+    /// Watcher startup diagnostics reflects actual runtime state.
     ///
     /// `watcher.is_some()` is `true` only when the watcher started successfully.
     /// With a valid directory the watcher should start; without one it should return None.
-    /// This guards the contract that `watcher_started` in telemetry must reflect
+    /// This guards the contract that `watcher_started` in diagnostics must reflect
     /// runtime outcome, not configuration intent.
     #[test]
     fn test_params_watcher_started_reflects_runtime() {
@@ -836,7 +836,7 @@ mod factory_tests {
         };
         assert!(
             params_no_watcher.watcher.is_none(),
-            "params.watcher.is_none() means telemetry reports watcher_started=false"
+            "params.watcher.is_none() means diagnostics reports watcher_started=false"
         );
     }
 

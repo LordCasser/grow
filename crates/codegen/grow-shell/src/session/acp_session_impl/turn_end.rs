@@ -223,7 +223,7 @@ impl SessionActor {
             broadcast_queue = input.queue_meta.is_some();
         } else {
             tracing::warn!("Received completion for unknown prompt: {prompt_id}");
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "shell.turn.stale_completion_dropped",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
@@ -345,7 +345,7 @@ impl SessionActor {
         .await;
     }
 
-    /// Telemetry error category; delegates to `stop_failure_error_type` so the
+    /// Diagnostic error category; delegates to `stop_failure_error_type` so the
     /// two classifications cannot drift.
     pub(super) fn classify_turn_error(err: &acp::Error) -> String {
         use grow_hooks::event::StopFailureKind as K;

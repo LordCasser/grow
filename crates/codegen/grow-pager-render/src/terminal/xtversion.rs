@@ -208,9 +208,9 @@ mod tests {
     // Sets the process-global OnceLock — safe under nextest's
     // process-per-test isolation.
     #[test]
-    fn telemetry_snapshot_includes_recorded_reply() {
+    fn diagnostics_snapshot_includes_recorded_reply() {
         record_reply("PtyHarnessTerm 9.9");
-        let t = crate::terminal::terminal_context().telemetry_snapshot();
+        let t = crate::terminal::terminal_context().diagnostics_snapshot();
         assert_eq!(t.xtversion, "PtyHarnessTerm 9.9");
     }
 }

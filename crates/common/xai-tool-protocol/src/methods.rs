@@ -95,17 +95,6 @@ define_methods! {
     ToolNotification => "tool.notification",
     /// Reply to a request/response hook, correlated back to the harness by `hook_id`.
     HookReply => "hook_reply",
-    /// Notification (no `id`, no response); rejects surface only in
-    /// hub metrics. Only hub-minted trace-ids are accepted.
-    TracesDonate => "traces.donate",
-    /// Notification (no `id`, no response); rejects surface only in hub
-    /// metrics. Donor service.name must be hub-allowlisted.
-    LogsDonate => "logs.donate",
-    /// Notification (no `id`, no response); rejects surface only in hub
-    /// metrics. Donor service.name must be hub-allowlisted. No envelope
-    /// `session_id` — metrics are process-aggregate.
-    MetricsDonate => "metrics.donate",
-
     // service → tool_server
     ToolCallRequest => "tool_call_request",
 
@@ -171,9 +160,6 @@ mod tests {
             Method::ToolCallProgress,
             Method::ToolNotification,
             Method::HookReply,
-            Method::TracesDonate,
-            Method::LogsDonate,
-            Method::MetricsDonate,
             Method::ToolCallRequest,
             Method::ToolsChanged,
             Method::SubscribeAck,

@@ -51,7 +51,7 @@
   },
   {
     "category": "fixes",
-    "description": "**Fixed a crash** shortly after launch on some systems caused by the telemetry exporter.",
+    "description": "**Fixed a crash** shortly after launch on some systems caused by the diagnostics exporter.",
     "breaking_change": false
   }
 ]

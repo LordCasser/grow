@@ -1033,7 +1033,7 @@ fn free_usage_translate_local_submit_maps_options() {
     open_free_usage_upsell(agent, None);
     let mut qv = agent.question_view.take().unwrap();
     let kind = || LocalQuestionKind::FreeUsageUpsell {
-        source: grow_telemetry::events::SubscriptionUpsell::FreeUsagePaywall,
+        source: grow_diagnostics::events::SubscriptionUpsell::FreeUsagePaywall,
     };
 
     for idx in [0, 1] {
@@ -1076,7 +1076,7 @@ fn restricted_command_submit_opens_two_option_upsell() {
         qv.local_kind,
         Some(
             crate::views::question_view::LocalQuestionKind::FreeUsageUpsell {
-                source: grow_telemetry::events::SubscriptionUpsell::RestrictedCommand,
+                source: grow_diagnostics::events::SubscriptionUpsell::RestrictedCommand,
             }
         )
     ));

@@ -123,7 +123,7 @@ impl SessionActor {
             if state.running_task.is_some() {
                 let queue_depth = state.pending_inputs.len();
                 if queue_depth > 0 {
-                    grow_telemetry::unified_log::debug(
+                    grow_diagnostics::unified_log::debug(
                         "shell.prompt.start_blocked",
                         Some(self.session_info.id.0.as_ref()),
                         Some(serde_json::json!({
@@ -229,8 +229,6 @@ impl SessionActor {
             prompt_id,
             prompt_blocks,
             prompt_mode,
-            trace_gcs_config,
-            artifact_tracker,
             client_identifier,
             screen_mode,
             verbatim,
@@ -249,8 +247,6 @@ impl SessionActor {
                 front.prompt_id.clone(),
                 front.prompt_blocks.clone(),
                 front.prompt_mode,
-                front.trace_gcs_config.clone(),
-                front.artifact_tracker.clone(),
                 front.client_identifier.clone(),
                 front.screen_mode.clone(),
                 front.verbatim,
@@ -266,7 +262,7 @@ impl SessionActor {
                 gate.set(false);
             }
             state.notifications_suppressed = false;
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "shell.task_wake.gate_cleared",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({ "reason": "queued_user_promotion" })),
@@ -313,8 +309,6 @@ impl SessionActor {
             prompt_id,
             prompt_blocks,
             prompt_mode,
-            trace_gcs_config,
-            artifact_tracker,
             client_identifier,
             screen_mode,
             verbatim,
@@ -583,8 +577,6 @@ impl SessionActor {
             prompt_id: merged_prompt_id,
             prompt_blocks: merged_blocks,
             prompt_mode: crate::session::plan_mode::PromptMode::Agent,
-            trace_gcs_config: None,
-            artifact_tracker: None,
             client_identifier: None,
             screen_mode: None,
             verbatim: true,

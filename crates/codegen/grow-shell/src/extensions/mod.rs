@@ -24,7 +24,6 @@ pub mod prompt_meta;
 pub mod recap;
 pub mod repair;
 pub mod rewind;
-pub mod rollout;
 pub mod routing;
 pub mod search;
 pub mod session_admin;

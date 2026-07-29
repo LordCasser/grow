@@ -183,7 +183,7 @@ impl DoomLoopSignal {
     /// The tightest label among `raws`: the `tail_repetition` trigger with
     /// the LOWEST threshold (tighter repetition = stronger evidence), falling
     /// back to the first label when none parse as `tail_repetition`. Raw
-    /// labels only — telemetry-safe.
+    /// labels only — diagnostics-safe.
     pub fn tightest(raws: impl IntoIterator<Item = impl AsRef<str>>) -> Option<String> {
         let mut first: Option<String> = None;
         let mut best: Option<(u32, String)> = None;

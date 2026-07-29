@@ -65,7 +65,7 @@ agent-client-protocol = { workspace = true }
 grow-config = { workspace = true }
 grow-shared = { workspace = true }
 grow-workspace = { workspace = true }
-grow-telemetry = { workspace = true }
+grow-diagnostics = { workspace = true }
 grow-tools = { workspace = true }
 grow-paths = { path = "../grow-paths" }
 

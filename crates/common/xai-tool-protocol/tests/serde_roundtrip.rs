@@ -735,14 +735,12 @@ fn tool_call_params_round_trips_and_omits_optionals_when_none() {
         deadline_ms: None,
         behavior_version: None,
         cwd: None,
-        trace_context: None,
     };
     let v = roundtrip(&p);
     let obj = v.as_object().unwrap();
     assert!(!obj.contains_key("deadline_ms"));
     assert!(!obj.contains_key("behavior_version"));
     assert!(!obj.contains_key("cwd"));
-    assert!(!obj.contains_key("trace_context"));
 
     let full = ToolCallParams {
         tool_call_id: call_id(),
@@ -751,13 +749,11 @@ fn tool_call_params_round_trips_and_omits_optionals_when_none() {
         deadline_ms: Some(60_000),
         behavior_version: Some("v1".to_owned()),
         cwd: Some("/work".to_owned()),
-        trace_context: Some("00-trace-span-01".to_owned()),
     };
     let v = roundtrip(&full);
     assert_eq!(v["deadline_ms"], json!(60_000));
     assert_eq!(v["behavior_version"], json!("v1"));
     assert_eq!(v["cwd"], json!("/work"));
-    assert_eq!(v["trace_context"], json!("00-trace-span-01"));
 }
 
 #[test]
@@ -1112,14 +1108,9 @@ fn hook_frame_round_trips_with_optional_fields() {
         call_id: Some(call_id()),
         hook_id: None,
         event: HookEvent::Cancel,
-        trace_context: Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".to_owned()),
     };
     let v = roundtrip(&f);
     assert_eq!(v["event"]["type"], json!("Cancel"));
-    assert_eq!(
-        v["trace_context"],
-        json!("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
-    );
 
     let session_wide = HookFrame {
         session_id: session(),
@@ -1127,13 +1118,11 @@ fn hook_frame_round_trips_with_optional_fields() {
         call_id: None,
         hook_id: None,
         event: HookEvent::SessionEnded,
-        trace_context: None,
     };
     let v = roundtrip(&session_wide);
     let obj = v.as_object().unwrap();
     assert!(!obj.contains_key("tool_id"));
     assert!(!obj.contains_key("call_id"));
-    assert!(!obj.contains_key("trace_context"));
 }
 
 #[test]

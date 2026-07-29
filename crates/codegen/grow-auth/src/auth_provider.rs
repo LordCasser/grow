@@ -1,23 +1,21 @@
 //! Credential dependency-inversion seam for outbound HTTP made by the
-//! data-collector. Shell installs `ShellAuthCredentialProvider` wrapping
-//! `AuthManager` + `TokenRefresher`; data-collector code holds an
+//! authenticated services. Shell installs `ShellAuthCredentialProvider` wrapping
+//! `AuthManager` + `TokenRefresher`; callers hold an
 //! `Arc<dyn AuthCredentialProvider>`.
 
 use reqwest::RequestBuilder;
 
 use crate::visibility::HttpAuth;
 
-/// Snapshot of the currently effective credentials. Used by callers
-/// that build their own header maps (the OTel OTLP exporter) or that
-/// need the bearer prefix for 401-attribution telemetry.
+/// Snapshot of the currently effective credentials for callers that build
+/// their own authenticated requests or record local 401 diagnostics.
 #[derive(Clone, Debug, Default)]
 pub struct CredentialSnapshot {
     /// Bearer token. `None` when no auth is configured (CI / `--api-key` headless).
     pub token: Option<String>,
     /// User identifier matching the bearer token's owner. `None` when no auth
     /// is configured or when the underlying provider has no concept of user
-    /// identity (`StaticAuthCredentialProvider`). Read by the OTel layer to
-    /// populate the `user.id` resource attribute.
+    /// identity (`StaticAuthCredentialProvider`).
     pub user_id: Option<String>,
     /// Team identifier from OAuth. `None` for personal accounts or when
     /// no auth is configured.
@@ -74,7 +72,7 @@ pub trait AuthCredentialProvider: HttpAuth + Send + Sync + 'static {
 /// `bearer` is the wire bearer the inner `HttpAuth` will send in the
 /// `Authorization` header. Stored alongside the inner so `snapshot().token`
 /// returns the same prefix that goes out on the wire (used by
-/// 401-attribution telemetry). `None` when no bearer is configured.
+/// 401-attribution diagnostics). `None` when no bearer is configured.
 pub struct StaticAuthCredentialProvider {
     inner: Box<dyn HttpAuth>,
     bearer: Option<String>,

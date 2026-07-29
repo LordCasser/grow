@@ -3,17 +3,10 @@
 //! Every 401 emit site in the shell joins the bearer the client
 //! actually sent on the wire (the `Authorization` value for OAI-compat
 //! backends, `x-api-key` for Anthropic Messages, the API proxy
-//! `Authorization` header for storage / feedback / registry /
-//! idle-resume) with the live
-//! [`AuthManager::current_api_key`] value. The two sinks are:
-//!
-//! 1. [`grow_telemetry::unified_log::warn`] for the local
-//!    `~/.grow/logs/unified.jsonl` file (best-effort; ships to GCS
-//!    only on OIDC refresh failure via `auth/refresh.rs`).
-//! 2. A discrete `tracing::warn_span!("auth_401_attribution", ...)`
-//!    captured by the OTel layer in `util/otel_layer.rs` and shipped
-//!    via OTLP export to the configured telemetry backend
-//!    (queryable by span name `auth_401_attribution`).
+//! `Authorization` header for registry / idle-resume) with the live
+//! [`AuthManager::current_api_key`] value. Records
+//! are written to the local unified log and the process-local `tracing`
+//! subscriber.
 //!
 //! # Schema (every emit)
 //!
@@ -24,8 +17,8 @@
 //!   "mint_age_seconds": <i64; current time minus auth.create_time, or -1>,
 //!   "expires_at_seconds_from_now": <i64; auth.expires_at minus now,
 //!                                 or 0 when no current token>,
-//!   "consumer": "OaiCompatClient.<endpoint>" | "StorageClient.<op>"
-//!             | "FeedbackClient.<op>" | "SessionRegistryClient.<op>"
+//!   "consumer": "OaiCompatClient.<endpoint>"
+//!             | "SessionRegistryClient.<op>"
 //!             | "IdleResumeModelRefresh",
 //!   "is_stale_snapshot": <bool; true iff sent_prefix differs from a *known* current_prefix>
 //! }
@@ -38,8 +31,8 @@
 //! its six 401 arms; this module provides [`ShellAttribution`], the
 //! concrete impl that the shell wires into
 //! [`grow_sampler::SamplerConfig::attribution_callback`] at every
-//! sampler-construction site. Non-sampler sites (storage / feedback /
-//! registry / idle-resume) call [`record_consumer_401`]
+//! sampler-construction site. Non-sampler sites (registry / idle-resume) call
+//! [`record_consumer_401`]
 //! directly with their `(consumer_kind, op)` pair.
 
 use std::sync::Arc;
@@ -149,7 +142,7 @@ impl Auth401AttributionCallback for ShellAttribution {
         // truncation is intentional belt-and-suspenders -- the
         // sampler-side scrub keeps the full bearer from ever leaving
         // that crate, and the shell-side scrub keeps the local-log
-        // and OTel-span sinks aligned with the existing 12-char
+        // and tracing sinks aligned with the existing 12-char
         // convention used by every other auth log line.
         record_consumer_401(
             self.auth_manager.as_ref(),
@@ -197,10 +190,6 @@ pub(crate) enum ConsumerKind {
     /// Sampler-side OpenAI-compat / Anthropic Messages emit. The op
     /// string is the [`SamplingConsumer::as_endpoint`] return value.
     OaiCompatClient,
-    /// Storage upload / batch / check sites in `upload/storage_client.rs`.
-    StorageClient,
-    /// Feedback collection sites in `agent/feedback_client.rs`.
-    FeedbackClient,
     /// Session registry register/update sites in
     /// `agent/session_registry_client.rs`.
     SessionRegistryClient,
@@ -229,8 +218,6 @@ impl ConsumerKind {
     fn prefix(self) -> &'static str {
         match self {
             Self::OaiCompatClient => "OaiCompatClient",
-            Self::StorageClient => "StorageClient",
-            Self::FeedbackClient => "FeedbackClient",
             Self::SessionRegistryClient => "SessionRegistryClient",
             Self::IdleResumeModelRefresh => "IdleResumeModelRefresh",
             Self::ImageGen => "ImageGen",
@@ -264,11 +251,10 @@ fn format_consumer(kind: ConsumerKind, op: &str) -> String {
 /// Emit a single `auth 401 attribution` event for a per-consumer 401.
 ///
 /// Wraps [`record_auth_401`] with the design-doc `consumer` formatting
-/// (e.g., `"StorageClient.upload"`, `"FeedbackClient.submit"`).
+/// (e.g., `"SessionRegistryClient.register"`).
 /// All 401 emit sites in `grow-shell` go through this helper -- the
 /// per-client `record_401_attribution` wrappers in
-/// `agent/feedback_client.rs`, `agent/session_registry_client.rs`,
-/// and `upload/storage_client.rs` each
+/// `agent/session_registry_client.rs` each
 /// resolve their bearer and call this with the right `(kind, op)`.
 ///
 /// `sent_bearer` may be either a full bearer (passed by the
@@ -290,8 +276,8 @@ pub(crate) fn record_consumer_401(
     record_auth_401(auth_manager, session_id, &consumer, sent_bearer);
 }
 
-/// Emit a single `auth 401 attribution` event to both sinks (local
-/// unified log file + OTel span for OTLP export).
+/// Emit a single `auth 401 attribution` event to the local unified log and
+/// process-local tracing subscriber.
 ///
 /// Schema:
 /// `(sent_key_prefix, current_key_prefix, mint_age_seconds,
@@ -307,7 +293,7 @@ pub(crate) fn record_consumer_401(
 ///
 /// `consumer` should be one of the canonical strings used by the
 /// per-client wrappers, e.g. `"OaiCompatClient.chat_completions_stream"`,
-/// `"StorageClient.upload"`, `"IdleResumeModelRefresh"`. Most call
+/// `"SessionRegistryClient.register"`, `"IdleResumeModelRefresh"`. Most call
 /// sites should go through [`record_consumer_401`] which formats the
 /// consumer string from a [`ConsumerKind`] for them.
 pub(crate) fn record_auth_401(
@@ -318,31 +304,11 @@ pub(crate) fn record_auth_401(
 ) {
     let payload = compute_attribution_payload(auth_manager, consumer, sent_bearer);
 
-    // Sink 1 -- local file (~/.grow/logs/unified.jsonl) + scrubbed
-    // tracing event. The local file is reliable but only ships to GCS
-    // on OIDC refresh failure (auth/refresh.rs::spawn_diagnostic_upload),
-    // so by itself it does not give visibility into the steady-state
-    // 401 population. Sink 2 below provides that.
-    grow_telemetry::unified_log::warn("auth 401 attribution", session_id, Some(payload.clone()));
+    // Durable local file (~/.grow/logs/unified.jsonl).
+    grow_diagnostics::unified_log::warn("auth 401 attribution", session_id, Some(payload.clone()));
 
-    // Sink 2 -- discrete OTel span exported via OTLP
-    // (util/otel_layer.rs). Auth 401 attribution schema fields below
-    // become OTel span attributes under `attributes.custom.<name>`
-    // per the tracing-opentelemetry bridge; query by span name
-    // `auth_401_attribution` in the configured telemetry backend.
-    //
-    // Wrapping in a `warn_span!` (vs. plain `tracing::warn!`) ensures
-    // emission even when no parent span is active. The OTel layer
-    // attaches plain events to the currently-entered span only, so a
-    // `tracing::warn!` from a `spawn_blocking` closure (idle-resume
-    // model refresh) or a background sync task is silently dropped.
-    // A `warn_span!` itself is always emitted by the layer's
-    // `on_new_span`/`on_close` hooks regardless of parent context.
-    //
-    // The span carries no body and is dropped immediately at the end
-    // of this function, so its `duration` is a few microseconds and
-    // it is logically a one-shot record (not a wrapping context for
-    // any other work).
+    // A discrete span makes the same scrubbed fields available to any local
+    // tracing layer even when no parent span is active.
     let _attribution_span = tracing::warn_span!(
         "auth_401_attribution",
         // String fields. tracing flattens Option<&str> via Display, so
@@ -601,11 +567,6 @@ mod tests {
                 "OaiCompatClient.chat_completions_stream",
             ),
             (
-                ConsumerKind::StorageClient,
-                "upload_file",
-                "StorageClient.upload_file",
-            ),
-            (
                 ConsumerKind::IdleResumeModelRefresh,
                 "",
                 "IdleResumeModelRefresh",
@@ -639,10 +600,6 @@ mod tests {
         assert_eq!(
             format_consumer(ConsumerKind::OaiCompatClient, "chat_completions_stream"),
             "OaiCompatClient.chat_completions_stream"
-        );
-        assert_eq!(
-            format_consumer(ConsumerKind::StorageClient, "upload_file"),
-            "StorageClient.upload_file"
         );
     }
 
@@ -690,9 +647,8 @@ mod tests {
     /// `warn_span!("auth_401_attribution", ...)` emit fired with the
     /// expected name and field values.
     ///
-    /// We intentionally only need `on_new_span` (which the
-    /// tracing-opentelemetry layer uses as its `OTel span_started`
-    /// hook). `on_close` is not asserted because the test cares about
+    /// We intentionally only need `on_new_span`. `on_close` is not asserted
+    /// because the test cares about
     /// "did the span exist with these attributes," not its duration.
     mod span_capture {
         use std::sync::Mutex;
@@ -770,13 +726,12 @@ mod tests {
 
     /// `record_auth_401` emits a discrete `warn_span!` with name
     /// `"auth_401_attribution"` and the attribution fields as span
-    /// attributes. This is the span the tracing-opentelemetry bridge
-    /// ships via OTLP export to the configured telemetry backend.
+    /// attributes for local tracing layers.
     /// Verifies field names, types, and values match the schema
     /// documented at the top of this module.
     #[test]
     #[serial_test::serial(attribution_emit_count)]
-    fn record_auth_401_emits_otel_span_with_attribution_fields() {
+    fn record_auth_401_emits_tracing_span_with_attribution_fields() {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
 
@@ -790,7 +745,7 @@ mod tests {
 
         record_auth_401(
             &am,
-            Some("sid-otel-span"),
+            Some("sid-tracing-span"),
             "OaiCompatClient.chat_completions_stream",
             Some("stale-snapshot-aaaaaa"),
         );
@@ -824,7 +779,7 @@ mod tests {
         );
         assert_eq!(
             attribution.fields_str.get("session_id").map(String::as_str),
-            Some("sid-otel-span"),
+            Some("sid-tracing-span"),
         );
 
         // Boolean: the load-bearing field for stale-vs-live splits.

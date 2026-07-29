@@ -33,7 +33,7 @@ impl ClipboardDelivery {
         matches!(self, Self::Confirmed | Self::Unverified)
     }
 
-    pub fn telemetry_label(self) -> &'static str {
+    pub fn diagnostics_label(self) -> &'static str {
         self.into()
     }
 }
@@ -257,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_projection_labels_and_historical_boolean_are_pinned() {
+    fn diagnostics_projection_labels_and_historical_boolean_are_pinned() {
         for (delivery, label, confirmed, failed, reported_success) in [
             (ClipboardDelivery::Confirmed, "confirmed", true, false, true),
             (
@@ -269,7 +269,7 @@ mod tests {
             ),
             (ClipboardDelivery::Failed, "failed", false, true, false),
         ] {
-            assert_eq!(delivery.telemetry_label(), label);
+            assert_eq!(delivery.diagnostics_label(), label);
             assert_eq!(delivery.is_confirmed(), confirmed);
             assert_eq!(delivery.is_failed(), failed);
             assert_eq!(delivery.reported_success(), reported_success);
@@ -453,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_and_container_prefer_container_feedback_and_telemetry_branch() {
+    fn remote_and_container_prefer_container_feedback_and_diagnostics_branch() {
         let confirmed = resolve_copy_decision(
             &legs(false, false, false, false, true, ""),
             "hello",

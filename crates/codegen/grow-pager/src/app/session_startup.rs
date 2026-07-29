@@ -450,7 +450,7 @@ pub(crate) fn pre_acp_auth_manager(
         &grow_shell::util::grow_home::grow_home(),
         agent_config.auth.clone(),
     ));
-    auth.configure_refresher(agent_config.auth.auth_provider_command.clone(), None);
+    auth.configure_refresher(agent_config.auth.auth_provider_command.clone());
     auth
 }
 /// Preflight: preferred id must be a UUID and not a persisted session under `cwd`.
@@ -706,19 +706,12 @@ async fn restore_session_from_remote(
             .with_deployment_key(deployment_key.clone())
             .with_alpha_test_key(agent_config.endpoints.alpha_test_key.clone())
             .with_auth(auth_manager.clone());
-    let storage_client = grow_shell::save::StorageClient;
     let progress: grow_shell::session::restore::ProgressCallback =
         Box::new(|event| eprintln!("  {}", event.display_line()));
-    let result = restore_session_with_storage(
-        &registry_client,
-        &storage_client,
-        session_id,
-        cwd,
-        None,
-        Some(progress),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to restore session from remote: {:#}", e))?;
+    let result =
+        restore_session_with_storage(&registry_client, session_id, cwd, None, Some(progress))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to restore session from remote: {:#}", e))?;
     let effective_id = if result.local_session_id.is_empty() {
         session_id.to_string()
     } else {

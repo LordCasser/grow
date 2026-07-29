@@ -139,7 +139,7 @@ pub struct VideoGenClient {
     /// Optional 401-attribution hook. Hosts wire this so a 401 from the
     /// Video Generation API emits an `auth_401_attribution` event with
     /// `consumer` of `"VideoGen.start"` (start request) or
-    /// `"VideoGen.poll"` (poll request) for unified auth-failure telemetry.
+    /// `"VideoGen.poll"` (poll request) for unified auth-failure diagnostics.
     attribution_callback: Option<SharedAttributionCallback>,
     /// When `true`, the user is on a tier the Imagine server zero-limits
     /// (free / Basic plan). The video tools short-circuit before any HTTP call

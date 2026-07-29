@@ -3,17 +3,17 @@
 //!
 //! The shared engine drives the sample → retry → degenerate/failure
 //! classification loop via [`sample_full_replace_summary`](grow_compaction::sample_full_replace_summary);
-//! this module adapts grow-build's transport and telemetry to its two seams:
+//! this module adapts grow-build's transport and diagnostics to its two seams:
 //!
 //! - [`ShellCompactionSampler`] wraps
 //!   [`generate_session_compact`](crate::session::helpers::session_compact::generate_session_compact)
 //!   as the shared [`CompactionSampler`]. It also stashes the full
 //!   [`CompactOutput`] of the last successful call so the L5 loop can still
-//!   record the streaming telemetry (TTFT / stream span / stop reason) that
+//!   record the streaming diagnostics (TTFT / stream span / stop reason) that
 //!   the shared [`LlmCompactionOutput`] doesn't model.
 //! - [`ShellFullReplaceObserver`] collects the per-attempt
 //!   [`CompactionAttempt`] rows, rejection counters, and emits the
-//!   `CompactionRetryDegraded` event — preserving the pre-migration telemetry.
+//!   `CompactionRetryDegraded` event — preserving the pre-migration diagnostics.
 //!
 //! The verbatim → fitted → lossy **input ladder** and auto-compaction
 //! suppression stay in L5 (`compaction.rs`), driven by the
@@ -29,9 +29,9 @@ use grow_compaction::{
     CompactionPrompt, CompactionSampleError, CompactionSampler, FullReplaceAttemptOutcome,
     FullReplaceObserver, LlmCompactionOutput,
 };
+use grow_diagnostics::events::{CompactionRetryDegraded, CompactionTrigger};
 use grow_sampler::SamplerConfig as SamplingConfig;
 use grow_sampling_types::{ConversationItem, HostedTool, ToolSpec};
-use grow_telemetry::events::{CompactionRetryDegraded, CompactionTrigger};
 
 use xai_chat_state::compaction_utils::{
     CompactionAttempt, MAX_CAPTURED_SUMMARY_CHARS, bound_captured_output,
@@ -47,7 +47,7 @@ use crate::session::helpers::session_compact::{
 ///
 /// Holds the per-call request context the seam does not carry (tools, client,
 /// session, config) and stashes the last successful [`CompactOutput`] so the
-/// caller can recover the streaming telemetry not modeled by
+/// caller can recover the streaming diagnostics not modeled by
 /// [`LlmCompactionOutput`].
 ///
 /// The summarization prompt is selected here by `use_short_prompt` (the
@@ -72,7 +72,7 @@ pub(crate) struct ShellCompactionSampler {
     /// reasoning-runaway backstop; `0` disables it.
     wall_clock_budget_secs: u64,
     tool_choice: crate::util::config::CompactionToolChoice,
-    /// Full output of the most recent successful sample (for L5 telemetry).
+    /// Full output of the most recent successful sample (for L5 diagnostics).
     last_success: Mutex<Option<CompactOutput>>,
 }
 
@@ -189,9 +189,9 @@ fn acp_error_message(err: &acp::Error) -> String {
         .to_string()
 }
 
-/// Collected telemetry from a full-replace pass, drained by the L5 loop after
+/// Collected diagnostics from a full-replace pass, drained by the L5 loop after
 /// the shared engine returns.
-pub(crate) struct FullReplaceTelemetry {
+pub(crate) struct FullReplaceDiagnostic {
     pub attempts: u32,
     pub attempt_details: Vec<CompactionAttempt>,
     pub degenerate_rejections: u32,
@@ -212,10 +212,10 @@ struct ObserverState {
     last_error_msg: Option<String>,
 }
 
-/// [`FullReplaceObserver`] that reproduces grow-build's per-attempt telemetry:
+/// [`FullReplaceObserver`] that reproduces grow-build's per-attempt diagnostics:
 /// `CompactionAttempt` rows, rejection counters, the `CompactionRetryDegraded`
 /// event, and the warn/error tracing — without the shared engine depending on
-/// a telemetry backend.
+/// a diagnostics backend.
 pub(crate) struct ShellFullReplaceObserver {
     trigger: CompactionTrigger,
     context_window: u64,
@@ -263,12 +263,12 @@ impl ShellFullReplaceObserver {
         self.state.lock().unwrap().last_error_msg.clone()
     }
 
-    /// Drain the collected telemetry. The cumulative attempt count spans all
+    /// Drain the collected diagnostics. The cumulative attempt count spans all
     /// input-ladder stages because the same observer instance is shared across
     /// every per-stage call.
-    pub(crate) fn into_telemetry(self) -> FullReplaceTelemetry {
+    pub(crate) fn into_diagnostics(self) -> FullReplaceDiagnostic {
         let s = self.state.into_inner().unwrap();
-        FullReplaceTelemetry {
+        FullReplaceDiagnostic {
             attempts: s.attempts,
             attempt_details: s.attempt_details,
             degenerate_rejections: s.degenerate_rejections,
@@ -317,7 +317,7 @@ impl FullReplaceObserver for ShellFullReplaceObserver {
                     self.estimated_input_tokens
                 ));
                 if *will_retry {
-                    grow_telemetry::session_ctx::log_event(CompactionRetryDegraded {
+                    grow_diagnostics::session_ctx::log_event(CompactionRetryDegraded {
                         trigger: self.trigger,
                         reason: "degenerate_summary",
                         from_stage: None,

@@ -495,7 +495,7 @@
 - Successful image compression no longer leaves a permanent line in the transcript.
 - **--no-ask-user** now also disables ask_user_question for subagents.
 - **--no-ask-user** now also disables ask_user_question for subagents.
-- **Fixed a crash** shortly after launch on some systems caused by the telemetry exporter.
+- **Fixed a crash** shortly after launch on some systems caused by the diagnostics exporter.
 
 
 # 0.2.92 — 2026-07-08

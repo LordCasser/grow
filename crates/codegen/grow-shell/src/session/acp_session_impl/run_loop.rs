@@ -8,7 +8,7 @@ use super::*;
 ///
 /// Callers MUST pass the read-back `actual`, never the request: under the
 /// always-approve pin the manager clamps a requested ON to OFF, so reporting the
-/// request would announce (event + telemetry + log) a turn-on that never
+/// request would announce (event + diagnostics + log) a turn-on that never
 /// happened.
 pub(super) fn yolo_toggle_report(was: bool, actual: bool) -> Option<bool> {
     (was != actual).then_some(actual)
@@ -17,7 +17,7 @@ pub(super) fn yolo_toggle_report(was: bool, actual: bool) -> Option<bool> {
 mod yolo_toggle_report_tests {
     use super::yolo_toggle_report;
     /// A pin-clamped enable (requested ON but actual stays OFF) reports no
-    /// change, so no spurious "turned on" event/telemetry is emitted. Real
+    /// change, so no spurious "turned on" event/diagnostics is emitted. Real
     /// flips report the actual new state.
     #[test]
     fn reports_actual_state_change_only() {
@@ -55,7 +55,7 @@ impl SessionActor {
         if !admitted {
             Self::push_task_wake_fallback(&mut state, fallback);
             drop(state);
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "shell.task_wake.actor_admission",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
@@ -73,7 +73,7 @@ impl SessionActor {
             return None;
         }
         drop(state);
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "shell.task_wake.actor_admission",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
@@ -268,7 +268,7 @@ pub(super) async fn run_session(
                     let last_len = session.last_idle_flush_conversation_len
                         .load(std::sync::atomic::Ordering::Relaxed);
                     if current_len > last_len {
-                        tracing::info!(target: grow_telemetry::memory_log::TARGET,
+                        tracing::info!(target: grow_diagnostics::memory_log::TARGET,
                             "MEMORY_IDLE_FLUSH: timer fired (conversation {last_len} → {current_len})");
                         session.last_idle_flush_conversation_len
                             .store(current_len, std::sync::atomic::Ordering::Relaxed);
@@ -276,13 +276,13 @@ pub(super) async fn run_session(
                             let session = session.clone();
                             async move {
                                 if !session.run_memory_flush("interval", None).await {
-                                    tracing::info!(target: grow_telemetry::memory_log::TARGET,
+                                    tracing::info!(target: grow_diagnostics::memory_log::TARGET,
                                         "MEMORY_IDLE_FLUSH: skipped — another flush already in progress");
                                 }
                             }
                         });
                     } else {
-                        tracing::debug!(target: grow_telemetry::memory_log::TARGET,
+                        tracing::debug!(target: grow_diagnostics::memory_log::TARGET,
                             "MEMORY_IDLE_FLUSH: skipped, no new messages since last flush (len={current_len})");
                     }
                     // Reset for next idle period
@@ -293,7 +293,7 @@ pub(super) async fn run_session(
                 // Dream check timer — periodically run dream consolidation.
                 _ = &mut dream_check_sleep, if session.dream_check_timeout.is_some()
                     && session.memory.is_enabled() => {
-                    tracing::debug!(target: grow_telemetry::memory_log::TARGET,
+                    tracing::debug!(target: grow_diagnostics::memory_log::TARGET,
                         "MEMORY_DREAM_CHECK: timer fired");
                     tokio::task::spawn_local({
                         let session = session.clone();
@@ -339,7 +339,7 @@ pub(super) async fn run_session(
                             body_bytes_after,
                         }) => {
                             // Unified-log record for local image-eviction verification.
-                            grow_telemetry::unified_log::info(
+                            grow_diagnostics::unified_log::info(
                                 "shell.image_budget",
                                 Some(session.session_info.id.0.as_ref()),
                                 Some(serde_json::json!({
@@ -394,11 +394,8 @@ pub(super) async fn run_session(
                 }
                 maybe_completion = completion_rx.recv() => {
                     let Some((prompt_id, result)) = maybe_completion else {
-                        // Channel closed - shutdown feedback sync loop
+                        // Channel closed.
                         shutdown_workflows(&session).await;
-                        if let Some(cancel) = &session.sync_loop_cancel {
-                            cancel.cancel();
-                        }
                         cleanup_session_scratch(&session);
                         return;
                     };
@@ -502,9 +499,9 @@ pub(super) async fn run_session(
                                     crate::session::memory::hooks::SessionEndResult::Failed(_) => "failed",
                                 };
                                 total_chunks_at_end = storage.total_chunk_count();
-                                let telem = session.memory.telemetry_snapshot();
+                                let telem = session.memory.diagnostics_snapshot();
                                 tracing::info!(
-                                    target: grow_telemetry::memory_log::TARGET,
+                                    target: grow_diagnostics::memory_log::TARGET,
                                     result = ?result,
                                     tool_searches = telem.tool_search_count,
                                     injection_searches = telem.injection_count,
@@ -520,14 +517,14 @@ pub(super) async fn run_session(
                             }
                         } else {
                             tracing::debug!(
-                                target: grow_telemetry::memory_log::TARGET,
+                                target: grow_diagnostics::memory_log::TARGET,
                                 "MEMORY_SUBAGENT_SKIP: skipping on_session_end for subagent session"
                             );
                         }
                         // Dream: attempt consolidation at session end
                         session.maybe_run_dream().await;
-                        // Structured telemetry after dream so counters are populated
-                        let telem = session.memory.telemetry_snapshot();
+                        // Structured diagnostics after dream so counters are populated
+                        let telem = session.memory.diagnostics_snapshot();
                         session.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
                         if let Some(notification) = replay_buffer.flush() {
                             session.emit_buffered(notification).await;
@@ -535,8 +532,8 @@ pub(super) async fn run_session(
                         {
                             let model_id = session.current_model_id().await;
                             if let Some(signals) = session.signals_handle().snapshot().await {
-                                grow_telemetry::session_ctx::log_event(
-                                    grow_telemetry::events::SessionEnded {
+                                grow_diagnostics::session_ctx::log_event(
+                                    grow_diagnostics::events::SessionEnded {
                                         duration_secs: session.session_start.elapsed().as_secs(),
                                         turn_count: signals.turn_count as u64,
                                         tool_call_count: signals.tool_call_count as u64,
@@ -547,10 +544,7 @@ pub(super) async fn run_session(
                             }
                         }
                         shutdown_workflows(&session).await;
-                        if let Some(cancel) = &session.sync_loop_cancel {
-                            cancel.cancel();
-                        }
-                        session.feedback_manager.shutdown(session.upload_queue.get()).await;
+                        session.signals_handle.shutdown();
                         if !session.startup_hints.is_subagent {
                             session.persist_background_task_manifest().await;
                         }
@@ -594,7 +588,7 @@ pub(super) async fn run_session(
                         SessionCommand::SetToolOverrides { overrides } => {
                             session.set_tool_overrides(overrides);
                         }
-                        SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, artifact_upload_ctx, client_identifier, screen_mode, verbatim, traceparent, json_schema, send_now, admission, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx } => {
+                        SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, client_identifier, screen_mode, verbatim, json_schema, send_now, admission, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx } => {
                             let origin = super::PromptOrigin::from_prompt_id(&prompt_id);
                             let (actor_admitted, task_wake_fallback) = match admission {
                                 Some(admission) => {
@@ -619,7 +613,7 @@ pub(super) async fn run_session(
                                 }
                                 let mut state = session.state.lock().await;
                                 state.notifications_suppressed = false;
-                                grow_telemetry::unified_log::info(
+                                grow_diagnostics::unified_log::info(
                                     "shell.task_wake.gate_cleared",
                                     Some(session.session_info.id.0.as_ref()),
                                     Some(serde_json::json!({ "reason": "user_intake" })),
@@ -655,18 +649,8 @@ pub(super) async fn run_session(
                                     "auto-wake: session actor received synthetic prompt"
                                 );
                             }
-                            // Adopt the caller's trace context so session.handle_prompt
-                            // is linked to agent.prompt across the channel boundary.
-                            if let Some(ref tp) = traceparent {
-                                let meta = serde_json::json!({ "traceparent": tp });
-                                xai_file_utils::trace_context::link_current_span_to_meta(&meta);
-                            }
-                            let (trace_gcs_config, artifact_tracker) = match artifact_upload_ctx {
-                                Some(tu) => (Some(tu.gcs_config), Some(tu.artifact_tracker)),
-                                None => (None, None),
-                            };
                             let cancel_for_send_now = session
-                                .queue_input(prompt_blocks, prompt_id, prompt_mode, trace_gcs_config, artifact_tracker, client_identifier, screen_mode, verbatim, json_schema, send_now, task_wake_fallback, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx)
+                                .queue_input(prompt_blocks, prompt_id, prompt_mode, client_identifier, screen_mode, verbatim, json_schema, send_now, task_wake_fallback, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx)
                                 .await;
                             if cancel_for_send_now {
                                 session.cancel_turn_for_send_now(&mut replay_buffer).await;
@@ -718,7 +702,6 @@ pub(super) async fn run_session(
                                         api_key: r.api_key,
                                         auth_type: r.auth_type,
                                         alpha_test_key: existing.alpha_test_key,
-                                        client_version: existing.client_version,
                                     });
                                 }
                                 // Credentials changed under a possibly-unchanged model id.
@@ -968,9 +951,7 @@ pub(super) async fn run_session(
                             // pending at cancel time are committed to
                             // updates.jsonl. Without this, the tail of a long
                             // reasoning stream sitting in the buffer when the
-                            // user hits Ctrl+C never reaches disk before the
-                            // trace upload snapshots the session directory.
-                            // Mirrors the pattern in `FlushComplete` below.
+                            // user hits Ctrl+C would never reach local persistence.
                             if let Some(notification) = replay_buffer.flush() {
                                 session.emit_buffered(notification).await;
                             }
@@ -1219,33 +1200,6 @@ pub(super) async fn run_session(
                                 }
                             };
                             let _ = respond_to.send(usage);
-                        }
-                        SessionCommand::SetNextTraceTurn {
-                            next_trace_turn,
-                            request_id,
-                        } => {
-                            let _ =
-                                session.notifications.persistence_tx.send(PersistenceMsg::NextTraceTurn {
-                                    next_trace_turn,
-                                    request_id,
-                                });
-                        }
-                        SessionCommand::CopyFile { respond_to } => {
-                            // Flush the actor-owned replay buffer first so any
-                            // buffered notifications (e.g. streamed reasoning
-                            // chunks emitted during sampler teardown after a
-                            // cancel) are committed to updates.jsonl before the
-                            // persistence task snapshots the session directory.
-                            // `PersistenceMsg` is FIFO on `persistence_tx`, so
-                            // the `Update` produced by `emit_buffered` lands
-                            // before `CopyFile`, and `flush_and_sync` on the
-                            // persistence side then sees it on disk.
-                            if let Some(notification) = replay_buffer.flush() {
-                                session.emit_buffered(notification).await;
-                            }
-                            let _ = session
-                                .notifications.persistence_tx
-                                .send(PersistenceMsg::CopyFile { one_shot: respond_to });
                         }
                         SessionCommand::IsBusy { respond_to } => {
                             // "Any work pending?" — a running turn or queued
@@ -1748,21 +1702,6 @@ pub(super) async fn run_session(
                         SessionCommand::RefreshMcpSearchIndex => {
                             session.refresh_mcp_snapshot_and_schedule_reminder().await;
                         }
-                        SessionCommand::TriggerTestFeedback { tier, mode, respond_to } => {
-                            let s = session.clone();
-                            tokio::task::spawn_local(async move {
-                                let request = s.feedback_manager.force_feedback_request(tier, mode).await;
-                                let notification = crate::extensions::notification::FeedbackRequestNotification::from(request.clone());
-                                s.send_feedback_notification(request).await;
-                                let resp = ExtMethodResult::success(notification).to_ext_response();
-                                let _ = respond_to.send(resp);
-                            });
-                        }
-                        SessionCommand::PersistFeedback(entry) => {
-                            let _ = session
-                                .notifications.persistence_tx
-                                .send(PersistenceMsg::Feedback(*entry));
-                        }
                         SessionCommand::AdvertiseCommands => {
                             session.send_available_commands_update().await;
                         }
@@ -1820,57 +1759,6 @@ pub(super) async fn run_session(
                                 session.send_hook_execution("session_start", None, None, &results).await;
                             }
                         }
-                        SessionCommand::GetFeedbackContext { turn_number, responds_to } => {
-                            let s = session.clone();
-                            tokio::task::spawn_local(async move {
-                                use prod_mc_cli_chat_proxy_types::feedback_types::FeedbackToolOutcome;
-
-                                // When the client provided a turn_number (per-turn
-                                // feedback on a specific assistant message in the
-                                // chat history), look up THAT turn's user/assistant
-                                // text.
-                                let turn_idx =
-                                    turn_number.and_then(|n| usize::try_from(n).ok());
-                                let (last_user_message, last_assistant_message) = match turn_idx {
-                                    Some(n) => {
-                                        let conv = s.chat_state_handle.get_conversation().await;
-                                        turn_texts_for_feedback(&conv, n)
-                                    }
-                                    None => {
-                                        tokio::join!(
-                                            s.chat_state_handle.get_last_user_query_text(),
-                                            s.chat_state_handle.get_last_assistant_text(),
-                                        )
-                                    }
-                                };
-
-                                let sh = s.signals_handle();
-                                let (signals, tool_outcomes) = tokio::join!(
-                                    sh.snapshot(),
-                                    sh.last_turn_tool_outcomes(),
-                                );
-                                let signals = signals.unwrap_or_default();
-
-                                let ctx = FeedbackContext {
-                                    last_user_message,
-                                    last_assistant_message,
-                                    tool_outcomes: tool_outcomes
-                                        .into_iter()
-                                        .map(|o| FeedbackToolOutcome {
-                                            tool_name: o.tool_name,
-                                            calls: o.successes + o.failures,
-                                            failures: o.failures,
-                                        })
-                                        .collect(),
-                                    compaction_count: signals.compaction_count as i64,
-                                    context_window_usage: signals.context_window_usage,
-                                    context_tokens_used: signals.context_tokens_used,
-                                    context_window_tokens: signals.context_window_tokens,
-                                    session_cwd: s.tool_context.cwd.as_path().to_string_lossy().to_string(),
-                                };
-                                let _ = responds_to.send(ctx);
-                            });
-                        }
                         SessionCommand::GetActiveAgent { responds_to } => {
                             let agent_type = session.active_agent_type.lock().clone();
                             let _ = responds_to.send(agent_type);
@@ -1916,7 +1804,7 @@ pub(super) async fn run_session(
                             // dedups this echo by `id` against its optimistic
                             // local block; viewers render it.
                             session.broadcast_interjection(&text, id.as_deref());
-                            // Telemetry at enqueue (not drain) so it is recorded
+                            // Diagnostic at enqueue (not drain) so it is recorded
                             // even when a cancel clears the buffer before the
                             // next drain point.
                             session.events.emit(crate::session::events::Event::Interjected {
@@ -1966,8 +1854,6 @@ pub(super) async fn run_session(
                                     prompt_id,
                                     prompt_blocks,
                                     prompt_mode: crate::session::plan_mode::PromptMode::Agent,
-                                    trace_gcs_config: None,
-                                    artifact_tracker: None,
                                     client_identifier: None,
                                     screen_mode: None,
                                     verbatim: true,
@@ -2017,8 +1903,6 @@ pub(super) async fn run_session(
                                     prompt_id,
                                     prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(prompt_text))],
                                     prompt_mode: crate::session::plan_mode::PromptMode::Agent,
-                                    trace_gcs_config: None,
-                                    artifact_tracker: None,
                                     client_identifier: None,
                                     screen_mode: None,
                                     verbatim: true,
@@ -2154,9 +2038,9 @@ pub(super) async fn run_session(
                                         crate::session::memory::hooks::SessionEndResult::Failed(_) => "failed",
                                     };
                                     total_chunks_at_end = storage.total_chunk_count();
-                                    let telem = session.memory.telemetry_snapshot();
+                                    let telem = session.memory.diagnostics_snapshot();
                                     tracing::info!(
-                                        target: grow_telemetry::memory_log::TARGET,
+                                        target: grow_diagnostics::memory_log::TARGET,
                                         result = ?result,
                                         tool_searches = telem.tool_search_count,
                                         injection_searches = telem.injection_count,
@@ -2173,21 +2057,16 @@ pub(super) async fn run_session(
                                 }
                             } else {
                                 tracing::debug!(
-                                    target: grow_telemetry::memory_log::TARGET,
+                                    target: grow_diagnostics::memory_log::TARGET,
                                     "MEMORY_SUBAGENT_SKIP: skipping on_session_end for subagent session"
                                 );
                             }
                             // Dream: attempt consolidation at session end
                             session.maybe_run_dream().await;
-                            // Structured telemetry after dream so counters are populated
-                            let telem = session.memory.telemetry_snapshot();
+                            // Structured diagnostics after dream so counters are populated
+                            let telem = session.memory.diagnostics_snapshot();
                             session.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
-                            // Shutdown feedback sync loop and do final sync
-                            if let Some(cancel) = &session.sync_loop_cancel {
-                                cancel.cancel();
-                            }
-                            // Shutdown feedback manager (syncs signals, drains upload queue)
-                            session.feedback_manager.shutdown(session.upload_queue.get()).await;
+                            session.signals_handle.shutdown();
                             if !session.startup_hints.is_subagent {
                                 session.persist_background_task_manifest().await;
                             }
@@ -2199,40 +2078,4 @@ pub(super) async fn run_session(
             }
         }
     }
-}
-/// Extract the user query text and assistant response text for the
-/// `turn_number`-th turn (0-based) of a conversation snapshot. Used by
-/// the `GetFeedbackContext` handler when a client supplies a `turn_number`
-/// (per-turn thumbs button on a specific assistant message).
-pub(super) fn turn_texts_for_feedback(
-    conversation: &[grow_sampling_types::ConversationItem],
-    turn_number: usize,
-) -> (Option<String>, Option<String>) {
-    use grow_sampling_types::ConversationItem;
-    let Some(start) = conversation
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| matches!(item, ConversationItem::User(_)))
-        .nth(turn_number)
-        .map(|(i, _)| i)
-    else {
-        return (None, None);
-    };
-    let raw = conversation[start].text_content();
-    let extracted = xai_chat_state::compaction_utils::extract_user_query(&raw);
-    let user_text = (!extracted.is_empty()).then_some(extracted);
-    let assistant_text = conversation
-        .iter()
-        .skip(start + 1)
-        .take_while(|item| !matches!(item, ConversationItem::User(_)))
-        .find_map(|item| {
-            if let ConversationItem::Assistant(a) = item
-                && !a.content.trim().is_empty()
-            {
-                Some(a.content.as_ref().to_owned())
-            } else {
-                None
-            }
-        });
-    (user_text, assistant_text)
 }

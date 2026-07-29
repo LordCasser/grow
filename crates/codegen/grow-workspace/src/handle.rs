@@ -157,6 +157,7 @@ use crate::config::{
     AgentSessionConfig, DEFAULT_EVENT_BUFFER_CAPACITY, HookSourceConfig, WorkspaceConfig,
 };
 use crate::diag_server::DiagHandle;
+use crate::diagnostics::dc_log;
 use crate::error::{WorkspaceError, WorkspaceResult};
 use crate::session::swap_policy::{
     DeferReason, SessionSnapshot, SwapAction, SwapDecision, SwapPolicy, SwapTrigger,
@@ -164,12 +165,10 @@ use crate::session::swap_policy::{
 };
 use crate::session::tool_config::resolve_session_toolset;
 use crate::session::{WorkspaceSession, WorkspaceShared};
-use crate::telemetry::dc_log;
 use crate::workspace_ops::{
     GetFileEntry, GetFileResult, GetFilesRes, PutFileEntry, PutFileResult, PutFilesRes,
 };
 
-use xai_tool_protocol::turn_hook::{AfterTurnAckPayload, AfterTurnAckStatus};
 /// Per-domain checkpoint captures, by domain and turn outcome.
 pub(crate) static REWIND_CHECKPOINT_CAPTURE_TOTAL: std::sync::LazyLock<IntCounterVec> =
     std::sync::LazyLock::new(|| {
@@ -396,62 +395,6 @@ pub struct WorkspaceHandle {
     pub(crate) shared: Arc<WorkspaceShared>,
 }
 impl WorkspaceHandle {
-    /// `None` when not connected. Never hands out an owned
-    /// `ToolServer` — a clone-drop begins server teardown.
-    pub async fn trace_donation_reporter(
-        &self,
-        service_name: &str,
-    ) -> Option<(
-        xai_computer_hub_sdk::HubDonatingReporter,
-        xai_computer_hub_sdk::TraceDonationPump,
-    )> {
-        self.shared
-            .hub_handle
-            .lock()
-            .await
-            .as_ref()
-            .map(|hub| hub.server.trace_donation_reporter(service_name))
-    }
-    /// Post-connect entry point for the log export layer, the analogue of
-    /// [`Self::trace_donation_reporter`]. Returns `None` when not connected
-    /// (the layer stays inert). On
-    /// `Some`, yields a [`LogDonationSender`] to swap into the
-    /// already-installed inert `DonatingLogLayer` plus a drain handle.
-    /// Never hands out an owned `ToolServer` — a clone-drop begins server
-    /// teardown.
-    ///
-    /// [`LogDonationSender`]: xai_computer_hub_sdk::LogDonationSender
-    pub async fn log_donation_layer(
-        &self,
-        service_name: &str,
-    ) -> Option<(
-        xai_computer_hub_sdk::LogDonationSender,
-        xai_computer_hub_sdk::LogDonationPump,
-    )> {
-        self.shared
-            .hub_handle
-            .lock()
-            .await
-            .as_ref()
-            .map(|hub| hub.server.log_donation_layer(service_name))
-    }
-    /// Post-connect entry point for metric export, the analogue of
-    /// [`Self::trace_donation_reporter`]. Returns `None` when not connected
-    /// (no reporter is spawned). On
-    /// `Some`, spawns the periodic Prometheus-registry gather → OTLP →
-    /// export pump and yields a drain handle. Never hands out an owned
-    /// `ToolServer` — a clone-drop begins server teardown.
-    pub async fn metric_donation_reporter(
-        &self,
-        service_name: &str,
-    ) -> Option<xai_computer_hub_sdk::MetricDonationPump> {
-        self.shared
-            .hub_handle
-            .lock()
-            .await
-            .as_ref()
-            .map(|hub| hub.server.metric_donation_reporter(service_name))
-    }
     /// Construct a handle with zero sessions.
     ///
     /// Sessions are created explicitly via [`Self::create_session`] or
@@ -1180,10 +1123,7 @@ impl WorkspaceHandle {
     /// hook counterparts (the server-side sampler signals turns ONLY through
     /// this request channel): `Before` drives [`Self::on_before_turn`]
     /// (including the YOLO-state sync) and answers with a no-op reply
-    /// (injections are not computed yet); `After` runs the turn-end work,
-    /// awaits this turn's enqueue outcomes under [`after_turn_watchdog`]
-    /// (which MUST undercut the requester's hook timeout), and returns the
-    /// artifact ack on `HookReply::after_turn_ack`.
+    /// (injections are not computed yet); `After` runs the turn-end work.
     ///
     /// Each phase must be signalled through exactly ONE channel per client —
     /// fire-and-forget hook or request — otherwise its work runs twice.
@@ -2403,12 +2343,8 @@ impl WorkspaceHandle {
                 let catalog = catalog.clone();
                 let rpc_tool_id = rpc_tool_id.clone();
                 let weak_shared = weak_shared.clone();
-                let bind_parent = params
-                    .as_ref()
-                    .and_then(|p| p.pointer("/trace_context"))
-                    .and_then(serde_json::Value::as_str)
-                    .and_then(fastrace::collector::SpanContext::decode_w3c_traceparent)
-                    .unwrap_or_else(xai_tracing::local_or_random_span_ctx);
+                let bind_parent = fastrace::collector::SpanContext::current_local_parent()
+                    .unwrap_or_else(fastrace::collector::SpanContext::random);
                 let bind_span = fastrace::Span::root("tool_server.session_bind", bind_parent)
                     .with_properties(|| {
                         [
@@ -3319,7 +3255,6 @@ pub async fn connect_local_workspace(
             .extend(bundled_allowlist_ignore_dirs(&dir, allowlist.as_deref()));
         ws_config.skills_config.bundled_skill_dirs = vec![dir];
     }
-    // Upload queue removed — skip queue setup, recovery, and stats sampling.
     if crate::session::tool_config::tool_state_enabled() {
         let home = workspace_home.clone();
         tokio::spawn(async move {
@@ -3867,35 +3802,6 @@ pub(crate) mod tests {
             .await;
         let typed = drain_terminal_ok(stream).await;
         assert_bash_cco_terminal(&typed);
-    }
-    /// No connection ⇒ every export entry point returns `None`, so the
-    /// binary leaves the `DonatingLogLayer` inert and spawns no metric reporter.
-    /// This is the flag-free "activate only on connection" contract that log
-    /// and metric export share with the pre-existing `trace_donation_reporter`.
-    #[tokio::test]
-    async fn donation_entry_points_are_inert_without_a_hub() {
-        let handle = make_handle();
-        assert!(
-            handle
-                .trace_donation_reporter("prod_grow_workspace")
-                .await
-                .is_none(),
-            "trace export must stay inert without a connection"
-        );
-        assert!(
-            handle
-                .log_donation_layer("prod_grow_workspace")
-                .await
-                .is_none(),
-            "log export must stay inert without a connection"
-        );
-        assert!(
-            handle
-                .metric_donation_reporter("prod_grow_workspace")
-                .await
-                .is_none(),
-            "metric export must stay inert without a connection"
-        );
     }
     #[test]
     fn rewind_outcome_label_maps_each_variant() {

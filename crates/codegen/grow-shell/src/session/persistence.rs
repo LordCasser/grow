@@ -75,206 +75,8 @@ pub struct BtwEntry {
     pub error: Option<String>,
 }
 
-// Local feedback persistence types
-
-/// A feedback entry persisted to `~/.grow/sessions/.../feedback.jsonl`.
-///
-/// Uses a tagged enum so different feedback types are self-describing in the
-/// JSONL file (currently only `UserFeedback`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum LocalFeedbackEntry {
-    /// Regular user feedback (spontaneous or solicited via heuristics)
-    UserFeedback(UserFeedbackEntry),
-}
-
-/// A user feedback entry (thumbs, stars, text, or dismiss).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UserFeedbackEntry {
-    pub submitted_at: DateTime<Utc>,
-    pub session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub turn_number: Option<i64>,
-    /// Whether this was a response to a server-initiated FeedbackRequest
-    pub solicited: bool,
-    /// The feedback request ID (only set for solicited feedback)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-    /// True if the user dismissed the feedback request without responding
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub dismissed: bool,
-    /// The full submission payload (omitted when dismissed)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub submission: Option<prod_mc_cli_chat_proxy_types::feedback_types::FeedbackSubmission>,
-}
-
-/// Helper for `#[serde(skip_serializing_if)]` on bool fields.
-pub(crate) fn is_false(v: &bool) -> bool {
-    !v
-}
-
-#[cfg(test)]
-mod feedback_tests {
-    use super::*;
-    use prod_mc_cli_chat_proxy_types::feedback_types::{
-        ClientType, FeedbackSubmission, FeedbackType, RatingType,
-    };
-
-    fn make_submission(thumbs_up: bool) -> FeedbackSubmission {
-        FeedbackSubmission {
-            session_id: "session-abc".into(),
-            user_id: None,
-            client_type: ClientType::Tui,
-            feedback_type: if thumbs_up {
-                FeedbackType::Rating
-            } else {
-                FeedbackType::RatingWithText
-            },
-            turn_number: Some(7),
-            rating_type: Some(RatingType::Thumbs),
-            rating_value: Some(if thumbs_up { 1 } else { -1 }),
-            feedback_text: if thumbs_up {
-                None
-            } else {
-                Some("could be better".into())
-            },
-            model_id: Some("grow-3-fast".into()),
-            resolved_model_id: Some("grow-4.5".into()),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_user_feedback_spontaneous_roundtrip() {
-        let entry = LocalFeedbackEntry::UserFeedback(UserFeedbackEntry {
-            submitted_at: chrono::Utc::now(),
-            session_id: "session-abc".into(),
-            turn_number: Some(7),
-            solicited: false,
-            request_id: None,
-            dismissed: false,
-            submission: Some(make_submission(true)),
-        });
-
-        let json = serde_json::to_string(&entry).unwrap();
-        assert!(json.contains(r#""type":"user_feedback""#));
-        assert!(!json.contains("dismissed")); // skip_serializing_if = is_false
-        assert!(!json.contains("requestId")); // skip_serializing_if = Option::is_none
-
-        let parsed: LocalFeedbackEntry = serde_json::from_str(&json).unwrap();
-        let LocalFeedbackEntry::UserFeedback(ref uf) = parsed;
-        assert!(!uf.solicited);
-        assert!(!uf.dismissed);
-        assert!(uf.submission.is_some());
-        assert_eq!(uf.session_id, "session-abc");
-    }
-
-    #[test]
-    fn test_user_feedback_solicited_roundtrip() {
-        let entry = LocalFeedbackEntry::UserFeedback(UserFeedbackEntry {
-            submitted_at: chrono::Utc::now(),
-            session_id: "session-abc".into(),
-            turn_number: Some(14),
-            solicited: true,
-            request_id: Some("req-123".into()),
-            dismissed: false,
-            submission: Some(make_submission(false)),
-        });
-
-        let json = serde_json::to_string(&entry).unwrap();
-        assert!(json.contains(r#""requestId":"req-123""#));
-        assert!(json.contains(r#""solicited":true"#));
-
-        let parsed: LocalFeedbackEntry = serde_json::from_str(&json).unwrap();
-        let LocalFeedbackEntry::UserFeedback(ref uf) = parsed;
-        assert!(uf.solicited);
-        assert_eq!(uf.request_id.as_deref(), Some("req-123"));
-        let sub = uf.submission.as_ref().unwrap();
-        assert_eq!(sub.feedback_text.as_deref(), Some("could be better"));
-    }
-
-    #[test]
-    fn test_user_feedback_dismiss_roundtrip() {
-        let entry = LocalFeedbackEntry::UserFeedback(UserFeedbackEntry {
-            submitted_at: chrono::Utc::now(),
-            session_id: "session-abc".into(),
-            turn_number: None,
-            solicited: true,
-            request_id: Some("req-456".into()),
-            dismissed: true,
-            submission: None,
-        });
-
-        let json = serde_json::to_string(&entry).unwrap();
-        assert!(json.contains(r#""dismissed":true"#));
-        assert!(!json.contains("submission")); // skip_serializing_if = Option::is_none
-
-        let parsed: LocalFeedbackEntry = serde_json::from_str(&json).unwrap();
-        let LocalFeedbackEntry::UserFeedback(ref uf) = parsed;
-        assert!(uf.dismissed);
-        assert!(uf.submission.is_none());
-    }
-
-    #[test]
-    fn test_feedback_jsonl_multi_line_roundtrip() {
-        // Simulate multiple entries written to a JSONL file
-        let entries = vec![
-            LocalFeedbackEntry::UserFeedback(UserFeedbackEntry {
-                submitted_at: chrono::Utc::now(),
-                session_id: "s1".into(),
-                turn_number: Some(1),
-                solicited: false,
-                request_id: None,
-                dismissed: false,
-                submission: Some(make_submission(true)),
-            }),
-            LocalFeedbackEntry::UserFeedback(UserFeedbackEntry {
-                submitted_at: chrono::Utc::now(),
-                session_id: "s1".into(),
-                turn_number: None,
-                solicited: true,
-                request_id: Some("req-1".into()),
-                dismissed: true,
-                submission: None,
-            }),
-        ];
-
-        // Serialize to JSONL
-        let mut jsonl = String::new();
-        for entry in &entries {
-            let line = serde_json::to_string(entry).unwrap();
-            jsonl.push_str(&line);
-            jsonl.push('\n');
-        }
-
-        // Deserialize each line
-        let parsed: Vec<LocalFeedbackEntry> = jsonl
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-
-        assert_eq!(parsed.len(), 2);
-        assert!(matches!(parsed[0], LocalFeedbackEntry::UserFeedback(_)));
-        assert!(matches!(parsed[1], LocalFeedbackEntry::UserFeedback(_)));
-
-        // Verify the dismiss entry
-        let LocalFeedbackEntry::UserFeedback(ref uf) = parsed[1];
-        assert!(uf.dismissed);
-        assert!(uf.solicited);
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct CopiedSessionFile {
-    pub name: String,
-    pub data: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SessionStateCopy {
-    pub files: Vec<CopiedSessionFile>,
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug)]
@@ -321,14 +123,6 @@ pub enum PersistenceMsg {
     MergeRewindPointsFrom {
         target_index: usize,
     },
-    /// Collection ID for telemetry tracing
-    CollectionId(String),
-    /// Monotonic telemetry turn counter and optional request_id for trace metadata/filenames.
-    /// This is the "next turn" value (i.e., after increment).
-    NextTraceTurn {
-        next_trace_turn: u64,
-        request_id: Option<String>,
-    },
     /// Persist a snapshot of the session signals.
     Signals(SessionSignals),
     /// Persist announcement tracking state (MCP + skill announcement dedup).
@@ -344,8 +138,6 @@ pub enum PersistenceMsg {
         respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
     },
     DeleteWorkflowRunState(String),
-    /// Persist a local feedback entry (user feedback)
-    Feedback(LocalFeedbackEntry),
     /// Persist a /btw side question entry
     Btw(BtwEntry),
     /// Persist updated HEAD commit and branch to summary.
@@ -383,11 +175,6 @@ pub enum PersistenceMsg {
     /// oneshot only resolves after `flush_pending()` finishes writing to disk.
     FlushAndAck {
         respond_to: tokio::sync::oneshot::Sender<()>,
-    },
-    /// Flush all pending writes, then copy the current session directory contents and return
-    /// the in-memory snapshot to the caller (who can tar.gz + upload to GCS, etc.).
-    CopyFile {
-        one_shot: tokio::sync::oneshot::Sender<anyhow::Result<SessionStateCopy>>,
     },
 }
 
@@ -852,13 +639,6 @@ pub struct Summary {
     /// Timestamp when this session was forked (only set for forked sessions)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_at: Option<DateTime<Utc>>,
-    /// Collection ID for telemetry trace uploads (one per session)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub collection_id: Option<String>,
-    /// Next telemetry trace turn id (monotonic, persisted).
-    /// Used to generate unique turn ids for telemetry metadata/filenames even across rewinds.
-    #[serde(default)]
-    pub next_trace_turn: u64,
     /// Chat history format version:
     /// - 0 (default): Legacy ChatRequestMessage format
     /// - 1: ConversationItem format
@@ -904,8 +684,6 @@ pub struct Summary {
     pub head_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_branch: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
     /// Absolute path to the `.grow` directory, used by reconstruction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grow_home: Option<String>,
@@ -976,8 +754,6 @@ impl Summary {
             current_model_id: model_id,
             parent_session_id: None,
             forked_at: None,
-            collection_id: None,
-            next_trace_turn: 0,
             chat_format_version: CHAT_FORMAT_VERSION,
             prompt_display_cwd: None,
             session_kind: None,
@@ -990,7 +766,6 @@ impl Summary {
             git_remotes: git_metadata.git_remotes,
             head_commit: git_metadata.head_commit,
             head_branch: git_metadata.head_branch,
-            request_id: None,
             grow_home: grow_home_string(),
             last_active_at: None,
             generated_title: None,
@@ -1838,16 +1613,6 @@ impl SessionPersistence {
         }
     }
 
-    /// Flush pending writes and sync all session files to disk.
-    /// Called before CopyFile to ensure all data is persisted.
-    async fn flush_and_sync(&mut self) {
-        self.flush_pending().await;
-        // Sync all session files to disk to ensure they're actually written
-        if let Err(e) = self.storage.sync_session_files(&self.info).await {
-            tracing::warn!(?e, "Failed to sync session files to disk");
-        }
-    }
-
     async fn run(mut self) {
         // Persistence traffic counts as worktree activity; debounced so
         // long-resident sessions (leader/remote, active for days without a
@@ -2117,27 +1882,6 @@ impl SessionPersistence {
                         tracing::warn!(?e, target_index, "failed to merge rewind points");
                     }
                 }
-                PersistenceMsg::CollectionId(collection_id) => {
-                    if let Err(e) = self
-                        .storage
-                        .update_collection_id(&self.info, &collection_id)
-                        .await
-                    {
-                        tracing::warn!(?e, "failed to write collection id");
-                    }
-                }
-                PersistenceMsg::NextTraceTurn {
-                    next_trace_turn,
-                    request_id,
-                } => {
-                    if let Err(e) = self
-                        .storage
-                        .update_next_trace_turn(&self.info, next_trace_turn, request_id.as_deref())
-                        .await
-                    {
-                        tracing::warn!(?e, "failed to write next trace turn");
-                    }
-                }
                 PersistenceMsg::Signals(signals) => {
                     if let Err(e) = self.storage.write_signals(&self.info, &signals).await {
                         tracing::warn!(?e, "failed to write session signals");
@@ -2150,11 +1894,6 @@ impl SessionPersistence {
                         .await
                     {
                         tracing::warn!(?e, "failed to write announcement state");
-                    }
-                }
-                PersistenceMsg::Feedback(entry) => {
-                    if let Err(e) = self.storage.append_feedback(&self.info, &entry).await {
-                        tracing::warn!(?e, "failed to write feedback entry");
                     }
                 }
                 PersistenceMsg::Btw(entry) => {
@@ -2203,97 +1942,11 @@ impl SessionPersistence {
                         tracing::warn!(?e, "failed to write compaction segment");
                     }
                 }
-                PersistenceMsg::CopyFile { one_shot } => {
-                    // Flush pending writes and sync all session files to disk before copying.
-                    self.flush_and_sync().await;
-
-                    let result = self.copy_session_dir_to_memory().await;
-                    let _ = one_shot.send(result);
-                }
             }
         }
 
         // Drain the merge buffer on channel close.
         self.flush_pending().await;
-    }
-
-    async fn copy_session_dir_to_memory(&self) -> anyhow::Result<SessionStateCopy> {
-        let session_dir = session_dir(&self.info);
-        tokio::task::spawn_blocking(move || {
-            let mut files = Vec::new();
-
-            if !session_dir.exists() {
-                return Ok(SessionStateCopy { files });
-            }
-
-            collect_session_files_recursive(&session_dir, &session_dir, &mut files);
-            collect_mcp_stderr_logs(&mut files);
-
-            Ok(SessionStateCopy { files })
-        })
-        .await?
-    }
-}
-
-/// Collect MCP server stderr logs from `~/.grow/logs/mcp/` for inclusion in the session archive.
-fn collect_mcp_stderr_logs(files: &mut Vec<CopiedSessionFile>) {
-    let mcp_log_dir = grow_config::grow_home().join("logs").join("mcp");
-    let Ok(entries) = std::fs::read_dir(&mcp_log_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file()
-            && path.extension().is_some_and(|ext| ext == "log")
-            && let Ok(data) = std::fs::read(&path)
-            && !data.is_empty()
-        {
-            let name = format!(
-                "mcp_stderr/{}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            );
-            files.push(CopiedSessionFile { name, data });
-        }
-    }
-}
-
-/// Recursively collect all files from `dir` into `files`, using paths relative to `base`.
-/// This captures subdirectories like `prompts/` which contain large-prompt files
-/// referenced by truncated chat history entries.
-fn collect_session_files_recursive(base: &Path, dir: &Path, files: &mut Vec<CopiedSessionFile>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-        Err(e) => {
-            tracing::warn!(?dir, ?e, "Failed to read directory during session copy");
-            return;
-        }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            let rel_path = match path.strip_prefix(base) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            let Some(name) = rel_path.to_str() else {
-                continue;
-            };
-            let data = match std::fs::read(&path) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(?e, "Failed to read session file during copy");
-                    continue;
-                }
-            };
-            files.push(CopiedSessionFile {
-                name: name.to_string(),
-                data,
-            });
-        } else if path.is_dir() {
-            collect_session_files_recursive(base, &path, files);
-        }
     }
 }
 
@@ -3417,101 +3070,6 @@ mod agent_name_persistence_tests {
         assert_eq!(summary.agent_name.as_deref(), Some("cursor"));
         assert_eq!(summary.current_model_id.0.as_ref(), "cursor-model");
         assert_eq!(summary.generated_title.as_deref(), Some("Fix editor mode"));
-    }
-}
-
-#[cfg(test)]
-mod collect_session_files_tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    #[test]
-    fn collects_top_level_files_with_flat_names() {
-        let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("chat_history.jsonl"), b"line1\nline2").unwrap();
-        fs::write(dir.path().join("summary.json"), b"{}").unwrap();
-
-        let mut files = Vec::new();
-        collect_session_files_recursive(dir.path(), dir.path(), &mut files);
-
-        files.sort_by(|a, b| a.name.cmp(&b.name));
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0].name, "chat_history.jsonl");
-        assert_eq!(files[0].data, b"line1\nline2");
-        assert_eq!(files[1].name, "summary.json");
-        assert_eq!(files[1].data, b"{}");
-    }
-
-    #[test]
-    fn collects_subdirectory_files_with_relative_paths() {
-        let dir = TempDir::new().unwrap();
-        let prompts_dir = dir.path().join("prompts");
-        fs::create_dir(&prompts_dir).unwrap();
-        fs::write(prompts_dir.join("prompt_0.txt"), b"long prompt content").unwrap();
-        fs::write(prompts_dir.join("prompt_1.txt"), b"another long prompt").unwrap();
-        fs::write(dir.path().join("summary.json"), b"{}").unwrap();
-
-        let mut files = Vec::new();
-        collect_session_files_recursive(dir.path(), dir.path(), &mut files);
-
-        files.sort_by(|a, b| a.name.cmp(&b.name));
-        assert_eq!(files.len(), 3);
-        assert_eq!(files[0].name, "prompts/prompt_0.txt");
-        assert_eq!(files[0].data, b"long prompt content");
-        assert_eq!(files[1].name, "prompts/prompt_1.txt");
-        assert_eq!(files[2].name, "summary.json");
-    }
-
-    #[test]
-    fn collects_nested_subdirectories() {
-        let dir = TempDir::new().unwrap();
-        let deep = dir.path().join("a").join("b");
-        fs::create_dir_all(&deep).unwrap();
-        fs::write(deep.join("deep.txt"), b"deep").unwrap();
-        fs::write(dir.path().join("top.txt"), b"top").unwrap();
-
-        let mut files = Vec::new();
-        collect_session_files_recursive(dir.path(), dir.path(), &mut files);
-
-        files.sort_by(|a, b| a.name.cmp(&b.name));
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0].name, "a/b/deep.txt");
-        assert_eq!(files[1].name, "top.txt");
-    }
-
-    #[test]
-    fn nonexistent_directory_returns_empty() {
-        let dir = TempDir::new().unwrap();
-        let missing = dir.path().join("does_not_exist");
-
-        let mut files = Vec::new();
-        collect_session_files_recursive(&missing, &missing, &mut files);
-
-        assert!(files.is_empty());
-    }
-
-    #[test]
-    fn empty_directory_returns_empty() {
-        let dir = TempDir::new().unwrap();
-
-        let mut files = Vec::new();
-        collect_session_files_recursive(dir.path(), dir.path(), &mut files);
-
-        assert!(files.is_empty());
-    }
-
-    #[test]
-    fn skips_empty_subdirectories() {
-        let dir = TempDir::new().unwrap();
-        fs::create_dir(dir.path().join("empty_subdir")).unwrap();
-        fs::write(dir.path().join("file.txt"), b"data").unwrap();
-
-        let mut files = Vec::new();
-        collect_session_files_recursive(dir.path(), dir.path(), &mut files);
-
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].name, "file.txt");
     }
 }
 

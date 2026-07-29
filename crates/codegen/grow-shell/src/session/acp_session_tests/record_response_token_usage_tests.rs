@@ -209,7 +209,7 @@ async fn build_session_info_sources_show_model_fingerprint_from_catalog() {
 
 /// `record_response_token_usage` must also stash the per-turn `TokenUsage`
 /// in chat state so the next `PromptResponse._meta` can carry input/output
-/// token counts to the bot's telemetry layer.
+/// token counts to the bot's diagnostics layer.
 #[tokio::test(flavor = "current_thread")]
 async fn stashes_per_turn_usage_in_chat_state() {
     let local = tokio::task::LocalSet::new();

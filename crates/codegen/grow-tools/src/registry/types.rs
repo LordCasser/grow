@@ -302,7 +302,7 @@ pub struct SessionContext {
     /// set, a 401 from `image_gen` / `video_gen` / `web_search`
     /// emits an `auth_401_attribution` event via this hook. Hosts can
     /// wire this to the same attribution sink used for inference-side
-    /// 401s so tool and chat auth failures share one telemetry path.
+    /// 401s so tool and chat auth failures share one diagnostics path.
     pub attribution_callback: Option<crate::SharedAttributionCallback>,
     /// Tag name for `<system-reminder>` wrappers in tool result text.
     /// Defaults to [`crate::reminders::DEFAULT_REMINDER_TAG`] (hyphen).

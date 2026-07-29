@@ -88,7 +88,7 @@ pub(crate) enum ToolLoop {
     FollowupMessage(String),
     /// A user-configured `pre_tool_use` hook blocked this tool call. Non-terminal:
     /// the deny reason is fed back and the turn continues (see `execute_tool_calls`).
-    /// Only `hook_name` is retained, for the per-tool telemetry/annotation.
+    /// Only `hook_name` is retained, for the per-tool diagnostics/annotation.
     HookDenied {
         hook_name: String,
     },
@@ -106,7 +106,7 @@ pub enum TodoGateReason {
 
 /// Outcome of `evaluate_todo_gate`. `Nudge` carries the rendered
 /// reminder text AND the typed reason so the producer can emit
-/// telemetry without re-deriving the reason from the input.
+/// diagnostics without re-deriving the reason from the input.
 ///
 /// Exposed as `pub` solely so the replay-trace integration test in
 /// `tests/trace_replay.rs` can match against the decision. Not part of
@@ -123,7 +123,7 @@ pub enum TodoGateDecision {
 }
 
 /// Closed reason for why `maybe_fire_laziness_check` aborted before
-/// producing a verdict. Maps 1:1 to the `LAZINESS_ABORT_*` telemetry
+/// producing a verdict. Maps 1:1 to the `LAZINESS_ABORT_*` diagnostics
 /// consts via `as_const_str()` — exhaustive match, no wildcard, so a
 /// new variant forces a new const + arm. Mirrors the
 /// `TodoGateReason` pattern (closed-set producer-side closure).
@@ -148,7 +148,7 @@ pub(crate) enum ClassifierParseError {
 }
 
 /// Outcome of `evaluate_laziness`. `Nudge` carries the category const,
-/// confidence, and evidence so the producer can emit telemetry and
+/// confidence, and evidence so the producer can emit diagnostics and
 /// build the nudge text without re-deriving anything from the input.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LazinessDecision {
@@ -175,7 +175,7 @@ pub(crate) enum NoNudgeReason {
     /// Confidence below the configured (or default) threshold.
     LowConfidence,
     /// Per-session cap was `0` (observation-only) or the cap has been
-    /// reached. Both cases mean "fire telemetry but inject no nudge".
+    /// reached. Both cases mean "fire diagnostics but inject no nudge".
     CapExhausted,
     /// Defensive: the caller should not have invoked `evaluate_laziness`
     /// when `cfg.enabled = false`, but if it did, return this rather
@@ -212,7 +212,7 @@ pub(crate) enum DrainSource {
 /// Reason a NotAchieved verdict was synthesized without invoking the
 /// sampler. Used by `account_not_achieved_without_sampler` to label
 /// the synthetic details file and (in future variants) emit distinct
-/// telemetry.
+/// diagnostics.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum NotAchievedSyntheticReason {
     /// Guard 3 — a second `update_goal(completed: true)` arrived while

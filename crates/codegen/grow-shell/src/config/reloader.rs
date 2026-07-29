@@ -183,7 +183,7 @@ impl ConfigReloader {
                         // land here. The resulting memory/disk divergence
                         // must be visible in unified.jsonl.
                         let path = self.grow_home.join("auth.json");
-                        grow_telemetry::unified_log::error(
+                        grow_diagnostics::unified_log::error(
                             "auth reload: auth.json unreadable, keeping previous credentials",
                             None,
                             Some(serde_json::json!({
@@ -300,7 +300,7 @@ impl ConfigReloader {
                     // AuthCleared makes the agent drop in-memory credentials;
                     // record what the reloader saw so "entry removed" is
                     // distinguishable from "file deleted" (the Err path).
-                    grow_telemetry::unified_log::warn(
+                    grow_diagnostics::unified_log::warn(
                         "auth reload: scope entry gone, sending AuthCleared",
                         None,
                         Some(serde_json::json!({

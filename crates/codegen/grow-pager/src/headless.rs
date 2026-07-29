@@ -1084,7 +1084,7 @@ pub async fn run_single_turn(
         if let Some(ref schema) = options.json_schema {
             meta.insert("outputSchema".to_string(), schema.clone());
         }
-        // Screen-mode telemetry (`prompt_submitted.screen_mode`): headless is
+        // Screen-mode diagnostics (`prompt_submitted.screen_mode`): headless is
         // its own mode, distinct from the TUI's fullscreen/inline/minimal.
         meta.insert(
             "screenMode".to_string(),

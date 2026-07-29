@@ -641,7 +641,7 @@ impl SettingsModalState {
             && choices_idx == unknown_dynamic_fallback_idx
             && unknown_dynamic_fallback_idx != 0
         {
-            // Telemetry: log when a DynamicEnum value is stale.
+            // Diagnostic: log when a DynamicEnum value is stale.
             tracing::warn!(
                 target: "settings",
                 key = key,

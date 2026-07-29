@@ -144,9 +144,6 @@ impl JsonlStorageAdapter {
     fn rewind_points_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join("rewind_points.jsonl")
     }
-    fn feedback_file(&self, info: &Info) -> PathBuf {
-        self.session_dir(info).join("feedback.jsonl")
-    }
     fn btw_history_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join("btw_history.jsonl")
     }
@@ -1141,8 +1138,6 @@ impl JsonlStorageAdapter {
             current_model_id: target_model_id,
             parent_session_id: options.parent_session_id,
             forked_at: Some(chrono::Utc::now()),
-            collection_id: None,
-            next_trace_turn: 0,
             chat_format_version: CHAT_FORMAT_VERSION,
             prompt_display_cwd: options.prompt_display_cwd,
             session_kind: Some(options.session_kind.unwrap_or_else(|| "fork".to_string())),
@@ -1155,7 +1150,6 @@ impl JsonlStorageAdapter {
             git_remotes: Vec::new(),
             head_commit: source_summary.head_commit,
             head_branch: source_summary.head_branch,
-            request_id: None,
             grow_home: crate::session::persistence::grow_home_string(),
             last_active_at: source_summary.last_active_at,
             generated_title: source_summary.generated_title,
@@ -1489,16 +1483,6 @@ impl StorageAdapter for JsonlStorageAdapter {
         )
         .await
     }
-    async fn update_collection_id(&self, info: &Info, collection_id: &str) -> io::Result<()> {
-        self.apply_summary_patch(
-            info,
-            super::summary_write::SummaryPatch {
-                collection_id: Some(collection_id.to_string()),
-                ..Default::default()
-            },
-        )
-        .await
-    }
     async fn update_git_head(
         &self,
         info: &Info,
@@ -1509,24 +1493,6 @@ impl StorageAdapter for JsonlStorageAdapter {
             info,
             super::summary_write::SummaryPatch {
                 git_head: Some(super::summary_write::GitHeadPatch { commit, branch }),
-                ..Default::default()
-            },
-        )
-        .await
-    }
-    async fn update_next_trace_turn(
-        &self,
-        info: &Info,
-        next_trace_turn: u64,
-        request_id: Option<&str>,
-    ) -> io::Result<()> {
-        self.apply_summary_patch(
-            info,
-            super::summary_write::SummaryPatch {
-                trace_turn: Some(super::summary_write::TraceTurnPatch {
-                    next_trace_turn,
-                    request_id: request_id.map(String::from),
-                }),
                 ..Default::default()
             },
         )
@@ -1806,31 +1772,6 @@ impl StorageAdapter for JsonlStorageAdapter {
         self.write_jsonl(self.rewind_points_file(info), &merged)
             .await
     }
-    async fn sync_session_files(&self, info: &Info) -> io::Result<()> {
-        let info_clone = info.clone();
-        let adapter_clone = self.clone();
-        tokio::task::spawn_blocking(move || -> io::Result<()> {
-            use std::fs::OpenOptions;
-            let adapter = adapter_clone;
-            let files_to_sync = [
-                adapter.updates_file(&info_clone),
-                adapter.chat_file(&info_clone),
-                adapter.summary_file(&info_clone),
-                adapter.plan_file(&info_clone),
-                adapter.rewind_points_file(&info_clone),
-            ];
-            for file_path in &files_to_sync {
-                if file_path.exists()
-                    && let Ok(file) = OpenOptions::new().write(true).open(file_path)
-                {
-                    let _ = file.sync_all();
-                }
-            }
-            Ok(())
-        })
-        .await
-        .map_err(io::Error::other)?
-    }
     async fn replace_chat_history(
         &self,
         info: &Info,
@@ -1918,14 +1859,6 @@ impl StorageAdapter for JsonlStorageAdapter {
     }
     fn rewind_points_file_path(&self, info: &Info) -> Option<std::path::PathBuf> {
         Some(self.rewind_points_file(info))
-    }
-    async fn append_feedback(
-        &self,
-        info: &Info,
-        entry: &crate::session::persistence::LocalFeedbackEntry,
-    ) -> io::Result<()> {
-        let path = self.feedback_file(info);
-        self.append_jsonl(path, entry).await
     }
     async fn append_btw(
         &self,

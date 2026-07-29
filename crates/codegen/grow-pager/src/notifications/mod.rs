@@ -112,11 +112,13 @@ impl NotificationService {
                 &event.body,
                 self.terminal_ctx,
             );
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::NotificationEmitted {
-                protocol: self.protocol.as_str(),
-                event_kind: event.kind.as_str(),
-                was_focused: self.focus_tracker.is_focused(),
-            });
+            grow_diagnostics::session_ctx::log_event(
+                grow_diagnostics::events::NotificationEmitted {
+                    protocol: self.protocol.as_str(),
+                    event_kind: event.kind.as_str(),
+                    was_focused: self.focus_tracker.is_focused(),
+                },
+            );
         }
     }
 

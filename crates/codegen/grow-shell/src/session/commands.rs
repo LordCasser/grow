@@ -46,7 +46,7 @@ pub enum PromptCompletionKind {
     /// `MvpAgent::prompt`'s short-circuit and `respond_removed_prompt`.
     RemovedFromQueue,
 }
-/// Successful prompt/turn payload returned to the ACP layer and trace uploaders.
+/// Successful prompt/turn payload returned to the ACP layer and local persistence.
 #[derive(Debug, Clone)]
 pub struct PromptTurnOk {
     pub stop_reason: acp::StopReason,
@@ -152,19 +152,14 @@ pub enum SessionCommand {
         prompt_blocks: Vec<acp::ContentBlock>,
         /// Prompt mode parsed from request `_meta.mode`.
         prompt_mode: PromptMode,
-        #[allow(private_interfaces)]
-        artifact_upload_ctx: Option<crate::save::ArtifactUploadContext>,
         /// Optional client identifier from the prompt request meta (overrides session-level one)
         client_identifier: Option<String>,
         /// Optional screen mode from the prompt request meta (`_meta.screenMode`,
         /// pager-only: `fullscreen` | `inline` | `minimal` | `headless`).
-        /// Telemetry-only; `None` for other clients and synthetic prompts.
+        /// Diagnostic-only; `None` for other clients and synthetic prompts.
         screen_mode: Option<String>,
         /// Skip `<user_query>` wrapping and large-prompt truncation.
         verbatim: bool,
-        /// W3C traceparent from the caller's OTEL span context, used to link
-        /// `session.handle_prompt` back to `agent.prompt` across the channel hop.
-        traceparent: Option<String>,
         json_schema: Option<serde_json::Value>,
         /// Cancel-and-send: cancel the running turn and run this prompt next.
         /// Also derived server-side during an interruptible wait (see
@@ -239,8 +234,7 @@ pub enum SessionCommand {
     /// rather than the agent-level default (e.g. `grow-4.5`).
     ///
     /// Keeps the existing base_url, api_key, and other config — only changes
-    /// the `model` field sent in the `x-grow-model-override` header and merges
-    /// any additional headers (e.g. `x-openrouter-api-key` for BYOK).
+    /// the request `model` field and merges any explicitly configured headers.
     ///
     /// Used to set model IDs (e.g. opaque third-party routing names) that are
     /// routing hints for the backend and don't need to exist in the
@@ -362,16 +356,6 @@ pub enum SessionCommand {
     ErrorPathUsageFallback {
         prompt_id: Option<String>,
         respond_to: oneshot::Sender<Option<crate::extensions::notification::PromptUsage>>,
-    },
-    /// Persist the monotonic telemetry turn counter ("next trace turn") for the session.
-    SetNextTraceTurn {
-        next_trace_turn: u64,
-        request_id: Option<String>,
-    },
-    /// Flush pending writes and copy the current session directory contents to memory.
-    /// The caller can then tar.gz + upload to GCS (or similar).
-    CopyFile {
-        respond_to: oneshot::Sender<anyhow::Result<crate::session::persistence::SessionStateCopy>>,
     },
     /// Flush the replay buffer and persistence, then signal completion.
     /// Used during reconnect to ensure all buffered content is persisted before replay.
@@ -626,17 +610,6 @@ pub enum SessionCommand {
         trigger: Option<String>,
     },
     Shutdown,
-    /// Force-trigger a feedback request notification for local client testing.
-    /// Bypasses all heuristics, sampling, and cooldown checks.
-    TriggerTestFeedback {
-        tier: crate::session::feedback::FeedbackTier,
-        mode: crate::session::feedback::FeedbackMode,
-        respond_to: oneshot::Sender<anyhow::Result<acp::ExtResponse>>,
-    },
-    /// Persist a local feedback entry via the persistence actor. This ensures
-    /// feedback.jsonl is written through the same channel as other session
-    /// files and is included in GCS CopyFile snapshots.
-    PersistFeedback(Box<crate::session::persistence::LocalFeedbackEntry>),
     AdvertiseCommands,
     GetWorkflowCatalogState {
         respond_to: oneshot::Sender<(bool, bool)>,
@@ -651,11 +624,6 @@ pub enum SessionCommand {
     DispatchSessionStartHook {
         /// "new" for brand new sessions, "load" for sessions loaded from disk.
         source: String,
-    },
-    /// Retrieve session context for enriching a feedback Slack notification.
-    GetFeedbackContext {
-        turn_number: Option<i64>,
-        responds_to: oneshot::Sender<FeedbackContext>,
     },
     /// Retrieve the session's active agent type.
     ///

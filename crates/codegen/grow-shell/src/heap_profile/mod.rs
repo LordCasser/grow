@@ -1,17 +1,7 @@
-//! Heap-profile IoC seam + threshold monitor.
+//! Local heap-profile instrumentation hooks.
 //!
 //! The composition root installs jemalloc ops; without a hook (tests, Windows,
-//! non-jemalloc builds) every seam API is inert. The monitor polls
-//! `stats.resident` and uploads dumps via `gcs::upload_file`.
-
-mod monitor;
-
-pub use monitor::{
-    DumpAttemptOutcome, HARD_DUMP_SIZE_CAP_BYTES, HeapProfileMonitor, HeapProfileUploadHandles,
-    JemallocHeapProfileConfig, SCOPED_KILL_SWITCH_INTERVAL, build_upload_handles,
-    clamp_poll_interval_secs, is_valid_session_id, normalize_thresholds, object_paths,
-    resolve_jemalloc_heap_profile, sanitize_version, should_latch,
-};
+//! non-jemalloc builds) every seam API is inert.
 
 /// Recommended jemalloc `lg_prof_sample` (2^19 bytes ≈ 512 KiB).
 ///

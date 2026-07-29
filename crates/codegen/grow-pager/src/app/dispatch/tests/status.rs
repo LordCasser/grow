@@ -68,14 +68,6 @@ fn show_privacy_info_zdr() {
     assert!(effects.is_empty());
     let text = last_system_text(&app, AgentId(0));
     assert!(text.contains("Zero Data Retention"));
-    assert!(
-        text.contains("Other settings (not changed by /privacy)"),
-        "must list other settings knobs: {text}",
-    );
-    assert!(
-        text.contains("GROW_TELEMETRY_ENABLED") && text.contains("GROW_EXTERNAL_OTEL"),
-        "must list telemetry/OTEL config keys: {text}",
-    );
 }
 
 /// `/privacy` info-print uses the desktop-aligned "privacy mode" /
@@ -92,13 +84,6 @@ fn show_privacy_info_opted_out() {
         "info-print must use 'Privacy: privacy mode' (desktop-aligned label): {text}",
     );
     assert!(text.contains("/privacy opt-in"));
-    assert!(
-        text.contains("Other settings (not changed by /privacy)")
-            && text.contains("GROW_TELEMETRY_ENABLED")
-            && text.contains("trace_upload")
-            && text.contains("GROW_EXTERNAL_OTEL"),
-        "must list config knobs not changed by /privacy: {text}",
-    );
 }
 
 #[test]

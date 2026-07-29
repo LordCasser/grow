@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 /// A permission event capturing the decision made for a tool call.
-/// Used for telemetry to track permission patterns and user behavior.
+/// Used for diagnostics to track permission patterns and user behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionEvent {
     /// Tool call ID from the model
@@ -43,8 +43,7 @@ pub struct PermissionEvent {
     pub subagent_description: Option<String>,
     /// Effective permission mode governing this decision (not the trigger):
     /// "ask" | "auto" | "always-approve". Hyphenated to match
-    /// `config.ui.permission_mode` in the same trace (differs from the telemetry
-    /// enum's underscore Mixpanel serde).
+    /// `config.ui.permission_mode` in the same trace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
     /// The trigger that produced this decision, distinct from `prompt_outcome`
@@ -110,7 +109,7 @@ pub enum ClientType {
     Extension,
     /// Grow Pager client - TUI-like terminal pager with interactive permission UI.
     /// Treated identically to GrowTUI for permission options (gets bash highlights +
-    /// interactive selection). Reports as "pager" for telemetry attribution.
+    /// interactive selection). Reports as "pager" for diagnostics attribution.
     ///
     /// Accepts both the hyphenated `"grow-pager"` (what the pager actually
     /// sends over the wire, matching `PAGER_CLIENT_TYPE`) and the underscored
@@ -169,7 +168,7 @@ pub enum AccessKind {
     Edit(String),
     Bash(String),
     /// An MCP tool call: the tool name plus its raw JSON args. The args are
-    /// carried so the auto-mode classifier (and telemetry) can judge what the
+    /// carried so the auto-mode classifier (and diagnostics) can judge what the
     /// call actually does, not just its name.
     MCPTool {
         name: String,

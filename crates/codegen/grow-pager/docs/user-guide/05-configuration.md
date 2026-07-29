@@ -61,7 +61,7 @@ screen_mode = "fullscreen"             # default render mode: "fullscreen" | "mi
                                        # (unset → fullscreen); set via /settings → Default screen mode
 
 [features]
-telemetry = false                      # anonymous usage telemetry
+diagnostics = false                      # anonymous usage diagnostics
 feedback = true                        # feedback system (default: true)
 lsp_tools = false                      # expose the lsp tool
 codebase_indexing = true               # code graph indexing (default: true)
@@ -481,39 +481,11 @@ Run `/doctor` in the affected session. It shows the detected notification and fo
 
 Keyboard shortcuts are **not** configurable — all bindings are built in. See [Keyboard Shortcuts](03-keyboard-shortcuts.md) for the complete reference.
 
-### Telemetry
+### Local diagnostics
 
-These are independent knobs (see [Monitoring Usage](24-monitoring-usage.md#related-settings)):
-
-- **`[features] telemetry`** / `GROW_TELEMETRY_ENABLED` — the product-analytics master switch. `/privacy` doesn't change it.
-- **`/privacy`** / Settings — coding-data sharing, separate from telemetry.
-- **`[telemetry] trace_upload`** / `GROW_TELEMETRY_TRACE_UPLOAD` — session traces; follows telemetry when unset.
-- **`[telemetry] otel_*`** / `GROW_EXTERNAL_OTEL` — external OTEL to your own collector (below).
-
-When telemetry is on, enterprises running their own collector can redirect it or turn parts off under `[telemetry]`:
-
-```toml
-[telemetry]
-events_url = "https://telemetry.your-company.com/events"  # send events to your own collector
-events_api_key = "your-collector-token"                   # auth for your collector, if required
-mixpanel_enabled = false                                  # disable Mixpanel product analytics
-trace_upload = false                                      # disable session/trace uploads (inherits the telemetry toggle when unset)
-```
-
-Set these only to point telemetry at your own infrastructure or to switch parts off. The built-in endpoint and credentials are managed by Grow — leave them unset to use the defaults.
-
-The same `[telemetry]` table also configures the **external OpenTelemetry stream**, an independent opt-in (it doesn't require the telemetry toggle above) that ships a curated, content-free usage schema to your *own* OTLP collector. Collector auth comes from `OTEL_EXPORTER_OTLP_HEADERS` and is never stored on disk. See [Monitoring & Usage](24-monitoring-usage.md) for the full schema, env vars, and privacy model.
-
-```toml
-[telemetry]
-otel_enabled = true                                       # external OTEL master switch (= GROW_EXTERNAL_OTEL)
-otel_metrics_exporter = "otlp"                            # otlp | console | none
-otel_logs_exporter = "otlp"                               # otlp | console | none
-otel_endpoint = "https://collector.corp.example:4318"     # OTLP base endpoint
-otel_protocol = "http/protobuf"                           # http/protobuf | grpc
-otel_log_user_prompts = false                             # content gate (admins can pin via requirements)
-otel_log_tool_details = false                             # content gate (admins can pin via requirements)
-```
+Grow has no telemetry or remote diagnostics configuration. Use `--debug`,
+`GROW_DEBUG_LOG`, `GROW_LOG_FILE`, and `RUST_LOG` to write diagnostics locally.
+See [Local Diagnostics](24-monitoring-usage.md).
 
 ### Version pinning
 
@@ -573,7 +545,7 @@ name = "Grow Latest (Proxy)"
 context_window = 128000
 
 [features]
-telemetry = false
+diagnostics = false
 ```
 
 ---
@@ -741,19 +713,6 @@ The key ones. See the README for the complete list.
 |----------|-------------|
 | `GROW_HOME` | Override config directory (default: `~/.grow`) |
 | `GROW_RESPECT_GITIGNORE` | Force gitignore filtering on (`1`) or off (`0`); overrides `[tools] respect_gitignore` |
-
-### Telemetry
-
-| Variable | Description |
-|----------|-------------|
-| `GROW_TELEMETRY_ENABLED` | Enable/disable telemetry |
-| `GROW_TELEMETRY_TRACE_UPLOAD` | Enable/disable session trace upload |
-| `GROW_TELEMETRY_MIXPANEL_ENABLED` | Enable/disable Mixpanel specifically |
-| `GROW_EXTERNAL_OTEL` | External OTEL to your collector (see [24-monitoring-usage.md](24-monitoring-usage.md)) |
-| `GROW_FEEDBACK_ENABLED` | Enable/disable feedback system |
-| `GROW_DEPLOYMENT_KEY` | Management API key for enterprise |
-
----
 
 ## File locations
 

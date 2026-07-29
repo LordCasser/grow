@@ -1280,7 +1280,7 @@ pub(super) fn apply_retry_state(
             session.set_retry_activity(None);
             session.rate_limited = *rate_limited;
             if *rate_limited {
-                grow_telemetry::session_ctx::log_event(grow_telemetry::events::RateLimitHit {
+                grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::RateLimitHit {
                     model_id: session
                         .models
                         .current
@@ -1340,7 +1340,7 @@ pub(super) fn apply_retry_state(
         }
     }
     if is_credit_limit {
-        grow_telemetry::session_ctx::log_event(grow_telemetry::events::CreditLimitHit {
+        grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::CreditLimitHit {
             model_id: session
                 .models
                 .current

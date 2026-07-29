@@ -260,11 +260,11 @@ pub(super) async fn filter_with_fragment_wait(
     if let Some(payload) = xt_filter.take_completed() {
         crate::terminal::xtversion::record_reply(&payload);
         // The startup terminal_context emission raced the async reply —
-        // re-emit so the populated xtversion field reaches telemetry.
+        // re-emit so the populated xtversion field reaches diagnostics.
         if crate::terminal::xtversion::detected().is_some() {
             tokio::task::spawn_blocking(|| {
-                let t = crate::terminal::terminal_context().telemetry_snapshot();
-                grow_telemetry::session_ctx::log_event(t);
+                let t = crate::terminal::terminal_context().diagnostics_snapshot();
+                grow_diagnostics::session_ctx::log_event(t);
             });
         }
     }

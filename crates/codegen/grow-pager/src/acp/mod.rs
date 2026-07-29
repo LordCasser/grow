@@ -267,7 +267,7 @@ pub async fn connect_via_leader(
 
     let mut agent_config = AgentConfig::new_from_toml_cfg(raw_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-    // resolve_telemetry_mode reads remote_settings.
+    // resolve_diagnostics_mode reads remote_settings.
     agent_config.remote_settings = flags.remote_settings.clone();
 
     let client_type = flags
@@ -346,9 +346,6 @@ pub async fn connect_via_leader(
         &grow_shell::util::grow_home::grow_home(),
         agent_config.auth.clone(),
     ));
-
-    // Leader has no in-process agent; init this process's product telemetry client.
-    grow_shell::agent::init::update_telemetry_config(&agent_config, &auth_manager);
 
     Ok(AcpConnection {
         tx,

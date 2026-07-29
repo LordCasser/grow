@@ -727,7 +727,7 @@ impl SessionActor {
         let session_cwd = std::path::Path::new(&self.session_info.cwd);
 
         let sid = self.session_info.id.0.as_ref();
-        grow_telemetry::unified_log::info("reload_plugins_impl: start", Some(sid), None);
+        grow_diagnostics::unified_log::info("reload_plugins_impl: start", Some(sid), None);
 
         // Folder-trust gates repo-local project plugins (hooks/MCP). Resolve and
         // record the verdict for this cwd BEFORE the plugins-config read below,
@@ -750,7 +750,7 @@ impl SessionActor {
         let count = handle.reload(Some(session_cwd), &discovery_config, project_trusted, force);
         let discover_ms = t2.elapsed().as_millis();
 
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "reload_plugins_impl: discovery done",
             Some(sid),
             Some(serde_json::json!({
@@ -898,7 +898,7 @@ impl SessionActor {
             }
         }
 
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "reload_plugins_impl: hooks done",
             Some(sid),
             Some(serde_json::json!({
@@ -968,7 +968,7 @@ impl SessionActor {
             false
         };
 
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "reload_plugins_impl: MCP done",
             Some(sid),
             Some(serde_json::json!({
@@ -980,7 +980,7 @@ impl SessionActor {
         // Refresh skills: re-scan from disk using the (already-updated) plugin registry.
         let t_skills = std::time::Instant::now();
         let skill_count = self.reload_skills_from_disk().await;
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "reload_plugins_impl: skills done",
             Some(sid),
             Some(serde_json::json!({
@@ -1037,7 +1037,7 @@ impl SessionActor {
                 .await;
         }
 
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "apply_plugin_registry_snapshot: complete",
             Some(sid),
             Some(serde_json::json!({

@@ -79,7 +79,7 @@ pub fn clipboard_route() -> &'static ClipboardRoute {
     })
 }
 
-/// Wayland data-control availability as a display/telemetry label:
+/// Wayland data-control availability as a display/diagnostics label:
 /// `"yes"`/`"no"` on Wayland sessions, `"n/a"` elsewhere.
 pub fn wayland_data_control_label() -> &'static str {
     match crate::host::DisplayServer::current() {
@@ -233,7 +233,7 @@ impl ClipboardProvider for SystemClipboard {
     }
 }
 
-/// Per-leg outcome of a routed clipboard write (for telemetry + trust).
+/// Per-leg outcome of a routed clipboard write (for diagnostics + trust).
 pub(crate) struct ClipboardWriteLegs {
     /// Whether the route enabled the native leg.
     pub(crate) route_native: bool,
@@ -310,7 +310,7 @@ pub struct CopyResult {
 
 /// Kind of clipboard feedback (success route, unverified send, or failure).
 ///
-/// Telemetry labels come from `IntoStaticStr` (`snake_case`); user-facing copy
+/// Diagnostic labels come from `IntoStaticStr` (`snake_case`); user-facing copy
 /// lives in [`ClipboardFeedback::message`] (intentionally different).
 #[derive(Debug, Clone, Copy, Eq, PartialEq, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -672,11 +672,8 @@ fn log_clipboard_copy_event(
     toast_kind: &'static str,
     started: std::time::Instant,
 ) {
-    if !grow_telemetry::client::is_enabled() {
-        return;
-    }
-    grow_telemetry::session_ctx::log_event(grow_telemetry::events::ClipboardCopy {
-        terminal: crate::terminal::terminal_context().telemetry_snapshot(),
+    grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::ClipboardCopy {
+        terminal: crate::terminal::terminal_context().diagnostics_snapshot(),
         source: "copy_text",
         text_len: text.len() as u64,
         route_native: route.native,
@@ -690,7 +687,7 @@ fn log_clipboard_copy_event(
         data_control: legs.data_control,
         tmux_ok: legs.tmux_ok,
         osc52_ok: legs.osc52_ok,
-        delivery: feedback.delivery().telemetry_label(),
+        delivery: feedback.delivery().diagnostics_label(),
         osc52_sink: osc52_sink_active(),
         container_no_display: is_container_no_display(),
         reported_success: feedback.delivery().reported_success(),
@@ -780,12 +777,12 @@ pub fn clipboard_text_is_pasteable(text: Option<&str>) -> bool {
     text.is_some_and(|t| !t.trim().is_empty())
 }
 
-/// Telemetry when a paste key was pressed but the host clipboard had nothing
+/// Diagnostic when a paste key was pressed but the host clipboard had nothing
 /// pasteable. Behavior is unchanged — callers still consume the key.
-/// Emits structured logs and a product analytics event when telemetry is enabled.
+/// Emits structured logs and a product analytics event when diagnostics is enabled.
 pub fn log_paste_key_empty_host_clipboard(surface: &str) {
-    let terminal = crate::terminal::terminal_context().telemetry_snapshot();
-    // Structured warn for the product telemetry pipeline.
+    let terminal = crate::terminal::terminal_context().diagnostics_snapshot();
+    // Structured warn for the product diagnostics pipeline.
     tracing::warn!(
         terminal.brand = %terminal.brand,
         terminal.multiplexer = %terminal.multiplexer,
@@ -799,13 +796,12 @@ pub fn log_paste_key_empty_host_clipboard(surface: &str) {
         paste.surface = %surface,
         "paste_key_empty_host_clipboard"
     );
-    if !grow_telemetry::client::is_enabled() {
-        return;
-    }
-    grow_telemetry::session_ctx::log_event(grow_telemetry::events::PasteKeyEmptyHostClipboard {
-        terminal,
-        surface: surface.to_owned(),
-    });
+    grow_diagnostics::session_ctx::log_event(
+        grow_diagnostics::events::PasteKeyEmptyHostClipboard {
+            terminal,
+            surface: surface.to_owned(),
+        },
+    );
 }
 
 fn lone_http_url_trimmed(t: &str) -> bool {
@@ -1022,21 +1018,18 @@ pub fn system_clipboard_probe_attachments(
     }
 }
 
-/// Emit a `clipboard_image_paste` telemetry event for one clipboard read.
+/// Emit a `clipboard_image_paste` diagnostics event for one clipboard read.
 ///
 /// `outcome`: "image" | "file_urls" | "empty" | "error". No-op (and no
-/// terminal-context detection) when telemetry is disabled.
+/// terminal-context detection) when diagnostics is disabled.
 fn log_clipboard_paste_event(
     probe: &str,
     outcome: &str,
     image_mime: &str,
     started: std::time::Instant,
 ) {
-    if !grow_telemetry::client::is_enabled() {
-        return;
-    }
-    grow_telemetry::session_ctx::log_event(grow_telemetry::events::ClipboardImagePaste {
-        terminal: crate::terminal::terminal_context().telemetry_snapshot(),
+    grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::ClipboardImagePaste {
+        terminal: crate::terminal::terminal_context().diagnostics_snapshot(),
         probe: probe.to_owned(),
         outcome: outcome.to_owned(),
         image_mime: image_mime.to_owned(),
@@ -2071,11 +2064,11 @@ mod tests {
                 120,
             ),
         ];
-        for (feedback, delivery, message, telemetry, ticks) in cases {
+        for (feedback, delivery, message, diagnostics, ticks) in cases {
             let result = feedback.to_result();
             assert_eq!(feedback.delivery(), delivery);
             assert_eq!(feedback.message(), message);
-            assert_eq!(Into::<&'static str>::into(feedback), telemetry);
+            assert_eq!(Into::<&'static str>::into(feedback), diagnostics);
             assert_eq!(result.message, message);
             assert_eq!(result.ticks, ticks);
             assert_eq!(result.delivery, delivery);

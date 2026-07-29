@@ -2,7 +2,7 @@
 //!
 //! The environment presets (per-environment endpoint URLs, the staging
 //! trust check, `EnvVarGuard`) live in the [`grow_env`] leaf crate so
-//! sibling crates (telemetry, tools, workspace) can share them without
+//! sibling crates (diagnostics, tools, workspace) can share them without
 //! depending on this crate. This module re-exports them and hosts the
 //! shell-specific gateway-bridge env vars.
 //!

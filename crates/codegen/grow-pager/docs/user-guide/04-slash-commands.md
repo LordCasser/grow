@@ -404,7 +404,7 @@ Show or toggle privacy and data-retention status.
 /privacy opt-out
 ```
 
-`/privacy` doesn't touch `[features] telemetry`, `trace_upload`, or your external OTEL settings — see [Monitoring Usage](24-monitoring-usage.md#related-settings). On team accounts, only a team admin can toggle privacy this way, and admins can also enable or disable Zero Data Retention for the team ([how to enable ZDR](https://docs.example.com/developers/faq/security#how-to-enable-zdr)).
+Local diagnostic logs are independent of `/privacy`; Grow never uploads them.
 
 ---
 

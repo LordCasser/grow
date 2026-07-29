@@ -883,8 +883,7 @@ pub(crate) fn execute(
                         .with_alpha_test_key(alpha_test_key.clone())
                         .with_session_id(session_id.clone())
                         .with_auth(auth_manager.clone());
-                    let storage = grow_shell::save::StorageClient;
-                    Some((auth_manager, registry, storage))
+                    Some((auth_manager, registry))
                 });
             tracing::info!(
                 elapsed_ms = setup_started.elapsed().as_millis() as u64,
@@ -895,7 +894,7 @@ pub(crate) fn execute(
             let ptx = progress_tx.clone();
             tasks
                 .spawn(async move {
-                    let Some((auth_manager, registry_client, storage_client)) = setup
+                    let Some((auth_manager, registry_client)) = setup
                     else {
                         return TaskResult::SessionRestoreFailed {
                             agent_id,
@@ -975,13 +974,12 @@ pub(crate) fn execute(
                     };
                     let cwd_str = target_cwd.to_string_lossy().to_string();
                     match restore_session_with_storage(
-                            &registry_client,
-                            &storage_client,
-                            &session_id,
-                            &cwd_str,
-                            None,
-                            progress,
-                        )
+                        &registry_client,
+                        &session_id,
+                        &cwd_str,
+                        None,
+                        progress,
+                    )
                         .await
                     {
                         Ok(result) => {
@@ -4545,7 +4543,7 @@ fn plain_prompt_content_block(
 /// Build the `PromptRequest._meta` payload: `promptId` for notification /
 /// response correlation, plus `screenMode` (`fullscreen` | `inline` |
 /// `minimal`; headless stamps `"headless"` in its own path) so the shell can
-/// attribute `prompt_submitted` telemetry to minimal vs. regular usage.
+/// attribute `prompt_submitted` diagnostics to minimal vs. regular usage.
 /// `screen_mode` is `None` only under `SessionFlags::default()` (tests); the
 /// key is omitted then, keeping the legacy wire shape byte-identical.
 /// Extracted from the spawns for testability.

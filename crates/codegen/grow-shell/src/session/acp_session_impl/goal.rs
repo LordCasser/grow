@@ -134,7 +134,6 @@ impl SessionActor {
                         crate::agent::config::stamp_session_local_sampler_fields(
                             &mut config,
                             &active_config,
-                            self.client_identifier.clone(),
                             Some(self.max_retries),
                         );
                         let model = config.model.clone();
@@ -1460,8 +1459,6 @@ impl SessionActor {
                     plan.directive,
                 ))],
                 prompt_mode: crate::session::plan_mode::PromptMode::Agent,
-                trace_gcs_config: None,
-                artifact_tracker: None,
                 client_identifier: None,
                 screen_mode: None,
                 verbatim: true,

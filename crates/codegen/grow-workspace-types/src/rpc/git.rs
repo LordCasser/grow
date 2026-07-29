@@ -694,7 +694,7 @@ pub struct GitCollectChangesResponse {
     /// Warnings (e.g., files skipped due to size limits, binary files excluded).
     pub warnings: Vec<String>,
 
-    /// Total size of collected data (bytes, for logging/telemetry).
+    /// Total size of collected data (bytes, for logging/diagnostics).
     pub total_size_bytes: u64,
 }
 

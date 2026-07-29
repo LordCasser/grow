@@ -2140,7 +2140,7 @@ impl DashboardState {
         // now — it lands on completion only if the probe finds no image. The
         // native snapshot gate skips plain text with no raster so common text
         // pastes never enqueue. Skip large / multi-line pastes that are
-        // obviously text; no empty-clipboard telemetry on the bracketed path.
+        // obviously text; no empty-clipboard diagnostics on the bracketed path.
         let should_probe = text.len() < 4096 && !text.contains('\n');
         if probe_clipboard_attachments
             && should_probe
@@ -3036,7 +3036,7 @@ impl DashboardState {
         // so "which surface" stays orthogonal to "was it keyboard".
         if self.pinned_upgrade_cta_live && key!('o', CONTROL).matches(key) {
             return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                grow_telemetry::events::AnnouncementCtaSurface::Keyboard,
+                grow_diagnostics::events::AnnouncementCtaSurface::Keyboard,
             ));
         }
 
@@ -3814,7 +3814,7 @@ impl DashboardState {
             // (resolved through the slot gate at dispatch time).
             if self.upgrade_cta_hit.contains(mouse.column, mouse.row) {
                 return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                    grow_telemetry::events::AnnouncementCtaSurface::Dashboard,
+                    grow_diagnostics::events::AnnouncementCtaSurface::Dashboard,
                 ));
             }
 

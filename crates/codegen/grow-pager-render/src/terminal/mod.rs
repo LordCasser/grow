@@ -583,14 +583,14 @@ impl TerminalContext {
         }
     }
 
-    /// Extract a flat snapshot of terminal details for telemetry.
-    pub fn telemetry_snapshot(&self) -> grow_telemetry::events::TerminalTelemetry {
+    /// Extract a flat snapshot of terminal details for diagnostics.
+    pub fn diagnostics_snapshot(&self) -> grow_diagnostics::events::TerminalDiagnostic {
         let os = crate::host::HostOs::current();
         let server = crate::host::DisplayServer::current();
         let kb = self.keyboard_capabilities();
         let route = crate::clipboard::clipboard_route();
         let (term_version, term_version_source) = self.term_version();
-        grow_telemetry::events::TerminalTelemetry {
+        grow_diagnostics::events::TerminalDiagnostic {
             brand: self.brand.to_string(),
             multiplexer: self.multiplexer.to_string(),
             is_ssh: self.is_ssh,
@@ -610,33 +610,6 @@ impl TerminalContext {
             clipboard_route: route.to_string(),
             clipboard_native_tool: grow_shared::clipboard::native_tool_name().to_owned(),
             clipboard_data_control: crate::clipboard::wayland_data_control_label().to_owned(),
-        }
-    }
-
-    /// Extract terminal info for feedback submissions.
-    pub fn feedback_info(&self) -> grow_shared::session::FeedbackTerminalInfo {
-        use grow_shared::session::FeedbackTerminalInfo;
-        // XTVERSION self-report lets feedback triage identify the terminal
-        // even when env detection failed (e.g. over SSH).
-        let brand = match xtversion::detected() {
-            Some(v) if self.brand == TerminalName::Unknown => format!("Unknown (XTVERSION: {v})"),
-            _ => self.brand.to_string(),
-        };
-        FeedbackTerminalInfo {
-            brand,
-            multiplexer: self.multiplexer.to_string(),
-            is_ssh: self.is_ssh,
-            is_byobu: self.is_byobu(),
-            term_var: self.term_var_or_na().to_owned(),
-            tmux_version: if self.is_tmux_backed() {
-                self.tmux_version.clone()
-            } else {
-                None
-            },
-            hyperlink_osc8_support: Some(self.hyperlink_capabilities().osc8.to_string()),
-            clipboard_route: Some(crate::clipboard::clipboard_route().to_string()),
-            clipboard_native_tool: Some(grow_shared::clipboard::native_tool_name().to_owned()),
-            display_server: Some(crate::host::DisplayServer::current().to_string()),
         }
     }
 }

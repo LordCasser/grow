@@ -14,7 +14,7 @@ pub(crate) async fn apply(
     args: acp::SetSessionModelRequest,
 ) -> Result<acp::SetSessionModelResponse, acp::Error> {
     tracing::info!("Received set session model request {args:?}");
-    grow_telemetry::unified_log::info(
+    grow_diagnostics::unified_log::info(
         "model changed",
         Some(args.session_id.0.as_ref()),
         Some(serde_json::json!({"model": args.model_id.0.as_ref()})),
@@ -92,7 +92,7 @@ pub(crate) async fn apply(
         model_id.0.as_ref(),
         applied_effort.map(|eff| eff.to_string()),
     );
-    grow_telemetry::session_ctx::log_event(grow_telemetry::events::ModelSwitched {
+    grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::ModelSwitched {
         session_id: session_id.0.to_string(),
         previous_model_id: previous_model_id.to_string(),
         new_model_id: model_id.0.to_string(),

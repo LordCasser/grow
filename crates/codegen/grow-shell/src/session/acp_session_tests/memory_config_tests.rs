@@ -146,7 +146,6 @@ async fn create_test_actor_with_memory(
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
-        telemetry_enabled: false,
         supports_backend_search: std::cell::Cell::new(false),
         tool_overrides: std::cell::RefCell::new(None),
         resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
@@ -216,9 +215,7 @@ async fn create_test_actor_with_memory(
         buffering_settings: None,
         client_identifier: None,
         origin_client: None,
-        feedback_manager: Arc::new(FeedbackManager::local_only("test-memory")),
-        upload_queue: Arc::new(OnceLock::new()),
-        sync_loop_cancel: None,
+        signals_handle: Default::default(),
         agent: std::cell::RefCell::new(test_agent_default().await),
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         git_head_enabled: false,
@@ -302,7 +299,6 @@ async fn create_test_actor_with_memory(
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: grow_workspace::WorkspaceOps::for_test(),
-        trace_config_template: std::cell::RefCell::new(None),
     }
 }
 #[tokio::test(flavor = "current_thread")]

@@ -19,11 +19,11 @@ use crate::auth::error::{AuthError, RefreshTokenError, RefreshTokenFailedReason}
 use crate::auth::manager::AuthManager;
 use crate::auth::model::ProviderAuth;
 use crate::auth::token_type::TokenType;
-use grow_telemetry::events::{AuthTokenKind, ManualAuth, ManualAuthReason, ManualAuthSurface};
+use grow_diagnostics::events::{AuthTokenKind, ManualAuth, ManualAuthReason, ManualAuthSurface};
 
 /// `manual_auth` KPI reason for a terminal `AuthError`, or `None` when it
 /// doesn't force a manual re-login. Lives here (not on `AuthError`) so the error
-/// model stays telemetry-free.
+/// model stays diagnostics-free.
 pub(crate) fn manual_auth_reason(err: &AuthError) -> Option<ManualAuthReason> {
     use ManualAuthReason as R;
     Some(match err {
@@ -73,7 +73,7 @@ pub(crate) enum RecoverySource {
     Turn,
     /// The relay / leader connection handshake.
     Relay,
-    /// Uploads, telemetry, tool calls. Never emits the KPI.
+    /// Uploads, diagnostics, tool calls. Never emits the KPI.
     Background,
 }
 
@@ -104,7 +104,7 @@ impl RejectedAuth {
     pub(crate) fn capture(auth: Option<&ProviderAuth>) -> Self {
         Self {
             principal: auth.map(|a| a.user_id.clone()).filter(|id| !id.is_empty()),
-            token_kind: TokenType::from_auth(auth).telemetry_kind(),
+            token_kind: TokenType::from_auth(auth).diagnostics_kind(),
             rejected_token_id: auth.map(|a| a.key.clone()).unwrap_or_default(),
         }
     }
@@ -184,7 +184,7 @@ impl ManualAuthTracker {
             self.emit_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        grow_telemetry::session_ctx::log_event(event);
+        grow_diagnostics::session_ctx::log_event(event);
     }
 
     #[cfg(test)]
@@ -364,12 +364,12 @@ impl UnauthorizedRecovery {
             // same-as-rejected / no entry): a silent arm hides which path
             // a recovery loop is taking. Debug level — the disk-state
             // *transition* is logged once by `read_disk_auth` itself.
-            grow_telemetry::unified_log::debug("auth recovery: no disk entry", None, None);
+            grow_diagnostics::unified_log::debug("auth recovery: no disk entry", None, None);
             return None;
         };
         if crate::auth::is_expired(&disk_auth) {
             tracing::debug!("auth recovery: disk token is expired, skipping");
-            grow_telemetry::unified_log::debug(
+            grow_diagnostics::unified_log::debug(
                 "auth recovery: disk token expired",
                 None,
                 Some(serde_json::json!({
@@ -381,7 +381,7 @@ impl UnauthorizedRecovery {
         }
         if self.is_different_token(&disk_auth) {
             tracing::info!("auth recovery: disk has a different token, accepting");
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "auth recovery: adopted disk token",
                 None,
                 Some(serde_json::json!({
@@ -393,7 +393,7 @@ impl UnauthorizedRecovery {
             Some(disk_auth)
         } else {
             tracing::debug!("auth recovery: disk token is same as rejected, skipping");
-            grow_telemetry::unified_log::debug(
+            grow_diagnostics::unified_log::debug(
                 "auth recovery: disk token same as rejected",
                 None,
                 None,
@@ -424,7 +424,7 @@ impl UnauthorizedRecovery {
             mint_age_seconds,
             "auth recovery: current token freshly minted, skipping refresh"
         );
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "auth recovery: fresh mint, refresh skipped",
             None,
             Some(serde_json::json!({
@@ -467,7 +467,7 @@ impl UnauthorizedRecovery {
                     .await;
                 match &result {
                     Ok(auth) => {
-                        grow_telemetry::unified_log::info(
+                        grow_diagnostics::unified_log::info(
                             "auth recovery: refreshed from authority",
                             None,
                             Some(serde_json::json!({
@@ -478,7 +478,7 @@ impl UnauthorizedRecovery {
                         );
                     }
                     Err(e) => {
-                        grow_telemetry::unified_log::warn(
+                        grow_diagnostics::unified_log::warn(
                             "auth recovery: refresh from authority failed",
                             None,
                             Some(serde_json::json!({
@@ -491,7 +491,7 @@ impl UnauthorizedRecovery {
                 result
             }
             TokenType::LegacySession | TokenType::ApiKey => {
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "auth recovery: no refresh authority for token type",
                     None,
                     Some(serde_json::json!({ "token_type": format!("{tt:?}") })),

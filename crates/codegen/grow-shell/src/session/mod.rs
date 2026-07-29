@@ -15,14 +15,11 @@ pub use self::commands::*;
 pub use self::fork::{ForkSessionRequest, ForkSessionResponse, fork_session};
 pub use self::handle::*;
 pub use self::persistence::{
-    LocalFeedbackEntry, UserFeedbackEntry, find_local_child_for_remote, resolve_local_session,
-    resolve_local_session_any_cwd, session_exists_for_cwd,
+    find_local_child_for_remote, resolve_local_session, resolve_local_session_any_cwd,
+    session_exists_for_cwd,
 };
 pub use self::result::{Empty, ExtMethodResult};
 pub use self::share::{ShareSessionRequest, ShareSessionResponse};
-pub use prod_mc_cli_chat_proxy_types::feedback_types::{
-    ClientType, FeedbackTerminalInfo, RatingType,
-};
 pub use xai_fsnotify::{FsConfig, FsEvent, FsEventKind, FsEventSource, FsNotifyError, GitMetaKind};
 /// `false` twin: this template is not compiled into this build, so no
 /// template matches. Keeps ungated call sites compiling in both
@@ -312,8 +309,6 @@ pub(crate) mod event_types;
 pub(crate) mod event_writer;
 pub(crate) mod events;
 pub mod export;
-pub mod feedback;
-pub mod feedback_manager;
 pub mod file_system;
 pub mod fork;
 pub(crate) mod fs_watch;
@@ -343,6 +338,7 @@ pub mod memory;
 pub(crate) mod normalize_cache;
 pub mod persistence;
 pub use grow_shared::placeholder_images;
+pub(crate) mod diagnostics;
 pub mod plan_mode;
 pub mod prompt_history;
 pub mod prompt_parser;
@@ -356,7 +352,6 @@ pub(crate) mod slash_commands;
 pub mod storage;
 pub(crate) mod streaming_capture;
 pub(crate) mod summary;
-pub(crate) mod telemetry;
 #[cfg(feature = "test-support")]
 pub mod testkit;
 pub mod tool_index;

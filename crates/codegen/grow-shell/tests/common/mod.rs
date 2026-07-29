@@ -338,15 +338,11 @@ pub fn test_sampler_config(
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: 256_000,
-        client_version: None,
         force_http1: false,
         max_retries: None,
         stream_tool_calls: false,
         idle_timeout_secs: None,
-        client_identifier: None,
         reasoning_effort: None,
-        deployment_id: None,
-        user_id: None,
         origin_client: None,
         attribution_callback: None,
         bearer_resolver: None,
@@ -354,6 +350,5 @@ pub fn test_sampler_config(
         compactions_remaining: None,
         compaction_at_tokens: None,
         doom_loop_recovery: None,
-        header_injector: None,
     }
 }

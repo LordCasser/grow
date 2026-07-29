@@ -10,7 +10,7 @@
 //! [[version_overrides]]
 //! minimum_version = "1.8.0"
 //! maximum_version = "1.9.999"
-//! [version_overrides.features.telemetry]
+//! [version_overrides.features.diagnostics]
 //! enabled = true
 //! ```
 
@@ -157,23 +157,23 @@ mod tests {
     fn later_matching_override_wins_on_same_key() {
         let mut cfg = parse(
             r#"
-            [features.telemetry]
+            [features.diagnostics]
             enabled = false
 
             [[version_overrides]]
             minimum_version = "1.7.0"
-            [version_overrides.features.telemetry]
+            [version_overrides.features.diagnostics]
             enabled = true
             sample_rate = 0.1
 
             [[version_overrides]]
             minimum_version = "1.8.0"
-            [version_overrides.features.telemetry]
+            [version_overrides.features.diagnostics]
             sample_rate = 0.5
             "#,
         );
         apply_version_overrides(&mut cfg, &v("1.8.0")).unwrap();
-        let t = &cfg["features"]["telemetry"];
+        let t = &cfg["features"]["diagnostics"];
         assert_eq!(t["enabled"].as_bool(), Some(true));
         assert_eq!(t["sample_rate"].as_float(), Some(0.5));
     }

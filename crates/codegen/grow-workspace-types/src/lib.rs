@@ -98,8 +98,8 @@ pub use crate::error::{IoKind, WorkspaceError};
 pub use crate::events::{EventLag, WorkspaceEvent, WorkspaceTopic, WorkspaceTopicSet};
 pub use crate::identity::{HunkId, SessionId, ToolCallId};
 pub use crate::metadata::{
-    META_CLIENT_ID, META_GRPC_TIMEOUT, META_PROMPT_INDEX, META_SESSION_ID, META_TRACEPARENT,
-    META_TRACESTATE, Metadata, STANDARD_META_KEYS,
+    META_CLIENT_ID, META_GRPC_TIMEOUT, META_PROMPT_INDEX, META_SESSION_ID, Metadata,
+    STANDARD_META_KEYS,
 };
 pub use crate::request::RequestMessage;
 pub use crate::requests::{

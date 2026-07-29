@@ -1069,7 +1069,7 @@ impl SessionActor {
             }
         };
 
-        // `GOAL_PLANNER_MAX_RUNS` is telemetry-only; resume retries are unbounded.
+        // `GOAL_PLANNER_MAX_RUNS` is diagnostics-only; resume retries are unbounded.
         let attempt = 1u32;
 
         let model_id = self
@@ -1277,7 +1277,7 @@ impl SessionActor {
                 &event_tx,
             )
             .await;
-        // Cloned for telemetry before `role_override` moves into the spawner.
+        // Cloned for diagnostics before `role_override` moves into the spawner.
         let strategist_model_override = role_override.model.clone();
         let spawner: std::sync::Arc<dyn crate::session::goal_strategist::GoalStrategistSpawner> =
             std::sync::Arc::new(crate::session::goal_strategist::ChannelSpawner {
@@ -1319,7 +1319,7 @@ impl SessionActor {
         self.chat_state_handle.flush_harness_trace_turn();
 
         // Fail-OPEN: persist on success; any other exit leaves `bonus_guard`
-        // armed (the runner already emitted telemetry + warning).
+        // armed (the runner already emitted diagnostics + warning).
         if let crate::session::goal_strategist::GoalStrategistOutcome::Advised {
             strategy_file,
             recommendation,
@@ -1339,7 +1339,7 @@ impl SessionActor {
     ///
     /// Best-effort / fail-OPEN: gated by `goal_summary_enabled`; any failure
     /// (disabled, no coordinator, spawn error, empty output) is logged /
-    /// telemetry'd and skipped — goal completion is NEVER blocked, paused, or
+    /// diagnostics'd and skipped — goal completion is NEVER blocked, paused, or
     /// un-achieved (the goal is already Complete when this runs). Read-only:
     /// the spawn pins a read-only toolset and the prompt forbids edits. No
     /// `goal_tracker` lock is held across the summarizer `.await`.
@@ -1413,7 +1413,7 @@ impl SessionActor {
         self.chat_state_handle.flush_harness_trace_turn();
 
         // Fail-OPEN: surface the summary on success; any other outcome already
-        // emitted telemetry and is skipped. The chunk persists via
+        // emitted diagnostics and is skipped. The chunk persists via
         // `updates.jsonl`, so resume/rewind keep it.
         if let crate::session::goal_summarizer::GoalSummarizerOutcome::Summarized {
             summary, ..

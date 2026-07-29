@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -220,34 +220,8 @@ fn paced_events(
     )
 }
 
-/// Max body bytes retained on each accepted [`StorageUpload`] (keeps large
-/// e2e artifacts from ballooning test memory; meta/small dumps stay intact).
-const STORAGE_BODY_CAPTURE_CAP: usize = 256 * 1024;
-
-/// One accepted (HTTP 200) mock `/v1/storage` upload.
-#[derive(Debug, Clone)]
-pub struct StorageUpload {
-    pub path: String,
-    pub size: usize,
-    /// Request body when `size <= 256 KiB`; empty for larger payloads.
-    pub body: Vec<u8>,
-    /// `Authorization` header value as sent (e.g. `Bearer …`).
-    pub authorization: Option<String>,
-}
-
-/// Mock `/v1/storage` state: a flippable 401 gate plus a record of accepted
-/// uploads, so e2e tests can simulate an auth outage window and assert the
-/// trace upload queue parks, then drains after the gate heals.
-#[derive(Default)]
-struct StorageState {
-    unauthorized: AtomicBool,
-    request_count: AtomicU32,
-    uploads: std::sync::Mutex<Vec<StorageUpload>>,
-}
-
 /// Mock `/v1/chat/completions` + `/v1/responses` + `/v1/messages` +
-/// `/v1/models` + `/v1/settings` + `/v1/storage` +
-/// `/v1/privacy/coding-data-retention` server.
+/// `/v1/models` + `/v1/settings` + `/v1/privacy/coding-data-retention` server.
 /// Logs all requests. Shuts down on drop.
 pub struct MockInferenceServer {
     addr: SocketAddr,
@@ -265,8 +239,6 @@ pub struct MockInferenceServer {
     messages_stop_reason: Arc<std::sync::RwLock<String>>,
     /// Optional per-SSE-event delay on all inference endpoints.
     chunk_delay: Arc<std::sync::RwLock<Option<Duration>>>,
-    /// Mock `/v1/storage` 401 gate + accepted-upload record.
-    storage: Arc<StorageState>,
     /// When set, `/v1/models` and `/v1/settings` hang forever (never
     /// respond); see [`Self::set_hang`].
     hang: Arc<std::sync::atomic::AtomicBool>,
@@ -308,7 +280,6 @@ impl MockInferenceServer {
         let agent_turns = Arc::new(std::sync::Mutex::new(VecDeque::new()));
         let messages_stop_reason = Arc::new(std::sync::RwLock::new("end_turn".to_string()));
         let chunk_delay = Arc::new(std::sync::RwLock::new(None::<Duration>));
-        let storage = Arc::new(StorageState::default());
         let hang = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let user_tier = Arc::new(std::sync::RwLock::new(None::<String>));
         let app = Self::build_router(
@@ -320,7 +291,6 @@ impl MockInferenceServer {
             agent_turns.clone(),
             messages_stop_reason.clone(),
             chunk_delay.clone(),
-            storage.clone(),
             hang.clone(),
             user_tier.clone(),
         );
@@ -360,7 +330,6 @@ impl MockInferenceServer {
             agent_turns,
             messages_stop_reason,
             chunk_delay,
-            storage,
             hang,
             user_tier,
         })
@@ -568,74 +537,6 @@ impl MockInferenceServer {
             })
     }
 
-    /// Flip the mock `/v1/storage` 401 gate. While `true`, every upload is
-    /// rejected with 401 (the auth-outage window the park-on-401 e2e drives).
-    pub fn set_storage_unauthorized(&self, unauthorized: bool) {
-        self.storage
-            .unauthorized
-            .store(unauthorized, Ordering::SeqCst);
-    }
-
-    /// Total `/v1/storage` upload attempts seen, including 401-rejected ones.
-    pub fn storage_request_count(&self) -> u32 {
-        self.storage.request_count.load(Ordering::SeqCst)
-    }
-
-    /// Snapshot of accepted (HTTP 200) `/v1/storage` uploads.
-    pub fn storage_uploads(&self) -> Vec<StorageUpload> {
-        self.storage.uploads.lock().unwrap().clone()
-    }
-
-    /// Mock `/v1/storage` upload: count the attempt, reject with 401 while the
-    /// gate is closed, else record the upload and mirror the proxy's
-    /// `UploadResponse` JSON shape.
-    fn storage_upload_handler(
-        storage: &StorageState,
-        headers: &HeaderMap,
-        body: &axum::body::Bytes,
-    ) -> Response {
-        storage.request_count.fetch_add(1, Ordering::SeqCst);
-        if storage.unauthorized.load(Ordering::SeqCst) {
-            return (
-                StatusCode::UNAUTHORIZED,
-                r#"{"error":"Invalid or expired credentials (mock)"}"#,
-            )
-                .into_response();
-        }
-
-        let path = headers
-            .get("X-Storage-Path")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_owned();
-        let size = body.len();
-        let captured_body = if size <= STORAGE_BODY_CAPTURE_CAP {
-            body.to_vec()
-        } else {
-            Vec::new()
-        };
-        let authorization = Self::extract_auth(headers);
-        let response = (
-            StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
-            json!({
-                "bucket": "mock-bucket",
-                "path": path,
-                "size": size,
-                "content_type": "application/octet-stream",
-                "generation": 1,
-            })
-            .to_string(),
-        );
-        storage.uploads.lock().unwrap().push(StorageUpload {
-            path,
-            size,
-            body: captured_body,
-            authorization,
-        });
-        response.into_response()
-    }
-
     fn extract_auth(headers: &HeaderMap) -> Option<String> {
         headers
             .get("authorization")
@@ -674,7 +575,6 @@ impl MockInferenceServer {
         agent_turns: Arc<std::sync::Mutex<VecDeque<String>>>,
         messages_stop_reason: Arc<std::sync::RwLock<String>>,
         chunk_delay: Arc<std::sync::RwLock<Option<Duration>>>,
-        storage: Arc<StorageState>,
         hang: Arc<std::sync::atomic::AtomicBool>,
         user_tier: Arc<std::sync::RwLock<Option<String>>>,
     ) -> Router {
@@ -1035,39 +935,6 @@ impl MockInferenceServer {
                         }
                     },
                 ),
-            )
-            .route(
-                "/v1/storage",
-                post({
-                    let storage = storage.clone();
-                    move |headers: HeaderMap, body: axum::body::Bytes| {
-                        let storage = storage.clone();
-                        async move { Self::storage_upload_handler(&storage, &headers, &body) }
-                    }
-                }),
-            )
-            // The shell probes these before/alongside per-file uploads. Answer
-            // 404 ("old proxy") so it falls back to plain `POST /v1/storage`,
-            // which is the path the park-on-401 e2e exercises.
-            .route(
-                "/v1/storage/exists",
-                get(|| async { StatusCode::NOT_FOUND }),
-            )
-            .route(
-                "/v1/storage/batch_exists",
-                post(|| async { StatusCode::NOT_FOUND }),
-            )
-            .route(
-                "/v1/storage/batch_upload_json",
-                post(|| async { StatusCode::NOT_FOUND }),
-            )
-            .route(
-                "/v1/storage/batch_upload",
-                post(|| async { StatusCode::NOT_FOUND }),
-            )
-            .route(
-                "/v1/storage/limits",
-                get(|| async { StatusCode::NOT_FOUND }),
             )
             // Body limit: repo-context archives can exceed axum's 2 MB default.
             .layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024))

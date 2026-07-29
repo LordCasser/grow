@@ -399,7 +399,7 @@ pub const HOME_IMAGE_SUBDIRS: &[&str] = &[
 /// path returns [`PlaceholderLoadError::OutsideAllowedPrefixes`]
 /// regardless of whether the file exists, the extension is recognised,
 /// or the bytes look like an image. This prevents log-level
-/// information disclosure (an attacker with read access to telemetry
+/// information disclosure (an attacker with read access to diagnostics
 /// can no longer distinguish "file exists but is outside scope" from
 /// "file does not exist").
 ///

@@ -26,7 +26,6 @@ use crate::sampling::{
     SyntheticReason, ToolSpec, conversation_truncate_for_prompt,
 };
 use crate::session::ClientFsConfig;
-use crate::session::feedback_manager::{FeedbackManager, FeedbackManagerConfig};
 use crate::session::fs_watch::{self, git_head_dedup_key};
 use crate::session::info::Info as SessionInfo;
 use crate::session::mcp_servers::McpInitStrategy;
@@ -120,9 +119,9 @@ use super::PromptOrigin;
 use super::acp_types;
 use super::chat_persistence;
 use super::compaction_config;
+use super::diagnostics;
 use super::helpers;
 use super::memory_state;
-use super::telemetry;
 #[path = "acp_session_impl/prompt_build.rs"]
 mod prompt_build;
 use prompt_build::*;
@@ -190,11 +189,9 @@ pub(crate) struct InputItem {
     pub(crate) prompt_id: String,
     pub(crate) prompt_blocks: Vec<ContentBlock>,
     pub(crate) prompt_mode: PromptMode,
-    pub(crate) trace_gcs_config: Option<crate::save::TraceExportConfig>,
-    pub(crate) artifact_tracker: Option<crate::save::ArtifactTracker>,
     /// Optional client identifier from the prompt request meta (overrides session-level one)
     pub(crate) client_identifier: Option<String>,
-    /// See [`SessionCommand::Prompt::screen_mode`]. Telemetry-only.
+    /// See [`SessionCommand::Prompt::screen_mode`]. Diagnostic-only.
     pub(crate) screen_mode: Option<String>,
     /// See [`SessionCommand::Prompt::verbatim`].
     pub(crate) verbatim: bool,
@@ -314,7 +311,7 @@ impl State {
     }
     /// Sweep `pending_inputs`, removing entries matching `drop_if` EXCEPT the
     /// running turn's own slot, and return the removed items (callers harvest
-    /// them for telemetry counts / reservation releases).
+    /// them for diagnostics counts / reservation releases).
     ///
     /// Returned items still carry live `respond_to` senders that this helper
     /// does NOT resolve — dropping them unfulfilled is correct only for
@@ -559,7 +556,7 @@ pub(crate) struct PreparedToolCall {
 impl PreparedToolCall {
     /// The tool name hooks see: the resolved dispatch target, else the wire name.
     /// The single source for the resolved name across the dispatch-phase hook
-    /// events (PostToolUse / PostToolUseFailure) and their telemetry labels.
+    /// events (PostToolUse / PostToolUseFailure) and their diagnostics labels.
     pub(crate) fn hook_tool_name(&self) -> &str {
         self.dispatch_target_name
             .as_deref()
@@ -639,9 +636,7 @@ pub(crate) struct SessionActor {
     /// read it synchronously to surface `NeedsInput`. Mutated by
     /// `PendingInteractionGuard` at each reverse-request site. Never persisted.
     pub(crate) pending_interactions: crate::session::pending_interaction::PendingInteractions,
-    /// Gates product analytics, not trace uploads. Resolved at spawn as
-    /// `is_telemetry_enabled() && !is_zdr()` — ZDR teams always have this false.
-    pub(crate) telemetry_enabled: bool,
+    /// Whether the selected provider exposes a hosted search capability.
     pub(crate) supports_backend_search: std::cell::Cell<bool>,
     /// Per-turn override, set at promotion. Not persisted; a reload reverts to the definition seed.
     pub(crate) tool_overrides: std::cell::RefCell<Option<grow_sampling_types::ToolOverrides>>,
@@ -657,7 +652,7 @@ pub(crate) struct SessionActor {
     /// `reconstruct_full_config` threads it into the sampler config, and the
     /// sampler itself sends the matching `x-grow-doom-loop-check` header.
     pub(crate) doom_loop_recovery: Option<grow_sampling_types::DoomLoopRecoveryPolicy>,
-    /// Telemetry-only per-turn doom-loop recovery tally (attempts, whether a
+    /// Diagnostic-only per-turn doom-loop recovery tally (attempts, whether a
     /// budget-spent accept happened, tightest trigger label). Accumulated by
     /// the event drainer, taken at turn end for the per-turn analytics event.
     pub(crate) doom_loop_turn_tally: parking_lot::Mutex<crate::session::signals::DoomLoopTurnTally>,
@@ -676,9 +671,9 @@ pub(crate) struct SessionActor {
     pub(crate) forked_tool_override: Option<Vec<ToolSpec>>,
     /// Compaction configuration and runtime state.
     pub(crate) compaction: super::compaction_config::CompactionConfig,
-    /// Memory subsystem: storage, flush config, injection state, telemetry.
+    /// Memory subsystem: storage, flush config, injection state, diagnostics.
     pub(crate) memory: super::memory_state::SessionMemory,
-    /// Telemetry counters for session summary.
+    /// Diagnostic counters for session summary.
     pub(crate) session_start: std::time::Instant,
     /// Per-chunk idle timeout for inference streaming. If no SSE chunk is received
     /// within this duration, the stream is aborted with a non-retryable error.
@@ -707,16 +702,12 @@ pub(crate) struct SessionActor {
     /// Buffering settings captured at session creation. The concrete ReplayBuffer
     /// is owned by `run_session()`.
     pub(crate) buffering_settings: Option<BufferingSettings>,
-    /// Client identifier for telemetry - passed from the MvpAgent (extracted from initialize meta)
+    /// Client identifier for diagnostics - passed from the MvpAgent (extracted from initialize meta)
     pub(crate) client_identifier: Option<String>,
     /// Origin client for User-Agent on sampling requests.
     pub(crate) origin_client: Option<crate::http::OriginClientInfo>,
-    /// Feedback manager for signal tracking and feedback request heuristics
-    pub(crate) feedback_manager: Arc<FeedbackManager>,
-    pub(crate) upload_queue:
-        std::sync::Arc<std::sync::OnceLock<crate::save::UploadQueue>>,
-    /// Cancellation token for the feedback sync loop (None if no feedback client)
-    pub(crate) sync_loop_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Session-local usage and lifecycle signals.
+    pub(crate) signals_handle: SessionSignalsHandle,
     /// The fully-built Agent: owns the ToolBridge, system prompt, policies,
     /// and the AgentDefinition. Replaces the old `tool_bridge` + `agent_definition` fields.
     /// Wrapped in `RefCell` for mid-session mutation (skill refresh, prompt regen).
@@ -764,13 +755,13 @@ pub(crate) struct SessionActor {
     pub(crate) current_prompt_mode: Arc<parking_lot::Mutex<PromptMode>>,
     /// Prompt mode captured at the start of the current turn. Set once in
     /// `handle_prompt` and never modified during the turn. Used for
-    /// `start_prompt_mode` telemetry.
+    /// `start_prompt_mode` diagnostics.
     pub(crate) turn_start_prompt_mode: parking_lot::Mutex<PromptMode>,
     /// Effective mode of the currently running turn. Set at turn start from
     /// the prompt mode parameter, then updated only by agent-initiated tool
     /// calls (`EnterPlanMode` / `ExitPlanMode`). NOT affected by
     /// `session/set_mode` (which only changes the next turn's start mode).
-    /// Read at turn end for `end_prompt_mode` telemetry.
+    /// Read at turn end for `end_prompt_mode` diagnostics.
     pub(crate) turn_prompt_mode: Arc<parking_lot::Mutex<PromptMode>>,
     /// Plan mode lifecycle tracker. Session-scoped dynamic state (not part
     /// of `AgentDefinition`). All plan mode logic lives in `plan_mode.rs`;
@@ -1037,7 +1028,6 @@ pub(crate) struct SessionActor {
     /// Template for building trace configs on synthetic auto-wake turns.
     /// Captured from the first real user prompt's trace config so synthetic
     /// turns can upload artifacts using the same bucket/method.
-    pub(crate) trace_config_template: std::cell::RefCell<Option<TraceConfigTemplate>>,
     /// Layer-3 LazinessDetector: monotonic counter bumped whenever a
     /// fresh (non-synthetic) user prompt arrives at the actor.
     /// `maybe_fire_laziness_check` snapshots the value at start and
@@ -1074,20 +1064,10 @@ pub(crate) struct SessionActor {
     /// guarantee for writes under `PIPE_BUF` (JSONL lines fit).
     pub(crate) laziness_debug_log: Option<std::sync::Arc<std::path::Path>>,
 }
-/// Template for building trace configs on synthetic auto-wake turns.
-///
-/// Captured from the first real user prompt's `TraceExportConfig` so
-/// synthetic turns can upload artifacts to the same GCS bucket using
-/// the same upload method (direct / proxy).
-#[derive(Clone)]
-pub(crate) struct TraceConfigTemplate {
-    pub(crate) bucket_url: Option<String>,
-    pub(crate) upload_method: crate::save::UploadMethod,
-}
 impl SessionActor {
     /// Get the signals handle for tracking session events.
     fn signals_handle(&self) -> SessionSignalsHandle {
-        self.feedback_manager.signals_handle()
+        self.signals_handle.clone()
     }
     fn emit_event(&self, event: crate::session::events::Event) {
         self.events.emit(event);
@@ -1171,7 +1151,6 @@ impl SessionActor {
             self.sync_goal_harness_from_tools(tool_names)
         };
         slash_commands::CommandAvailability {
-            feedback: self.feedback_manager.is_enabled(),
             memory: self.memory.is_enabled() && memory_read_registered,
             memory_configured: self.memory.backend_params.is_some(),
             scheduler: tool_names
@@ -1244,11 +1223,6 @@ impl SessionActor {
         if let Err(e) = crate::session::replay_events::flush_replay_actor(&self.event_tx).await {
             tracing::warn!(?e, "flush_replay_actor failed");
         }
-    }
-    /// Send a feedback request notification to the client.
-    async fn send_feedback_notification(&self, request: crate::session::feedback::FeedbackRequest) {
-        self.send_xai_notification(XaiSessionUpdate::FeedbackRequest(request.into()))
-            .await;
     }
 }
 impl SessionActor {
@@ -1812,9 +1786,6 @@ mod build_tool_parse_error_message_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/cancel_running_task_tests.rs"]
 mod cancel_running_task_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/feedback_turn_lookup_tests.rs"]
-mod feedback_turn_lookup_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/idle_resume_tests.rs"]
 mod idle_resume_tests;

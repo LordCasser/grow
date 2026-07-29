@@ -166,7 +166,7 @@ impl ProviderAuth {
 
     /// `true` when the team has ZDR or the user opted out of coding data
     /// retention. Use this for trace-upload and research-data gates.
-    /// Product analytics (`telemetry_enabled`) and user-facing sync
+    /// Product analytics (`diagnostics_enabled`) and user-facing sync
     /// features should use `is_zdr_team()` directly.
     pub fn is_data_collection_disabled(&self) -> bool {
         self.is_zdr_team() || self.coding_data_retention_opt_out

@@ -58,9 +58,9 @@ impl AgentView {
         if matches!(outcome, InputOutcome::Action(_))
             && self.ephemeral_tip.current_key() == Some(crate::tips::send_now::SEND_NOW_TIP_KEY)
         {
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::ContextualTip {
-                tip: grow_telemetry::events::ContextualTipKind::SendNow,
-                action: grow_telemetry::events::ContextualTipAction::Accepted,
+            grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::ContextualTip {
+                tip: grow_diagnostics::events::ContextualTipKind::SendNow,
+                action: grow_diagnostics::events::ContextualTipAction::Accepted,
             });
             self.ephemeral_tip
                 .clear(crate::tips::send_now::SEND_NOW_TIP_KEY);

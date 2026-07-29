@@ -330,8 +330,6 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
                         prompt_id: "user-real-prompt".to_string(),
                         prompt_blocks: vec![],
                         prompt_mode: crate::session::plan_mode::PromptMode::Agent,
-                        trace_gcs_config: None,
-                        artifact_tracker: None,
                         client_identifier: None,
                         screen_mode: None,
                         verbatim: true,

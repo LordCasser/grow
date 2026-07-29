@@ -166,7 +166,7 @@ pub(crate) const GOAL_VERIFIER_DETAILS_PATH_TEMPLATE: &str =
 /// a verdict and treats the goal as achieved so an internal failure
 /// never blocks user progress. PARSE-class fail-closed outcomes
 /// (malformed terminal token, missing details file) map onto
-/// `NotAchieved`; telemetry distinguishes them via
+/// `NotAchieved`; diagnostics distinguishes them via
 /// `Event::GoalClassifierFailClosed`.
 #[derive(Debug, Clone)]
 pub(crate) enum GoalClassifierOutcome {
@@ -529,9 +529,9 @@ pub(crate) struct ChannelSpawner {
     /// current model — round-robin expansion + auth/capability fail-open is
     /// resolved parent-side before the spawner is built.
     pub(crate) skeptic_overrides: Vec<RoleSpawnOverride>,
-    // Event sink for the spawn-and-retry-once fail-open telemetry; `None`
+    // Event sink for the spawn-and-retry-once fail-open diagnostics; `None`
     // in tests / when no event log is wired.
-    // Event sink for telemetry; removed (EventWriter no longer exists).
+    // Event sink for diagnostics; removed (EventWriter no longer exists).
     // pub(crate) events: Option<EventWriter>,
 }
 
@@ -648,7 +648,7 @@ impl ChannelSpawner {
 
 // Fail-open helper (shared by verification stage)
 
-/// Record a fail-open outcome: emit telemetry, write a placeholder
+/// Record a fail-open outcome: emit diagnostics, write a placeholder
 /// details file (when the path is resolved), and return the
 /// `FailOpenAchieved` value. Empty `details_raw` skips the write.
 async fn record_fail_open(
@@ -1661,7 +1661,7 @@ async fn read_skeptic_verdict(
 }
 
 /// Spawn one skeptic under `spawn_id`, wait for its terminal response,
-/// and read the JSON verdict file. Pure per-skeptic; no telemetry
+/// and read the JSON verdict file. Pure per-skeptic; no diagnostics
 /// side-effects so the orchestrator owns event emission for both the
 /// happy and failure paths uniformly.
 ///
@@ -2188,7 +2188,7 @@ pub(crate) async fn run_verification_stage(
     };
 
     for r in &results {
-        // GoalVerifierSkepticVerdict telemetry removed (Event type gone).
+        // GoalVerifierSkepticVerdict diagnostics removed (Event type gone).
     }
     let (refuted_count, total, quorum_achieved) = aggregate_skeptic_verdicts(&results);
     // A decisive skeptic-0 refute overrides the quorum: a refuted+high
@@ -4132,7 +4132,7 @@ mod tests {
         ];
         let mut inputs = stage_inputs("obj", "claim", wsp.path(), &vid, 1, 3);
         inputs.tool_names = &tns;
-        let _ = run_verification_stage(spawner, inputs, ).await;
+        let _ = run_verification_stage(spawner, inputs).await;
 
         let prompts = observed.prompts.lock().unwrap();
         let idxs = observed.skeptic_idxs.lock().unwrap();
@@ -4769,7 +4769,7 @@ mod tests {
         let vid = unique_verifier_id();
         let mut inputs = stage_inputs("obj", "claim", wsp.path(), &vid, 1, 1);
         inputs.max_runs = 4;
-        let _ = run_verification_stage(spawner, inputs, ).await;
+        let _ = run_verification_stage(spawner, inputs).await;
         assert_eq!(
             *captured.lock().unwrap(),
             Some(4),
@@ -4845,7 +4845,7 @@ mod tests {
         let vid = unique_verifier_id();
         let mut inputs = stage_inputs("do X", "done", _wsp.path(), &vid, 2, 1);
         inputs.prior_gaps = Some("gap · src/foo.rs:12 — no test for criterion 2");
-        let _ = run_verification_stage(spawner, inputs, ).await;
+        let _ = run_verification_stage(spawner, inputs).await;
         let prompts = observed.prompts.lock().unwrap();
         assert!(
             prompts[0].contains("gap · src/foo.rs:12 — no test for criterion 2"),
@@ -4967,12 +4967,10 @@ mod tests {
         let observed = spawner.clone();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
-        let _ = run_verification_stage(
-            spawner,
-            stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 99),
-        )
-        .await
-        .outcome;
+        let _ =
+            run_verification_stage(spawner, stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 99))
+                .await
+                .outcome;
         assert_eq!(
             observed
                 .spawn_count
@@ -4991,12 +4989,9 @@ mod tests {
         let observed = spawner.clone();
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
-        let _ = run_verification_stage(
-            spawner,
-            stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 0),
-        )
-        .await
-        .outcome;
+        let _ = run_verification_stage(spawner, stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 0))
+            .await
+            .outcome;
         assert_eq!(
             observed
                 .spawn_count
@@ -5017,12 +5012,10 @@ mod tests {
         ]));
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
-        let outcome = run_verification_stage(
-            spawner,
-            stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 3),
-        )
-        .await
-        .outcome;
+        let outcome =
+            run_verification_stage(spawner, stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 3))
+                .await
+                .outcome;
         let GoalClassifierOutcome::Achieved { details_path } = outcome else {
             panic!("expected Achieved (1 transport-fail + 2 not-refuted)");
         };
@@ -5037,12 +5030,10 @@ mod tests {
         ]));
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
-        let outcome = run_verification_stage(
-            spawner,
-            stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2),
-        )
-        .await
-        .outcome;
+        let outcome =
+            run_verification_stage(spawner, stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2))
+                .await
+                .outcome;
         // N=2: skeptic 0 synthetic-refutes (cancel), cold skeptic 1
         // clears. Approval rests on the cold panel (skeptic 1), which
         // meets needed(1) → Achieved.
@@ -5059,12 +5050,10 @@ mod tests {
         ]));
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
-        let outcome = run_verification_stage(
-            spawner,
-            stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2),
-        )
-        .await
-        .outcome;
+        let outcome =
+            run_verification_stage(spawner, stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2))
+                .await
+                .outcome;
         assert!(matches!(outcome, GoalClassifierOutcome::NotAchieved { .. }));
     }
 
@@ -5079,12 +5068,10 @@ mod tests {
         ]));
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
-        let outcome = run_verification_stage(
-            spawner,
-            stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2),
-        )
-        .await
-        .outcome;
+        let outcome =
+            run_verification_stage(spawner, stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2))
+                .await
+                .outcome;
         let GoalClassifierOutcome::Achieved { details_path } = outcome else {
             panic!("expected Achieved (N=2 tie: 1 synthetic refute + 1 not-refute)");
         };
@@ -5105,12 +5092,10 @@ mod tests {
         ]));
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
-        let outcome = run_verification_stage(
-            spawner,
-            stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2),
-        )
-        .await
-        .outcome;
+        let outcome =
+            run_verification_stage(spawner, stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2))
+                .await
+                .outcome;
         let GoalClassifierOutcome::NotAchieved { details_path, .. } = outcome else {
             panic!("expected NotAchieved: cold skeptic 1 refuted via terminal fallback");
         };
@@ -5128,12 +5113,10 @@ mod tests {
             Arc::new(MockSpawner::new([MockResponse::json_empty_details_md()]));
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
-        let outcome = run_verification_stage(
-            spawner,
-            stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 1),
-        )
-        .await
-        .outcome;
+        let outcome =
+            run_verification_stage(spawner, stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 1))
+                .await
+                .outcome;
         let GoalClassifierOutcome::Achieved { details_path } = outcome else {
             panic!("expected Achieved");
         };
@@ -5151,11 +5134,11 @@ mod tests {
 
     /// End-to-end coverage of the headline flow: two `not_refuted`
     /// skeptics run, aggregate is 0/2 refuted → Achieved. Asserts the
-    /// full telemetry ordering (`fired → skeptic:0 → skeptic:1 → agg →
+    /// full diagnostics ordering (`fired → skeptic:0 → skeptic:1 → agg →
     /// verdict`) so a regression that reordered or dropped any event
     /// would surface here.
     #[tokio::test]
-    async fn verification_stage_panel_clears_emits_full_telemetry() {
+    async fn verification_stage_panel_clears_emits_full_diagnostics() {
         let spawner: Arc<dyn GoalClassifierSpawner> = Arc::new(MockSpawner::new([
             MockResponse::not_refuted(),
             MockResponse::not_refuted(),
@@ -5211,12 +5194,10 @@ mod tests {
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
-        let outcome = run_verification_stage(
-            spawner,
-            stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 3),
-        )
-        .await
-        .outcome;
+        let outcome =
+            run_verification_stage(spawner, stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 3))
+                .await
+                .outcome;
         let GoalClassifierOutcome::Achieved { details_path } = outcome else {
             panic!("expected Achieved on 1-of-3 minority refute after full panel");
         };
@@ -5400,12 +5381,10 @@ mod tests {
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
-        let outcome = run_verification_stage(
-            spawner,
-            stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 3),
-        )
-        .await
-        .outcome;
+        let outcome =
+            run_verification_stage(spawner, stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 3))
+                .await
+                .outcome;
         assert_eq!(
             observed
                 .spawn_count
@@ -5430,12 +5409,10 @@ mod tests {
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
         let _wsp = tempfile::tempdir().unwrap();
         let vid = unique_verifier_id();
-        let outcome = run_verification_stage(
-            spawner,
-            stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2),
-        )
-        .await
-        .outcome;
+        let outcome =
+            run_verification_stage(spawner, stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 2))
+                .await
+                .outcome;
         assert_eq!(
             observed
                 .spawn_count
@@ -5491,10 +5468,8 @@ mod tests {
             hold1.notify_one();
             hold2.notify_one();
         };
-        let stage_fut = run_verification_stage(
-            spawner,
-            stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 3),
-        );
+        let stage_fut =
+            run_verification_stage(spawner, stage_inputs("obj", "ok", _wsp.path(), &vid, 1, 3));
         let (result, ()) = tokio::join!(stage_fut, watcher);
         let GoalClassifierOutcome::Achieved { details_path } = result.outcome else {
             panic!("expected Achieved");

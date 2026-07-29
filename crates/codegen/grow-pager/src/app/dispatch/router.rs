@@ -115,7 +115,7 @@ use crate::app::agent_view::ActivePane;
 use crate::app::app_view::{ActiveView, AppView, AuthState};
 use crate::scrollback::types::DisplayMode;
 use crate::views::session_picker::CONTENT_EXPAND_OFFSET;
-use grow_telemetry::session_ctx::log_event;
+use grow_diagnostics::session_ctx::log_event;
 pub(super) fn dispatch_copy_auth_url(
     app: &mut AppView,
     copy: impl FnOnce(&str) -> crate::clipboard::ClipboardDelivery,
@@ -579,7 +579,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             if group_toggled {
                 return vec![];
             }
-            let mut credit_card: Option<(String, grow_telemetry::events::CreditLimitChoice)> = None;
+            let mut credit_card: Option<(String, grow_diagnostics::events::CreditLimitChoice)> =
+                None;
             with_scrollback(app, |s| {
                 if let Some(idx) = s.selected()
                     && let Some(entry) = s.entry(idx)
@@ -588,19 +589,19 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                     use crate::scrollback::blocks::CreditLimitCardAction;
                     let choice = match blk.action {
                         CreditLimitCardAction::PurchaseCredits => {
-                            grow_telemetry::events::CreditLimitChoice::PurchaseCredits
+                            grow_diagnostics::events::CreditLimitChoice::PurchaseCredits
                         }
                         CreditLimitCardAction::EnablePayg
                         | CreditLimitCardAction::IncreasePaygLimit => {
-                            grow_telemetry::events::CreditLimitChoice::PayAsYouGo
+                            grow_diagnostics::events::CreditLimitChoice::PayAsYouGo
                         }
                     };
                     credit_card = Some((blk.url.clone(), choice));
                 }
             });
             if let Some((url, choice)) = credit_card {
-                log_event(grow_telemetry::events::CreditLimitUpsellClicked {
-                    surface: grow_telemetry::events::CreditLimitUpsellSurface::InlineCard,
+                log_event(grow_diagnostics::events::CreditLimitUpsellClicked {
+                    surface: grow_diagnostics::events::CreditLimitUpsellSurface::InlineCard,
                     choice,
                 });
                 open_url_or_show(app, &url);
@@ -943,7 +944,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             ) {
                 let url = url.to_owned();
                 let promo_id = promo.id.clone();
-                log_event(grow_telemetry::events::AnnouncementCtaClicked {
+                log_event(grow_diagnostics::events::AnnouncementCtaClicked {
                     id: promo_id,
                     source: surface,
                 });

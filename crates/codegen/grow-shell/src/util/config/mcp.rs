@@ -32,7 +32,6 @@ pub struct Config {
     pub cli: crate::agent::config::CliConfig,
     pub models: crate::agent::config::ModelsConfig,
     pub ui: crate::agent::config::UiConfig,
-    pub harness: crate::agent::config::HarnessConfig,
     pub skills: SkillsConfig,
     /// `[compat]` vendor-compatibility config, round-tripped so the
     /// pager preserves per-vendor toggles when persisting other settings.
@@ -1496,21 +1495,6 @@ pub fn load_management_api_key_sync() -> Option<String> {
     }
 }
 
-/// Synchronously load the gcs_service_account_key from the config file.
-/// This is intended for use in contexts where async is not available.
-pub fn load_gcs_service_account_key_sync() -> Option<String> {
-    let root: TomlValue = crate::config::load_effective_config().ok()?;
-    if let TomlValue::Table(table) = root
-        && let Some(TomlValue::Table(endpoints)) = table.get("endpoints")
-    {
-        endpoints
-            .get("gcs_service_account_key")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    } else {
-        None
-    }
-}
 /// Returns `None` when `[cli] use_leader` is not set in the config
 /// (allowing a remote settings fallback), or `Some(true/false)` when
 /// explicitly configured. This distinction lets callers fall through

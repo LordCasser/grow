@@ -202,7 +202,7 @@ impl EphemeralTipState {
     }
 }
 
-/// Why a tip left the slot, mapped to the `tip.dismissed` telemetry reason.
+/// Why a tip left the slot, mapped to the `tip.dismissed` diagnostics reason.
 #[derive(Debug, Clone, Copy)]
 enum DismissReason {
     /// A different-keyed tip took the slot.
@@ -214,7 +214,7 @@ enum DismissReason {
 }
 
 impl DismissReason {
-    /// Telemetry string — must stay stable for `tip.dismissed` dashboards.
+    /// Diagnostic string — must stay stable for `tip.dismissed` dashboards.
     fn as_str(self) -> &'static str {
         match self {
             Self::Replaced => "replaced",

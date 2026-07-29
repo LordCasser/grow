@@ -475,7 +475,7 @@ async fn run_auth_flow_inner(
     if !force_interactive && let Some(cached) = auth_manager.current() {
         if is_cached_credential_compatible(&cached, auth) {
             tracing::info!(auth_mode = ?cached.auth_mode, "auth: using cached credentials");
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "auth: using cached credentials",
                 None,
                 Some(serde_json::json!({ "auth_mode": format!("{:?}", cached.auth_mode) })),
@@ -507,7 +507,7 @@ async fn run_auth_flow_inner(
         // Read disk first — another process may have already refreshed.
         let disk_auth = auth_manager.read_disk_auth();
         let disk_expired = disk_auth.as_ref().is_some_and(crate::auth::is_expired);
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "auth run_auth_flow expired path",
             None,
             Some(serde_json::json!({
@@ -519,7 +519,7 @@ async fn run_auth_flow_inner(
         if disk_auth.as_ref().is_some_and(|d| {
             !crate::auth::is_expired(d) && is_cached_credential_compatible(d, auth)
         }) {
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "auth run_auth_flow using valid disk token",
                 None,
                 None,
@@ -545,7 +545,7 @@ async fn run_auth_flow_inner(
                         )
                     ) && d.refresh_token.is_some()
                 }) {
-                    grow_telemetry::unified_log::warn(
+                    grow_diagnostics::unified_log::warn(
                         "auth run_auth_flow refresh failed, deferring to consumer refresh",
                         None,
                         Some(serde_json::json!({
@@ -556,7 +556,7 @@ async fn run_auth_flow_inner(
                     auth_manager.hot_swap(d);
                     return Ok((ret, false));
                 }
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "auth run_auth_flow refresh failed, falling through to interactive",
                     None,
                     Some(serde_json::json!({
@@ -592,7 +592,7 @@ async fn run_auth_flow_inner(
             Ok(new_auth) => match auth_manager.save_without_enrichment(new_auth).await {
                 Ok(auth) => {
                     let _ = auth_manager.remove_scope(LEGACY_AUTH_SCOPE);
-                    grow_telemetry::unified_log::info(
+                    grow_diagnostics::unified_log::info(
                         "auth: devbox migration in auth flow succeeded",
                         None,
                         Some(serde_json::json!({
@@ -683,7 +683,7 @@ pub async fn try_ensure_fresh_auth(auth: &ServiceAuthConfig) -> Option<ProviderA
 fn build_startup_auth_manager(auth: &ServiceAuthConfig) -> Arc<AuthManager> {
     let auth_manager = Arc::new(AuthManager::new(&grow_home::grow_home(), auth.clone()));
     // auth()'s OIDC/external refresh needs the refresher configured first.
-    auth_manager.configure_refresher(auth.auth_provider_command.clone(), None);
+    auth_manager.configure_refresher(auth.auth_provider_command.clone());
     auth_manager
 }
 
@@ -1082,7 +1082,7 @@ pub fn perform_logout(
     // Intentional credential removal must be attributable in
     // unified.jsonl, so a later "auth.json entry gone" can be
     // distinguished from accidental loss (deleted/corrupt file).
-    grow_telemetry::unified_log::info(
+    grow_diagnostics::unified_log::info(
         "auth: logout",
         None,
         Some(serde_json::json!({
@@ -1092,16 +1092,6 @@ pub fn perform_logout(
         })),
     );
     if was_logged_in {
-        // Order matters for the no-leak guarantee (flush-on-logout
-        // parity). Clear the external OTEL identity attrs FIRST so any
-        // record emitted from here on cannot carry the prior user's ids; THEN
-        // flush already-queued records (which were built with their ids during
-        // the active session — that is correct); THEN clear credentials.
-        // Clearing identity before the flush closes the window in which a
-        // concurrent emission between flush and identity-reset would still
-        // stamp the prior user's ids onto a customer-collector record.
-        grow_telemetry::external::set_identity(grow_telemetry::external::IdentityAttrs::default());
-        grow_telemetry::external::flush();
         if let Some(scope) = scope {
             auth_manager.remove_scope(scope)?;
         } else {
@@ -2066,7 +2056,7 @@ mod tests {
 
         // Same engine as `try_ensure_fresh_auth`.
         let auth_manager = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
-        auth_manager.configure_refresher(cfg.auth_provider_command.clone(), None);
+        auth_manager.configure_refresher(cfg.auth_provider_command.clone());
 
         assert!(
             auth_manager.auth().await.is_err(),
@@ -2123,7 +2113,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = ServiceAuthConfig::default();
         let am = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
-        am.configure_refresher(cfg.auth_provider_command.clone(), None);
+        am.configure_refresher(cfg.auth_provider_command.clone());
         am.hot_swap(ProviderAuth {
             key: "expired".into(),
             auth_mode: AuthMode::Oidc,

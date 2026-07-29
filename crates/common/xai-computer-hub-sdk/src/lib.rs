@@ -28,20 +28,15 @@ pub(crate) mod cancel;
 pub mod connection;
 pub(crate) mod connection_borrow;
 pub mod demux;
-pub(crate) mod donate_pump;
 pub mod error;
 pub mod handshake;
 pub mod harness;
-pub mod log_donate;
-#[cfg(feature = "metrics")]
-pub mod metric_donate;
 pub mod metrics;
 pub mod notification;
 pub mod observability;
 pub mod pool;
 pub mod refcount;
 pub mod server;
-pub mod trace_donate;
 
 pub mod oidc_provider;
 
@@ -52,9 +47,6 @@ pub use harness::{
     CancelOnDrop, LocalRegistry, ModelOutputExtractor, SessionBindReport, ToolHarness,
     ToolHarnessBuilder, extractor_for,
 };
-pub use log_donate::{DonatingLogLayer, LogDonationPump, LogDonationSender, flush_log_layer};
-#[cfg(feature = "metrics")]
-pub use metric_donate::MetricDonationPump;
 pub use notification::HubNotification;
 pub use observability::ObservabilityBridge;
 pub use oidc_provider::{
@@ -65,7 +57,6 @@ pub use server::{
     ResolvedSessionHandlers, SessionHandlerResolver, SystemNotifyAck, ToolServer,
     ToolServerBuilder, ToolServerHandler, WeakToolServer,
 };
-pub use trace_donate::{HubDonatingReporter, TraceDonationPump};
 // Re-exported so consumers that depend only on the SDK can recognize the
 // server's `workspace_unavailable` error without also pulling in the core crate.
 pub use xai_computer_hub_core::is_workspace_unavailable;

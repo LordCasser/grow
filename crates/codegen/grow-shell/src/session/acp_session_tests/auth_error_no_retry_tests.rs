@@ -1136,15 +1136,11 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 query_params: Default::default(),
                 env_http_headers: Default::default(),
                 context_window: 256_000,
-                client_version: None,
                 force_http1: false,
                 max_retries: None,
                 stream_tool_calls: false,
                 idle_timeout_secs: None,
-                client_identifier: None,
                 reasoning_effort: None,
-                deployment_id: None,
-                user_id: None,
                 origin_client: None,
                 attribution_callback: None,
                 bearer_resolver: None,
@@ -1152,7 +1148,6 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
-                header_injector: None,
             };
             let catalog_model_id = acp::ModelId::new("deepseek/deepseek-v4-pro");
             let updated_model_id = actor
@@ -1244,15 +1239,11 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 query_params: Default::default(),
                 env_http_headers: Default::default(),
                 context_window: 256_000,
-                client_version: None,
                 force_http1: false,
                 max_retries: None,
                 stream_tool_calls: false,
                 idle_timeout_secs: None,
-                client_identifier: None,
                 reasoning_effort: None,
-                deployment_id: None,
-                user_id: None,
                 origin_client: None,
                 attribution_callback: None,
                 bearer_resolver: None,
@@ -1260,7 +1251,6 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
-                header_injector: None,
             };
             let _ = actor
                 .handle_set_session_model(

@@ -542,8 +542,8 @@ impl ExtensionsTab {
         }
     }
 
-    pub fn telemetry_tab(self) -> grow_telemetry::events::ExtensionsModalTab {
-        use grow_telemetry::events::ExtensionsModalTab;
+    pub fn diagnostics_tab(self) -> grow_diagnostics::events::ExtensionsModalTab {
+        use grow_diagnostics::events::ExtensionsModalTab;
         match self {
             Self::Hooks => ExtensionsModalTab::Hooks,
             Self::Plugins => ExtensionsModalTab::Plugins,
@@ -1102,9 +1102,9 @@ pub fn action_key_display(ch: char) -> &'static str {
     }
 }
 
-/// Per-tab action keys for the extensions modal (footer, picker, telemetry).
+/// Per-tab action keys for the extensions modal (footer, picker, diagnostics).
 ///
-/// Space stays labeled `"toggle"` on the wire for telemetry / picker identity;
+/// Space stays labeled `"toggle"` on the wire for diagnostics / picker identity;
 /// user-facing copy remaps via [`action_key_footer_desc`] /
 /// [`action_key_cheatsheet_desc`].
 pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
@@ -1294,7 +1294,7 @@ pub fn tab_all_hints(tab: ExtensionsTab) -> Vec<crate::views::shortcuts_bar::Hin
     hints
 }
 
-pub fn action_telemetry_label(tab: ExtensionsTab, ch: char) -> Option<String> {
+pub fn action_diagnostics_label(tab: ExtensionsTab, ch: char) -> Option<String> {
     extensions_action_keys(tab)
         .iter()
         .find(|&&(c, _)| c == ch)
@@ -4054,7 +4054,7 @@ mod tests {
     }
 
     #[test]
-    fn action_keys_resolve_and_have_pinned_telemetry_labels() {
+    fn action_keys_resolve_and_have_pinned_diagnostics_labels() {
         let expected: &[(ExtensionsTab, &[(char, &str)])] = &[
             (
                 ExtensionsTab::Hooks,
@@ -4107,7 +4107,7 @@ mod tests {
             assert_eq!(
                 keys.len(),
                 pairs.len(),
-                "{tab:?}: action key set changed — telemetry `action` values are wire \
+                "{tab:?}: action key set changed — diagnostics `action` values are wire \
                  contract; update this pinning test deliberately"
             );
             for &(ch, label) in pairs {
@@ -4117,9 +4117,9 @@ mod tests {
                      returns None"
                 );
                 assert_eq!(
-                    action_telemetry_label(tab, ch).as_deref(),
+                    action_diagnostics_label(tab, ch).as_deref(),
                     Some(label),
-                    "telemetry label for ({tab:?}, '{ch}') drifted — these values feed \
+                    "diagnostics label for ({tab:?}, '{ch}') drifted — these values feed \
                      product analytics; renaming the footer hint renames the metric"
                 );
             }
@@ -4352,9 +4352,7 @@ mod tests {
             &std::collections::HashSet::new(),
         );
         assert!(
-            rows.labels
-                .iter()
-                .any(|l| l.starts_with("Managed service")),
+            rows.labels.iter().any(|l| l.starts_with("Managed service")),
             "managed section header must appear"
         );
         assert!(
@@ -5021,11 +5019,11 @@ mod tests {
             other => panic!("expected plugins install StartInput, got {other:?}"),
         }
         assert_eq!(
-            action_telemetry_label(ExtensionsTab::Plugins, 'a').as_deref(),
+            action_diagnostics_label(ExtensionsTab::Plugins, 'a').as_deref(),
             Some("install")
         );
         assert_eq!(
-            action_telemetry_label(ExtensionsTab::Plugins, ' ').as_deref(),
+            action_diagnostics_label(ExtensionsTab::Plugins, ' ').as_deref(),
             Some("toggle")
         );
     }
@@ -7014,5 +7012,4 @@ mod tests {
             "expanded view shows the install hint placeholder exactly once"
         );
     }
-
 }

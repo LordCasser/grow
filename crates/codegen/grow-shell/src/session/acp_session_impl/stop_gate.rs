@@ -81,7 +81,7 @@ fn format_stop_feedback(blocks: &[dispatcher::StopBlock], additional_context: &[
 }
 
 /// Downgrade `Blocked` to `Success` for the observe-only session-end fire: the
-/// decision is discarded, so scrollback and telemetry must not report a block.
+/// decision is discarded, so scrollback and diagnostics must not report a block.
 pub(super) fn demote_ignored_blocks(
     results: Vec<result::HookRunResult>,
 ) -> Vec<result::HookRunResult> {
@@ -136,7 +136,7 @@ impl SessionActor {
         result.results = demote_ignored_blocks(result.results);
         self.send_hook_execution("stop", None, None, &result.results)
             .await;
-        self.emit_hook_executed_telemetry("stop", None, &result.results)
+        self.emit_hook_executed_diagnostics("stop", None, &result.results)
             .await;
     }
 
@@ -240,7 +240,7 @@ impl SessionActor {
         let name = event.to_string();
         self.send_hook_execution(&name, None, Some(prompt_id), results)
             .await;
-        self.emit_hook_executed_telemetry(&name, None, results)
+        self.emit_hook_executed_diagnostics(&name, None, results)
             .await;
     }
 
@@ -307,7 +307,7 @@ impl SessionActor {
         }
 
         // Merge file and client results and emit once: one stop gate is one
-        // scrollback entry and one telemetry batch.
+        // scrollback entry and one diagnostics batch.
         let client = self.run_stop_client_hooks(&envelope).await;
         let mut all_results = std::mem::take(&mut result.results);
         all_results.extend(client.results);
@@ -334,7 +334,7 @@ impl SessionActor {
     }
 
     /// Annotate the scrollback when a stop gate keeps the agent working: one line
-    /// per block (with `HookBlocked` telemetry), or the context lines when only
+    /// per block (with `HookBlocked` diagnostics), or the context lines when only
     /// `additionalContext` was returned.
     async fn announce_keep_working(
         &self,
@@ -347,7 +347,7 @@ impl SessionActor {
                 block.hook_name, block.reason
             ))
             .await;
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::HookBlocked {
+            grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::HookBlocked {
                 hook_name: block.hook_name.clone(),
             });
         }

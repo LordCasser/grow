@@ -53,7 +53,6 @@ use tokio::sync::oneshot;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use crate::agent::auth_method;
 use crate::agent::config::{self, Config as AgentConfig, ModelEntry, resolve_credentials};
-use crate::agent::feedback_client::FeedbackClient;
 use crate::agent::folder_trust;
 use crate::agent::models::{resolve_catalog_key, selectable_catalog_key_for_persisted};
 use crate::agent::session_config;
@@ -65,8 +64,7 @@ use crate::agent::update_chunk_merge;
 use crate::auth::AuthManager;
 use crate::config::StorageMode;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
-use grow_telemetry::id::{agent_id, agent_instance_id};
-use grow_telemetry::session_ctx::log_event;
+use grow_diagnostics::session_ctx::log_event;
 use grow_workspace::file_system::{AcpSessionFs, CodebaseIndexManager, LocalFs};
 use grow_workspace::permission::{ClientType, PermissionEvent};
 use crate::sampling::Client as OaiCompatClient;
@@ -81,26 +79,58 @@ use crate::session::{
 };
 use crate::terminal::{AcpTerminalRunner, TerminalRunner};
 use crate::tools::ToolContext;
-use crate::save::write_error_manifest;
-use crate::save::{
-    GCS_SCHEMA_VERSION, PromptMetadata, TurnResultMetadata,
-    build_chat_history_session_state, local_sandbox_telemetry, upload_full_prompt_txt,
-    upload_harness_session_archive, upload_images, upload_metadata, upload_plugin_state,
-    upload_session_state, upload_turn_messages, upload_turn_result, upload_unified_log,
-};
-use crate::save::{
-    PromptTraceContext, UploadWait, complete_prompt_trace, spawn_upload_task,
-};
-use crate::save::{
-    apply_yolo_mode_to_matching_sessions, lookup_session_model,
-    parse_agent_profile_from_meta,
-};
 use tokio_util::sync::CancellationToken;
 use grow_paths::AbsPathBuf;
 use grow_workspace::session::git::GitDiscoveryResult;
 use xai_hunk_tracker::HunkTrackerActor;
 /// Hard-error message for legacy Direct hub-bind sessions (`grow/cloud_server_id`).
 pub(crate) const DIRECT_HUB_CLOUD_REMOVED_MSG: &str = "Direct hub cloud removed; use Gateway (envId or existing-workspace attach)";
+
+fn parse_agent_profile_from_meta(meta: Option<&acp::Meta>) -> Option<grow_agent::AgentDefinition> {
+    let value = meta?.get("agentProfile")?;
+    if value.is_object() {
+        return grow_agent::AgentDefinition::from_json(value)
+            .map_err(|error| tracing::warn!(%error, "invalid ACP agentProfile object"))
+            .ok();
+    }
+    value
+        .as_str()
+        .and_then(grow_agent::discovery::by_name)
+}
+
+fn parse_ask_user_question_from_meta(meta: Option<&acp::Meta>) -> Option<bool> {
+    meta?.get("askUserQuestion")?.as_bool()
+}
+
+fn lookup_session_model(
+    sessions: &HashMap<acp::SessionId, SessionHandle>,
+    session_id: Option<&acp::SessionId>,
+    default_model_id: &acp::ModelId,
+) -> acp::ModelId {
+    session_id
+        .and_then(|id| sessions.get(id).map(|handle| handle.model_id.clone()))
+        .unwrap_or_else(|| default_model_id.clone())
+}
+
+fn apply_yolo_mode_to_matching_sessions(
+    sessions: &mut HashMap<acp::SessionId, SessionHandle>,
+    sender_id: Option<&str>,
+    yolo_mode: bool,
+) -> usize {
+    let mut updated = 0;
+    for handle in sessions.values_mut() {
+        let matches_sender = sender_id.is_none()
+            || handle.origin_client.as_ref().map(|client| client.product.as_str()) == sender_id;
+        if matches_sender {
+            handle.yolo_mode = yolo_mode;
+            let _ = handle
+                .cmd_tx
+                .send(SessionCommand::SetYoloMode { enabled: yolo_mode });
+            updated += 1;
+        }
+    }
+    updated
+}
 /// Reject session `_meta` that still requests Direct hub bind (D8).
 ///
 /// Shared by `new_session` / `load_session` via [`MvpAgent::spawn_and_register_session`].
@@ -116,7 +146,7 @@ pub(crate) fn reject_direct_hub_cloud_meta(
 /// If `persist_data` is provided, it will be included in the meta under `grow/persist`.
 /// Extract the numeric `tier` claim from a JWT access token (no signature
 /// verification). Maps the `prod_auth.SubscriptionTier` proto enum values
-/// to display-style strings that `normalize_tier` in the telemetry crate
+/// to display-style strings that `normalize_tier` in the diagnostics crate
 /// will canonicalize for Mixpanel.
 pub(crate) fn jwt_tier_claim(jwt: &str) -> Option<String> {
     use base64::Engine;
@@ -146,7 +176,7 @@ pub(crate) fn jwt_tier_claim(jwt: &str) -> Option<String> {
 /// 1. CCP `/settings` `subscription_tier_display` (when present and non-empty)
 /// 2. [`AuthMode::ApiKey`] → `"api_key"` (never free)
 /// 3. JWT `tier` claim via [`jwt_tier_claim`] (OAuth free → `"free"`)
-pub(crate) fn resolve_subscription_tier_for_telemetry(
+pub(crate) fn resolve_subscription_tier_for_diagnostics(
     display: Option<String>,
     auth: Option<&crate::auth::ProviderAuth>,
 ) -> Option<String> {
@@ -669,12 +699,12 @@ pub struct MvpAgent {
     ///
     /// **Known limitation (leader mode)**: in a session with multiple concurrent
     /// clients, the last `initialize` call wins and overwrites the global value.
-    /// This means per-client telemetry attribution (AB experiments, analytics,
+    /// This means per-client diagnostics attribution (AB experiments, analytics,
     /// worktree-pool eligibility) uses the identity of whichever client most
     /// recently initialized — not the client that owns the current session.
     ///
     /// This is considered acceptable because `client_type` is used only for
-    /// non-safety-critical telemetry and experiment filtering.  Fully per-session
+    /// non-safety-critical diagnostics and experiment filtering.  Fully per-session
     /// attribution would require threading `clientIdentifier` from `_meta` through
     /// every session handler, which is deferred to future work.
     client_type: RefCell<ClientType>,
@@ -703,25 +733,17 @@ pub struct MvpAgent {
     tier_allowed: std::cell::Cell<bool>,
     /// The `user_id` the current `tier_allowed` verdict was resolved for.
     /// `cfg.remote_settings` isn't reset on account switch, so a mismatch here
-    /// means "unknown" (provisional open), like `OtelGate::rearm_on_switch`.
+    /// means "unknown" (provisional open).
     allow_access_resolved_for: std::cell::RefCell<Option<String>>,
     /// Writeback vs local. `Cell` so [`Self::reapply_storage_mode`] can
     /// upgrade it when remote settings land; persistence reads the live value.
     /// Authoritative post-construction — `Config.storage_mode` is only the
     /// boot seed.
     storage_mode: std::cell::Cell<StorageMode>,
-    /// External-OTEL emission gate; see [`crate::agent::otel_gate`].
-    otel_gate: crate::agent::otel_gate::OtelGate,
     /// Default YOLO mode - when true, sessions start with auto-approve enabled.
     /// Per-session YOLO tracking lives in SessionHandle.yolo_mode.
     default_yolo_mode: bool,
     default_auto_mode: bool,
-    /// `Send` mirror of `cfg.is_trace_upload_enabled()` for the per-session
-    /// live collection gates (`cfg` is `!Send`; the gates run on the tokio
-    /// pool). Kept current by
-    /// [`Self::sync_collection_config_gate`] on every mid-session
-    /// `remote_settings` rewrite.
-    pub(crate) trace_upload_live: Arc<std::sync::atomic::AtomicBool>,
     /// Memory system configuration (None when --experimental-memory not set).
     memory_config: Option<crate::config::MemoryConfig>,
     /// Optional channel to the leader's `ConfigFileWatcher` for dynamic
@@ -893,10 +915,6 @@ pub struct MvpAgent {
     /// without touching this, so their changes still get pushed on the next
     /// gate call. LEADER-SAFE(shared): one agent-wide push stream.
     last_emitted_announcements: RefCell<Vec<grow_announcements::RemoteAnnouncement>>,
-    /// Threshold jemalloc heap-profile monitor (agent process only).
-    heap_profile_monitor: RefCell<crate::heap_profile::HeapProfileMonitor>,
-    /// Idempotency guard for the heap-profile poll / kill-switch loop.
-    heap_profile_started: std::cell::Cell<bool>,
     /// Test-only spy recording every session id whose cloud replica was
     /// finalized via `finalize_session_replica`. Lets the no-evict tests assert
     /// that `finalize()` does NOT fire on a mere client disconnect (only on a
@@ -1193,7 +1211,6 @@ impl Drop for SessionLoadGuard<'_> {
 }
 mod code_nav;
 mod folder_trust_prompt;
-mod heap_profile;
 mod session_lifecycle;
 mod subagent_coordinator;
 mod agent_ops;
@@ -1770,7 +1787,7 @@ impl MvpAgent {
                 new_tier = %unblocked.new_tier,
                 "subscription detected, lifting gate"
             );
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "paywall_check_gate_lifting",
                 None,
                 Some(
@@ -1796,7 +1813,7 @@ impl MvpAgent {
                     new_tier = %unblocked.new_tier,
                     "subscription detected but allow_access still false, keeping gate"
                 );
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "paywall_check_gate_kept_allow_access_false",
                     None,
                     Some(
@@ -1819,7 +1836,7 @@ impl MvpAgent {
             {
                 Ok(_) => {
                     tracing::info!("post-unblock: JWT refresh_chain succeeded");
-                    grow_telemetry::unified_log::info(
+                    grow_diagnostics::unified_log::info(
                         "paywall_check_jwt_refreshed",
                         None,
                         Some(serde_json::json!({ "user_id": user_id })),
@@ -1828,7 +1845,7 @@ impl MvpAgent {
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "post-unblock: JWT refresh failed, user may need to re-login on next restart");
-                    grow_telemetry::unified_log::warn(
+                    grow_diagnostics::unified_log::warn(
                         "paywall_check_error",
                         None,
                         Some(
@@ -1858,7 +1875,7 @@ impl MvpAgent {
                 let new_tier = unblocked.new_tier.clone();
                 let jwt_claim_log = jwt_claim.clone();
                 tokio::task::spawn(async move {
-                    grow_telemetry::unified_log::info(
+                    grow_diagnostics::unified_log::info(
                         "model catalog: post_subscription_unblock refresh",
                         None,
                         Some(
@@ -1880,7 +1897,7 @@ impl MvpAgent {
                     new_tier = %unblocked.new_tier,
                     "post-unblock: JWT tier claim missing or stale vs live tier; deferring model catalog refresh with retry"
                 );
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "model catalog: post_subscription_unblock deferred (jwt tier missing or stale)",
                     None,
                     Some(
@@ -1901,7 +1918,7 @@ impl MvpAgent {
                 );
             }
         } else {
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "paywall_check_no_subscription",
                 None,
                 Some(serde_json::json!({
@@ -1925,7 +1942,7 @@ impl MvpAgent {
             let subscription_tier = rs.and_then(|s| s.subscription_tier_display.clone());
             (rs.and_then(|s| s.show_resolved_model), gate, subscription_tier)
         };
-        let subscription_tier = resolve_subscription_tier_for_telemetry(
+        let subscription_tier = resolve_subscription_tier_for_diagnostics(
             subscription_tier,
             self.auth_manager.current_or_expired().as_ref(),
         );
@@ -2171,254 +2188,6 @@ impl MvpAgent {
         });
     }
 }
-/// Handle a synthetic turn trace request: allocate a turn number, build a
-/// trace context, await turn completion, then upload the trace.
-async fn handle_synthetic_turn_trace(
-    agent_ref: LocalRef<MvpAgent>,
-    request: crate::save::SyntheticTurnTraceRequest,
-) {
-    use crate::session::SessionCommand;
-    use crate::save::{UploadWait, complete_prompt_trace, spawn_upload_task};
-    let turn_started_at = chrono::Utc::now().to_rfc3339();
-    let (info, turn_number, user_id, user_email, client_source, client_version, model) = {
-        let this = agent_ref.get();
-        let session_info = {
-            let sessions = this.sessions.borrow();
-            let sid = &request.session_id;
-            sessions.get(sid).map(|h| h.info.clone())
-        };
-        let Some(info) = session_info else {
-            tracing::debug!(
-                session_id = %request.session_id.0,
-                prompt_id = %request.prompt_id,
-                "Synthetic trace: session not found, skipping",
-            );
-            return;
-        };
-        let turn_number = this.allocate_turn_number(&request.session_id);
-        let auth = this.auth_manager.current();
-        let user_id = auth
-            .as_ref()
-            .filter(|a| a.is_service_auth())
-            .map(|a| a.user_id.clone());
-        let user_email = auth.as_ref().and_then(|a| a.email.clone());
-        let init_meta = this.initialize_request.get().and_then(|req| req.meta.as_ref());
-        let client_source = init_meta
-            .and_then(|m| {
-                m
-                    .get("clientSource")
-                    .or_else(|| m.get("clientType"))
-                    .or_else(|| m.get("clientIdentifier"))
-            })
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let client_version = this.cfg.borrow().client_version.clone();
-        let model = {
-            let sessions = this.sessions.borrow();
-            sessions
-                .get(&request.session_id)
-                .map(|h| h.model_id.0.to_string())
-                .unwrap_or_else(|| this.models_manager.current_model_id().0.to_string())
-        };
-        (info, turn_number, user_id, user_email, client_source, client_version, model)
-    };
-    let this = agent_ref.get();
-    let trace_context = this.get_trace_context(&info, turn_number).await;
-    let Some(ctx) = trace_context else {
-        tracing::info!(
-            session_id = %request.session_id.0,
-            prompt_id = %request.prompt_id,
-            "Synthetic trace: trace uploads disabled, skipping",
-        );
-        return;
-    };
-    let before_ctx = ctx.clone();
-    let metadata = PromptMetadata {
-        schema_version: GCS_SCHEMA_VERSION.to_string(),
-        session_id: ctx.session_info.id.0.to_string(),
-        turn_number: ctx.turn_number,
-        request_id: request.prompt_id.clone(),
-        turn_started_at,
-        repo_root: None,
-        remote_url: None,
-        user_id,
-        user_email,
-        team_id: None,
-        client_source,
-        client_version,
-        model: model.clone(),
-        reasoning_effort: ctx
-            .session_handle
-            .reasoning_effort
-            .map(|e| e.as_str().to_string()),
-        experiment_id: None,
-        host_os: std::env::consts::OS.to_string(),
-        host_arch: std::env::consts::ARCH.to_string(),
-        prompt_has_image: Some(false),
-        prompt_was_truncated: Some(false),
-        prompt_verbatim: Some(true),
-        cwd: Some(info.cwd.clone()),
-        agent_type: None,
-        shell_version: Some(grow_version::VERSION.to_string()),
-        workspace_type: None,
-        sandbox: local_sandbox_telemetry(),
-    };
-    spawn_upload_task(
-        "synthetic_before_uploads",
-        async move {
-            futures::join!(
-            upload_session_state(
-                &before_ctx,
-                "before",
-                request.before_session_copy_rx,
-                UploadWait::Confirm,
-            ),
-            upload_metadata(&before_ctx, metadata),
-        );
-        },
-    );
-    let turn_result = request.completion_rx.await;
-    let Ok(prompt_result) = turn_result else {
-        tracing::debug!(
-            session_id = %request.session_id.0,
-            prompt_id = %request.prompt_id,
-            "Synthetic trace: turn completion channel dropped, skipping",
-        );
-        return;
-    };
-    match &prompt_result {
-        Ok(turn_ok) => {
-            let completed = matches!(turn_ok.stop_reason, acp::StopReason::EndTurn);
-            let turn_result_metadata: TurnResultMetadata = TurnResultMetadata {
-                schema_version: GCS_SCHEMA_VERSION,
-                request_id: request.prompt_id.clone(),
-                completed,
-                stop_reason: Some(format!("{:?}", turn_ok.stop_reason)),
-                total_tokens: Some(turn_ok.total_tokens),
-                input_tokens: turn_ok
-                    .turn_snapshot
-                    .as_ref()
-                    .map(|s| s.turn_input_tokens),
-                cached_input_tokens: turn_ok
-                    .turn_snapshot
-                    .as_ref()
-                    .map(|s| s.turn_cached_input_tokens),
-                output_tokens: turn_ok
-                    .turn_snapshot
-                    .as_ref()
-                    .map(|s| s.turn_output_tokens),
-                error: None,
-                finished_at: chrono::Utc::now().to_rfc3339(),
-                signals: turn_ok.turn_snapshot.as_ref().and_then(|s| serde_json::to_value(s.current.clone()).ok()),
-                turn_delta: turn_ok.turn_snapshot.as_ref().and_then(|s| serde_json::to_value(s.delta.clone()).ok()),
-                start_prompt_mode: None,
-                end_prompt_mode: None,
-                resolved_model: Some(model.clone()),
-                subagents_spawned: vec![],
-            };
-            upload_turn_result(&ctx, &turn_result_metadata, UploadWait::Confirm).await;
-        }
-        Err(e) => {
-            let turn_result_metadata: TurnResultMetadata = TurnResultMetadata {
-                schema_version: GCS_SCHEMA_VERSION,
-                request_id: request.prompt_id.clone(),
-                completed: false,
-                stop_reason: None,
-                total_tokens: None,
-                input_tokens: None,
-                cached_input_tokens: None,
-                output_tokens: None,
-                error: Some(e.to_string()),
-                finished_at: chrono::Utc::now().to_rfc3339(),
-                signals: None,
-                turn_delta: None,
-                start_prompt_mode: None,
-                end_prompt_mode: None,
-                resolved_model: Some(model.clone()),
-                subagents_spawned: vec![],
-            };
-            upload_turn_result(&ctx, &turn_result_metadata, UploadWait::Confirm).await;
-        }
-    }
-    let turn_messages: Option<xai_chat_state::TurnCapture> = {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if ctx
-            .session_handle
-            .cmd_tx
-            .send(SessionCommand::TakeTurnMessages {
-                respond_to: tx,
-            })
-            .is_ok()
-        {
-            rx.await.ok().flatten()
-        } else {
-            None
-        }
-    };
-    let permission_events = {
-        let this = agent_ref.get();
-        this.collect_permission_events(&request.session_id)
-    };
-    let (session_copy_tx, session_copy_rx) = tokio::sync::oneshot::channel();
-    let _ = ctx
-        .session_handle
-        .cmd_tx
-        .send(SessionCommand::CopyFile {
-            respond_to: session_copy_tx,
-        });
-    let synthetic_committed = matches!(&prompt_result, Ok(ok) if matches!(ok.stop_reason, acp::StopReason::EndTurn));
-    let streaming_partial = crate::save::take_streaming_partial(
-            &ctx.session_handle.cmd_tx,
-            request.prompt_id.clone(),
-            synthetic_committed,
-            Some(model.clone()),
-        )
-        .await
-        .map(|mut cap| {
-            cap.reason
-                .get_or_insert_with(|| match &prompt_result {
-                    Ok(turn_ok) => {
-                        match &turn_ok.completion_kind {
-                            crate::session::commands::PromptCompletionKind::Cancelled {
-                                category,
-                                ..
-                            } => {
-                                match category {
-                                    Some(cat) => format!("synthetic_cancelled:{cat:?}"),
-                                    None => "synthetic_cancelled".to_string(),
-                                }
-                            }
-                            _ => "synthetic_non_completed".to_string(),
-                        }
-                    }
-                    Err(e) => format!("synthetic_error:{e:?}"),
-                });
-            cap
-        });
-    spawn_upload_task(
-        "synthetic_turn_trace",
-        async move {
-            match complete_prompt_trace(
-                    ctx,
-                    permission_events,
-                    session_copy_rx,
-                    turn_messages,
-                    streaming_partial,
-                    UploadWait::Confirm,
-                )
-                .await
-            {
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(
-                    error = %e,
-                    "Synthetic turn trace upload failed (non-fatal)",
-                );
-                }
-            }
-        },
-    );
-}
 /// Clears [`MvpAgent::post_unblock_jwt_retry_in_flight`] on scope exit —
 /// success, exhaustion, cancel/abort, or panic — so the single-flight flag
 /// cannot wedge `true` for the rest of the process.
@@ -2458,7 +2227,7 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
         tracing::debug!(
             "post-unblock JWT/catalog retry already in flight, skipping duplicate spawn"
         );
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "model catalog: post_subscription_unblock jwt retry skipped (already in flight)",
             None,
             Some(serde_json::json!({
@@ -2515,7 +2284,7 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
                     let user_id = user_id.clone();
                     let new_tier = new_tier.clone();
                     async move {
-                        grow_telemetry::unified_log::warn(
+                        grow_diagnostics::unified_log::warn(
                             "model catalog: post_subscription_unblock jwt retry scheduled",
                             None,
                             Some(
@@ -2534,7 +2303,7 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
             .await;
         match result {
             Ok(()) => {
-                grow_telemetry::unified_log::info(
+                grow_diagnostics::unified_log::info(
                     "model catalog: post_subscription_unblock refresh (after jwt retry)",
                     None,
                     Some(
@@ -2547,7 +2316,7 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
                 models_manager.on_auth_changed().await;
             }
             Err(e) => {
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "model catalog: post_subscription_unblock jwt retry exhausted",
                     None,
                     Some(

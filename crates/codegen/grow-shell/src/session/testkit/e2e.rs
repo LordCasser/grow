@@ -53,11 +53,7 @@ pub async fn load_session_via_agent<C: acp::Client + 'static>(
         acp::AgentSideConnection::new(agent, a2c_a.compat_write(), agent_incoming, |fut| {
             tokio::task::spawn_local(fut);
         });
-    tokio::task::spawn_local(
-        GatewayReceiver::new(gw_rx, agent_conn)
-            .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
-            .run(),
-    );
+    tokio::task::spawn_local(GatewayReceiver::new(gw_rx, agent_conn).run());
     tokio::task::spawn_local(agent_io);
 
     // Client side.

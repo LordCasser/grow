@@ -136,7 +136,7 @@ pub enum GoalPauseReason {
     /// Verification stage saw no change in the flagged-gap fingerprint
     /// across consecutive attempts and auto-paused before the run cap.
     /// Maps to [`GoalStatus::NoProgressPaused`] — same resumable paused
-    /// family as the cap, surfaced distinctly in the UI / telemetry.
+    /// family as the cap, surfaced distinctly in the UI / diagnostics.
     NoProgress,
     /// [`GoalStatus::Blocked`]; pairs with a human-readable message on
     /// [`GoalOrchestration::pause_message`].

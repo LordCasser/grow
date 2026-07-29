@@ -151,7 +151,7 @@ Beyond the base ACP protocol, Grow defines extension methods under the `grow/` p
 | **Session Management**     | `grow/session/*`     | `fork`, `resolve_local_for_worktree_resume`      |
 | **Conversation & History** | `grow/*`             | `prompt_history`, `rewind/*`, `compact_conversation` |
 | **Authentication**         | `grow/auth/*`        | `get_url`, `submit_code`                         |
-| **Feedback & Telemetry**   | `grow/*`             | `feedback`, `telemetry/*`                        |
+| **Feedback & Diagnostic**   | `grow/*`             | `feedback`, `diagnostics/*`                        |
 
 The tables here show representative methods in each category. The `grow/*` set is SpaceXAI-specific and may expand across releases, so treat it as non-exhaustive and discover the available methods from the agent's `initialize` response.
 

@@ -36,13 +36,11 @@ Grow 没有内置的 xAI/Grok 服务端点、OAuth issuer 或 OAuth client。未
 运行时连接分为三类：
 
 - 模型调用：只访问当前 session 所选 provider 的 `base_url`。
-- 用户显式配置：MCP、插件源、外部 OTLP、反馈、trace upload 和可选服务端点只在用户配置
-  或执行对应操作后访问；远程拉取、语音、图像和视频能力默认关闭。
+- 用户显式配置：MCP、插件源和其他可选服务端点只在用户配置或执行对应操作后访问。
 - `grow/*` 与 `_grow/*` 是本地 ACP wire protocol，不表示任何外部服务。
 
-内部 OTLP 只有在本地开启 telemetry 且设置 `GROW_INTERNAL_OTLP_TRACES_ENDPOINT` 时才导出；
-它不会从聊天代理派生端点，也不会读取标准 `OTEL_EXPORTER_OTLP_*`。标准 `OTEL_*` 仅供用户
-显式启用的 external OTLP 流使用。
+Grow 不包含遥测、产品分析、Sentry、OTLP exporter 或 trace upload。诊断事件只写入用户指定
+的本地日志；详见用户指南的 Local Diagnostics 章节。
 
 ## 配置 LLM（BYOK）
 

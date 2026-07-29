@@ -90,7 +90,7 @@ pub(crate) async fn single_check(
     {
         Ok(ui) => ui,
         Err(kind) => {
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "paywall_check_error",
                 None,
                 Some(serde_json::json!({ "user_id": user_id, "kind": kind })),
@@ -98,7 +98,7 @@ pub(crate) async fn single_check(
             return None;
         }
     };
-    grow_telemetry::unified_log::info(
+    grow_diagnostics::unified_log::info(
         "paywall_check_result",
         None,
         Some(serde_json::json!({
@@ -113,7 +113,7 @@ pub(crate) async fn single_check(
     if !QUALIFYING_TIERS.contains(&new_tier.as_str()) {
         return None;
     }
-    grow_telemetry::unified_log::info(
+    grow_diagnostics::unified_log::info(
         "paywall_check_subscription_detected",
         None,
         Some(serde_json::json!({
@@ -125,7 +125,7 @@ pub(crate) async fn single_check(
         .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
         .await
     {
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "paywall_check_error",
             None,
             Some(serde_json::json!({
@@ -135,7 +135,7 @@ pub(crate) async fn single_check(
             })),
         );
     }
-    grow_telemetry::unified_log::info(
+    grow_diagnostics::unified_log::info(
         "paywall_check_unblocked",
         None,
         Some(serde_json::json!({ "user_id": user_id, "new_tier": new_tier })),

@@ -1,8 +1,6 @@
 use agent_client_protocol as acp;
 use grow_tools::types::TaskSnapshot;
 
-use crate::session::feedback::FeedbackRequest as FeedbackRequestData;
-
 pub use crate::session::goal_tracker::GoalClassifierVerdict;
 
 /// Retained for wire backwards compatibility; always empty in the
@@ -459,8 +457,6 @@ pub enum SessionUpdate {
         /// Total tokens used after auto-continue
         total_tokens: u64,
     },
-    /// Request for user feedback based on session heuristics
-    FeedbackRequest(FeedbackRequestNotification),
     /// Relay sync status update (connected, disconnected, etc.)
     RelaySyncStatus(RelaySyncStatus),
     /// Auto-recovery is starting after a prompt failure (e.g. remote/workspace recovery)
@@ -1087,46 +1083,6 @@ pub struct DiffContent {
     pub diff: acp::Diff,
 }
 
-/// Notification requesting user feedback based on session heuristics.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub struct FeedbackRequestNotification {
-    /// Unique ID for this feedback request
-    pub request_id: String,
-    /// The tier that triggered this request
-    pub tier: String,
-    /// Human-readable prompt to show the user
-    pub prompt: String,
-    /// Whether this is a non-intrusive/dismissible request
-    pub dismissible: bool,
-    /// Trigger type identifier (e.g., "tier1_engagement", "tier2_complex_recovery")
-    pub trigger_type: String,
-    /// The specific condition that was met (e.g., "turns >= 10 AND tool_calls >= 5 AND ...")
-    pub trigger_condition: String,
-    /// Human-readable explanation of what triggered this request with actual values
-    pub trigger_reason: String,
-    pub stars: bool,
-    pub thumbs: bool,
-    pub text: bool,
-}
-
-impl From<FeedbackRequestData> for FeedbackRequestNotification {
-    fn from(data: FeedbackRequestData) -> Self {
-        Self {
-            request_id: data.request_id,
-            tier: format!("{:?}", data.tier).to_lowercase(),
-            stars: data.stars,
-            thumbs: data.thumbs,
-            text: data.text,
-            prompt: data.prompt,
-            dismissible: data.dismissible,
-            trigger_type: data.trigger_type,
-            trigger_condition: data.trigger_condition.condition.clone(),
-            trigger_reason: data.trigger_condition.trigger_reason(),
-        }
-    }
-}
-
 // ── Compaction checkpoint types ────────────────────────────────────────
 
 /// Metadata stored in `updates.jsonl` as a `CompactionCheckpoint` session update.
@@ -1209,9 +1165,8 @@ pub struct CompactionSegmentFile {
 /// On-disk artifact capturing the exact compaction request sent to the model
 /// plus the response (or final error) it produced.
 ///
-/// Stored at `{session_dir}/compaction_requests/{request_id}.json`. Rides on
-/// the post-turn session archive to cloud storage, where it can be downloaded for prompt
-/// iteration — you get the exact `chat_history` that was sent, the prompt
+/// Stored at `{session_dir}/compaction_requests/{request_id}.json` for local
+/// prompt iteration — it contains the exact `chat_history`, prompt
 /// variant, any `/compact <text>` user context, the model used, and the
 /// resulting summary (or error). Replay the request locally to A/B test
 /// alternate prompt wordings against the same input.
@@ -1221,8 +1176,6 @@ pub struct CompactionRequestFile {
     /// Schema version for forward compatibility.
     pub schema_version: u32,
     /// Unique artifact identifier (filename stem).
-    /// Note: this is a per-artifact ID, not the model API's `x_grok_req_id`
-    /// (which is generated per-attempt inside the sampling layer).
     pub request_id: String,
     /// ISO 8601 timestamp of when the compaction call started.
     pub created_at: String,
@@ -1267,9 +1220,8 @@ pub struct CompactionRequestFile {
 /// On-disk artifact capturing the exact recap request sent to the model plus
 /// the response (or final error) it produced.
 ///
-/// Stored at `{session_dir}/recap_requests/{request_id}.json`. Rides on
-/// the post-turn session archive to cloud storage (same path as compaction request
-/// artifacts) so recap prompt / model garble can be replayed offline.
+/// Stored at `{session_dir}/recap_requests/{request_id}.json` so recap prompt
+/// and model output can be replayed locally.
 /// Recap never mutates the conversation; this file is the only durable
 /// record of what was sent for `/recap` or auto return-from-away recap.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1277,8 +1229,7 @@ pub struct CompactionRequestFile {
 pub struct RecapRequestFile {
     /// Schema version for forward compatibility.
     pub schema_version: u32,
-    /// Unique artifact identifier (filename stem). Distinct from the model
-    /// API's `x_grok_req_id` (also recorded below for proxy correlation).
+    /// Unique artifact identifier (filename stem).
     pub request_id: String,
     /// ISO 8601 timestamp of when the recap model call started.
     pub created_at: String,
@@ -1287,10 +1238,6 @@ pub struct RecapRequestFile {
     pub trigger: String,
     /// The model id used for the recap side-call.
     pub model: String,
-    /// Sampling request id sent to the proxy (`xai-recap-{uuid}`).
-    pub x_grok_req_id: String,
-    /// Sampling conversation id (`recap-{uuid}`).
-    pub x_grok_conv_id: String,
     /// Whether reasoning/thinking blocks were stripped from the prefix
     /// (Anthropic Messages backend only; other backends keep reasoning
     /// verbatim for prompt-cache warmth).
@@ -1327,8 +1274,6 @@ mod tests {
             created_at: "2026-06-30T00:00:00Z".into(),
             trigger: "auto".into(),
             model: "v9-zingster".into(),
-            x_grok_req_id: "xai-recap-abc".into(),
-            x_grok_conv_id: "recap-abc".into(),
             strip_reasoning: false,
             reminder_tag: "system-reminder".into(),
             chat_history: vec![],
@@ -1340,7 +1285,6 @@ mod tests {
         let parsed: RecapRequestFile = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.schema_version, 1);
         assert_eq!(parsed.trigger, "auto");
-        assert_eq!(parsed.x_grok_req_id, "xai-recap-abc");
         assert_eq!(
             parsed.summary.as_deref(),
             Some("We fixed the flaky test in queue_worker.")

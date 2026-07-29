@@ -198,11 +198,7 @@ fn spawn_agent_local(
     let (conn, handle_io) = acp::AgentSideConnection::new(agent, outgoing, incoming, |fut| {
         tokio::task::spawn_local(fut);
     });
-    tokio::task::spawn_local(
-        GatewayReceiver::new(gw_rx, conn)
-            .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
-            .run(),
-    );
+    tokio::task::spawn_local(GatewayReceiver::new(gw_rx, conn).run());
     handle_io
 }
 
@@ -296,7 +292,7 @@ pub async fn run_stdio_agent(
     register_fs_watch_runtime();
     // Stamp binary version into unified log entries so zombie processes
     // are identifiable by version in diagnostic logs.
-    grow_telemetry::unified_log::set_version(grow_version::VERSION);
+    grow_diagnostics::unified_log::set_version(grow_version::VERSION);
 
     // cleanup_orphaned_uploads removed — xai_file_utils::queue is gone
 
@@ -374,9 +370,6 @@ pub async fn run_stdio_agent(
 
             // Restore managed policy right before bootstrap reads it (no stale window after prefetch).
             crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
-            // Fail-closed external-OTEL gate: suppress until settings resolve,
-            // opening now only for a pure env-API-key user (no remote policy).
-            apply_otel_config(&auth_manager, &agent_config.auth);
             let handle_io = spawn_agent_local(
                 agent_config,
                 auth_manager,
@@ -391,12 +384,6 @@ pub async fn run_stdio_agent(
         .await;
     // Kill PTY child processes so they don't outlive the agent.
     crate::terminal::pty_session::close_all().await;
-
-    // Brief grace period for the upload queue worker to finish in-flight uploads.
-    // The worker runs on the tokio runtime (not the LocalSet), so it continues
-    // after the LocalSet drops. The channel closes when all senders drop (agent
-    // exit), and the worker drains remaining items before exiting.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     result
 }
@@ -425,7 +412,7 @@ async fn run_headless_inner(
     memory_config: Option<crate::config::MemoryConfig>,
 ) -> anyhow::Result<()> {
     register_fs_watch_runtime();
-    grow_telemetry::unified_log::set_version(grow_version::VERSION);
+    grow_diagnostics::unified_log::set_version(grow_version::VERSION);
     // `grow agent [headless]` serves non-TUI automation; stamp proxy requests
     // as headless. IDE-facing `grow agent stdio` stays interactive.
     crate::http::set_process_client_mode_headless();
@@ -595,9 +582,7 @@ async fn run_headless_inner(
                         tokio::task::spawn_local(fut);
                     });
                 tokio::task::spawn_local(
-                    GatewayReceiver::new(gw_rx, conn)
-                        .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
-                        .run(),
+                    GatewayReceiver::new(gw_rx, conn).run(),
                 );
 
                 // Run the agent I/O handler - this processes incoming requests
@@ -664,12 +649,6 @@ async fn run_headless_inner(
         })
         .await?;
 
-    // Brief grace period for the upload queue worker to finish in-flight uploads.
-    // The worker runs on the tokio runtime (not the LocalSet), so it continues
-    // after the LocalSet drops. The channel closes when all senders drop,
-    // and the worker drains remaining items before exiting.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
     Ok(())
 }
 
@@ -686,7 +665,7 @@ async fn migrate_devbox_auth_if_legacy(
     }
 
     info!("Devbox legacy auth detected, attempting migration to OIDC");
-    grow_telemetry::unified_log::info(
+    grow_diagnostics::unified_log::info(
         "devbox legacy auth migration: starting",
         None,
         Some(serde_json::json!({
@@ -705,7 +684,7 @@ async fn migrate_devbox_auth_if_legacy(
         Ok(new_auth) => new_auth,
         Err(e) => {
             tracing::warn!(error = ?e, "devbox legacy auth migration: devbox login helper call failed, continuing with legacy auth");
-            grow_telemetry::unified_log::error(
+            grow_diagnostics::unified_log::error(
                 "devbox legacy auth migration: mint failed",
                 None,
                 Some(serde_json::json!({ "error": e.to_string() })),
@@ -721,7 +700,7 @@ async fn migrate_devbox_auth_if_legacy(
             if let Err(e) = migration_auth_manager.remove_scope(crate::auth::LEGACY_AUTH_SCOPE) {
                 tracing::warn!(error = ?e, "Failed to remove legacy auth scope entry (non-fatal)");
             }
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "devbox legacy auth migration: succeeded",
                 None,
                 Some(serde_json::json!({
@@ -736,7 +715,7 @@ async fn migrate_devbox_auth_if_legacy(
         }
         Err(e) => {
             tracing::warn!(error = ?e, "devbox legacy auth migration: failed to save new auth, continuing with legacy");
-            grow_telemetry::unified_log::error(
+            grow_diagnostics::unified_log::error(
                 "devbox legacy auth migration: save failed",
                 None,
                 Some(serde_json::json!({ "error": e.to_string() })),
@@ -944,33 +923,6 @@ impl DeferredRelayArm {
     }
 }
 
-/// Close the external-OTEL gate before telemetry init; see
-/// [`crate::agent::otel_gate`].
-pub fn suppress_otel() {
-    crate::agent::otel_gate::suppress();
-}
-
-/// Startup external-OTEL gate for an in-process (embedded) agent. Mirrors the
-/// leader startup gate so the pager process is fail-closed by construction at the
-/// agent boundary: suppress until the agent's first settings outcome, except a
-/// pure env-API-key user (no session now, none minting) whose stream has no
-/// remote policy and may emit immediately.
-pub fn apply_otel_config(auth_manager: &AuthManager, auth: &ServiceAuthConfig) {
-    suppress_otel();
-    // Session presence is disk-based (valid or expired), not refresh success: an
-    // expired session the refresher will renew still has a remote policy, so it
-    // must keep the gate closed.
-    let has_session = auth_manager.current().is_some() || auth_manager.read_disk_auth().is_some();
-    if crate::agent::otel_gate::should_open_at_startup(crate::agent::otel_gate::StartupGate {
-        has_session,
-        has_api_key_env: crate::agent::auth_method::has_provider_api_key_env(),
-        session_pending: crate::agent::otel_gate::is_session_pending(has_session, auth),
-        remote_fetch_enabled: crate::util::config::resolve_remote_fetch_enabled(),
-    }) {
-        crate::agent::otel_gate::open_at_startup();
-    }
-}
-
 /// Run the agent in leader mode, accepting IPC connections from multiple clients.
 /// When a service.example.com session is present, the leader connects to the websocket relay
 /// after startup (post-auth, post-prefetch); BYOK / no-session leaders start
@@ -1013,18 +965,7 @@ pub async fn run_leader(
     use tokio_util::sync::CancellationToken;
 
     register_fs_watch_runtime();
-    grow_telemetry::unified_log::set_version(grow_version::VERSION);
-
-    // Clean up orphaned upload queue temp files from previous sessions
-    // (best-effort). Detached onto a blocking thread so it never stalls leader
-    // startup: the queue can hold up to several GB (DEFAULT_MAX_QUEUE_BYTES) and
-    // the sweep walks/stats/deletes the whole tree synchronously. Running it
-    // inline here blocked the socket bind and lock acquisition below, so clients
-    // could not connect until the sweep finished.
-    // cleanup_orphaned_uploads removed — xai_file_utils::queue is gone
-    tokio::task::spawn_blocking(|| {
-        // (was: xai_file_utils::queue::cleanup_orphaned_uploads(...))
-    });
+    grow_diagnostics::unified_log::set_version(grow_version::VERSION);
 
     let mut agent_config = agent_config.clone();
     agent_config.mode = crate::agent::config::AgentMode::Leader;
@@ -1207,7 +1148,6 @@ pub async fn run_leader(
 
     let ctx = &agent_config.auth;
 
-    suppress_otel(); // idempotent re-assert
     // No-mint on the readiness path: a cached/expired session + a bounded
     // (~5s) refresh only. A session-less-but-mintable leader is minted by the
     // post-readiness background task below, so readiness never blocks on the
@@ -1217,27 +1157,14 @@ pub async fn run_leader(
     // ── Phase 6b: Legacy devbox auth migration ─────────────────────────────
     let auth: Option<ProviderAuth> = migrate_devbox_auth_if_legacy(auth, &agent_config).await;
 
-    // A session-less leader that can still mint one (auth provider / devbox) will
-    // acquire a service.example.com session post-readiness whose fleet policy governs
-    // external OTEL; see the background cold-mint below.
-    // Disk presence, not the is_xai-filtered no-mint result: an enterprise
-    // session has remote policy and must keep the gate closed.
     let has_session = auth.is_some()
         || agent_config
             .create_auth_manager()
             .read_disk_auth()
             .is_some();
-    let session_pending =
-        crate::agent::otel_gate::is_session_pending(has_session, &agent_config.auth);
-    if crate::agent::otel_gate::should_open_at_startup(crate::agent::otel_gate::StartupGate {
-        has_session,
-        has_api_key_env: crate::agent::auth_method::has_provider_api_key_env(),
-        session_pending,
-        remote_fetch_enabled: crate::util::config::resolve_remote_fetch_enabled(),
-    }) {
-        info!("Pure env-API-key leader; opening external-OTEL gate (no remote policy applies)");
-        crate::agent::otel_gate::open_at_startup();
-    }
+    let session_pending = !has_session
+        && (agent_config.auth.auth_provider_command.is_some()
+            || crate::auth::devbox_login::is_devbox_environment());
 
     // Non-blocking boot: nothing is prefetched; the catalog and remote settings
     // stream in after readiness via the background refreshes below.
@@ -1369,9 +1296,7 @@ pub async fn run_leader(
                         tokio::task::spawn_local(fut);
                     });
                 tokio::task::spawn_local(
-                    GatewayReceiver::new(gw_rx, conn)
-                        .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
-                        .run(),
+                    GatewayReceiver::new(gw_rx, conn).run(),
                 );
 
                 if let Err(e) = handle_io.await {
@@ -1625,7 +1550,7 @@ pub async fn run_leader(
                                 expires_at = ?auth.expires_at,
                                 "Auth token hot-reloaded from config watcher"
                             );
-                            grow_telemetry::unified_log::info(
+                            grow_diagnostics::unified_log::info(
                                 "auth hot-swapped from disk",
                                 None,
                                 Some(serde_json::json!({
@@ -1674,7 +1599,7 @@ pub async fn run_leader(
                                 warn!(error = %e, "failed to inject auth-cleared cleanup into ACP stream");
                             }
                             models_manager_for_config.on_auth_changed().await;
-                            grow_telemetry::unified_log::warn(
+                            grow_diagnostics::unified_log::warn(
                                 "auth cleared from disk",
                                 None,
                                 None,
@@ -1821,9 +1746,6 @@ pub async fn run_leader(
         })
         .await?;
 
-    // Brief grace period for the upload queue worker to finish in-flight uploads.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
     Ok(())
 }
 
@@ -1958,101 +1880,6 @@ mod tests {
         };
         crate::agent::relay::RelayConfig::for_session(&auth, &cfg, None, None)
             .expect("x.ai OIDC session must be relay-eligible")
-    }
-
-    /// The external-OTEL gate opens at startup only for a pure env-API-key leader:
-    /// env key set, no session, no pending mint. Any session (resolved of any
-    /// credential type, or about to be minted) makes it wait for the fetch.
-    #[test]
-    fn otel_gate_opens_only_for_pure_env_api_key_leader() {
-        use crate::agent::otel_gate::{StartupGate, should_open_at_startup};
-        let opens = |has_session, has_api_key_env, session_pending| {
-            should_open_at_startup(StartupGate {
-                has_session,
-                has_api_key_env,
-                session_pending,
-                remote_fetch_enabled: true,
-            })
-        };
-        //         (has_session, has_api_key_env, session_pending)
-        assert!(opens(false, true, false), "pure env API key → opens");
-        assert!(!opens(true, true, false), "any resolved session → waits");
-        assert!(!opens(true, false, false), "session, no env key → waits");
-        assert!(
-            !opens(false, true, true),
-            "pending mint → session coming, waits"
-        );
-        assert!(
-            !opens(false, false, false),
-            "no env key, no session → waits"
-        );
-    }
-
-    /// The embedded startup gate (every pager `--no-leader` / fallback path) must be
-    /// fail-closed by construction: a session user stays closed until the agent
-    /// resolves settings, even when an env API key is also present (the key must
-    /// not bypass the session's remote policy). The pure env-API-key open path
-    /// is covered by `otel_gate_opens_only_for_pure_env_api_key_leader`, since
-    /// `is_session_pending` is environment-dependent (true in a devbox/CI pod).
-    #[test]
-    #[serial_test::serial]
-    fn embedded_otel_gate_keeps_a_session_user_fail_closed() {
-        use crate::agent::auth_method::GROW_API_KEY_ENV_VAR;
-        use grow_telemetry::external::{
-            is_settings_gate_open, mark_external_otel_settings_resolved,
-        };
-
-        unsafe fn set_or_clear(key: &str, value: Option<std::ffi::OsString>) {
-            match value {
-                Some(v) => unsafe { std::env::set_var(key, v) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-        }
-
-        /// Restores the api-key env and reopens the gate on drop so no state leaks.
-        struct Restore {
-            key: Option<std::ffi::OsString>,
-        }
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                // SAFETY: serialized by `#[serial]`.
-                unsafe {
-                    set_or_clear(GROW_API_KEY_ENV_VAR, self.key.take());
-                }
-                mark_external_otel_settings_resolved();
-            }
-        }
-
-        let _restore = Restore {
-            key: std::env::var_os(GROW_API_KEY_ENV_VAR),
-        };
-        let cfg = ServiceAuthConfig::default();
-
-        // SAFETY: serialized by `#[serial]`.
-        unsafe {
-            std::env::set_var(GROW_API_KEY_ENV_VAR, "test-key");
-        }
-
-        let session = ProviderAuth {
-            // Far-future expiry so `current()` accepts it regardless of clock skew
-            // or a leaked `GROW_AUTH_EARLY_INVALIDATION_SECS` buffer; the gate reads
-            // session presence via `current()`, which filters expired tokens.
-            expires_at: chrono::DateTime::from_timestamp(9_999_999_999, 0),
-            auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(crate::auth::TEST_OAUTH2_ISSUER.to_string()),
-            ..ProviderAuth::test_default()
-        };
-        let with_session = {
-            let dir = tempfile::tempdir().unwrap();
-            let am = Arc::new(AuthManager::new(dir.path(), ServiceAuthConfig::default()));
-            am.hot_swap(session);
-            am
-        };
-        apply_otel_config(&with_session, &cfg);
-        assert!(
-            !is_settings_gate_open(),
-            "a session user must boot fail-closed even with an env key set"
-        );
     }
 
     /// Wait until at least one relay connection is accepted, or panic.

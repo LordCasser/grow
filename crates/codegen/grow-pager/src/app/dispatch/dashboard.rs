@@ -1,7 +1,7 @@
 //! Dashboard dispatchers: attach, overlays, rows, renames, and permissions.
 
 use super::ctx::{show_welcome, surface_yolo_launch_block_notice};
-use super::dashboard_telemetry::{
+use super::dashboard_diagnostics::{
     log_dashboard_attached, log_dashboard_closed, log_dashboard_launched, log_dashboard_opened,
 };
 use super::modes::{dispatch_cycle_mode_and_sync, set_yolo_mode, yolo_enable_blocked};
@@ -1308,8 +1308,8 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         let reg = dashboard.dispatch.slash_controller.registry();
 
         {
-            use grow_telemetry::events::{PagerCommandSource, PagerSlashCommand};
-            use grow_telemetry::session_ctx::log_event;
+            use grow_diagnostics::events::{PagerCommandSource, PagerSlashCommand};
+            use grow_diagnostics::session_ctx::log_event;
             let source = if reg.is_builtin(invocation.token) {
                 PagerCommandSource::Builtin
             } else {
@@ -1654,7 +1654,7 @@ pub(super) fn dispatch_dashboard_peek_cycle_mode(app: &mut AppView) -> Vec<Effec
 
     // Temporarily target the peeked agent so `dispatch_cycle_mode_and_sync`
     // (which reads `active_view`) acts on it; restored before returning so the
-    // dashboard stays foregrounded. Uses the telemetry-free cycle body: the
+    // dashboard stays foregrounded. Uses the diagnostics-free cycle body: the
     // user is viewing the dashboard, not this agent's prompt, so a plan nudge
     // still within TTL must not attribute a (spurious) acceptance.
     let saved_view = app.active_view;

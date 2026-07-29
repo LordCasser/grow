@@ -1,10 +1,10 @@
 //! Observability seam for the full-replace (grow-build) pass.
 //!
 //! The shared orchestrator reports per-attempt and terminal outcomes through
-//! this trait so each harness can emit its own telemetry (grow-build:
+//! this trait so each harness can emit its own diagnostics (grow-build:
 //! `CompactionAttempt` rows, `CompactionRetryDegraded` events, span records,
 //! request-artifact persistence) without the shared crate depending on a
-//! telemetry backend. Mirrors
+//! diagnostics backend. Mirrors
 //! [`IntraCompactionObserver`](crate::intra_compaction::IntraCompactionObserver)
 //! / [`InterCompactionObserver`](crate::inter_compaction::InterCompactionObserver).
 //!
@@ -16,7 +16,7 @@ use std::time::Duration;
 
 /// Classified outcome of a single full-replace sample attempt.
 ///
-/// The harness turns this into its per-attempt telemetry row. `summary` is the
+/// The harness turns this into its per-attempt diagnostics row. `summary` is the
 /// raw model output (the harness bounds/captures it as needed); it is borrowed
 /// for the duration of the callback so no allocation happens on the hot path.
 #[derive(Debug)]
@@ -56,7 +56,7 @@ pub enum FullReplaceAttemptOutcome<'a> {
 }
 
 /// Receives full-replace compaction outcomes. All methods default to no-ops so
-/// harnesses without telemetry (and tests) can use `()`.
+/// harnesses without diagnostics (and tests) can use `()`.
 pub trait FullReplaceObserver: Send + Sync {
     /// One sample attempt finished with the given classified outcome.
     /// `attempt` is 1-based and cumulative across the pass.
@@ -69,5 +69,5 @@ pub trait FullReplaceObserver: Send + Sync {
     fn on_error(&self, _attempts: u32) {}
 }
 
-/// No-op observer for tests and harnesses without telemetry.
+/// No-op observer for tests and harnesses without diagnostics.
 impl FullReplaceObserver for () {}

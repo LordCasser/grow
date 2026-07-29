@@ -6,8 +6,8 @@ use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::AppView;
 use crate::scrollback::block::RenderBlock;
-use grow_telemetry::events::{SubscriptionUpsell, SubscriptionUpsellClicked};
-use grow_telemetry::session_ctx::log_event;
+use grow_diagnostics::events::{SubscriptionUpsell, SubscriptionUpsellClicked};
+use grow_diagnostics::session_ctx::log_event;
 use std::time::Duration;
 
 /// How long the pager auto-checks subscription status before stopping.
@@ -103,14 +103,14 @@ pub(super) fn open_credit_limit_upsell(
         secondary_desc,
         card_action,
         second_choice,
-        payg_telemetry,
+        payg_diagnostics,
     ): (
         &str,
         &str,
         &str,
         &str,
         CreditLimitCardAction,
-        grow_telemetry::events::CreditLimitChoice,
+        grow_diagnostics::events::CreditLimitChoice,
         bool,
     ) = match mode {
         CreditLimitUpsellMode::UnifiedCredits => (
@@ -119,7 +119,7 @@ pub(super) fn open_credit_limit_upsell(
             "Buy more credits",
             "Purchase credits to keep using Grow",
             CreditLimitCardAction::PurchaseCredits,
-            grow_telemetry::events::CreditLimitChoice::PurchaseCredits,
+            grow_diagnostics::events::CreditLimitChoice::PurchaseCredits,
             false,
         ),
         CreditLimitUpsellMode::LegacyPayg { enabled: true } => (
@@ -128,7 +128,7 @@ pub(super) fn open_credit_limit_upsell(
             "Increase limit",
             "Raise your pay-as-you-go spending cap",
             CreditLimitCardAction::IncreasePaygLimit,
-            grow_telemetry::events::CreditLimitChoice::PayAsYouGo,
+            grow_diagnostics::events::CreditLimitChoice::PayAsYouGo,
             true,
         ),
         CreditLimitUpsellMode::LegacyPayg { enabled: false } => (
@@ -137,7 +137,7 @@ pub(super) fn open_credit_limit_upsell(
             "Pay as you go",
             "Enable pay-as-you-go credits for on-demand usage",
             CreditLimitCardAction::EnablePayg,
-            grow_telemetry::events::CreditLimitChoice::PayAsYouGo,
+            grow_diagnostics::events::CreditLimitChoice::PayAsYouGo,
             false,
         ),
     };
@@ -146,10 +146,10 @@ pub(super) fn open_credit_limit_upsell(
     // ── Max tier: inline scrollback card ─────────────────────────
     if max_tier {
         use crate::scrollback::block::RenderBlock;
-        log_event(grow_telemetry::events::CreditLimitUpsellShown {
-            surface: grow_telemetry::events::CreditLimitUpsellSurface::InlineCard,
+        log_event(grow_diagnostics::events::CreditLimitUpsellShown {
+            surface: grow_diagnostics::events::CreditLimitUpsellSurface::InlineCard,
             max_tier: true,
-            pay_as_you_go: payg_telemetry,
+            pay_as_you_go: payg_diagnostics,
             unified_billing,
         });
         agent.scrollback.push_block(RenderBlock::credit_limit_card(
@@ -160,10 +160,10 @@ pub(super) fn open_credit_limit_upsell(
         return;
     }
 
-    log_event(grow_telemetry::events::CreditLimitUpsellShown {
-        surface: grow_telemetry::events::CreditLimitUpsellSurface::QuestionModal,
+    log_event(grow_diagnostics::events::CreditLimitUpsellShown {
+        surface: grow_diagnostics::events::CreditLimitUpsellSurface::QuestionModal,
         max_tier: false,
-        pay_as_you_go: payg_telemetry,
+        pay_as_you_go: payg_diagnostics,
         unified_billing,
     });
 
@@ -203,7 +203,7 @@ pub(super) fn open_credit_limit_upsell(
     )
     .with_local_kind(LocalQuestionKind::CreditLimitUpsell {
         choices: vec![
-            grow_telemetry::events::CreditLimitChoice::UpgradeTier,
+            grow_diagnostics::events::CreditLimitChoice::UpgradeTier,
             second_choice,
         ],
     })
@@ -236,7 +236,7 @@ pub(super) fn open_restricted_command_upsell(
 }
 
 /// Which situation opened the Provider Plan upsell modal. Controls the heading
-/// and the telemetry source.
+/// and the diagnostics source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UpsellReason {
     /// Free-usage quota exhausted (429 paywall).
@@ -276,7 +276,7 @@ fn open_provider_plan_upsell(
         ),
     };
 
-    log_event(grow_telemetry::events::SubscriptionUpsellShown {
+    log_event(grow_diagnostics::events::SubscriptionUpsellShown {
         source,
         auth_method,
     });

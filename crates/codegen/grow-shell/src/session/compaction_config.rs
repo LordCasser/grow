@@ -48,7 +48,7 @@ pub struct AsyncCompactionCache {
     /// Model slug pass-1 ran under; invalidated on model switch.
     pub model_slug: String,
     /// Wall time pass-1 took (ms) — latency that ran off the critical path
-    /// when prefire finished before compact (not counted in telemetry TTFT unless
+    /// when prefire finished before compact (not counted in diagnostics TTFT unless
     /// the user waited on an in-flight pass-1).
     pub pass1_latency_ms: u64,
 }

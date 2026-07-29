@@ -12,7 +12,7 @@ use grow_tools::implementations::grow_build::ask_user_question;
 
 /// Stable identity for a setting. The string id matches the `UiConfig`
 /// serde field name (for SHELL/SHARED settings) and is the canonical key
-/// referenced by tests, telemetry, and registry lookups.
+/// referenced by tests, diagnostics, and registry lookups.
 ///
 /// We deliberately do NOT use a `SettingId` enum: enum renames would
 /// ripple through call sites, while `&'static str` ties the registry's

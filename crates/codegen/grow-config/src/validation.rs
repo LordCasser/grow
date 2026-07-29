@@ -264,7 +264,7 @@ fail_closed = true
 [[version_overrides]]
 minimum_version = "not-a-version"
 [version_overrides.features]
-telemetry = true
+diagnostics = true
 "#
         )
         .unwrap();
@@ -358,7 +358,7 @@ minimum_version = "not-a-version"
         let flag = |s: &str| fail_closed_flag(&toml::from_str::<toml::Value>(s).unwrap());
         assert!(flag("fail_closed = true\n"));
         assert!(!flag("fail_closed = false\n"));
-        assert!(!flag("[features]\ntelemetry = true\n"));
+        assert!(!flag("[features]\ndiagnostics = true\n"));
         assert!(!flag("fail_closed = \"yes\"\n"));
         assert!(!flag(""));
     }
@@ -371,14 +371,14 @@ minimum_version = "not-a-version"
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("requirements.toml");
         let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "fail_closed = true\n[features]\ntelemetry = true\n").unwrap();
+        writeln!(f, "fail_closed = true\n[features]\ndiagnostics = true\n").unwrap();
 
         let result = load_requirements_layer(&path).unwrap();
         assert!(
             result.get(FAIL_CLOSED_KEY).is_none(),
             "fail_closed must not leak into the returned config"
         );
-        assert_eq!(result["features"]["telemetry"].as_bool(), Some(true));
+        assert_eq!(result["features"]["diagnostics"].as_bool(), Some(true));
 
         let _ = std::fs::remove_file(&path);
     }
@@ -396,10 +396,10 @@ minimum_version = "not-a-version"
         let dir = std::env::temp_dir().join(format!("grow-req-load-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut f = std::fs::File::create(dir.join("requirements.toml")).unwrap();
-        writeln!(f, "[features]\ntelemetry = true\n").unwrap();
+        writeln!(f, "[features]\ndiagnostics = true\n").unwrap();
 
         let v = load_user_requirements(Some(&dir)).expect("layer present");
-        assert_eq!(v["features"]["telemetry"].as_bool(), Some(true));
+        assert_eq!(v["features"]["diagnostics"].as_bool(), Some(true));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

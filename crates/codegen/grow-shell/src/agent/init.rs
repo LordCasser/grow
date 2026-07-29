@@ -2,7 +2,6 @@
 //!
 //! [`bootstrap`] runs the full init sequence (config resolution, process
 //! singletons, model catalog) and returns a resolved config + `ModelsManager`.
-//! [`update_telemetry_config`] re-initializes telemetry after auth changes.
 
 use std::sync::Arc;
 
@@ -149,17 +148,15 @@ fn resolve_config(cfg: &AgentConfig, auth_manager: &AuthManager) -> AgentConfig 
     cfg
 }
 
-/// Initialize process-level singletons (deployment sync, built-in metadata,
-/// telemetry). `Once`-guarded: only the first call takes effect.
-/// Telemetry user ID is updated separately via [`update_telemetry_config`].
-fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
+/// Initialize process-level singletons. `Once`-guarded: only the first call
+/// takes effect.
+fn init_process(cfg: &AgentConfig, _auth_manager: &AuthManager) {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        // Every agent mode (stdio/headless/leader and the in-process TUI
-        // agent) passes through here, so diagnostic uploads always carry
-        // the version stamp and the resource ceilings in effect.
-        grow_telemetry::unified_log::set_version(grow_version::VERSION);
+        // Every agent mode passes through here, so local diagnostic records
+        // carry the version stamp and resource ceilings in effect.
+        grow_diagnostics::unified_log::set_version(grow_version::VERSION);
         crate::util::limits::log_effective_limits();
 
         if !cfg!(test) {
@@ -172,56 +169,5 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
         crate::builtin::extract_builtin_files(&grow_home);
 
         crate::extensions::marketplace::purge_default_skills_installs(&grow_home);
-
-        let telemetry_mode = cfg.resolve_telemetry_mode();
-        let trace_upload = cfg.resolve_trace_upload();
-        let feedback = cfg.resolve_feedback();
-        let feedback_url = cfg.endpoints.resolve_feedback_base_url();
-        let trace_upload_url = cfg.endpoints.resolve_trace_upload_url();
-        tracing::info!(
-            telemetry = %telemetry_mode,
-            trace_upload = %trace_upload,
-            feedback = %feedback,
-            feedback_url = %feedback_url,
-            feedback_url_custom = cfg.endpoints.feedback_base_url.is_some(),
-            trace_upload_url = %trace_upload_url,
-            trace_upload_url_custom = cfg.endpoints.trace_upload_url.is_some(),
-            trace_upload_bucket = cfg.endpoints.trace_upload_bucket.as_deref().unwrap_or("none"),
-            trace_upload_region = cfg.endpoints.trace_upload_region.as_deref().unwrap_or("none"),
-            "data capture config resolved",
-        );
-        if telemetry_mode.value.is_disabled() && trace_upload.value {
-            tracing::info!(
-                "Telemetry disabled but trace uploads enabled: \
-                 session artifacts will be uploaded, analytics events will not"
-            );
-        }
-        update_telemetry_config(cfg, auth_manager);
     });
-}
-
-/// Apply current telemetry config + auth identity. Tears down the client
-/// when telemetry is disabled, so it's safe to call repeatedly.
-pub fn update_telemetry_config(config: &AgentConfig, auth_manager: &AuthManager) {
-    let grok_auth = auth_manager.current().filter(|a| a.is_service_auth());
-    let user_id = grok_auth.as_ref().map(|a| a.user_id.clone());
-    let team_id = grok_auth.as_ref().and_then(|a| a.team_id.clone());
-    let subscription_tier = super::mvp_agent::resolve_subscription_tier_for_telemetry(
-        config
-            .remote_settings
-            .as_ref()
-            .and_then(|rs| rs.subscription_tier_display.clone()),
-        auth_manager.current_or_expired().as_ref(),
-    );
-    grow_telemetry::client::init(
-        config.telemetry.clone(),
-        config.resolve_telemetry_mode().value,
-        user_id,
-        team_id,
-        config.endpoints.deployment_key.clone(),
-        crate::http::origin_client_info_from_env(),
-        grow_version::VERSION.to_owned(),
-        subscription_tier,
-        crate::http::shared_client(),
-    );
 }

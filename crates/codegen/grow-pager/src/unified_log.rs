@@ -8,7 +8,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use agent_client_protocol as acp;
-use grow_telemetry::unified_log::{
+use grow_diagnostics::unified_log::{
     ClientLogEntry, LOG_METHOD, LogLevel, LogNotificationParams, LogSource,
 };
 use tokio::runtime::Handle;

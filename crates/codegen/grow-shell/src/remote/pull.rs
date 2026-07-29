@@ -130,8 +130,6 @@ pub(crate) mod hydrate {
             current_model_id: model_id,
             parent_session_id,
             forked_at: None,
-            collection_id: None,
-            next_trace_turn: 0,
             chat_format_version: CHAT_FORMAT_VERSION,
             prompt_display_cwd: None,
             session_kind: None,
@@ -144,7 +142,6 @@ pub(crate) mod hydrate {
             git_remotes: Vec::new(),
             head_commit: None,
             head_branch: None,
-            request_id: None,
             // Record the *local* grow_home (where this hydrated copy lives),
             // not the original remote session's, since reconstruction runs locally.
             grow_home: crate::session::persistence::grow_home_string(),

@@ -122,13 +122,6 @@ pub struct Cwd(pub PathBuf);
 #[derive(Clone, Debug)]
 pub struct BehaviorVersion(pub String);
 
-/// Distributed-trace correlation context (e.g. W3C `traceparent`).
-///
-/// Receive-side carrier only: stamped from the inbound wire value for
-/// tool impls to read, never serialized back out.
-#[derive(Clone, Debug)]
-pub struct TraceContext(pub String);
-
 /// Session ID context — identifies which hub session this call belongs to.
 /// Used by multi-session tool servers to dispatch to the correct
 /// per-session state.

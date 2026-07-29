@@ -19,7 +19,7 @@ use crate::agent::mvp_agent::{CodeNavEligibility, MvpAgent};
 use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
 
-/// Record a structured telemetry event at the end of a code-nav handler call.
+/// Record a structured diagnostics event at the end of a code-nav handler call.
 ///
 /// This is called once per request with the method name, triggering session,
 /// cwd, whether the index was newly spawned or reused, and total elapsed time.
@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 ///  - identify first-use latency (newly spawned + high elapsed_ms)
 ///  - identify reuse latency (reused + low elapsed_ms)
 ///  - attribute slowness to index startup vs query processing
-fn log_code_nav_telemetry(
+fn log_code_nav_diagnostics(
     method: &str,
     session_id: Option<&acp::SessionId>,
     cwd: &Path,
@@ -200,7 +200,7 @@ pub async fn handle(
                 )
                 .await
                 .map_err(|e| acp::Error::internal_error().data(format!("code nav error: {e}")))?;
-            log_code_nav_telemetry(
+            log_code_nav_diagnostics(
                 "goto-definition",
                 req.session_id.as_ref(),
                 &cwd,
@@ -229,7 +229,7 @@ pub async fn handle(
                 )
                 .await
                 .map_err(|e| acp::Error::internal_error().data(format!("code nav error: {e}")))?;
-            log_code_nav_telemetry(
+            log_code_nav_diagnostics(
                 "goto-references",
                 req.session_id.as_ref(),
                 &cwd,
@@ -259,7 +259,7 @@ pub async fn handle(
                 )
                 .await
                 .map_err(|e| acp::Error::internal_error().data(format!("code nav error: {e}")))?;
-            log_code_nav_telemetry(
+            log_code_nav_diagnostics(
                 "find-definitions",
                 req.session_id.as_ref(),
                 &cwd,
@@ -289,7 +289,7 @@ pub async fn handle(
                 )
                 .await
                 .map_err(|e| acp::Error::internal_error().data(format!("code nav error: {e}")))?;
-            log_code_nav_telemetry(
+            log_code_nav_diagnostics(
                 "find-references",
                 req.session_id.as_ref(),
                 &cwd,
@@ -378,7 +378,7 @@ fn to_code_nav_ext_response(resp: grow_workspace::workspace_ops::CodeNavResponse
 }
 
 /// Check eligibility, ensure the codebase index is started, and return
-/// whether the index was newly created (for telemetry).
+/// whether the index was newly created (for diagnostics).
 fn ensure_eligible_and_started(
     agent: &MvpAgent,
     session_id: Option<&acp::SessionId>,

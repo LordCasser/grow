@@ -121,7 +121,7 @@ pub enum SamplingError {
     /// A confident server-reported doom loop on the attempt (mid-stream or
     /// on the completed response). Retryable on the recovery loop's own
     /// budget, separate from the transport budget. Carries the raw trigger
-    /// labels (never generation content) plus, for telemetry only, the
+    /// labels (never generation content) plus, for diagnostics only, the
     /// stream chunk index the mid-stream abort fired at (`None` when the
     /// signal was only seen on the completed response).
     #[error("doom loop detected: {}", triggers.join(", "))]

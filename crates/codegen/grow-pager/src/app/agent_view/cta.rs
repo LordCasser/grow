@@ -25,7 +25,7 @@ impl AgentView {
             && !self.session.state.is_busy();
     }
 
-    /// Log the `shown` telemetry impression for the prompt-suggestion ghost
+    /// Log the `shown` diagnostics impression for the prompt-suggestion ghost
     /// at its *first actual visibility* — exactly once per installed
     /// suggestion (latched in the controller). Visibility is derived per
     /// frame, not fixed at load: a suggestion that arrives behind a
@@ -45,8 +45,8 @@ impl AgentView {
             return;
         }
         let (chars, words) = crate::views::prompt_suggestion::suggestion_size(&full);
-        grow_telemetry::session_ctx::log_event(grow_telemetry::events::PromptSuggestion {
-            action: grow_telemetry::events::PromptSuggestionAction::Shown,
+        grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::PromptSuggestion {
+            action: grow_diagnostics::events::PromptSuggestionAction::Shown,
             chars,
             words,
         });
@@ -575,10 +575,12 @@ impl AgentView {
             } => (plugin_relative_path.clone(), name.clone(), true),
             _ => return,
         };
-        grow_telemetry::session_ctx::log_event(grow_telemetry::events::PluginCtaConnectClicked {
-            plugin_name: name.clone(),
-            is_retry,
-        });
+        grow_diagnostics::session_ctx::log_event(
+            grow_diagnostics::events::PluginCtaConnectClicked {
+                plugin_name: name.clone(),
+                is_retry,
+            },
+        );
         let Some(session_id) = self.session.session_id.clone() else {
             return;
         };

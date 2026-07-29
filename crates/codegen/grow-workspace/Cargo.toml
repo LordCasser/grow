@@ -73,14 +73,13 @@ glob = "0.3"
 grow-sandbox = { path = "../grow-sandbox", default-features = false }
 grow-hooks = { path = "../grow-hooks" }
 xai-hunk-tracker = { path = "../xai-hunk-tracker" }
-# `metrics` enables the SDK's metric-donation client (periodic Prometheus
-# registry gather → OTLP → hub donation pump); see metric_donation_reporter.
+# `metrics` enables process-local Prometheus counters used by the workspace.
 xai-computer-hub-sdk = { workspace = true, features = ["metrics"] }
 xai-computer-hub-mcp-adapter = { path = "../../common/xai-computer-hub-mcp-adapter" }
 grow-mcp = { path = "../grow-mcp" }
 xai-file-utils = { path = "../xai-file-utils" }
 grow-auth = { path = "../grow-auth" }
-grow-telemetry = { workspace = true }
+grow-diagnostics = { workspace = true }
 xai-tty-utils = { workspace = true }
 xai-sqlite-journal = { workspace = true }
 reqwest = { workspace = true }
@@ -98,7 +97,6 @@ clap = { workspace = true }
 tracing-subscriber = { workspace = true }
 # "enable" required for the SDK's spans to record at all.
 fastrace = { workspace = true, features = ["enable"] }
-xai-tracing = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 tempfile = { workspace = true }

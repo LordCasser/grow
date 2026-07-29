@@ -36,7 +36,7 @@ impl SessionActor {
             .set(sampling_config.compactions_remaining);
         self.compaction_at_tokens
             .set(sampling_config.compaction_at_tokens);
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "backend_search: model switch",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
@@ -74,7 +74,6 @@ impl SessionActor {
                     existing.auth_type,
                 ),
                 alpha_test_key: existing.alpha_test_key,
-                client_version: sampling_config.client_version.clone(),
             });
         self.invalidate_model_auth_memo();
         self.signals_handle()

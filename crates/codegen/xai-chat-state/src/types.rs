@@ -50,7 +50,7 @@ pub struct ChatStateSnapshot {
     pub turn_start_ms: Option<i64>,
     /// Prompt index at which the last compaction occurred.
     pub last_compaction_prompt_index: Option<usize>,
-    /// Opaque credential secrets (API key, optional extra auth, client version).
+    /// Opaque credential secrets used by the configured provider.
     #[serde(default)]
     pub credentials: Credentials,
 }
@@ -123,8 +123,6 @@ pub struct Credentials {
     pub auth_type: AuthType,
     /// Optional extra auth material forwarded with requests when present.
     pub alpha_test_key: Option<String>,
-    /// Client version string.
-    pub client_version: Option<String>,
 }
 
 /// The messages captured during a single conversation turn.
@@ -141,7 +139,7 @@ pub struct TurnCapture {
 /// Item counts for a conversation, broken down by role.
 ///
 /// Returned by `get_conversation_counts()` — avoids cloning the conversation
-/// when only role counts and total length are needed (e.g. for telemetry).
+/// when only role counts and total length are needed (e.g. for diagnostics).
 #[derive(Debug, Clone, Default)]
 pub struct ConversationCounts {
     /// Total number of items in the conversation.

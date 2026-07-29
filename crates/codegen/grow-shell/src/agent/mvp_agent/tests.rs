@@ -94,25 +94,25 @@ fn auth_with_mode(mode: crate::auth::AuthMode, key: &str) -> crate::auth::Provid
 #[test]
 fn resolve_subscription_tier_prefers_display_then_api_key_then_jwt() {
     assert_eq!(
-        resolve_subscription_tier_for_telemetry(Some("Free".into()), None).as_deref(),
+        resolve_subscription_tier_for_diagnostics(Some("Free".into()), None).as_deref(),
         Some("Free")
     );
     let api = auth_with_mode(crate::auth::AuthMode::ApiKey, "xai-not-a-jwt");
     assert_eq!(
-        resolve_subscription_tier_for_telemetry(Some("  ".into()), Some(&api)).as_deref(),
+        resolve_subscription_tier_for_diagnostics(Some("  ".into()), Some(&api)).as_deref(),
         Some("api_key")
     );
     assert_eq!(
-        resolve_subscription_tier_for_telemetry(None, Some(&api)).as_deref(),
+        resolve_subscription_tier_for_diagnostics(None, Some(&api)).as_deref(),
         Some("api_key")
     );
     let oauth = auth_with_mode(crate::auth::AuthMode::Oidc, &jwt_with_tier(0));
     assert_eq!(
-        resolve_subscription_tier_for_telemetry(None, Some(&oauth)).as_deref(),
+        resolve_subscription_tier_for_diagnostics(None, Some(&oauth)).as_deref(),
         Some("free")
     );
     assert_ne!(
-        resolve_subscription_tier_for_telemetry(None, Some(&api)).as_deref(),
+        resolve_subscription_tier_for_diagnostics(None, Some(&api)).as_deref(),
         Some("free")
     );
 }
@@ -366,21 +366,6 @@ async fn broadcast_refresh_skill_baseline_tolerates_dropped_receiver() {
         Ok(crate::session::SessionCommand::RefreshSkillBaseline)
     ));
 }
-/// The monotonic turn counter must never wrap on the DB-bound i32 path.
-/// `allocate_turn_number` returns u64; the AB submission casts to i32.
-/// Verify we saturate instead of wrapping.
-#[test]
-fn trace_turn_to_i32_saturates_at_max() {
-    let small: u64 = 42;
-    let result = i32::try_from(small).unwrap_or(i32::MAX);
-    assert_eq!(result, 42);
-    let huge: u64 = (i32::MAX as u64) + 100;
-    let result = i32::try_from(huge).unwrap_or(i32::MAX);
-    assert_eq!(result, i32::MAX);
-    let boundary: u64 = i32::MAX as u64;
-    let result = i32::try_from(boundary).unwrap_or(i32::MAX);
-    assert_eq!(result, i32::MAX);
-}
 /// When remote settings are absent (`None`), default to blocked.
 #[test]
 fn settings_allow_access_none_settings_is_blocked() {
@@ -418,8 +403,7 @@ fn settings_allow_access_field_absent_is_blocked() {
     assert!(!settings_allow_access(Some(&rs)));
 }
 /// After allocating a turn number, `session_turn_numbers` holds the next
-/// value (current + 1). This is the value that must be persisted via
-/// `SetNextTraceTurn` so the counter survives restarts.
+/// value (current + 1) for process-local structured diagnostic ordering.
 #[test]
 fn allocate_turn_number_advances_counter() {
     use std::cell::RefCell;
@@ -438,242 +422,6 @@ fn allocate_turn_number_advances_counter() {
     assert_eq!(*counters.borrow().get(&sid).unwrap(), 2);
     assert_eq!(allocate(&sid), 2);
     assert_eq!(*counters.borrow().get(&sid).unwrap(), 3);
-}
-/// Build a synthetic harness `task` call/result pair carrying the
-/// `<subagent_result>` footer, mirroring what the verifier/planner record.
-fn harness_pair(id: &str) -> Vec<grow_sampling_types::conversation::ConversationItem> {
-    use grow_sampling_types::ToolCall;
-    use grow_sampling_types::conversation::ConversationItem;
-    vec![
-        ConversationItem::assistant_tool_calls(vec![ToolCall {
-            id: id.into(),
-            name: "task".into(),
-            arguments: "{}".into(),
-        }]),
-        ConversationItem::tool_result(id, "<subagent_result>\nsubagent_id: skeptic-1"),
-    ]
-}
-/// Agent-side upload path: each drained harness turn takes a distinct,
-/// monotonic turn number that CONTINUES past the user turn, advances the
-/// per-session counter, and is persisted via exactly one `SetNextTraceTurn`.
-/// This is what makes each sibling `turn_{N}` reachable — without the
-/// advance every harness turn would clobber the same GCS path.
-#[tokio::test(flavor = "current_thread")]
-async fn upload_harness_trace_turns_numbers_siblings_and_persists_counter() {
-    let agent = build_minimal_agent_for_tests();
-    {
-        let mut cfg = agent.cfg.borrow_mut();
-        cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
-        cfg.telemetry.trace_upload = Some(true);
-        cfg.endpoints.trace_upload_bucket = Some("gs://harness-trace-test".to_string());
-    }
-    let sid = acp::SessionId::new("harness-upload-sess");
-    let info = crate::session::info::Info {
-        id: sid.clone(),
-        cwd: "/tmp".to_string(),
-    };
-    let mut handle = make_test_handle("test-model", false, None);
-    handle.info = info.clone();
-    let queue_home = tempfile::tempdir().unwrap();
-    let queue_cfg = crate::save::TraceExportConfig {
-        bucket_url: Some("gs://harness-trace-test".to_string()),
-        service_account_key: None,
-        prefix_dir: None,
-        gcs_prefix: None,
-        absolute_paths: false,
-        archive_name_override: None,
-        upload_method: crate::save::UploadMethod::Direct {
-            service_account_key: None,
-        },
-    };
-    let queue = crate::save::spawn_upload_queue(
-        queue_home.path(),
-        &queue_cfg,
-        Some(grow_version::VERSION),
-        agent.auth_manager.clone(),
-    );
-    let _ = handle.upload_queue.set(queue);
-    agent.sessions.borrow_mut().insert(sid.clone(), handle);
-    for _ in 0..3 {
-        agent.allocate_turn_number(&sid);
-    }
-    assert_eq!(agent.session_turn_number(&sid), Some(3));
-    let built = agent
-        .build_harness_trace_uploads(
-            &sid,
-            &info,
-            "test-model",
-            3,
-            vec![harness_pair("a"), harness_pair("b")],
-        )
-        .await;
-    let numbers: Vec<u64> = built.iter().map(|(_, m, _)| m.turn_number).collect();
-    assert_eq!(numbers, vec![3, 4], "siblings take base, base+1");
-    assert!(
-        built.iter().all(|(_, m, _)| m.model == "test-model"),
-        "harness metadata carries the requested model alias",
-    );
-    let (cmd_tx, mut cmd_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::session::SessionCommand>();
-    agent
-        .upload_harness_trace_turns(
-            &sid,
-            &info,
-            &cmd_tx,
-            "test-model",
-            vec![harness_pair("a"), harness_pair("b")],
-        )
-        .await;
-    assert_eq!(
-        agent.session_turn_number(&sid),
-        Some(5),
-        "two siblings advance the counter by two from the user turn",
-    );
-    let mut persisted = Vec::new();
-    while let Ok(cmd) = cmd_rx.try_recv() {
-        if let crate::session::SessionCommand::SetNextTraceTurn {
-            next_trace_turn, ..
-        } = cmd
-        {
-            persisted.push(next_trace_turn);
-        }
-    }
-    assert_eq!(
-        persisted,
-        vec![5],
-        "persist the advanced counter once, ahead of the spawned uploads",
-    );
-}
-/// With trace upload disabled the agent-side path must NOT burn a turn
-/// number or persist a counter (and spawns no upload). The buffer-clearing
-/// half of the drain is the caller's `TakeHarnessTraceTurns`; this guards
-/// the upload function's uploads-disabled branch.
-#[tokio::test(flavor = "current_thread")]
-async fn upload_harness_trace_turns_uploads_disabled_does_not_burn_counter() {
-    let agent = build_minimal_agent_for_tests();
-    let sid = acp::SessionId::new("harness-disabled-sess");
-    let info = crate::session::info::Info {
-        id: sid.clone(),
-        cwd: "/tmp".to_string(),
-    };
-    let (cmd_tx, mut cmd_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::session::SessionCommand>();
-    agent
-        .upload_harness_trace_turns(&sid, &info, &cmd_tx, "test-model", vec![harness_pair("a")])
-        .await;
-    assert_eq!(
-        agent.session_turn_number(&sid),
-        None,
-        "uploads-disabled skip must not consume a turn number",
-    );
-    assert!(
-        cmd_rx.try_recv().is_err(),
-        "uploads-disabled path must not persist a counter",
-    );
-}
-/// Guards the per-harness-turn manifest seam: (1) every turn's ctx carries
-/// a FRESH `artifact_tracker`, so turn 1 never inherits turn 0's recorded
-/// artifacts; (2) recording the turn's metadata + turn_messages yields a
-/// manifest listing exactly those two; (3) `fully_uploaded` is true iff
-/// neither failed.
-#[tokio::test(flavor = "current_thread")]
-async fn upload_harness_trace_turns_build_per_turn_manifest() {
-    use crate::save::{
-        ArtifactResult, ArtifactStatus, build_manifest, record_artifact, resolve_upload_method,
-    };
-    let agent = build_minimal_agent_for_tests();
-    {
-        let mut cfg = agent.cfg.borrow_mut();
-        cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
-        cfg.telemetry.trace_upload = Some(true);
-        cfg.endpoints.trace_upload_bucket = Some("gs://harness-trace-test".to_string());
-    }
-    let sid = acp::SessionId::new("harness-manifest-sess");
-    let info = crate::session::info::Info {
-        id: sid.clone(),
-        cwd: "/tmp".to_string(),
-    };
-    let mut handle = make_test_handle("test-model", false, None);
-    handle.info = info.clone();
-    let queue_home = tempfile::tempdir().unwrap();
-    let queue_cfg = crate::save::TraceExportConfig {
-        bucket_url: Some("gs://harness-trace-test".to_string()),
-        service_account_key: None,
-        prefix_dir: None,
-        gcs_prefix: None,
-        absolute_paths: false,
-        archive_name_override: None,
-        upload_method: crate::save::UploadMethod::Direct {
-            service_account_key: None,
-        },
-    };
-    let queue = crate::save::spawn_upload_queue(
-        queue_home.path(),
-        &queue_cfg,
-        Some(grow_version::VERSION),
-        agent.auth_manager.clone(),
-    );
-    let _ = handle.upload_queue.set(queue);
-    agent.sessions.borrow_mut().insert(sid.clone(), handle);
-    let built = agent
-        .build_harness_trace_uploads(
-            &sid,
-            &info,
-            "test-model",
-            0,
-            vec![harness_pair("a"), harness_pair("b")],
-        )
-        .await;
-    assert_eq!(
-        built.len(),
-        2,
-        "both harness turns obtained a trace context"
-    );
-    let ctx0 = &built[0].0;
-    record_artifact(
-        &ctx0.artifact_tracker,
-        "metadata.json",
-        ArtifactResult::Succeeded,
-    );
-    record_artifact(
-        &ctx0.artifact_tracker,
-        "turn_messages.json",
-        ArtifactResult::Succeeded,
-    );
-    let m0 = build_manifest(&ctx0.artifact_tracker, resolve_upload_method(ctx0));
-    assert!(matches!(
-        m0.artifacts.get("metadata.json"),
-        Some(ArtifactStatus::Succeeded)
-    ));
-    assert!(matches!(
-        m0.artifacts.get("turn_messages.json"),
-        Some(ArtifactStatus::Succeeded)
-    ));
-    assert!(m0.fully_uploaded, "both succeeded → fully_uploaded");
-    let ctx1 = &built[1].0;
-    let before = build_manifest(&ctx1.artifact_tracker, resolve_upload_method(ctx1));
-    assert!(
-        before.artifacts.is_empty(),
-        "per-turn tracker: turn 1 must not inherit turn 0's artifacts",
-    );
-    record_artifact(
-        &ctx1.artifact_tracker,
-        "metadata.json",
-        ArtifactResult::Succeeded,
-    );
-    record_artifact(
-        &ctx1.artifact_tracker,
-        "turn_messages.json",
-        ArtifactResult::Failed {
-            reason: "upload_failed".to_string(),
-        },
-    );
-    let m1 = build_manifest(&ctx1.artifact_tracker, resolve_upload_method(ctx1));
-    assert!(
-        !m1.fully_uploaded,
-        "a failed turn_messages flips fully_uploaded",
-    );
-    assert_eq!(m1.artifacts.len(), 2, "no cross-turn contamination");
 }
 /// A new session with no explicit profile uses the global default Agent.
 #[test]
@@ -999,11 +747,6 @@ fn make_test_handle(
         mcp_servers: vec![],
         initial_client_mcp_servers: vec![],
         display_cwd: None,
-        feedback_manager: std::sync::Arc::new(
-            crate::session::feedback_manager::FeedbackManager::local_only("test"),
-        ),
-        upload_queue: Arc::new(OnceLock::new()),
-        upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tool_context: crate::tools::ToolContext::new_local_context(
             grow_paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap(),
             std::sync::Arc::new(grow_workspace::file_system::LocalFs::new(
@@ -2474,254 +2217,7 @@ async fn auth_info_returns_profile_when_token_expired() {
     assert_eq!(info["email"], "user@example.com");
     assert_eq!(info["firstName"], "Test");
 }
-#[tokio::test]
-async fn data_collection_enabled_for_normal_user() {
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth::test_default());
-    assert!(
-        !agent.is_data_collection_disabled(),
-        "normal user must have data collection enabled"
-    );
-}
-#[tokio::test]
-async fn data_collection_disabled_for_zdr_team() {
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth {
-        team_blocked_reasons: vec!["BLOCKED_REASON_NO_LOGS".into()],
-        ..crate::auth::ProviderAuth::test_default()
-    });
-    assert!(
-        agent.is_data_collection_disabled(),
-        "ZDR team must have data collection disabled"
-    );
-    assert!(
-        agent.trace_upload_config_snapshot().is_none(),
-        "trace uploads must be disabled for ZDR team"
-    );
-}
-#[tokio::test]
-async fn data_collection_disabled_for_zdr_moderated_team() {
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth {
-        team_blocked_reasons: vec!["BLOCKED_REASON_NO_LOGS_MODERATED".into()],
-        ..crate::auth::ProviderAuth::test_default()
-    });
-    assert!(
-        agent.is_data_collection_disabled(),
-        "ZDR-moderated team must have data collection disabled"
-    );
-}
-#[tokio::test]
-async fn data_collection_disabled_for_opted_out_team() {
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth {
-        coding_data_retention_opt_out: true,
-        ..crate::auth::ProviderAuth::test_default()
-    });
-    assert!(
-        agent.is_data_collection_disabled(),
-        "opted-out team must have data collection disabled"
-    );
-    assert!(
-        agent.trace_upload_config_snapshot().is_none(),
-        "trace uploads must be disabled for opted-out team"
-    );
-}
-#[tokio::test]
-async fn data_collection_disabled_for_zdr_plus_opt_out() {
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth {
-        team_blocked_reasons: vec!["BLOCKED_REASON_NO_LOGS".into()],
-        coding_data_retention_opt_out: true,
-        ..crate::auth::ProviderAuth::test_default()
-    });
-    assert!(
-        agent.is_data_collection_disabled(),
-        "ZDR + opt-out must have data collection disabled"
-    );
-}
-#[tokio::test]
-async fn data_collection_enabled_for_non_zdr_team_with_unrelated_blocks() {
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth {
-        team_blocked_reasons: vec![
-            "BLOCKED_REASON_BILLING".into(),
-            "BLOCKED_REASON_SUSPENDED".into(),
-        ],
-        ..crate::auth::ProviderAuth::test_default()
-    });
-    assert!(
-        !agent.is_data_collection_disabled(),
-        "non-ZDR blocked reasons must not disable data collection"
-    );
-}
-fn enable_product_telemetry(agent: &MvpAgent) {
-    agent.cfg.borrow_mut().features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
-}
-/// Enable trace uploads via config so only the auth-level privacy gate
-/// can disable collection in the tests below.
-fn enable_trace_upload_config(agent: &MvpAgent) {
-    let mut cfg = agent.cfg.borrow_mut();
-    cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
-    cfg.telemetry.trace_upload = Some(true);
-}
-#[tokio::test]
-async fn product_analytics_enabled_for_normal_user_with_telemetry_on() {
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth::test_default());
-    enable_product_telemetry(&agent);
-    assert!(agent.product_analytics_enabled());
-}
-#[tokio::test]
-async fn product_analytics_enabled_despite_coding_retention_opt_out() {
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth {
-        coding_data_retention_opt_out: true,
-        ..crate::auth::ProviderAuth::test_default()
-    });
-    enable_product_telemetry(&agent);
-    assert!(agent.is_data_collection_disabled());
-    assert!(agent.product_analytics_enabled());
-}
-#[tokio::test]
-async fn product_analytics_disabled_for_zdr_team() {
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth {
-        team_blocked_reasons: vec!["BLOCKED_REASON_NO_LOGS".into()],
-        ..crate::auth::ProviderAuth::test_default()
-    });
-    enable_product_telemetry(&agent);
-    assert!(!agent.product_analytics_enabled());
-}
-#[tokio::test]
-async fn product_analytics_disabled_when_telemetry_off() {
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth::test_default());
-    agent.cfg.borrow_mut().features.telemetry = Some(crate::agent::config::TelemetryMode::Disabled);
-    assert!(!agent.product_analytics_enabled());
-}
-/// Counting HTTP stub: any request increments the counter and gets a
-/// storage-proxy-shaped 200 so the client does not retry.
-async fn spawn_counting_storage_stub() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
-    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let count_clone = count.clone();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let app = axum::Router::new().fallback(move || {
-        let count = count_clone.clone();
-        async move {
-            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            (
-                [("content-type", "application/json")],
-                r#"{"bucket":"test-bucket","path":"auth-diagnostics/test.jsonl"}"#,
-            )
-        }
-    });
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (format!("http://127.0.0.1:{port}"), count)
-}
-/// Regression: the auth-diagnostics uploader was gated only on the
-/// trace-upload config switch; it must also honor ZDR / retention
-/// opt-out, checked at invocation time.
-#[tokio::test]
-async fn diagnostic_upload_skipped_for_opted_out_user() {
-    let (stub_url, count) = spawn_counting_storage_stub().await;
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth {
-        coding_data_retention_opt_out: true,
-        ..crate::auth::ProviderAuth::test_default()
-    });
-    enable_trace_upload_config(&agent);
-    agent.cfg.borrow_mut().endpoints.trace_upload_url = Some(stub_url);
-    let uploader = agent
-        .diagnostic_upload_config()
-        .expect("uploader is wired whenever trace upload config is on");
-    uploader(b"log".to_vec(), "tok".into(), "user-id-1".into()).await;
-    assert_eq!(
-        count.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "no diagnostics request may leave the machine after opt-out"
-    );
-}
-#[tokio::test]
-async fn diagnostic_upload_sent_for_normal_user() {
-    let (stub_url, count) = spawn_counting_storage_stub().await;
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth::test_default());
-    enable_trace_upload_config(&agent);
-    agent.cfg.borrow_mut().endpoints.trace_upload_url = Some(stub_url);
-    let uploader = agent
-        .diagnostic_upload_config()
-        .expect("uploader is wired whenever trace upload config is on");
-    uploader(b"log".to_vec(), "tok".into(), "user-id-1".into()).await;
-    assert!(
-        count.load(std::sync::atomic::Ordering::SeqCst) >= 1,
-        "positive control: diagnostics upload reaches the proxy for a \
-         normal user"
-    );
-}
-/// The diagnostics privacy gate fails closed: with no credential in the
-/// `AuthManager` (e.g. a mid-session `/logout` raced the refresh failure
-/// that triggers the upload), nothing may leave the machine.
-#[tokio::test]
-async fn diagnostic_upload_skipped_without_credentials() {
-    let (stub_url, count) = spawn_counting_storage_stub().await;
-    let agent = build_minimal_agent_for_tests();
-    enable_trace_upload_config(&agent);
-    agent.cfg.borrow_mut().endpoints.trace_upload_url = Some(stub_url);
-    let uploader = agent
-        .diagnostic_upload_config()
-        .expect("uploader is wired whenever trace upload config is on");
-    uploader(b"log".to_vec(), "tok".into(), "user-id-1".into()).await;
-    assert_eq!(
-        count.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "missing credentials must fail closed for diagnostics uploads"
-    );
-}
-/// The diagnostics uploader is wired once (at agent construction), so it
-/// must re-check the live trace-upload mirror at invocation time: a
-/// mid-session config-level kill switch stops diagnostics uploads too.
-#[tokio::test]
-async fn diagnostic_upload_skipped_after_mid_session_trace_upload_kill_switch() {
-    let (stub_url, count) = spawn_counting_storage_stub().await;
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth::test_default());
-    enable_trace_upload_config(&agent);
-    agent.cfg.borrow_mut().endpoints.trace_upload_url = Some(stub_url);
-    agent.sync_collection_config_gate();
-    let uploader = agent
-        .diagnostic_upload_config()
-        .expect("uploader is wired whenever trace upload config is on");
-    {
-        let mut cfg = agent.cfg.borrow_mut();
-        cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Disabled);
-        cfg.telemetry.trace_upload = Some(false);
-    }
-    agent.sync_collection_config_gate();
-    uploader(b"log".to_vec(), "tok".into(), "user-id-1".into()).await;
-    assert_eq!(
-        count.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "an already-wired diagnostics uploader must honor a mid-session \
-         trace-upload kill switch"
-    );
-}
-/// The live collection gate reads a `Send` mirror of the config-level
-/// trace-upload switch; `sync_collection_config_gate` must keep that mirror
-/// current so a mid-session remote-settings flip (kill switch) stops
-/// collection without a new session.
-#[tokio::test]
-async fn collection_config_gate_mirror_follows_trace_upload_flip() {
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth::test_default());
-    enable_trace_upload_config(&agent);
-    agent.sync_collection_config_gate();
-    assert!(
-        agent
-            .trace_upload_live
-            .load(std::sync::atomic::Ordering::Relaxed),
-        "precondition: mirror reflects the enabled switch"
-    );
-    {
-        let mut cfg = agent.cfg.borrow_mut();
-        cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Disabled);
-        cfg.telemetry.trace_upload = Some(false);
-    }
-    agent.sync_collection_config_gate();
-    assert!(
-        !agent
-            .trace_upload_live
-            .load(std::sync::atomic::Ordering::Relaxed),
-        "mirror must follow a mid-session config-level trace-upload flip"
-    );
-}
+
 /// `parse_session_kind` routes `session/load` to the gateway Chat path vs. the
 /// disk-backed Build path. Anything but an explicit `kind: "chat"` is Build.
 #[test]
@@ -3652,18 +3148,9 @@ fn drained_settings_update(
     }
     found
 }
-/// Re-open the process-global external-OTEL gate on drop so a closed gate
-/// never leaks into another test.
-struct RestoreOtelGate;
-impl Drop for RestoreOtelGate {
-    fn drop(&mut self) {
-        grow_telemetry::external::mark_external_otel_settings_resolved();
-    }
-}
 /// Regression: `cfg.remote_settings` is not reset on an account switch, so the
 /// access gate must not read a previous identity's cached `allow_access`. A
-/// mismatched identity stays provisionally open (unknown), like the OTEL gate's
-/// `rearm_on_switch`.
+/// mismatched identity stays provisionally open (unknown).
 #[tokio::test]
 async fn access_gate_does_not_leak_verdict_across_identities() {
     use crate::agent::config::AgentMode;
@@ -3699,14 +3186,12 @@ async fn access_gate_does_not_leak_verdict_across_identities() {
     );
 }
 /// First-party xAI auth + `writeback_enabled` settings → storage upgrades to
-/// Writeback; the settings arrival also emits `grow/settings/update` and opens
-/// the external-OTEL gate.
+/// Writeback; the settings arrival also emits `grow/settings/update`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
-async fn post_auth_settings_xai_upgrades_writeback_emits_and_opens_gate() {
+async fn post_auth_settings_xai_upgrades_writeback_and_emits() {
     use crate::agent::config::AgentMode;
     use crate::auth::{ProviderAuth, TEST_OAUTH2_ISSUER};
-    let _restore = RestoreOtelGate;
     let _storage_env = crate::env::EnvVarGuard::remove("GROW_STORAGE_MODE");
     let server = grow_test_support::MockInferenceServer::start()
         .await
@@ -3727,8 +3212,6 @@ async fn post_auth_settings_xai_upgrades_writeback_emits_and_opens_gate() {
         StorageMode::Local,
         "precondition: leader boots in Local storage mode"
     );
-    grow_telemetry::external::suppress_external_otel_until_settings();
-    assert!(!grow_telemetry::external::is_settings_gate_open());
     agent.maybe_fetch_post_auth_settings().await;
     assert_eq!(
         agent.storage_mode(),
@@ -3736,22 +3219,17 @@ async fn post_auth_settings_xai_upgrades_writeback_emits_and_opens_gate() {
         "xai auth + writeback_enabled settings must upgrade storage to Writeback"
     );
     assert!(
-        grow_telemetry::external::is_settings_gate_open(),
-        "a settings response must open the external-OTEL gate"
-    );
-    assert!(
         drained_settings_update(&mut rx),
         "settings arrival must push grow/settings/update to clients"
     );
 }
 /// BYOK auth must not be upgraded to `Writeback` even when the server
-/// advertises it; the push and gate still fire.
+/// advertises it; the settings push still fires.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn post_auth_settings_third_party_keeps_local_but_still_emits() {
     use crate::agent::config::AgentMode;
     use crate::auth::{AuthMode, ProviderAuth};
-    let _restore = RestoreOtelGate;
     let server = grow_test_support::MockInferenceServer::start()
         .await
         .unwrap();
@@ -3769,7 +3247,6 @@ async fn post_auth_settings_third_party_keeps_local_but_still_emits() {
     );
     let (agent, mut rx) =
         build_agent_with_auth_and_proxy(api_auth, server.url(), AgentMode::Leader);
-    grow_telemetry::external::suppress_external_otel_until_settings();
     agent.maybe_fetch_post_auth_settings().await;
     assert_eq!(
         agent.storage_mode(),
@@ -3777,66 +3254,8 @@ async fn post_auth_settings_third_party_keeps_local_but_still_emits() {
         "non-xai auth must stay Local even when writeback is advertised remotely"
     );
     assert!(
-        grow_telemetry::external::is_settings_gate_open(),
-        "a settings response must open the gate regardless of auth kind"
-    );
-    assert!(
         drained_settings_update(&mut rx),
         "settings arrival must push grow/settings/update for non-xai auth too"
-    );
-}
-/// A failed post-auth fetch must re-close the gate and leave it closed. Guards
-/// two behaviors a passing-on-`Fetched` test can't: the account-switch
-/// re-suppress fires (gate was open, identity not yet resolved), and a
-/// transient/4xx outcome (`Retry`) does not reopen it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial]
-async fn post_auth_settings_retry_re_suppresses_and_stays_closed() {
-    use crate::agent::config::AgentMode;
-    use crate::auth::{ProviderAuth, TEST_OAUTH2_ISSUER};
-    let _restore = RestoreOtelGate;
-    let server = grow_test_support::MockInferenceServer::start()
-        .await
-        .unwrap();
-    let xai_auth = ProviderAuth {
-        oidc_issuer: Some(TEST_OAUTH2_ISSUER.to_string()),
-        ..ProviderAuth::test_default()
-    };
-    let (agent, _rx) = build_agent_with_auth_and_proxy(xai_auth, server.url(), AgentMode::Leader);
-    grow_telemetry::external::mark_external_otel_settings_resolved();
-    assert!(grow_telemetry::external::is_settings_gate_open());
-    agent.maybe_fetch_post_auth_settings().await;
-    assert!(
-        !grow_telemetry::external::is_settings_gate_open(),
-        "a Retry (failed) post-auth fetch must re-close the gate and keep it closed"
-    );
-}
-/// A same-credential refresh must NOT re-suppress a gate already resolved for
-/// that credential; the reason `OtelGate` remembers the identity. With the
-/// gate resolved-open for this identity, a later failing (`Retry`) refresh
-/// leaves it OPEN (regressing the identity guard would re-close it forever).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial]
-async fn same_credential_refresh_does_not_flap_resolved_gate() {
-    use crate::agent::config::AgentMode;
-    use crate::auth::{ProviderAuth, TEST_OAUTH2_ISSUER};
-    let _restore = RestoreOtelGate;
-    let server = grow_test_support::MockInferenceServer::start()
-        .await
-        .unwrap();
-    let xai_auth = ProviderAuth {
-        oidc_issuer: Some(TEST_OAUTH2_ISSUER.to_string()),
-        ..ProviderAuth::test_default()
-    };
-    let (agent, _rx) =
-        build_agent_with_auth_and_proxy(xai_auth.clone(), server.url(), AgentMode::Leader);
-    agent.otel_gate.set_resolved_for(&xai_auth.user_id);
-    grow_telemetry::external::mark_external_otel_settings_resolved();
-    assert!(grow_telemetry::external::is_settings_gate_open());
-    agent.refresh_remote_settings(&xai_auth).await;
-    assert!(
-        grow_telemetry::external::is_settings_gate_open(),
-        "a same-credential refresh must not flap a gate already resolved for it"
     );
 }
 /// A `/settings` 401 from a token that rotated mid-flight must self-heal:
@@ -3848,7 +3267,6 @@ async fn settings_self_heal_refetches_after_token_rotation() {
     use crate::agent::config::AgentMode;
     use crate::auth::refresh::{RefreshOutcome, TokenRefresher};
     use crate::auth::{ProviderAuth, TEST_OAUTH2_ISSUER};
-    let _restore = RestoreOtelGate;
     let server = grow_test_support::MockInferenceServer::start_with_required_auth(
         vec![grow_test_support::MockModelEntry::new("grow-build")],
         "rotated-key",
@@ -3881,12 +3299,7 @@ async fn settings_self_heal_refetches_after_token_rotation() {
     agent
         .auth_manager
         .set_refresher(std::sync::Arc::new(RotatingRefresher));
-    grow_telemetry::external::suppress_external_otel_until_settings();
     agent.refresh_remote_settings(&stale).await;
-    assert!(
-        grow_telemetry::external::is_settings_gate_open(),
-        "the rotated-token re-fetch must land settings and open the gate"
-    );
     assert!(
         agent.cfg.borrow().remote_settings.is_some(),
         "the re-fetched settings must be stored"
@@ -3899,7 +3312,6 @@ async fn settings_self_heal_refetches_after_token_rotation() {
 async fn settings_not_cached_when_identity_logs_out_during_fetch() {
     use crate::agent::config::AgentMode;
     use crate::auth::{ProviderAuth, TEST_OAUTH2_ISSUER};
-    let _restore = RestoreOtelGate;
     let server = grow_test_support::MockInferenceServer::start()
         .await
         .unwrap();

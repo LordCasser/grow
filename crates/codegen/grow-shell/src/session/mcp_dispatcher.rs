@@ -711,7 +711,7 @@ pub async fn run_dispatcher(
 
         // Classify each configured server's transport (single lock).
         // `http_servers` decides recover-in-place vs evict; `transport_map`
-        // feeds the disconnect telemetry below. `recoverable_http_servers`
+        // feeds the disconnect diagnostics below. `recoverable_http_servers`
         // excludes managed (`MANAGED_MCP_PREFIX`, server-side rotating
         // creds) AND disabled names so it stays in lockstep with the
         // recovery gate `is_http_server_configured` — otherwise a disabled
@@ -741,7 +741,7 @@ pub async fn run_dispatcher(
         let dead = collect_close_candidates(&win, &http_servers);
         let stale = drop_dead_clients(&mcp_state, &dead).await;
         // Strip stale closes BEFORE the restart-key capture, the
-        // disconnect telemetry, and the status flush below, so the
+        // disconnect diagnostics, and the status flush below, so the
         // healthy replacement is neither reported unavailable nor
         // respawned.
         for server in &stale {
@@ -781,7 +781,7 @@ pub async fn run_dispatcher(
         if has_transport_closed {
             for (server, kind) in buf.keys() {
                 if matches!(kind, McpClientEventKind::TransportClosed) {
-                    crate::session::telemetry::emit_mcp_connection_span(
+                    crate::session::diagnostics::emit_mcp_connection_span(
                         "disconnected",
                         server.as_str(),
                         transport_map

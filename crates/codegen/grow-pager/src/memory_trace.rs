@@ -15,8 +15,7 @@
 //! - **Thresholds**: when the physical footprint crosses a bucket
 //!   (`GROW_MEMTRACE_THRESHOLD_MB`, default 1 GiB, then doubling), a full
 //!   allocator stats dump (jemalloc `malloc_stats_print`) is written next to
-//!   the trace and the *threshold hook* fires — the seam the GCS trace-upload
-//!   pipeline plugs into (see below). Buckets re-arm once the footprint
+//!   the trace and the local *threshold hook* fires. Buckets re-arm once the footprint
 //!   halves, so a long-lived process can evidence repeated growth cycles.
 //!
 //! ## Files
@@ -24,8 +23,7 @@
 //! `$GROW_HOME/memtrace/<start-ts>-<pid>.jsonl` (+ `.1` after 4 MiB
 //! rotation) and `<stem>-jemalloc-<seq>.txt` threshold dumps. Files are
 //! created lazily on the first event so short-lived CLI invocations leave no
-//! debris. Traces contain **process memory numbers only** — no user content —
-//! so they are safe to ship for analysis.
+//! debris. Traces contain **process memory numbers only** — no user content.
 //!
 //! ## Seams (composition-root pattern, mirrors `memory_release`)
 //!
@@ -128,8 +126,7 @@ pub fn install_allocator_dump_provider(provider: fn() -> String) {
 }
 
 /// Install the threshold hook: `(jsonl_trace_path, crossed_threshold_bytes)`.
-/// This is the attachment point for the GCS trace-upload pipeline: it fires
-/// at most once per bucket per growth cycle (buckets re-arm after the
+/// It fires at most once per bucket per growth cycle (buckets re-arm after the
 /// footprint halves). Idempotent; first caller wins.
 pub fn install_threshold_hook(hook: fn(&Path, u64)) {
     let _ = THRESHOLD_HOOK.set(hook);

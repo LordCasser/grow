@@ -166,7 +166,7 @@ pub fn build_auth_methods(inputs: AuthMethodsBuildInputs<'_>) -> BuiltAuthMethod
 
 fn build_pinned_api_key(has_external_api_key: bool) -> BuiltAuthMethods {
     if !has_external_api_key {
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "auth: preferred_method=api_key but no API key credentials available",
             None,
             None,
@@ -234,7 +234,7 @@ fn build_unpinned(
         let overrode_api_key = default_auth_method_id.is_some();
         default_auth_method_id = Some(acp::AuthMethodId::new(CACHED_TOKEN_AUTH_METHOD_ID));
         if overrode_api_key {
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "auth method priority: cached_token overrides provider.api_key for default_auth_method_id",
                 None,
                 Some(serde_json::json!({

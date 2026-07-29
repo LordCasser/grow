@@ -118,7 +118,7 @@ pub struct AfterTurnPayload {
 /// Turn outcome as observed by the sampler.
 ///
 /// Named `TurnHookOutcome` (not `TurnOutcome`) to avoid collision with the
-/// shell's existing `TurnOutcome` and the telemetry crate's
+/// shell's existing `TurnOutcome` and the diagnostics crate's
 /// `TurnOutcomeLabel`. Module-qualified usage (`turn_hook::TurnHookOutcome`)
 /// is still recommended in shell code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -195,53 +195,6 @@ pub struct HookReply {
     /// Optional loop-control override.
     #[serde(default)]
     pub control: TurnControl,
-    /// Artifact-handling ack for a [`TurnHookRequest::After`] request; `None`
-    /// on `Before` replies and from workspaces that predate the ack.
-    /// Informational only — the requester never gates its loop on it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after_turn_ack: Option<AfterTurnAckPayload>,
-}
-
-/// Terminal status of the workspace's per-turn artifact handling, carried in
-/// the [`AfterTurnAckPayload`] the workspace sends back to the shell.
-///
-/// The variants are wire-stable snake_case strings; the shell routes on them
-/// to decide how to record the turn's data-collection outcome. The ack
-/// is informational — the shell never blocks its agent loop on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AfterTurnAckStatus {
-    /// Every archive the workspace attempted was durably handed off to its
-    /// upload queue (written to the on-disk spill, or an inline-fallback
-    /// upload is in flight). The cloud upload then proceeds independently with
-    /// the queue's own retry policy. The caller MAY advance.
-    Enqueued,
-    /// At least one archive could not be handed off (temp file unwritable,
-    /// queue worker shut down, or the archive build failed). The workspace has
-    /// done what it can — the caller MUST NOT retry.
-    Failed,
-    /// The workspace skipped uploads before touching disk (no upload queue
-    /// configured / not in proxy mode). `error_message` carries the reason.
-    Skipped,
-}
-
-/// Artifact-handling ack the workspace returns for a
-/// [`TurnHookRequest::After`] request on [`HookReply::after_turn_ack`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AfterTurnAckPayload {
-    /// The turn this ack corresponds to (matches `AfterTurnPayload::turn_number`).
-    pub turn_number: u64,
-    /// Terminal artifact-handling status for the turn.
-    pub status: AfterTurnAckStatus,
-    /// Failure / skip reason. `Some` only for [`AfterTurnAckStatus::Failed`] or
-    /// [`AfterTurnAckStatus::Skipped`]; omitted from the wire when `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error_message: Option<String>,
-    /// Count of archives this turn that landed durably on the queue's on-disk
-    /// spill — `0`, `1`, or `2` (before/after repository snapshot archives).
-    /// Informational; defaults to `0` for back-compat.
-    #[serde(default)]
-    pub artifact_count: u32,
 }
 
 #[cfg(test)]
@@ -497,36 +450,6 @@ mod tests {
         let reply = HookReply::default();
         assert!(reply.injections.is_empty());
         assert_eq!(reply.control, TurnControl::Auto);
-        assert_eq!(reply.after_turn_ack, None);
-        // `None` must skip serialization so the default reply stays the legacy
-        // `{}`-compatible shape (old decoders use `deny_unknown_fields`).
-        let serialized = serde_json::to_value(&reply).unwrap();
-        assert!(serialized.get("after_turn_ack").is_none());
-    }
-
-    /// An `After` reply carrying the ack round-trips, and a legacy reply
-    /// without the field decodes with `after_turn_ack == None`.
-    #[test]
-    fn hook_reply_after_turn_ack_round_trip_and_legacy_decode() {
-        let reply = HookReply {
-            injections: vec![],
-            control: TurnControl::Auto,
-            after_turn_ack: Some(AfterTurnAckPayload {
-                turn_number: 7,
-                status: AfterTurnAckStatus::Enqueued,
-                error_message: None,
-                artifact_count: 2,
-            }),
-        };
-        let serialized = serde_json::to_value(&reply).unwrap();
-        assert_eq!(serialized["after_turn_ack"]["turn_number"], json!(7));
-        assert_eq!(serialized["after_turn_ack"]["status"], json!("enqueued"));
-        let deserialized: HookReply = serde_json::from_value(serialized).unwrap();
-        assert_eq!(deserialized, reply);
-
-        let legacy: HookReply =
-            serde_json::from_value(json!({"injections": [], "control": "auto"})).unwrap();
-        assert_eq!(legacy.after_turn_ack, None);
     }
 
     #[test]
@@ -556,7 +479,6 @@ mod tests {
                 },
             ],
             control: TurnControl::ForceContinue,
-            after_turn_ack: None,
         };
         let serialized = serde_json::to_value(&reply).unwrap();
         assert_eq!(
@@ -629,73 +551,5 @@ mod tests {
         let payload: AfterTurnPayload = serde_json::from_value(json).unwrap();
         assert_eq!(payload.cancellation_category, None);
         assert_eq!(payload.cancellation_context, None);
-    }
-
-    #[test]
-    fn after_turn_ack_status_serializes_snake_case() {
-        assert_eq!(
-            serde_json::to_value(AfterTurnAckStatus::Enqueued).unwrap(),
-            json!("enqueued"),
-        );
-        assert_eq!(
-            serde_json::to_value(AfterTurnAckStatus::Failed).unwrap(),
-            json!("failed"),
-        );
-        assert_eq!(
-            serde_json::to_value(AfterTurnAckStatus::Skipped).unwrap(),
-            json!("skipped"),
-        );
-    }
-
-    #[test]
-    fn after_turn_ack_payload_round_trip_enqueued() {
-        // `Enqueued` ack with no error message: `error_message` skips the wire.
-        let payload = AfterTurnAckPayload {
-            turn_number: 42,
-            status: AfterTurnAckStatus::Enqueued,
-            error_message: None,
-            artifact_count: 2,
-        };
-        let serialized = serde_json::to_value(&payload).unwrap();
-        assert_eq!(
-            serialized,
-            json!({
-                "turn_number": 42,
-                "status": "enqueued",
-                "artifact_count": 2,
-            })
-        );
-        let deserialized: AfterTurnAckPayload = serde_json::from_value(serialized).unwrap();
-        assert_eq!(deserialized, payload);
-    }
-
-    #[test]
-    fn after_turn_ack_payload_round_trip_failed_carries_message() {
-        let payload = AfterTurnAckPayload {
-            turn_number: 1,
-            status: AfterTurnAckStatus::Failed,
-            error_message: Some("disk budget exhausted".to_string()),
-            artifact_count: 1,
-        };
-        let serialized = serde_json::to_value(&payload).unwrap();
-        assert_eq!(serialized["status"], json!("failed"));
-        assert_eq!(serialized["error_message"], json!("disk budget exhausted"));
-        assert_eq!(serialized["artifact_count"], json!(1));
-        let deserialized: AfterTurnAckPayload = serde_json::from_value(serialized).unwrap();
-        assert_eq!(deserialized, payload);
-    }
-
-    /// Back-compat: an ack with only the required fields (old sender) defaults
-    /// `artifact_count` to 0 and `error_message` to `None`.
-    #[test]
-    fn after_turn_ack_payload_minimal_defaults() {
-        let json = json!({
-            "turn_number": 5,
-            "status": "skipped",
-        });
-        let payload: AfterTurnAckPayload = serde_json::from_value(json).unwrap();
-        assert_eq!(payload.status, AfterTurnAckStatus::Skipped);
-        assert_eq!(payload.artifact_count, 0);
-        assert_eq!(payload.error_message, None);
     }
 }

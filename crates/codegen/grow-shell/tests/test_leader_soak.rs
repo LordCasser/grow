@@ -45,7 +45,7 @@ fn env_u64(key: &str, default: u64) -> u64 {
 
 /// `leader.response.send_failed` entries written by THIS process.
 fn send_failed_count() -> usize {
-    let Some(bytes) = grow_telemetry::unified_log::snapshot_log() else {
+    let Some(bytes) = grow_diagnostics::unified_log::snapshot_log() else {
         return 0;
     };
     String::from_utf8_lossy(&bytes)
@@ -105,9 +105,6 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
         std::env::set_var("GROW_CLI_CHAT_PROXY_BASE_URL", server.url());
         std::env::set_var("GROW_INFERENCE_BASE_URL", server.url());
         std::env::set_var("GROW_API_KEY", "test-key-for-ci");
-        std::env::set_var("GROW_TELEMETRY_ENABLED", "false");
-        std::env::set_var("GROW_FEEDBACK_ENABLED", "false");
-        std::env::set_var("GROW_TRACE_UPLOAD", "false");
     }
 
     let sock_path = grow_home.path().join("leader-soak.sock");
@@ -179,9 +176,7 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
                     },
                 );
                 tokio::task::spawn_local(
-                    GatewayReceiver::new(gw_rx, conn)
-                        .with_on_meta(grow_shell::trace_context::span_from_meta_traceparent)
-                        .run(),
+                    GatewayReceiver::new(gw_rx, conn).run(),
                 );
                 let _ = handle_io.await;
             });

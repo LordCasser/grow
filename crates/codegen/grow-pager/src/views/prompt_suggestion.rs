@@ -41,7 +41,7 @@ pub struct PromptSuggestionController {
     /// Set when the user dismissed the current suggestion (Esc). Cleared by
     /// the next loaded suggestion.
     dismissed: bool,
-    /// Set once the `shown` telemetry impression for the current suggestion
+    /// Set once the `shown` diagnostics impression for the current suggestion
     /// has been logged. Visibility is derived per frame ([`Self::ghost_for`]),
     /// so a suggestion can become visible *after* load (divergent draft
     /// cleared, gate re-opened) — this latch makes the impression fire
@@ -135,7 +135,7 @@ impl PromptSuggestionController {
 
     /// Latch the `shown` impression for the current suggestion: returns
     /// `true` exactly once per installed suggestion (the caller logs the
-    /// telemetry event on `true`). Callers check actual visibility first;
+    /// diagnostics event on `true`). Callers check actual visibility first;
     /// this only guards against double-logging when visibility — which is
     /// re-derived per frame — recurs or is re-checked on a later path.
     pub fn mark_shown_logged(&mut self) -> bool {
@@ -169,7 +169,7 @@ pub fn resolve_enabled() -> bool {
         .unwrap_or_else(crate::appearance::cache::load_prompt_suggestions)
 }
 
-/// Content-free size metadata for acceptance-rate telemetry: `(chars, words)`
+/// Content-free size metadata for acceptance-rate diagnostics: `(chars, words)`
 /// of the full suggestion text. Never log the text itself.
 pub fn suggestion_size(text: &str) -> (usize, usize) {
     (text.chars().count(), text.split_whitespace().count())

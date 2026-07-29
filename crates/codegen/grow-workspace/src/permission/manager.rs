@@ -70,7 +70,7 @@ const AUTO_DENY_GUIDANCE: &str = "Take a safer approach that stays within what t
      alternative exists, ask the user how to proceed.";
 
 #[derive(Clone, Copy)]
-enum ClassifierTelemetrySnapshot {
+enum ClassifierDiagnosticSnapshot {
     FastPath,
     Completed {
         source: crate::permission::auto_mode::ClassifierSource,
@@ -78,7 +78,7 @@ enum ClassifierTelemetrySnapshot {
     },
 }
 
-impl ClassifierTelemetrySnapshot {
+impl ClassifierDiagnosticSnapshot {
     const fn source(self) -> &'static str {
         match self {
             Self::FastPath => "fast_path",
@@ -95,14 +95,14 @@ impl ClassifierTelemetrySnapshot {
 }
 
 #[derive(Clone, Copy)]
-struct PermissionTelemetrySnapshot {
-    classifier: Option<ClassifierTelemetrySnapshot>,
+struct PermissionDiagnosticSnapshot {
+    classifier: Option<ClassifierDiagnosticSnapshot>,
     auto_denials_consecutive: u32,
     auto_denials_total: u32,
 }
 
-impl PermissionTelemetrySnapshot {
-    const fn with_classifier(self, classifier: ClassifierTelemetrySnapshot) -> Self {
+impl PermissionDiagnosticSnapshot {
+    const fn with_classifier(self, classifier: ClassifierDiagnosticSnapshot) -> Self {
         Self {
             classifier: Some(classifier),
             ..self
@@ -118,11 +118,10 @@ impl PermissionTelemetrySnapshot {
     }
 }
 
-/// Canonical permission-mode string for the uploaded artifact. Matches
-/// `config.ui.permission_mode` (hyphenated) for trace-internal consistency,
-/// deliberately diverging from the telemetry enum's underscore Mixpanel serde.
-fn permission_mode_artifact_str(mode: grow_telemetry::enums::PermissionMode) -> &'static str {
-    use grow_telemetry::enums::PermissionMode;
+/// Canonical permission-mode string for the local artifact. Matches
+/// `config.ui.permission_mode` (hyphenated) for trace-internal consistency.
+fn permission_mode_artifact_str(mode: grow_diagnostics::enums::PermissionMode) -> &'static str {
+    use grow_diagnostics::enums::PermissionMode;
     match mode {
         PermissionMode::AlwaysApprove => "always-approve",
         PermissionMode::Auto => "auto",
@@ -163,7 +162,7 @@ pub enum PermissionHandle {
         /// Grep Read-deny globs, carried so subagents inherit the parent's excludes.
         deny_read_globs: Arc<Vec<String>>,
         /// Concurrent in-flight permission requests. Shared across handle clones
-        /// (subagents), so the actor can gauge overlapping requests for telemetry.
+        /// (subagents), so the actor can gauge overlapping requests for diagnostics.
         in_flight: Arc<AtomicUsize>,
     },
     AllowAll,
@@ -1167,7 +1166,7 @@ fn session_grant_pre_decision(
     }
 }
 
-/// Spawns the permission manager actor, returning a handle and the telemetry
+/// Spawns the permission manager actor, returning a handle and the diagnostics
 /// event receiver.
 pub fn spawn_permission_manager(
     session_id: acp::SessionId,
@@ -1419,13 +1418,13 @@ fn spawn_permission_manager_with_pin(
                     let request_received = std::time::Instant::now();
                     // Effective mode (yolo wins); stable for the arm (single-threaded actor).
                     let permission_mode = if yolo_mode {
-                        grow_telemetry::enums::PermissionMode::AlwaysApprove
+                        grow_diagnostics::enums::PermissionMode::AlwaysApprove
                     } else if auto_mode {
-                        grow_telemetry::enums::PermissionMode::Auto
+                        grow_diagnostics::enums::PermissionMode::Auto
                     } else {
-                        grow_telemetry::enums::PermissionMode::Ask
+                        grow_diagnostics::enums::PermissionMode::Ask
                     };
-                    // Extract tool info for telemetry
+                    // Extract tool info for diagnostics
                     let tool_id = tool_call_update.tool_call_id.to_string();
                     // Tool name is the single source of truth shared with the
                     // prompter's `events.jsonl` Permission* events (so the two
@@ -1440,7 +1439,7 @@ fn spawn_permission_manager_with_pin(
                         AccessKind::Edit(path) => ("edit".to_string(), Some(path.clone())),
                         AccessKind::Bash(cmd) => ("bash".to_string(), Some(cmd.clone())),
                         // Carry the MCP args (truncated) so the classifier and
-                        // telemetry judge the call by what it does, not just its name.
+                        // diagnostics judge the call by what it does, not just its name.
                         AccessKind::MCPTool { name, input } => (
                             "mcp".to_string(),
                             Some(crate::permission::auto_mode::mcp_access_detail(name, input)),
@@ -1451,7 +1450,7 @@ fn spawn_permission_manager_with_pin(
                         }
                     };
 
-                    let telemetry = std::cell::Cell::new(PermissionTelemetrySnapshot {
+                    let diagnostics = std::cell::Cell::new(PermissionDiagnosticSnapshot {
                         classifier: None,
                         auto_denials_consecutive: auto_consecutive_denials,
                         auto_denials_total: auto_total_denials,
@@ -1474,7 +1473,7 @@ fn spawn_permission_manager_with_pin(
                                 Decision::Cancelled => ("cancelled".to_string(), None),
                             };
 
-                            let telemetry = telemetry.get();
+                            let diagnostics = diagnostics.get();
                             let event = PermissionEvent {
                                 tool_id: tool_id.clone(),
                                 tool_name: tool_name.clone(),
@@ -1494,16 +1493,16 @@ fn spawn_permission_manager_with_pin(
                                     permission_mode_artifact_str(permission_mode).to_string(),
                                 ),
                                 decision_reason: decision_reason.map(|s| s.to_string()),
-                                classifier_source: telemetry
+                                classifier_source: diagnostics
                                     .classifier
                                     .map(|snapshot| snapshot.source().to_owned()),
-                                classifier_latency_ms: telemetry
+                                classifier_latency_ms: diagnostics
                                     .classifier
-                                    .and_then(ClassifierTelemetrySnapshot::latency_ms),
+                                    .and_then(ClassifierDiagnosticSnapshot::latency_ms),
                                 auto_denials_consecutive: auto_mode
-                                    .then_some(telemetry.auto_denials_consecutive),
+                                    .then_some(diagnostics.auto_denials_consecutive),
                                 auto_denials_total: auto_mode
-                                    .then_some(telemetry.auto_denials_total),
+                                    .then_some(diagnostics.auto_denials_total),
                                 wait_ms: Some(request_received.elapsed().as_millis() as u64),
                                 // Live count at emit, this request included.
                                 queue_depth: Some(in_flight_actor.load(Ordering::Relaxed) as u32),
@@ -1686,10 +1685,10 @@ fn spawn_permission_manager_with_pin(
                         let fast = auto_mode_fast_path(&access, &tool_name, needs_user);
                         match fast {
                             AutoFastPath::Allow => {
-                                telemetry.set(
-                                    telemetry
+                                diagnostics.set(
+                                    diagnostics
                                         .get()
-                                        .with_classifier(ClassifierTelemetrySnapshot::FastPath),
+                                        .with_classifier(ClassifierDiagnosticSnapshot::FastPath),
                                 );
                                 tracing::debug!(
                                     tool = %tool_name,
@@ -1747,8 +1746,8 @@ fn spawn_permission_manager_with_pin(
                                 let classifier_latency_ms =
                                     u64::try_from(classify_started.elapsed().as_millis())
                                         .unwrap_or(u64::MAX);
-                                telemetry.set(telemetry.get().with_classifier(
-                                    ClassifierTelemetrySnapshot::Completed {
+                                diagnostics.set(diagnostics.get().with_classifier(
+                                    ClassifierDiagnosticSnapshot::Completed {
                                         source: outcome.source(),
                                         latency_ms: classifier_latency_ms,
                                     },
@@ -1767,7 +1766,7 @@ fn spawn_permission_manager_with_pin(
                                             "auto mode: classifier allow"
                                         );
                                         auto_consecutive_denials = 0;
-                                        telemetry.set(telemetry.get().with_auto_denials(
+                                        diagnostics.set(diagnostics.get().with_auto_denials(
                                             auto_consecutive_denials,
                                             auto_total_denials,
                                         ));
@@ -1805,7 +1804,7 @@ fn spawn_permission_manager_with_pin(
                                     {
                                         auto_consecutive_denials += 1;
                                         auto_total_denials += 1;
-                                        telemetry.set(telemetry.get().with_auto_denials(
+                                        diagnostics.set(diagnostics.get().with_auto_denials(
                                             auto_consecutive_denials,
                                             auto_total_denials,
                                         ));
@@ -2322,8 +2321,8 @@ fn spawn_permission_manager_with_pin(
                         matches!(decision, Decision::Cancelled) && respond_to.is_closed();
                     if user_prompted && outcome_str != "error" && !requester_gone {
                         auto_consecutive_denials = 0;
-                        telemetry.set(
-                            telemetry
+                        diagnostics.set(
+                            diagnostics
                                 .get()
                                 .with_auto_denials(auto_consecutive_denials, auto_total_denials),
                         );
@@ -5317,7 +5316,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn requester_death_during_classify_omits_classifier_telemetry() {
+    async fn requester_death_during_classify_omits_classifier_diagnostics() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {

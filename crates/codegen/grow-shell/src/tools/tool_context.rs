@@ -182,23 +182,6 @@ pub struct ToolContext {
     pub task_completion_reservations:
         Option<grow_tools::reminders::task_completion::TaskCompletionReservations>,
     pub task_wake_suppressed: Option<grow_tools::reminders::task_completion::TaskWakeSuppressed>,
-    /// Channel for requesting trace uploads for synthetic auto-wake turns.
-    pub(crate) synthetic_trace_tx:
-        Option<tokio::sync::mpsc::UnboundedSender<crate::save::SyntheticTurnTraceRequest>>,
-    /// Shared slot for the synthetic trace channel. Populated by
-    /// `start_subagent_coordinator` after the notification bridge is spawned.
-    /// The notification bridge reads from this slot on each completion event.
-    pub(crate) synthetic_trace_tx_shared: Option<
-        std::sync::Arc<
-            std::sync::Mutex<
-                Option<
-                    tokio::sync::mpsc::UnboundedSender<
-                        crate::save::SyntheticTurnTraceRequest,
-                    >,
-                >,
-            >,
-        >,
-    >,
     /// Resolved name of the `BackgroundTaskAction` tool in the current toolset.
     /// Used by auto-wake to format completion messages with the correct tool name.
     pub task_output_tool_name: String,
@@ -271,8 +254,6 @@ impl ToolContext {
             monitor_event_buffer: None,
             task_completion_reservations: None,
             task_wake_suppressed: None,
-            synthetic_trace_tx: None,
-            synthetic_trace_tx_shared: None,
             task_output_tool_name: grow_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL
                 .to_string(),
             auto_wake_enabled: true,
@@ -311,8 +292,6 @@ impl ToolContext {
             monitor_event_buffer: None,
             task_completion_reservations: None,
             task_wake_suppressed: None,
-            synthetic_trace_tx: None,
-            synthetic_trace_tx_shared: None,
             task_output_tool_name: grow_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL
                 .to_string(),
             auto_wake_enabled: true,
@@ -404,8 +383,6 @@ mod tests {
                 monitor_event_buffer: None,
                 task_completion_reservations: None,
                 task_wake_suppressed: None,
-                synthetic_trace_tx: None,
-                synthetic_trace_tx_shared: None,
                 task_output_tool_name:
                     grow_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string(),
                 auto_wake_enabled: true,

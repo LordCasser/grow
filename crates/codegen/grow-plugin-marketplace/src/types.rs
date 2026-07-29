@@ -194,7 +194,7 @@ pub struct MarketplaceEntry {
     pub components: Option<xai_hooks_plugins_types::PluginComponents>,
 }
 
-/// Result of a marketplace scan, with catalog telemetry.
+/// Result of a marketplace scan, with catalog diagnostics.
 #[derive(Debug, Clone)]
 pub struct MarketplaceScan {
     pub entries: Vec<MarketplaceEntry>,

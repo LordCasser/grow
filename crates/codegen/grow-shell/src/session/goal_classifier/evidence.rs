@@ -53,15 +53,24 @@ const DIFF_COMMAND_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 // xai_file_utils::skip_dir_set() and xai_file_utils::SKIP_DIR_NAMES
 // which were removed from xai-file-utils.
 const SKIP_DIR_NAMES: &[&str] = &[
-    ".git", "node_modules", "__pycache__", ".mypy_cache",
-    ".pytest_cache", ".ruff_cache", "target", ".venv", "venv",
-    ".tox", ".eggs", "build", "dist", ".gradle",
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "target",
+    ".venv",
+    "venv",
+    ".tox",
+    ".eggs",
+    "build",
+    "dist",
+    ".gradle",
 ];
 fn skip_dir_set() -> &'static std::collections::HashSet<String> {
     static SET: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
-    SET.get_or_init(|| {
-        SKIP_DIR_NAMES.iter().map(|s| s.to_string()).collect()
-    })
+    SET.get_or_init(|| SKIP_DIR_NAMES.iter().map(|s| s.to_string()).collect())
 }
 
 /// Build a `tokio::process::Command` for `git` with `kill_on_drop(true)`
@@ -799,8 +808,7 @@ fn walkdir_changes_blocking(
                 .file_name()
                 .to_str()
                 .map(|name| {
-                    name != ".git"
-                        && !skip_dir_set().contains(name.to_lowercase().as_str())
+                    name != ".git" && !skip_dir_set().contains(name.to_lowercase().as_str())
                 })
                 .unwrap_or(true)
         });

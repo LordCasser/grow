@@ -122,7 +122,6 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 api_key: Some("test-key".to_string()),
                 auth_type: Default::default(),
                 alpha_test_key: None,
-                client_version: None,
             });
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let actor = SessionActor {
@@ -168,7 +167,6 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
                 turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
                 turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
-                telemetry_enabled: false,
                 supports_backend_search: std::cell::Cell::new(false),
                 tool_overrides: std::cell::RefCell::new(None),
                 resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
@@ -228,9 +226,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 buffering_settings: None,
                 client_identifier: None,
                 origin_client: None,
-                feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-                upload_queue: Arc::new(OnceLock::new()),
-                sync_loop_cancel: None,
+                signals_handle: Default::default(),
                 agent: std::cell::RefCell::new(test_agent_default().await),
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
                 git_head_enabled: false,
@@ -319,7 +315,6 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 ),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: grow_workspace::WorkspaceOps::for_test(),
-                trace_config_template: std::cell::RefCell::new(None),
             };
             let eleven_minutes_ago_ms = chrono::Utc::now().timestamp_millis() - (11 * 60 * 1000);
             actor

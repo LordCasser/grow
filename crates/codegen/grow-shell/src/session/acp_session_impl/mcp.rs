@@ -102,7 +102,7 @@ impl SessionActor {
                     result = "recovered",
                 );
                 tracing::info!(server = %server_name, "managed MCP reactive re-auth recovered");
-                crate::session::telemetry::emit_mcp_connection_span(
+                crate::session::diagnostics::emit_mcp_connection_span(
                     "connected",
                     server_name,
                     "http",
@@ -158,14 +158,14 @@ impl SessionActor {
                         server = %server_name,
                         "managed MCP reactive re-auth exhausted; surfacing NeedsAuth"
                     );
-                    crate::session::telemetry::emit_mcp_connection_span(
+                    crate::session::diagnostics::emit_mcp_connection_span(
                         "failed",
                         server_name,
                         "http",
                         scope(),
                         Some(elapsed_ms),
                         None,
-                        Some(grow_telemetry::events::McpErrorType::Auth.as_str()),
+                        Some(grow_diagnostics::events::McpErrorType::Auth.as_str()),
                     );
                     self.unregister_server_tools(server_name);
                     self.refresh_mcp_snapshot_and_schedule_reminder().await;
@@ -1130,10 +1130,7 @@ impl SessionActor {
         }
         {
             let _cwd = std::path::Path::new(&self.session_info.cwd);
-            crate::session::mcp_servers::build_config_resolved_event(
-                    &mcp_server_configs,
-                    _cwd,
-                );
+            crate::session::mcp_servers::build_config_resolved_event(&mcp_server_configs, _cwd);
             let managed_count = mcp_server_configs
                 .iter()
                 .filter(|c| {
@@ -1537,12 +1534,12 @@ impl SessionActor {
                                 .copied()
                                 .unwrap_or("unknown")
                             {
-                                "stdio" => grow_telemetry::events::McpTransport::Stdio,
-                                "sse" => grow_telemetry::events::McpTransport::Sse,
-                                _ => grow_telemetry::events::McpTransport::Http,
+                                "stdio" => grow_diagnostics::events::McpTransport::Stdio,
+                                "sse" => grow_diagnostics::events::McpTransport::Sse,
+                                _ => grow_diagnostics::events::McpTransport::Http,
                             };
-                            grow_telemetry::session_ctx::log_event(
-                                grow_telemetry::events::McpServerConnected {
+                            grow_diagnostics::session_ctx::log_event(
+                                grow_diagnostics::events::McpServerConnected {
                                     server_name: server_name.clone(),
                                     tool_count,
                                     transport: transport_enum,
@@ -1554,7 +1551,7 @@ impl SessionActor {
                                 .copied()
                                 .unwrap_or("unknown");
                             // McpServerConnected event removed — xai_file_utils::events is gone
-                            crate::session::telemetry::emit_mcp_connection_span(
+                            crate::session::diagnostics::emit_mcp_connection_span(
                                 "connected",
                                 server_name.as_str(),
                                 transport_str,
@@ -1573,7 +1570,11 @@ impl SessionActor {
                         Err((server_name, ref e, needs_auth, elapsed, timeout_sec)) => {
                             // McpErrorCategory removed — xai_file_utils::events is gone
                             #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-                            enum McpErrorCategory { AuthRequired, Timeout, Other }
+                            enum McpErrorCategory {
+                                AuthRequired,
+                                Timeout,
+                                Other,
+                            }
                             let error_cat = if needs_auth {
                                 McpErrorCategory::AuthRequired
                             } else {
@@ -1581,15 +1582,17 @@ impl SessionActor {
                             };
                             let error_type_label = match error_cat {
                                 McpErrorCategory::AuthRequired => {
-                                    grow_telemetry::events::McpErrorType::Auth
+                                    grow_diagnostics::events::McpErrorType::Auth
                                 }
                                 McpErrorCategory::Timeout => {
-                                    grow_telemetry::events::McpErrorType::Timeout
+                                    grow_diagnostics::events::McpErrorType::Timeout
                                 }
-                                McpErrorCategory::Other => grow_telemetry::events::McpErrorType::HandshakeFailed,
+                                McpErrorCategory::Other => {
+                                    grow_diagnostics::events::McpErrorType::HandshakeFailed
+                                }
                             };
-                            grow_telemetry::session_ctx::log_event(
-                                grow_telemetry::events::McpServerFailed {
+                            grow_diagnostics::session_ctx::log_event(
+                                grow_diagnostics::events::McpServerFailed {
                                     server_name: server_name.clone(),
                                     error_type: error_type_label,
                                     duration_ms: elapsed.as_millis() as u64,
@@ -1600,7 +1603,7 @@ impl SessionActor {
                                 .get(server_name.as_str())
                                 .copied()
                                 .unwrap_or("unknown");
-                            crate::session::telemetry::emit_mcp_connection_span(
+                            crate::session::diagnostics::emit_mcp_connection_span(
                                 "failed",
                                 server_name.as_str(),
                                 transport_str,
@@ -1649,16 +1652,18 @@ impl SessionActor {
                     "mcp_bg_handshake: clients inserted, calling notify_waiters"
                 );
                 mcp_handshakes_done.notify_waiters();
-                grow_telemetry::session_ctx::log_event(grow_telemetry::events::McpInitCompleted {
-                    total_duration_ms: handshake_start.elapsed().as_millis() as u64,
-                    server_count,
-                    servers_succeeded,
-                    servers_failed,
-                    servers_auth_required,
-                    total_tools_registered,
-                    strategy: mcp_strategy,
-                    is_reinit,
-                });
+                grow_diagnostics::session_ctx::log_event(
+                    grow_diagnostics::events::McpInitCompleted {
+                        total_duration_ms: handshake_start.elapsed().as_millis() as u64,
+                        server_count,
+                        servers_succeeded,
+                        servers_failed,
+                        servers_auth_required,
+                        total_tools_registered,
+                        strategy: mcp_strategy,
+                        is_reinit,
+                    },
+                );
                 // McpInitCompleted event removed — xai_file_utils::events is gone
             }
             for (server_name, client) in &shared_clients_for_bg {

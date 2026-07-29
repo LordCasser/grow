@@ -987,7 +987,7 @@ mod link_click_tests {
     #[test]
     fn header_upgrade_cta_rect_and_ctrl_o_override() {
         use crate::actions::ActionId;
-        use grow_telemetry::events::AnnouncementCtaSurface;
+        use grow_diagnostics::events::AnnouncementCtaSurface;
         let reg = ActionRegistry::defaults();
         let cta = || {
             Some(grow_announcements::AnnouncementCta {

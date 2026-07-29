@@ -49,9 +49,9 @@ impl SessionActor {
             if entered && turn_in_flight {
                 self.activate_plan_mode_mid_turn().await;
             }
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::PlanModeToggled {
+            grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::PlanModeToggled {
                 enabled: true,
-                trigger: grow_telemetry::events::PlanModeTrigger::User,
+                trigger: grow_diagnostics::events::PlanModeTrigger::User,
                 turn_in_flight,
                 was_previously_active: !entered,
             });
@@ -59,7 +59,7 @@ impl SessionActor {
                 tracing::info_span!(
                     "session.permission_mode_changed",
                     from_mode =
-                        super::telemetry::permission_mode_label(self.permissions.is_yolo_mode()),
+                        super::diagnostics::permission_mode_label(self.permissions.is_yolo_mode()),
                     to_mode = "plan",
                     trigger = "user",
                     enabled = true,
@@ -83,9 +83,9 @@ impl SessionActor {
                 turn_in_flight,
                 "Plan mode toggled OFF"
             );
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::PlanModeToggled {
+            grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::PlanModeToggled {
                 enabled: false,
-                trigger: grow_telemetry::events::PlanModeTrigger::User,
+                trigger: grow_diagnostics::events::PlanModeTrigger::User,
                 turn_in_flight,
                 was_previously_active: true,
             });

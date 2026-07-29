@@ -814,9 +814,6 @@ async fn provider_helper_env_scrubs_first_party_credentials() {
         "GROW_AUTH_PATH",
         "GROW_DEPLOYMENT_KEY",
         "GROW_EXTRA_AUTH_KEY",
-        "GROW_TRACE_UPLOAD_CREDENTIALS_FILE",
-        "OTEL_EXPORTER_OTLP_HEADERS",
-        "GROW_INTERNAL_OTLP_HEADERS",
     ];
     assert_eq!(
         crate::agent::config::FIRST_PARTY_CREDENTIAL_ENV_VARS,

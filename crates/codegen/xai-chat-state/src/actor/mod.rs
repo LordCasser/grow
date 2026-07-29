@@ -286,9 +286,6 @@ impl ChatStateActor {
                 tool_definitions,
                 memory_reminder,
                 persist_memory_reminder,
-                trace,
-                conv_id,
-                req_id,
                 reply,
             } => {
                 self.ensure_conversation_integrity();
@@ -296,9 +293,6 @@ impl ChatStateActor {
                     tool_definitions,
                     memory_reminder,
                     persist_memory_reminder,
-                    trace,
-                    conv_id,
-                    req_id,
                 );
                 let _ = reply.send(request);
             }

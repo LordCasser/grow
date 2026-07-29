@@ -3,25 +3,14 @@ license = "Apache-2.0"
 name = "xai-file-utils"
 version = "0.1.0"
 edition.workspace = true
-description = "General utilities: SHA-256 hashing, W3C trace context propagation, workspace classifier"
+description = "General utilities: SHA-256 hashing and workspace classification"
 
 [dependencies]
 dirs = { workspace = true }
-opentelemetry = { workspace = true }
-reqwest = { workspace = true }
-serde_json = { workspace = true }
 sha2 = { workspace = true, features = ["force-soft"] }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs"] }
-tracing = { workspace = true }
-tracing-opentelemetry = { workspace = true }
 
 [features]
 default-bazel = []
-
-[dev-dependencies]
-opentelemetry_sdk = { workspace = true }
-tempfile = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

@@ -2,7 +2,7 @@
 //!
 //! Owns env cadence knobs, fail-closed probe planning (sync only when auto can
 //! change a clock), paint-clock resolution, and the terminal + display-refresh
-//! telemetry `spawn_blocking`. Keeps the event loop free of this policy glue.
+//! diagnostics `spawn_blocking`. Keeps the event loop free of this policy glue.
 
 use std::time::Duration;
 
@@ -47,13 +47,13 @@ fn cadence_ms_from_env(name: &str, default_ms: u64) -> (bool, u64) {
     }
 }
 
-/// How to obtain the display-refresh probe for telemetry (and optionally cadence).
+/// How to obtain the display-refresh probe for diagnostics (and optionally cadence).
 enum ProbePlan {
     /// Kill switch: no FFI; emit skipped/disabled.
     Disabled,
     /// Auto-cadence needs Hz before paint clocks pin — probe on the main path.
     Sync(crate::host::DisplayRefreshProbeResult),
-    /// Telemetry-only: probe in the background task (default path).
+    /// Diagnostic-only: probe in the background task (default path).
     Async,
 }
 
@@ -64,7 +64,7 @@ struct StartupTel {
 }
 
 /// Resolve policy, pin motion clocks, and spawn terminal + display-refresh
-/// telemetry off the first-paint path.
+/// diagnostics off the first-paint path.
 pub fn start(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -107,13 +107,13 @@ pub fn start(
         auto_cadence_enabled: policy.auto_cadence_enabled,
         cadence,
     };
-    spawn_terminal_and_display_refresh_telemetry(tel);
+    spawn_terminal_and_display_refresh_diagnostics(tel);
     clocks
 }
 
-fn spawn_terminal_and_display_refresh_telemetry(tel: StartupTel) {
+fn spawn_terminal_and_display_refresh_diagnostics(tel: StartupTel) {
     tokio::task::spawn_blocking(move || {
-        let t = crate::terminal::terminal_context().telemetry_snapshot();
+        let t = crate::terminal::terminal_context().diagnostics_snapshot();
         let _span = tracing::info_span!(
             "terminal.detect",
             terminal.brand = %t.brand,
@@ -128,7 +128,7 @@ fn spawn_terminal_and_display_refresh_telemetry(tel: StartupTel) {
         )
         .entered();
         tracing::info!("terminal environment detected");
-        grow_telemetry::session_ctx::log_event(t.clone());
+        grow_diagnostics::session_ctx::log_event(t.clone());
 
         let (outcome, hz, source, skip_reason, duration_ms) = match tel.plan {
             ProbePlan::Disabled => ("skipped", None, "none".into(), "disabled".into(), 0_u64),
@@ -169,7 +169,7 @@ fn spawn_terminal_and_display_refresh_telemetry(tel: StartupTel) {
             auto_cadence_reason = c.reason,
             "display refresh probed"
         );
-        grow_telemetry::session_ctx::log_event(grow_telemetry::events::DisplayRefreshProbe {
+        grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::DisplayRefreshProbe {
             terminal: t,
             outcome: outcome.to_string(),
             hz: hz_i,

@@ -218,7 +218,7 @@ impl AuthProvider for LeaderAuthProvider {
     /// Owner identity from the leader's `AuthManager`, so the workspace derives
     /// `WorkspaceIdentity` from this provider instead of a separate auth.json
     /// read. Mirrors the in-process path (`mvp_agent`): prefer `ProviderAuth.team_id`
-    /// (what shell telemetry/snapshot use) mapped onto a `"Team"` principal so
+    /// (what shell diagnostics/snapshot use) mapped onto a `"Team"` principal so
     /// team attribution is derived; otherwise pass principal fields through.
     /// `None` when no credential is available (identity resolution never blocks).
     fn identity(&self) -> Option<AuthIdentity> {
@@ -1606,7 +1606,7 @@ pub async fn run_leader_server(
                         client.registered = true;
                         client_count.fetch_add(1, Ordering::Relaxed);
                         debug!(client_id = id.0, ?mode, yolo_mode = client.capabilities.yolo_mode, client_type = %client.client_type, "Client registered");
-                        grow_telemetry::unified_log::info(
+                        grow_diagnostics::unified_log::info(
                             "leader.client.registered",
                             None,
                             Some(serde_json::json!({
@@ -1650,7 +1650,7 @@ pub async fn run_leader_server(
                     clients.remove(&id);
                     if was_registered {
                         client_count.fetch_sub(1, Ordering::Relaxed);
-                        grow_telemetry::unified_log::info(
+                        grow_diagnostics::unified_log::info(
                             "leader.client.disconnected",
                             None,
                             Some(serde_json::json!({ "client_id": id.0 })),
@@ -1904,7 +1904,7 @@ pub async fn run_leader_server(
                         request_id = orphan_req_id.as_str(),
                         "Dropping RPC response: requesting client disconnected (response orphaned)"
                     );
-                    grow_telemetry::unified_log::warn(
+                    grow_diagnostics::unified_log::warn(
                         "leader.response.orphaned",
                         None,
                         Some(serde_json::json!({
@@ -1951,7 +1951,7 @@ pub async fn run_leader_server(
                                 client_id = client_id.0,
                                 "Failed to send response to client (channel full)"
                             );
-                            grow_telemetry::unified_log::warn(
+                            grow_diagnostics::unified_log::warn(
                                 "leader.response.send_failed",
                                 None,
                                 Some(serde_json::json!({
@@ -1962,7 +1962,7 @@ pub async fn run_leader_server(
                         }
                         Err(e) => {
                             warn!(client_id = client_id.0, error = %e, "Failed to send response to client (channel closed)");
-                            grow_telemetry::unified_log::warn(
+                            grow_diagnostics::unified_log::warn(
                                 "leader.response.send_failed",
                                 None,
                                 Some(serde_json::json!({

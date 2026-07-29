@@ -96,7 +96,7 @@ pub fn parse_segment_index(filename: &str) -> Option<u64> {
         .ok()
 }
 
-/// A read of the `compaction/` store; `Display` (snake_case) is the telemetry
+/// A read of the `compaction/` store; `Display` (snake_case) is the diagnostics
 /// label on `compaction.segment_read`.
 #[derive(Debug, PartialEq, Eq, strum::Display)]
 #[strum(serialize_all = "snake_case")]

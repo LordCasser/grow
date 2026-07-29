@@ -58,9 +58,6 @@ use crate::connection_borrow::ConnectionBorrow;
 use crate::error::ClientError;
 use crate::pool::HubConnectionPool;
 
-/// Host-supplied source of the current W3C `traceparent`.
-pub type TraceContextProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
-
 /// Host-registered sink for inbound reverse-direction hook requests
 /// (server → harness); invoked by the inbox loop with the decoded
 /// [`HookFrame`](xai_tool_protocol::HookFrame), answered via
@@ -329,7 +326,6 @@ pub struct ToolHarnessBuilder {
     session: Option<SessionId>,
     local_registry: LocalRegistry,
     default_extensions: Option<xai_tool_runtime::TypedExtensions>,
-    trace_context_provider: Option<TraceContextProvider>,
     on_reconnect: Option<Arc<ReconnectCallback>>,
     /// Sampler label for `hub_harness_connect_total` metric
     /// (`"chat"` or `"shell"`). Defaults to `"unknown"`.
@@ -406,16 +402,6 @@ impl ToolHarnessBuilder {
     /// Default extensions merged into every `ToolCallContext` before dispatch.
     pub fn default_extensions(mut self, extensions: xai_tool_runtime::TypedExtensions) -> Self {
         self.default_extensions = Some(extensions);
-        self
-    }
-
-    /// Sampled per outgoing tool call / hook on the caller's task.
-    /// Keeps the host's tracing stack out of the SDK.
-    pub fn trace_context_provider<F>(mut self, provider: F) -> Self
-    where
-        F: Fn() -> Option<String> + Send + Sync + 'static,
-    {
-        self.trace_context_provider = Some(Arc::new(provider));
         self
     }
 
@@ -531,7 +517,6 @@ impl ToolHarnessBuilder {
             local_registry: self.local_registry,
             session,
             default_extensions: self.default_extensions.unwrap_or_default(),
-            trace_context_provider: self.trace_context_provider,
             remote_tools: arc_swap::ArcSwap::from_pointee(Vec::new()),
             last_bind_report: arc_swap::ArcSwapOption::empty(),
             discovery_handle: parking_lot::Mutex::new(None),
@@ -582,7 +567,7 @@ fn spawn_pending_bind<F>(bind: F) -> PendingBind
 where
     F: std::future::Future<Output = Result<ToolHarness, Arc<str>>> + Send + 'static,
 {
-    let task = xai_tracing::tokio::spawn_traced(bind);
+    let task = tokio::spawn(bind);
     async move {
         match task.await {
             Ok(result) => result,
@@ -633,8 +618,6 @@ struct ToolHarnessInner {
     session: SessionId,
     /// Default extensions merged into every `ToolCallContext` before dispatch.
     default_extensions: xai_tool_runtime::TypedExtensions,
-    /// See [`ToolHarnessBuilder::trace_context_provider`].
-    trace_context_provider: Option<TraceContextProvider>,
     remote_tools: arc_swap::ArcSwap<Vec<ToolDescription>>,
     last_bind_report: arc_swap::ArcSwapOption<SessionBindReport>,
     discovery_handle: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -798,7 +781,6 @@ impl ToolHarness {
             local_registry: registry,
             session,
             default_extensions,
-            trace_context_provider: None,
             remote_tools: arc_swap::ArcSwap::from_pointee(Vec::new()),
             last_bind_report: arc_swap::ArcSwapOption::empty(),
             discovery_handle: parking_lot::Mutex::new(None),
@@ -828,7 +810,6 @@ impl ToolHarness {
             local_registry: registry,
             session,
             default_extensions,
-            trace_context_provider: None,
             remote_tools: arc_swap::ArcSwap::from_pointee(Vec::new()),
             last_bind_report: arc_swap::ArcSwapOption::empty(),
             discovery_handle: parking_lot::Mutex::new(None),
@@ -864,7 +845,6 @@ impl ToolHarness {
             local_registry: registry,
             session,
             default_extensions,
-            trace_context_provider: None,
             remote_tools: arc_swap::ArcSwap::from_pointee(Vec::new()),
             last_bind_report: arc_swap::ArcSwapOption::empty(),
             discovery_handle: parking_lot::Mutex::new(None),
@@ -1290,14 +1270,6 @@ impl ToolHarness {
         ctx.extensions
             .merge_defaults(&self.inner.default_extensions);
 
-        // Sampled on the caller's task while the dispatching span is
-        // active; never rides ctx extensions.
-        let trace_context = self
-            .inner
-            .trace_context_provider
-            .as_ref()
-            .and_then(|provider| provider());
-
         // Capture identifiers before `ctx` moves into the dispatch path —
         // they feed both the local-only / remote branches AND the
         // `ObservedToolStream` wrapper.
@@ -1314,7 +1286,6 @@ impl ToolHarness {
                     tool_id.clone(),
                     args,
                     ctx,
-                    trace_context,
                 )
                 .await;
                 crate::metrics::call_dispatch_observe(start.elapsed().as_secs_f64());
@@ -1392,15 +1363,7 @@ impl ToolHarness {
     /// outbound message is queued, without waiting for a server ack.
     /// Server-side errors (e.g. unknown tool, invalid session) are not
     /// surfaced to the caller.
-    pub async fn send_hook(
-        &self,
-        mut hook: xai_tool_protocol::HookFrame,
-    ) -> Result<(), ClientError> {
-        if hook.trace_context.is_none()
-            && let Some(provider) = &self.inner.trace_context_provider
-        {
-            hook.trace_context = provider();
-        }
+    pub async fn send_hook(&self, hook: xai_tool_protocol::HookFrame) -> Result<(), ClientError> {
         let hook_type = match &hook.event {
             xai_tool_protocol::HookEvent::Cancel => "cancel",
             xai_tool_protocol::HookEvent::Pause => "pause",
@@ -1497,12 +1460,6 @@ impl ToolHarness {
             hook_id,
             xai_tool_protocol::turn_hook::TURN_HOOK_KIND.to_owned(),
             payload,
-        )
-        .with_trace_context(
-            self.inner
-                .trace_context_provider
-                .as_ref()
-                .and_then(|provider| provider()),
         );
         let request_id = connection.try_alloc_request_id()?;
         let req = JsonRpcRequest {
@@ -1990,7 +1947,6 @@ async fn dispatch_remote(
     tool_id: ToolId,
     args: Value,
     ctx: ToolCallContext,
-    trace_context: Option<String>,
 ) -> ToolStream<TypedToolOutput> {
     let call_id = ctx.call_id.clone();
     let cwd = ctx
@@ -2029,7 +1985,6 @@ async fn dispatch_remote(
         deadline_ms: None,
         behavior_version,
         cwd,
-        trace_context,
     };
     // Serialize params to a Value first so the wire shape and THIS step's
     // `request_encoding` subcode stay unchanged. The envelope `to_string`
@@ -2896,7 +2851,6 @@ mod tests {
             call_id: None,
             hook_id: Some("hook-7".to_owned()),
             event: xai_tool_protocol::HookEvent::Pause,
-            trace_context: None,
         };
         assert!(parse_permission_request_hook(&inbound_hook_request_frame(&hook)).is_none());
     }

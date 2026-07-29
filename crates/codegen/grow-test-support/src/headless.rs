@@ -32,7 +32,7 @@ fn headless_timeout() -> Duration {
 const HEADLESS_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Run `grow` with the given args against the mock server, bounded by the
-/// scaled headless timeout. Uses an isolated HOME and disables telemetry.
+/// scaled headless timeout. Uses an isolated HOME and disables diagnostics.
 pub async fn run_headless(
     server: &MockInferenceServer,
     args: &[&str],

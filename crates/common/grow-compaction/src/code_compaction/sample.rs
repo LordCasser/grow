@@ -20,7 +20,7 @@
 //! [`SampleRetryError`] onto their own error type, and decide whether to clean
 //! the winning summary (grow-build cleans in its assembler; intra cleans via
 //! [`format_compact_summary`](super::format_compact_summary)). Per-attempt
-//! telemetry flows through the [`FullReplaceObserver`] seam; callers without
+//! diagnostics flows through the [`FullReplaceObserver`] seam; callers without
 //! per-attempt metrics (intra) pass `&()`.
 
 use std::time::Duration;
@@ -46,7 +46,7 @@ pub struct SampledSummary {
 
 /// Terminal failure of [`sample_summary_with_retries`] after all attempts.
 ///
-/// `attempts` is the number of tries made, for the caller's terminal telemetry.
+/// `attempts` is the number of tries made, for the caller's terminal diagnostics.
 #[derive(Debug)]
 pub enum SampleRetryError {
     /// Every attempt produced an empty or degenerate (too-short) summary.

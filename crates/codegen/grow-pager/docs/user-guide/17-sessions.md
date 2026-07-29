@@ -31,7 +31,6 @@ Grow stores each session in its own directory, grouped by working directory. It 
   plan.json               # TODO/task list state
   rewind_points.jsonl     # file snapshots for /rewind undo
   signals.json            # session signals (token usage, tool/turn counters)
-  feedback.jsonl          # user feedback and ratings
   compaction_checkpoints/ # saved state from compaction (manual or auto)
   subagents/              # per-subagent metadata (meta.json); the child sessions live in the normal sessions tree
 ```

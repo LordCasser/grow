@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use xai_workflow::{Journal, WorkflowOutcome, WorkflowRunParams};
 
 use super::host_service::{
-    HostDrainOutcome, TelemetryHook, WorkflowHostParams, spawn_workflow_host_service,
+    DiagnosticHook, HostDrainOutcome, WorkflowHostParams, spawn_workflow_host_service,
 };
 use super::notify::WorkflowNotifySender;
 use super::registry::{ResolvedWorkflow, WorkflowSource};
@@ -61,7 +61,7 @@ pub(crate) struct WorkflowManager {
     notify: WorkflowNotifySender,
     subagent_event_tx:
         mpsc::UnboundedSender<grow_tools::implementations::grow_build::task::types::SubagentEvent>,
-    telemetry: TelemetryHook,
+    diagnostics: DiagnosticHook,
     session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
     templates: HashMap<String, String>,
     active: HashMap<String, ActiveRun>,
@@ -80,7 +80,7 @@ impl WorkflowManager {
         subagent_event_tx: mpsc::UnboundedSender<
             grow_tools::implementations::grow_build::task::types::SubagentEvent,
         >,
-        telemetry: TelemetryHook,
+        diagnostics: DiagnosticHook,
         session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
         templates: HashMap<String, String>,
     ) -> Self {
@@ -92,7 +92,7 @@ impl WorkflowManager {
             store,
             notify,
             subagent_event_tx,
-            telemetry,
+            diagnostics,
             session_cmd_tx,
             templates,
             active: HashMap::new(),
@@ -252,7 +252,7 @@ impl WorkflowManager {
                 parent_session_id: self.session_id.clone(),
                 allow_fork_context,
                 templates: self.templates.clone(),
-                telemetry: self.telemetry.clone(),
+                diagnostics: self.diagnostics.clone(),
                 cancel: cancel.clone(),
             },
             host_rx,

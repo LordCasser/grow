@@ -222,7 +222,6 @@ fn full_call_envelope_serialises_to_expected_shape() {
             deadline_ms: None,
             behavior_version: None,
             cwd: None,
-            trace_context: None,
         },
     };
     let v = serde_json::to_value(&req).unwrap();

@@ -58,8 +58,6 @@ async fn queue_input_user_prompt_bumps_recap_epoch() {
                     crate::session::plan_mode::PromptMode::Agent,
                     None,
                     None,
-                    None,
-                    None,
                     false,
                     None,
                     false,
@@ -96,8 +94,6 @@ async fn queue_input_synthetic_does_not_bump_recap_epoch() {
                     vec![],
                     "task-completed-bg-1".to_string(),
                     crate::session::plan_mode::PromptMode::Agent,
-                    None,
-                    None,
                     None,
                     None,
                     false,
@@ -424,11 +420,6 @@ async fn manual_recap_generation_failure_persists_request_artifact() {
                         !artifact.chat_history.is_empty(),
                         "artifact must include the recap request items"
                     );
-                    assert!(
-                        artifact.x_grok_req_id.starts_with("xai-recap-"),
-                        "req id: {}",
-                        artifact.x_grok_req_id
-                    );
                     saw_recap_request = true;
                 }
             }
@@ -676,12 +667,9 @@ async fn recap_request_rides_parent_prompt_cache() {
                 .find(|r| r.path.contains("responses"))
                 .expect("a responses request must be recorded");
 
-            let conv_id = recap_req
-                .header("x-grow-conv-id")
-                .expect("recap must send x-grow-conv-id");
             assert!(
-                conv_id.starts_with("recap-"),
-                "conv id keeps the recap-* label: {conv_id}"
+                recap_req.header("x-grow-conv-id").is_none(),
+                "local recap requests must not send product tracking headers"
             );
 
             let body = recap_req.body.as_ref().expect("recap body must be JSON");

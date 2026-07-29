@@ -7,7 +7,7 @@
 //! Business logic lives in `grow_shell::plugin` (shared orchestration)
 //! and lower crates (`grow-agent`, `grow-plugin-marketplace`). This
 //! module is a thin CLI wrapper: parse args, call ops, format output, emit
-//! telemetry.
+//! diagnostics.
 
 use std::path::{Path, PathBuf};
 
@@ -393,20 +393,20 @@ fn resolve_marketplace_root(
     }
 }
 
-fn install_kind(is_git: bool) -> grow_telemetry::events::InstallKind {
+fn install_kind(is_git: bool) -> grow_diagnostics::events::InstallKind {
     if is_git {
-        grow_telemetry::events::InstallKind::Git
+        grow_diagnostics::events::InstallKind::Git
     } else {
-        grow_telemetry::events::InstallKind::Local
+        grow_diagnostics::events::InstallKind::Local
     }
 }
 
 fn log_plugin_installed(
-    install_kind: grow_telemetry::events::InstallKind,
+    install_kind: grow_diagnostics::events::InstallKind,
     success: bool,
     error_category: Option<String>,
 ) {
-    grow_telemetry::session_ctx::log_event(grow_telemetry::events::PluginInstalled {
+    grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::PluginInstalled {
         install_kind,
         success,
         trust: true,
@@ -447,7 +447,7 @@ fn cmd_install(source: &str, trust: bool) -> Result<()> {
         Err(e) => {
             let cat = plugin::classify_install_error(&e);
             // On failure we don't know the kind; default to Git (matches canonical).
-            log_plugin_installed(grow_telemetry::events::InstallKind::Git, false, Some(cat));
+            log_plugin_installed(grow_diagnostics::events::InstallKind::Git, false, Some(cat));
             bail!("{e}");
         }
     }
@@ -512,7 +512,7 @@ fn cmd_install_marketplace(
         Err(e) => {
             // On failure we don't know the kind; default to Git (matches canonical).
             log_plugin_installed(
-                grow_telemetry::events::InstallKind::Git,
+                grow_diagnostics::events::InstallKind::Git,
                 false,
                 Some(e.category()),
             );
@@ -524,7 +524,7 @@ fn cmd_install_marketplace(
 fn cmd_uninstall(name: &str, confirm: bool, keep_data: bool) -> Result<()> {
     match plugin::uninstall_plugin(name, confirm, keep_data) {
         Ok(outcome) => {
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::PluginUninstalled {
+            grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::PluginUninstalled {
                 confirmed: true,
                 success: true,
             });

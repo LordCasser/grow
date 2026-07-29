@@ -35,9 +35,6 @@ pub struct ToolCallParams {
     /// OS-native path; informational for cross-FS tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    /// W3C `traceparent` for distributed tracing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_context: Option<String>,
 }
 
 /// Body of a successful `tool_call_result` response.
@@ -57,58 +54,6 @@ pub struct ToolCallResult {
     /// decoders reconstruct it into the typed frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_completion_output: Option<serde_json::Value>,
-}
-
-// ── Trace donation ────────────────────────────────────────────────────────
-
-/// Hub rejects oversized batches wholesale; donors chunk before encoding.
-pub const MAX_SPANS_PER_DONATION: usize = 512;
-
-/// Maximum decoded `ExportTraceServiceRequest` size the hub accepts.
-pub const MAX_DONATION_BYTES: usize = 1024 * 1024;
-
-/// `traces.donate` params (tool_server → service notification).
-/// Envelope `session_id` required. `hub.*` span attributes are
-/// reserved — the hub strips them and stamps its own attribution.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TracesDonateParams {
-    /// Base64 (standard alphabet, padded) protobuf-encoded
-    /// `opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest`.
-    pub otlp_request: String,
-}
-
-// ── Log donation ──────────────────────────────────────────────────────────
-
-/// Hub rejects oversized batches wholesale; donors chunk before encoding.
-/// The 1 MiB [`MAX_DONATION_BYTES`] decoded-size cap is the real bound; this
-/// record cap is a secondary guard symmetric with [`MAX_SPANS_PER_DONATION`].
-pub const MAX_LOG_RECORDS_PER_DONATION: usize = 512;
-
-/// `logs.donate` params (tool_server → service notification).
-/// Envelope `session_id` required. `hub.*` log attributes are reserved —
-/// the hub strips them and stamps its own attribution.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LogsDonateParams {
-    /// Base64 (standard alphabet, padded) protobuf-encoded
-    /// `opentelemetry.proto.collector.logs.v1.ExportLogsServiceRequest`.
-    pub otlp_request: String,
-}
-
-// ── Metric donation ───────────────────────────────────────────────────────
-
-/// Hub rejects oversized batches wholesale; donors chunk before encoding.
-/// Secondary guard alongside the 1 MiB [`MAX_DONATION_BYTES`] decoded-size cap.
-pub const MAX_METRICS_PER_DONATION: usize = 512;
-
-/// `metrics.donate` params (tool_server → service notification).
-/// **No envelope `session_id`** — metrics are process-aggregate, not
-/// per-session (unlike [`LogsDonateParams`]). `hub.*` resource attributes
-/// are reserved — the hub strips them and stamps its own attribution.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MetricsDonateParams {
-    /// Base64 (standard alphabet, padded) protobuf-encoded
-    /// `opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest`.
-    pub otlp_request: String,
 }
 
 /// Body of a `tool_call_progress` notification.
@@ -714,9 +659,6 @@ pub struct HookFrame {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_id: Option<String>,
     pub event: HookEvent,
-    /// W3C `traceparent` (mirrors [`ToolCallParams::trace_context`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_context: Option<String>,
 }
 
 impl HookFrame {
@@ -728,7 +670,6 @@ impl HookFrame {
             call_id: Some(call_id),
             hook_id: None,
             event: HookEvent::Cancel,
-            trace_context: None,
         }
     }
 
@@ -740,7 +681,6 @@ impl HookFrame {
             call_id: None,
             hook_id: None,
             event: HookEvent::Pause,
-            trace_context: None,
         }
     }
 
@@ -752,7 +692,6 @@ impl HookFrame {
             call_id: None,
             hook_id: None,
             event: HookEvent::Resume,
-            trace_context: None,
         }
     }
 
@@ -764,7 +703,6 @@ impl HookFrame {
             call_id: None,
             hook_id: None,
             event: HookEvent::SessionEnded,
-            trace_context: None,
         }
     }
 
@@ -776,7 +714,6 @@ impl HookFrame {
             call_id: None,
             hook_id: None,
             event: HookEvent::Custom { kind, payload },
-            trace_context: None,
         }
     }
 
@@ -793,14 +730,7 @@ impl HookFrame {
             call_id: None,
             hook_id: Some(hook_id),
             event: HookEvent::Custom { kind, payload },
-            trace_context: None,
         }
-    }
-
-    /// Attach a W3C `traceparent` (builder-style).
-    pub fn with_trace_context(mut self, trace_context: Option<String>) -> Self {
-        self.trace_context = trace_context;
-        self
     }
 }
 
@@ -874,25 +804,6 @@ pub struct ToolServerStatusPayload {
     /// `None` while busy; epoch ms of the last busy→ready transition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_since_ms: Option<u64>,
-    /// Items accepted by the durable upload queue but not yet uploaded
-    /// (includes `upload_queue_inflight`). `0` when no queue is configured.
-    #[serde(default)]
-    pub upload_queue_pending: u32,
-    /// Total bytes of the pending upload-queue spill files on disk.
-    #[serde(default)]
-    pub upload_queue_pending_bytes: u64,
-    /// Pending items the worker is actively uploading right now (a subset of
-    /// `upload_queue_pending`).
-    #[serde(default)]
-    pub upload_queue_inflight: u32,
-    /// `true` while the upload queue's circuit breaker is paused on a run of
-    /// transient upload failures.
-    #[serde(default)]
-    pub upload_queue_circuit_breaker_tripped: bool,
-    /// Detached artifact-producer tasks (archive build, tool_state, tool
-    /// definitions) still running — work not yet handed to the upload queue.
-    #[serde(default)]
-    pub artifact_producers_inflight: u32,
     /// Epoch ms when a graceful drain began (SIGTERM or hub evict); `None`
     /// until draining starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1206,30 +1117,6 @@ mod tests {
         assert_eq!(back, params);
     }
 
-    // ── Donation params ────────────────────────────────────────────
-
-    #[test]
-    fn logs_donate_params_round_trips() {
-        let params = super::LogsDonateParams {
-            otlp_request: "b64payload".to_owned(),
-        };
-        let json = serde_json::to_value(&params).expect("serialize");
-        assert_eq!(json["otlp_request"], "b64payload");
-        let back: super::LogsDonateParams = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(back, params);
-    }
-
-    #[test]
-    fn metrics_donate_params_round_trips() {
-        let params = super::MetricsDonateParams {
-            otlp_request: "b64payload".to_owned(),
-        };
-        let json = serde_json::to_value(&params).expect("serialize");
-        assert_eq!(json["otlp_request"], "b64payload");
-        let back: super::MetricsDonateParams = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(back, params);
-    }
-
     // ── ToolServerStatusPayload ────────────────────────────────────
 
     #[test]
@@ -1312,7 +1199,7 @@ mod tests {
         assert_eq!(back.idle_since_ms, Some(1721234560000));
     }
 
-    /// The six queue/drain fields round-trip with real values on the wire.
+    /// Drain fields round-trip with real values on the wire.
     #[test]
     fn tool_server_status_payload_carries_queue_and_drain_fields() {
         let payload = super::ToolServerStatusPayload {
@@ -1328,21 +1215,11 @@ mod tests {
             last_tool_call_completed_ms: 0,
             uptime_ms: 5000,
             idle_since_ms: None,
-            upload_queue_pending: 7,
-            upload_queue_pending_bytes: 4096,
-            upload_queue_inflight: 2,
-            upload_queue_circuit_breaker_tripped: true,
-            artifact_producers_inflight: 3,
             drain_started_ms: Some(1721234599999),
             turn_active: true,
             idle_ignores_background: false,
         };
         let json = serde_json::to_value(&payload).expect("serialize");
-        assert_eq!(json["upload_queue_pending"], 7);
-        assert_eq!(json["upload_queue_pending_bytes"], 4096u64);
-        assert_eq!(json["upload_queue_inflight"], 2);
-        assert_eq!(json["upload_queue_circuit_breaker_tripped"], true);
-        assert_eq!(json["artifact_producers_inflight"], 3);
         assert_eq!(json["drain_started_ms"], 1721234599999u64);
         assert_eq!(json["turn_active"], true);
         let back: super::ToolServerStatusPayload =
@@ -1356,11 +1233,6 @@ mod tests {
         let back: super::ToolServerStatusPayload =
             serde_json::from_value(legacy_status_json()).expect("legacy payload must deserialize");
         assert_eq!(back.status, super::ToolServerLifecycleStatus::Ready);
-        assert_eq!(back.upload_queue_pending, 0);
-        assert_eq!(back.upload_queue_pending_bytes, 0);
-        assert_eq!(back.upload_queue_inflight, 0);
-        assert!(!back.upload_queue_circuit_breaker_tripped);
-        assert_eq!(back.artifact_producers_inflight, 0);
         assert_eq!(back.drain_started_ms, None);
         assert!(!back.turn_active);
     }

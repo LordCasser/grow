@@ -1,5 +1,5 @@
 //! Sampling log — emits `tracing` events with `target: "sampling_log"`.
-//! A dedicated layer in `grow-telemetry` routes these to
+//! A dedicated layer in `grow-diagnostics` routes these to
 //! `~/.grow/logs/sampling.jsonl`. Enable with `--log-sampling`.
 
 use crate::types::RequestId;

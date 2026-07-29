@@ -321,9 +321,6 @@ impl PagerLeaderCluster {
             crate::test_util::EnvVarGuard::set("GROW_CLI_CHAT_PROXY_BASE_URL", server.url()),
             crate::test_util::EnvVarGuard::set("GROW_INFERENCE_BASE_URL", server.url()),
             crate::test_util::EnvVarGuard::set("GROW_API_KEY", "test-key-for-ci"),
-            crate::test_util::EnvVarGuard::set("GROW_TELEMETRY_ENABLED", "false"),
-            crate::test_util::EnvVarGuard::set("GROW_FEEDBACK_ENABLED", "false"),
-            crate::test_util::EnvVarGuard::set("GROW_TRACE_UPLOAD", "false"),
             // Pin every leader-path derivation (LeaderLock::new / reconnect's
             // connect_or_spawn) to this cluster's socket.
             crate::test_util::EnvVarGuard::set(LEADER_SOCKET_ENV, &sock_path),
@@ -421,11 +418,7 @@ impl PagerLeaderCluster {
                     tokio::task::spawn_local(fut);
                 },
             );
-            tokio::task::spawn_local(
-                GatewayReceiver::new(gw_rx, conn)
-                    .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
-                    .run(),
-            );
+            tokio::task::spawn_local(GatewayReceiver::new(gw_rx, conn).run());
             let _ = handle_io.await;
         }));
 

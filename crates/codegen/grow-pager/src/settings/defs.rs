@@ -986,7 +986,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
         // Default "opt-out" matches `AuthEntry::coding_data_retention_opt_out = true`
         // (safer consumer default; server enrichment may still opt the user in).
         // ZDR / non-admin guards are enforced at dispatch time.
-        // Do not put "telemetry" in keywords — that word is the config-file
+        // Do not put "diagnostics" in keywords — that word is the config-file
         // analytics toggle (Monitoring / Configuration docs).
         SettingMeta {
             key: "coding_data_sharing",

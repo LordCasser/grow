@@ -19,8 +19,6 @@ impl SessionActor {
         prompt_blocks: Vec<acp::ContentBlock>,
         prompt_id: String,
         prompt_mode: PromptMode,
-        trace_gcs_config: Option<crate::save::TraceExportConfig>,
-        artifact_tracker: Option<crate::save::ArtifactTracker>,
         client_identifier: Option<String>,
         screen_mode: Option<String>,
         verbatim: bool,
@@ -34,7 +32,7 @@ impl SessionActor {
     ) -> bool {
         tracing::info!("queueing prompt: {prompt_id}");
         let queue_depth = { self.state.lock().await.pending_inputs.len() };
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "shell.prompt.queued",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
@@ -82,50 +80,9 @@ impl SessionActor {
             crate::session::prompt_history::append_prompt_async(cwd, entry).await;
         }
 
-        // Capture trace config template from the first real user prompt so
-        // synthetic auto-wake turns can reuse the same GCS bucket/method.
-        let (trace_gcs_config, artifact_tracker) = if let Some(ref cfg) = trace_gcs_config {
-            *self.trace_config_template.borrow_mut() = Some(TraceConfigTemplate {
-                bucket_url: cfg.bucket_url.clone(),
-                upload_method: cfg.upload_method.clone(),
-            });
-            (trace_gcs_config, artifact_tracker)
-        } else {
-            (trace_gcs_config, artifact_tracker)
-        };
-
         if let crate::session::PromptOrigin::SubagentCompleted { subagent_id } = &origin {
             self.mark_completions_reported(&[subagent_id]).await;
         }
-
-        // For synthetic prompts, derive trace config from the template
-        // captured during the first real user prompt.
-        let (trace_gcs_config, artifact_tracker) =
-            if origin.is_synthetic() && trace_gcs_config.is_none() {
-                if let Some(template) = self.trace_config_template.borrow().clone() {
-                    let cfg = crate::save::TraceExportConfig {
-                        bucket_url: template.bucket_url,
-                        service_account_key: None,
-                        prefix_dir: None,
-                        gcs_prefix: Some(format!(
-                            "{}/turn_{}",
-                            self.session_info.id.0,
-                            self.chat_state_handle.get_prompt_index().await,
-                        )),
-                        absolute_paths: false,
-                        archive_name_override: None,
-                        upload_method: template.upload_method,
-                    };
-                    (
-                        Some(cfg),
-                        Some(crate::save::new_artifact_tracker()),
-                    )
-                } else {
-                    (None, None)
-                }
-            } else {
-                (trace_gcs_config, artifact_tracker)
-            };
 
         let mut state = self.state.lock().await;
 
@@ -193,8 +150,6 @@ impl SessionActor {
             prompt_id,
             prompt_blocks,
             prompt_mode,
-            trace_gcs_config,
-            artifact_tracker,
             client_identifier,
             screen_mode,
             verbatim,
@@ -265,7 +220,7 @@ impl SessionActor {
             "server appended prompt to pending_inputs",
         );
         if cancel_running_turn {
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "shell.prompt.send_now_cancels_turn",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
@@ -576,7 +531,7 @@ impl SessionActor {
             }
             state.pending_inputs.insert(insert_at, item);
             cancel_running_turn = turn_running && !goal_active;
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "shell.prompt.send_now_cancels_turn",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({

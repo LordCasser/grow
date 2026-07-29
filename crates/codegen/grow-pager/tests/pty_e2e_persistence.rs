@@ -23,5 +23,3 @@ mod rename_title_shows_in_prompt_border;
 mod reparked_wait_stays_markerless;
 #[path = "pty_e2e/spinner_reappears_after_wait_resumes.rs"]
 mod spinner_reappears_after_wait_resumes;
-#[path = "pty_e2e/storage_upload_parks_on_401_and_drains_after_recovery.rs"]
-mod storage_upload_parks_on_401_and_drains_after_recovery;

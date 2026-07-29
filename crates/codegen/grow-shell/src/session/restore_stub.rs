@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use crate::save::StorageClient;
 
 use crate::agent::session_registry_client::{SessionRecord, SessionRegistryClient};
 
@@ -148,7 +147,6 @@ pub async fn restore_session_with_progress(
 
 pub async fn restore_session_with_storage(
     _client: &SessionRegistryClient,
-    _storage_client: &StorageClient,
     _session_id: &str,
     _target_cwd: &str,
     _turn_override: Option<i32>,

@@ -200,8 +200,8 @@ impl AgentView {
         self.casual_commenting_range = None;
         self.casual_editing_comment_id = None;
         {
-            use grow_telemetry::events::PlanSubmit;
-            use grow_telemetry::session_ctx::log_event;
+            use grow_diagnostics::events::PlanSubmit;
+            use grow_diagnostics::session_ctx::log_event;
             log_event(PlanSubmit {
                 action: "build".to_string(),
             });
@@ -227,8 +227,8 @@ impl AgentView {
         self.casual_commenting_range = None;
         self.casual_editing_comment_id = None;
         {
-            use grow_telemetry::events::PlanSubmit;
-            use grow_telemetry::session_ctx::log_event;
+            use grow_diagnostics::events::PlanSubmit;
+            use grow_diagnostics::session_ctx::log_event;
             log_event(PlanSubmit {
                 action: "abandon".to_string(),
             });
@@ -261,8 +261,8 @@ impl AgentView {
         self.prompt.textarea.cancel_undo_group();
         self.show_toast("Plan revision sent.");
         {
-            use grow_telemetry::events::PlanSubmit;
-            use grow_telemetry::session_ctx::log_event;
+            use grow_diagnostics::events::PlanSubmit;
+            use grow_diagnostics::session_ctx::log_event;
             log_event(PlanSubmit {
                 action: "revise".to_string(),
             });

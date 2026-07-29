@@ -23,7 +23,7 @@ use sleep_gate::{GateRaise, InFlightGuard, SleepGate};
 use crate::auth::config::ServiceAuthConfig;
 use crate::auth::error::AuthError;
 use crate::auth::token_type::TokenType;
-use grow_telemetry::events::ManualAuthSurface;
+use grow_diagnostics::events::ManualAuthSurface;
 
 #[cfg(test)]
 use super::model::UserInfo;
@@ -246,7 +246,7 @@ enum ScopeRemoval {
 }
 
 impl ScopeRemoval {
-    /// Stable telemetry label for the `disk_mutation` field.
+    /// Stable diagnostics label for the `disk_mutation` field.
     fn label(self) -> &'static str {
         match self {
             Self::EntryRemoved => "entry removed",
@@ -286,7 +286,7 @@ impl AuthManager {
         let proxy_base_url =
             crate::agent::config::EndpointsConfig::from_effective_config().proxy_url();
 
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "AuthManager::new",
             None,
             Some(serde_json::json!({
@@ -375,7 +375,7 @@ impl AuthManager {
                 (None, detail, state)
             }
         };
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "AuthManager::new auth.json load result",
             None,
             Some(auth_read_detail),
@@ -484,7 +484,7 @@ impl AuthManager {
         // Intentional removal must be attributable from unified.jsonl:
         // downstream, a deliberately deleted auth.json is indistinguishable
         // from accidental loss (corruption, external deletion).
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "auth: scope removed from auth.json",
             None,
             Some(serde_json::json!({
@@ -590,7 +590,7 @@ impl AuthManager {
         let retain = in_mem.as_ref().is_some_and(|a| a.refresh_token.is_some())
             && self.permanent_failure().is_none();
         if let Some(a) = in_mem.filter(|_| retain) {
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "auth: disk anomaly, retaining in-memory credentials",
                 None,
                 Some(serde_json::json!({
@@ -616,7 +616,7 @@ impl AuthManager {
     /// survives until login.
     fn drop_in_memory_credentials(&self, reason: &str) {
         if let Some(d) = self.current_or_expired() {
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "auth: in-memory credentials dropped (disk reload found none)",
                 None,
                 Some(serde_json::json!({
@@ -680,7 +680,7 @@ impl AuthManager {
             AuthError::ApiKeyAuthDisabled => "api_key_disabled",
             _ => "login_policy",
         };
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "auth: cached session rejected by login policy; clearing",
             None,
             Some(serde_json::json!({ "policy": policy, "reason": error.to_string() })),
@@ -840,7 +840,7 @@ impl AuthManager {
             Err(e) => {
                 // Non-recoverable error (PermissionDenied, etc.) — keep conservative.
                 tracing::warn!(error = %e, "auth: read failed, updating in-memory only");
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "auth update skipped disk write (read failed)",
                     None,
                     Some(serde_json::json!({ "error": e.to_string() })),
@@ -857,7 +857,7 @@ impl AuthManager {
         let write_result = write_auth_json(&self.path, &map);
         let elapsed_ms = update_started.elapsed().as_millis() as u64;
         match &write_result {
-            Ok(()) => grow_telemetry::unified_log::info(
+            Ok(()) => grow_diagnostics::unified_log::info(
                 "auth update disk written",
                 None,
                 Some(serde_json::json!({
@@ -866,7 +866,7 @@ impl AuthManager {
                     "elapsed_ms": elapsed_ms,
                 })),
             ),
-            Err(e) => grow_telemetry::unified_log::error(
+            Err(e) => grow_diagnostics::unified_log::error(
                 "auth update disk write failed",
                 None,
                 Some(serde_json::json!({
@@ -903,7 +903,7 @@ impl AuthManager {
             Err(e) => {
                 // Non-recoverable error — keep conservative.
                 tracing::warn!(error = %e, "auth: read failed, updating in-memory only (no enrichment)");
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "auth update skipped disk write (read failed, no enrichment)",
                     None,
                     Some(serde_json::json!({ "error": e.to_string() })),
@@ -918,7 +918,7 @@ impl AuthManager {
         let write_result = write_auth_json(&self.path, &map);
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match &write_result {
-            Ok(()) => grow_telemetry::unified_log::info(
+            Ok(()) => grow_diagnostics::unified_log::info(
                 "auth update disk written (no enrichment)",
                 None,
                 Some(serde_json::json!({
@@ -927,7 +927,7 @@ impl AuthManager {
                     "elapsed_ms": elapsed_ms,
                 })),
             ),
-            Err(e) => grow_telemetry::unified_log::error(
+            Err(e) => grow_diagnostics::unified_log::error(
                 "auth update disk write failed (no enrichment)",
                 None,
                 Some(serde_json::json!({
@@ -1035,7 +1035,7 @@ impl AuthManager {
     }
 
     /// Re-read disk and try to adopt a sibling-written token, emitting
-    /// telemetry on success. Combines `read_disk_auth` +
+    /// diagnostics on success. Combines `read_disk_auth` +
     /// `try_use_disk_token` + the structured log that was previously
     /// duplicated at each callsite in `refresh_chain`.
     fn try_adopt_disk_token(&self, reason: RefreshReason, msg: &str) -> Option<ProviderAuth> {
@@ -1043,7 +1043,7 @@ impl AuthManager {
         let refreshed = self.try_use_disk_token(disk_auth.as_ref(), reason)?;
         let adopted = token_suffix(&refreshed.key);
         let prev = self.expired_auth().map(|a| token_suffix(&a.key).to_owned());
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             msg,
             None,
             Some(serde_json::json!({
@@ -1114,7 +1114,7 @@ impl AuthManager {
     }
 
     /// Disk read for the configured scope with NO observation side effects (no
-    /// `disk_state` write, no transition telemetry). For side-effect-free
+    /// `disk_state` write, no transition diagnostics). For side-effect-free
     /// getters like [`Self::attempted_verdict_key`]; prefer [`Self::read_disk_auth`]
     /// when the read should drive transition logging.
     fn read_disk_auth_silent(&self) -> Option<ProviderAuth> {
@@ -1204,7 +1204,7 @@ impl AuthManager {
         match new_state {
             // Recovery (or first observation in GROW_AUTH mode).
             DiskAuthState::Ok => {
-                grow_telemetry::unified_log::info(
+                grow_diagnostics::unified_log::info(
                     "auth disk state: entry present",
                     None,
                     Some(ctx),
@@ -1215,7 +1215,7 @@ impl AuthManager {
             DiskAuthState::FileMissing
             | DiskAuthState::EntryMissing
             | DiskAuthState::Unreadable => {
-                grow_telemetry::unified_log::warn("auth disk state: entry lost", None, Some(ctx));
+                grow_diagnostics::unified_log::warn("auth disk state: entry lost", None, Some(ctx));
             }
         }
     }
@@ -1234,11 +1234,7 @@ impl AuthManager {
     /// per-session call sites don't reset refresher-internal state
     /// like `OidcRefresher::upload_in_flight`). Returns `true` if
     /// this call installed the refresher.
-    pub fn configure_refresher(
-        self: &Arc<Self>,
-        auth_provider_command: Option<String>,
-        diagnostic_uploader: Option<super::refresh::DiagnosticUploader>,
-    ) -> bool {
+    pub fn configure_refresher(self: &Arc<Self>, auth_provider_command: Option<String>) -> bool {
         use std::sync::atomic::Ordering;
         // Idempotent: the AcqRel CAS publishes the subsequent
         // `refresher.write()` to any reader that observes
@@ -1251,11 +1247,7 @@ impl AuthManager {
             tracing::debug!("auth: configure_refresher already wired; ignoring");
             return false;
         }
-        let refresher = super::refresh::build_refresher(
-            Arc::clone(self),
-            auth_provider_command,
-            diagnostic_uploader,
-        );
+        let refresher = super::refresh::build_refresher(Arc::clone(self), auth_provider_command);
         *self.refresher.write() = Some(refresher);
         true
     }
@@ -1450,7 +1442,7 @@ impl AuthManager {
             tracing::debug!(
                 "auth: devbox recovery skipped (preferred_method=api_key blocks automatic OIDC)"
             );
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "auth: devbox recovery skipped (preferred_method=api_key)",
                 None,
                 None,
@@ -1466,7 +1458,7 @@ impl AuthManager {
         }
 
         tracing::info!("auth: attempting devbox recovery (purge + re-mint)");
-        grow_telemetry::unified_log::info("auth: devbox recovery starting", None, None);
+        grow_diagnostics::unified_log::info("auth: devbox recovery starting", None, None);
 
         // Raw mint: the `/user` merge would block up to 10s under refresh_lock.
         let new_auth = super::devbox_login::mint_devbox_auth_raw()
@@ -1489,7 +1481,7 @@ impl AuthManager {
         // ZDR flags arrive via the background `/user` merge, off the lock.
         self.spawn_user_info_enrichment(auth.clone());
 
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "auth: devbox recovery succeeded",
             None,
             Some(serde_json::json!({
@@ -1544,7 +1536,7 @@ impl AuthManager {
             // Debug, not warn: the verdict transition is already logged once by
             // `record_permanent_failure`; a 401-hammering consumer must not
             // flood warns on every short-circuited call.
-            grow_telemetry::unified_log::debug(
+            grow_diagnostics::unified_log::debug(
                 "auth: refresh_chain short-circuit on permanent failure",
                 None,
                 Some(serde_json::json!({
@@ -1638,7 +1630,7 @@ impl AuthManager {
             // the suspend window the ack-hold protects.
             let _in_flight = InFlightGuard::new(self);
             if self.is_sleep_gated() {
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "auth.sleep.refresh_deferred",
                     None,
                     Some(serde_json::json!({
@@ -1670,7 +1662,7 @@ impl AuthManager {
         let lock_started = std::time::Instant::now();
         let Some(file_lock) = self.try_lock_auth_file_async(REFRESH_LOCK_TIMEOUT).await else {
             tracing::warn!("auth: file lock timed out, waiting for sibling to finish");
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "auth.refresh.lock_timeout",
                 None,
                 Some(serde_json::json!({
@@ -1707,7 +1699,7 @@ impl AuthManager {
             // clears, so make these greppable to distinguish harmless defers
             // (still-valid token) from the ones that surface as auth failures.
             let has_live_token = self.current().is_some();
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "auth.sleep.refresh_deferred",
                 None,
                 Some(serde_json::json!({
@@ -1730,7 +1722,7 @@ impl AuthManager {
         // defer forever and force a logout.
         if self.should_defer_for_dark_wake() {
             let has_live_token = self.current().is_some();
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "auth.dark_wake.refresh_deferred",
                 None,
                 Some(serde_json::json!({
@@ -1761,7 +1753,7 @@ impl AuthManager {
         if file_lock.still_live(&self.path) {
             return Ok(LockOutcome::Held(file_lock));
         }
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "auth.refresh.lock_lost_before_idp",
             None,
             Some(serde_json::json!({ "reason": format!("{reason:?}") })),
@@ -1800,7 +1792,7 @@ impl AuthManager {
             RefreshOutcome::Success(new_auth) => match self.update(*new_auth).await {
                 Ok(auth) => {
                     let new_prefix = token_suffix(&auth.key);
-                    grow_telemetry::unified_log::info(
+                    grow_diagnostics::unified_log::info(
                         "auth.refresh.success",
                         None,
                         Some(serde_json::json!({
@@ -1816,7 +1808,7 @@ impl AuthManager {
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "auth: failed to persist refreshed token");
-                    grow_telemetry::unified_log::warn(
+                    grow_diagnostics::unified_log::warn(
                         "auth.refresh.persist_failed",
                         None,
                         Some(serde_json::json!({ "error": format!("{e}") })),
@@ -1826,7 +1818,7 @@ impl AuthManager {
             },
             RefreshOutcome::PermanentFailure { error, tried_key } => {
                 tracing::warn!(reason = ?error.reason, "auth.refresh.permanent_failure");
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "auth.refresh.permanent_failure",
                     None,
                     Some(serde_json::json!({
@@ -1891,7 +1883,7 @@ impl AuthManager {
                     if clear_mem {
                         self.clear_inner();
                     }
-                    grow_telemetry::unified_log::warn(
+                    grow_diagnostics::unified_log::warn(
                         "auth: cleared credentials after permanent refresh failure",
                         None,
                         Some(serde_json::json!({
@@ -1908,7 +1900,7 @@ impl AuthManager {
             }
             RefreshOutcome::TransientFailure { message } => {
                 tracing::warn!(%message, "auth.refresh.transient_failure");
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "auth.refresh.transient_failure",
                     None,
                     Some(serde_json::json!({ "message": &message })),
@@ -1931,7 +1923,7 @@ impl AuthManager {
             && self.is_different_token(a)
         {
             tracing::info!("auth: picked up sibling-written token from disk");
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "auth: pick_up_sibling_token adopted",
                 None,
                 Some(serde_json::json!({
@@ -1959,7 +1951,7 @@ impl AuthManager {
     ) {
         // Don't advertise a TTL for a sticky (never-expiring) verdict.
         let ttl_seconds = (!error.reason.is_sticky()).then(|| PERMANENT_FAILURE_TTL.as_secs());
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "auth.permanent_failure.set",
             None,
             Some(serde_json::json!({
@@ -2122,7 +2114,7 @@ impl AuthManager {
             {
                 Ok(_) => return true,
                 Err(e) if e.is_transient() && attempt + 1 < MAX_TRANSIENT_ATTEMPTS => {
-                    grow_telemetry::unified_log::warn(
+                    grow_diagnostics::unified_log::warn(
                         "auth recovery: transient failure, retrying",
                         None,
                         Some(serde_json::json!({
@@ -2156,7 +2148,7 @@ impl AuthManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn manual_auth_last_emit(&self) -> Option<grow_telemetry::events::ManualAuth> {
+    pub(crate) fn manual_auth_last_emit(&self) -> Option<grow_diagnostics::events::ManualAuth> {
         self.manual_auth.last_emit_for_test()
     }
 
@@ -2247,7 +2239,7 @@ impl AuthManager {
                     tracing::info!(
                         "auth: proactive refresh skipped, adopted sibling token from disk"
                     );
-                    grow_telemetry::unified_log::info(
+                    grow_diagnostics::unified_log::info(
                         "auth: proactive refresh adopted sibling token",
                         None,
                         Some(serde_json::json!({
@@ -2262,7 +2254,7 @@ impl AuthManager {
                 match this.auth().await {
                     Ok(auth) => {
                         tracing::info!("auth: proactive refresh succeeded");
-                        grow_telemetry::unified_log::info(
+                        grow_diagnostics::unified_log::info(
                             "auth: proactive refresh completed",
                             None,
                             Some(serde_json::json!({
@@ -2274,7 +2266,7 @@ impl AuthManager {
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "auth: proactive refresh failed");
-                        grow_telemetry::unified_log::warn(
+                        grow_diagnostics::unified_log::warn(
                             "auth: proactive refresh completed",
                             None,
                             Some(serde_json::json!({

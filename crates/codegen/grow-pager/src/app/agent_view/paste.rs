@@ -176,10 +176,10 @@ impl AgentView {
                         );
                     }
                     if ctx.source.tip_showing() {
-                        grow_telemetry::session_ctx::log_event(
-                            grow_telemetry::events::ContextualTip {
-                                tip: grow_telemetry::events::ContextualTipKind::ImageInput,
-                                action: grow_telemetry::events::ContextualTipAction::Accepted,
+                        grow_diagnostics::session_ctx::log_event(
+                            grow_diagnostics::events::ContextualTip {
+                                tip: grow_diagnostics::events::ContextualTipKind::ImageInput,
+                                action: grow_diagnostics::events::ContextualTipAction::Accepted,
                             },
                         );
                     }
@@ -1309,7 +1309,7 @@ pub(super) mod paste_key_tests {
     }
     /// Ctrl+Z while the undo tip is on screen is an acceptance: it restores the
     /// wiped draft and retires the hint (the guarded branch that also emits the
-    /// `accepted` telemetry; the emit itself has no in-process capture sink).
+    /// `accepted` diagnostics; the emit itself has no in-process capture sink).
     #[test]
     fn ctrl_z_accepts_and_retires_undo_tip() {
         let mut agent = make_agent();
@@ -1424,7 +1424,7 @@ pub(super) mod paste_key_tests {
     /// branch (the guarded `contextual_tip` emit): the image attaches and the
     /// hint retires. The emission has no in-process sink, so this pins the
     /// guarded branch's observable behavior; `current_key()` is unit-tested in
-    /// `tips::ephemeral` and the mapping in the telemetry crate.
+    /// `tips::ephemeral` and the mapping in the diagnostics crate.
     #[test]
     fn image_paste_accepts_clipboard_tip_and_attaches() {
         let mut agent = make_agent();
@@ -1465,7 +1465,7 @@ pub(super) mod paste_key_tests {
         );
     }
     /// `show_ephemeral_tip` refuses shows that cannot paint, so no seen count,
-    /// TTL, or telemetry burns invisibly: an unknown/short terminal, or any
+    /// TTL, or diagnostics burns invisibly: an unknown/short terminal, or any
     /// occluding view. One case per occluder predicate term — a per-term typo
     /// (wrong field, duplicate, omission) fails exactly one assertion — closed
     /// by a non-vacuous success that shows and counts.

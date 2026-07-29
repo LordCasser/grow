@@ -3,7 +3,7 @@
 
 /// Emit one `startup.effective_limits` entry to the unified log.
 pub fn log_effective_limits() {
-    grow_telemetry::unified_log::info("startup.effective_limits", None, Some(gather()));
+    grow_diagnostics::unified_log::info("startup.effective_limits", None, Some(gather()));
 }
 
 fn gather() -> serde_json::Value {

@@ -109,7 +109,7 @@ pub fn validate_script_with_agent_budget(
                 R::GitDiffSince { reply, .. } => {
                     let _ = reply.send(Ok("".into()));
                 }
-                R::Phase { .. } | R::Log { .. } | R::Telemetry { .. } => {}
+                R::Phase { .. } | R::Log { .. } | R::Diagnostic { .. } => {}
             }
         }
     });

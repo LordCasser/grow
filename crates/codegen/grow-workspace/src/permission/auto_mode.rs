@@ -27,7 +27,7 @@ pub enum ClassifierVerdict {
     Unavailable,
 }
 
-/// Stable source categories written to classifier telemetry.
+/// Stable source categories written to classifier diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassifierSource {
     Llm,
@@ -1243,7 +1243,7 @@ pub fn classifier_output_json_schema() -> serde_json::Value {
 
 /// Char cap for the compact-JSON MCP args carried in `access_detail`. MCP tool
 /// inputs are arbitrary JSON (file contents, large payloads), so they are
-/// bounded here to keep the classifier prompt and telemetry from blowing up.
+/// bounded here to keep the classifier prompt and diagnostics from blowing up.
 pub const MCP_ACCESS_DETAIL_MAX_LEN: usize = 1024;
 
 /// Render an MCP tool call's `access_detail`: the tool name followed by its

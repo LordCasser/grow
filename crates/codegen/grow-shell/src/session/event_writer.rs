@@ -157,8 +157,7 @@ struct EventEntry {
 impl EventEntry {
     fn new(event: Event) -> Self {
         Self {
-            ts: chrono::Utc::now()
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             event,
         }
     }

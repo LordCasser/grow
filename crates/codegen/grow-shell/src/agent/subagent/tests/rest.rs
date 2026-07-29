@@ -1,7 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use crate::test_support::lsp_runtime::{ctx_with_toggle, test_gateway};
-use crate::save::SubagentSpawnedRef;
 use grow_tools::implementations::grow_build::task::backend::ChannelBackend;
 #[test]
 fn normalize_forked_context_strips_project_layout() {
@@ -1724,33 +1723,6 @@ fn notification_subagent_spawned_includes_resumed_from() {
     assert!(json.get("resumed_from").is_none());
     assert!(json.get("role").is_none());
     assert!(json.get("model").is_none());
-}
-#[test]
-fn upload_ref_includes_resumed_from() {
-    let ref_resumed = SubagentSpawnedRef {
-        subagent_id: "sa-r".into(),
-        child_session_id: "child-r".into(),
-        subagent_type: "general-purpose".into(),
-        description: "goal achievement skeptic".into(),
-        persona: Some("implementer".into()),
-        resumed_from: Some("prev-agent".into()),
-    };
-    let json = serde_json::to_value(&ref_resumed).unwrap();
-    assert_eq!(json["resumed_from"], "prev-agent");
-    assert_eq!(json["description"], "goal achievement skeptic");
-    let ref_fresh = SubagentSpawnedRef {
-        subagent_id: "sa-f".into(),
-        child_session_id: "child-f".into(),
-        subagent_type: "explore".into(),
-        description: String::new(),
-        persona: None,
-        resumed_from: None,
-    };
-    let json = serde_json::to_value(&ref_fresh).unwrap();
-    assert!(json.get("resumed_from").is_none());
-    assert!(json.get("description").is_none());
-    let parsed: SubagentSpawnedRef = serde_json::from_value(json).unwrap();
-    assert!(parsed.description.is_empty());
 }
 #[test]
 fn turn_active_flag_defaults_to_false() {

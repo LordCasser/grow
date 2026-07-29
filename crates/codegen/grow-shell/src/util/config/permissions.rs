@@ -1,9 +1,9 @@
 use toml::Value as TomlValue;
 
 /// How the agent handles tool execution permissions. Defined in
-/// `grow-telemetry`; re-exported here so existing call sites continue
+/// `grow-diagnostics`; re-exported here so existing call sites continue
 /// to work.
-pub use grow_telemetry::enums::PermissionMode;
+pub use grow_diagnostics::enums::PermissionMode;
 
 /// Parse a `permission_mode` canonical string to `PermissionMode`.
 ///

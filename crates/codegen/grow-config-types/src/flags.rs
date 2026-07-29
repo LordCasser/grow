@@ -131,7 +131,7 @@ fn resolve_bool_flag(
 ///
 /// All fields default to the disabled state. Activation is a deliberate
 /// two-step opt-in: setting `enabled = true` lets the classifier fire
-/// (and emit `LazinessClassifierFired` telemetry), but a nudge is only
+/// (and emit `LazinessClassifierFired` diagnostics), but a nudge is only
 /// injected when `max_nudges_per_session > 0` as well. This makes
 /// observation-only rollout (classify-but-don't-act) the natural
 /// intermediate state.

@@ -383,10 +383,6 @@ pub(crate) async fn generate_session_compact(
                     .with_tool_choice(wire_tool_choice);
             }
             let sid = session_id.to_string();
-            message.x_grok_conv_id = Some(sid.clone());
-            message.x_grok_req_id = Some(format!("xai-compact-{}", uuid::Uuid::new_v4()));
-            message.x_grok_session_id = Some(sid);
-            message.x_grok_agent_id = Some(grow_telemetry::id::agent_id());
             tracing::info!(
                 compact_model = %sampling_config.model,
                 num_messages = num_messages,
@@ -479,10 +475,6 @@ pub(crate) async fn generate_session_compact(
                 hosted_tools,
                 model: Some(sampling_config.model.to_owned()),
                 temperature: Some(1.0),
-                x_grok_conv_id: Some(session_id.to_string()),
-                x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
-                x_grok_session_id: Some(session_id.to_string()),
-                x_grok_agent_id: Some(grow_telemetry::id::agent_id()),
                 ..Default::default()
             };
             let stream_result = client.conversation_stream_responses(request).await;
@@ -604,10 +596,6 @@ pub(crate) async fn generate_session_compact(
                 hosted_tools,
                 model: Some(sampling_config.model.to_owned()),
                 temperature: Some(1.0),
-                x_grok_conv_id: Some(session_id.to_string()),
-                x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
-                x_grok_session_id: Some(session_id.to_string()),
-                x_grok_agent_id: Some(grow_telemetry::id::agent_id()),
                 ..Default::default()
             };
             let stream_result = client.conversation_stream_messages(request).await;
@@ -1638,15 +1626,11 @@ mod reasoning_compaction_regression_tests {
             query_params: Default::default(),
             env_http_headers: Default::default(),
             context_window: 256_000,
-            client_version: None,
             force_http1: false,
             max_retries: None,
             stream_tool_calls: false,
             idle_timeout_secs: None,
-            client_identifier: None,
             reasoning_effort: None,
-            deployment_id: None,
-            user_id: None,
             origin_client: None,
             attribution_callback: None,
             bearer_resolver: None,
@@ -1654,7 +1638,6 @@ mod reasoning_compaction_regression_tests {
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
-            header_injector: None,
         }
     }
     #[tokio::test]

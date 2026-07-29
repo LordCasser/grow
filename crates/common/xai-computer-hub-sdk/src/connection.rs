@@ -950,7 +950,6 @@ async fn open_socket(
         headers.insert(header_name, header_value);
     }
     let _ = alpha_test_key;
-    xai_tracing::http_client::attach_trace_to_http_request(headers);
     let (ws, _resp) = connect_async(request)
         .await
         .map_err(ClientError::from_handshake_error)?;
@@ -1037,7 +1036,7 @@ fn exit_for_close_code(code: Option<u16>) -> ConnectedExit {
 /// Best-effort: the writer task populates `writer_error` asynchronously
 /// after its send fails, so the reader can observe the resulting stream
 /// EOF/error and classify it here *before* the slot is set. In that
-/// (telemetry-only) race a genuine write-side failure is reported as
+/// (diagnostics-only) race a genuine write-side failure is reported as
 /// `eof` / `transport_read_error` instead of `transport_write_error`.
 fn classify_stream_end(inner: &HubConnectionInner, read_error: Option<String>) -> DisconnectCause {
     if let Some(detail) = inner.writer_error.lock().take() {

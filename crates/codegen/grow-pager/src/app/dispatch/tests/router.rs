@@ -549,7 +549,7 @@ fn shown_banner_id(app: &AppView) -> Option<String> {
 #[serial_test::serial(GROW_TEST_OPEN_URL_FILE)]
 #[test]
 fn announcements_open_cta_opens_promo_and_noops_under_critical() {
-    use grow_telemetry::events::AnnouncementCtaSurface;
+    use grow_diagnostics::events::AnnouncementCtaSurface;
     let url_file = std::env::temp_dir().join(format!("grow-cta-open-{}.txt", std::process::id()));
     let _ = std::fs::remove_file(&url_file);
     unsafe { std::env::set_var("GROW_TEST_OPEN_URL_FILE", &url_file) };
@@ -604,7 +604,7 @@ fn announcements_open_cta_opens_promo_and_noops_under_critical() {
 #[test]
 fn cta_impressions_latch_once_per_surface_and_reemit_for_new_id() {
     use crate::app::app_view::ActiveView;
-    use grow_telemetry::events::AnnouncementCtaSurface;
+    use grow_diagnostics::events::AnnouncementCtaSurface;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.active_view = ActiveView::Agent(id);
@@ -675,7 +675,7 @@ fn cta_impressions_respect_slot_gate_and_paint() {
 #[test]
 fn cta_impressions_suppressed_while_rect_occluded() {
     use crate::app::app_view::ActiveView;
-    use grow_telemetry::events::AnnouncementCtaSurface;
+    use grow_diagnostics::events::AnnouncementCtaSurface;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.active_view = ActiveView::Agent(id);
@@ -708,7 +708,7 @@ fn cta_impressions_suppressed_while_rect_occluded() {
 fn cta_impressions_cover_welcome_and_dashboard_surfaces() {
     use crate::app::app_view::ActiveView;
     use crate::views::dashboard::state::DashboardState;
-    use grow_telemetry::events::AnnouncementCtaSurface;
+    use grow_diagnostics::events::AnnouncementCtaSurface;
     let mut app = test_app();
     app.active_announcements = vec![promo_announcement("p")];
     let rect = Some(ratatui::layout::Rect::new(0, 0, 4, 1));

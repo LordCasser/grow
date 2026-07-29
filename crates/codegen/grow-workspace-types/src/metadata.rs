@@ -33,12 +33,6 @@ use std::collections::BTreeMap;
 /// Standard metadata key for the active session id.
 pub const META_SESSION_ID: &str = "x-workspace-session-id";
 
-/// Standard metadata key for the W3C trace parent (`traceparent`).
-pub const META_TRACEPARENT: &str = "traceparent";
-
-/// Standard metadata key for the W3C trace state (`tracestate`).
-pub const META_TRACESTATE: &str = "tracestate";
-
 /// Standard metadata key for the originating client identity.
 pub const META_CLIENT_ID: &str = "x-workspace-client-id";
 
@@ -62,8 +56,6 @@ pub const META_GRPC_TIMEOUT: &str = "grpc-timeout";
 /// want to scrub well-known keys from a metadata map.
 pub const STANDARD_META_KEYS: &[&str] = &[
     META_SESSION_ID,
-    META_TRACEPARENT,
-    META_TRACESTATE,
     META_CLIENT_ID,
     META_PROMPT_INDEX,
     META_GRPC_TIMEOUT,
@@ -183,8 +175,6 @@ mod tests {
     fn standard_meta_keys_have_expected_values() {
         // Sanity: lock the wire constants down so a typo is a test failure.
         assert_eq!(META_SESSION_ID, "x-workspace-session-id");
-        assert_eq!(META_TRACEPARENT, "traceparent");
-        assert_eq!(META_TRACESTATE, "tracestate");
         assert_eq!(META_CLIENT_ID, "x-workspace-client-id");
         assert_eq!(META_PROMPT_INDEX, "x-workspace-prompt-index");
         assert_eq!(META_GRPC_TIMEOUT, "grpc-timeout");
@@ -192,7 +182,7 @@ mod tests {
 
     #[test]
     fn metadata_round_trips_through_json() {
-        let m: Metadata = [(META_SESSION_ID, "sess-1"), (META_TRACEPARENT, "00-...")]
+        let m: Metadata = [(META_SESSION_ID, "sess-1"), (META_CLIENT_ID, "grow")]
             .into_iter()
             .collect();
         let json = serde_json::to_string(&m).unwrap();

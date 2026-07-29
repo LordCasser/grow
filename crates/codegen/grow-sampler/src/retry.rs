@@ -111,7 +111,7 @@ pub enum RetryDecision {
 
     /// Retry honoring the server's `Retry-After` header (429 rate
     /// limits). `is_rate_limited` distinguishes 429s from generic
-    /// retry-with-backoff cases for telemetry.
+    /// retry-with-backoff cases for diagnostics.
     RetryWithBackoff {
         backoff: Duration,
         is_rate_limited: bool,
@@ -250,7 +250,7 @@ pub fn classify_error(
     RetryDecision::Fatal(clone_error(err))
 }
 
-/// Build a human-readable, telemetry-friendly description of a sampling
+/// Build a human-readable, diagnostics-friendly description of a sampling
 /// error.
 ///
 /// `retry_count`, when present, is rendered as a "Request failed after

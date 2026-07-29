@@ -228,7 +228,7 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "billing: upstream request failed");
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "billing: upstream request failed",
                 None,
                 Some(serde_json::json!({ "error": e.to_string() })),
@@ -246,7 +246,7 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
             .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
             .unwrap_or_else(|| format!("HTTP {status}"));
 
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "billing: upstream error",
             None,
             Some(serde_json::json!({
@@ -260,7 +260,7 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
 
     let mut billing: BillingConfigResponse = credits_resp.json().await.map_err(|e| {
         tracing::error!(error = %e, "billing: failed to parse response");
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "billing: failed to parse response",
             None,
             Some(serde_json::json!({ "error": e.to_string() })),
@@ -279,7 +279,7 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
 
     // Every prompt / /usage / poll path hits `grow/billing`; log the fetched
     // credits snapshot so support can correlate limit UX with real balances.
-    grow_telemetry::unified_log::info(
+    grow_diagnostics::unified_log::info(
         "billing: fetched credits config",
         None,
         Some(billing_unified_log_ctx(&billing)),

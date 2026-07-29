@@ -1,7 +1,5 @@
-//! General utilities: SHA-256 hashing, W3C trace context propagation,
-//! and workspace classifier.
+//! General utilities: SHA-256 hashing and workspace classification.
 
-pub mod trace_context;
 pub mod workspace_classifier;
 
 /// Compute SHA256 hash of content as a hex string.

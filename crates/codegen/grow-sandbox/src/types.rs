@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// A recorded sandbox event for telemetry and debugging.
+/// A recorded sandbox event for diagnostics and debugging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxEvent {
     pub timestamp: DateTime<Utc>,
@@ -157,7 +157,7 @@ pub enum SandboxEventType {
     BypassDenied,
 }
 
-/// Counters for sandbox activity, used for telemetry dashboards.
+/// Counters for sandbox activity, used for diagnostics dashboards.
 #[derive(Debug, Default)]
 pub struct SandboxMetrics {
     pub fs_violations: AtomicU64,

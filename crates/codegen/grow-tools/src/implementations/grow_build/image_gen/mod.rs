@@ -63,7 +63,7 @@ pub struct ImageGenClient {
     api_key_provider: Option<SharedApiKeyProvider>,
     /// Optional 401-attribution hook. Hosts wire this so a 401 from the
     /// Imagine API emits an `auth_401_attribution` event with
-    /// `consumer == "ImageGen"` for unified auth-failure telemetry.
+    /// `consumer == "ImageGen"` for unified auth-failure diagnostics.
     attribution_callback: Option<SharedAttributionCallback>,
     /// When `true`, the user is on a tier the Imagine server zero-limits
     /// (free / Basic plan). `image_gen` / `image_edit` short-circuit before any

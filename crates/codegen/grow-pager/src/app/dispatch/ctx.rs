@@ -1,6 +1,6 @@
 //! Active-agent lookup and view-context helpers shared across dispatch modules.
 
-use super::dashboard_telemetry::log_dashboard_opened;
+use super::dashboard_diagnostics::log_dashboard_opened;
 use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView, WelcomeAnnouncementState};

@@ -115,7 +115,7 @@ pub async fn fork_session(
     let copy_ms = t0.elapsed().as_millis() as u64;
 
     // Writeback session to backend (fire-and-forget).
-    // This is telemetry-grade: the local fork works without it. All fork
+    // This is diagnostics-grade: the local fork works without it. All fork
     // state lives locally (session files on disk), and the caller does not
     // depend on synchronous backend registration. The backend eventually
     // learns about the session when the background task completes.

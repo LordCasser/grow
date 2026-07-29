@@ -564,7 +564,6 @@ impl ModelsManager {
     /// Auth identity changed: invalidate disk cache and refresh the catalog.
     pub async fn on_auth_changed(&self) {
         let config = self.inner.cfg.read().clone();
-        crate::agent::init::update_telemetry_config(&config, &self.inner.auth_manager);
         self.inner.cache.invalidate();
         let has_session = self.inner.auth_manager.current_or_expired().is_some();
         let fetch_auth = ModelFetchAuth::resolve(&config.endpoints, has_session);
@@ -585,7 +584,7 @@ impl ModelsManager {
         };
         if needs_bundled_fallback {
             if remote_fetch_enabled {
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "model catalog: falling back to bundled defaults only",
                     None,
                     Some(serde_json::json!({
@@ -611,7 +610,7 @@ impl ModelsManager {
         let available = self.available();
         let current = self.current_model_id();
         let count = available.len();
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "model catalog: notifying clients",
             None,
             Some(serde_json::json!({
@@ -663,7 +662,7 @@ impl ModelsManager {
         let count = cached.models.len();
         self.apply_catalog(&cfg, cached.models, cached.etag);
         tracing::info!(count, "model catalog hot-reloaded from disk cache");
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "model catalog: reloaded from external disk-cache write",
             None,
             Some(serde_json::json!({ "model_count": count })),
@@ -715,7 +714,7 @@ impl ModelsManager {
                     }
                 },
                 |attempt, max_retries, delay| async move {
-                    grow_telemetry::unified_log::warn(
+                    grow_diagnostics::unified_log::warn(
                         "model catalog: retry scheduled",
                         None,
                         Some(serde_json::json!({
@@ -731,7 +730,7 @@ impl ModelsManager {
             match result {
                 Ok(()) => {
                     let count = mgr.available().len();
-                    grow_telemetry::unified_log::info(
+                    grow_diagnostics::unified_log::info(
                         "model catalog: retry succeeded",
                         None,
                         Some(serde_json::json!({ "model_count": count })),
@@ -739,7 +738,7 @@ impl ModelsManager {
                     mgr.notify_models_updated();
                 }
                 Err(e) => {
-                    grow_telemetry::unified_log::warn(
+                    grow_diagnostics::unified_log::warn(
                         "model catalog: all retries exhausted",
                         None,
                         Some(serde_json::json!({ "error": e })),
@@ -764,7 +763,7 @@ impl ModelsManager {
     pub fn start_auth_refresh_watcher(&self, notify: Arc<tokio::sync::Notify>) {
         let mgr = self.clone();
         let had_catalog_at_start = self.inner.catalog.read().has_fetched_real_catalog;
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "model catalog: auth refresh watcher started",
             None,
             Some(serde_json::json!({
@@ -783,7 +782,7 @@ impl ModelsManager {
                 }
                 let had_catalog = mgr.inner.catalog.read().has_fetched_real_catalog;
                 let old_count = mgr.available().len();
-                grow_telemetry::unified_log::info(
+                grow_diagnostics::unified_log::info(
                     "model catalog: auth refresh watcher triggered",
                     None,
                     Some(serde_json::json!({
@@ -796,7 +795,7 @@ impl ModelsManager {
                 let new_count = mgr.available().len();
                 if has_catalog {
                     if !had_catalog || new_count != old_count {
-                        grow_telemetry::unified_log::info(
+                        grow_diagnostics::unified_log::info(
                             "model catalog: auth refresh watcher updated catalog",
                             None,
                             Some(serde_json::json!({
@@ -808,7 +807,7 @@ impl ModelsManager {
                     }
                     mgr.notify_models_updated();
                 } else {
-                    grow_telemetry::unified_log::warn(
+                    grow_diagnostics::unified_log::warn(
                         "model catalog: auth refresh watcher fetch failed",
                         None,
                         Some(serde_json::json!({
@@ -856,11 +855,6 @@ impl ModelsManager {
             current_model,
             credentials,
             config.endpoints.alpha_test_key.clone(),
-            config.client_version.clone(),
-            crate::managed_config::resolve_deployment_id(
-                config.endpoints.deployment_key.as_deref(),
-            ),
-            None,
         )
     }
 
@@ -997,7 +991,7 @@ impl ModelsManager {
         let has_auth = auth.is_some();
         let fetch_auth = *self.inner.fetch_auth.read();
         let cfg = self.inner.cfg.read().clone();
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "model catalog: fetching",
             None,
             Some(serde_json::json!({
@@ -1023,7 +1017,7 @@ impl ModelsManager {
         };
         let success = self.apply_refresh_result(&cfg, new_prefetched, None);
         if success {
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "model catalog: fetch succeeded",
                 None,
                 Some(serde_json::json!({
@@ -1072,7 +1066,7 @@ impl ModelsManager {
     ) -> bool {
         let Some(new_prefetched) = new_prefetched else {
             tracing::warn!("model refresh failed, leaving existing models unchanged");
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "model catalog refresh failed",
                 None,
                 Some(serde_json::json!({

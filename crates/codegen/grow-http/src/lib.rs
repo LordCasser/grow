@@ -6,7 +6,7 @@
 //! public and cached, the last crate-internal and built on demand):
 //!
 //! - `shared_client`: a `OnceLock`-cached async client for general
-//!   use (telemetry, feedback, settings, etc.).
+//!   use (diagnostics, feedback, settings, etc.).
 //! - `shared_upload_client`: a `OnceLock`-cached client for GCS
 //!   uploads with aggressive connection pool eviction.
 //! - `shared_startup_blocking_client`: a blocking client for the early
@@ -71,11 +71,11 @@ const _: () = assert!(
 /// Replaces `grow_shell::instrumentation_timer!`, which cannot be referenced
 /// here (it lives in the shell crate, which now depends on this one). This is a
 /// behavior-preserving copy: it routes to the same
-/// `grow_telemetry::instrumentation` API and keeps the Chrome trace
+/// `grow_diagnostics::instrumentation` API and keeps the Chrome trace
 /// span for these startup timings.
 macro_rules! startup_timer {
     ($name:literal) => {{
-        use grow_telemetry::instrumentation::{
+        use grow_diagnostics::instrumentation::{
             InstrumentationMode, InstrumentationTimer, TARGET, current_mode,
         };
         let mode = current_mode();
@@ -94,7 +94,7 @@ static CLIENT_TYPE: OnceLock<ClientType> = OnceLock::new();
 // `OriginClientInfo` is owned by `grow-sampler` so `SamplerConfig` can use
 // it without taking a circular dependency on `grow-shell`. Re-exported
 // under the same path (`crate::http::OriginClientInfo`) so existing call-sites
-// compile unchanged. The telemetry engine in `grow-telemetry` consumes
+// compile unchanged. The diagnostics engine in `grow-diagnostics` consumes
 // the same type via `grow_sampler::OriginClientInfo`. The shell-specific
 // constructors that depended on `ClientType` (a shell-only type) are free
 // functions below.

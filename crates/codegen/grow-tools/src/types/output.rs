@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use strip_ansi_escapes::strip_str;
 use xai_tool_types::SubagentCompletedOutput;
-/// `(added, removed)` line counts for the `edit.lines` telemetry counter.
+/// `(added, removed)` line counts for the `edit.lines` diagnostics counter.
 pub fn line_diff(old: &str, new: &str) -> (i64, i64) {
     let mut added = 0i64;
     let mut removed = 0i64;
@@ -444,7 +444,7 @@ pub struct BashOutput {
     /// echo -n, echo -e, simple printf for literal output, etc.).
     ///
     /// Used for:
-    /// - Telemetry / statistics on this pattern for the grow_build backend.
+    /// - Diagnostic / statistics on this pattern for the grow_build backend.
     /// - Potential doom-loop / stagnation signals (repeated trivial echoes
     ///   are a common "no progress" signal).
     /// - Model hints (see BareEchoHintState in the bash tool).

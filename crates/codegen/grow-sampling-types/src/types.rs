@@ -2,54 +2,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::num::NonZeroU64;
 
-// ============================================================================
-// TraceContext — cloneable, type-erased context for request tracing
-// ============================================================================
-
-/// Object-safe trait for opaque tracing context attached to requests.
-///
-/// `Clone` is not object-safe, so we use a `clone_box` method instead.
-/// Any concrete type that is `Clone + Send + Sync + Debug + 'static` gets a
-/// blanket impl, so callers just do:
-///
-/// ```ignore
-/// request.trace = Some(Box::new(my_concrete_trace));
-/// ```
-pub trait TraceContext: std::any::Any + Send + Sync + std::fmt::Debug {
-    /// Clone this trace context into a new `Box`.
-    fn clone_box(&self) -> Box<dyn TraceContext>;
-
-    /// Upcast to `&dyn Any` for downcasting back to the concrete type.
-    fn as_any(&self) -> &dyn std::any::Any;
-}
-
-/// Blanket impl: any `T: Clone + Send + Sync + Debug + 'static` is a `TraceContext`.
-impl<T> TraceContext for T
-where
-    T: Clone + Send + Sync + std::fmt::Debug + 'static,
-{
-    fn clone_box(&self) -> Box<dyn TraceContext> {
-        Box::new(self.clone())
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-impl Clone for Box<dyn TraceContext> {
-    fn clone(&self) -> Self {
-        // Explicitly dereference to `&dyn TraceContext` so `clone_box()` dispatches
-        // through the vtable to the concrete type's implementation.
-        //
-        // Without this, `self.clone_box()` resolves via auto-deref to
-        // `<Box<dyn TraceContext> as TraceContext>::clone_box()` (from the blanket impl),
-        // which calls `self.clone()` → `self.clone_box()` → infinite recursion.
-        let inner: &dyn TraceContext = &**self;
-        inner.clone_box()
-    }
-}
-
 /// Deserialize a field that may be `null` as the default value.
 /// This is useful for fields like `Vec<T>` where `null` should become `vec![]`.
 fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -87,28 +39,6 @@ pub struct ChatCompletionRequest {
     pub response_format: Option<crate::rs::ResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
-
-    /// custom headers
-    #[serde(skip)]
-    pub x_grok_conv_id: Option<String>,
-    #[serde(skip)]
-    pub x_grok_req_id: Option<String>,
-    #[serde(skip)]
-    pub x_grok_session_id: Option<String>,
-    #[serde(skip)]
-    pub x_grok_turn_idx: Option<String>,
-    #[serde(skip)]
-    pub x_grok_agent_id: Option<String>,
-    #[serde(skip)]
-    pub x_grok_deployment_id: Option<String>,
-    #[serde(skip)]
-    pub x_grok_user_id: Option<String>,
-
-    /// Optional opaque tracing context (e.g., where to persist the finalized request payload).
-    /// This is intentionally not serialized or deserialized.
-    /// Consumers downcast via `trace.as_ref().unwrap().as_any().downcast_ref::<T>()`.
-    #[serde(skip)]
-    pub trace: Option<Box<dyn TraceContext>>,
 }
 
 impl ChatCompletionRequest {
@@ -127,14 +57,6 @@ impl ChatCompletionRequest {
             search_parameters: None,
             response_format: None,
             reasoning_effort: None,
-            x_grok_conv_id: None,
-            x_grok_req_id: None,
-            x_grok_session_id: None,
-            x_grok_turn_idx: None,
-            x_grok_agent_id: None,
-            x_grok_deployment_id: None,
-            x_grok_user_id: None,
-            trace: None,
         }
     }
 
@@ -153,14 +75,6 @@ impl ChatCompletionRequest {
             search_parameters: None,
             response_format: None,
             reasoning_effort: None,
-            x_grok_conv_id: None,
-            x_grok_req_id: None,
-            x_grok_session_id: None,
-            x_grok_turn_idx: None,
-            x_grok_agent_id: None,
-            x_grok_deployment_id: None,
-            x_grok_user_id: None,
-            trace: None,
         }
     }
 
@@ -1063,28 +977,12 @@ pub struct SamplingConfig {
 
 // ============ Responses API wrapper ============
 
-/// Wrapper around `async_openai::types::responses::CreateResponse` that adds
-/// custom header fields for xAI request tracking, similar to
-/// `ChatCompletionRequest`.
+/// Wrapper around `async_openai::types::responses::CreateResponse` for raw
+/// hosted-tool entries not represented by the upstream type.
 #[derive(Debug, Clone, Default)]
 pub struct CreateResponseWrapper {
     /// The inner Responses API request.
     pub inner: crate::rs::CreateResponse,
-
-    /// Custom header: conversation ID for tracking.
-    pub x_grok_conv_id: Option<String>,
-
-    /// Custom header: request ID for tracking.
-    pub x_grok_req_id: Option<String>,
-
-    pub x_grok_session_id: Option<String>,
-    pub x_grok_turn_idx: Option<String>,
-    pub x_grok_agent_id: Option<String>,
-    pub x_grok_deployment_id: Option<String>,
-    pub x_grok_user_id: Option<String>,
-
-    /// Optional tracing context (e.g., where to persist the finalized request payload).
-    pub trace: Option<Box<dyn TraceContext>>,
 
     /// xAI-specific tool definitions that can't be expressed via
     /// `async_openai`'s `rs::Tool` enum (e.g., `x_search`). Injected
@@ -1097,105 +995,13 @@ impl CreateResponseWrapper {
     pub fn new(inner: crate::rs::CreateResponse) -> Self {
         Self {
             inner,
-            x_grok_conv_id: None,
-            x_grok_req_id: None,
-            x_grok_session_id: None,
-            x_grok_turn_idx: None,
-            x_grok_agent_id: None,
-            x_grok_deployment_id: None,
-            x_grok_user_id: None,
-            trace: None,
             extra_tool_entries: vec![],
         }
-    }
-
-    /// Set the conversation ID header.
-    pub fn with_conv_id(mut self, conv_id: impl Into<String>) -> Self {
-        self.x_grok_conv_id = Some(conv_id.into());
-        self
-    }
-
-    /// Set the request ID header.
-    pub fn with_req_id(mut self, req_id: impl Into<String>) -> Self {
-        self.x_grok_req_id = Some(req_id.into());
-        self
-    }
-
-    /// Set the trace context for request logging.
-    pub fn with_trace(mut self, trace: impl TraceContext + 'static) -> Self {
-        self.trace = Some(Box::new(trace));
-        self
     }
 }
 
 impl From<crate::rs::CreateResponse> for CreateResponseWrapper {
     fn from(inner: crate::rs::CreateResponse) -> Self {
-        Self::new(inner)
-    }
-}
-
-// ============ Messages API wrapper ============
-
-/// Wrapper around `MessagesRequest` that adds custom header fields for xAI
-/// request tracking, analogous to `CreateResponseWrapper`.
-#[derive(Debug, Clone, Default)]
-pub struct MessagesRequestWrapper {
-    /// The inner Messages API request.
-    pub inner: crate::messages::MessagesRequest,
-
-    /// Custom header: conversation ID for tracking.
-    pub x_grok_conv_id: Option<String>,
-
-    /// Custom header: request ID for tracking.
-    pub x_grok_req_id: Option<String>,
-
-    pub x_grok_session_id: Option<String>,
-    pub x_grok_turn_idx: Option<String>,
-    pub x_grok_agent_id: Option<String>,
-    pub x_grok_deployment_id: Option<String>,
-    pub x_grok_user_id: Option<String>,
-
-    /// Optional tracing context (e.g., where to persist the finalized request payload).
-    pub trace: Option<Box<dyn TraceContext>>,
-}
-
-impl MessagesRequestWrapper {
-    /// Create a new wrapper from an existing `MessagesRequest`.
-    pub fn new(inner: crate::messages::MessagesRequest) -> Self {
-        Self {
-            inner,
-            x_grok_conv_id: None,
-            x_grok_req_id: None,
-            x_grok_session_id: None,
-            x_grok_turn_idx: None,
-            x_grok_agent_id: None,
-            x_grok_deployment_id: None,
-            x_grok_user_id: None,
-            trace: None,
-        }
-    }
-
-    /// Set the conversation ID header.
-    pub fn with_conv_id(mut self, conv_id: impl Into<String>) -> Self {
-        self.x_grok_conv_id = Some(conv_id.into());
-        self
-    }
-
-    /// Set the request ID header.
-    pub fn with_req_id(mut self, req_id: impl Into<String>) -> Self {
-        self.x_grok_req_id = Some(req_id.into());
-        self
-    }
-
-    /// Set the trace context for request logging.
-    pub fn with_trace(mut self, trace: impl TraceContext + 'static) -> Self {
-        self.trace = Some(Box::new(trace));
-        self
-    }
-}
-
-impl From<crate::messages::MessagesRequest> for MessagesRequestWrapper {
-    fn from(inner: crate::messages::MessagesRequest) -> Self {
         Self::new(inner)
     }
 }
@@ -1472,52 +1278,5 @@ mod tests {
         assert_eq!(delta.role, Some(Role::Assistant));
         assert_eq!(delta.content, Some("".to_string()));
         assert!(delta.tool_calls.is_empty());
-    }
-
-    /// Regression test: cloning `Box<dyn TraceContext>` must not infinitely recurse.
-    ///
-    /// The blanket `impl<T: Clone + ...> TraceContext for T` applies to
-    /// `Box<dyn TraceContext>` itself. Without the explicit dereference in
-    /// `Clone for Box<dyn TraceContext>`, `self.clone_box()` resolves to the
-    /// blanket impl's method (via auto-deref) instead of dispatching through
-    /// the vtable, causing `clone()` → `clone_box()` → `clone()` → stack overflow.
-    #[test]
-    fn clone_box_dyn_trace_context_does_not_recurse() {
-        #[derive(Debug, Clone)]
-        struct TestTrace(String);
-
-        let trace: Box<dyn TraceContext> = Box::new(TestTrace("hello".into()));
-        let cloned = trace.clone();
-
-        // Verify the clone produced a valid TraceContext with the same data.
-        // Note: `as_any()` must be called through `&dyn TraceContext` (not on the Box
-        // directly) to use vtable dispatch rather than the blanket impl.
-        let inner: &dyn TraceContext = &*trace;
-        let original = inner.as_any().downcast_ref::<TestTrace>().unwrap();
-
-        let cloned_inner_ref: &dyn TraceContext = &*cloned;
-        let cloned_inner = cloned_inner_ref
-            .as_any()
-            .downcast_ref::<TestTrace>()
-            .unwrap();
-        assert_eq!(original.0, cloned_inner.0);
-    }
-
-    /// Verify that cloning a `ChatCompletionRequest` with a trace does not recurse.
-    #[test]
-    fn clone_chat_completion_request_with_trace() {
-        #[derive(Debug, Clone)]
-        struct TestTrace(String);
-
-        let mut request = ChatCompletionRequest::new("test-model", vec![]);
-        request.trace = Some(Box::new(TestTrace("trace-data".into())));
-
-        let cloned = request.clone();
-        assert!(cloned.trace.is_some());
-
-        let cloned_trace = cloned.trace.unwrap();
-        let inner: &dyn TraceContext = &*cloned_trace;
-        let downcast = inner.as_any().downcast_ref::<TestTrace>().unwrap();
-        assert_eq!(downcast.0, "trace-data");
     }
 }

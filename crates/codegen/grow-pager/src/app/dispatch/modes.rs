@@ -7,7 +7,7 @@ use super::settings::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView};
 use agent_client_protocol as acp;
-use grow_telemetry::session_ctx::log_event;
+use grow_diagnostics::session_ctx::log_event;
 
 /// Show the current plan: if a plan file exists, open it in the preview
 /// overlay popover. If no plan has been written yet, show a toast.
@@ -330,12 +330,12 @@ pub(super) fn set_yolo_mode_inner(app: &mut AppView, new: bool) {
         super::permissions::restore_permission_stashes(agent);
     }
 
-    // Telemetry + tracing guarded on real state change only.
+    // Diagnostic + tracing guarded on real state change only.
     if previous_state != new {
-        grow_telemetry::session_ctx::log_event(grow_telemetry::events::YoloToggled {
+        grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::YoloToggled {
             enabled: new,
             previous_state,
-            trigger: grow_telemetry::events::YoloTrigger::Pager,
+            trigger: grow_diagnostics::events::YoloTrigger::Pager,
         });
         tracing::info!(target: "settings", key = "permission_mode", value = new, "setting changed");
     }
@@ -509,7 +509,7 @@ fn yolo_toast(new: bool) -> String {
 
 /// Toggle YOLO mode (Ctrl+O keybinding path). Delegates to the
 /// registry-driven `set_yolo_mode` so permission-queue draining,
-/// telemetry, and persistence all flow through a single code path.
+/// diagnostics, and persistence all flow through a single code path.
 pub(super) fn dispatch_toggle_yolo(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -522,7 +522,7 @@ pub(super) fn dispatch_toggle_yolo(app: &mut AppView) -> Vec<Effect> {
 }
 
 /// Ctrl+R mode cycle from the agent chat view: the shared cycle body plus
-/// plan-nudge acceptance telemetry (the nudge advertises this chord). The
+/// plan-nudge acceptance diagnostics (the nudge advertises this chord). The
 /// dashboard peek calls [`dispatch_cycle_mode_and_sync`] instead, so a peeked
 /// agent — whose prompt the user is not looking at — never attributes an accept
 /// and never collapses Auto/Always-Approve for the nudge jump.
@@ -543,9 +543,9 @@ pub(super) fn dispatch_cycle_mode(app: &mut AppView) -> Vec<Effect> {
         && let Some(agent) = app.agents.get_mut(&id)
         && agent.plan_mode_pending.unwrap_or(agent.plan_mode_active)
     {
-        log_event(grow_telemetry::events::ContextualTip {
-            tip: grow_telemetry::events::ContextualTipKind::PlanMode,
-            action: grow_telemetry::events::ContextualTipAction::Accepted,
+        log_event(grow_diagnostics::events::ContextualTip {
+            tip: grow_diagnostics::events::ContextualTipKind::PlanMode,
+            action: grow_diagnostics::events::ContextualTipAction::Accepted,
         });
         // Retire the now-stale nudge so one impression maps to at most one
         // acceptance — a full mode loop back to Plan within the ~3s TTL would
@@ -599,7 +599,7 @@ fn collapse_to_ask_for_nudge_jump(app: &mut AppView) -> Option<Vec<Effect>> {
 /// apply the mode, then keep the per-session `auto_mode` display flag in sync
 /// with the freshly written canonical mode — covering every arm (including the
 /// pre-session and policy-pin early returns) without per-arm edits. Deliberately
-/// telemetry-free: the dashboard peek reuses it so it can't attribute a
+/// diagnostics-free: the dashboard peek reuses it so it can't attribute a
 /// plan-nudge acceptance for an agent the user isn't viewing.
 pub(super) fn dispatch_cycle_mode_and_sync(app: &mut AppView) -> Vec<Effect> {
     app.permission_mode_from_soft_default = false;
@@ -933,7 +933,7 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
 
         // Any other combination → reset to Normal.
         // YOLO inner only called when actually in YOLO (avoids
-        // spurious telemetry).
+        // spurious diagnostics).
         _ => {
             agent.plan_mode_pending = Some(false);
             // NLL releases the `agent` borrow after the assignment

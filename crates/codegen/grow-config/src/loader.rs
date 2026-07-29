@@ -750,14 +750,14 @@ mod tests {
     #[test]
     fn full_layer_precedence_requirements_over_config_over_managed() {
         let system_managed: toml::Value =
-            toml::from_str("[telemetry]\nmode = \"system_managed_value\"\n").unwrap();
+            toml::from_str("[diagnostics]\nmode = \"system_managed_value\"\n").unwrap();
         let managed: toml::Value =
-            toml::from_str("[telemetry]\nmode = \"managed_value\"\n").unwrap();
-        let user: toml::Value = toml::from_str("[telemetry]\nmode = \"user_value\"\n").unwrap();
+            toml::from_str("[diagnostics]\nmode = \"managed_value\"\n").unwrap();
+        let user: toml::Value = toml::from_str("[diagnostics]\nmode = \"user_value\"\n").unwrap();
         let user_requirements: toml::Value =
-            toml::from_str("[telemetry]\nmode = \"user_requirements_value\"\n").unwrap();
+            toml::from_str("[diagnostics]\nmode = \"user_requirements_value\"\n").unwrap();
         let system_requirements: toml::Value =
-            toml::from_str("[telemetry]\nmode = \"system_requirements_value\"\n").unwrap();
+            toml::from_str("[diagnostics]\nmode = \"system_requirements_value\"\n").unwrap();
 
         let mut merged = system_managed;
         deep_merge_toml(&mut merged, &managed);
@@ -766,7 +766,7 @@ mod tests {
         deep_merge_toml(&mut merged, &system_requirements);
 
         assert_eq!(
-            merged["telemetry"]["mode"].as_str(),
+            merged["diagnostics"]["mode"].as_str(),
             Some("system_requirements_value")
         );
     }
@@ -795,7 +795,7 @@ mod tests {
             r#"
             [[version_overrides]]
             minimum_version = "1.0.0"
-            [version_overrides.telemetry]
+            [version_overrides.diagnostics]
             mode = "managed_versioned"
             "#,
         )
@@ -804,7 +804,7 @@ mod tests {
             r#"
             [[version_overrides]]
             minimum_version = "1.0.0"
-            [version_overrides.telemetry]
+            [version_overrides.diagnostics]
             mode = "user_versioned"
             "#,
         )
@@ -813,7 +813,7 @@ mod tests {
             r#"
             [[version_overrides]]
             minimum_version = "1.0.0"
-            [version_overrides.telemetry]
+            [version_overrides.diagnostics]
             mode = "requirements_versioned"
             "#,
         )
@@ -828,7 +828,7 @@ mod tests {
         deep_merge_toml(&mut merged, &requirements);
 
         assert_eq!(
-            merged["telemetry"]["mode"].as_str(),
+            merged["diagnostics"]["mode"].as_str(),
             Some("requirements_versioned")
         );
     }
@@ -839,7 +839,7 @@ mod tests {
     fn deep_merge_toml_table_merge_array_replace_and_insert() {
         let mut base: toml::Value = toml::from_str(
             r#"
-            [features.telemetry]
+            [features.diagnostics]
             enabled = false
             sample_rate = 0.0
 
@@ -850,7 +850,7 @@ mod tests {
         .unwrap();
         let overrides: toml::Value = toml::from_str(
             r#"
-            [features.telemetry]
+            [features.diagnostics]
             enabled = true
 
             [server]
@@ -865,11 +865,11 @@ mod tests {
         deep_merge_toml(&mut base, &overrides);
 
         assert_eq!(
-            base["features"]["telemetry"]["enabled"].as_bool(),
+            base["features"]["diagnostics"]["enabled"].as_bool(),
             Some(true)
         );
         assert_eq!(
-            base["features"]["telemetry"]["sample_rate"].as_float(),
+            base["features"]["diagnostics"]["sample_rate"].as_float(),
             Some(0.0)
         );
         let arr: Vec<_> = base["server"]["allowed"]
@@ -889,17 +889,17 @@ mod tests {
             r#"
             [[version_overrides]]
             minimum_version = "1.0.0"
-            [version_overrides.telemetry]
+            [version_overrides.diagnostics]
             mode = "enabled"
             "#,
         )
         .unwrap();
         apply_version_overrides(&mut user, &cli_version).unwrap();
-        assert_eq!(user["telemetry"]["mode"].as_str(), Some("enabled"));
+        assert_eq!(user["diagnostics"]["mode"].as_str(), Some("enabled"));
 
         let requirements: toml::Value = toml::from_str(
             r#"
-            [telemetry]
+            [diagnostics]
             mode = "disabled"
             "#,
         )
@@ -907,7 +907,7 @@ mod tests {
 
         let mut merged = user;
         deep_merge_toml(&mut merged, &requirements);
-        assert_eq!(merged["telemetry"]["mode"].as_str(), Some("disabled"));
+        assert_eq!(merged["diagnostics"]["mode"].as_str(), Some("disabled"));
     }
 
     #[test]
@@ -925,10 +925,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("grow-load-layer-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut f = std::fs::File::create(dir.join("config.toml")).unwrap();
-        writeln!(f, "[telemetry]\nmode = \"from_file\"\n").unwrap();
+        writeln!(f, "[diagnostics]\nmode = \"from_file\"\n").unwrap();
 
         let v = load_user_config_layer(Some(&dir), "config.toml").unwrap();
-        assert_eq!(v["telemetry"]["mode"].as_str(), Some("from_file"));
+        assert_eq!(v["diagnostics"]["mode"].as_str(), Some("from_file"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

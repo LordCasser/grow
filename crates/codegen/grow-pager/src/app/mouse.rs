@@ -188,7 +188,7 @@ impl AgentView {
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
                     return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                        grow_telemetry::events::AnnouncementCtaSurface::Banner,
+                        grow_diagnostics::events::AnnouncementCtaSurface::Banner,
                     ));
                 }
                 if self
@@ -203,8 +203,8 @@ impl AgentView {
                         tracing::warn!(error = %e, "couldn't persist plugin CTA dismissal");
                     }
                     self.plugin_cta.dismissed.insert(plugin_id.clone());
-                    grow_telemetry::session_ctx::log_event(
-                        grow_telemetry::events::PluginCtaDismissed {
+                    grow_diagnostics::session_ctx::log_event(
+                        grow_diagnostics::events::PluginCtaDismissed {
                             plugin_name: plugin_id,
                         },
                     );
@@ -238,7 +238,7 @@ impl AgentView {
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
                     return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                        grow_telemetry::events::AnnouncementCtaSurface::Header,
+                        grow_diagnostics::events::AnnouncementCtaSurface::Header,
                     ));
                 }
                 if self.hit_cwd.contains(mouse.column, mouse.row) {
@@ -872,11 +872,11 @@ impl AgentView {
                                         use crate::scrollback::blocks::CreditLimitCardAction;
                                         let choice = match blk.action {
                                             CreditLimitCardAction::PurchaseCredits => {
-                                                grow_telemetry::events::CreditLimitChoice::PurchaseCredits
+                                                grow_diagnostics::events::CreditLimitChoice::PurchaseCredits
                                             }
                                             CreditLimitCardAction::EnablePayg
                                             | CreditLimitCardAction::IncreasePaygLimit => {
-                                                grow_telemetry::events::CreditLimitChoice::PayAsYouGo
+                                                grow_diagnostics::events::CreditLimitChoice::PayAsYouGo
                                             }
                                         };
                                         Some((blk.url.clone(), choice))
@@ -892,8 +892,8 @@ impl AgentView {
                                 let url_row = area.y + area.height.saturating_sub(2);
                                 if click_row >= url_row {
                                     self.scrollback.set_selected(Some(idx));
-                                    grow_telemetry::session_ctx::log_event(grow_telemetry::events::CreditLimitUpsellClicked {
-                                        surface: grow_telemetry::events::CreditLimitUpsellSurface::InlineCard,
+                                    grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::CreditLimitUpsellClicked {
+                                        surface: grow_diagnostics::events::CreditLimitUpsellSurface::InlineCard,
                                         choice,
                                     });
                                     self.open_url_or_show(&url);

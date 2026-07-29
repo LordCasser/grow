@@ -65,8 +65,8 @@ fn fingerprint_prefix(items: &[ConversationItem]) -> u64 {
 }
 /// Outcome of a background prefire pass-1 run, recorded on the
 /// `session.prefire_pass1` span as `compaction_prefire_outcome`.
-/// [`PrefireOutcome::as_str`] values are stable telemetry keys
-/// (telemetry/dashboards key off them) — don't rename the strings.
+/// [`PrefireOutcome::as_str`] values are stable diagnostics keys
+/// (diagnostics/dashboards key off them) — don't rename the strings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PrefireOutcome {
     Cached,
@@ -90,7 +90,7 @@ impl PrefireOutcome {
         }
     }
 }
-/// Telemetry from one prefire pass-1 run; recorded onto the
+/// Diagnostic from one prefire pass-1 run; recorded onto the
 /// `session.prefire_pass1` span by [`SessionActor::run_prefire_pass1`].
 /// `None` fields = the run exited before that stage.
 struct PrefirePass1Run {
@@ -338,7 +338,7 @@ impl SessionActor {
     /// summarize (NOTE₁ + recent tail + special prompt) → final summary and
     /// return its `CompactOutput`. `None` → caller runs the single-pass path.
     ///
-    /// **telemetry / `session.compact_inner` latency:** the returned `CompactOutput`
+    /// **diagnostics / `session.compact_inner` latency:** the returned `CompactOutput`
     /// stream timings are what land on `compaction_ttft_ms` /
     /// `compaction_stream_ms`. Those reflect **user-visible sync wait only**:
     /// - background pass-1 that already finished before compact is *not*
@@ -436,7 +436,7 @@ pub(crate) struct AutoCompactTriggerInfo {
     pub percentage: u8,
 }
 /// Why auto-compaction was suppressed after a deterministic failure.
-/// [`SuppressReason::as_str`] is a stable telemetry value (BQ/OTLP/dashboards key
+/// [`SuppressReason::as_str`] is a stable diagnostics value (BQ/OTLP/dashboards key
 /// off it) — don't rename the strings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SuppressReason {
@@ -572,7 +572,7 @@ impl SessionActor {
         }
     }
     /// Tag the current `session.compact` span with `mode` (and `detail`, for
-    /// `segments`) — the A/B variant key for grouping outcomes in telemetry.
+    /// `segments`) — the A/B variant key for grouping outcomes in diagnostics.
     fn record_compaction_variant(&self) {
         let mode = self.compaction.compaction_mode;
         let span = tracing::Span::current();
@@ -615,7 +615,7 @@ impl SessionActor {
             .run_compact_inner(
                 user_context,
                 None,
-                grow_telemetry::events::CompactionTrigger::Manual,
+                grow_diagnostics::events::CompactionTrigger::Manual,
             )
             .await
         {
@@ -641,7 +641,7 @@ impl SessionActor {
     /// Suppress AUTO compaction after a deterministic failure. Scope depends on
     /// the reason (see [`SuppressReason::suppress_state`]): size/schema sticky,
     /// credit until 200, auth until credentials recover, other clears next turn.
-    /// Telemetry + one notification per transition; manual `/compact` exempt.
+    /// Diagnostic + one notification per transition; manual `/compact` exempt.
     async fn suppress_auto_compaction(
         &self,
         reason: SuppressReason,
@@ -666,11 +666,13 @@ impl SessionActor {
                 context_window,
                 "auto-compaction suppressed after deterministic compaction failure"
             );
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::AutoCompactSuppressed {
-                reason: reason.as_str(),
-                estimated_tokens,
-                context_window,
-            });
+            grow_diagnostics::session_ctx::log_event(
+                grow_diagnostics::events::AutoCompactSuppressed {
+                    reason: reason.as_str(),
+                    estimated_tokens,
+                    context_window,
+                },
+            );
             let message = match reason {
                 SuppressReason::CreditBlock => {
                     "out of credits or over your spending limit. Add credits and retry."
@@ -693,7 +695,7 @@ impl SessionActor {
         }
     }
     /// Map a deterministic failure's error text to a fixed, content-free
-    /// [`SuppressReason`] (drives telemetry + sticky-vs-per-turn scope).
+    /// [`SuppressReason`] (drives diagnostics + sticky-vs-per-turn scope).
     fn classify_suppress_reason(error_msg: &str) -> SuppressReason {
         let m = error_msg.to_ascii_lowercase();
         if m.contains("spending-limit")
@@ -779,7 +781,7 @@ impl SessionActor {
             reauthable = session_reauthable,
             "auto-compact auth failure: aborting turn"
         );
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "auto-compact auth failure: aborting turn",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
@@ -923,14 +925,14 @@ impl SessionActor {
         &self,
         user_context: Option<String>,
         auto_continue: Option<crate::extensions::notification::AutoContinueInfo>,
-        trigger: grow_telemetry::events::CompactionTrigger,
+        trigger: grow_diagnostics::events::CompactionTrigger,
     ) -> Result<(), acp::Error> {
         let tokens_before = self.chat_state_handle.get_total_tokens().await;
         tracing::Span::current().record("compaction_tokens_before", tokens_before as i64);
         self.signals_handle().record_compaction(tokens_before);
         let trigger_str = match trigger {
-            grow_telemetry::events::CompactionTrigger::Manual => "manual",
-            grow_telemetry::events::CompactionTrigger::Auto => "auto",
+            grow_diagnostics::events::CompactionTrigger::Manual => "manual",
+            grow_diagnostics::events::CompactionTrigger::Auto => "auto",
         };
         let sampling_config = self.chat_state_handle.get_sampling_config().await;
         let context_window = sampling_config
@@ -956,7 +958,7 @@ impl SessionActor {
             .map(|c| c.api_backend == ApiBackend::Messages)
             .unwrap_or(false);
         let model_id = sampling_config.map(|c| c.model).unwrap_or_default();
-        let compaction = grow_telemetry::events::CompactionScope::begin(
+        let compaction = grow_diagnostics::events::CompactionScope::begin(
             trigger,
             tokens_before,
             context_window,
@@ -1092,7 +1094,7 @@ impl SessionActor {
         let started_at = chrono::Utc::now().to_rfc3339();
         let estimated_input_tokens =
             xai_chat_state::estimate_conversation_tokens(&simplified_messages);
-        let auto_trigger = matches!(trigger, grow_telemetry::events::CompactionTrigger::Auto);
+        let auto_trigger = matches!(trigger, grow_diagnostics::events::CompactionTrigger::Auto);
         let wall_clock_budget_secs = self
             .agent
             .borrow()
@@ -1177,8 +1179,8 @@ impl SessionActor {
                         };
                         if let Some(stage) = next_stage {
                             input_overflow_rejections += 1;
-                            grow_telemetry::session_ctx::log_event(
-                                grow_telemetry::events::CompactionRetryDegraded {
+                            grow_diagnostics::session_ctx::log_event(
+                                grow_diagnostics::events::CompactionRetryDegraded {
                                     trigger,
                                     reason: "input_overflow",
                                     from_stage: Some(input_stage.as_str()),
@@ -1258,7 +1260,7 @@ impl SessionActor {
                 }
             }
         }
-        let telemetry = observer.into_telemetry();
+        let diagnostics = observer.into_diagnostics();
         if two_pass_output.is_none() {
             let request_chat_history = build_compaction_chat_history(
                 request_turns,
@@ -1274,10 +1276,10 @@ impl SessionActor {
                 trigger,
                 compact_summary
                     .as_deref()
-                    .or(telemetry.last_rejected_summary.as_deref()),
+                    .or(diagnostics.last_rejected_summary.as_deref()),
                 last_error.as_ref(),
-                telemetry.attempts,
-                telemetry.attempt_details,
+                diagnostics.attempts,
+                diagnostics.attempt_details,
                 started_at,
             );
         }
@@ -1290,10 +1292,10 @@ impl SessionActor {
             },
             None => {
                 let span = tracing::Span::current();
-                span.record("compaction_attempts", telemetry.attempts as i64);
+                span.record("compaction_attempts", diagnostics.attempts as i64);
                 span.record(
                     "compaction_degenerate_rejections",
-                    telemetry.degenerate_rejections as i64,
+                    diagnostics.degenerate_rejections as i64,
                 );
                 span.record(
                     "compaction_input_overflow_rejections",
@@ -1301,11 +1303,11 @@ impl SessionActor {
                 );
                 span.record(
                     "compaction_deterministic_rejections",
-                    telemetry.deterministic_rejections as i64,
+                    diagnostics.deterministic_rejections as i64,
                 );
                 span.record(
                     "compaction_transient_rejections",
-                    telemetry.transient_rejections as i64,
+                    diagnostics.transient_rejections as i64,
                 );
                 span.record("compaction_outcome", last_failure_outcome.as_str());
                 return Err(last_error.unwrap_or_else(|| {
@@ -1600,7 +1602,7 @@ impl SessionActor {
                     .compaction_recovery_count
                     .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
                 tracing::debug!(
-                    target: grow_telemetry::memory_log::TARGET,
+                    target: grow_diagnostics::memory_log::TARGET,
                     count = n,
                     "MEMORY_COMPACTION_RECOVERY: {} search(es) performed",
                     n,
@@ -1741,7 +1743,7 @@ impl SessionActor {
             .context_injected
             .store(false, std::sync::atomic::Ordering::Relaxed);
         if self.memory.is_enabled() {
-            tracing::info!(target: grow_telemetry::memory_log::TARGET, "MEMORY_COMPACT: post-compaction reset, next turn re-checks injection (search only if no block persisted)");
+            tracing::info!(target: grow_diagnostics::memory_log::TARGET, "MEMORY_COMPACT: post-compaction reset, next turn re-checks injection (search only if no block persisted)");
         }
         let _ = self
             .notifications
@@ -1779,10 +1781,10 @@ impl SessionActor {
                 "compaction_summary_chars",
                 compact_output.content.chars().count() as i64,
             );
-            span.record("compaction_attempts", telemetry.attempts as i64);
+            span.record("compaction_attempts", diagnostics.attempts as i64);
             span.record(
                 "compaction_degenerate_rejections",
-                telemetry.degenerate_rejections as i64,
+                diagnostics.degenerate_rejections as i64,
             );
             span.record(
                 "compaction_input_overflow_rejections",
@@ -1790,11 +1792,11 @@ impl SessionActor {
             );
             span.record(
                 "compaction_deterministic_rejections",
-                telemetry.deterministic_rejections as i64,
+                diagnostics.deterministic_rejections as i64,
             );
             span.record(
                 "compaction_transient_rejections",
-                telemetry.transient_rejections as i64,
+                diagnostics.transient_rejections as i64,
             );
             let stop_reason = compact_output.stop_reason.as_deref().unwrap_or("stop");
             span.record("compaction_stop_reason", stop_reason);
@@ -2023,7 +2025,7 @@ impl SessionActor {
         }
     }
     /// Compact without auto-continue. The outer turn loop rebuilds and retries.
-    /// Emits telemetry (`auto_compact_fired`) and UI notifications automatically.
+    /// Emits diagnostics (`auto_compact_fired`) and UI notifications automatically.
     #[tracing::instrument(
         name = "session.compact",
         skip_all,
@@ -2046,7 +2048,7 @@ impl SessionActor {
         self.record_compaction_variant();
         let tokens_before = self.chat_state_handle.get_total_tokens().await;
         tracing::Span::current().record("pre_tokens", tokens_before as i64);
-        grow_telemetry::session_ctx::log_event(grow_telemetry::events::AutoCompactFired {
+        grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::AutoCompactFired {
             tokens_before: trigger_info.tokens_used,
             percentage: trigger_info.percentage,
         });
@@ -2067,7 +2069,11 @@ impl SessionActor {
         .await;
         let compact_start = std::time::Instant::now();
         let result = self
-            .run_compact_inner(None, None, grow_telemetry::events::CompactionTrigger::Auto)
+            .run_compact_inner(
+                None,
+                None,
+                grow_diagnostics::events::CompactionTrigger::Auto,
+            )
             .await;
         let elapsed_ms = compact_start.elapsed().as_millis() as i64;
         match result {
@@ -2127,7 +2133,7 @@ impl SessionActor {
         user_context: Option<&str>,
         use_short_prompt: bool,
         model: &str,
-        trigger: grow_telemetry::events::CompactionTrigger,
+        trigger: grow_diagnostics::events::CompactionTrigger,
         summary: Option<&str>,
         error: Option<&acp::Error>,
         attempts: u32,
@@ -2137,8 +2143,8 @@ impl SessionActor {
         use crate::extensions::notification::CompactionRequestFile;
         let request_id = uuid::Uuid::new_v4().to_string();
         let trigger_str = match trigger {
-            grow_telemetry::events::CompactionTrigger::Manual => "manual",
-            grow_telemetry::events::CompactionTrigger::Auto => "auto",
+            grow_diagnostics::events::CompactionTrigger::Manual => "manual",
+            grow_diagnostics::events::CompactionTrigger::Auto => "auto",
         };
         let prompt_variant = if use_short_prompt {
             "short"
@@ -2334,7 +2340,6 @@ mod inline_auto_compact_flow_tests {
             pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
-            telemetry_enabled: false,
             supports_backend_search: std::cell::Cell::new(false),
             tool_overrides: std::cell::RefCell::new(None),
             resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
@@ -2394,9 +2399,7 @@ mod inline_auto_compact_flow_tests {
             buffering_settings: None,
             client_identifier: None,
             origin_client: None,
-            feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-            upload_queue: Arc::new(OnceLock::new()),
-            sync_loop_cancel: None,
+            signals_handle: Default::default(),
             agent: std::cell::RefCell::new(test_agent_default().await),
             last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             git_head_enabled: false,
@@ -2489,7 +2492,6 @@ mod inline_auto_compact_flow_tests {
             ),
             subagent_token_records: parking_lot::Mutex::new(std::collections::HashMap::new()),
             workspace_ops: grow_workspace::WorkspaceOps::for_test(),
-            trace_config_template: std::cell::RefCell::new(None),
         }
     }
     /// Test check_auto_compact_needed uses state values.
@@ -3447,7 +3449,7 @@ mod inline_auto_compact_flow_tests {
             SuppressReason::Other
         );
     }
-    /// `SuppressReason::as_str` is the stable telemetry wire value — BQ/OTLP and
+    /// `SuppressReason::as_str` is the stable diagnostics wire value — BQ/OTLP and
     /// dashboards key off these exact strings. Lock them so a rename can't break monitoring.
     #[test]
     fn suppress_reason_as_str_is_stable() {

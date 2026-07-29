@@ -67,12 +67,12 @@ impl SessionActor {
 
     pub(super) fn emit_memory_session_summary(
         &self,
-        telem: &super::memory_state::MemoryTelemetry,
+        telem: &super::memory_state::MemoryDiagnostic,
         total_chunks_at_end: usize,
         session_end_result: &str,
     ) {
-        grow_telemetry::session_ctx::log_event(
-            grow_telemetry::memory_telemetry::MemorySessionSummary {
+        grow_diagnostics::session_ctx::log_event(
+            grow_diagnostics::memory_events::MemorySessionSummary {
                 session_id: self.session_info.id.to_string(),
                 session_duration_secs: self.session_start.elapsed().as_secs(),
                 flush_count: telem.flush_count,
@@ -125,7 +125,7 @@ impl SessionActor {
     pub(super) async fn maybe_run_dream(&self) {
         if self.startup_hints.is_subagent {
             tracing::debug!(
-                target: grow_telemetry::memory_log::TARGET,
+                target: grow_diagnostics::memory_log::TARGET,
                 "MEMORY_SUBAGENT_SKIP: skipping dream for subagent session"
             );
             return;
@@ -142,7 +142,7 @@ impl SessionActor {
             DreamGate::Open { sessions } => sessions,
             other => {
                 tracing::info!(
-                    target: grow_telemetry::memory_log::TARGET,
+                    target: grow_diagnostics::memory_log::TARGET,
                     gate = ?other,
                     "MEMORY_DREAM: gate check result, skipping"
                 );
@@ -151,7 +151,7 @@ impl SessionActor {
         };
 
         tracing::info!(
-            target: grow_telemetry::memory_log::TARGET,
+            target: grow_diagnostics::memory_log::TARGET,
             session_count = sessions.len(),
             "MEMORY_DREAM: gates passed, starting consolidation"
         );
@@ -175,7 +175,7 @@ impl SessionActor {
         ) {
             Ok(s) if s.is_empty() => {
                 tracing::info!(
-                    target: grow_telemetry::memory_log::TARGET,
+                    target: grow_diagnostics::memory_log::TARGET,
                     "MEMORY_DREAM_SLASH: no session logs found, nothing to consolidate"
                 );
                 return;
@@ -183,7 +183,7 @@ impl SessionActor {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
-                    target: grow_telemetry::memory_log::TARGET,
+                    target: grow_diagnostics::memory_log::TARGET,
                     error = %e,
                     "MEMORY_DREAM_SLASH: failed to list sessions"
                 );
@@ -192,7 +192,7 @@ impl SessionActor {
         };
 
         tracing::info!(
-            target: grow_telemetry::memory_log::TARGET,
+            target: grow_diagnostics::memory_log::TARGET,
             session_count = sessions.len(),
             "MEMORY_DREAM_SLASH: starting manual consolidation"
         );
@@ -225,7 +225,7 @@ impl SessionActor {
                 Some(msg) => msg,
                 None => {
                     tracing::info!(
-                        target: grow_telemetry::memory_log::TARGET,
+                        target: grow_diagnostics::memory_log::TARGET,
                         "{log_prefix}: no readable session content, skipping"
                     );
                     return;
@@ -241,7 +241,7 @@ impl SessionActor {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
                 tracing::warn!(
-                    target: grow_telemetry::memory_log::TARGET,
+                    target: grow_diagnostics::memory_log::TARGET,
                     error = %e,
                     "{log_prefix}: model call failed"
                 );
@@ -250,7 +250,7 @@ impl SessionActor {
             }
             Err(_) => {
                 tracing::warn!(
-                    target: grow_telemetry::memory_log::TARGET,
+                    target: grow_diagnostics::memory_log::TARGET,
                     "{log_prefix}: model call timed out (30m)"
                 );
                 self.memory.record_dream_result(false);
@@ -308,7 +308,7 @@ impl SessionActor {
         .await;
 
         tracing::info!(
-            target: grow_telemetry::memory_log::TARGET,
+            target: grow_diagnostics::memory_log::TARGET,
             status = ?result.status,
             sessions_eligible = result.sessions_eligible,
             sessions_cleaned = result.cleaned_stems.len(),
@@ -332,10 +332,6 @@ impl SessionActor {
                 ConversationItem::user(user_message),
             ],
             model: Some(model),
-            x_grok_conv_id: Some(format!("dream-{}", uuid::Uuid::new_v4())),
-            x_grok_req_id: Some(format!("xai-dream-{}", uuid::Uuid::new_v4())),
-            x_grok_session_id: Some(session_id),
-            x_grok_agent_id: Some(grow_telemetry::id::agent_id()),
             ..Default::default()
         };
         let response = sampling_client
@@ -365,13 +361,13 @@ impl SessionActor {
         // running (idle timer, pre-compaction, or user-requested), skip.
         if !self.memory.try_acquire_flush_lock() {
             tracing::info!(
-                target: grow_telemetry::memory_log::TARGET,
+                target: grow_diagnostics::memory_log::TARGET,
                 "MEMORY_FLUSH: skipped — another flush is already in progress (trigger={trigger})"
             );
             return false;
         }
 
-        tracing::info!(target: grow_telemetry::memory_log::TARGET, "MEMORY_FLUSH: starting");
+        tracing::info!(target: grow_diagnostics::memory_log::TARGET, "MEMORY_FLUSH: starting");
         let flush_start = std::time::Instant::now();
 
         self.send_xai_notification(XaiSessionUpdate::MemoryFlushStarted)
@@ -386,8 +382,8 @@ impl SessionActor {
                 Some(snapshot) => snapshot,
                 None => self.snapshot_memory_flush_state().await,
             };
-            grow_telemetry::session_ctx::log_event(
-                grow_telemetry::memory_telemetry::MemoryFlushStart {
+            grow_diagnostics::session_ctx::log_event(
+                grow_diagnostics::memory_events::MemoryFlushStart {
                     session_id: self.session_info.id.to_string(),
                     trigger: trigger.to_owned(),
                     conversation_len: counts.total,
@@ -395,7 +391,7 @@ impl SessionActor {
                 },
             );
             tracing::info!(
-                target: grow_telemetry::memory_log::TARGET,
+                target: grow_diagnostics::memory_log::TARGET,
                 "MEMORY_FLUSH: conversation has {user} user, {assistant} assistant, {tool} tool messages ({total} total)",
                 user = counts.user,
                 assistant = counts.assistant,
@@ -416,7 +412,7 @@ impl SessionActor {
             };
             let mut items: Vec<ConversationItem> = vec![ConversationItem::system(system_prompt)];
             tracing::info!(
-                target: grow_telemetry::memory_log::TARGET,
+                target: grow_diagnostics::memory_log::TARGET,
                 "MEMORY_FLUSH: sending {n} recent messages to model (+ system prompt + user closer)",
                 n = recent.len(),
             );
@@ -432,17 +428,13 @@ impl SessionActor {
                     .unwrap_or_default(),
             };
             tracing::info!(
-                target: grow_telemetry::memory_log::TARGET,
+                target: grow_diagnostics::memory_log::TARGET,
                 "MEMORY_FLUSH: using model={model}"
             );
             let session_id = self.session_info.id.to_string();
             let request = ConversationRequest {
                 items,
                 model: Some(model),
-                x_grok_conv_id: Some(format!("flush-{}", uuid::Uuid::new_v4())),
-                x_grok_req_id: Some(format!("xai-flush-{}", uuid::Uuid::new_v4())),
-                x_grok_session_id: Some(session_id.clone()),
-                x_grok_agent_id: Some(grow_telemetry::id::agent_id()),
                 ..Default::default()
             };
 
@@ -585,7 +577,7 @@ impl SessionActor {
             }
         };
 
-        tracing::info!(target: grow_telemetry::memory_log::TARGET, outcome = %outcome, "MEMORY_FLUSH: completed");
+        tracing::info!(target: grow_diagnostics::memory_log::TARGET, outcome = %outcome, "MEMORY_FLUSH: completed");
         let flush_outcome = if outcome.starts_with("written") {
             "written"
         } else if outcome.starts_with("nothing") {
@@ -598,8 +590,8 @@ impl SessionActor {
             "error"
         };
         self.memory.record_flush_result(flush_outcome);
-        grow_telemetry::session_ctx::log_event(
-            grow_telemetry::memory_telemetry::MemoryFlushComplete {
+        grow_diagnostics::session_ctx::log_event(
+            grow_diagnostics::memory_events::MemoryFlushComplete {
                 session_id: self.session_info.id.to_string(),
                 trigger: trigger.to_owned(),
                 outcome: flush_outcome.to_owned(),
@@ -610,23 +602,23 @@ impl SessionActor {
             },
         );
 
-        // Rolling session summary on each flush — crash-safe telemetry.
+        // Rolling session summary on each flush — crash-safe diagnostics.
         let total_chunks = self
             .memory
             .storage
             .borrow()
             .as_ref()
             .map_or(0, |s| s.total_chunk_count());
-        let telem = self.memory.telemetry_snapshot();
+        let telem = self.memory.diagnostics_snapshot();
         self.emit_memory_session_summary(&telem, total_chunks, "flush_checkpoint");
 
         let flush_trigger = match trigger {
-            "slash_command" => grow_telemetry::events::MemoryFlushTrigger::SlashCommand,
-            "interval" => grow_telemetry::events::MemoryFlushTrigger::Interval,
-            "pre_compaction" => grow_telemetry::events::MemoryFlushTrigger::PreCompaction,
-            _ => grow_telemetry::events::MemoryFlushTrigger::UserRequested,
+            "slash_command" => grow_diagnostics::events::MemoryFlushTrigger::SlashCommand,
+            "interval" => grow_diagnostics::events::MemoryFlushTrigger::Interval,
+            "pre_compaction" => grow_diagnostics::events::MemoryFlushTrigger::PreCompaction,
+            _ => grow_diagnostics::events::MemoryFlushTrigger::UserRequested,
         };
-        grow_telemetry::session_ctx::log_event(grow_telemetry::events::MemoryFlushed {
+        grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::MemoryFlushed {
             trigger: flush_trigger,
             success: flush_outcome == "written",
             duration_ms: flush_start.elapsed().as_millis() as u64,

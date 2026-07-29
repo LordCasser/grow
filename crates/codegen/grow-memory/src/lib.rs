@@ -57,7 +57,7 @@ pub async fn embed_missing_chunks(
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
-                target: grow_telemetry::memory_log::TARGET,
+                target: grow_diagnostics::memory_log::TARGET,
                 error = %e,
                 "failed to query chunks without embeddings"
             );
@@ -76,7 +76,7 @@ pub async fn embed_missing_chunks(
                 for ((chunk_id, _), embedding) in batch.iter().zip(embeddings.iter()) {
                     if let Err(e) = index.upsert_embedding(chunk_id, embedding) {
                         tracing::warn!(
-                            target: grow_telemetry::memory_log::TARGET,
+                            target: grow_diagnostics::memory_log::TARGET,
                             chunk_id,
                             error = %e,
                             "failed to upsert embedding"
@@ -88,7 +88,7 @@ pub async fn embed_missing_chunks(
             }
             Err(e) => {
                 tracing::warn!(
-                    target: grow_telemetry::memory_log::TARGET,
+                    target: grow_diagnostics::memory_log::TARGET,
                     error = %e,
                     batch_size = texts.len(),
                     "embedding batch failed, skipping"
@@ -99,7 +99,7 @@ pub async fn embed_missing_chunks(
 
     if embedded > 0 {
         tracing::info!(
-            target: grow_telemetry::memory_log::TARGET,
+            target: grow_diagnostics::memory_log::TARGET,
             embedded,
             total,
             "embedded missing chunks"

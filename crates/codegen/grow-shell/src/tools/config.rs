@@ -223,15 +223,11 @@ impl ShellToolsetConfig {
             query_params: indexmap::IndexMap::new(),
             env_http_headers: indexmap::IndexMap::new(),
             context_window: 256_000,
-            client_version: None,
             reasoning_effort: None,
             force_http1: false,
             max_retries: None,
             stream_tool_calls: false,
             idle_timeout_secs: None,
-            client_identifier: None,
-            deployment_id: None,
-            user_id: None,
             origin_client: None,
             // Default base for the in-process web-search tool config.
             // Real `SamplerConfig`s (e.g. from `sampling_config_for_model`)
@@ -247,7 +243,6 @@ impl ShellToolsetConfig {
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
-            header_injector: None,
         };
         let mut toolset = base.unwrap_or_else(|| Self {
             bash: BashToolConfig::default(),

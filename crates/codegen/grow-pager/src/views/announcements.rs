@@ -312,7 +312,7 @@ pub(crate) fn promo_cta<'a>(
 
 /// The `[label]` button's target: the promo owner + its validated url. The
 /// url-only projection of [`promo_cta`] the click dispatch (url + announcement
-/// id for telemetry) and the OSC 8 emission share.
+/// id for diagnostics) and the OSC 8 emission share.
 pub fn promo_cta_target<'a>(
     announcements: &'a [grow_announcements::RemoteAnnouncement],
     hidden_ids: &BTreeSet<String>,

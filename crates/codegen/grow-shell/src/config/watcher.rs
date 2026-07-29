@@ -443,7 +443,7 @@ fn discovery_change_for_path(path: &Path) -> Option<DiscoveryChange> {
 /// directly under `$HOME` ([`HOME_VENDOR_DIRS`]).
 ///
 /// These hold large non-skill trees — `~/.grow` alone has `worktrees/`,
-/// `sessions/`, `logs/`, `upload_queue/` — so recursing them exhausted the
+/// `sessions/`, and `logs/` — so recursing them exhausted the
 /// inotify quota (~780k watches on a devbox) and, since each worktree is a full
 /// checkout, fired skill reloads on ordinary repo activity. They get scoped
 /// watches instead ([`watch_skill_subdirs`]); project/repo dirs — and

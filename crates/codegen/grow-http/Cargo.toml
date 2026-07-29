@@ -12,7 +12,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 grow-auth = { workspace = true, features = ["middleware"] }
 grow-sampler = { path = "../grow-sampler" }
-grow-telemetry = { workspace = true }
+grow-diagnostics = { workspace = true }
 grow-version = { workspace = true }
 grow-workspace = { workspace = true }
 

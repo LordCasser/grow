@@ -17,7 +17,7 @@ use super::{TerminalName, terminal_name_from_term_program};
 
 /// Which environment variable produced a [`TermVersion`].
 ///
-/// The rendered labels are stable telemetry values — do not rename them.
+/// The rendered labels are stable diagnostics values — do not rename them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum TermVersionSource {
@@ -129,8 +129,8 @@ mod tests {
 
     /// Unlike the others, this reads ambient host state and warms process-wide
     /// caches; the asserted fields still come only from the injected map.
-    fn snapshot(pairs: &[(&str, &str)]) -> grow_telemetry::events::TerminalTelemetry {
-        build_terminal_context_from_env(&env_from(pairs)).telemetry_snapshot()
+    fn snapshot(pairs: &[(&str, &str)]) -> grow_diagnostics::events::TerminalDiagnostic {
+        build_terminal_context_from_env(&env_from(pairs)).diagnostics_snapshot()
     }
 
     #[test]
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_snapshot_carries_version_and_source() {
+    fn diagnostics_snapshot_carries_version_and_source() {
         let populated = snapshot(&[("VTE_VERSION", "7402")]);
         assert_eq!(populated.term_version, "7402");
         assert_eq!(populated.term_version_source, "vte");

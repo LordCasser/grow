@@ -19,7 +19,7 @@ pub enum NotificationProtocol {
 }
 
 impl NotificationProtocol {
-    /// Stable lowercase name for telemetry and analytics output.
+    /// Stable lowercase name for diagnostics and analytics output.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Osc9 => "osc9",

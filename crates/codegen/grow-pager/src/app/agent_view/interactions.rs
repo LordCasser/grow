@@ -1165,7 +1165,7 @@ impl AgentView {
         } else {
             "interview_submit"
         };
-        grow_telemetry::session_ctx::log_event(grow_telemetry::events::PlanSubmit {
+        grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::PlanSubmit {
             action: action.to_string(),
         });
         InputOutcome::Changed

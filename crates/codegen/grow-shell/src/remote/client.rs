@@ -84,7 +84,7 @@ async fn add_bundle_fetch_headers(
             crate::http::CLIENT_MODE_HEADER,
             crate::http::process_client_mode(),
         );
-    xai_file_utils::trace_context::inject_trace_context_into_request(builder)
+    builder
 }
 /// Fetch the bundled subagent cache payload from cli-chat-proxy `GET /v1/subagents/bundle`.
 ///
@@ -442,9 +442,7 @@ impl BackendClient {
         builder: reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, BackendError> {
         let headers = self.auth_header_map().await?;
-        let builder = xai_file_utils::trace_context::inject_trace_context_into_request(
-            builder.timeout(DEFAULT_TIMEOUT).headers(headers),
-        );
+        let builder = builder.timeout(DEFAULT_TIMEOUT).headers(headers);
         let request = builder.build()?;
         self.client.execute(request).await.map_err(|e| match e {
             reqwest_middleware::Error::Reqwest(e) => BackendError::Network(e),
@@ -557,20 +555,18 @@ impl BackendClient {
         Ok(())
     }
 }
-/// Outcome of a blocking settings fetch. Distinguishes the three cases the
-/// external-OTEL gate cares about (see [`crate::agent::mvp_agent`]).
+/// Outcome of a blocking settings fetch.
 #[derive(Debug)]
 #[must_use]
 #[non_exhaustive]
 pub enum SettingsFetch {
-    /// Settings fetched and parsed; carries the policy that resolves the gate.
+    /// Settings fetched and parsed.
     /// Boxed because `RemoteSettings` is large and the other variants are unit-sized.
     Fetched(Box<crate::util::config::RemoteSettings>),
-    /// Credential unambiguously rejected (401): the remote policy will never reach
-    /// this leader, so the gate may open without waiting.
+    /// Credential unambiguously rejected (401).
     Rejected,
     /// Transient/ambiguous (network, 5xx exhausted, 403/429/other 4xx, unparseable
-    /// 2xx): outcome unknown. Leave the gate closed (fail-closed), retry later.
+    /// 2xx): outcome unknown and may be retried later.
     Retry,
 }
 impl SettingsFetch {
@@ -664,29 +660,14 @@ struct LoginConfigResponse {
 }
 /// Fetch `grow_build_login_device_flow` from cli-chat-proxy `GET /v1/login-config`.
 ///
-/// Unauthenticated (pre-login); `x-grow-agent-id` is the per-install bucketing key.
 /// Best-effort: any error or unset flag returns `None` so the caller keeps the
-/// loopback default. Caps at 1.5s with no retries since it's on the login path;
-/// `agent_id()` runs on the blocking pool so the fetch never stalls the executor.
+/// loopback default. Caps at 1.5s with no retries since it's on the login path.
 pub async fn fetch_login_device_flow(cli_chat_proxy_base_url: &str) -> Option<bool> {
-    let agent_id = tokio::task::spawn_blocking(grow_telemetry::id::agent_id)
-        .await
-        .ok()?;
     let client = crate::http::shared_client();
     let url = format!("{}/login-config", cli_chat_proxy_base_url);
     let response = client
         .get(&url)
         .timeout(std::time::Duration::from_millis(1500))
-        .header("x-grow-agent-id", agent_id)
-        .header("x-grow-client-version", grow_version::VERSION)
-        .header(
-            "x-grow-client-identifier",
-            crate::http::process_client_identifier(),
-        )
-        .header(
-            crate::http::CLIENT_MODE_HEADER,
-            crate::http::process_client_mode(),
-        )
         .send()
         .await;
     let resp = match response {
@@ -1120,9 +1101,6 @@ mod tests {
         authorization: Option<String>,
         user_id: Option<String>,
         email: Option<String>,
-        agent_id: Option<String>,
-        client_identifier: Option<String>,
-        client_version: Option<String>,
     }
     #[derive(Clone)]
     struct LoginConfigServerState {
@@ -1157,9 +1135,6 @@ mod tests {
                             authorization: header_str(&headers, "authorization"),
                             user_id: header_str(&headers, "x-userid"),
                             email: header_str(&headers, "x-email"),
-                            agent_id: header_str(&headers, "x-grow-agent-id"),
-                            client_identifier: header_str(&headers, "x-grow-client-identifier"),
-                            client_version: header_str(&headers, "x-grow-client-version"),
                         });
                         (state.status_code, state.body)
                     },
@@ -1212,18 +1187,6 @@ mod tests {
         let h = seen
             .last()
             .expect("server should have received one request");
-        assert!(
-            h.agent_id.as_deref().is_some_and(|v| !v.is_empty()),
-            "must send x-grow-agent-id (the bucketing key)"
-        );
-        assert!(
-            h.client_identifier.is_some(),
-            "must send x-grow-client-identifier"
-        );
-        assert!(
-            h.client_version.is_some(),
-            "must send x-grow-client-version"
-        );
         assert_eq!(h.authorization, None, "must not send Authorization");
         assert_eq!(h.user_id, None, "must not send x-userid");
         assert_eq!(h.email, None, "must not send x-email");
@@ -1245,9 +1208,8 @@ mod tests {
         let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (base, handle)
     }
-    /// `fetch_settings_blocking` maps each HTTP outcome to the [`SettingsFetch`]
-    /// variant the external-OTEL gate relies on; 401 is the only outcome that
-    /// yields `Rejected`, everything else non-2xx fails closed as `Retry`.
+    /// `fetch_settings_blocking` maps each HTTP outcome to [`SettingsFetch`];
+    /// 401 is the only outcome that yields `Rejected`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn settings_fetch_maps_status_to_outcome() {
         let auth = ProviderAuth::test_default();

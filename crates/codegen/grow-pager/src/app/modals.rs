@@ -777,7 +777,7 @@ impl AgentView {
                                 self.active_modal = None;
                                 InputOutcome::Action(Action::OpenExtensionsModal {
                                     tab,
-                                    trigger: grow_telemetry::events::ExtensionsModalTrigger::CommandPalette,
+                                    trigger: grow_diagnostics::events::ExtensionsModalTrigger::CommandPalette,
                                 })
                             }
                             PaletteCommand::OpenSettings => {

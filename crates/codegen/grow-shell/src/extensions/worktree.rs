@@ -319,7 +319,7 @@ pub async fn handle(
                 req.worktree_type.unwrap_or(worktree_type_default.into()),
             );
             let registry_client = agent.session_registry_client();
-            let agent_id = grow_telemetry::id::agent_id();
+            let agent_id = grow_diagnostics::id::agent_id();
 
             to_response(
                 resume_session_in_worktree(

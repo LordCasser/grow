@@ -691,11 +691,11 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
 
     let c = ctx.clone();
     engine.register_fn(
-        "telemetry_event",
+        "diagnostics_event",
         move |name: &str, fields: rhai::Map| -> ScriptResult<()> {
             let fields = map_to_value(fields)?;
             let name = name.to_string();
-            host_emit(&c, |replayed| WorkflowHostRequest::Telemetry {
+            host_emit(&c, |replayed| WorkflowHostRequest::Diagnostic {
                 name,
                 fields,
                 replayed,

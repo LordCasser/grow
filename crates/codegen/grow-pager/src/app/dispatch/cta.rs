@@ -5,7 +5,7 @@ use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
 use crate::app::app_view::AppView;
 use agent_client_protocol as acp;
-use grow_telemetry::session_ctx::log_event;
+use grow_diagnostics::session_ctx::log_event;
 
 /// Max post-install MCP-list re-probes while waiting for a just-installed
 /// plugin's MCP servers to reach a terminal state. Probes are ~1s apart
@@ -181,7 +181,7 @@ pub(super) fn handle_cta_plugin_install_done(
     let name = name.clone();
     let session_id = agent.session.session_id.clone();
     let error_category = cta_install_error_category(&result);
-    log_event(grow_telemetry::events::PluginCtaInstalled {
+    log_event(grow_diagnostics::events::PluginCtaInstalled {
         plugin_name: name.clone(),
         success: error_category.is_none(),
         error_category,
@@ -362,9 +362,9 @@ pub(super) fn handle_plugin_cta_mcps_loaded(
                 modal.mcps_data = TabDataState::Loaded(servers);
                 agent.agents_modal = None;
                 agent.extensions_modal = Some(modal);
-                log_event(grow_telemetry::events::ExtensionsModalOpened {
-                    trigger: grow_telemetry::events::ExtensionsModalTrigger::AuthHandoff,
-                    tab: ExtensionsTab::McpServers.telemetry_tab(),
+                log_event(grow_diagnostics::events::ExtensionsModalOpened {
+                    trigger: grow_diagnostics::events::ExtensionsModalTrigger::AuthHandoff,
+                    tab: ExtensionsTab::McpServers.diagnostics_tab(),
                 });
                 agent.plugin_cta.phase = CtaPhase::Hidden;
                 if let Some(session_id) = session_id.clone() {
@@ -465,7 +465,7 @@ pub(super) fn handle_plugin_cta_catalog_loaded(
                     if let Some(plugin_name) =
                         cta_impression_plugin_name(&agent.plugin_cta.phase, &new_phase)
                     {
-                        log_event(grow_telemetry::events::PluginCtaImpression {
+                        log_event(grow_diagnostics::events::PluginCtaImpression {
                             plugin_name: plugin_name.to_string(),
                         });
                     }
@@ -522,7 +522,7 @@ pub(super) fn handle_plugin_cta_debounce_expired(
         |name| agent.plugin_cta.dismissed.contains(name),
     );
     if let Some(plugin_name) = cta_impression_plugin_name(&agent.plugin_cta.phase, &new_phase) {
-        log_event(grow_telemetry::events::PluginCtaImpression {
+        log_event(grow_diagnostics::events::PluginCtaImpression {
             plugin_name: plugin_name.to_string(),
         });
     }

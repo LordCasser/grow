@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn unknown_terminal_skip_reason() {
-        // Unknown brand must report a skip_reason so telemetry/feedback
+        // Unknown brand must report a skip_reason so diagnostics/feedback
         // doesn't log "none" alongside emit_osc8=false.
         assert_eq!(
             unknown_ctx().hyperlink_skip_reason(),

@@ -1034,22 +1034,6 @@ fn apply_managed_settings_features_inner(
     };
     let source = RequirementSource::ManagedSettings { path: path.clone() };
     let mut enforced: Vec<EnforcedField> = Vec::new();
-    if features.disable_telemetry == Some(true) {
-        config.features.telemetry = Some(crate::agent::config::TelemetryMode::Disabled);
-        enforced.push(EnforcedField {
-            path: "features.telemetry",
-            value: "false (DISABLE_TELEMETRY)".to_string(),
-            source: source.clone(),
-        });
-    }
-    if features.disable_feedback == Some(true) {
-        config.features.feedback = Some(false);
-        enforced.push(EnforcedField {
-            path: "features.feedback",
-            value: "false (DISABLE_FEEDBACK_COMMAND)".to_string(),
-            source: source.clone(),
-        });
-    }
     enforced
 }
 /// Clamp `AgentConfig` fields per `requirements.toml`. No-op if absent.
@@ -1118,17 +1102,6 @@ fn apply_requirements_inner(
             }
         };
     }
-    use crate::agent::config::TelemetryMode;
-    let req_telemetry_mode = req_str(req, "features", "telemetry")
-        .and_then(TelemetryMode::parse)
-        .or_else(|| req_bool(req, "features", "telemetry").map(TelemetryMode::from));
-    if let Some(mode) = req_telemetry_mode {
-        config.requirements.telemetry.pin(mode, source.clone());
-        if config.features.telemetry != Some(mode) {
-            config.features.telemetry = Some(mode);
-            push("features.telemetry", format!("{mode}"));
-        }
-    }
     macro_rules! pin_requirement_only {
         ($name:ident) => {
             if let Some(val) = req_bool(req, "features", stringify!($name)) {
@@ -1137,7 +1110,6 @@ fn apply_requirements_inner(
             }
         };
     }
-    pin_feature!(feedback);
     pin_feature!(lsp_tools);
     pin_feature!(tool_search);
     pin_feature!(web_fetch);
@@ -1147,13 +1119,6 @@ fn apply_requirements_inner(
     pin_feature!(video_gen);
     pin_feature!(write_file);
     pin_requirement_only!(remote_fetch);
-    if let Some(val) = req_bool(req, "telemetry", "trace_upload") {
-        config.requirements.trace_upload.pin(val, source.clone());
-        if config.telemetry.trace_upload != Some(val) {
-            config.telemetry.trace_upload = Some(val);
-            push("telemetry.trace_upload", format!("{val}"));
-        }
-    }
     enforce_opt!("cli", "auto_update", config.cli.auto_update);
     enforce_opt!("cli", "use_leader", config.cli.use_leader);
     enforce_opt!("cli", "show_tips", config.cli.show_tips);
@@ -1254,52 +1219,8 @@ fn apply_requirements_inner(
     }
     enforce_str!(
         "endpoints",
-        "trace_upload_url",
-        config.endpoints.trace_upload_url
-    );
-    enforce_str!(
-        "endpoints",
-        "feedback_base_url",
-        config.endpoints.feedback_base_url
-    );
-    enforce_str!(
-        "endpoints",
         "deployment_key",
         config.endpoints.deployment_key,
-        redacted
-    );
-    enforce_str!("telemetry", "events_url", config.telemetry.events_url);
-    enforce_str!(
-        "telemetry",
-        "events_api_key",
-        config.telemetry.events_api_key,
-        redacted
-    );
-    // trace_upload enforce_val removed - cloud upload disabled
-    enforce_str!(
-        "endpoints",
-        "trace_upload_bucket",
-        config.endpoints.trace_upload_bucket
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_region",
-        config.endpoints.trace_upload_region
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_credentials_file",
-        config.endpoints.trace_upload_credentials_file
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_endpoint_url",
-        config.endpoints.trace_upload_endpoint_url
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_credentials",
-        config.endpoints.trace_upload_credentials,
         redacted
     );
     if let Some(val) = req.get("features").and_then(|f| f.get("codebase_indexing")) {

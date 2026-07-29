@@ -157,7 +157,7 @@ pub(crate) enum DebugDecision {
     /// cap, which debug mode ignores).
     WouldNudge,
     /// Parsed verdict was `not_stalled_*`. Production would have
-    /// fired classifier telemetry only.
+    /// fired classifier diagnostics only.
     NoNudgeNotStalled,
     /// Parsed verdict was `stalled_*` but below the configured
     /// min-confidence threshold (default 0.7).
@@ -283,7 +283,7 @@ impl SessionActor {
         None
     }
 
-    /// Emit a typed `LazinessClassifierAborted` telemetry event for
+    /// Emit a typed `LazinessClassifierAborted` diagnostics event for
     /// the given reason. Centralized so every abort path goes through
     /// one site and the closed `LAZINESS_ABORT_*` const set stays
     /// authoritative.
@@ -340,7 +340,7 @@ impl SessionActor {
     ///     parse error, verdict).
     ///
     /// The cap (`max_nudges_per_session`) and the production
-    /// telemetry (`LazinessClassifierFired` / `LazinessNudgeFired` /
+    /// diagnostics (`LazinessClassifierFired` / `LazinessNudgeFired` /
     /// `LazinessClassifierAborted`) flow through the same code path
     /// in both modes — debug mode adds logging, it does not bypass
     /// the production decision logic.
@@ -460,7 +460,7 @@ impl SessionActor {
         // where the model was finishing the agent's own thought
         // instead of classifying the transcript as data.
         //
-        // `items_sent` (the count surfaced to telemetry / debug log)
+        // `items_sent` (the count surfaced to diagnostics / debug log)
         // reports the number of SOURCE chat items the classifier saw,
         // not the 2 wire items. That matches the historical meaning
         // and keeps the cost dashboard interpretable.
@@ -495,7 +495,7 @@ impl SessionActor {
         // than catch it.
         let backing_task_count = self.snapshot_backing_task_count_for_debug_log().await;
         // Reuse the same field on `meta` if we already captured it
-        // above so debug-mode telemetry stays consistent with what
+        // above so debug-mode diagnostics stays consistent with what
         // the classifier saw.
         if let Some(m) = meta.as_mut() {
             m.backing_task_count = backing_task_count;
@@ -537,7 +537,7 @@ impl SessionActor {
             }),
         ];
 
-        // Telemetry attribution headers — match `run_memory_flush`
+        // Diagnostic attribution headers — match `run_memory_flush`
         // so backend trace correlation can distinguish "classifier
         // fired in session X" from background traffic.
         let session_id_str = self.session_info.id.to_string();
@@ -557,10 +557,6 @@ impl SessionActor {
             // JSON object — even on reasoning-capable models the
             // default suffices; no need to force it off.
             reasoning_effort: None,
-            x_grok_conv_id: Some(format!("trace-classifier-{}", uuid::Uuid::new_v4())),
-            x_grok_req_id: Some(format!("{LAZINESS_REQ_ID_PREFIX}{}", uuid::Uuid::new_v4())),
-            x_grok_session_id: Some(session_id_str),
-            x_grok_agent_id: Some(grow_telemetry::id::agent_id()),
             ..ConversationRequest::default()
         };
 
@@ -725,7 +721,7 @@ impl SessionActor {
 
         let LazinessDecision::Nudge { evidence, .. } = decision else {
             // No nudge — the `reason` discriminator is observable in
-            // the telemetry pipeline via the `LazinessClassifierFired`
+            // the diagnostics pipeline via the `LazinessClassifierFired`
             // category + the absence of a paired `LazinessNudgeFired`.
             self.events
                 .emit(crate::session::events::Event::LazinessClassifierFired {
@@ -776,7 +772,7 @@ impl SessionActor {
         // overlap (a fresh prompt makes `pending_inputs`
         // non-empty AND bumps `user_input_generation`), so this
         // ordering routes the dashboard-actionable signal to
-        // telemetry instead of dropping it.
+        // diagnostics instead of dropping it.
         //
         // This also guards the case where a model switch can land
         // between the sampler returning and this lock acquire; the

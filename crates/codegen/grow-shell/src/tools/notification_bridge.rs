@@ -54,17 +54,6 @@ pub struct NotificationBridgeConfig {
     pub task_completion_reservations:
         grow_tools::reminders::task_completion::TaskCompletionReservations,
     pub task_wake_suppressed: grow_tools::reminders::task_completion::TaskWakeSuppressed,
-    /// Channel for requesting trace uploads for synthetic auto-wake turns.
-    /// Wrapped in `Arc<Mutex<..>>` because the coordinator creates the channel
-    /// after the notification bridge is spawned — the bridge reads the latest
-    /// value on each notification.
-    pub(crate) synthetic_trace_tx: Arc<
-        std::sync::Mutex<
-            Option<
-                tokio::sync::mpsc::UnboundedSender<crate::save::SyntheticTurnTraceRequest>,
-            >,
-        >,
-    >,
     /// Resolved name of the `BackgroundTaskAction` tool. Written exactly
     /// once after the agent's toolset is finalized; read many times
     /// thereafter from the notification bridge and the session actor's
@@ -409,12 +398,7 @@ async fn handle_notification(
                 let message = grow_tools::reminders::wrap_reminder(&body);
                 let prompt_id = format!("task-completed-{task_id}");
                 let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(message))];
-                let synthetic_trace_tx = config
-                    .synthetic_trace_tx
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                let (respond_to, completion_rx) = tokio::sync::oneshot::channel();
+                let (respond_to, _completion_rx) = tokio::sync::oneshot::channel();
                 let (admission_tx, admission_rx) = tokio::sync::oneshot::channel();
                 tracing::info!(
                     task_id = %task_id,
@@ -428,11 +412,9 @@ async fn handle_notification(
                         prompt_id: prompt_id.clone(),
                         prompt_blocks,
                         prompt_mode: crate::session::plan_mode::PromptMode::Agent,
-                        artifact_upload_ctx: None,
                         client_identifier: None,
                         screen_mode: None,
                         verbatim: true,
-                        traceparent: xai_file_utils::trace_context::current_traceparent(),
                         json_schema: None,
                         send_now: false,
                         tool_overrides_update: None,
@@ -476,7 +458,7 @@ async fn handle_notification(
                     false
                 };
                 will_wake = admitted;
-                grow_telemetry::unified_log::info(
+                grow_diagnostics::unified_log::info(
                     "shell.task_wake.bridge_admission",
                     Some(config.session_id.0.as_ref()),
                     Some(serde_json::json!({
@@ -495,38 +477,6 @@ async fn handle_notification(
                                 .send(SessionCommand::DropMonitorNotifications {
                                     task_id: task_id.clone(),
                                 });
-                    }
-                    if let Some(trace_tx) = synthetic_trace_tx {
-                        let (before_copy_tx, before_session_copy_rx) =
-                            tokio::sync::oneshot::channel();
-                        let copy_requested = config
-                            .session_cmd_tx
-                            .send(SessionCommand::CopyFile {
-                                respond_to: before_copy_tx,
-                            })
-                            .is_ok();
-                        if copy_requested {
-                            tracing::info!(
-                                task_id = %task_id,
-                                "auto-wake: sending synthetic turn trace request"
-                            );
-                            let _ = trace_tx.send(crate::save::SyntheticTurnTraceRequest {
-                                session_id: config.session_id.clone(),
-                                prompt_id,
-                                completion_rx,
-                                before_session_copy_rx,
-                            });
-                        } else {
-                            tracing::debug!(
-                                task_id = %task_id,
-                                "auto-wake: session snapshot request failed, skipping trace request"
-                            );
-                        }
-                    } else {
-                        tracing::debug!(
-                            task_id = %task_id,
-                            "auto-wake: no synthetic trace consumer, skipping trace request"
-                        );
                     }
                 }
             } else {
@@ -906,7 +856,6 @@ mod tests {
                 grow_tools::reminders::task_completion::TaskCompletionReservations::default(),
             task_wake_suppressed:
                 grow_tools::reminders::task_completion::TaskWakeSuppressed::default(),
-            synthetic_trace_tx: Arc::new(std::sync::Mutex::new(None)),
             task_output_tool_name: Arc::new(std::sync::OnceLock::new()),
             read_tool_name: Arc::new(std::sync::OnceLock::new()),
             auto_wake_enabled: true,
@@ -1102,11 +1051,6 @@ mod tests {
             .task_output_tool_name
             .set(Some("get_command_or_subagent_output".to_string()))
             .expect("slot is fresh in this test fixture");
-        let (trace_tx, mut trace_rx) = mpsc::unbounded_channel();
-        *config
-            .synthetic_trace_tx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(trace_tx);
         let mut offsets = HashMap::new();
         handle_notification_with_admission(
             &config,
@@ -1120,25 +1064,12 @@ mod tests {
             cmd_rx.recv().await,
             Some(SessionCommand::Prompt { .. })
         ));
-        match cmd_rx.recv().await {
-            Some(SessionCommand::CopyFile { respond_to }) => drop(respond_to),
-            _ => panic!("trace copy must follow accepted prompt admission"),
-        }
         assert_eq!(
             task_completed_will_wake(&mut gateway_rx),
             Some(true),
             "an auto-woken completion must stamp will_wake: true"
         );
-        assert!(
-            trace_rx.try_recv().is_ok(),
-            "accepted admission must request a synthetic-turn trace"
-        );
         let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
-        let (trace_tx, mut trace_rx) = mpsc::unbounded_channel();
-        *config
-            .synthetic_trace_tx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(trace_tx);
         let mut offsets = HashMap::new();
         handle_notification_with_admission(
             &config,
@@ -1156,10 +1087,6 @@ mod tests {
         assert!(
             config.task_completion_reservations.contains("bg-declined"),
             "the actor owns reservation release after queuing the deferred fallback"
-        );
-        assert!(
-            trace_rx.try_recv().is_err(),
-            "declined admission must not request a synthetic-turn trace"
         );
         assert!(matches!(
             cmd_rx.try_recv(),

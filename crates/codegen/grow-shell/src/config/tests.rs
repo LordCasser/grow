@@ -2856,8 +2856,8 @@ fn add_dismissed_plugin_cta_preserves_other_config() {
 fn config_layers_user_overrides_managed() {
     let layers = ConfigLayers {
         system_managed: toml::Value::Table(Default::default()),
-        managed: toml::from_str("[features]\ntelemetry = false\n").unwrap(),
-        user: toml::from_str("[features]\ntelemetry = true\n").unwrap(),
+        managed: toml::from_str("[features]\nlsp_tools = false\n").unwrap(),
+        user: toml::from_str("[features]\nlsp_tools = true\n").unwrap(),
         user_requirements: None,
         system_requirements: None,
         mdm_requirements: None,
@@ -2867,10 +2867,7 @@ fn config_layers_user_overrides_managed() {
             &layers.effective_config_disk_only(),
         )
         .unwrap();
-    assert_eq!(
-            Some(crate::agent::config::TelemetryMode::Enabled),
-            cfg.features.telemetry
-        );
+    assert_eq!(Some(true), cfg.features.lsp_tools);
 }
 /// A provider in a trusted disk layer resolves through the real
 /// `ConfigLayers` → `effective_config_disk_only` → parse seam that the
@@ -2923,17 +2920,15 @@ fn model_provider_honored_only_from_trusted_disk_layers() {
 }
 /// REGRESSION: the real enterprise two-file merge —
 /// `managed_config.toml` (proxy + BYO model host) layered with
-/// `requirements.toml` (deployment key + S3 trace upload) via the actual
+/// `requirements.toml` (deployment key) via the actual
 /// `ConfigLayers::effective_config()` path — must resolve the deployment-config
 /// fetch to cli-chat-proxy, never the model host, and must preserve the
-/// customer's S3 trace-upload endpoint.
 #[test]
 #[serial_test::serial]
 fn enterprise_two_file_merge_routes_deployment_key_to_proxy() {
     for k in [
         "GROW_MANAGED_CONFIG_URL",
         "GROW_CLI_CHAT_PROXY_BASE_URL",
-        "GROW_TRACE_UPLOAD_ENDPOINT_URL",
     ] {
         unsafe { std::env::remove_var(k) };
     }
@@ -2955,15 +2950,9 @@ default = "grow-4.5"
         .unwrap();
     let requirements = toml::from_str(
             r#"
-[features]
-feedback = true
-telemetry = false
-
 [endpoints]
 deployment_key = "xai-token-ENTERPRISE"
 inference_base_url = "https://inference.acme-corp.example/xai/v1"
-trace_upload_bucket = "s3://acme-trace"
-trace_upload_endpoint_url = "https://s3.acme-corp.example"
 "#,
         )
         .unwrap();
@@ -2989,93 +2978,14 @@ trace_upload_endpoint_url = "https://s3.acme-corp.example"
                 .resolve_managed_config_url()
                 .contains("acme-corp")
         );
-    assert_eq!(
-            cfg.endpoints.trace_upload_endpoint_url.as_deref(),
-            Some("https://s3.acme-corp.example")
-        );
     assert!(cfg.endpoints.deployment_key.is_some());
-}
-/// `[feedback.user]` in the managed layer must survive the layer
-/// merge into the resolved `Config` (its presence is the opt-in).
-#[test]
-fn managed_config_feedback_user_reaches_resolved_config() {
-    let managed = toml::from_str(
-            r#"
-[endpoints]
-cli_chat_proxy_base_url = "https://service.example.com/v1"
-
-[feedback.user]
-name = ["os_user"]
-email = ["git_email", "team@example.com"]
-email_domain = "example.com"
-"#,
-        )
-        .unwrap();
-    let layers = ConfigLayers {
-        managed,
-        ..Default::default()
-    };
-    let cfg = crate::agent::config::Config::new_from_toml_cfg(
-            &layers.effective_config_disk_only(),
-        )
-        .unwrap();
-    let user = cfg
-        .feedback
-        .user
-        .expect("[feedback.user] from managed_config.toml must reach Config");
-    assert_eq!(user.name, vec!["os_user"]);
-    assert_eq!(user.email, vec!["git_email", "team@example.com"]);
-    assert_eq!(user.email_domain.as_deref(), Some("example.com"));
-    let layers = ConfigLayers::default();
-    let cfg = crate::agent::config::Config::new_from_toml_cfg(
-            &layers.effective_config_disk_only(),
-        )
-        .unwrap();
-    assert_eq!(cfg.feedback.user, None);
-}
-/// RCE guard: a project `.grow/config.toml` must never source
-/// `[feedback.user]` (its `command` runs `sh -c`).
-#[test]
-#[serial_test::serial]
-fn project_config_never_sources_feedback_user() {
-    use grow_test_support::EnvGuard;
-    let home = tempfile::tempdir().unwrap();
-    let _env = EnvGuard::set("GROW_HOME", home.path());
-    let _flag = EnvGuard::unset("GROW_FOLDER_TRUST");
-    let _sim = simulate_release_build();
-    let repo = tempfile::tempdir().unwrap();
-    git2::Repository::init(repo.path()).unwrap();
-    let grow = repo.path().join(".grow");
-    std::fs::create_dir_all(&grow).unwrap();
-    std::fs::write(
-            grow.join("config.toml"),
-            "[plugins]\npaths = [\"./p\"]\n\n[feedback.user]\ncommand = \"/evil\"\n",
-        )
-        .unwrap();
-    let cwd = repo.path();
-    crate::agent::folder_trust::grant_folder_trust(cwd);
-    assert!(
-            resolve_effective_plugins_config(cwd)
-                .paths
-                .iter()
-                .any(|p| p == "./p"),
-            "trusted project [plugins].paths must merge (proves the project config is read)"
-        );
-    let cfg = crate::agent::config::Config::new_from_toml_cfg(
-            &load_effective_config().unwrap(),
-        )
-        .unwrap();
-    assert_eq!(
-            cfg.feedback.user, None,
-            "a project [feedback.user] must never reach Config (would be sh -c RCE)"
-        );
 }
 #[test]
 fn config_layers_origins_tracks_source() {
     use crate::agent::config::ConfigSource;
     let layers = ConfigLayers {
         system_managed: toml::Value::Table(Default::default()),
-        managed: toml::from_str("[features]\ntelemetry = false\n").unwrap(),
+        managed: toml::from_str("[features]\nlsp_tools = false\n").unwrap(),
         user: toml::from_str("[ui]\ntheme = \"dark\"\n").unwrap(),
         user_requirements: None,
         system_requirements: None,
@@ -3083,7 +2993,7 @@ fn config_layers_origins_tracks_source() {
         ..Default::default()
     };
     let origins = config_origins(&layers);
-    assert_eq!(origins["features.telemetry"], ConfigSource::ManagedConfig);
+    assert_eq!(origins["features.lsp_tools"], ConfigSource::ManagedConfig);
     assert_eq!(origins["ui.theme"], ConfigSource::UserConfig);
 }
 #[test]
@@ -3091,22 +3001,22 @@ fn config_layers_origins_user_wins() {
     use crate::agent::config::ConfigSource;
     let layers = ConfigLayers {
         system_managed: toml::Value::Table(Default::default()),
-        managed: toml::from_str("[features]\ntelemetry = false\n").unwrap(),
-        user: toml::from_str("[features]\ntelemetry = true\n").unwrap(),
+        managed: toml::from_str("[features]\nlsp_tools = false\n").unwrap(),
+        user: toml::from_str("[features]\nlsp_tools = true\n").unwrap(),
         user_requirements: None,
         system_requirements: None,
         mdm_requirements: None,
         ..Default::default()
     };
     let origins = config_origins(&layers);
-    assert_eq!(origins["features.telemetry"], ConfigSource::UserConfig);
+    assert_eq!(origins["features.lsp_tools"], ConfigSource::UserConfig);
 }
 #[test]
 fn config_layers_system_managed_lowest_priority() {
     let layers = ConfigLayers {
-        system_managed: toml::from_str("[features]\ntelemetry = false\n").unwrap(),
+        system_managed: toml::from_str("[features]\nlsp_tools = false\n").unwrap(),
         managed: toml::Value::Table(Default::default()),
-        user: toml::from_str("[features]\ntelemetry = true\n").unwrap(),
+        user: toml::from_str("[features]\nlsp_tools = true\n").unwrap(),
         user_requirements: None,
         system_requirements: None,
         mdm_requirements: None,
@@ -3116,32 +3026,24 @@ fn config_layers_system_managed_lowest_priority() {
             &layers.effective_config_disk_only(),
         )
         .unwrap();
-    assert_eq!(
-            Some(crate::agent::config::TelemetryMode::Enabled),
-            cfg.features.telemetry
-        );
+    assert_eq!(Some(true), cfg.features.lsp_tools);
 }
 #[test]
 fn apply_requirements_value_overrides_user_settings() {
     let raw_config: toml::Value = toml::from_str(
-            "[cli]\nauto_update = true\nchannel = \"beta\"\n\n[features]\ntelemetry = true\nfeedback = true\nlsp_tools = true\nweb_fetch = true\nwrite_file = true\n\n[telemetry]\ntrace_upload = true\n\n[ui]\nyolo = true\n\n[models]\ndefault = \"user-model\"\nweb_search = \"user-ws-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://user-proxy.example/v1\"\ninference_base_url = \"https://user-api.example/v1\"\nmodels_base_url = \"https://user-models.example/v1\"\nmodels_list_url = \"https://user-models.example/v1/models\"\n",
+            "[cli]\nauto_update = true\nchannel = \"beta\"\n\n[features]\nlsp_tools = true\nweb_fetch = true\nwrite_file = true\n\n[ui]\nyolo = true\n\n[models]\ndefault = \"user-model\"\nweb_search = \"user-ws-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://user-proxy.example/v1\"\ninference_base_url = \"https://user-api.example/v1\"\nmodels_base_url = \"https://user-models.example/v1\"\nmodels_list_url = \"https://user-models.example/v1/models\"\n",
         )
         .unwrap();
     let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw_config).unwrap();
     cfg.default_yolo_mode = true;
     let requirements: toml::Value = toml::from_str(
-            "[cli]\nauto_update = false\nchannel = \"stable\"\n\n[features]\ntelemetry = false\nfeedback = false\nlsp_tools = false\nweb_fetch = false\nwrite_file = false\nremote_fetch = false\n\n[telemetry]\ntrace_upload = false\n\n[ui]\nyolo = false\n\n[models]\ndefault = \"managed-model\"\nweb_search = \"managed-ws-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://managed-proxy.example/v1\"\ninference_base_url = \"https://managed-api.example/v1\"\nmodels_base_url = \"https://managed-models.example/v1\"\nmodels_list_url = \"https://managed-models.example/v1/models\"\ndeployment_key = \"enterprise-deploy-key-should-not-log\"\ntrace_upload_endpoint_url = \"https://s3.custom.example.com\"\ntrace_upload_credentials = '{\"aws_access_key_id\":\"AKTEST\",\"aws_secret_access_key\":\"secret\"}'\n",
+            "[cli]\nauto_update = false\nchannel = \"stable\"\n\n[features]\nlsp_tools = false\nweb_fetch = false\nwrite_file = false\nremote_fetch = false\n\n[ui]\nyolo = false\n\n[models]\ndefault = \"managed-model\"\nweb_search = \"managed-ws-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://managed-proxy.example/v1\"\ninference_base_url = \"https://managed-api.example/v1\"\nmodels_base_url = \"https://managed-models.example/v1\"\nmodels_list_url = \"https://managed-models.example/v1/models\"\ndeployment_key = \"enterprise-deploy-key-should-not-log\"\n",
         )
         .unwrap();
     let source = RequirementSource::Requirements {
         path: std::path::PathBuf::from("/test/requirements.toml"),
     };
     let enforced = apply_requirements_inner(&mut cfg, &requirements, &source);
-    assert_eq!(
-            Some(crate::agent::config::TelemetryMode::Disabled),
-            cfg.features.telemetry
-        );
-    assert_eq!(Some(false), cfg.features.feedback);
     assert_eq!(Some(false), cfg.features.lsp_tools);
     assert_eq!(Some(false), cfg.features.web_fetch);
     assert_eq!(Some(false), cfg.features.write_file);
@@ -3151,7 +3053,6 @@ fn apply_requirements_value_overrides_user_settings() {
                 .iter()
                 .any(|e| e.path == "features.remote_fetch" && e.value == "false")
         );
-    assert_eq!(Some(false), cfg.telemetry.trace_upload);
     assert_eq!(Some(false), cfg.cli.auto_update);
     assert!(!cfg.ui.yolo);
     assert!(!cfg.default_yolo_mode);
@@ -3180,19 +3081,6 @@ fn apply_requirements_value_overrides_user_settings() {
                 .any(|e| e.path == "ui.yolo" && e.value == "--yolo blocked")
         );
     assert_eq!(
-            Some("https://s3.custom.example.com"),
-            cfg.endpoints.trace_upload_endpoint_url.as_deref()
-        );
-    assert!(
-            cfg.endpoints.trace_upload_credentials.is_some(),
-            "trace_upload_credentials should be set"
-        );
-    assert!(
-            enforced
-                .iter()
-                .any(|e| e.path == "endpoints.trace_upload_credentials" && e.value == "[redacted]")
-        );
-    assert_eq!(
             Some("enterprise-deploy-key-should-not-log"),
             cfg.endpoints.deployment_key.as_deref()
         );
@@ -3208,9 +3096,6 @@ fn apply_requirements_value_overrides_user_settings() {
                 .all(|e| e.path != "endpoints.deployment_key"
                     || e.value != "enterprise-deploy-key-should-not-log"),
             "raw deployment_key must not appear in enforced audit entries"
-        );
-    assert!(
-            true // mixpanel fields removed from TelemetryConfig
         );
 }
 /// Strict precedence: requirement always wins (covers from-None and
@@ -3269,33 +3154,6 @@ fn apply_requirements_default_beats_campaign_default() {
         );
 }
 #[test]
-fn apply_requirements_telemetry_string_form_pins_known_modes_only() {
-    use crate::agent::config::TelemetryMode;
-    let source = RequirementSource::Requirements {
-        path: std::path::PathBuf::from("/test/requirements.toml"),
-    };
-    let apply = |toml_str: &str| {
-        let raw = toml::Value::Table(toml::map::Map::new());
-        let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
-        let req: toml::Value = toml::from_str(toml_str).unwrap();
-        let enforced = apply_requirements_inner(&mut cfg, &req, &source);
-        (cfg, enforced)
-    };
-    let (cfg, enforced) = apply("[features]\ntelemetry = \"session_metrics\"\n");
-    assert_eq!(
-            cfg.requirements.telemetry.pinned(),
-            Some(TelemetryMode::SessionMetrics),
-        );
-    assert!(
-            enforced
-                .iter()
-                .any(|e| e.path == "features.telemetry" && e.value == "session_metrics"),
-        );
-    let (cfg, enforced) = apply("[features]\ntelemetry = \"garbage\"\n");
-    assert_eq!(cfg.requirements.telemetry.pinned(), None);
-    assert!(!enforced.iter().any(|e| e.path == "features.telemetry"));
-}
-#[test]
 fn validate_hooks_path_rejects_relative_path() {
     let result = validate_hooks_path("relative/path/hooks");
     assert!(result.is_err());
@@ -3334,70 +3192,24 @@ fn validate_hooks_path_accepts_grow_hooks_subdir() {
     let result = validate_hooks_path(valid_path.to_str().unwrap());
     assert!(result.is_ok(), "path under ~/.grow/ should be accepted");
 }
-#[test]
-fn managed_settings_disables_features_and_requirements_overrides() {
-    use grow_workspace::permission::resolution::ManagedSettingsFeatures;
-    let mut cfg = crate::agent::config::Config::default();
-    cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
-    cfg.features.feedback = Some(true);
-    cfg.default_yolo_mode = true;
-    let features = ManagedSettingsFeatures {
-        disable_telemetry: Some(true),
-        disable_feedback: Some(true),
-        disable_yolo: Some(true),
-        source_path: Some(std::path::PathBuf::from("/etc/managed-settings.json")),
-    };
-    let enforced = apply_managed_settings_features_inner(&mut cfg, &features);
-    assert_eq!(
-            cfg.features.telemetry,
-            Some(crate::agent::config::TelemetryMode::Disabled)
-        );
-    assert_eq!(cfg.features.feedback, Some(false));
-    assert!(cfg.default_yolo_mode);
-    assert_eq!(enforced.len(), 2);
-    assert!(!enforced.iter().any(|e| e.path == "ui.yolo"));
-    let req: toml::Value = toml::from_str(
-            "[features]\ntelemetry = true\nfeedback = true\n\n[ui]\nyolo = true\n",
-        )
-        .unwrap();
-    let source = RequirementSource::Requirements {
-        path: std::path::PathBuf::from("/test/requirements.toml"),
-    };
-    apply_requirements_inner(&mut cfg, &req, &source);
-    assert_eq!(
-            cfg.features.telemetry,
-            Some(crate::agent::config::TelemetryMode::Enabled)
-        );
-    assert_eq!(cfg.features.feedback, Some(true));
-    assert!(cfg.ui.yolo);
-}
 /// REGRESSION: external managed-settings.json is advisory, not authoritative.
 /// disableBypassPermissionsMode (-> features.disable_yolo) must NOT clamp the user's own grow yolo.
 #[test]
 fn managed_settings_does_not_override_user_yolo() {
     use grow_workspace::permission::resolution::ManagedSettingsFeatures;
     let mut cfg = crate::agent::config::Config::default();
-    cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
-    cfg.features.feedback = Some(true);
     cfg.ui.yolo = true;
     cfg.default_yolo_mode = true;
     let features = ManagedSettingsFeatures {
-        disable_telemetry: Some(true),
-        disable_feedback: Some(true),
         disable_yolo: Some(true),
         source_path: Some(
             std::path::PathBuf::from("/etc/claude-code/managed-settings.json"),
         ),
     };
     let enforced = apply_managed_settings_features_inner(&mut cfg, &features);
-    assert_eq!(
-            cfg.features.telemetry,
-            Some(crate::agent::config::TelemetryMode::Disabled)
-        );
-    assert_eq!(cfg.features.feedback, Some(false));
     assert!(cfg.ui.yolo);
     assert!(cfg.default_yolo_mode);
-    assert_eq!(enforced.len(), 2);
+    assert!(enforced.is_empty());
     assert!(!enforced.iter().any(|e| e.path == "ui.yolo"));
 }
 /// Simulate a release-stamped build so the folder-trust gate engages (a

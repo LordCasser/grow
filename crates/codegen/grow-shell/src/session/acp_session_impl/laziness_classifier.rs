@@ -50,7 +50,7 @@ pub(crate) const LAZINESS_MAX_OUTPUT_TOKENS: u32 = 150;
 /// `SamplerHandle::submit_and_collect` RAII guard. Chosen as a coarse
 /// upper bound — the prompt is small and `reasoning_effort: None`, so
 /// in practice the call completes well under 10s; the budget exists
-/// to surface stuck calls in telemetry rather than silently hang.
+/// to surface stuck calls in diagnostics rather than silently hang.
 /// User input arriving during the call is observed within ~100ms via
 /// `LAZINESS_ABORT_POLL_INTERVAL_MS` and short-circuits this cap, so
 /// raising it does not delay cancellation on real activity.
@@ -110,18 +110,9 @@ impl LazinessAbortReason {
 /// Prompt-structure mitigations against motivated reasoning:
 /// "Do not roleplay", JSON-only, no chain-of-thought,
 /// no role context, transcript framed as third-party data.
-/// Prefix on `x_grok_req_id` for laziness-classifier sampler calls.
-/// Centralised here so the production producer
-/// (`maybe_fire_laziness_check`) AND the offline replay harness
-/// (`crate::trace_classifier::build_classifier_request`) share a
-/// single source of truth — a drift would otherwise pass the F17
-/// fidelity test by re-typing the literal in both sites.
-pub(crate) const LAZINESS_REQ_ID_PREFIX: &str = "xai-laziness-";
-
 /// Preamble on the User-item text of the classifier request. The
 /// User content is
 /// `format!("{LAZINESS_USER_PREAMBLE}=== BEGIN TRANSCRIPT ===\n{runtime_state}{transcript}=== END TRANSCRIPT ===\n")`.
-/// See [`LAZINESS_REQ_ID_PREFIX`] for the same shared-truth rationale.
 pub(crate) const LAZINESS_USER_PREAMBLE: &str =
     "Classify the following transcript. Output JSON only.\n\n";
 
@@ -766,7 +757,7 @@ pub(crate) fn parse_classifier_output(raw: &str) -> Result<ClassifierOutput, Cla
 /// only `cfg.enabled` + idle conditions to decide whether to *invoke*
 /// the classifier. The cap check lives **here**, so observation-only
 /// mode (`enabled = true, max_nudges_per_session = 0`) genuinely fires
-/// the classifier and emits `LazinessClassifierFired` telemetry, while
+/// the classifier and emits `LazinessClassifierFired` diagnostics, while
 /// this function returns `NoNudge { reason: CapExhausted }` and the
 /// caller suppresses the `LazinessNudgeFired` event.
 ///

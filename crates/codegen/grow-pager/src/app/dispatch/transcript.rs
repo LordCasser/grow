@@ -8,7 +8,7 @@ use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::{BlockContent, RenderBlock};
 use crate::scrollback::blocks::ToolCallBlock;
 use agent_client_protocol as acp;
-use grow_telemetry::session_ctx::log_event;
+use grow_diagnostics::session_ctx::log_event;
 
 /// Copy the selected block's content to the system clipboard.
 ///
@@ -450,7 +450,7 @@ pub(super) fn push_marketplace_fetch(
 pub(super) fn dispatch_open_extensions_modal(
     app: &mut AppView,
     tab: crate::views::extensions_modal::ExtensionsTab,
-    trigger: grow_telemetry::events::ExtensionsModalTrigger,
+    trigger: grow_diagnostics::events::ExtensionsModalTrigger,
 ) -> Vec<Effect> {
     use crate::views::extensions_modal::ExtensionsModalState;
 
@@ -465,9 +465,9 @@ pub(super) fn dispatch_open_extensions_modal(
     agent.agents_modal = None;
     let modal = ExtensionsModalState::new(tab);
     agent.extensions_modal = Some(modal);
-    log_event(grow_telemetry::events::ExtensionsModalOpened {
+    log_event(grow_diagnostics::events::ExtensionsModalOpened {
         trigger,
-        tab: tab.telemetry_tab(),
+        tab: tab.diagnostics_tab(),
     });
 
     let Some(session_id) = agent.session.session_id.clone() else {
@@ -557,7 +557,7 @@ pub(super) fn dispatch_dump_input_log(app: &mut AppView) -> Vec<Effect> {
     let time_span_ms = agent.input_log.time_span_ms();
     let entries = agent.input_log.snapshot_entries();
     let entry_count = entries.len();
-    let terminal = crate::terminal::terminal_context().telemetry_snapshot();
+    let terminal = crate::terminal::terminal_context().diagnostics_snapshot();
     let session_id = agent.session.session_id.as_ref().map(|s| s.0.to_string());
     let pager_version = crate::client_identity::PAGER_CLIENT_VERSION;
 

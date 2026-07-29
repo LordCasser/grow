@@ -1,8 +1,6 @@
 mod external_refresher;
 mod oidc_refresher;
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::auth::manager::AuthManager;
@@ -11,11 +9,6 @@ use crate::auth::model::ProviderAuth;
 
 use external_refresher::ExternalBinaryRefresher;
 pub(crate) use oidc_refresher::OidcRefresher;
-
-/// Callback for diagnostic log upload on auth refresh failure.
-/// Args: `(log_bytes, auth_token_suffix, user_id)` — path key is user id, never email.
-pub(crate) type DiagnosticUploader =
-    Arc<dyn Fn(Vec<u8>, String, String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Read-only view of `AuthManager` for refreshers. Enforces the
 /// no-mutation contract on *credential* state at the type level: refreshers
@@ -28,7 +21,7 @@ pub(crate) trait AuthSnapshot: Send + Sync {
     fn expired_auth(&self) -> Option<ProviderAuth>;
     /// Re-read auth.json from disk for the configured scope. Read-only w.r.t.
     /// credentials, but may advance disk-observation state and emit transition
-    /// telemetry (not credential mutation).
+    /// diagnostics (not credential mutation).
     fn read_disk_auth(&self) -> Option<ProviderAuth>;
     /// Whether the in-memory bearer is expired.
     fn is_expired(&self) -> bool;
@@ -150,7 +143,6 @@ pub(crate) trait TokenRefresher: Send + Sync {
 pub(crate) fn build_refresher(
     auth_manager: Arc<AuthManager>,
     auth_provider_command: Option<String>,
-    diagnostic_uploader: Option<DiagnosticUploader>,
 ) -> Arc<dyn TokenRefresher> {
     match auth_provider_command {
         Some(cmd) => {
@@ -159,11 +151,7 @@ pub(crate) fn build_refresher(
         }
         None => {
             let snapshot: Arc<dyn AuthSnapshot> = auth_manager;
-            let refresher = OidcRefresher::new(snapshot);
-            match diagnostic_uploader {
-                Some(uploader) => Arc::new(refresher.with_diagnostic_upload(uploader)),
-                None => Arc::new(refresher),
-            }
+            Arc::new(OidcRefresher::new(snapshot))
         }
     }
 }

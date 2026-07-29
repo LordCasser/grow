@@ -484,7 +484,7 @@ fn is_data_collection_disabled_matrix() {
 
 /// Fail-direction contract of the two `AuthManager` collection predicates:
 /// `is_data_collection_disabled` fails open on missing credentials (legacy
-/// semantics shared by telemetry/sync gates), `allows_data_collection` fails
+/// semantics shared by diagnostics/sync gates), `allows_data_collection` fails
 /// closed (nothing may leave the machine while privacy state is unknown,
 /// e.g. after a mid-session `/logout`).
 #[test]
@@ -1080,8 +1080,8 @@ async fn refresh_chain_surfaces_transient_failure() {
 /// expired API key is usable. Pre-fix, `current()` filtered with
 /// `!is_token_expired()` (returning None) while the `auth()`
 /// `TokenType::ApiKey` branch cloned the stale entry, so the UI saw
-/// "logged out" while downstream consumers (trace upload, MCP,
-/// embeddings) sent the stale key and hit 401.
+/// "logged out" while downstream consumers (MCP and embeddings) sent the
+/// stale key and hit 401.
 #[tokio::test]
 async fn auth_returns_expired_api_key_consistently_with_current() {
     let dir = tempfile::tempdir().unwrap();
@@ -2591,7 +2591,7 @@ async fn enrichment_aborts_when_disk_user_changes_mid_flight() {
 }
 
 /// Regression: on initial Team-principal login, the OIDC flow
-/// stamps `auth.user_id = team_id` as a placeholder so telemetry
+/// stamps `auth.user_id = team_id` as a placeholder so diagnostics
 /// can distinguish teams immediately (see `extract_user_info` in
 /// `oidc.rs`). The `/user` enrichment then returns the *real*
 /// user_id and must overlay it onto disk -- this is the entire
@@ -4365,7 +4365,7 @@ fn sleep_ack_hold_releases_when_in_flight_refresh_drains() {
 
 /// A refresh that never drains must not pin the machine awake: the hold is
 /// bounded and returns at the deadline, leaving the refresh running (never
-/// aborted) for the existing straddle telemetry to catch.
+/// aborted) for the existing straddle diagnostics to catch.
 #[test]
 fn sleep_ack_hold_times_out_when_refresh_never_drains() {
     let dir = tempfile::tempdir().unwrap();
@@ -4397,7 +4397,7 @@ fn sleep_ack_hold_times_out_when_refresh_never_drains() {
 fn manual_auth_reason_maps_terminal_and_skips_non_forcing() {
     use crate::auth::error::RefreshTokenFailedReason as Reason;
     use crate::auth::recovery::manual_auth_reason;
-    use grow_telemetry::events::ManualAuthReason as R;
+    use grow_diagnostics::events::ManualAuthReason as R;
 
     let permanent = |reason: Reason| manual_auth_reason(&AuthError::permanent(reason));
     // A revoked refresh token forces a re-login -> counts.
@@ -4468,13 +4468,13 @@ fn relay_should_cancel_gives_up_only_on_terminal_failures() {
     assert!(!relay_should_cancel(&AuthError::NotLoggedIn));
 }
 
-// Async so `record` has a runtime for its telemetry `tokio::spawn`: another
-// test in the same process can enable the global telemetry client, which would
+// Async so `record` has a runtime for its diagnostics `tokio::spawn`: another
+// test in the same process can enable the global diagnostics client, which would
 // otherwise make this emit path panic under a plain `#[test]`.
 #[tokio::test]
 async fn manual_auth_capture_attributes_and_recorder_debounces() {
     use crate::auth::recovery::{ManualAuthTracker, RejectedAuth};
-    use grow_telemetry::events::{AuthTokenKind, ManualAuthSurface};
+    use grow_diagnostics::events::{AuthTokenKind, ManualAuthSurface};
 
     let auth = ProviderAuth {
         key: "dead-token".into(),
@@ -4561,7 +4561,9 @@ async fn manual_auth_emits_only_for_user_facing_source() {
         .unwrap_err();
     assert!(matches!(err, AuthError::ServerRejectedNoRecovery));
     // Assert the emitted payload, not just that something fired.
-    use grow_telemetry::events::{AuthTokenKind, ManualAuth, ManualAuthReason, ManualAuthSurface};
+    use grow_diagnostics::events::{
+        AuthTokenKind, ManualAuth, ManualAuthReason, ManualAuthSurface,
+    };
     assert_eq!(
         turn.manual_auth_last_emit(),
         Some(ManualAuth {

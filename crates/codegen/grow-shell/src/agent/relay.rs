@@ -190,7 +190,7 @@ async fn attempt_auth_recovery(
                 timeout_secs = AUTH_RECOVERY_TIMEOUT_SECS,
                 "auth recovery: relay {context}, refresh timed out"
             );
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "auth recovery: relay refresh timed out",
                 None,
                 Some(serde_json::json!({
@@ -204,7 +204,7 @@ async fn attempt_auth_recovery(
     match recovered {
         Ok(new_auth) if new_auth.key == config.auth.key => {
             info!("auth recovery: relay {context}, token unchanged, backing off");
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "auth recovery: relay token unchanged, backing off",
                 None,
                 Some(serde_json::json!({
@@ -216,7 +216,7 @@ async fn attempt_auth_recovery(
         }
         Ok(new_auth) => {
             info!("auth recovery: relay {context}, recovered, reconnecting");
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "auth recovery: relay recovered",
                 None,
                 Some(serde_json::json!({
@@ -229,7 +229,7 @@ async fn attempt_auth_recovery(
         }
         Err(e) if crate::auth::recovery::relay_should_cancel(&e) => {
             teprintln!("{e}");
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "auth recovery: relay giving up (terminal)",
                 None,
                 Some(serde_json::json!({ "context": context, "error": format!("{e}") })),
@@ -239,7 +239,7 @@ async fn attempt_auth_recovery(
         }
         Err(e) => {
             warn!(error = %e, "auth recovery: relay {context}, refresh failed");
-            grow_telemetry::unified_log::debug(
+            grow_diagnostics::unified_log::debug(
                 "auth recovery: relay refresh failed",
                 None,
                 Some(serde_json::json!({ "context": context, "error": format!("{e}") })),
@@ -498,7 +498,7 @@ where
                             timeout_secs = liveness.as_secs(),
                             "no WS traffic within liveness window, treating connection as dead"
                         );
-                        grow_telemetry::unified_log::warn(
+                        grow_diagnostics::unified_log::warn(
                             "relay: read liveness timeout, reconnecting",
                             None,
                             Some(serde_json::json!({

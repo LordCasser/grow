@@ -1,6 +1,6 @@
 //! `SessionMemory` — memory subsystem state for the session actor.
 //!
-//! Groups storage, flush config, injection state, and telemetry counters
+//! Groups storage, flush config, injection state, and diagnostics counters
 //! that were previously scattered across 15 fields on `SessionActor`.
 
 use std::cell::RefCell;
@@ -182,7 +182,7 @@ impl SessionMemory {
                     Ok(n) => total_removed += n,
                     Err(e) => {
                         tracing::warn!(
-                            target: grow_telemetry::memory_log::TARGET,
+                            target: grow_diagnostics::memory_log::TARGET,
                             path = %path.display(),
                             error = %e,
                             "DREAM_CLEANUP: failed to remove chunks from index"
@@ -192,7 +192,7 @@ impl SessionMemory {
             }
             if total_removed > 0 {
                 tracing::info!(
-                    target: grow_telemetry::memory_log::TARGET,
+                    target: grow_diagnostics::memory_log::TARGET,
                     chunks_removed = total_removed,
                     files = paths.len(),
                     "DREAM_CLEANUP: removed stale chunks from index"
@@ -201,10 +201,10 @@ impl SessionMemory {
         }
     }
 
-    /// Collect telemetry counters for session-end summary.
-    pub fn telemetry_snapshot(&self) -> MemoryTelemetry {
+    /// Collect diagnostics counters for session-end summary.
+    pub fn diagnostics_snapshot(&self) -> MemoryDiagnostic {
         use std::sync::atomic::Ordering::Relaxed;
-        MemoryTelemetry {
+        MemoryDiagnostic {
             flush_count: self.flush_count.load(Relaxed),
             flush_success_count: self.flush_success_count.load(Relaxed),
             flush_error_count: self.flush_error_count.load(Relaxed),
@@ -223,8 +223,8 @@ impl SessionMemory {
     }
 }
 
-/// Snapshot of memory telemetry counters for session-end logging.
-pub struct MemoryTelemetry {
+/// Snapshot of memory diagnostics counters for session-end logging.
+pub struct MemoryDiagnostic {
     pub flush_count: u64,
     pub flush_success_count: u64,
     pub flush_error_count: u64,

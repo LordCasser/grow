@@ -235,11 +235,7 @@ impl WorkspaceHandle {
     /// checkpoint on non-`Completed` turn-ends (gap #2).
     ///
     /// Turn-hook ends return the after-turn enqueue handle for the ack path.
-    pub(crate) async fn on_turn_boundary(
-        &self,
-        session_id: &str,
-        boundary: TurnBoundary,
-    ) {
+    pub(crate) async fn on_turn_boundary(&self, session_id: &str, boundary: TurnBoundary) {
         match boundary {
             TurnBoundary::Start {
                 prompt_index: Some(idx),

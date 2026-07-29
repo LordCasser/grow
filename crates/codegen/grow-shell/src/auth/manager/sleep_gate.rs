@@ -113,7 +113,7 @@ pub(super) struct SleepGate {
 impl SleepGate {
     pub(super) fn raise(&self) {
         *self.raised_at.write() = Some(GateRaise::now());
-        grow_telemetry::unified_log::warn("auth.sleep.gate_set", None, None);
+        grow_diagnostics::unified_log::warn("auth.sleep.gate_set", None, None);
     }
 
     pub(super) fn lower(&self, reason: &str) {
@@ -124,7 +124,7 @@ impl SleepGate {
                 (mono.as_millis() as u64, wall.as_millis() as u64)
             })
             .unwrap_or((0, 0));
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "auth.sleep.gate_cleared",
             None,
             Some(serde_json::json!({
@@ -160,7 +160,7 @@ impl SleepGate {
         // surface it explicitly to confirm the fix firing in the field.
         let sleep_straddle = mono < SLEEP_GATE_MAX;
         *self.raised_at.write() = None;
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "auth.sleep.gate_cleared",
             None,
             Some(serde_json::json!({
@@ -259,7 +259,7 @@ impl AuthManager {
         if in_flight == 0 {
             return;
         }
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "auth.sleep.refresh_in_flight_at_suspend",
             None,
             Some(serde_json::json!({ "in_flight": in_flight })),
@@ -282,7 +282,7 @@ impl AuthManager {
             }
         }
         let remaining = self.refresh_in_flight.load(Ordering::SeqCst);
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "auth.sleep.refresh_drain",
             None,
             Some(serde_json::json!({
@@ -356,7 +356,7 @@ impl AuthManager {
         // before the next forced refresh, rather than abandoning deferral
         // entirely.
         *self.dark_wake_defer_since.write() = None;
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "auth.dark_wake.defer_budget_exhausted",
             None,
             Some(serde_json::json!({
@@ -424,7 +424,7 @@ impl AuthManager {
             // permanently no-op'd for this manager.
             self.power_listener_started.store(false, Ordering::Release);
         }
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "auth.sleep.power_listener_init",
             None,
             Some(serde_json::json!({ "available": available })),

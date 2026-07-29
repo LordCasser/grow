@@ -28,13 +28,11 @@ pub(crate) struct BuiltinCommand {
 /// - `Scheduler`: `scheduler_create` is registered.
 /// - `Hooks`: a hook registry is loaded.
 /// - `Plugins`: a plugin registry is loaded.
-/// - `Feedback`: the feedback manager is enabled.
 /// - `MemoryConfigured`: memory backend params exist (may be currently
 ///   disabled). Used for `/memory` so the user can re-enable via toggle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinGate {
     AlwaysOn,
-    Feedback,
     Memory,
     MemoryConfigured,
     /// Checks `scheduler_create` only. If any future shell-side builtin
@@ -227,16 +225,6 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         resolve: |_args| BuiltinAction::SessionInfo,
     },
     BuiltinCommand {
-        name: "feedback",
-        description: "Send feedback about the current session",
-        argument_hint: Some("feedback text"),
-        aliases: &[],
-        gate: BuiltinGate::Feedback,
-        resolve: |args| BuiltinAction::Feedback {
-            text: args.trim().to_string(),
-        },
-    },
-    BuiltinCommand {
         name: "deep-research",
         description: "Research with bounded parallel agents, cross-check evidence, and write a cited report",
         argument_hint: Some("<query>"),
@@ -360,7 +348,6 @@ const PROMPT_COMMANDS: &[BuiltinCommand] = &[BuiltinCommand {
 /// gated builtin.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct CommandAvailability {
-    pub feedback: bool,
     /// Memory backend is enabled AND the active toolset includes the
     /// memory read tools. `/flush` and `/dream` only make sense when the
     /// model can later read back what they wrote, so the read-side tool
@@ -385,7 +372,6 @@ impl CommandAvailability {
     pub fn allows(&self, gate: BuiltinGate) -> bool {
         match gate {
             BuiltinGate::AlwaysOn => true,
-            BuiltinGate::Feedback => self.feedback,
             BuiltinGate::Memory => self.memory,
             BuiltinGate::MemoryConfigured => self.memory_configured,
             BuiltinGate::Scheduler => self.scheduler,
@@ -402,7 +388,6 @@ impl CommandAvailability {
     #[cfg(test)]
     pub fn all_enabled() -> Self {
         Self {
-            feedback: true,
             memory: true,
             memory_configured: true,
             scheduler: true,
@@ -784,7 +769,7 @@ pub(crate) struct ParsedSkillRef {
     pub args: String,
     /// The resolved `SkillInfo` path, for loading SKILL.md.
     pub skill_path: String,
-    /// Scope-qualified name (e.g. "user:commit"), used for telemetry.
+    /// Scope-qualified name (e.g. "user:commit"), used for diagnostics.
     pub qualified_name: String,
     /// Plugin name if this is a plugin skill.
     pub plugin_name: Option<String>,
@@ -849,9 +834,6 @@ pub(super) enum BuiltinAction {
     PluginsUpdate {
         name: Option<String>,
     },
-    Feedback {
-        text: String,
-    },
     MemoryBrowse,
     MemoryToggle {
         enabled: bool,
@@ -899,7 +881,6 @@ impl BuiltinAction {
             BuiltinAction::PluginsInstall { .. } => "plugins-install",
             BuiltinAction::PluginsUninstall { .. } => "plugins-uninstall",
             BuiltinAction::PluginsUpdate { .. } => "plugins-update",
-            BuiltinAction::Feedback { .. } => "feedback",
             BuiltinAction::MemoryBrowse => "memory",
             BuiltinAction::MemoryToggle { .. } => "memory",
             BuiltinAction::GoalSet { .. }
@@ -934,7 +915,6 @@ impl BuiltinAction {
             BuiltinAction::PluginsInstall { .. } => true,
             BuiltinAction::PluginsUninstall { .. } => true,
             BuiltinAction::PluginsUpdate { name } => name.is_some(),
-            BuiltinAction::Feedback { text } => !text.is_empty(),
             BuiltinAction::MemoryBrowse => false,
             BuiltinAction::MemoryToggle { .. } => true,
             BuiltinAction::GoalSet { .. } => true,
@@ -2293,22 +2273,6 @@ mod tests {
             )
             .is_ok()
         );
-    }
-
-    #[test]
-    fn feedback_resolves_when_enabled() {
-        let outcome = resolve(
-            vec![text_block("/feedback hello")],
-            &[],
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .unwrap_err();
-        assert!(matches!(
-            outcome,
-            SlashCommandOutcome::Builtin(BuiltinAction::Feedback { ref text }) if text == "hello"
-        ));
     }
 
     /// Collect the advertised command names for the given availability.

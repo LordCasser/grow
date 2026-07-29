@@ -972,7 +972,7 @@ fn dashboard_peek_cycle_mode_cycles_peeked_agent() {
 /// A dashboard-peek Shift+Tab cycles the peeked agent into plan mode but must
 /// NOT attribute a plan-nudge acceptance: the user is on the dashboard, not
 /// that agent's prompt, so the nudge (still within TTL) is left intact. This
-/// pins that the peek routes through the telemetry-free cycle body.
+/// pins that the peek routes through the diagnostics-free cycle body.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_peek_cycle_does_not_retire_the_nudge() {
@@ -3415,7 +3415,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use grow_telemetry::events::AnnouncementCtaSurface;
+    use grow_diagnostics::events::AnnouncementCtaSurface;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let registry = ActionRegistry::defaults();

@@ -30,7 +30,7 @@ pub enum QueueEntryKind {
     Cron,
 }
 impl QueueEntryKind {
-    /// Short, stable label for telemetry / profiling logs.
+    /// Short, stable label for diagnostics / profiling logs.
     pub fn as_label(&self) -> &'static str {
         match self {
             Self::Prompt => "prompt",

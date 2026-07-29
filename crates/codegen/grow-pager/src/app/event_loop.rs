@@ -1175,7 +1175,7 @@ pub(crate) async fn run(
     // Cache whether cwd is inside a git repo (avoids repeated stat() in draw).
     app.cwd_has_git_ancestor = app.cwd.ancestors().any(|p| p.join(".git").exists());
 
-    // Probe / auto-cadence / terminal telemetry — see `display_refresh_startup`.
+    // Probe / auto-cadence / terminal diagnostics — see `display_refresh_startup`.
     let motion = super::display_refresh_startup::start(
         requirements.as_ref(),
         user_config.as_ref(),

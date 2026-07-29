@@ -273,7 +273,7 @@ pub(crate) struct SessionFlags {
     pub chat_mode: bool,
     /// Effective screen mode label (`ScreenMode::meta_label`), stamped into
     /// every `PromptRequest._meta.screenMode` for minimal-vs-regular usage
-    /// telemetry. `None` (key omitted) only under `Default` in tests; real
+    /// diagnostics. `None` (key omitted) only under `Default` in tests; real
     /// launches always know their mode.
     pub screen_mode_label: Option<&'static str>,
     /// Active auth is API key (not OAuth/session). Drives rate-limit copy in

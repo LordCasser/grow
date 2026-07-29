@@ -37,7 +37,6 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     merge_section(table, "cli", &config.cli);
     merge_section(table, "models", &config.models);
     merge_section(table, "ui", &config.ui);
-    merge_section(table, "harness", &config.harness);
     merge_section(table, "session", &config.session);
     merge_ask_user_question_section(table, &config.ask_user_question);
     if config.privacy == super::mcp::PrivacyConfig::default() {
@@ -509,26 +508,6 @@ mod tests {
         );
     }
     #[test]
-    fn merge_section_empty_struct_preserves_existing_section() {
-        let mut table = TomlMap::new();
-        let mut harness = TomlMap::new();
-        harness.insert("custom_key".into(), TomlValue::Boolean(true));
-        harness.insert("another_key".into(), TomlValue::String("value".into()));
-        table.insert("harness".into(), TomlValue::Table(harness));
-        let cfg = crate::agent::config::HarnessConfig::default();
-        merge_section(&mut table, "harness", &cfg);
-        let harness = table.get("harness").unwrap().as_table().unwrap();
-        assert_eq!(
-            harness.get("custom_key").and_then(|v| v.as_bool()),
-            Some(true),
-            "existing fields must survive when struct serializes empty"
-        );
-        assert_eq!(
-            harness.get("another_key").and_then(|v| v.as_str()),
-            Some("value"),
-        );
-    }
-    #[test]
     fn ui_config_round_trip_preserves_pager_fields() {
         let toml_str = r#"
 [ui]
@@ -642,7 +621,6 @@ auto_update = true
         merge_section(&mut table, "cli", &cfg.cli);
         merge_section(&mut table, "models", &cfg.models);
         merge_section(&mut table, "ui", &cfg.ui);
-        merge_section(&mut table, "harness", &cfg.harness);
         let ui = table.get("ui").unwrap().as_table().unwrap();
         assert_eq!(
             ui.get("show_timestamps").and_then(|v| v.as_bool()),

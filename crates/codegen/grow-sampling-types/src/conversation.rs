@@ -15,8 +15,7 @@ use crate::rs;
 use crate::tool_overrides::{ToolOverrides, WebSearchOptions, XSearchOptions, drop_empty};
 use crate::types::{
     ChatCompletionRequest, ChatContentBlock, ChatRequestMessage, ChatResponseMessage, FinishReason,
-    ImageUrl, MessageContent, Role, ToolCallRequest, ToolChoice, ToolDefinition, TraceContext,
-    Usage,
+    ImageUrl, MessageContent, Role, ToolCallRequest, ToolChoice, ToolDefinition, Usage,
 };
 
 // ============================================================================
@@ -172,7 +171,7 @@ impl SyntheticReason {
 /// `mid_turn_abort` (ESC / Ctrl+C), `permission_rejected`, `permission_cancelled`.
 /// A mid-turn *interjection* is deliberately NOT represented here — it does not
 /// cancel the turn and is captured on its own message via
-/// [`SyntheticReason::Interjection`] (and the `interjected` telemetry event).
+/// [`SyntheticReason::Interjection`] (and the `interjected` diagnostics event).
 /// Automatic terminations (hook-denied, max-turns) are not user interrupts
 /// and never set this.
 ///
@@ -566,22 +565,11 @@ pub struct ConversationRequest {
     pub max_output_tokens: Option<u32>,
     /// Top-p sampling
     pub top_p: Option<f32>,
-    /// Custom headers for xAI tracking
-    pub x_grok_conv_id: Option<String>,
-    pub x_grok_req_id: Option<String>,
-    pub x_grok_session_id: Option<String>,
-    pub x_grok_turn_idx: Option<String>,
-    pub x_grok_agent_id: Option<String>,
-    pub x_grok_deployment_id: Option<String>,
-    pub x_grok_user_id: Option<String>,
-    /// Optional opaque tracing context (e.g., where to persist the finalized request payload).
-    /// Consumers downcast via `trace.as_ref().unwrap().as_any().downcast_ref::<T>()`.
-    pub trace: Option<Box<dyn TraceContext>>,
     /// Reasoning effort level for reasoning models.
     pub reasoning_effort: Option<crate::ReasoningEffort>,
     /// JSON Schema for structured output (strict mode).
     pub json_schema: Option<serde_json::Value>,
-    /// Sticky routing key for prompt-cache reuse; overrides `x_grok_conv_id` for routing.
+    /// Sticky routing key for prompt-cache reuse when supported by a provider.
     pub prompt_cache_key: Option<String>,
 }
 
@@ -2175,14 +2163,6 @@ impl From<ConversationRequest> for ChatCompletionRequest {
             search_parameters: None,
             response_format,
             reasoning_effort: req.reasoning_effort,
-            x_grok_conv_id: req.x_grok_conv_id,
-            x_grok_req_id: req.x_grok_req_id,
-            x_grok_session_id: req.x_grok_session_id,
-            x_grok_turn_idx: req.x_grok_turn_idx,
-            x_grok_agent_id: req.x_grok_agent_id,
-            x_grok_deployment_id: req.x_grok_deployment_id,
-            x_grok_user_id: req.x_grok_user_id,
-            trace: None,
         }
     }
 }
@@ -2571,25 +2551,6 @@ impl ConversationRequest {
     /// Set max output tokens
     pub fn with_max_output_tokens(mut self, max_tokens: u32) -> Self {
         self.max_output_tokens = Some(max_tokens);
-        self
-    }
-
-    /// Set conversation ID header
-    pub fn with_conv_id(mut self, conv_id: impl Into<String>) -> Self {
-        self.x_grok_conv_id = Some(conv_id.into());
-        self
-    }
-
-    /// Set request ID header
-    pub fn with_req_id(mut self, req_id: impl Into<String>) -> Self {
-        self.x_grok_req_id = Some(req_id.into());
-        self
-    }
-
-    /// Set trace context for request logging.
-    /// Accepts any type that implements `TraceContext` (i.e., `Clone + Send + Sync + Debug + 'static`).
-    pub fn with_trace(mut self, trace: impl TraceContext + 'static) -> Self {
-        self.trace = Some(Box::new(trace));
         self
     }
 
@@ -7081,15 +7042,11 @@ mod tests {
             .with_model("grow-3")
             .with_temperature(0.5)
             .with_max_output_tokens(1000)
-            .with_conv_id("conv-123")
-            .with_req_id("req-456")
             .with_tool_choice(ConversationToolChoice::Auto);
 
         assert_eq!(req.model, Some("grow-3".to_string()));
         assert_eq!(req.temperature, Some(0.5));
         assert_eq!(req.max_output_tokens, Some(1000));
-        assert_eq!(req.x_grok_conv_id, Some("conv-123".to_string()));
-        assert_eq!(req.x_grok_req_id, Some("req-456".to_string()));
         assert_matches!(req.tool_choice, Some(ConversationToolChoice::Auto));
     }
 

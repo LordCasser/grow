@@ -81,7 +81,7 @@ pub enum WorkflowHostRequest {
         message: String,
         replayed: bool,
     },
-    Telemetry {
+    Diagnostic {
         name: String,
         fields: serde_json::Value,
         replayed: bool,
@@ -117,7 +117,7 @@ impl WorkflowHostRequest {
             Self::SpawnAgent { .. } => "spawn_agent",
             Self::Phase { .. } => "phase",
             Self::Log { .. } => "log",
-            Self::Telemetry { .. } => "telemetry",
+            Self::Diagnostic { .. } => "diagnostics",
             Self::BudgetQuery { .. } => "budget",
             Self::RenderTemplate { .. } => "render_template",
             Self::WriteScratchFile { .. } => "write_scratch_file",

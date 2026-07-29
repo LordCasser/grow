@@ -38,9 +38,9 @@ impl TokenType {
         matches!(self, Self::OidcSession | Self::ExternalBinary)
     }
 
-    /// Stable telemetry mirror for the `manual_auth` KPI.
-    pub(crate) fn telemetry_kind(self) -> grow_telemetry::events::AuthTokenKind {
-        use grow_telemetry::events::AuthTokenKind as K;
+    /// Stable diagnostics mirror for the `manual_auth` KPI.
+    pub(crate) fn diagnostics_kind(self) -> grow_diagnostics::events::AuthTokenKind {
+        use grow_diagnostics::events::AuthTokenKind as K;
         match self {
             Self::OidcSession => K::OidcSession,
             Self::ExternalBinary => K::ExternalBinary,

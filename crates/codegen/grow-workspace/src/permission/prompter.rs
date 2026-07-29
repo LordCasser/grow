@@ -763,7 +763,7 @@ impl AcpPrompter {
     }
 }
 
-/// Tool name used for telemetry. Single source of truth: the
+/// Tool name used for diagnostics. Single source of truth: the
 /// permission manager calls this for the `tool_name` component of its
 /// `(tool_name, access_kind, access_detail)` derivation, so the two cannot
 /// drift.
@@ -1470,7 +1470,7 @@ mod tests {
     #[test]
     fn tool_name_for_access_pins_canonical_names() {
         // This helper is the single source of truth shared with the permission
-        // manager's telemetry; pin every variant so a rename can't slip through.
+        // manager's diagnostics; pin every variant so a rename can't slip through.
         assert_eq!(tool_name_for_access(&AccessKind::Read(None)), "read_file");
         assert_eq!(
             tool_name_for_access(&AccessKind::Grep {

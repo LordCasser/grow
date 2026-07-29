@@ -6,8 +6,8 @@
 // Re-exports from restored local stub modules (previously in xai-file-utils).
 pub(crate) use crate::session::event_tracker::EventTracker;
 pub(crate) use crate::session::event_types::{
-    CancellationCategory, EVENT_SCHEMA_VERSION, Event, GoalClassifierVerdictTelemetry,
-    GoalPauseReasonTelemetry, InterjectionSource, Phase, RedirectKind, SessionRelationship,
+    CancellationCategory, EVENT_SCHEMA_VERSION, Event, GoalClassifierVerdictDiagnostic,
+    GoalPauseReasonDiagnostic, InterjectionSource, Phase, RedirectKind, SessionRelationship,
     ToolOutcome, TurnOutcomeLabel,
 };
 pub(crate) use crate::session::event_writer::EventWriter;
@@ -24,7 +24,7 @@ pub(crate) use crate::session::event_writer::EventWriter;
 //
 // The category strings are also the lowercase serde representation of
 // the classifier's JSON output, so producer (classifier prompt) and
-// consumer (Rust enum + telemetry) share one vocabulary.
+// consumer (Rust enum + diagnostics) share one vocabulary.
 
 /// Stalled — the model emitted prose narration claiming progress
 /// without any real tool calls.
@@ -647,10 +647,10 @@ impl GoalRoleModelFailOpenReason {
     }
 }
 
-/// Bridge `GoalClassifierVerdict` (shell) → `GoalClassifierVerdictTelemetry`.
-/// Mirrors the `GoalPauseReason` → `GoalPauseReasonTelemetry` pattern;
+/// Bridge `GoalClassifierVerdict` (shell) → `GoalClassifierVerdictDiagnostic`.
+/// Mirrors the `GoalPauseReason` → `GoalPauseReasonDiagnostic` pattern;
 /// exhaustive match catches drift if either side adds a variant.
-impl From<crate::session::goal_tracker::GoalClassifierVerdict> for GoalClassifierVerdictTelemetry {
+impl From<crate::session::goal_tracker::GoalClassifierVerdict> for GoalClassifierVerdictDiagnostic {
     fn from(verdict: crate::session::goal_tracker::GoalClassifierVerdict) -> Self {
         use crate::session::goal_tracker::GoalClassifierVerdict;
         match verdict {
@@ -660,11 +660,11 @@ impl From<crate::session::goal_tracker::GoalClassifierVerdict> for GoalClassifie
     }
 }
 
-/// Bridge `GoalPauseReason` (shell) → `GoalPauseReasonTelemetry`
+/// Bridge `GoalPauseReason` (shell) → `GoalPauseReasonDiagnostic`
 /// (`xai-file-utils`). The two enums are intentional mirrors and live in
 /// different crates due to the orphan rule. The exhaustive `match` here
 /// ensures the compiler catches drift if either side adds a variant.
-impl From<crate::session::goal_tracker::GoalPauseReason> for GoalPauseReasonTelemetry {
+impl From<crate::session::goal_tracker::GoalPauseReason> for GoalPauseReasonDiagnostic {
     fn from(reason: crate::session::goal_tracker::GoalPauseReason) -> Self {
         use crate::session::goal_tracker::GoalPauseReason;
         match reason {
@@ -706,26 +706,26 @@ mod tests {
     }
 
     #[test]
-    fn goal_pause_reason_telemetry_mirrors_all_variants() {
+    fn goal_pause_reason_diagnostics_mirrors_all_variants() {
         assert!(matches!(
-            GoalPauseReasonTelemetry::from(GoalPauseReason::User),
-            GoalPauseReasonTelemetry::User
+            GoalPauseReasonDiagnostic::from(GoalPauseReason::User),
+            GoalPauseReasonDiagnostic::User
         ));
         assert!(matches!(
-            GoalPauseReasonTelemetry::from(GoalPauseReason::BackOff),
-            GoalPauseReasonTelemetry::BackOff
+            GoalPauseReasonDiagnostic::from(GoalPauseReason::BackOff),
+            GoalPauseReasonDiagnostic::BackOff
         ));
         assert!(matches!(
-            GoalPauseReasonTelemetry::from(GoalPauseReason::NoProgress),
-            GoalPauseReasonTelemetry::NoProgress
+            GoalPauseReasonDiagnostic::from(GoalPauseReason::NoProgress),
+            GoalPauseReasonDiagnostic::NoProgress
         ));
         assert!(matches!(
-            GoalPauseReasonTelemetry::from(GoalPauseReason::Verification),
-            GoalPauseReasonTelemetry::Verification
+            GoalPauseReasonDiagnostic::from(GoalPauseReason::Verification),
+            GoalPauseReasonDiagnostic::Verification
         ));
         assert!(matches!(
-            GoalPauseReasonTelemetry::from(GoalPauseReason::Infra),
-            GoalPauseReasonTelemetry::Infra
+            GoalPauseReasonDiagnostic::from(GoalPauseReason::Infra),
+            GoalPauseReasonDiagnostic::Infra
         ));
     }
 

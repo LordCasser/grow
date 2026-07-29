@@ -7,9 +7,8 @@
 //! * Responses API (`/responses`)
 //! * Anthropic Messages API (`/messages`)
 //!
-//! All trace-upload and URL-based header injection is intentionally
-//! *not* here. The session is responsible for putting any per-request
-//! headers (proxy auth, OTel context, etc.)
+//! URL-based header injection is intentionally *not* here. The session is
+//! responsible for putting any explicit per-request headers (such as proxy auth)
 //! into [`SamplerConfig::extra_headers`] before constructing the client.
 
 use eventsource_stream::Eventsource;
@@ -24,9 +23,8 @@ use serde::Serialize;
 use grow_sampling_types::error::{try_parse_stream_error, user_facing_api_error_message};
 use grow_sampling_types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
-    ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MessagesRequestWrapper,
-    ResponseModelMetadata, Result, SamplingError, build_messages_request, is_check_event, messages,
-    rs,
+    ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, ResponseModelMetadata,
+    Result, SamplingError, build_messages_request, is_check_event, messages, rs,
 };
 
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
@@ -34,45 +32,9 @@ use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
 // Re-export ApiBackend from the shared types crate for downstream callers.
 pub use grow_sampling_types::ApiBackend;
 
-/// Process-level fallback for the `x-grow-client-identifier` header.
-const DEFAULT_CLIENT_IDENTIFIER: &str = "grow-shell";
-
 /// Product identifier baked into User-Agent strings.
 const AGENT_PRODUCT: &str = "grow-shell";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
-
-/// Per-request `x-grow-*` headers. Optional fields are skipped when empty/`None`.
-struct GrowRequestHeaders<'a> {
-    conv_id: &'a str,
-    req_id: &'a str,
-    model_id: &'a str,
-    session_id: &'a str,
-    turn_idx: Option<&'a str>,
-    agent_id: &'a str,
-    deployment_id: Option<&'a str>,
-    user_id: Option<&'a str>,
-}
-
-impl GrowRequestHeaders<'_> {
-    fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let mut b = builder
-            .header("x-grow-conv-id", self.conv_id)
-            .header("x-grow-req-id", self.req_id)
-            .header("x-grow-model-override", self.model_id)
-            .header("x-grow-session-id", self.session_id)
-            .header("x-grow-agent-id", self.agent_id);
-        if let Some(idx) = self.turn_idx {
-            b = b.header("x-grow-turn-idx", idx);
-        }
-        if let Some(id) = self.deployment_id.filter(|s| !s.is_empty()) {
-            b = b.header("x-grow-deployment-id", id);
-        }
-        if let Some(id) = self.user_id.filter(|s| !s.is_empty()) {
-            b = b.header("x-grow-user-id", id);
-        }
-        b
-    }
-}
 
 /// Parse the `Retry-After` response header as delta-seconds.
 /// Our inference backends only emit integer seconds (never HTTP-date),
@@ -94,7 +56,7 @@ impl GrowRequestHeaders<'_> {
 /// Async-openai's typed `ResponseUsage` doesn't model `context_details`,
 /// so we peek the raw JSON for it. The cumulative `input_tokens` /
 /// `output_tokens` / `cached_tokens` continue to flow from the typed
-/// `ResponseUsage` unchanged so billing telemetry stays correct. When
+/// `ResponseUsage` unchanged so billing diagnostics stays correct. When
 /// the API doesn't emit `context_details` (older deployments) `total_tokens`
 /// passes through unchanged.
 fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
@@ -143,7 +105,7 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
 /// context the model is sitting in. Billing fields
 /// (`input_tokens`, `output_tokens`, `input_tokens_details.cached_tokens`,
 /// `output_tokens_details.reasoning_tokens`) stay on the cumulative
-/// wire values so telemetry is unaffected.
+/// wire values so diagnostics is unaffected.
 ///
 /// No-op when:
 /// - the event is not terminal,
@@ -318,8 +280,6 @@ pub struct SamplingClient {
     attribution_callback: Option<crate::attribution::SharedAttributionCallback>,
     /// Per-request bearer override. See `SamplerConfig::bearer_resolver`.
     bearer_resolver: Option<crate::config::SharedBearerResolver>,
-    /// Per-request header injection (OTel traceparent).
-    header_injector: Option<crate::config::SharedHeaderInjector>,
     /// Endpoint URL builder, resolved once from `base_url` + `query_params`.
     endpoint: EndpointTemplate,
 }
@@ -552,44 +512,6 @@ impl SamplingClient {
             &mut headers,
         );
 
-        // Add x-grow-client-version header for version gating at the proxy.
-        if let Some(client_version) = config.client_version.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(client_version)
-        {
-            headers.insert(
-                HeaderName::from_static("x-grow-client-version"),
-                header_value,
-            );
-        }
-
-        if let Some(deployment_id) = config.deployment_id.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(deployment_id)
-        {
-            headers.insert(
-                HeaderName::from_static("x-grow-deployment-id"),
-                header_value,
-            );
-        }
-
-        if let Some(user_id) = config.user_id.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(user_id)
-        {
-            headers.insert(HeaderName::from_static("x-grow-user-id"), header_value);
-        }
-
-        {
-            let client_id = config
-                .client_identifier
-                .clone()
-                .unwrap_or_else(|| DEFAULT_CLIENT_IDENTIFIER.to_string());
-            if let Ok(header_value) = HeaderValue::from_str(&client_id) {
-                headers.insert(
-                    HeaderName::from_static("x-grow-client-identifier"),
-                    header_value,
-                );
-            }
-        }
-
         // Always set User-Agent: per-session origin if available, else fallback.
         {
             let ua_string = match config.origin_client.as_ref() {
@@ -647,7 +569,6 @@ impl SamplingClient {
             defaults,
             attribution_callback: config.attribution_callback,
             bearer_resolver: config.bearer_resolver,
-            header_injector: config.header_injector,
             endpoint,
         })
     }
@@ -702,9 +623,6 @@ impl SamplingClient {
                 auth_header_prefix = auth_prefix.as_deref().unwrap_or("none"),
                 x_api_key_prefix = x_api_key_prefix.as_deref().unwrap_or("none"),
             );
-        }
-        if let Some(injector) = &self.header_injector {
-            injector.inject(&mut headers);
         }
         self.http.post(url).headers(headers)
     }
@@ -888,8 +806,6 @@ impl SamplingClient {
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse> {
         let payload = self.apply_defaults(request)?;
-        let x_grok_conv_id = &payload.x_grok_conv_id.clone().unwrap_or_default();
-        let x_grok_req_id = &payload.x_grok_req_id.clone().unwrap_or_default();
         let model_id = payload.model.clone().unwrap_or_default();
 
         tracing::debug!(
@@ -898,19 +814,7 @@ impl SamplingClient {
             "Sending chat completion request"
         );
 
-        let grow_headers = GrowRequestHeaders {
-            conv_id: x_grok_conv_id,
-            req_id: x_grok_req_id,
-            model_id: &model_id,
-            session_id: payload.x_grok_session_id.as_deref().unwrap_or_default(),
-            turn_idx: payload.x_grok_turn_idx.as_deref(),
-            agent_id: payload.x_grok_agent_id.as_deref().unwrap_or_default(),
-            deployment_id: payload.x_grok_deployment_id.as_deref(),
-            user_id: payload.x_grok_user_id.as_deref(),
-        };
-        let http_request = grow_headers
-            .apply(self.post(self.endpoint("chat/completions")))
-            .json(&payload);
+        let http_request = self.post(self.endpoint("chat/completions")).json(&payload);
 
         let response = http_request.send().await.map_err(|e| {
             // Log at debug level; errors are surfaced to the caller.
@@ -941,8 +845,6 @@ impl SamplingClient {
         Option<ResponseModelMetadata>,
     )> {
         let payload = self.apply_defaults(request)?;
-        let x_grok_conv_id = &payload.x_grok_conv_id.clone().unwrap_or_default();
-        let x_grok_req_id = &payload.x_grok_req_id.clone().unwrap_or_default();
         let model_id = payload.model.clone().unwrap_or_default();
 
         // Wrap the request with streaming fields and serialize once.
@@ -956,18 +858,8 @@ impl SamplingClient {
             },
         };
 
-        let grow_headers = GrowRequestHeaders {
-            conv_id: x_grok_conv_id,
-            req_id: x_grok_req_id,
-            model_id: &model_id,
-            session_id: payload.x_grok_session_id.as_deref().unwrap_or_default(),
-            turn_idx: payload.x_grok_turn_idx.as_deref(),
-            agent_id: payload.x_grok_agent_id.as_deref().unwrap_or_default(),
-            deployment_id: payload.x_grok_deployment_id.as_deref(),
-            user_id: payload.x_grok_user_id.as_deref(),
-        };
-        let http_request = grow_headers
-            .apply(self.post(self.endpoint("chat/completions")))
+        let http_request = self
+            .post(self.endpoint("chat/completions"))
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
             .json(&streaming_request);
 
@@ -1147,29 +1039,11 @@ impl SamplingClient {
         mut request: CreateResponseWrapper,
     ) -> Result<rs::Response> {
         self.apply_response_defaults(&mut request)?;
-
-        let x_grok_conv_id = request.x_grok_conv_id.as_deref().unwrap_or_default();
-        let x_grok_req_id = request.x_grok_req_id.as_deref().unwrap_or_default();
         let model_id = request.inner.model.clone().unwrap_or_default();
-
-        // The trace field is process-local: it is consumed by upstream
-        // session code (which may upload a payload artifact) and is not
-        // forwarded by the sampler. Drop it before we send.
-        request.trace.take();
 
         tracing::debug!("create_response: {:?}", &request);
         tracing::debug!("endpoint: {:?}", self.endpoint("responses"));
 
-        let grow_headers = GrowRequestHeaders {
-            conv_id: x_grok_conv_id,
-            req_id: x_grok_req_id,
-            model_id: &model_id,
-            session_id: request.x_grok_session_id.as_deref().unwrap_or_default(),
-            turn_idx: request.x_grok_turn_idx.as_deref(),
-            agent_id: request.x_grok_agent_id.as_deref().unwrap_or_default(),
-            deployment_id: request.x_grok_deployment_id.as_deref(),
-            user_id: request.x_grok_user_id.as_deref(),
-        };
         let mut request_body = serde_json::to_value(&request.inner).map_err(|e| {
             tracing::error!("Failed to serialize responses request: {}", e);
             SamplingError::Serialization(e)
@@ -1179,9 +1053,7 @@ impl SamplingClient {
         // it in post-serialize. This is the last surviving piece of the
         // old raw_output machinery.
         grow_sampling_types::patch_reasoning_text_types(&mut request_body);
-        let http_request = grow_headers
-            .apply(self.post(self.endpoint("responses")))
-            .json(&request_body);
+        let http_request = self.post(self.endpoint("responses")).json(&request_body);
 
         let response = http_request.send().await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
@@ -1273,12 +1145,7 @@ impl SamplingClient {
         // Enable streaming
         request.inner.stream = Some(true);
 
-        let x_grok_conv_id = request.x_grok_conv_id.as_deref().unwrap_or_default();
-        let x_grok_req_id = request.x_grok_req_id.as_deref().unwrap_or_default();
         let model_id = request.inner.model.clone().unwrap_or_default();
-
-        // Drop process-local trace data (see note in `create_response`).
-        request.trace.take();
 
         tracing::debug!(
             base_url = %self.base_url,
@@ -1286,16 +1153,6 @@ impl SamplingClient {
             "Sending responses API stream request"
         );
 
-        let grow_headers = GrowRequestHeaders {
-            conv_id: x_grok_conv_id,
-            req_id: x_grok_req_id,
-            model_id: &model_id,
-            session_id: request.x_grok_session_id.as_deref().unwrap_or_default(),
-            turn_idx: request.x_grok_turn_idx.as_deref(),
-            agent_id: request.x_grok_agent_id.as_deref().unwrap_or_default(),
-            deployment_id: request.x_grok_deployment_id.as_deref(),
-            user_id: request.x_grok_user_id.as_deref(),
-        };
         let extra_tool_entries = std::mem::take(&mut request.extra_tool_entries);
         let mut request_body = serde_json::to_value(&request.inner).map_err(|e| {
             tracing::error!("Failed to serialize responses request: {}", e);
@@ -1321,8 +1178,8 @@ impl SamplingClient {
             .defaults
             .doom_loop_recovery
             .map(crate::doom_loop::DoomLoopSignalCollector::new);
-        let mut http_request = grow_headers
-            .apply(self.post(self.endpoint("responses")))
+        let mut http_request = self
+            .post(self.endpoint("responses"))
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
         if doom_loop.is_some() {
             // Presence opts in; the server ignores the value.
@@ -1465,27 +1322,27 @@ impl SamplingClient {
     // =========================================================================
 
     /// Apply default configuration to a Messages API request.
-    fn apply_message_defaults(&self, request: &mut MessagesRequestWrapper) -> Result<()> {
+    fn apply_message_defaults(&self, request: &mut messages::MessagesRequest) -> Result<()> {
         // Apply model default if not specified
-        if request.inner.model.is_empty() {
-            request.inner.model = self.defaults.model.clone();
+        if request.model.is_empty() {
+            request.model = self.defaults.model.clone();
         }
 
-        if request.inner.max_tokens == 0 {
-            request.inner.max_tokens = self
+        if request.max_tokens == 0 {
+            request.max_tokens = self
                 .defaults
                 .output_limit
                 .unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);
         }
 
         // Apply temperature default if not specified
-        if request.inner.temperature.is_none() {
-            request.inner.temperature = self.defaults.temperature;
+        if request.temperature.is_none() {
+            request.temperature = self.defaults.temperature;
         }
 
         // Apply top_p default if not specified
-        if request.inner.top_p.is_none() {
-            request.inner.top_p = self.defaults.top_p;
+        if request.top_p.is_none() {
+            request.top_p = self.defaults.top_p;
         }
 
         Ok(())
@@ -1494,33 +1351,15 @@ impl SamplingClient {
     /// Create a message using the Anthropic Messages API (non-streaming).
     pub async fn create_message(
         &self,
-        mut request: MessagesRequestWrapper,
+        mut request: messages::MessagesRequest,
     ) -> Result<messages::MessagesResponse> {
         self.apply_message_defaults(&mut request)?;
+        let model_id = request.model.clone();
 
-        let x_grok_conv_id = request.x_grok_conv_id.as_deref().unwrap_or_default();
-        let x_grok_req_id = request.x_grok_req_id.as_deref().unwrap_or_default();
-        let model_id = request.inner.model.clone();
-
-        // Drop process-local trace data.
-        request.trace.take();
-
-        tracing::debug!("create_message: {:?}", &request.inner);
+        tracing::debug!("create_message: {:?}", &request);
         tracing::debug!("endpoint: {:?}", self.endpoint("messages"));
 
-        let grow_headers = GrowRequestHeaders {
-            conv_id: x_grok_conv_id,
-            req_id: x_grok_req_id,
-            model_id: &model_id,
-            session_id: request.x_grok_session_id.as_deref().unwrap_or_default(),
-            turn_idx: request.x_grok_turn_idx.as_deref(),
-            agent_id: request.x_grok_agent_id.as_deref().unwrap_or_default(),
-            deployment_id: request.x_grok_deployment_id.as_deref(),
-            user_id: request.x_grok_user_id.as_deref(),
-        };
-        let http_request = grow_headers
-            .apply(self.post(self.endpoint("messages")))
-            .json(&request.inner);
+        let http_request = self.post(self.endpoint("messages")).json(&request);
 
         let response = http_request.send().await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
@@ -1584,7 +1423,7 @@ impl SamplingClient {
         skip_all,
         fields(
             endpoint = %self.endpoint("messages"),
-            model_id = request.inner.model.as_str(),
+            model_id = request.model.as_str(),
             status_code = tracing::field::Empty,
             success = tracing::field::Empty,
             error = tracing::field::Empty,
@@ -1592,7 +1431,7 @@ impl SamplingClient {
     )]
     pub async fn create_message_stream(
         &self,
-        mut request: MessagesRequestWrapper,
+        mut request: messages::MessagesRequest,
     ) -> Result<(
         BoxStream<'static, Result<messages::MessageStreamEvent>>,
         Option<ResponseModelMetadata>,
@@ -1600,14 +1439,9 @@ impl SamplingClient {
         self.apply_message_defaults(&mut request)?;
 
         // Enable streaming
-        request.inner.stream = Some(true);
+        request.stream = Some(true);
 
-        let x_grok_conv_id = request.x_grok_conv_id.as_deref().unwrap_or_default();
-        let x_grok_req_id = request.x_grok_req_id.as_deref().unwrap_or_default();
-        let model_id = request.inner.model.clone();
-
-        // Drop process-local trace data.
-        request.trace.take();
+        let model_id = request.model.clone();
 
         tracing::debug!(
             base_url = %self.base_url,
@@ -1615,20 +1449,10 @@ impl SamplingClient {
             "Sending Messages API stream request"
         );
 
-        let grow_headers = GrowRequestHeaders {
-            conv_id: x_grok_conv_id,
-            req_id: x_grok_req_id,
-            model_id: &model_id,
-            session_id: request.x_grok_session_id.as_deref().unwrap_or_default(),
-            turn_idx: request.x_grok_turn_idx.as_deref(),
-            agent_id: request.x_grok_agent_id.as_deref().unwrap_or_default(),
-            deployment_id: request.x_grok_deployment_id.as_deref(),
-            user_id: request.x_grok_user_id.as_deref(),
-        };
-        let http_request = grow_headers
-            .apply(self.post(self.endpoint("messages")))
+        let http_request = self
+            .post(self.endpoint("messages"))
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
-            .json(&request.inner);
+            .json(&request);
 
         let built_request = http_request.build().map_err(|e| {
             tracing::error!("Failed to build HTTP request: {}", e);
@@ -1794,12 +1618,7 @@ impl SamplingClient {
     )> {
         self.apply_conversation_defaults(&mut request)?;
 
-        let trace = request.trace.take();
-        let mut chat_request: ChatCompletionRequest = request.into();
-        if let Some(trace) = trace {
-            chat_request.trace = Some(trace);
-        }
-
+        let chat_request: ChatCompletionRequest = request.into();
         self.chat_completion_stream(chat_request).await
     }
 
@@ -1812,12 +1631,7 @@ impl SamplingClient {
     ) -> Result<ChatCompletionResponse> {
         self.apply_conversation_defaults(&mut request)?;
 
-        let trace = request.trace.take();
-        let mut chat_request: ChatCompletionRequest = request.into();
-        if let Some(trace) = trace {
-            chat_request.trace = Some(trace);
-        }
-
+        let chat_request: ChatCompletionRequest = request.into();
         self.chat_completion(chat_request).await
     }
 
@@ -1838,13 +1652,6 @@ impl SamplingClient {
     )> {
         self.apply_conversation_defaults(&mut request)?;
 
-        let trace = request.trace.take();
-        let x_grok_conv_id = request.x_grok_conv_id.clone();
-        let x_grok_req_id = request.x_grok_req_id.clone();
-        let x_grok_session_id = request.x_grok_session_id.clone();
-        let x_grok_turn_idx = request.x_grok_turn_idx.clone();
-        let x_grok_agent_id = request.x_grok_agent_id.clone();
-
         // Collect xAI-specific tools that can't be expressed via rs::Tool
         // (e.g., x_search). These are injected as raw JSON after serialization.
         let extra_tools = grow_sampling_types::extra_tool_entries(&request.hosted_tools);
@@ -1852,16 +1659,7 @@ impl SamplingClient {
         let responses_request: rs::CreateResponse = (&request).into();
 
         let mut wrapper = CreateResponseWrapper::new(responses_request);
-        wrapper.x_grok_conv_id = x_grok_conv_id;
-        wrapper.x_grok_req_id = x_grok_req_id;
-        wrapper.x_grok_session_id = x_grok_session_id;
-        wrapper.x_grok_turn_idx = x_grok_turn_idx;
-        wrapper.x_grok_agent_id = x_grok_agent_id;
         wrapper.extra_tool_entries = extra_tools;
-
-        if let Some(trace) = trace {
-            wrapper.trace = Some(trace);
-        }
 
         self.create_response_stream(wrapper).await
     }
@@ -1875,25 +1673,9 @@ impl SamplingClient {
     ) -> Result<rs::Response> {
         self.apply_conversation_defaults(&mut request)?;
 
-        let trace = request.trace.take();
-        let x_grok_conv_id = request.x_grok_conv_id.clone();
-        let x_grok_req_id = request.x_grok_req_id.clone();
-        let x_grok_session_id = request.x_grok_session_id.clone();
-        let x_grok_turn_idx = request.x_grok_turn_idx.clone();
-        let x_grok_agent_id = request.x_grok_agent_id.clone();
-
         let responses_request: rs::CreateResponse = (&request).into();
 
-        let mut wrapper = CreateResponseWrapper::new(responses_request);
-        wrapper.x_grok_conv_id = x_grok_conv_id;
-        wrapper.x_grok_req_id = x_grok_req_id;
-        wrapper.x_grok_session_id = x_grok_session_id;
-        wrapper.x_grok_turn_idx = x_grok_turn_idx;
-        wrapper.x_grok_agent_id = x_grok_agent_id;
-
-        if let Some(trace) = trace {
-            wrapper.trace = Some(trace);
-        }
+        let wrapper = CreateResponseWrapper::new(responses_request);
 
         self.create_response(wrapper).await
     }
@@ -1910,27 +1692,8 @@ impl SamplingClient {
     )> {
         self.apply_conversation_defaults(&mut request)?;
 
-        let trace = request.trace.take();
-        let x_grok_conv_id = request.x_grok_conv_id.clone();
-        let x_grok_req_id = request.x_grok_req_id.clone();
-        let x_grok_session_id = request.x_grok_session_id.clone();
-        let x_grok_turn_idx = request.x_grok_turn_idx.clone();
-        let x_grok_agent_id = request.x_grok_agent_id.clone();
-
         let messages_request = build_messages_request(&request);
-
-        let mut wrapper = MessagesRequestWrapper::new(messages_request);
-        wrapper.x_grok_conv_id = x_grok_conv_id;
-        wrapper.x_grok_req_id = x_grok_req_id;
-        wrapper.x_grok_session_id = x_grok_session_id;
-        wrapper.x_grok_turn_idx = x_grok_turn_idx;
-        wrapper.x_grok_agent_id = x_grok_agent_id;
-
-        if let Some(trace) = trace {
-            wrapper.trace = Some(trace);
-        }
-
-        self.create_message_stream(wrapper).await
+        self.create_message_stream(messages_request).await
     }
 
     /// Send a conversation request using the Anthropic Messages API (non-streaming).
@@ -1942,27 +1705,8 @@ impl SamplingClient {
     ) -> Result<messages::MessagesResponse> {
         self.apply_conversation_defaults(&mut request)?;
 
-        let trace = request.trace.take();
-        let x_grok_conv_id = request.x_grok_conv_id.clone();
-        let x_grok_req_id = request.x_grok_req_id.clone();
-        let x_grok_session_id = request.x_grok_session_id.clone();
-        let x_grok_turn_idx = request.x_grok_turn_idx.clone();
-        let x_grok_agent_id = request.x_grok_agent_id.clone();
-
         let messages_request = build_messages_request(&request);
-
-        let mut wrapper = MessagesRequestWrapper::new(messages_request);
-        wrapper.x_grok_conv_id = x_grok_conv_id;
-        wrapper.x_grok_req_id = x_grok_req_id;
-        wrapper.x_grok_session_id = x_grok_session_id;
-        wrapper.x_grok_turn_idx = x_grok_turn_idx;
-        wrapper.x_grok_agent_id = x_grok_agent_id;
-
-        if let Some(trace) = trace {
-            wrapper.trace = Some(trace);
-        }
-
-        self.create_message(wrapper).await
+        self.create_message(messages_request).await
     }
 
     /// Backend-aware streaming call that collects the full response.
@@ -2032,17 +1776,12 @@ mod tests {
             idle_timeout_secs: None,
             reasoning_effort: None,
             origin_client: None,
-            client_identifier: None,
-            deployment_id: None,
-            user_id: None,
-            client_version: None,
             attribution_callback: None,
             bearer_resolver: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
-            header_injector: None,
         }
     }
 
@@ -2065,14 +1804,6 @@ mod tests {
             search_parameters: None,
             response_format: None,
             reasoning_effort: None,
-            x_grok_conv_id: None,
-            x_grok_req_id: None,
-            x_grok_session_id: None,
-            x_grok_turn_idx: None,
-            x_grok_agent_id: None,
-            x_grok_deployment_id: None,
-            x_grok_user_id: None,
-            trace: None,
         };
 
         let wrapper = StreamingChatRequest {
@@ -2316,33 +2047,6 @@ mod tests {
     fn sampling_client_always_has_user_agent() {
         let client = SamplingClient::new(minimal_config()).expect("build");
         assert!(client.default_headers.contains_key(USER_AGENT));
-    }
-
-    // Regression: a past change dropped HeaderInjector (traceparent) from sampling requests.
-    #[test]
-    fn header_injector_is_called_in_post() {
-        #[derive(Debug)]
-        struct TestInjector;
-        impl crate::config::HeaderInjector for TestInjector {
-            fn inject(&self, headers: &mut HeaderMap) {
-                headers.insert(
-                    HeaderName::from_static("traceparent"),
-                    HeaderValue::from_static("00-test-trace-id-00"),
-                );
-            }
-        }
-
-        let mut config = minimal_config();
-        config.header_injector = Some(std::sync::Arc::new(TestInjector));
-        let client = SamplingClient::new(config).expect("build");
-        let req = client
-            .post("http://localhost/test")
-            .build()
-            .expect("build request");
-        assert!(
-            req.headers().contains_key("traceparent"),
-            "HeaderInjector should inject traceparent into post() requests"
-        );
     }
 
     #[test]

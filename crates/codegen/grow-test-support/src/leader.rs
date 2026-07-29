@@ -255,7 +255,6 @@ impl LeaderFixture {
             .env("GROW_INFERENCE_BASE_URL", base_url)
             .env("GROW_MODELS_BASE_URL", base_url)
             .env("GROW_FEEDBACK_BASE_URL", base_url)
-            .env("GROW_TRACE_UPLOAD_URL", base_url)
             .env("GROW_API_KEY", "test-key-for-ci")
             .env("GROW_LEADER_SOCKET", &socket)
             .env("RUST_LOG", "grow_shell=debug");
@@ -641,7 +640,6 @@ impl LeaderStdioClient {
                 .env("GROW_INFERENCE_BASE_URL", base_url)
                 .env("GROW_MODELS_BASE_URL", base_url)
                 .env("GROW_FEEDBACK_BASE_URL", base_url)
-                .env("GROW_TRACE_UPLOAD_URL", base_url)
                 .env("GROW_API_KEY", "test-key-for-ci")
                 .env("GROW_LEADER_SOCKET", leader_socket)
                 .env("RUST_LOG", "grow_shell=debug"),

@@ -66,8 +66,6 @@ impl SessionActor {
             prompt_id,
             prompt_blocks,
             prompt_mode,
-            trace_gcs_config: None,
-            artifact_tracker: None,
             client_identifier: None,
             screen_mode: None,
             verbatim: false,
@@ -251,16 +249,16 @@ impl SessionActor {
         let has_workflow_runs = !self.workflow_tracker().await.lock().list().is_empty();
         let availability = self.build_command_availability(&tool_names, has_workflow_runs);
         let parsed = slash_commands::parse_skill_references(text, &slash_skills, availability)?;
-        // Deliberately lighter telemetry than turn start: no `skill.activated`
+        // Deliberately lighter diagnostics than turn start: no `skill.activated`
         // span, `PluginUsed`, or `active_skill` stamp — those attribute the
         // turn, which this skill did not start. `SkillDispatched` still
         // carries `plugin_source`, so dispatch counts stay complete.
         for sk in &parsed {
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::SlashCommandUsed {
+            grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::SlashCommandUsed {
                 command: sk.name.clone(),
                 args_provided: !sk.args.is_empty(),
             });
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::SkillDispatched {
+            grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::SkillDispatched {
                 skill_name: sk.name.clone(),
                 plugin_source: sk.plugin_name.clone(),
             });

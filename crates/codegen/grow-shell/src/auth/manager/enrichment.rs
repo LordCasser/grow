@@ -30,7 +30,7 @@ impl Drop for EnrichmentExitGuard {
         if !self.armed {
             return;
         }
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "auth update enrichment dropped",
             None,
             Some(serde_json::json!({
@@ -73,7 +73,7 @@ async fn fetch_user_info(manager: &AuthManager, key: &str, log_label: &str) -> O
         Ok(resp) if resp.status().is_success() => match resp.json::<UserInfo>().await {
             Ok(ui) if !ui.user_id.is_empty() => Some(ui),
             Ok(_) => {
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     &format!("{log_label} skipped"),
                     None,
                     Some(serde_json::json!({
@@ -84,7 +84,7 @@ async fn fetch_user_info(manager: &AuthManager, key: &str, log_label: &str) -> O
                 None
             }
             Err(e) => {
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     &format!("{log_label} failed"),
                     None,
                     Some(serde_json::json!({
@@ -97,7 +97,7 @@ async fn fetch_user_info(manager: &AuthManager, key: &str, log_label: &str) -> O
             }
         },
         Ok(resp) => {
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 &format!("{log_label} failed"),
                 None,
                 Some(serde_json::json!({
@@ -109,7 +109,7 @@ async fn fetch_user_info(manager: &AuthManager, key: &str, log_label: &str) -> O
             None
         }
         Err(e) => {
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 &format!("{log_label} failed"),
                 None,
                 Some(serde_json::json!({
@@ -149,7 +149,7 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: ProviderAuth) {
     }
 
     let Ok(mut map) = read_auth_json(&manager.path) else {
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "auth update enrichment skipped",
             None,
             Some(serde_json::json!({ "reason": "read_disk_failed" })),
@@ -157,7 +157,7 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: ProviderAuth) {
         return;
     };
     let Some(mut disk) = lookup_auth(&map, &manager.scope) else {
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "auth update enrichment skipped",
             None,
             Some(serde_json::json!({ "reason": "no_disk_auth" })),
@@ -177,7 +177,7 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: ProviderAuth) {
     // Team-login transitions (placeholder→real user_id) don't rotate
     // tokens, so OR correctly allows enrichment for that case.
     if disk.key != auth.key || disk.refresh_token != auth.refresh_token {
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "auth update enrichment skipped",
             None,
             Some(serde_json::json!({
@@ -194,7 +194,7 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: ProviderAuth) {
     map.insert(manager.scope.clone(), disk.clone());
     let write_started = std::time::Instant::now();
     if let Err(e) = write_auth_json(&manager.path, &map) {
-        grow_telemetry::unified_log::error(
+        grow_diagnostics::unified_log::error(
             "auth update enrichment write failed",
             None,
             Some(serde_json::json!({
@@ -207,7 +207,7 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: ProviderAuth) {
         return;
     }
     manager.with_inner_write(|inner| *inner = Some(disk));
-    grow_telemetry::unified_log::info(
+    grow_diagnostics::unified_log::info(
         "auth update enrichment done",
         None,
         Some(serde_json::json!({

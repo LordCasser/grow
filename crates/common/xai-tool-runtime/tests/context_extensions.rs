@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use xai_tool_protocol::ToolCallId;
-use xai_tool_runtime::{BehaviorVersion, Cwd, ToolCallContext, TraceContext};
+use xai_tool_runtime::{BehaviorVersion, Cwd, ToolCallContext};
 
 #[derive(Debug, PartialEq)]
 struct Config {
@@ -197,28 +197,19 @@ fn each_well_known_extension_round_trips_independently() {
     let mut ctx = ToolCallContext::default();
     ctx.extensions.insert(Cwd(std::path::PathBuf::from("/tmp")));
     ctx.extensions.insert(BehaviorVersion("v1.0".into()));
-    ctx.extensions
-        .insert(TraceContext("traceparent: 00-...-00".into()));
 
     assert_eq!(
         ctx.extensions.get::<Cwd>().unwrap().0,
         std::path::PathBuf::from("/tmp")
     );
     assert_eq!(ctx.extensions.get::<BehaviorVersion>().unwrap().0, "v1.0");
-    assert!(
-        ctx.extensions
-            .get::<TraceContext>()
-            .unwrap()
-            .0
-            .contains("traceparent")
-    );
-    assert_eq!(ctx.extensions.len(), 3);
+    assert_eq!(ctx.extensions.len(), 2);
 }
 
 #[test]
 fn dispatcher_can_install_only_what_it_has() {
-    // A dispatcher that knows the cwd but not the trace context installs
-    // only `Cwd`. The other extensions stay absent (not "default"),
+    // A dispatcher that knows only the cwd installs only `Cwd`. The other
+    // extensions stay absent (not "default"),
     // which is the discriminator a tool can rely on.
     let mut ctx = ToolCallContext::default();
     ctx.extensions
@@ -226,15 +217,7 @@ fn dispatcher_can_install_only_what_it_has() {
 
     assert!(ctx.extensions.contains::<Cwd>());
     assert!(!ctx.extensions.contains::<BehaviorVersion>());
-    assert!(!ctx.extensions.contains::<TraceContext>());
     assert_eq!(ctx.extensions.len(), 1);
-
-    // Adding `TraceContext` later does not implicitly conjure a
-    // `BehaviorVersion` — extensions are independent.
-    ctx.extensions.insert(TraceContext("tp".into()));
-    assert!(ctx.extensions.contains::<TraceContext>());
-    assert!(!ctx.extensions.contains::<BehaviorVersion>());
-    assert_eq!(ctx.extensions.len(), 2);
 }
 
 #[test]
@@ -245,19 +228,15 @@ fn absence_signals_backend_or_other_mode() {
     let ctx = ToolCallContext::default();
     assert!(ctx.extensions.get::<Cwd>().is_none());
     assert!(ctx.extensions.get::<BehaviorVersion>().is_none());
-    assert!(ctx.extensions.get::<TraceContext>().is_none());
     assert!(!ctx.extensions.contains::<Cwd>());
     assert!(!ctx.extensions.contains::<BehaviorVersion>());
-    assert!(!ctx.extensions.contains::<TraceContext>());
 }
 
 #[test]
 fn well_known_extensions_clone_preserves_inner_value() {
     let cwd = Cwd(std::path::PathBuf::from("/etc"));
     let behavior = BehaviorVersion("v0".into());
-    let trace = TraceContext("tp".into());
 
     assert_eq!(cwd.clone().0, cwd.0);
     assert_eq!(behavior.clone().0, behavior.0);
-    assert_eq!(trace.clone().0, trace.0);
 }

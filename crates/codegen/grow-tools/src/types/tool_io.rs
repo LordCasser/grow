@@ -103,7 +103,7 @@ impl ToolInput {
     /// The real target tool for *meta-dispatch* tools whose wire `function.name`
     /// is only the wrapper (`use_tool`), or `None` for
     /// ordinary tools (already named by `function.name`). Single source of truth
-    /// for hook matching / telemetry; callers fall back to `function.name` on
+    /// for hook matching / diagnostics; callers fall back to `function.name` on
     /// `None`. Add any new dispatcher here.
     pub fn dispatch_target_name(&self) -> Option<String> {
         match self {

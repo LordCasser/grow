@@ -397,7 +397,7 @@ fn map_run_result(
         Ok(()) => Err("no_output"),
         Err(SubprocessError::Timeout) => Err("timeout"),
         // Split the non-zero exit so a containment event is observable in
-        // telemetry rather than masquerading as an ordinary render failure: a
+        // diagnostics rather than masquerading as an ordinary render failure: a
         // signal-terminated child (the `RLIMIT_AS` allocation abort, a
         // panic-under-`panic=abort`, or a SIGKILL) and the child's own watchdog
         // self-destruct each get a distinct reason. All still degrade to the same

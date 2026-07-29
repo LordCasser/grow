@@ -30,7 +30,7 @@ pub struct RegisterRequest {
     pub repo_head_at_start: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
-    /// Opaque per-machine device id (telemetry `agent_id()`) for machine disambiguation.
+    /// Opaque per-machine device id (diagnostics `agent_id()`) for machine disambiguation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -194,7 +194,6 @@ impl SessionRegistryClient {
         builder: RequestBuilder,
         op: &'static str,
     ) -> Result<reqwest::Response> {
-        let builder = xai_file_utils::trace_context::inject_trace_context_into_request(builder);
         let request = builder.build().context(op)?;
         self.client.execute(request).await.map_err(|e| match e {
             reqwest_middleware::Error::Middleware(e) => e.context(op),

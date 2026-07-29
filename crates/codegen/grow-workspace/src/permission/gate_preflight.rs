@@ -95,7 +95,7 @@ impl GatePreflight {
         self.defers_gate_ask
     }
 
-    /// The gate-owned prompt trigger for telemetry, or `None` when a bash floor
+    /// The gate-owned prompt trigger for diagnostics, or `None` when a bash floor
     /// or plain needs-user forced the prompt. Rule-match Asks keep their gate
     /// label; a deferrable Ask does not.
     pub(crate) fn prompt_trigger(

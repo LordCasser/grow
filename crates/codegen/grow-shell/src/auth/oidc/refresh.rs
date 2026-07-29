@@ -45,7 +45,7 @@ pub(crate) async fn oidc_token_exchange(auth: &ProviderAuth) -> OidcRefreshResul
         "oidc try_refresh_pure enter"
     );
     if !has_rt || !has_issuer || !has_client_id {
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "oidc try_refresh skipped: missing fields",
             None,
             Some(serde_json::json!({

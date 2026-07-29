@@ -1,5 +1,5 @@
 //! Hook dispatch concern for `SessionActor`: run contexts, hook execution
-//! notifications and telemetry, and turn/tool outcome mapping.
+//! notifications and diagnostics, and turn/tool outcome mapping.
 
 use super::*;
 
@@ -247,11 +247,11 @@ impl SessionActor {
             grow_hooks::dispatcher::dispatch_non_blocking(&registry, event, &envelope, &ctx).await;
         self.send_hook_execution(&event.to_string(), tool_name, prompt_id, &results)
             .await;
-        self.emit_hook_executed_telemetry(&event.to_string(), tool_name, &results)
+        self.emit_hook_executed_diagnostics(&event.to_string(), tool_name, &results)
             .await;
     }
 
-    pub(super) async fn emit_hook_executed_telemetry(
+    pub(super) async fn emit_hook_executed_diagnostics(
         &self,
         event_name: &str,
         tool_name: Option<&str>,
@@ -265,25 +265,25 @@ impl SessionActor {
                 } => (
                     hook_name,
                     elapsed,
-                    grow_telemetry::events::HookOutcome::Success,
+                    grow_diagnostics::events::HookOutcome::Success,
                 ),
                 grow_hooks::result::HookRunResult::Blocked {
                     hook_name, elapsed, ..
                 } => (
                     hook_name,
                     elapsed,
-                    grow_telemetry::events::HookOutcome::Blocked,
+                    grow_diagnostics::events::HookOutcome::Blocked,
                 ),
                 grow_hooks::result::HookRunResult::Failed {
                     hook_name, elapsed, ..
                 } => (
                     hook_name,
                     elapsed,
-                    grow_telemetry::events::HookOutcome::Error,
+                    grow_diagnostics::events::HookOutcome::Error,
                 ),
                 grow_hooks::result::HookRunResult::Skipped { .. } => continue,
             };
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::HookExecuted {
+            grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::HookExecuted {
                 hook_name: hook_name.clone(),
                 event: event_name.to_string(),
                 tool_name: tool.clone(),
@@ -297,9 +297,7 @@ impl SessionActor {
 #[cfg(test)]
 mod notification_hook_filter_tests {
     use super::*;
-    use crate::extensions::notification::{
-        FeedbackRequestNotification, HookRunEntryDto, HookRunStatusDto, RetryState,
-    };
+    use crate::extensions::notification::{HookRunEntryDto, HookRunStatusDto, RetryState};
 
     #[test]
     fn hook_updates_do_not_fire_notification_hook() {
@@ -327,23 +325,6 @@ mod notification_hook_filter_tests {
             attempt: 1,
             max_retries: 3,
             reason: "timeout".into(),
-        });
-        assert!(notification_hook_for_update(&update).is_none());
-    }
-
-    #[test]
-    fn feedback_request_does_not_fire_notification_hook() {
-        let update = XaiSessionUpdate::FeedbackRequest(FeedbackRequestNotification {
-            request_id: "req-1".into(),
-            tier: "tier1".into(),
-            prompt: "How was this session?".into(),
-            dismissible: true,
-            trigger_type: "tier1_engagement".into(),
-            trigger_condition: "turns >= 10".into(),
-            trigger_reason: "long session".into(),
-            stars: true,
-            thumbs: false,
-            text: false,
         });
         assert!(notification_hook_for_update(&update).is_none());
     }

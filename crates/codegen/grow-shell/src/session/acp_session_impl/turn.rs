@@ -81,7 +81,7 @@ impl UsageDrainOutcome {
 }
 /// Accumulates a turn's per-call token usage and tool-call presence across the
 /// agentic loop's model calls, recording running totals on the turn span. Kept
-/// out of the loop body so telemetry bookkeeping doesn't obscure control flow.
+/// out of the loop body so diagnostics bookkeeping doesn't obscure control flow.
 #[derive(Default)]
 struct TurnSpanTotals {
     input_tokens: i64,
@@ -242,8 +242,6 @@ impl SessionActor {
         prompt_id: &str,
         prompt_blocks: Vec<acp::ContentBlock>,
         prompt_mode: PromptMode,
-        trace_gcs_config: Option<crate::save::TraceExportConfig>,
-        artifact_tracker: Option<crate::save::ArtifactTracker>,
         prompt_client_identifier: Option<String>,
         prompt_screen_mode: Option<String>,
         verbatim: bool,
@@ -261,7 +259,7 @@ impl SessionActor {
             .sum();
         tracing::Span::current().record("prompt_length", prompt_length as i64);
         *self.active_skill.lock() = None;
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "shell.handle_prompt.start",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
@@ -352,7 +350,7 @@ impl SessionActor {
             Err(SlashCommandOutcome::Builtin(action)) => {
                 let text_block =
                     |text: String| acp::ContentBlock::Text(acp::TextContent::new(text));
-                let slash_used = grow_telemetry::events::SlashCommandUsed {
+                let slash_used = grow_diagnostics::events::SlashCommandUsed {
                     command: action.command_name().to_string(),
                     args_provided: action.args_provided(),
                 };
@@ -366,12 +364,12 @@ impl SessionActor {
                         objective,
                         token_budget,
                     } => {
-                        grow_telemetry::session_ctx::log_event(slash_used);
+                        grow_diagnostics::session_ctx::log_event(slash_used);
                         let reminder = self.setup_goal(&objective, token_budget).await;
                         vec![text_block(reminder)]
                     }
                     BuiltinAction::GoalResume => {
-                        grow_telemetry::session_ctx::log_event(slash_used);
+                        grow_diagnostics::session_ctx::log_event(slash_used);
                         match self.resume_goal().await {
                             GoalResumeOutcome::Inference { reminder, user_msg } => {
                                 self.send_slash_command_output(&user_msg).await;
@@ -416,14 +414,14 @@ impl SessionActor {
                     );
                 }
                 for sk in &parsed_skills {
-                    grow_telemetry::session_ctx::log_event(
-                        grow_telemetry::events::SlashCommandUsed {
+                    grow_diagnostics::session_ctx::log_event(
+                        grow_diagnostics::events::SlashCommandUsed {
                             command: sk.name.clone(),
                             args_provided: !sk.args.is_empty(),
                         },
                     );
-                    grow_telemetry::session_ctx::log_event(
-                        grow_telemetry::events::SkillDispatched {
+                    grow_diagnostics::session_ctx::log_event(
+                        grow_diagnostics::events::SkillDispatched {
                             skill_name: sk.name.clone(),
                             plugin_source: sk.plugin_name.clone(),
                         },
@@ -431,7 +429,7 @@ impl SessionActor {
                     let skill_source = if sk.plugin_name.is_some() {
                         "plugin"
                     } else {
-                        crate::session::telemetry::skill_source_label(
+                        crate::session::diagnostics::skill_source_label(
                             &sk.skill_path,
                             self.session_info.cwd.as_str(),
                         )
@@ -444,8 +442,8 @@ impl SessionActor {
                     )
                     .in_scope(|| {});
                     if let Some(ref pname) = sk.plugin_name {
-                        grow_telemetry::session_ctx::log_event(
-                            grow_telemetry::events::PluginUsed {
+                        grow_diagnostics::session_ctx::log_event(
+                            grow_diagnostics::events::PluginUsed {
                                 plugin_id: pname.clone(),
                                 plugin_name: pname.clone(),
                                 skill_name: Some(sk.name.clone()),
@@ -514,12 +512,12 @@ impl SessionActor {
         })
         .await;
         let turn_idx = self.chat_state_handle.get_prompt_index().await as u64;
-        grow_telemetry::session_ctx::log_session_event(crate::agent::session_metrics::Turn {
+        grow_diagnostics::session_ctx::log_session_event(crate::agent::session_metrics::Turn {
             session_id: self.session_info.id.0.to_string(),
             turn_number: turn_idx,
         });
         let current_prompt_index = self.chat_state_handle.get_prompt_index().await;
-        grow_telemetry::session_ctx::begin_prompt_id();
+        grow_diagnostics::session_ctx::begin_prompt_id();
         let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
         let mut chunk_meta = serde_json::Map::new();
         chunk_meta.insert("modelId".into(), serde_json::json!(model_id));
@@ -676,17 +674,16 @@ impl SessionActor {
             .await
             .map(|c| c.model)
             .unwrap_or_default();
-        if self.telemetry_enabled || grow_telemetry::external::is_active() {
+        {
             let effective_client_identifier =
                 prompt_client_identifier.or_else(|| self.client_identifier.clone());
-            let ev = grow_telemetry::events::PromptSubmitted {
+            let ev = grow_diagnostics::events::PromptSubmitted {
                 prompt_length: user_message.len(),
                 model_id,
                 client_identifier: effective_client_identifier,
                 screen_mode: prompt_screen_mode,
-                prompt_text: None,
             };
-            grow_telemetry::session_ctx::log_event_dual(self.telemetry_enabled, ev);
+            grow_diagnostics::session_ctx::log_event(ev);
         }
         self.maybe_inject_mcp_reminder().await;
         self.maybe_inject_mcp_connecting_reminder().await;
@@ -697,7 +694,7 @@ impl SessionActor {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
                 gate.set(false);
             }
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "shell.task_wake.gate_cleared",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({ "reason": "handle_prompt_user_start" })),
@@ -739,9 +736,6 @@ impl SessionActor {
             .await;
         let prompt_text_for_hook = user_message.clone();
         {
-            if trace_gcs_config.is_some() {
-                self.chat_state_handle.begin_turn_capture();
-            }
             let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
             if matches!(origin, super::super::PromptOrigin::User) {
                 self.maybe_inject_interrupt_reminder().await;
@@ -841,8 +835,6 @@ impl SessionActor {
         let doom_event_model = turn_model_id.clone();
         let turn_timer = std::time::Instant::now();
         let result = {
-            let mut round_trace = trace_gcs_config;
-            let mut round_artifact = artifact_tracker;
             let mut stop_continuations_this_turn: u32 = 0;
             loop {
                 if self.goal_harness_enabled() {
@@ -851,12 +843,7 @@ impl SessionActor {
                     self.set_goal_loop_active_resource(goal_loop_active).await;
                 }
                 let round = self
-                    .process_conversation_turn_with_recovery(
-                        prompt_id,
-                        round_trace.take(),
-                        round_artifact.take(),
-                        json_schema.clone(),
-                    )
+                    .process_conversation_turn_with_recovery(prompt_id, json_schema.clone())
                     .await;
                 if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
                     break round;
@@ -906,7 +893,7 @@ impl SessionActor {
         };
         let turn_duration_ms = turn_timer.elapsed().as_millis() as u64;
         let handle_prompt_elapsed_ms = handle_prompt_start.elapsed().as_millis() as u64;
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "shell.handle_prompt.done",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
@@ -960,8 +947,8 @@ impl SessionActor {
                     cancellation_context: None,
                 })
                 .await;
-                grow_telemetry::session_ctx::log_event(grow_telemetry::events::TurnCompleted {
-                    outcome: grow_telemetry::events::Outcome::Completed,
+                grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::TurnCompleted {
+                    outcome: grow_diagnostics::events::Outcome::Completed,
                     duration_ms: turn_duration_ms,
                     tool_call_count: turn_tool_count,
                     model_id: turn_model_id,
@@ -986,8 +973,8 @@ impl SessionActor {
                     cancellation_context: None,
                 })
                 .await;
-                grow_telemetry::session_ctx::log_event(grow_telemetry::events::TurnCompleted {
-                    outcome: grow_telemetry::events::Outcome::Completed,
+                grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::TurnCompleted {
+                    outcome: grow_diagnostics::events::Outcome::Completed,
                     duration_ms: turn_duration_ms,
                     tool_call_count: turn_tool_count,
                     model_id: turn_model_id,
@@ -1015,8 +1002,8 @@ impl SessionActor {
                     cancellation_context: context.clone(),
                 })
                 .await;
-                grow_telemetry::session_ctx::log_event(grow_telemetry::events::TurnCompleted {
-                    outcome: grow_telemetry::events::Outcome::Cancelled,
+                grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::TurnCompleted {
+                    outcome: grow_diagnostics::events::Outcome::Cancelled,
                     duration_ms: turn_duration_ms,
                     tool_call_count: turn_tool_count,
                     model_id: turn_model_id,
@@ -1048,8 +1035,8 @@ impl SessionActor {
                     })),
                 })
                 .await;
-                grow_telemetry::session_ctx::log_event(grow_telemetry::events::TurnCompleted {
-                    outcome: grow_telemetry::events::Outcome::Cancelled,
+                grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::TurnCompleted {
+                    outcome: grow_diagnostics::events::Outcome::Cancelled,
                     duration_ms: turn_duration_ms,
                     tool_call_count: turn_tool_count,
                     model_id: turn_model_id,
@@ -1071,14 +1058,16 @@ impl SessionActor {
                 })
                 .await;
                 let error_category = Self::classify_turn_error(err);
-                grow_telemetry::session_ctx::log_session_event(grow_telemetry::events::ApiError {
-                    error_category: error_category.clone(),
-                    model_id: turn_model_id.clone(),
-                    status_code: None,
-                    duration_ms: Some(turn_duration_ms),
-                });
-                grow_telemetry::session_ctx::log_event(grow_telemetry::events::TurnCompleted {
-                    outcome: grow_telemetry::events::Outcome::Error,
+                grow_diagnostics::session_ctx::log_session_event(
+                    grow_diagnostics::events::ApiError {
+                        error_category: error_category.clone(),
+                        model_id: turn_model_id.clone(),
+                        status_code: None,
+                        duration_ms: Some(turn_duration_ms),
+                    },
+                );
+                grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::TurnCompleted {
+                    outcome: grow_diagnostics::events::Outcome::Error,
                     duration_ms: turn_duration_ms,
                     tool_call_count: turn_tool_count,
                     model_id: turn_model_id,
@@ -1098,7 +1087,7 @@ impl SessionActor {
                 .await;
             }
         }
-        grow_telemetry::session_ctx::log_session_event(
+        grow_diagnostics::session_ctx::log_session_event(
             crate::agent::session_metrics::TurnCompletedLifecycle {
                 session_id: self.session_info.id.0.to_string(),
                 turn_number: current_prompt_index as u64,
@@ -1106,7 +1095,7 @@ impl SessionActor {
         );
         let doom_tally = std::mem::take(&mut *self.doom_loop_turn_tally.lock());
         if doom_tally.fired() {
-            grow_telemetry::session_ctx::log_session_event(
+            grow_diagnostics::session_ctx::log_session_event(
                 crate::agent::session_metrics::DoomLoopRecovery {
                     session_id: self.session_info.id.0.to_string(),
                     turn_number: current_prompt_index as u64,
@@ -1502,8 +1491,6 @@ impl SessionActor {
     pub(super) async fn process_conversation_turn_with_recovery(
         self: &Arc<Self>,
         req_id: &str,
-        trace_gcs_config: Option<crate::save::TraceExportConfig>,
-        artifact_tracker: Option<crate::save::ArtifactTracker>,
         json_schema: Option<serde_json::Value>,
     ) -> Result<TurnOutcome, acp::Error> {
         let _ = self.compaction.auto_compact_suppressed.compare_exchange(
@@ -1516,38 +1503,19 @@ impl SessionActor {
         let completion_req = match agent_ref.completion_requirement() {
             Some(req) => req,
             None => {
-                return self
-                    .process_conversation_turn(
-                        req_id,
-                        trace_gcs_config,
-                        artifact_tracker.as_ref(),
-                        json_schema,
-                    )
-                    .await;
+                return self.process_conversation_turn(req_id, json_schema).await;
             }
         };
         let recovery = match &completion_req.recovery {
             Some(r) => r.clone(),
             None => {
-                return self
-                    .process_conversation_turn(
-                        req_id,
-                        trace_gcs_config,
-                        artifact_tracker.as_ref(),
-                        json_schema,
-                    )
-                    .await;
+                return self.process_conversation_turn(req_id, json_schema).await;
             }
         };
         let required_tool = completion_req.tool.clone();
         let recovery_prompt = completion_req.reminder.clone();
         let mut result = self
-            .process_conversation_turn(
-                req_id,
-                trace_gcs_config.clone(),
-                artifact_tracker.as_ref(),
-                json_schema.clone(),
-            )
+            .process_conversation_turn(req_id, json_schema.clone())
             .await;
         if matches!(
             result,
@@ -1608,14 +1576,7 @@ impl SessionActor {
             sleep(delay).await;
             let recovery_message = ConversationItem::auto_recovery(recovery_prompt.clone());
             self.chat_state_handle.push_user_message(recovery_message);
-            result = self
-                .process_conversation_turn(
-                    req_id,
-                    trace_gcs_config.clone(),
-                    artifact_tracker.as_ref(),
-                    None,
-                )
-                .await;
+            result = self.process_conversation_turn(req_id, None).await;
             if matches!(
                 result,
                 Ok(TurnOutcome::MaxTurnsReached { .. }) | Ok(TurnOutcome::StationarityEnded { .. })
@@ -1658,7 +1619,7 @@ impl SessionActor {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         if !self.memory.initial_injection_config.enabled {
             tracing::info!(
-                target: grow_telemetry::memory_log::TARGET,
+                target: grow_diagnostics::memory_log::TARGET,
                 "MEMORY_INJECT: first-turn injection disabled by config"
             );
             return None;
@@ -1671,7 +1632,7 @@ impl SessionActor {
         let conversation = self.chat_state_handle.get_conversation().await;
         if crate::session::helpers::memory_context::conversation_has_memory_context(&conversation) {
             tracing::info!(
-                target: grow_telemetry::memory_log::TARGET,
+                target: grow_diagnostics::memory_log::TARGET,
                 "MEMORY_INJECT: existing memory-context block present in system message -- skipping re-injection to preserve prompt cache"
             );
             return None;
@@ -1705,19 +1666,21 @@ impl SessionActor {
             .as_ref()
             .map_or(0, |r| r.iter().map(|s| s.snippet.len()).sum());
         tracing::info!(
-            target: grow_telemetry::memory_log::TARGET,
+            target: grow_diagnostics::memory_log::TARGET,
             configured_min_score,
             "MEMORY_INJECT_SEARCH: results={result_count}"
         );
-        grow_telemetry::session_ctx::log_event(grow_telemetry::memory_telemetry::MemoryInjection {
-            session_id: self.session_info.id.to_string(),
-            was_greeting_fallback: was_greeting,
-            result_count,
-            total_snippet_chars,
-            top_score,
-            configured_min_score,
-            injection_duration_ms: inject_start.elapsed().as_millis() as u64,
-        });
+        grow_diagnostics::session_ctx::log_event(
+            grow_diagnostics::memory_events::MemoryInjection {
+                session_id: self.session_info.id.to_string(),
+                was_greeting_fallback: was_greeting,
+                result_count,
+                total_snippet_chars,
+                top_score,
+                configured_min_score,
+                injection_duration_ms: inject_start.elapsed().as_millis() as u64,
+            },
+        );
         inject_results.and_then(|results| {
             crate::session::helpers::memory_context::format_memory_reminder(&results)
         })
@@ -1794,8 +1757,8 @@ impl SessionActor {
             _ => false,
         }
     }
-    /// Shared turn-completion bookkeeping (plan cleanup, signals snapshot +
-    /// persistence, BigQuery turn delta, feedback prompt). Runs identically for
+    /// Shared turn-completion bookkeeping (plan cleanup, local signals snapshot,
+    /// persistence, feedback prompt). Runs identically for
     /// the native and StructuredOutput-tool completion paths. Returns the
     /// turn-end snapshot for `TurnOutcome::Completed`.
     async fn finalize_turn_bookkeeping(
@@ -1814,7 +1777,7 @@ impl SessionActor {
             snap.turn_output_tokens = turn_span_totals.output_tokens.max(0) as u64;
             snap.turn_cached_input_tokens = turn_span_totals.cache_read_tokens.max(0) as u64;
             for pr in &snap.delta.prs_created_this_turn {
-                grow_telemetry::session_ctx::log_event(grow_telemetry::events::PrCreated {
+                grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::PrCreated {
                     source: pr.source,
                     had_commit_in_session: pr.had_commit_in_session,
                 });
@@ -1825,22 +1788,6 @@ impl SessionActor {
                 .notifications
                 .persistence_tx
                 .send(PersistenceMsg::Signals(snap.current.clone()));
-        }
-        self.feedback_manager
-            .send_turn_delta_with_snapshot(
-                snapshot.clone(),
-                Some(req_id.to_string()),
-                Some(conv_turn_start.elapsed().as_millis() as i64),
-                Some("completed".to_string()),
-                model_fingerprint,
-            )
-            .await;
-        if let Some(request) = self
-            .feedback_manager
-            .maybe_request_feedback(Some(req_id.to_string()))
-            .await
-        {
-            self.send_feedback_notification(request).await;
         }
         snapshot
     }
@@ -1873,8 +1820,6 @@ impl SessionActor {
     async fn process_conversation_turn(
         self: &Arc<Self>,
         req_id: &str,
-        trace_gcs_config: Option<crate::save::TraceExportConfig>,
-        artifact_tracker: Option<&crate::save::ArtifactTracker>,
         json_schema: Option<serde_json::Value>,
     ) -> Result<TurnOutcome, acp::Error> {
         let conv_turn_start = std::time::Instant::now();
@@ -1916,7 +1861,7 @@ impl SessionActor {
         if let Some(ref mut pt) = prompt_timing {
             pt.record_tool_prep(mcp_wait_ms, total_prep_ms);
         }
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "shell.turn.tool_prep_done",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
@@ -1926,21 +1871,6 @@ impl SessionActor {
                 "elapsed_since_turn_start_ms": conv_turn_start.elapsed().as_millis() as u64,
             })),
         );
-        if let Some(ref gcs_config) = trace_gcs_config {
-            let gcs_cfg = gcs_config.clone();
-            let tool_defs = tool_definitions.clone();
-            let manifest_clone = artifact_tracker.cloned();
-            let auth_manager = self.auth_manager.clone();
-            tokio::spawn(async move {
-                crate::save::upload_tool_definitions(
-                    gcs_cfg,
-                    auth_manager,
-                    &tool_defs,
-                    manifest_clone.as_ref(),
-                )
-                .await;
-            });
-        }
         self.record_turn_model().await;
         let mut metrics_drop_guard = TurnMetrics::new();
         let mut turn_tools_called: Vec<String> = Vec::new();
@@ -1992,7 +1922,7 @@ impl SessionActor {
                     true_noop,
                     "action stationarity: ending turn after repeated identical tool calls"
                 );
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "shell.turn.action_stationarity_stop",
                     Some(self.session_info.id.0.as_ref()),
                     Some(serde_json::json!({
@@ -2002,8 +1932,8 @@ impl SessionActor {
                         "true_noop": true_noop,
                     })),
                 );
-                grow_telemetry::session_ctx::log_event(
-                    grow_telemetry::events::ActionStationarityStop {
+                grow_diagnostics::session_ctx::log_event(
+                    grow_diagnostics::events::ActionStationarityStop {
                         true_noop,
                         run_len,
                         tool_name: tool_name.clone(),
@@ -2030,7 +1960,7 @@ impl SessionActor {
                     .injection_count
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::info!(
-                    target: grow_telemetry::memory_log::TARGET,
+                    target: grow_diagnostics::memory_log::TARGET,
                     "MEMORY_INJECT: first-turn memory context injected"
                 );
             }
@@ -2084,24 +2014,10 @@ impl SessionActor {
             let build_req_start = std::time::Instant::now();
             let request = self
                 .chat_state_handle
-                .build_request(
-                    effective_tools,
-                    memory_reminder,
-                    self.memory.is_enabled(),
-                    trace_gcs_config
-                        .clone()
-                        .map(|cfg| -> Box<dyn crate::sampling::TraceContext> {
-                            Box::new(crate::sampling::ConversationRequestTrace {
-                                gcs_config: cfg,
-                                artifact_tracker: artifact_tracker.cloned(),
-                            })
-                        }),
-                    self.session_info.id.to_string(),
-                    req_id.to_owned(),
-                )
+                .build_request(effective_tools, memory_reminder, self.memory.is_enabled())
                 .await
                 .expect("chat state actor should be alive");
-            grow_telemetry::unified_log::debug(
+            grow_diagnostics::unified_log::debug(
                 "shell.turn.build_request_done",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
@@ -2110,15 +2026,6 @@ impl SessionActor {
                 })),
             );
             let mut request = request;
-            request.x_grok_session_id = Some(self.session_info.id.to_string());
-            request.x_grok_turn_idx =
-                Some(self.chat_state_handle.get_prompt_index().await.to_string());
-            request.x_grok_agent_id = Some(grow_telemetry::id::agent_id());
-            if request.x_grok_deployment_id.is_none() {
-                request.x_grok_deployment_id = crate::managed_config::resolve_deployment_id(
-                    crate::managed_config::resolve_deployment_key().as_deref(),
-                );
-            }
             if structured_output_native {
                 request.json_schema = json_schema.clone();
             }
@@ -2137,7 +2044,7 @@ impl SessionActor {
                     },
                 )
                 .await;
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "shell.turn.inference_start",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
@@ -2164,7 +2071,7 @@ impl SessionActor {
                             delay_ms,
                             "auth 401 retry: backing off before resubmit"
                         );
-                        grow_telemetry::unified_log::warn(
+                        grow_diagnostics::unified_log::warn(
                             "shell.turn.auth_retry_backoff",
                             Some(self.session_info.id.0.as_ref()),
                             Some(serde_json::json!({
@@ -2217,7 +2124,7 @@ impl SessionActor {
                 }
                 _ => None,
             };
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "shell.turn.inference_done",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
@@ -2250,8 +2157,8 @@ impl SessionActor {
             let model_duration_ms = model_timer.elapsed().as_millis() as u64;
             {
                 let model_id = self.current_model_id().await;
-                grow_telemetry::session_ctx::log_event(
-                    grow_telemetry::events::ModelResponseReceived {
+                grow_diagnostics::session_ctx::log_event(
+                    grow_diagnostics::events::ModelResponseReceived {
                         model_id,
                         duration_ms: model_duration_ms,
                         stop_reason: response
@@ -2494,7 +2401,7 @@ impl SessionActor {
             let identical_run_len =
                 identical_tool_calls.observe(&step_signature, &step_tool_name, is_true_noop);
             if is_true_noop {
-                grow_telemetry::session_ctx::log_event(grow_telemetry::events::ShellTrueNoop {
+                grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::ShellTrueNoop {
                     tool_name: step_tool_name.clone(),
                 });
             }
@@ -2505,7 +2412,7 @@ impl SessionActor {
                     run_len = identical_run_len,
                     "action stationarity: nudging model to break repeated identical tool calls"
                 );
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "shell.turn.action_stationarity_nudge",
                     Some(self.session_info.id.0.as_ref()),
                     Some(serde_json::json!({

@@ -35,9 +35,6 @@ async fn embedded_mode_boots_without_hanging_on_blocked_backend() {
         ("GROW_API_KEY", "test-key-for-ci"),
         ("GROW_CLI_CHAT_PROXY_BASE_URL", base.as_str()),
         ("GROW_INFERENCE_BASE_URL", base.as_str()),
-        ("GROW_TELEMETRY_ENABLED", "false"),
-        ("GROW_FEEDBACK_ENABLED", "false"),
-        ("GROW_TRACE_UPLOAD", "false"),
     ];
 
     let binary = pager_binary().expect("resolve pager binary");

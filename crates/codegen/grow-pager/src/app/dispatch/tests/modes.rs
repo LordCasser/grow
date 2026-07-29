@@ -309,7 +309,7 @@ fn set_plan_mode_mutates_only_active_agent_not_others() {
 //     `AllowOnce` responses (NOT cancelled — auto-approve).
 //   - The drain ALSO runs on a duplicate YOLO=ON dispatch
 //     (any permission queued between
-//     dispatches must be drained on the second). Only telemetry
+//     dispatches must be drained on the second). Only diagnostics
 //     + the "setting changed" tracing log are gated on
 //     transitions.
 //   - On no-AllowOnce shape: the drain falls back to `Cancelled`,
@@ -1371,15 +1371,15 @@ fn cycle_mode_pre_session_normal_to_plan_does_not_persist_permission_mode() {
 
 /// No-active-agent → no-op (no panic, no effect, no mutation).
 ///
-/// **Telemetry-no-op contract.** The
+/// **Diagnostic-no-op contract.** The
 /// `set_yolo_mode_inner` early-return at the `app.active_view`
-/// guard MUST precede the `grow_telemetry::log_event` call
+/// guard MUST precede the `grow_diagnostics::log_event` call
 /// — otherwise a no-agent dispatch would leak a `YoloToggled`
-/// telemetry event for an action that never happened. We can't
-/// easily intercept the telemetry library from a unit test, but
+/// diagnostics event for an action that never happened. We can't
+/// easily intercept the diagnostics library from a unit test, but
 /// we DO pin the absence-of-side-effects contract via the
 /// SHARED-state defense below. A future refactor that hoists
-/// telemetry above the guard would change the testable side
+/// diagnostics above the guard would change the testable side
 /// effects (Effect emission, default_yolo, current_ui mutation
 /// all gated by the same guard), so this test catches the
 /// regression class.
@@ -1746,7 +1746,7 @@ fn cycle_into_plan_with_nudge_showing_accepts_and_retires_nudge() {
 
 /// A Normal→Plan cycle with a NON-nudge tip on screen still enters plan mode
 /// and leaves that tip intact: the accept's clear is keyed to PLAN_NUDGE_KEY,
-/// not "any tip". With no telemetry sink this pins plan-entry + keyed-clear
+/// not "any tip". With no diagnostics sink this pins plan-entry + keyed-clear
 /// correctness, not the emit-gating itself.
 #[test]
 fn cycle_into_plan_without_nudge_leaves_other_tip_intact() {

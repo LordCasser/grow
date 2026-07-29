@@ -6,7 +6,7 @@ impl SessionActor {
         self: &Arc<Self>,
         action: BuiltinAction,
     ) -> PromptTurnResult {
-        grow_telemetry::session_ctx::log_event(grow_telemetry::events::SlashCommandUsed {
+        grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::SlashCommandUsed {
             command: action.command_name().to_string(),
             args_provided: action.args_provided(),
         });
@@ -20,20 +20,22 @@ impl SessionActor {
                 self.permissions.set_yolo_mode(enabled);
                 // Report the ACTUAL state, not the request: the manager clamps a
                 // requested ON to OFF under the always-approve pin, so `enabled`
-                // would mis-report a turn-on (event, telemetry, and the log line)
+                // would mis-report a turn-on (event, diagnostics, and the log line)
                 // that never happened.
                 let actual = self.permissions.is_yolo_mode();
                 if let Some(actual) = yolo_toggle_report(was, actual) {
                     self.emit_event(crate::session::events::Event::YoloToggled { enabled: actual });
-                    grow_telemetry::session_ctx::log_event(grow_telemetry::events::YoloToggled {
-                        enabled: actual,
-                        previous_state: was,
-                        trigger: grow_telemetry::events::YoloTrigger::SlashCommand,
-                    });
+                    grow_diagnostics::session_ctx::log_event(
+                        grow_diagnostics::events::YoloToggled {
+                            enabled: actual,
+                            previous_state: was,
+                            trigger: grow_diagnostics::events::YoloTrigger::SlashCommand,
+                        },
+                    );
                     tracing::info_span!(
                         "session.permission_mode_changed",
-                        from_mode = crate::session::telemetry::permission_mode_label(was),
-                        to_mode = crate::session::telemetry::permission_mode_label(actual),
+                        from_mode = crate::session::diagnostics::permission_mode_label(was),
+                        to_mode = crate::session::diagnostics::permission_mode_label(actual),
                         trigger = "slash_command",
                         enabled = actual,
                     )
@@ -81,14 +83,14 @@ impl SessionActor {
             BuiltinAction::HooksTrust => {
                 let msg = match Self::do_hooks_trust_project(&self.session_info.cwd) {
                     Ok(root) => {
-                        grow_telemetry::session_ctx::log_event(
-                            grow_telemetry::events::HookTrusted { success: true },
+                        grow_diagnostics::session_ctx::log_event(
+                            grow_diagnostics::events::HookTrusted { success: true },
                         );
                         format!("Trusted: {}.", root.display())
                     }
                     Err(e) => {
-                        grow_telemetry::session_ctx::log_event(
-                            grow_telemetry::events::HookTrusted { success: false },
+                        grow_diagnostics::session_ctx::log_event(
+                            grow_diagnostics::events::HookTrusted { success: false },
                         );
                         e
                     }
@@ -144,8 +146,8 @@ impl SessionActor {
                     // paths are under ~/.grow/ to prevent hook path injection.
                     match crate::config::add_hooks_path(&path) {
                         Ok(()) => {
-                            grow_telemetry::session_ctx::log_event(
-                                grow_telemetry::events::HookAdded { success: true },
+                            grow_diagnostics::session_ctx::log_event(
+                                grow_diagnostics::events::HookAdded { success: true },
                             );
                             self.send_host_turn_slash_command_output(&format!(
                                 "Added hook path: {path}\n\
@@ -154,8 +156,8 @@ impl SessionActor {
                             .await;
                         }
                         Err(e) => {
-                            grow_telemetry::session_ctx::log_event(
-                                grow_telemetry::events::HookAdded { success: false },
+                            grow_diagnostics::session_ctx::log_event(
+                                grow_diagnostics::events::HookAdded { success: false },
                             );
                             self.send_host_turn_slash_command_output(&format!(
                                 "Failed to add hook path: {e}"
@@ -175,8 +177,8 @@ impl SessionActor {
                 } else {
                     match crate::config::remove_hooks_path(&path) {
                         Ok(()) => {
-                            grow_telemetry::session_ctx::log_event(
-                                grow_telemetry::events::HookRemoved { success: true },
+                            grow_diagnostics::session_ctx::log_event(
+                                grow_diagnostics::events::HookRemoved { success: true },
                             );
                             self.send_host_turn_slash_command_output(&format!(
                                 "Removed hook path: {path}\nRestart session to stop loading hooks from this path."
@@ -184,8 +186,8 @@ impl SessionActor {
                             .await;
                         }
                         Err(e) => {
-                            grow_telemetry::session_ctx::log_event(
-                                grow_telemetry::events::HookRemoved { success: false },
+                            grow_diagnostics::session_ctx::log_event(
+                                grow_diagnostics::events::HookRemoved { success: false },
                             );
                             self.send_host_turn_slash_command_output(&format!(
                                 "Failed to remove hook path: {e}"
@@ -277,14 +279,14 @@ impl SessionActor {
                     Some(handle) => {
                         // Explicit user reload: force a full local-install re-copy.
                         let msg = self.reload_plugins_impl(handle, true).await;
-                        grow_telemetry::session_ctx::log_event(
-                            grow_telemetry::events::PluginReloaded { success: true },
+                        grow_diagnostics::session_ctx::log_event(
+                            grow_diagnostics::events::PluginReloaded { success: true },
                         );
                         self.send_host_turn_slash_command_output(&msg).await;
                     }
                     None => {
-                        grow_telemetry::session_ctx::log_event(
-                            grow_telemetry::events::PluginReloaded { success: false },
+                        grow_diagnostics::session_ctx::log_event(
+                            grow_diagnostics::events::PluginReloaded { success: false },
                         );
                         self.send_host_turn_slash_command_output(
                             "No plugin registry handle available. Start a new session to discover plugins.",
@@ -387,9 +389,9 @@ impl SessionActor {
                     let path_str = resolved.to_string_lossy().to_string();
                     match crate::config::add_plugin_path(&path_str) {
                         Ok(()) => {
-                            grow_telemetry::session_ctx::log_event(
-                                grow_telemetry::events::PluginAdded {
-                                    source: grow_telemetry::events::PluginSource::LocalPath,
+                            grow_diagnostics::session_ctx::log_event(
+                                grow_diagnostics::events::PluginAdded {
+                                    source: grow_diagnostics::events::PluginSource::LocalPath,
                                     success: true,
                                 },
                             );
@@ -401,9 +403,9 @@ impl SessionActor {
                             }
                         }
                         Err(e) => {
-                            grow_telemetry::session_ctx::log_event(
-                                grow_telemetry::events::PluginAdded {
-                                    source: grow_telemetry::events::PluginSource::LocalPath,
+                            grow_diagnostics::session_ctx::log_event(
+                                grow_diagnostics::events::PluginAdded {
+                                    source: grow_diagnostics::events::PluginSource::LocalPath,
                                     success: false,
                                 },
                             );
@@ -435,8 +437,8 @@ impl SessionActor {
                     let path_str = resolved.to_string_lossy().to_string();
                     match crate::config::remove_plugin_path(&path_str) {
                         Ok(()) => {
-                            grow_telemetry::session_ctx::log_event(
-                                grow_telemetry::events::PluginRemoved { success: true },
+                            grow_diagnostics::session_ctx::log_event(
+                                grow_diagnostics::events::PluginRemoved { success: true },
                             );
                             let msg = format!("Removed plugin path: {path_str}");
                             self.send_host_turn_slash_command_output(&msg).await;
@@ -446,8 +448,8 @@ impl SessionActor {
                             }
                         }
                         Err(e) => {
-                            grow_telemetry::session_ctx::log_event(
-                                grow_telemetry::events::PluginRemoved { success: false },
+                            grow_diagnostics::session_ctx::log_event(
+                                grow_diagnostics::events::PluginRemoved { success: false },
                             );
                             self.send_host_turn_slash_command_output(&format!(
                                 "Failed to remove plugin path: {e}"
@@ -506,12 +508,12 @@ impl SessionActor {
                                     tracing::warn!("{w}");
                                 }
                                 let kind = if outcome.is_local {
-                                    grow_telemetry::events::InstallKind::Local
+                                    grow_diagnostics::events::InstallKind::Local
                                 } else {
-                                    grow_telemetry::events::InstallKind::Git
+                                    grow_diagnostics::events::InstallKind::Git
                                 };
-                                grow_telemetry::session_ctx::log_event(
-                                    grow_telemetry::events::PluginInstalled {
+                                grow_diagnostics::session_ctx::log_event(
+                                    grow_diagnostics::events::PluginInstalled {
                                         install_kind: kind,
                                         success: true,
                                         trust: true,
@@ -537,9 +539,9 @@ impl SessionActor {
                             Err(e) => {
                                 let error_category = Self::classify_install_error(&e);
                                 let kind = if crate::plugin::install_source_is_local(&source, cwd) {
-                                    grow_telemetry::events::InstallKind::Local
+                                    grow_diagnostics::events::InstallKind::Local
                                 } else {
-                                    grow_telemetry::events::InstallKind::Git
+                                    grow_diagnostics::events::InstallKind::Git
                                 };
                                 tracing::info_span!(
                                     "plugin.installed",
@@ -548,8 +550,8 @@ impl SessionActor {
                                     error_category = %error_category,
                                 )
                                 .in_scope(|| {});
-                                grow_telemetry::session_ctx::log_event(
-                                    grow_telemetry::events::PluginInstalled {
+                                grow_diagnostics::session_ctx::log_event(
+                                    grow_diagnostics::events::PluginInstalled {
                                         install_kind: kind,
                                         success: false,
                                         trust: true,
@@ -577,8 +579,8 @@ impl SessionActor {
                     use crate::plugin::UninstallError;
                     match crate::plugin::uninstall_plugin(&name, confirm, false) {
                         Ok(outcome) => {
-                            grow_telemetry::session_ctx::log_event(
-                                grow_telemetry::events::PluginUninstalled {
+                            grow_diagnostics::session_ctx::log_event(
+                                grow_diagnostics::events::PluginUninstalled {
                                     confirmed: true,
                                     success: true,
                                 },
@@ -668,7 +670,6 @@ impl SessionActor {
                 }
                 ok_end_turn(0, None)
             }
-            BuiltinAction::Feedback { text } => self.execute_feedback_command(text).await,
             BuiltinAction::MemoryBrowse => {
                 let file_infos = if let Some(ref storage) = *self.memory.storage.borrow() {
                     match storage.list_memory_files() {
@@ -955,60 +956,5 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
         }
-    }
-
-    async fn execute_feedback_command(self: &Arc<Self>, text: String) -> PromptTurnResult {
-        if text.is_empty() {
-            self.send_host_turn_slash_command_output("Usage: /feedback <text>")
-                .await;
-            return ok_end_turn(0, None);
-        }
-
-        let (sampling_config, model_metadata, credentials) = tokio::join!(
-            self.chat_state_handle.get_sampling_config(),
-            self.chat_state_handle.get_last_model_metadata(),
-            self.chat_state_handle.get_credentials(),
-        );
-        let model_id = sampling_config.map(|c| c.model);
-        let resolved_model_id = model_metadata.resolved_model_id;
-        let client_version = credentials.client_version;
-
-        use crate::session::feedback_manager::{SessionFeedbackData, SubmitOutcome};
-        let outcome = self
-            .feedback_manager
-            .submit_text_feedback(
-                text,
-                SessionFeedbackData {
-                    model_id,
-                    resolved_model_id,
-                    client_version,
-                    session_cwd: self.session_info.cwd.clone(),
-                },
-                Some(&self.notifications.persistence_tx),
-                self.telemetry_enabled,
-            )
-            .await;
-
-        match outcome {
-            SubmitOutcome::Submitted => {
-                self.send_host_turn_slash_command_output("Feedback submitted. Thank you!")
-                    .await;
-            }
-            SubmitOutcome::LocalOnly => {
-                self.send_host_turn_slash_command_output(
-                    "Feedback saved locally; no feedback server is configured for this session.",
-                )
-                .await;
-            }
-            SubmitOutcome::Failed(err) => {
-                tracing::warn!(error = %err, "feedback submission failed");
-                self.send_host_turn_slash_command_output(
-                    "Feedback saved locally; submitting to the server failed (see logs).",
-                )
-                .await;
-            }
-        }
-
-        ok_end_turn(0, None)
     }
 }

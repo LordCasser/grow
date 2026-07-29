@@ -209,7 +209,7 @@ pub const PROJECT_HOOK_PREFIX: &str = "project/";
 pub const PLUGIN_HOOK_PREFIX: &str = "plugin/";
 pub const AGENT_HOOK_PREFIX: &str = "agent:";
 
-/// A hook's classified origin for display and telemetry.
+/// A hook's classified origin for display and diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookOrigin {
     SystemManaged,
@@ -984,7 +984,7 @@ mod tests {
                 ]
             },
             "autoUpdates": true,
-            "telemetry": { "enabled": false, "shareUsageData": false }
+            "diagnostics": { "enabled": false, "shareUsageData": false }
         }"#;
         let (specs, errors) = parse_hook_file(json, Path::new("/home/user/.claude/settings.json"));
         assert!(errors.is_empty(), "errors: {errors:?}");

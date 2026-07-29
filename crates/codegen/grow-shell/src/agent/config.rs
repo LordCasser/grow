@@ -163,53 +163,14 @@ pub struct EndpointsConfig {
     /// Env: `GROW_MODELS_LIST_URL`. Overrides the default `{base}/models` list URL.
     #[serde(alias = "models_endpoint", skip_serializing_if = "Option::is_none")]
     pub models_list_url: Option<String>,
-    /// Env: `GROW_FEEDBACK_BASE_URL`. Where feedback submissions go.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub feedback_base_url: Option<String>,
-    /// Env: `GROW_TRACE_UPLOAD_URL`. Where trace uploads go.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_upload_url: Option<String>,
-    /// Env: `GROW_TRACE_UPLOAD_BUCKET`. Direct bucket (`gs://` or `s3://`), bypasses proxy.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_upload_bucket: Option<String>,
-    /// Env: `GROW_TRACE_UPLOAD_REGION`. AWS region (S3 only).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_upload_region: Option<String>,
-    /// Env: `GROW_TRACE_UPLOAD_CREDENTIALS_FILE`. Path to GCS SA key or AWS credentials file.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_upload_credentials_file: Option<String>,
-    /// Inline credentials (JSON/INI). Takes precedence over `credentials_file`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_upload_credentials: Option<String>,
-    /// Env: `GROW_TRACE_UPLOAD_ENDPOINT_URL`. Custom S3-compatible endpoint.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_upload_endpoint_url: Option<String>,
     /// Env: `GROW_DEPLOYMENT_KEY`. Management API key for enterprise deployments.
-    /// Sent on telemetry and service requests for deployment-level attribution.
+    /// Sent on managed service requests for deployment-level attribution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_key: Option<String>,
     /// Env: `GROW_MANAGED_CONFIG_URL`. Override the managed config endpoint.
     /// Defaults to `{proxy_url()}/deployment/config`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub managed_config_url: Option<String>,
-    /// Env: `GROW_INTERNAL_OTLP_TRACES_ENDPOINT`. Full INTERNAL traces endpoint,
-    /// used verbatim. The internal exporter is disabled when this is absent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub grow_internal_otlp_traces_endpoint: Option<String>,
-    /// Env: `GROW_INTERNAL_OTLP_HEADERS`. `k=v,k2=v2` extra headers for the
-    /// internal export.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub grow_internal_otlp_headers: Option<String>,
-    /// Env: `OTEL_TRACES_EXPORTER`. `otlp` (default) or `none` to disable spans.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub otel_traces_exporter: Option<String>,
-    /// Env: `OTEL_BSP_SCHEDULE_DELAY` (OTel) or `OTEL_TRACES_EXPORT_INTERVAL`
-    /// (Claude alias). Batch flush interval (ms).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub otel_traces_export_interval: Option<u64>,
-    /// Env: `OTEL_EXPORTER_OTLP_TIMEOUT`. Export HTTP timeout (ms).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub otel_exporter_otlp_timeout: Option<u64>,
     /// Base URL for the asset server (profile images, etc.).
     /// Env: `GROW_ASSET_SERVER_URL`.
     #[serde(default = "default_asset_server_url")]
@@ -217,9 +178,6 @@ pub struct EndpointsConfig {
     /// Read by `load_management_api_key_sync()`. Declared for `serde_ignored`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub management_api_key: Option<String>,
-    /// Read by `load_gcs_service_account_key_sync()`. Declared for `serde_ignored`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gcs_service_account_key: Option<String>,
 }
 pub(crate) fn default_asset_server_url() -> String {
     std::env::var("GROW_ASSET_SERVER_URL").unwrap_or_else(|_| ASSET_SERVER_URL_DEFAULT.to_owned())
@@ -230,18 +188,6 @@ fn blank_as_unset(opt: &Option<String>) -> Option<String> {
     opt.as_deref()
         .filter(|s| !s.trim().is_empty())
         .map(str::to_owned)
-}
-/// Parse a `k=v,k2=v2` OTLP header list (the `OTEL_EXPORTER_OTLP_HEADERS`
-/// format, shared with `GROW_INTERNAL_OTLP_HEADERS`): split on `,`,
-/// `split_once('=')`, trim key/value, skip blank keys, keep empty values.
-fn parse_otlp_header_list(raw: &str) -> Vec<(String, String)> {
-    raw.split(',')
-        .filter_map(|kv| {
-            let (k, v) = kv.split_once('=')?;
-            let k = k.trim();
-            (!k.is_empty()).then(|| (k.to_string(), v.trim().to_string()))
-        })
-        .collect()
 }
 impl EndpointsConfig {
     pub fn has_custom_endpoint(&self) -> bool {
@@ -281,16 +227,6 @@ impl EndpointsConfig {
             .clone()
             .unwrap_or_else(|| self.proxy_url())
     }
-    /// Feedback endpoint — an auxiliary service, so it defaults to the
-    /// cli-chat-proxy, never `inference_base_url`.
-    pub fn resolve_feedback_base_url(&self) -> String {
-        blank_as_unset(&self.feedback_base_url).unwrap_or_else(|| self.proxy_url())
-    }
-    /// Trace upload endpoint — an auxiliary service, so it defaults to the
-    /// cli-chat-proxy, never `inference_base_url`.
-    pub fn resolve_trace_upload_url(&self) -> String {
-        blank_as_unset(&self.trace_upload_url).unwrap_or_else(|| self.proxy_url())
-    }
     /// Managed deployment-config URL (`grow setup`): explicit `managed_config_url`,
     /// else `proxy_url` + `/deployment/config`. Never `inference_base_url`, so the
     /// deployment key reaches the proxy, not the inference host.
@@ -300,139 +236,6 @@ impl EndpointsConfig {
                 "{}/deployment/config",
                 self.proxy_url().trim_end_matches('/')
             )
-        })
-    }
-    /// Explicit internal OTLP traces endpoint. There is deliberately no
-    /// proxy-derived or standard-`OTEL_*` fallback.
-    pub fn resolve_otlp_traces_endpoint(&self) -> Option<String> {
-        blank_as_unset(&self.grow_internal_otlp_traces_endpoint)
-            .map(|url| url.trim_end_matches('/').to_string())
-    }
-    /// Extra headers for the internal export. Standard `OTEL_*` variables are
-    /// reserved for the user-configured external OTEL stream.
-    pub fn resolve_otlp_headers(&self) -> Vec<(String, String)> {
-        blank_as_unset(&self.grow_internal_otlp_headers)
-            .map(|headers| parse_otlp_header_list(&headers))
-            .unwrap_or_default()
-    }
-    /// Trace export enabled unless `OTEL_TRACES_EXPORTER=none`. Deliberately
-    /// still honored by the internal pipeline even with `GROW_EXTERNAL_OTEL`
-    /// set: disabling internal span export is the safe direction.
-    pub fn resolve_traces_export_enabled(&self) -> bool {
-        !matches!(
-            self.otel_traces_exporter.as_deref().map(str::trim),
-            Some("none")
-        )
-    }
-    /// `OTEL_BSP_SCHEDULE_DELAY` / `OTEL_TRACES_EXPORT_INTERVAL` — tuning-only,
-    /// deliberately shared between the internal and external pipelines.
-    pub fn resolve_otlp_export_interval(&self) -> Option<std::time::Duration> {
-        self.otel_traces_export_interval
-            .map(std::time::Duration::from_millis)
-    }
-    /// `OTEL_EXPORTER_OTLP_TIMEOUT` — tuning-only, deliberately shared between
-    /// the internal and external pipelines.
-    pub fn resolve_otlp_timeout(&self) -> Option<std::time::Duration> {
-        self.otel_exporter_otlp_timeout
-            .map(std::time::Duration::from_millis)
-    }
-    /// Resolve trace upload credentials: inline > file > `None` (ambient).
-    pub fn resolve_trace_credentials(&self) -> Option<String> {
-        if let Some(ref inline) = self.trace_upload_credentials {
-            let trimmed = inline.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_owned());
-            }
-        }
-        self.trace_upload_credentials_file
-            .as_deref()
-            .and_then(|path| {
-                std::fs::read_to_string(path)
-                    .inspect_err(|e| {
-                        tracing::warn!(
-                            path = %path,
-                            error = %e,
-                            "Failed to read trace upload credentials file"
-                        );
-                    })
-                    .ok()
-            })
-    }
-    /// Resolve direct-to-bucket upload method from `trace_upload_bucket`.
-    /// Returns `None` if no bucket is configured or scheme is unrecognized.
-    pub fn resolve_direct_upload_method(
-        &self,
-    ) -> Option<crate::save::UploadMethod> {
-        let bucket_url = self.trace_upload_bucket.as_deref()?.trim();
-        if bucket_url.is_empty() {
-            return None;
-        }
-        if let Some(bucket_name) = bucket_url
-            .strip_prefix("s3://")
-            .map(|s| s.trim_end_matches('/'))
-        {
-            let region = self
-                .trace_upload_region
-                .clone()
-                .unwrap_or_else(|| "us-east-1".to_owned());
-            return Some(crate::save::UploadMethod::S3 {
-                bucket: bucket_name.to_owned(),
-                region,
-                credentials_file: None,
-                credentials_content: self.resolve_trace_credentials(),
-                endpoint_url: self.trace_upload_endpoint_url.clone(),
-            });
-        }
-        if bucket_url.starts_with("gs://") {
-            return Some(crate::save::UploadMethod::Direct {
-                service_account_key: self.resolve_trace_credentials(),
-            });
-        }
-        tracing::warn!(
-            bucket = %bucket_url,
-            "trace_upload_bucket has unrecognized scheme (expected gs:// or s3://), ignoring"
-        );
-        None
-    }
-    /// Whether trace upload can authenticate without an interactive login.
-    pub fn has_noninteractive_upload_auth(&self) -> bool {
-        self.deployment_key.is_some() || self.resolve_direct_upload_method().is_some()
-    }
-    /// Direct bucket → proxy (if `auth_token` or `deployment_key`) → ambient GCS → `None`.
-    pub fn resolve_upload_method(
-        &self,
-        auth_token: Option<String>,
-    ) -> Option<crate::save::UploadMethod> {
-        if let Some(method) = self.resolve_direct_upload_method() {
-            return Some(method);
-        }
-        if auth_token.is_some() || self.deployment_key.is_some() {
-            return Some(crate::save::UploadMethod::Proxy {
-                proxy_base_url: self.resolve_trace_upload_url(),
-                user_token: auth_token.unwrap_or_default(),
-                deployment_key: self.deployment_key.clone(),
-                alpha_test_key: self.alpha_test_key.clone(),
-            });
-        }
-        let service_account_key = crate::util::config::load_gcs_service_account_key_sync();
-        if service_account_key.is_some() {
-            return Some(crate::save::UploadMethod::Direct {
-                service_account_key,
-            });
-        }
-        None
-    }
-    /// Resolve trace bucket URL: env > config > compiled-in default.
-    /// `None` disables direct GCS trace uploads.
-    pub fn resolve_trace_bucket_url(&self) -> Option<Resolved<String>> {
-        resolve_string_flag(
-            None,
-            "GROW_TELEMETRY_GCS_BUCKET",
-            self.trace_upload_bucket.as_deref(),
-            None,
-        )
-        .or_else(|| {
-            None
         })
     }
     /// `models_list_url` > `{models_base_url}/models` > `{proxy_base_url}/models`.
@@ -456,26 +259,10 @@ impl Default for EndpointsConfig {
             alpha_test_key: None,
             models_base_url: env_string("GROW_MODELS_BASE_URL"),
             models_list_url: env_string("GROW_MODELS_LIST_URL"),
-            feedback_base_url: env_string("GROW_FEEDBACK_BASE_URL"),
-            trace_upload_url: env_string("GROW_TRACE_UPLOAD_URL"),
-            trace_upload_bucket: env_string("GROW_TRACE_UPLOAD_BUCKET"),
-            trace_upload_region: env_string("GROW_TRACE_UPLOAD_REGION"),
-            trace_upload_credentials_file: env_string("GROW_TRACE_UPLOAD_CREDENTIALS_FILE"),
-            trace_upload_credentials: None,
-            trace_upload_endpoint_url: env_string("GROW_TRACE_UPLOAD_ENDPOINT_URL"),
             deployment_key: env_string("GROW_DEPLOYMENT_KEY"),
             managed_config_url: env_string("GROW_MANAGED_CONFIG_URL"),
-            grow_internal_otlp_traces_endpoint: env_string("GROW_INTERNAL_OTLP_TRACES_ENDPOINT"),
-            grow_internal_otlp_headers: env_string("GROW_INTERNAL_OTLP_HEADERS"),
-            otel_traces_exporter: env_string("OTEL_TRACES_EXPORTER"),
-            otel_traces_export_interval: env_string("OTEL_BSP_SCHEDULE_DELAY")
-                .or_else(|| env_string("OTEL_TRACES_EXPORT_INTERVAL"))
-                .and_then(|s| s.parse().ok()),
-            otel_exporter_otlp_timeout: env_string("OTEL_EXPORTER_OTLP_TIMEOUT")
-                .and_then(|s| s.parse().ok()),
             asset_server_url: default_asset_server_url(),
             management_api_key: None,
-            gcs_service_account_key: None,
         }
     }
 }
@@ -510,9 +297,6 @@ impl<T: Clone> Constrained<T> {
 /// Enforced requirements from `requirements.toml`. Pinned values win over all other sources.
 #[derive(Debug, Clone, Default)]
 pub struct Requirements {
-    pub telemetry: Constrained<TelemetryMode>,
-    pub trace_upload: Constrained<bool>,
-    pub feedback: Constrained<bool>,
     pub lsp_tools: Constrained<bool>,
     pub tool_search: Constrained<bool>,
     pub web_fetch: Constrained<bool>,
@@ -568,9 +352,6 @@ pub(crate) const FIRST_PARTY_CREDENTIAL_ENV_VARS: &[&str] = &[
     "GROW_AUTH_PATH",
     "GROW_DEPLOYMENT_KEY",
     "GROW_EXTRA_AUTH_KEY",
-    "GROW_TRACE_UPLOAD_CREDENTIALS_FILE",
-    "OTEL_EXPORTER_OTLP_HEADERS",
-    "GROW_INTERNAL_OTLP_HEADERS",
 ];
 /// Read an env var as a trimmed string. Returns `None` if unset or empty/whitespace-only.
 pub(crate) fn env_string(name: &str) -> Option<String> {
@@ -777,8 +558,6 @@ pub(crate) fn resolve_enabled(
         .default(default)
         .resolve()
 }
-pub(crate) use grow_telemetry::config::env_telemetry_mode;
-pub use grow_telemetry::config::{TelemetryConfig, TelemetryMode};
 /// Plugin system configuration from `[plugins]` section in config.toml.
 ///
 /// ```toml
@@ -845,33 +624,6 @@ impl PluginsConfig {
             enabled: self.enabled.clone(),
         }
     }
-}
-/// Feedback submission configuration (`[feedback]` in config.toml).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct FeedbackConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user: Option<FeedbackUserConfig>,
-}
-/// Self-reported feedback author identity (never used for authorization).
-/// Merged only from trusted config tiers, so a cloned repo can't inject the
-/// `command` escape hatch.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct FeedbackUserConfig {
-    /// Sources tried in order for the name. `os_user` yields the OS user name;
-    /// any other entry is a literal (`$VAR` expanded at load).
-    pub name: Vec<String>,
-    /// Sources tried in order for the email. `git_email` yields the global git
-    /// email; any other entry is a literal (`$VAR` expanded at load) needing `@`.
-    pub email: Vec<String>,
-    /// Fallback domain for `<name>@<domain>` when no `email` source resolves.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub email_domain: Option<String>,
-    /// Optional `sh -c` script printing `{"name","email"}` JSON; its fields win
-    /// over the lists above, with per-field fallback. Trusted config tiers only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -993,17 +745,6 @@ pub struct ModelsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_tool_calls: Option<bool>,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HarnessConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub block_for_upload: Option<bool>,
-    /// Budget (seconds) for the turn-end upload flush when
-    /// `block_for_upload` is active. Default 60.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upload_flush_timeout_secs: Option<u64>,
-}
-impl HarnessConfig {}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RelayConfig {
@@ -1279,8 +1020,6 @@ pub struct Config {
     pub shell_environment_policy: ShellEnvironmentPolicyKnownKeys,
     #[serde(default)]
     pub endpoints: EndpointsConfig,
-    #[serde(default)]
-    pub telemetry: TelemetryConfig,
     /// Session behavior configuration.
     #[serde(default)]
     pub session: SessionConfig,
@@ -1302,9 +1041,6 @@ pub struct Config {
     /// Plugin system configuration.
     #[serde(default)]
     pub plugins: PluginsConfig,
-    /// Feedback submission configuration.
-    #[serde(default)]
-    pub feedback: FeedbackConfig,
     /// Filesystem path overrides (`[paths]` in config.toml).
     #[serde(default)]
     pub paths: PathsConfig,
@@ -1312,8 +1048,6 @@ pub struct Config {
     pub cli: CliConfig,
     #[serde(default, skip_serializing)]
     pub models: ModelsConfig,
-    #[serde(default, skip_serializing)]
-    pub harness: HarnessConfig,
     #[serde(default, skip_serializing)]
     pub relay: RelayConfig,
     #[serde(default, skip_serializing)]
@@ -1415,7 +1149,6 @@ pub struct Config {
     #[serde(skip)]
     pub mode: AgentMode,
     /// Remote settings fetched from cli-chat-proxy at startup.
-    /// Used for upload limits (replaces on-demand /v1/storage/limits fetch).
     #[serde(skip)]
     pub remote_settings: Option<crate::util::config::RemoteSettings>,
     #[serde(skip)]
@@ -1703,18 +1436,15 @@ impl Default for Config {
             toolset: ShellToolsetConfig::default(),
             shell_environment_policy: ShellEnvironmentPolicyKnownKeys::default(),
             endpoints,
-            telemetry: TelemetryConfig::default(),
             session: SessionConfig::default(),
             agent: AgentSelectionConfig::default(),
             repo_changes_dedup: RepoChangesDedupConfig::default(),
             skills: SkillsConfig::default(),
             compat: CompatConfigToml::default(),
             plugins: PluginsConfig::default(),
-            feedback: FeedbackConfig::default(),
             paths: PathsConfig::default(),
             cli: CliConfig::default(),
             models: ModelsConfig::default(),
-            harness: HarnessConfig::default(),
             relay: RelayConfig::default(),
             remote: RemoteConfig::default(),
             hub: HubConfig::default(),
@@ -2216,21 +1946,7 @@ impl Config {
         self.resolve_runtime_fields(&ctx);
         crate::util::config::set_remote_campaigns_from_settings(self.remote_settings.as_ref());
     }
-    fn apply_env_overrides(&mut self) {
-        self.telemetry.apply_env_overrides();
-        if let Some(mode) = env_telemetry_mode("GROW_TELEMETRY_ENABLED") {
-            self.features.telemetry = Some(mode);
-        }
-    }
-    pub fn is_telemetry_enabled(&self) -> bool {
-        self.resolve_telemetry_mode().value.is_enabled()
-    }
-    pub fn is_trace_upload_enabled(&self) -> bool {
-        self.resolve_trace_upload().value
-    }
-    pub fn is_feedback_enabled(&self) -> bool {
-        self.resolve_feedback().value
-    }
+    fn apply_env_overrides(&mut self) {}
     pub fn is_session_recap_enabled(&self) -> bool {
         self.resolve_session_recap().value
     }
@@ -2239,91 +1955,6 @@ impl Config {
     /// config.toml key, or `GROW_TWO_PASS_COMPACTION` env.
     pub fn is_two_pass_compaction_enabled(&self) -> bool {
         self.resolve_two_pass_compaction().value
-    }
-    pub(crate) fn resolve_telemetry_mode(&self) -> Resolved<TelemetryMode> {
-        if let Some(mode) = self.requirements.telemetry.pinned() {
-            return Resolved::new(mode, ConfigSource::Requirement);
-        }
-        if let Some(mode) = env_telemetry_mode("GROW_TELEMETRY_ENABLED") {
-            return Resolved::new(mode, ConfigSource::Env);
-        }
-        if let Some(mode) = self.features.telemetry {
-            return Resolved::new(mode, ConfigSource::Config);
-        }
-        Resolved::new(TelemetryMode::Disabled, ConfigSource::Default)
-    }
-    pub(crate) fn resolve_trace_upload(&self) -> Resolved<bool> {
-        BoolFlag::env("GROW_TELEMETRY_TRACE_UPLOAD")
-            .requirement(self.requirements.trace_upload.pinned())
-            .config(self.telemetry.trace_upload)
-            .default(false)
-            .resolve()
-    }
-    /// Resolve jemalloc heap-profile config from stored remote settings + gates.
-    pub fn resolve_jemalloc_heap_profile(
-        &self,
-        data_collection_disabled: bool,
-    ) -> crate::heap_profile::JemallocHeapProfileConfig {
-        let rs = self.remote_settings.as_ref();
-        crate::heap_profile::resolve_jemalloc_heap_profile(
-            rs.and_then(|s| s.jemalloc_heap_profile_enabled),
-            rs.and_then(|s| s.jemalloc_heap_profile_thresholds_bytes.as_deref()),
-            rs.and_then(|s| s.jemalloc_heap_profile_poll_interval_secs),
-            data_collection_disabled,
-            self.resolve_trace_upload().value,
-            crate::heap_profile::prof_available(),
-        )
-    }
-    /// K12 scoped resolve: fresh jemalloc fields + current gates (no remote rewrite).
-    pub fn resolve_jemalloc_heap_profile_from_partial(
-        &self,
-        jemalloc_enabled: Option<bool>,
-        jemalloc_thresholds: Option<&[u64]>,
-        jemalloc_poll_interval_secs: Option<u64>,
-        data_collection_disabled: bool,
-    ) -> crate::heap_profile::JemallocHeapProfileConfig {
-        crate::heap_profile::resolve_jemalloc_heap_profile(
-            jemalloc_enabled,
-            jemalloc_thresholds,
-            jemalloc_poll_interval_secs,
-            data_collection_disabled,
-            self.resolve_trace_upload().value,
-            crate::heap_profile::prof_available(),
-        )
-    }
-    pub(crate) fn trace_upload_decision_debug(&self) -> serde_json::Value {
-        let telemetry = self.resolve_telemetry_mode();
-        let trace_upload = self.resolve_trace_upload();
-        let req = &self.requirements.trace_upload;
-        serde_json::json!({
-            "trace_upload": trace_upload.value,
-            "trace_upload_source": trace_upload.source.to_string(),
-            "telemetry_mode": telemetry.value.to_string(),
-            "telemetry_source": telemetry.source.to_string(),
-            "in_requirement_pin": req.pinned(),
-            "in_requirement_src": req.source().map(|s| s.to_string()),
-            "in_env_trace_upload": std::env::var("GROW_TELEMETRY_TRACE_UPLOAD").ok(),
-            "in_env_telemetry_enabled": std::env::var("GROW_TELEMETRY_ENABLED").ok(),
-            "in_cfg_telemetry_trace_upload": self.telemetry.trace_upload,
-            "in_cfg_features_telemetry": self.features.telemetry.map(|m| m.to_string()),
-            "in_remote_trace_upload_enabled": self
-                .remote_settings
-                .as_ref()
-                .and_then(|s| s.trace_upload_enabled),
-            "has_remote_settings": self.remote_settings.is_some(),
-        })
-    }
-    pub(crate) fn resolve_feedback(&self) -> Resolved<bool> {
-        let ff = self
-            .remote_settings
-            .as_ref()
-            .and_then(|s| s.feedback_enabled);
-        BoolFlag::env("GROW_FEEDBACK_ENABLED")
-            .requirement(self.requirements.feedback.pinned())
-            .config(self.features.feedback)
-            .feature_flag(ff)
-            .default(true)
-            .resolve()
     }
     pub(crate) fn resolve_two_pass_compaction(&self) -> Resolved<bool> {
         let ff = self
@@ -3058,130 +2689,6 @@ pub fn resolve_mcp_recursive_config_watch(
         .default(true)
         .resolve()
 }
-/// Sync analogue of [`BoolFlag`] for callers that run before the tokio
-/// runtime (e.g. `init_sentry`). Loads from disk + env directly rather than
-/// from a pre-built `Config`.
-///
-/// Same convention as [`BoolFlag`]: `resolve()` returns the *enabled* value.
-/// `disable_env` is sugar for "force-off if this env is truthy" and does not
-/// invert the convention.
-///
-/// Layer precedence:
-/// 1. `requirements.toml`              (admin pin)
-/// 2. `managed_settings.json` env      (Claude admin pin, force-off)
-/// 3. process env via `disable_env`    (force-off)
-/// 4. process env via `enable_env`     (either direction)
-/// 5. merged config                    (user/managed defaults)
-/// 6. `inherit`, then `default`
-pub struct SyncBoolFlag {
-    extract_toml: fn(&toml::Value) -> Option<bool>,
-    disable_env: Option<&'static str>,
-    enable_env: Option<fn() -> Option<bool>>,
-    inherit: Option<fn() -> bool>,
-    default: bool,
-}
-impl SyncBoolFlag {
-    pub const fn new(extract_toml: fn(&toml::Value) -> Option<bool>) -> Self {
-        Self {
-            extract_toml,
-            disable_env: None,
-            enable_env: None,
-            inherit: None,
-            default: false,
-        }
-    }
-    /// Force-off env name (e.g. `"DISABLE_TELEMETRY"`). Truthy at this name
-    /// in `managed_settings.json` or process env disables the flag.
-    pub const fn disable_env(mut self, name: &'static str) -> Self {
-        self.disable_env = Some(name);
-        self
-    }
-    /// Either-direction env resolver (typically `GROW_*`). Returns
-    /// `Some(enabled)` for an explicit signal, `None` to fall through.
-    pub const fn enable_env(mut self, resolver: fn() -> Option<bool>) -> Self {
-        self.enable_env = Some(resolver);
-        self
-    }
-    /// Fallback when no source above fires.
-    pub const fn inherit(mut self, resolver: fn() -> bool) -> Self {
-        self.inherit = Some(resolver);
-        self
-    }
-    pub const fn default(mut self, val: bool) -> Self {
-        self.default = val;
-        self
-    }
-    pub fn resolve(&self) -> bool {
-        if let Some(enabled) = read_requirements_toml()
-            .as_ref()
-            .and_then(|r| (self.extract_toml)(r))
-        {
-            return enabled;
-        }
-        if let Some(name) = self.disable_env
-            && managed_settings_env_flag(name) == Some(true)
-        {
-            return false;
-        }
-        if let Some(name) = self.disable_env
-            && env_bool(name) == Some(true)
-        {
-            return false;
-        }
-        if let Some(resolver) = self.enable_env
-            && let Some(enabled) = resolver()
-        {
-            return enabled;
-        }
-        if let Some(enabled) = crate::config::load_effective_config()
-            .ok()
-            .as_ref()
-            .and_then(|r| (self.extract_toml)(r))
-        {
-            return enabled;
-        }
-        self.inherit.map_or(self.default, |f| f())
-    }
-}
-/// Sync slice of [`Config::resolve_telemetry_mode`] for use before the tokio
-/// runtime (e.g. `init_sentry`). `true` only when explicitly off.
-pub fn is_telemetry_disabled_sync() -> bool {
-    !SyncBoolFlag::new(telemetry_enabled_from_toml)
-        .disable_env("DISABLE_TELEMETRY")
-        .enable_env(grow_telemetry_env_enabled)
-        .resolve()
-}
-/// Sync sibling of [`is_telemetry_disabled_sync`] scoped to Sentry. Inherits
-/// from telemetry when no Sentry-specific signal is set.
-pub fn is_error_reporting_disabled_sync() -> bool {
-    !SyncBoolFlag::new(error_reporting_enabled_from_toml)
-        .disable_env("DISABLE_ERROR_REPORTING")
-        .enable_env(|| env_bool("GROW_ERROR_REPORTING"))
-        .inherit(|| !is_telemetry_disabled_sync())
-        .resolve()
-}
-/// `[features] telemetry` as enabled bool. SessionMetrics counts as enabled
-/// — see ERROR_REPORTING_PLAN.md. `None` for absent or unparseable.
-fn telemetry_enabled_from_toml(root: &toml::Value) -> Option<bool> {
-    match root.get("features")?.as_table()?.get("telemetry")? {
-        toml::Value::Boolean(b) => Some(*b),
-        toml::Value::String(s) => TelemetryMode::parse(s).map(|m| !m.is_disabled()),
-        _ => None,
-    }
-}
-/// `[diagnostics] error_reporting` as enabled bool. Bool-only; no
-/// `session_metrics` equivalent. `None` falls through to inheritance.
-fn error_reporting_enabled_from_toml(root: &toml::Value) -> Option<bool> {
-    root.get("diagnostics")?
-        .as_table()?
-        .get("error_reporting")?
-        .as_bool()
-}
-/// `GROW_TELEMETRY_ENABLED` resolved through `TelemetryMode::parse` so the
-/// extended string forms (e.g. `"session_metrics"`) are accepted.
-fn grow_telemetry_env_enabled() -> Option<bool> {
-    env_telemetry_mode("GROW_TELEMETRY_ENABLED").map(|m| !m.is_disabled())
-}
 /// Load `~/.grow/requirements.toml` standalone so the admin pin can beat
 /// env vars. The merged config layer can't express that — last-merge-wins
 /// loses provenance.
@@ -3190,112 +2697,11 @@ pub(crate) fn read_requirements_toml() -> Option<toml::Value> {
     let content = std::fs::read_to_string(&path).ok()?;
     toml::from_str(&content).ok()
 }
-/// Resolve the external OTEL stream configuration at process startup
-/// (env + local config only — remote settings are not yet available when
-/// tracing init runs).
-///
-/// Layering is **requirement > env > local config > default**, where the
-/// `[telemetry]` `otel_*` keys from the
-/// effective config (which already includes managed-config layers distributed
-/// by `grow setup`) sit under the env vars, requirements pins are applied on
-/// top, and the remote layer is restrictive-only + asynchronous
-/// ([`apply_external_otel_remote_policy`]).
-pub fn resolve_external_otel_config(
-    client: grow_telemetry::external::config::ExternalClientInfo,
-) -> Option<grow_telemetry::external::ExternalOtelConfig> {
-    resolve_external_otel_config_with(
-        crate::config::load_effective_config().ok().as_ref(),
-        grow_config::load_merged_requirements().as_ref(),
-        |name| std::env::var(name).ok(),
-        client,
-    )
-}
-/// Testable core of [`resolve_external_otel_config`]: all inputs injected so
-/// tests don't race on process env / disk.
-pub(crate) fn resolve_external_otel_config_with(
-    effective_config: Option<&toml::Value>,
-    requirements: Option<&toml::Value>,
-    getenv: impl Fn(&str) -> Option<String>,
-    client: grow_telemetry::external::config::ExternalClientInfo,
-) -> Option<grow_telemetry::external::ExternalOtelConfig> {
-    let file_cfg: Option<grow_telemetry::external::ExternalOtelFileConfig> = effective_config
-        .and_then(|cfg| cfg.get("telemetry"))
-        .map(|t| grow_telemetry::external::ExternalOtelFileConfig {
-            enabled: t.get("otel_enabled").and_then(toml::Value::as_bool),
-            metrics_exporter: t
-                .get("otel_metrics_exporter")
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned),
-            logs_exporter: t
-                .get("otel_logs_exporter")
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned),
-            endpoint: t
-                .get("otel_endpoint")
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned),
-            protocol: t
-                .get("otel_protocol")
-                .or_else(|| t.get("otel_transport"))
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned),
-            log_user_prompts: t
-                .get("otel_log_user_prompts")
-                .and_then(toml::Value::as_bool),
-            log_tool_details: t
-                .get("otel_log_tool_details")
-                .and_then(toml::Value::as_bool),
-        });
-    let req_get =
-        |key: &str| -> Option<bool> { requirements?.get("telemetry")?.get(key)?.as_bool() };
-    let req_enabled = req_get("otel_enabled");
-    let req_prompts = req_get("otel_log_user_prompts");
-    let req_details = req_get("otel_log_tool_details");
-    let getenv_pinned = |name: &str| -> Option<String> {
-        let pin = match name {
-            grow_telemetry::external::config::ENV_MASTER_SWITCH => req_enabled,
-            "OTEL_LOG_USER_PROMPTS" => req_prompts,
-            "OTEL_LOG_TOOL_DETAILS" => req_details,
-            _ => None,
-        };
-        if let Some(v) = pin {
-            return Some(if v { "1" } else { "0" }.to_owned());
-        }
-        getenv(name)
-    };
-    let mut resolved = grow_telemetry::external::ExternalOtelConfig::resolve_with(
-        getenv_pinned,
-        file_cfg.as_ref(),
-    )?;
-    resolved.client = client;
-    Some(resolved)
-}
-/// Apply the restrictive-only remote-settings policy for the external OTEL
-/// stream (fleet kill switch + content-gate lock). Tighten-only by
-/// construction — there is no remote enable direction — so it is safe to
-/// call on every settings refresh.
-pub fn apply_external_otel_remote_policy(settings: Option<&crate::util::config::RemoteSettings>) {
-    let Some(settings) = settings else { return };
-    let policy = grow_telemetry::external::ExternalOtelRemotePolicy {
-        force_disable: settings.external_otel_disabled.unwrap_or(false),
-        lock_content_gates: settings.external_otel_content_gates_locked.unwrap_or(false),
-    };
-    if policy.force_disable || policy.lock_content_gates {
-        grow_telemetry::external::apply_remote_policy(policy);
-    }
-}
 /// Seed free-function remote caches after writing `Config.remote_settings`.
 ///
 /// Called from `init.rs` at boot and from the agent when backgrounded settings
 /// arrive later, so every side effect here must be idempotent and safe to
-/// re-apply. The emission-gate flip is owned by
-/// [`crate::agent::otel_gate::OtelGate`], not here.
-///
-/// The `force_disable` write here is `Relaxed`; the synchronizing publish is
-/// `OtelGate::apply_and_open`, which applies the same tighten-only policy and then
-/// opens the gate with a `Release` swap. Removing that second application to
-/// deduplicate would leave only the `Relaxed` store and reopen an ARM
-/// visibility hole.
+/// re-apply.
 pub fn apply_remote_settings_side_effects(settings: Option<&crate::util::config::RemoteSettings>) {
     if let Some(s) = settings {
         let origin_trusted = crate::util::is_prod_cli_chat_proxy_url(
@@ -3319,7 +2725,6 @@ pub fn apply_remote_settings_side_effects(settings: Option<&crate::util::config:
     crate::util::config::cache_remote_crash_handler_enabled(
         settings.and_then(|s| s.crash_handler_enabled),
     );
-    apply_external_otel_remote_policy(settings);
     let image_normalize_cache_enabled = settings
         .and_then(|r| r.image_normalize_cache_enabled)
         .unwrap_or(false);
@@ -4356,9 +3761,6 @@ pub struct Features {
     /// when set, the agent may ask permission for tool executions
     #[serde(default)]
     pub support_permission: bool,
-    /// `None` = defer to remote settings / default (off).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub telemetry: Option<TelemetryMode>,
     /// Codebase graph indexing for go-to-definition/references.
     /// Accepts: true | false | ["glob", "!negative-glob", ...]
     /// Default: true (index any git repo). Patterns can explicitly match non-git directories.
@@ -4370,10 +3772,6 @@ pub struct Features {
     /// precedence — `Some(false)` from remote settings overrides `true` here.
     #[serde(default)]
     pub non_git_warning: bool,
-    /// Feedback system (heuristic popups + `/feedback` slash command).
-    /// `None` = defer to remote settings / default (false).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub feedback: Option<bool>,
     /// Managed config fetching (managed_config.toml + requirements.toml).
     /// `None` = defer to env / default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4611,7 +4009,10 @@ fn resolve_credentials_enforced(
     enforce_disable_api_key_auth(&mut credentials, disable_api_key_auth, session_key);
     credentials
 }
-pub use grow_telemetry::config::deployment_id_from_key;
+/// Derive a stable local identifier from a deployment key without exposing the key.
+pub fn deployment_id_from_key(key: &str) -> String {
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, key.as_bytes()).to_string()
+}
 /// Try to resolve credentials for a model by loading the effective config.
 /// Returns `None` (with a warning) if config loading, parsing, or model
 /// lookup fails. `session_key` should only be passed when `auth_type` is
@@ -4721,7 +4122,6 @@ pub fn resolve_aux_model_sampling_config(
     session_key: Option<&str>,
     disable_api_key_auth: bool,
     alpha_test_key: Option<String>,
-    client_version: Option<String>,
 ) -> Option<SamplerConfig> {
     if model_id.trim().is_empty() {
         return None;
@@ -4729,14 +4129,7 @@ pub fn resolve_aux_model_sampling_config(
     let catalog_entry = find_model_by_id(models, model_id).cloned();
     if let Some(entry) = &catalog_entry {
         let credentials = resolve_credentials_enforced(entry, session_key, disable_api_key_auth);
-        let sampler = sampling_config_for_model(
-            entry,
-            credentials,
-            alpha_test_key.clone(),
-            client_version.clone(),
-            None,
-            None,
-        );
+        let sampler = sampling_config_for_model(entry, credentials, alpha_test_key.clone());
         if sampler.api_key.is_some() {
             return Some(sampler);
         }
@@ -4754,8 +4147,8 @@ pub fn resolve_aux_model_sampling_config(
     );
     None
 }
-/// Stamp the session-local fields (client id, attribution, bearer resolver,
-/// retries) from the active session onto a routed aux `SamplerConfig` so a
+/// Stamp the session-local attribution, bearer resolver, and retry policy
+/// from the active session onto a routed aux `SamplerConfig` so a
 /// helper model keeps the session's auth/attribution. Shared by image-describe
 /// and the auto-mode classifier so the two can't drift.
 ///
@@ -4765,10 +4158,8 @@ pub fn resolve_aux_model_sampling_config(
 pub fn stamp_session_local_sampler_fields(
     cfg: &mut SamplerConfig,
     active_session_config: &SamplerConfig,
-    client_identifier: Option<String>,
     max_retries: Option<u32>,
 ) {
-    cfg.client_identifier = client_identifier;
     cfg.attribution_callback = active_session_config.attribution_callback.clone();
     if crate::util::is_service_api_bearer_url(&cfg.base_url) {
         cfg.bearer_resolver = active_session_config.bearer_resolver.clone();
@@ -4786,7 +4177,6 @@ pub fn stamp_session_local_sampler_fields(
 pub fn finalize_image_describe_sampler_config(
     resolved_aux: Option<SamplerConfig>,
     active_session_config: &SamplerConfig,
-    client_identifier: Option<String>,
     max_retries: Option<u32>,
 ) -> (String, SamplerConfig) {
     match resolved_aux {
@@ -4794,7 +4184,6 @@ pub fn finalize_image_describe_sampler_config(
             stamp_session_local_sampler_fields(
                 &mut describe_cfg,
                 active_session_config,
-                client_identifier,
                 max_retries,
             );
             let model = describe_cfg.model.clone();
@@ -4822,9 +4211,6 @@ pub fn sampling_config_for_model(
     model: &ModelEntry,
     credentials: ResolvedCredentials,
     alpha_test_key: Option<String>,
-    client_version: Option<String>,
-    deployment_id: Option<String>,
-    user_id: Option<String>,
 ) -> SamplerConfig {
     let info = model.info();
     let model_name = info.model.clone();
@@ -4851,15 +4237,11 @@ pub fn sampling_config_for_model(
         query_params: info.query_params.clone(),
         env_http_headers: info.env_http_headers.clone(),
         context_window: info.context_window.get(),
-        client_version,
         reasoning_effort: info.reasoning_effort,
         force_http1: false,
         max_retries: info.max_retries,
         stream_tool_calls: info.stream_tool_calls.unwrap_or(false),
         idle_timeout_secs: None,
-        client_identifier: None,
-        deployment_id,
-        user_id,
         origin_client: None,
         attribution_callback: None,
         bearer_resolver: None,
@@ -4867,7 +4249,6 @@ pub fn sampling_config_for_model(
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
-        header_injector: None,
     }
 }
 /// Fold URL-derived headers into `extra_headers`.
@@ -4907,7 +4288,6 @@ pub fn resolve_model_to_sampling_config(
     models: &IndexMap<String, ModelEntry>,
     session_key: Option<&str>,
     alpha_test_key: Option<String>,
-    client_version: Option<String>,
     fallback_entry: Option<ModelEntry>,
 ) -> Option<SamplerConfig> {
     let entry = find_model_by_id(models, model_id)
@@ -4918,9 +4298,6 @@ pub fn resolve_model_to_sampling_config(
         &entry,
         credentials,
         alpha_test_key,
-        client_version,
-        None,
-        None,
     ))
 }
 pub fn resolve_web_search_sampling_config(
@@ -4929,7 +4306,6 @@ pub fn resolve_web_search_sampling_config(
     session_key: Option<&str>,
     disable_api_key_auth: bool,
     alpha_test_key: Option<String>,
-    client_version: Option<String>,
     _endpoints: &EndpointsConfig,
 ) -> Option<SamplerConfig> {
     let resolved = if let Some(entry) = find_model_by_id(models, model_id).cloned() {
@@ -4945,9 +4321,6 @@ pub fn resolve_web_search_sampling_config(
             &entry,
             credentials,
             alpha_test_key,
-            client_version,
-            None,
-            None,
         ))
     } else {
         None
@@ -5361,7 +4734,6 @@ reasoning_effort = "low"
             Some("session-token"),
             false,
             None,
-            None,
             &endpoints,
         )
         .expect("hidden default web search model should resolve");
@@ -5380,7 +4752,7 @@ reasoning_effort = "low"
             model: "composer-session-model".into(),
             ..Default::default()
         };
-        let (model, cfg) = finalize_image_describe_sampler_config(None, &active, None, Some(3));
+        let (model, cfg) = finalize_image_describe_sampler_config(None, &active, Some(3));
         assert_eq!(model, "composer-session-model");
         assert_eq!(cfg.model, "composer-session-model");
         assert_ne!(cfg.model, "grow-build");
@@ -5395,11 +4767,9 @@ reasoning_effort = "low"
             model: "grow-build".into(),
             ..Default::default()
         };
-        let (model, cfg) =
-            finalize_image_describe_sampler_config(Some(aux), &active, Some("cli".into()), Some(7));
+        let (model, cfg) = finalize_image_describe_sampler_config(Some(aux), &active, Some(7));
         assert_eq!(model, "grow-build");
         assert_eq!(cfg.model, "grow-build");
-        assert_eq!(cfg.client_identifier.as_deref(), Some("cli"));
         assert_eq!(cfg.max_retries, Some(7));
     }
     #[test]
@@ -5422,7 +4792,6 @@ reasoning_effort = "low"
             &endpoints,
             None,
             false,
-            None,
             None,
         )
         .expect("override entry has an API key, so resolution succeeds");
@@ -5458,7 +4827,6 @@ reasoning_effort = "low"
                 Some("session-jwt"),
                 false,
                 None,
-                None,
             )
             .is_none(),
             "cold provider cache must not reroute the aux model through the xAI proxy"
@@ -5470,7 +4838,6 @@ reasoning_effort = "low"
             &endpoints,
             Some("session-jwt"),
             false,
-            None,
             None,
         )
         .expect("warm cache resolves");
@@ -5497,7 +4864,7 @@ reasoning_effort = "low"
             base_url: "https://litellm.corp.example/v1".into(),
             ..SamplerConfig::default()
         };
-        stamp_session_local_sampler_fields(&mut third_party, &session_cfg, None, None);
+        stamp_session_local_sampler_fields(&mut third_party, &session_cfg, None);
         assert!(
             third_party.bearer_resolver.is_none(),
             "a third-party endpoint must keep its resolved credential"
@@ -5506,7 +4873,7 @@ reasoning_effort = "low"
             base_url: EndpointsConfig::default().resolve_inference_base_url(),
             ..SamplerConfig::default()
         };
-        stamp_session_local_sampler_fields(&mut first_party, &session_cfg, None, None);
+        stamp_session_local_sampler_fields(&mut first_party, &session_cfg, None);
         assert!(
             first_party.bearer_resolver.is_some(),
             "first-party aux samplers keep the session refresh behavior"
@@ -5539,7 +4906,6 @@ reasoning_effort = "low"
                 Some("session-jwt"),
                 false,
                 None,
-                None,
                 &endpoints,
             )
             .is_none(),
@@ -5551,7 +4917,6 @@ reasoning_effort = "low"
             &catalog,
             Some("session-jwt"),
             false,
-            None,
             None,
             &endpoints,
         )
@@ -5772,7 +5137,6 @@ reasoning_effort = "low"
             &models,
             Some("session-token"),
             true,
-            None,
             None,
             &endpoints,
         )
@@ -6173,14 +5537,8 @@ reasoning_effort = "low"
             None,
             None,
         );
-        let sampling_config = sampling_config_for_model(
-            &model,
-            resolve_credentials(&model, None),
-            None,
-            None,
-            None,
-            None,
-        );
+        let sampling_config =
+            sampling_config_for_model(&model, resolve_credentials(&model, None), None);
         assert_eq!(
             sampling_config.api_key,
             Some("model-specific-key".to_string())
@@ -6198,9 +5556,6 @@ reasoning_effort = "low"
                 auth_type: xai_chat_state::AuthType::ApiKey,
                 auth_scheme: AuthScheme::Bearer,
             },
-            None,
-            None,
-            None,
             None,
         );
         assert_eq!(sampling_config.api_key, Some("fallback-key".to_string()));
@@ -6475,14 +5830,8 @@ reasoning_effort = "low"
             None,
         );
         model.info.api_backend = ApiBackend::Messages;
-        let config = sampling_config_for_model(
-            &model,
-            resolve_credentials(&model, Some("tok")),
-            None,
-            None,
-            None,
-            None,
-        );
+        let config =
+            sampling_config_for_model(&model, resolve_credentials(&model, Some("tok")), None);
         assert_eq!(config.api_backend, ApiBackend::Messages);
         assert_eq!(config.auth_scheme, AuthScheme::Bearer);
         assert_eq!(config.api_key, Some("tok".to_string()));
@@ -6596,7 +5945,7 @@ reasoning_effort = "low"
         assert_eq!(creds.auth_scheme, AuthScheme::XApiKey);
         assert_eq!(creds.auth_type, xai_chat_state::AuthType::ApiKey);
         assert_eq!(creds.api_key, Some("sk-ant-test-key".to_string()));
-        let config = sampling_config_for_model(&model, creds, None, None, None, None);
+        let config = sampling_config_for_model(&model, creds, None);
         assert_eq!(config.auth_scheme, AuthScheme::XApiKey);
         assert_eq!(config.api_backend, ApiBackend::Messages);
         let client = grow_sampler::SamplingClient::new(config).expect("client should build");
@@ -6615,7 +5964,7 @@ reasoning_effort = "low"
         assert_eq!(model.info.auth_scheme, AuthScheme::Bearer);
         let creds = resolve_credentials(&model, None);
         assert_eq!(creds.auth_scheme, AuthScheme::Bearer);
-        let config = sampling_config_for_model(&model, creds, None, None, None, None);
+        let config = sampling_config_for_model(&model, creds, None);
         assert_eq!(config.auth_scheme, AuthScheme::Bearer);
         let client = grow_sampler::SamplingClient::new(config).expect("client should build");
         let info = client.auth_info();
@@ -6930,26 +6279,12 @@ reasoning_effort = "low"
     #[test]
     fn sampling_config_context_window_from_entry_or_default() {
         let model = test_model_entry("any-model", "https://api.example.com/v1", None, None, None);
-        let config = sampling_config_for_model(
-            &model,
-            resolve_credentials(&model, None),
-            None,
-            None,
-            None,
-            None,
-        );
+        let config = sampling_config_for_model(&model, resolve_credentials(&model, None), None);
         assert_eq!(config.context_window, 200_000);
         let mut model =
             test_model_entry("any-model", "https://api.example.com/v1", None, None, None);
         model.info.context_window = NonZeroU64::new(256_000).unwrap();
-        let config = sampling_config_for_model(
-            &model,
-            resolve_credentials(&model, None),
-            None,
-            None,
-            None,
-            None,
-        );
+        let config = sampling_config_for_model(&model, resolve_credentials(&model, None), None);
         assert_eq!(config.context_window, 256_000);
     }
     #[test]
@@ -7077,14 +6412,8 @@ reasoning_effort = "low"
         let mut model =
             test_model_entry("test-model", "https://api.example.com/v1", None, None, None);
         model.info.api_backend = ApiBackend::Responses;
-        let sampling_config = sampling_config_for_model(
-            &model,
-            resolve_credentials(&model, None),
-            None,
-            None,
-            None,
-            None,
-        );
+        let sampling_config =
+            sampling_config_for_model(&model, resolve_credentials(&model, None), None);
         assert_eq!(sampling_config.api_backend, ApiBackend::Responses);
     }
     #[test]
@@ -7771,55 +7100,7 @@ reasoning_effort = "low"
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.inference_idle_timeout_secs, Some(120));
     }
-    #[test]
-    fn telemetry_config_parses_custom_values_from_toml() {
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [telemetry]
-            events_url     = "https://custom.example.com/events"
-            events_api_key = "custom-key"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("should parse");
-        assert_eq!(
-            cfg.telemetry.events_url.as_deref(),
-            Some("https://custom.example.com/events")
-        );
-        assert_eq!(cfg.telemetry.events_api_key.as_deref(), Some("custom-key"));
-    }
-    /// Empty/whitespace values must become `None`, not reach the HTTP client as empty strings.
-    #[test]
-    fn telemetry_empty_string_disables_sink() {
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [telemetry]
-            events_url     = ""
-            events_api_key = "  "
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("should parse");
-        assert!(cfg.telemetry.events_url.is_none());
-        assert!(cfg.telemetry.events_api_key.is_none());
-    }
-    #[test]
-    fn telemetry_partial_override_retains_defaults() {
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [telemetry]
-            events_url = "https://my-proxy/events"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("should parse");
-        assert_eq!(
-            cfg.telemetry.events_url.as_deref(),
-            Some("https://my-proxy/events")
-        );
-        let defaults = TelemetryConfig::default();
-        assert_eq!(cfg.telemetry.events_api_key, defaults.events_api_key);
-    }
+
     #[test]
     fn auth_alias_maps_to_auth() {
         let raw: toml::Value = toml::from_str(
@@ -7950,7 +7231,7 @@ reasoning_effort = "low"
     }
     fn resolve_sampling(model: &ModelEntry, session_key: Option<&str>) -> SamplerConfig {
         let credentials = resolve_credentials(model, session_key);
-        sampling_config_for_model(model, credentials, None, None, None, None)
+        sampling_config_for_model(model, credentials, None)
     }
     #[test]
     #[serial]
@@ -8385,17 +7666,9 @@ reasoning_effort = "low"
         for k in [
             "GROW_CLI_CHAT_PROXY_BASE_URL",
             "GROW_INFERENCE_BASE_URL",
-            "GROW_FEEDBACK_BASE_URL",
-            "GROW_TRACE_UPLOAD_URL",
             "GROW_MANAGED_CONFIG_URL",
             "GROW_MODELS_BASE_URL",
             "GROW_MODELS_LIST_URL",
-            "OTEL_EXPORTER_OTLP_ENDPOINT",
-            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-            "OTEL_EXPORTER_OTLP_HEADERS",
-            "GROW_INTERNAL_OTLP_TRACES_ENDPOINT",
-            "GROW_INTERNAL_OTLP_HEADERS",
-            "GROW_EXTERNAL_OTEL",
         ] {
             unsafe { std::env::remove_var(k) };
         }
@@ -8421,35 +7694,21 @@ reasoning_effort = "low"
             cfg.resolve_managed_config_url(),
             format!("{proxy}/deployment/config")
         );
-        assert_eq!(cfg.resolve_feedback_base_url(), proxy);
-        assert_eq!(cfg.resolve_trace_upload_url(), proxy);
-        assert_eq!(cfg.resolve_otlp_traces_endpoint(), None);
         assert_eq!(cfg.inference_base_url, inference);
         let overridden = EndpointsConfig {
             cli_chat_proxy_base_url: Some("https://proxy.enterprise.example/v1".to_string()),
             managed_config_url: Some(
                 "https://control.enterprise.example/deployment/config".to_string(),
             ),
-            feedback_base_url: Some("https://feedback.enterprise.example".to_string()),
-            trace_upload_url: Some("https://trace.enterprise.example".to_string()),
             ..Default::default()
         };
         assert_eq!(
             overridden.proxy_url(),
             "https://proxy.enterprise.example/v1"
         );
-        assert_eq!(overridden.resolve_otlp_traces_endpoint(), None);
         assert_eq!(
             overridden.resolve_managed_config_url(),
             "https://control.enterprise.example/deployment/config"
-        );
-        assert_eq!(
-            overridden.resolve_feedback_base_url(),
-            "https://feedback.enterprise.example"
-        );
-        assert_eq!(
-            overridden.resolve_trace_upload_url(),
-            "https://trace.enterprise.example"
         );
     }
     /// REGRESSION: the managed-config URL never follows `inference_base_url`
@@ -8537,16 +7796,6 @@ reasoning_effort = "low"
             model_override.base_url.is_none(),
             "base_url should be None when user didn't set it"
         );
-    }
-    #[test]
-    #[serial]
-    fn resolve_feedback_defaults_to_true_when_unset() {
-        unsafe { std::env::remove_var("GROW_FEEDBACK_ENABLED") };
-        unsafe { std::env::remove_var("GROW_TELEMETRY_ENABLED") };
-        let cfg = Config::default();
-        let r = cfg.resolve_feedback();
-        assert!(r.value, "feedback should be true by default");
-        assert_eq!(r.source, ConfigSource::Default);
     }
     #[test]
     #[serial]
@@ -8805,131 +8054,6 @@ reasoning_effort = "low"
         let p = cfg.resolve_doom_loop_recovery().expect("enabled");
         assert_eq!(p.max_threshold, 2);
         assert_eq!(p.max_retries, 0, "0 retries is valid (observe-only)");
-    }
-    #[test]
-    #[serial]
-    fn resolve_feedback_env_overrides_all() {
-        unsafe { std::env::set_var("GROW_FEEDBACK_ENABLED", "true") };
-        let mut cfg = Config::default();
-        cfg.features.feedback = Some(false);
-        cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-            feedback_enabled: Some(false),
-            ..Default::default()
-        });
-        let r = cfg.resolve_feedback();
-        assert_eq!(r.source, ConfigSource::Env);
-        assert!(r.value);
-        unsafe { std::env::remove_var("GROW_FEEDBACK_ENABLED") };
-    }
-    #[test]
-    #[serial]
-    fn resolve_feedback_config_overrides_remote_settings() {
-        unsafe { std::env::remove_var("GROW_FEEDBACK_ENABLED") };
-        let mut cfg = Config::default();
-        cfg.features.feedback = Some(true);
-        cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-            feedback_enabled: Some(false),
-            ..Default::default()
-        });
-        let r = cfg.resolve_feedback();
-        assert_eq!(r.source, ConfigSource::Config);
-        assert!(r.value);
-    }
-    #[test]
-    #[serial]
-    fn resolve_feedback_remote_settings_used_when_no_local() {
-        unsafe { std::env::remove_var("GROW_FEEDBACK_ENABLED") };
-        let cfg = Config {
-            remote_settings: Some(crate::util::config::RemoteSettings {
-                feedback_enabled: Some(true),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let r = cfg.resolve_feedback();
-        assert_eq!(r.source, ConfigSource::Remote);
-        assert!(r.value);
-    }
-    #[test]
-    #[serial]
-    fn remote_settings_cannot_enable_telemetry_or_trace_upload() {
-        unsafe { std::env::remove_var("GROW_TELEMETRY_ENABLED") };
-        unsafe { std::env::remove_var("GROW_TELEMETRY_TRACE_UPLOAD") };
-        let mut cfg = Config::default();
-        cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-            telemetry_enabled: Some(true),
-            telemetry_mode: Some("enabled".to_string()),
-            trace_upload_enabled: Some(true),
-            ..Default::default()
-        });
-        let telemetry = cfg.resolve_telemetry_mode();
-        assert_eq!(telemetry.source, ConfigSource::Default);
-        assert!(telemetry.value.is_disabled());
-        let r = cfg.resolve_trace_upload();
-        assert!(
-            !r.value,
-            "remote settings must not opt the user into upload"
-        );
-        assert!(!cfg.is_trace_upload_enabled());
-    }
-    #[test]
-    #[serial]
-    fn resolve_trace_upload_explicit_config_wins_over_telemetry_off() {
-        unsafe { std::env::remove_var("GROW_TELEMETRY_ENABLED") };
-        unsafe { std::env::remove_var("GROW_TELEMETRY_TRACE_UPLOAD") };
-        let mut cfg = Config::default();
-        cfg.features.telemetry = Some(TelemetryMode::Disabled);
-        cfg.telemetry.trace_upload = Some(true);
-        let r = cfg.resolve_trace_upload();
-        assert!(
-            r.value,
-            "explicit trace_upload config wins over telemetry off"
-        );
-        assert_eq!(r.source, ConfigSource::Config);
-        cfg.telemetry.trace_upload = None;
-        cfg.requirements
-            .trace_upload
-            .pin(true, crate::config::RequirementSource::Unknown);
-        assert!(cfg.resolve_trace_upload().value);
-    }
-    #[test]
-    #[serial]
-    fn trace_upload_decision_debug_reports_winning_source() {
-        unsafe { std::env::remove_var("GROW_TELEMETRY_ENABLED") };
-        unsafe { std::env::remove_var("GROW_TELEMETRY_TRACE_UPLOAD") };
-        let mut cfg = Config::default();
-        cfg.features.telemetry = Some(TelemetryMode::Disabled);
-        cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-            trace_upload_enabled: Some(true),
-            ..Default::default()
-        });
-        let d = cfg.trace_upload_decision_debug();
-        assert_eq!(d["trace_upload"], serde_json::json!(false));
-        assert_eq!(d["trace_upload_source"], serde_json::json!("default"));
-        assert_eq!(d["telemetry_mode"], serde_json::json!("false"));
-        assert_eq!(d["in_remote_trace_upload_enabled"], serde_json::json!(true));
-        assert_eq!(d["has_remote_settings"], serde_json::json!(true));
-        cfg.telemetry.trace_upload = Some(true);
-        let d = cfg.trace_upload_decision_debug();
-        assert_eq!(d["trace_upload"], serde_json::json!(true));
-        assert_eq!(d["trace_upload_source"], serde_json::json!("config"));
-        assert_eq!(d["in_cfg_telemetry_trace_upload"], serde_json::json!(true));
-    }
-    #[test]
-    #[serial]
-    fn resolve_trace_upload_requires_its_own_opt_in() {
-        unsafe { std::env::remove_var("GROW_TELEMETRY_ENABLED") };
-        unsafe { std::env::remove_var("GROW_TELEMETRY_TRACE_UPLOAD") };
-        let mut cfg = Config::default();
-        cfg.features.telemetry = Some(TelemetryMode::Enabled);
-        cfg.telemetry.trace_upload = Some(false);
-        let r = cfg.resolve_trace_upload();
-        assert!(!r.value);
-        assert_eq!(r.source, ConfigSource::Config);
-        cfg.telemetry.trace_upload = None;
-        let r = cfg.resolve_trace_upload();
-        assert!(!r.value, "telemetry alone must not enable session uploads");
-        assert_eq!(r.source, ConfigSource::Default);
     }
     #[test]
     #[serial]
@@ -10117,7 +9241,6 @@ agent_type = "cursor"
             [endpoints]
             deployment_key = "test"
             management_api_key = "mgmt-key"
-            gcs_service_account_key = "gcs-key"
             [models]
             default = "grow-3"
             [ui]
@@ -10126,9 +9249,8 @@ agent_type = "cursor"
             approval_mode = "ask"
             [session]
             auto_compact_threshold_percent = 85
-            [telemetry]
-            enabled = true
-            trace_upload = true
+            [diagnostics]
+            crash_handler = true
             [agent]
             name = "custom"
             [skills]
@@ -10142,8 +9264,6 @@ agent_type = "cursor"
             [compaction]
             [compaction.pruning]
             enabled = true
-            [harness]
-            block_for_upload = true
             [feedback.user]
             name = ["os_user"]
             email = ["git_email", "team@example.com"]
@@ -10300,179 +9420,6 @@ agent_type = "cursor"
             vec!["ui.yollo".to_string()],
             "exactly the typo'd key must be flagged"
         );
-    }
-    /// Regression: a deployment key with no OAuth token must resolve to Proxy.
-    #[test]
-    fn resolve_upload_method_accepts_deployment_key_without_oauth() {
-        use crate::save::UploadMethod;
-        let endpoints = EndpointsConfig {
-            deployment_key: Some("enterprise-key".to_string()),
-            ..Default::default()
-        };
-        match endpoints.resolve_upload_method(None) {
-            Some(UploadMethod::Proxy {
-                deployment_key,
-                user_token,
-                ..
-            }) => {
-                assert_eq!(deployment_key.as_deref(), Some("enterprise-key"));
-                assert_eq!(user_token, "");
-            }
-            other => panic!("expected Proxy upload method, got {other:?}"),
-        }
-    }
-    #[test]
-    fn internal_otlp_requires_an_explicit_grow_endpoint() {
-        let cfg = EndpointsConfig {
-            cli_chat_proxy_base_url: Some("https://proxy.example/v1".to_string()),
-            grow_internal_otlp_traces_endpoint: None,
-            ..Default::default()
-        };
-        assert_eq!(cfg.resolve_otlp_traces_endpoint(), None);
-
-        let cfg = EndpointsConfig {
-            grow_internal_otlp_traces_endpoint: Some(
-                "https://collector.example/v1/traces/".to_string(),
-            ),
-            ..cfg
-        };
-        assert_eq!(
-            cfg.resolve_otlp_traces_endpoint().as_deref(),
-            Some("https://collector.example/v1/traces")
-        );
-    }
-
-    #[test]
-    fn internal_otlp_headers_only_use_grow_namespace() {
-        let cfg = EndpointsConfig {
-            grow_internal_otlp_headers: Some("a=1, b = 2 ,=skip,c=".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            cfg.resolve_otlp_headers(),
-            vec![
-                ("a".to_string(), "1".to_string()),
-                ("b".to_string(), "2".to_string()),
-                ("c".to_string(), String::new()),
-            ]
-        );
-    }
-    fn ext_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
-        let map: std::collections::HashMap<String, String> = pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        move |name: &str| map.get(name).cloned()
-    }
-    fn ext_client() -> grow_telemetry::external::config::ExternalClientInfo {
-        grow_telemetry::external::config::ExternalClientInfo::default()
-    }
-    #[test]
-    fn external_otel_default_off_and_double_opt_in() {
-        assert!(
-            resolve_external_otel_config_with(None, None, ext_env(&[]), ext_client()).is_none()
-        );
-        assert!(
-            resolve_external_otel_config_with(
-                None,
-                None,
-                ext_env(&[("GROW_EXTERNAL_OTEL", "1")]),
-                ext_client(),
-            )
-            .is_none()
-        );
-        assert!(
-            resolve_external_otel_config_with(
-                None,
-                None,
-                ext_env(&[
-                    ("GROW_EXTERNAL_OTEL", "1"),
-                    ("OTEL_METRICS_EXPORTER", "otlp"),
-                ]),
-                ext_client(),
-            )
-            .is_some()
-        );
-    }
-    #[test]
-    fn external_otel_file_table_layered_under_env() {
-        let effective: toml::Value = toml::from_str(
-            r#"
-            [telemetry]
-            otel_enabled = true
-            otel_logs_exporter = "otlp"
-            otel_endpoint = "https://collector.corp.example:4318"
-            otel_protocol = "grpc"
-            "#,
-        )
-        .unwrap();
-        let cfg =
-            resolve_external_otel_config_with(Some(&effective), None, ext_env(&[]), ext_client())
-                .expect("file table must activate");
-        assert_eq!(cfg.transport.as_protocol_str(), "grpc");
-        assert_eq!(cfg.logs_endpoint, "https://collector.corp.example:4318");
-        let cfg = resolve_external_otel_config_with(
-            Some(&effective),
-            None,
-            ext_env(&[("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")]),
-            ext_client(),
-        )
-        .expect("env protocol must override file protocol");
-        assert_eq!(cfg.transport.as_protocol_str(), "http/protobuf");
-        assert_eq!(
-            cfg.logs_endpoint,
-            "https://collector.corp.example:4318/v1/logs"
-        );
-        assert!(
-            resolve_external_otel_config_with(
-                Some(&effective),
-                None,
-                ext_env(&[("GROW_EXTERNAL_OTEL", "0")]),
-                ext_client(),
-            )
-            .is_none()
-        );
-    }
-    #[test]
-    fn external_otel_requirements_pin_wins_over_env() {
-        let req: toml::Value = toml::from_str(
-            r#"
-            [telemetry]
-            otel_enabled = false
-            "#,
-        )
-        .unwrap();
-        assert!(
-            resolve_external_otel_config_with(
-                None,
-                Some(&req),
-                ext_env(&[("GROW_EXTERNAL_OTEL", "1"), ("OTEL_LOGS_EXPORTER", "otlp"),]),
-                ext_client(),
-            )
-            .is_none()
-        );
-        let req: toml::Value = toml::from_str(
-            r#"
-            [telemetry]
-            otel_log_user_prompts = false
-            otel_log_tool_details = false
-            "#,
-        )
-        .unwrap();
-        let cfg = resolve_external_otel_config_with(
-            None,
-            Some(&req),
-            ext_env(&[
-                ("GROW_EXTERNAL_OTEL", "1"),
-                ("OTEL_LOGS_EXPORTER", "otlp"),
-                ("OTEL_LOG_USER_PROMPTS", "1"),
-                ("OTEL_LOG_TOOL_DETAILS", "1"),
-            ]),
-            ext_client(),
-        )
-        .expect("stream still active; only gates pinned");
-        assert!(!cfg.gates.log_user_prompts, "requirement pin must win");
-        assert!(!cfg.gates.log_tool_details, "requirement pin must win");
     }
     fn empty_config() -> toml::Value {
         toml::Value::Table(toml::map::Map::new())
@@ -11016,51 +9963,7 @@ hooks = true
         assert_eq!(cfg.managed_mcps_enabled, first_mcps);
         assert_eq!(cfg.web_search_model, first_ws);
     }
-    #[test]
-    fn telemetry_mode_toml_roundtrip() {
-        let cfg: Features = toml::from_str("telemetry = true").unwrap();
-        assert_eq!(cfg.telemetry, Some(TelemetryMode::Enabled));
-        let cfg: Features = toml::from_str("telemetry = false").unwrap();
-        assert_eq!(cfg.telemetry, Some(TelemetryMode::Disabled));
-        let cfg: Features = toml::from_str(r#"telemetry = "session_metrics""#).unwrap();
-        assert_eq!(cfg.telemetry, Some(TelemetryMode::SessionMetrics));
-        let cfg: Features =
-            toml::from_str(r#"telemetry = "metrics_v3""#).expect("unknown string must not error");
-        assert_eq!(cfg.telemetry, Some(TelemetryMode::Disabled));
-        assert!(toml::from_str::<Features>("telemetry = 42").is_err());
-    }
-    #[test]
-    fn telemetry_enabled_from_toml_recognizes_modes() {
-        let on: toml::Value = toml::from_str("[features]\ntelemetry = true\n").unwrap();
-        assert_eq!(telemetry_enabled_from_toml(&on), Some(true));
-        let session: toml::Value = toml::from_str(
-            r#"[features]
-telemetry = "session_metrics"
-"#,
-        )
-        .unwrap();
-        assert_eq!(telemetry_enabled_from_toml(&session), Some(true));
-        let unknown: toml::Value = toml::from_str(
-            r#"[features]
-telemetry = "garbage"
-"#,
-        )
-        .unwrap();
-        assert_eq!(telemetry_enabled_from_toml(&unknown), None);
-    }
-    #[test]
-    #[serial]
-    fn is_telemetry_disabled_sync_env_signals() {
-        unsafe { std::env::set_var("GROW_TELEMETRY_ENABLED", "0") };
-        unsafe { std::env::remove_var("DISABLE_TELEMETRY") };
-        assert!(is_telemetry_disabled_sync());
-        unsafe { std::env::set_var("GROW_TELEMETRY_ENABLED", "1") };
-        assert!(!is_telemetry_disabled_sync());
-        unsafe { std::env::remove_var("GROW_TELEMETRY_ENABLED") };
-        unsafe { std::env::set_var("DISABLE_TELEMETRY", "1") };
-        assert!(is_telemetry_disabled_sync());
-        unsafe { std::env::remove_var("DISABLE_TELEMETRY") };
-    }
+
     #[test]
     fn version_overrides_apply_into_typed_config() {
         let mut value: toml::Value = toml::from_str(

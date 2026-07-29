@@ -54,7 +54,7 @@ which = { workspace = true }
 # Atomic descriptor writes (NamedTempFile + persist) in materialize_descriptors.
 tempfile = { workspace = true }
 grow-tools = { workspace = true }
-grow-telemetry = { workspace = true }
+grow-diagnostics = { workspace = true }
 grow-workspace-types = { workspace = true }
 xai-tool-protocol = { workspace = true }
 xai-tool-runtime = { workspace = true }

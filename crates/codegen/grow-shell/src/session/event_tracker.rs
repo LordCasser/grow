@@ -2,8 +2,8 @@ use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::time::Instant;
 
-use super::event_writer::EventWriter;
 use super::event_types::{CancellationCategory, Event, RedirectKind, TurnOutcomeLabel};
+use super::event_writer::EventWriter;
 
 /// Per-session event state. `!Send` — lives on the session actor.
 /// Background tasks use `tracker.writer()` to get a `Clone + Send + Sync` handle.

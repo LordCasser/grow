@@ -443,7 +443,7 @@ async fn mint_provider_token(
             service.clone(),
             format!("provider::{name}"),
         ));
-        manager.configure_refresher(None, None);
+        manager.configure_refresher(None);
         if mark_expired {
             let _ = manager
                 .try_recover_unauthorized(super::recovery::RecoverySource::Background)

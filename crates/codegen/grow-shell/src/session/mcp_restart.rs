@@ -75,7 +75,7 @@
 //! `shutting_down` exit needs no push (the upstream `ConfigRemoved`
 //! flush already emitted one).
 //!
-//! ## Telemetry
+//! ## Diagnostic
 //!
 //! Emitted via `tracing::info!` with the metric name in the `target:`
 //! field (`metrics.mcp.auto_restart.<counter>`), one target per metric.
@@ -642,7 +642,7 @@ pub fn forward_status(
     gateway.forward_fire_and_forget(acp::ExtNotification::new(SERVER_STATUS_METHOD, raw.into()));
 }
 
-// ── telemetry helpers (tracing-as-metrics; see module doc § Telemetry) ──
+// ── diagnostics helpers (tracing-as-metrics; see module doc § Diagnostic) ──
 
 fn record_attempted(server: &str, attempt: usize) {
     tracing::info!(
@@ -1115,7 +1115,7 @@ mod tests {
     /// `Reason::RestartFailed` carrying `detail="exhausted after 3
     /// attempts"`.
     ///
-    /// ## Telemetry coverage caveat
+    /// ## Diagnostic coverage caveat
     ///
     /// The `mcp.auto_restart.exhausted` and per-attempt
     /// `mcp.auto_restart.attempted` counters are emitted via
@@ -1123,11 +1123,11 @@ mod tests {
     /// NOT install a `tracing` subscriber — if a future refactor
     /// accidentally deletes the `record_exhausted` / `record_attempted`
     /// calls, the wire-push assertion below would still pass while
-    /// the counters silently disappear from telemetry. Acceptable because
+    /// the counters silently disappear from diagnostics. Acceptable because
     /// both call sites are right next to the wire push and likely to
     /// be deleted/edited together; tighter coverage is a follow-up.
     #[tokio::test(start_paused = true)]
-    async fn all_three_attempts_fail_emits_exhausted_telemetry() {
+    async fn all_three_attempts_fail_emits_exhausted_diagnostics() {
         run_in_local(async {
             let mock = Rc::new(MockActions::new());
             mock.configure("svr");

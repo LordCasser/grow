@@ -1,8 +1,6 @@
 //! ConversationRequest assembly — image compaction, pruning, repair, memory injection.
 
-use grow_sampling_types::{
-    ContentPart, ConversationItem, ConversationRequest, ToolSpec, TraceContext,
-};
+use grow_sampling_types::{ContentPart, ConversationItem, ConversationRequest, ToolSpec};
 
 use super::ChatStateActor;
 use crate::events::ChatStateEvent;
@@ -39,9 +37,6 @@ impl ChatStateActor {
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
         persist_memory_reminder: bool,
-        trace: Option<Box<dyn TraceContext>>,
-        conv_id: String,
-        req_id: String,
     ) -> ConversationRequest {
         let needs_prune = should_prune(
             self.state.total_tokens,
@@ -134,14 +129,6 @@ impl ChatStateActor {
             temperature: self.state.sampling_config.temperature,
             max_output_tokens: self.state.sampling_config.output_limit,
             top_p: self.state.sampling_config.top_p,
-            x_grok_conv_id: Some(conv_id),
-            x_grok_req_id: Some(req_id),
-            x_grok_session_id: None,
-            x_grok_turn_idx: None,
-            x_grok_agent_id: None,
-            x_grok_deployment_id: None,
-            x_grok_user_id: None,
-            trace,
             prompt_cache_key: None,
             reasoning_effort: self.state.sampling_config.reasoning_effort,
             json_schema: None,

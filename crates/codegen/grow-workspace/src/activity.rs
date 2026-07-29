@@ -509,11 +509,6 @@ impl ActivityTracker {
             last_tool_call_completed_ms: last_completed,
             uptime_ms: self.started_at.elapsed().as_millis() as u64,
             idle_since_ms,
-            upload_queue_pending: 0,
-            upload_queue_pending_bytes: 0,
-            upload_queue_inflight: 0,
-            upload_queue_circuit_breaker_tripped: false,
-            artifact_producers_inflight: 0,
             drain_started_ms: drain_started,
             turn_active,
             idle_ignores_background: self.idle_ignores_background,
@@ -566,11 +561,6 @@ impl ActivityTracker {
             last_tool_call_completed_ms: self.last_call_completed_ms.load(Ordering::Relaxed),
             uptime_ms: self.started_at.elapsed().as_millis() as u64,
             idle_since_ms,
-            upload_queue_pending: 0,
-            upload_queue_pending_bytes: 0,
-            upload_queue_inflight: 0,
-            upload_queue_circuit_breaker_tripped: false,
-            artifact_producers_inflight: 0,
             drain_started_ms: drain_started,
             turn_active: self.any_turn_active(),
             idle_ignores_background: self.idle_ignores_background,
@@ -862,10 +852,5 @@ mod tests {
         let t = ActivityTracker::new();
         let s = t.snapshot();
         // Just verify the payload has reasonable defaults.
-        assert_eq!(s.upload_queue_pending, 0);
-        assert_eq!(s.upload_queue_pending_bytes, 0);
-        assert_eq!(s.upload_queue_inflight, 0);
-        assert!(!s.upload_queue_circuit_breaker_tripped);
-        assert_eq!(s.artifact_producers_inflight, 0);
     }
 }

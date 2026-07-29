@@ -24,7 +24,7 @@ pub use xai_prompt_queue as prompt_queue;
 mod acp_handler;
 mod csi_filter;
 mod dispatch;
-/// Display-refresh probe + motion cadence + terminal telemetry at startup.
+/// Display-refresh probe + motion cadence + terminal diagnostics at startup.
 mod display_refresh_startup;
 mod effects;
 pub mod roster;
@@ -218,9 +218,9 @@ impl ScreenMode {
     pub(crate) fn is_minimal(self) -> bool {
         matches!(self, Self::Minimal)
     }
-    /// Stable wire label for the `_meta.screenMode` prompt-telemetry field
-    /// (headless sends `"headless"`). Values are pinned by the telemetry
-    /// allowlist (`grow-telemetry`'s `KNOWN_SCREEN_MODES`); renaming one
+    /// Stable wire label for the `_meta.screenMode` prompt-diagnostics field
+    /// (headless sends `"headless"`). Values are pinned by the diagnostics
+    /// allowlist (`grow-diagnostics`'s `KNOWN_SCREEN_MODES`); renaming one
     /// silently collapses it to `"other"` on the external stream.
     pub(crate) fn meta_label(self) -> &'static str {
         match self {

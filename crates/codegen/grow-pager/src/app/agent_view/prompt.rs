@@ -393,9 +393,9 @@ impl AgentView {
                     // (the ghost only shows when the text is a prefix of it).
                     let (chars, words) =
                         crate::views::prompt_suggestion::suggestion_size(self.prompt.text());
-                    grow_telemetry::session_ctx::log_event(
-                        grow_telemetry::events::PromptSuggestion {
-                            action: grow_telemetry::events::PromptSuggestionAction::Accepted,
+                    grow_diagnostics::session_ctx::log_event(
+                        grow_diagnostics::events::PromptSuggestion {
+                            action: grow_diagnostics::events::PromptSuggestionAction::Accepted,
                             chars,
                             words,
                         },
@@ -412,11 +412,13 @@ impl AgentView {
                     self.prompt.prompt_suggestion_ghost().unwrap_or_default(),
                 );
                 self.prompt.prompt_suggestion.dismiss();
-                grow_telemetry::session_ctx::log_event(grow_telemetry::events::PromptSuggestion {
-                    action: grow_telemetry::events::PromptSuggestionAction::Dismissed,
-                    chars,
-                    words,
-                });
+                grow_diagnostics::session_ctx::log_event(
+                    grow_diagnostics::events::PromptSuggestion {
+                        action: grow_diagnostics::events::PromptSuggestionAction::Dismissed,
+                        chars,
+                        words,
+                    },
+                );
                 return InputOutcome::Changed;
             }
         }
@@ -723,10 +725,10 @@ impl AgentView {
             match self.prompt.handle_key(key) {
                 PromptEvent::Edited => {
                     if undo_tip_accepted {
-                        grow_telemetry::session_ctx::log_event(
-                            grow_telemetry::events::ContextualTip {
-                                tip: grow_telemetry::events::ContextualTipKind::Undo,
-                                action: grow_telemetry::events::ContextualTipAction::Accepted,
+                        grow_diagnostics::session_ctx::log_event(
+                            grow_diagnostics::events::ContextualTip {
+                                tip: grow_diagnostics::events::ContextualTipKind::Undo,
+                                action: grow_diagnostics::events::ContextualTipAction::Accepted,
                             },
                         );
                         // Retire the hint on the restore that consumed it (its

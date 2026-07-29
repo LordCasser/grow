@@ -97,12 +97,6 @@ pub(super) fn dispatch_show_privacy_info(app: &mut AppView) -> Vec<Effect> {
         lines.push("  Use /privacy opt-out to enable privacy mode.");
     }
 
-    // Config keys only; do not describe retention/training/analytics policy here.
-    lines.push("");
-    lines.push("  Other settings (not changed by /privacy):");
-    lines.push("  - [features] telemetry / GROW_TELEMETRY_ENABLED");
-    lines.push("  - [telemetry] trace_upload / GROW_TELEMETRY_TRACE_UPLOAD");
-    lines.push("  - GROW_EXTERNAL_OTEL / OTEL_*");
     lines.push("");
     lines.push("  Review the privacy terms of each configured provider before opting in.");
     let text = lines.join("\n");

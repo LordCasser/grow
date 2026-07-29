@@ -24,7 +24,7 @@ use crate::sampling::{ChatRequestMessage, Role};
 // dream <-> memory_flush module cycle).
 use crate::session::memory::text_utils::{has_markdown_headers, is_no_reply};
 
-/// Memory log target — matches `grow_telemetry::memory_log::TARGET`.
+/// Memory log target — matches `grow_diagnostics::memory_log::TARGET`.
 const LOG: &str = "grow_memory";
 
 /// Check whether a memory flush should run before the next compaction.

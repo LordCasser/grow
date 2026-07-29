@@ -184,7 +184,7 @@ mod cli_catchall_drop_tests {
 }
 /// Spawns a session actor and returns the session handle plus a receiver for permission events.
 ///
-/// The permission events receiver should be used to collect telemetry about permission
+/// The permission events receiver should be used to collect diagnostics about permission
 /// decisions (YOLO mode, user accept/reject, etc.) for upload to GCS.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(
@@ -212,7 +212,6 @@ pub(crate) async fn spawn_session_actor(
     parent_mcp_pool: Option<crate::session::mcp_servers::SharedMcpPool>,
     acp_mcp_servers: Vec<crate::session::mcp_servers::AcpServerEntry>,
     support_permission: bool,
-    telemetry_enabled: bool,
     auto_update: Option<bool>,
     persistence: PersistenceHandle,
     mut conversation: Vec<ConversationItem>,
@@ -234,10 +233,6 @@ pub(crate) async fn spawn_session_actor(
     codebase_indexes: std::sync::Arc<parking_lot::Mutex<CodebaseIndexManager>>,
     code_nav_enabled: bool,
     fs_watch_caps: fs_watch::FsWatchCapabilities,
-    feedback_proxy_url: Option<String>,
-    feedback_user_token: Option<String>,
-    feedback_alpha_test_key: Option<String>,
-    deployment_key: Option<String>,
     client_terminal_capable: bool,
     client_fs_capable: bool,
     gateway_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -252,8 +247,6 @@ pub(crate) async fn spawn_session_actor(
     persisted_workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
     persisted_announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     memory_config: Option<crate::config::MemoryConfig>,
-    loc_tracking_enabled: bool,
-    feedback_flags: crate::session::feedback_manager::FeedbackFlags,
     managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
     managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     managed_mcp_proxy_base_url: String,
@@ -585,15 +578,6 @@ pub(crate) async fn spawn_session_actor(
         grow_tools::reminders::task_completion::TaskWakeSuppressed::default();
     tool_context.task_completion_reservations = Some(task_completion_reservations.clone());
     tool_context.task_wake_suppressed = Some(task_wake_suppressed.clone());
-    let synthetic_trace_tx_shared: std::sync::Arc<
-        std::sync::Mutex<
-            Option<
-                tokio::sync::mpsc::UnboundedSender<crate::save::SyntheticTurnTraceRequest>,
-            >,
-        >,
-    > = std::sync::Arc::new(std::sync::Mutex::new(None));
-    *synthetic_trace_tx_shared.lock().unwrap() = tool_context.synthetic_trace_tx.clone();
-    tool_context.synthetic_trace_tx_shared = Some(synthetic_trace_tx_shared.clone());
     let mut tool_context = tool_context.with_file_state_handle(file_state_handle);
     let index_root_for_session =
         grow_workspace::session::git::find_git_root_from_path(tool_context.cwd.as_path())
@@ -643,7 +627,6 @@ pub(crate) async fn spawn_session_actor(
             session_cmd_tx: cmd_tx.clone(),
             task_completion_reservations: task_completion_reservations.clone(),
             task_wake_suppressed: task_wake_suppressed.clone(),
-            synthetic_trace_tx: synthetic_trace_tx_shared.clone(),
             task_output_tool_name: task_output_tool_name.clone(),
             read_tool_name: read_tool_name.clone(),
             auto_wake_enabled: tool_context.auto_wake_enabled,
@@ -727,7 +710,7 @@ pub(crate) async fn spawn_session_actor(
     let bridge_state_path =
         crate::session::persistence::session_dir(&session_info).join("tool_state.json");
     let initial_agent_type = Some(agent_definition.name.clone());
-    let harness_metrics = if telemetry_enabled || grow_telemetry::external::is_active() {
+    let harness_metrics = {
         let plugin_names = plugin_registry
             .as_ref()
             .map(|reg| {
@@ -737,19 +720,19 @@ pub(crate) async fn spawn_session_actor(
                     .collect()
             })
             .unwrap_or_default();
-        Some(super::telemetry::SessionHarnessMetrics {
+        Some(super::diagnostics::SessionHarnessMetrics {
             session_id: session_info.id.0.to_string(),
             client_identifier: session_client_identifier.clone(),
             model_id: session_model_id.0.to_string(),
             agent_name: agent_definition.name.clone(),
             permission_mode: if session_yolo_mode {
-                grow_telemetry::enums::PermissionMode::AlwaysApprove
+                grow_diagnostics::enums::PermissionMode::AlwaysApprove
             } else if session_auto_mode
                 && crate::util::config::auto_permission_mode_enabled_from_disk()
             {
-                grow_telemetry::enums::PermissionMode::Auto
+                grow_diagnostics::enums::PermissionMode::Auto
             } else {
-                grow_telemetry::enums::PermissionMode::Ask
+                grow_diagnostics::enums::PermissionMode::Ask
             },
             mcp_server_names: mcp_servers
                 .iter()
@@ -764,8 +747,6 @@ pub(crate) async fn spawn_session_actor(
             plugin_registry: plugin_registry.clone(),
             plugin_names,
         })
-    } else {
-        None
     };
     let compaction_policy = grow_agent::CompactionPolicy {
         auto_compact_threshold_percent: auto_compact_threshold_percent as u32,
@@ -813,7 +794,7 @@ pub(crate) async fn spawn_session_actor(
     > = if let Some(ref storage) = memory_storage_for_session {
         if let Err(e) = storage.ensure_initialized() {
             tracing::warn!(
-                target: grow_telemetry::memory_log::TARGET,
+                target: grow_diagnostics::memory_log::TARGET,
                 error = %e,
                 "MEMORY_INIT: ensure_initialized failed, continuing without template files"
             );
@@ -824,14 +805,14 @@ pub(crate) async fn spawn_session_actor(
             tokio::task::spawn_blocking(move || match gc_storage.gc(gc_max_age) {
                 Ok(removed) if removed > 0 => {
                     tracing::info!(
-                        target: grow_telemetry::memory_log::TARGET,
+                        target: grow_diagnostics::memory_log::TARGET,
                         removed,
                         "MEMORY_GC: cleaned orphaned workspace directories"
                     );
                 }
                 Err(e) => {
                     tracing::debug!(
-                        target: grow_telemetry::memory_log::TARGET,
+                        target: grow_diagnostics::memory_log::TARGET,
                         error = %e,
                         "MEMORY_GC: failed"
                     );
@@ -879,13 +860,13 @@ pub(crate) async fn spawn_session_actor(
         memory_backend_params_for_session = Some(params);
         if watcher_config.enabled && !watcher_started {
             tracing::warn!(
-                target: grow_telemetry::memory_log::TARGET,
+                target: grow_diagnostics::memory_log::TARGET,
                 "MEMORY_INIT: watcher was configured but failed to start \
                  (directory may not exist or OS watcher unavailable)"
             );
         }
         tracing::info!(
-            target: grow_telemetry::memory_log::TARGET,
+            target: grow_diagnostics::memory_log::TARGET,
             workspace = %storage.workspace_dir().display(),
             global = %storage.global_dir().display(),
             watcher_config_enabled = watcher_config.enabled,
@@ -894,8 +875,8 @@ pub(crate) async fn spawn_session_actor(
         );
         let mc = memory_config.as_ref();
         let total_chunks = storage.total_chunk_count();
-        grow_telemetry::session_ctx::log_event(
-            grow_telemetry::memory_telemetry::MemorySessionInit {
+        grow_diagnostics::session_ctx::log_event(
+            grow_diagnostics::memory_events::MemorySessionInit {
                 session_id: session_info.id.to_string(),
                 memory_enabled: true,
                 watcher_config_enabled: watcher_config.enabled,
@@ -914,7 +895,7 @@ pub(crate) async fn spawn_session_actor(
         Some(backend)
     } else {
         tracing::debug!(
-            target: grow_telemetry::memory_log::TARGET,
+            target: grow_diagnostics::memory_log::TARGET,
             "MEMORY_INIT: memory disabled, no storage created"
         );
         None
@@ -1123,55 +1104,8 @@ pub(crate) async fn spawn_session_actor(
     );
     persist_chat_history_jsonl_sync(&session_info, &conversation);
     chat_state_handle.replace_conversation(conversation);
-    let feedback_client = feedback_proxy_url.map(|base_url| {
-        let mut client =
-            crate::agent::feedback_client::FeedbackClient::new(base_url, feedback_user_token)
-                .with_alpha_test_key(feedback_alpha_test_key)
-                .with_deployment_key(deployment_key);
-        if let Some(am) = auth_manager.as_ref() {
-            client = client.with_auth_manager(am.clone());
-        }
-        client
-    });
-    let has_feedback_client = feedback_client.is_some();
-    tracing::info!(
-        session_id = %session_info.id.0,
-        has_feedback_client = has_feedback_client,
-        "Creating feedback manager"
-    );
-    let feedback_client_type = match client_type {
-        ClientType::GrowTUI => prod_mc_cli_chat_proxy_types::feedback_types::ClientType::Tui,
-        ClientType::GrowWeb => prod_mc_cli_chat_proxy_types::feedback_types::ClientType::Web,
-        ClientType::Nebula => prod_mc_cli_chat_proxy_types::feedback_types::ClientType::Nebula,
-        ClientType::Extension => {
-            prod_mc_cli_chat_proxy_types::feedback_types::ClientType::Extension
-        }
-        ClientType::Generic => prod_mc_cli_chat_proxy_types::feedback_types::ClientType::Agent,
-        ClientType::Desktop => prod_mc_cli_chat_proxy_types::feedback_types::ClientType::Desktop,
-        ClientType::GrowPager => prod_mc_cli_chat_proxy_types::feedback_types::ClientType::Tui,
-    };
-    let user_cfg = feedback_flags.user;
-    let feedback_config = FeedbackManagerConfig {
-        feedback_enabled: feedback_flags.enabled,
-        telemetry_enabled,
-        client_type: feedback_client_type,
-        loc_tracking_enabled,
-        user: user_cfg.clone(),
-        ..Default::default()
-    };
-    if feedback_flags.enabled
-        && let Some(user_cfg) = user_cfg
-    {
-        tokio::spawn(async move {
-            let _ = crate::util::user_identity::cached_identity(Some(&user_cfg)).await;
-        });
-    }
-    let feedback_manager = Arc::new(FeedbackManager::new(
-        session_info.id.0.to_string(),
-        feedback_client,
-        feedback_config,
-    ));
-    let signals_handle = feedback_manager.signals_handle();
+    let (signals_handle, signals_actor) = crate::session::signals::SessionSignalsActor::new();
+    tokio::spawn(signals_actor.run());
     if let Some(persisted) = persisted_signals {
         signals_handle.restore_signals(persisted);
     } else {
@@ -1185,11 +1119,6 @@ pub(crate) async fn spawn_session_actor(
     }
     signals_handle.set_primary_model(&primary_model_id);
     signals_handle.set_tracing_config(inference_idle_timeout_secs);
-    let sync_loop_cancel = if has_feedback_client {
-        Some(tokio_util::sync::CancellationToken::new())
-    } else {
-        None
-    };
     let force_compact = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let resolved_workspace_root = grow_workspace::session::git::find_git_root_from_path(
         std::path::Path::new(&session_info.cwd),
@@ -1264,7 +1193,6 @@ pub(crate) async fn spawn_session_actor(
         .iter()
         .map(|e| e.to_string())
         .collect();
-    let upload_queue = Arc::new(std::sync::OnceLock::new());
     let (goal_update_tx, goal_update_rx) = tokio::sync::mpsc::unbounded_channel::<
         grow_tools::implementations::grow_build::update_goal::UpdateGoalEnvelope,
     >();
@@ -1304,7 +1232,7 @@ pub(crate) async fn spawn_session_actor(
             }),
             Arc::new(|name: &str, fields: &serde_json::Value, replayed: bool| {
                 if !replayed {
-                    tracing::info!(event = name, %fields, "workflow telemetry");
+                    tracing::info!(event = name, %fields, "workflow diagnostics");
                 }
             }),
             cmd_tx.clone(),
@@ -1553,7 +1481,6 @@ pub(crate) async fn spawn_session_actor(
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: current_prompt_id.clone(),
         pending_interactions: pending_interactions.clone(),
-        telemetry_enabled,
         supports_backend_search: std::cell::Cell::new(sampling_config.supports_backend_search),
         tool_overrides: std::cell::RefCell::new(None),
         resolved_tool_overrides: resolved_tool_overrides.clone(),
@@ -1633,9 +1560,7 @@ pub(crate) async fn spawn_session_actor(
         buffering_settings,
         client_identifier: session_client_identifier.clone(),
         origin_client: origin_client.clone(),
-        feedback_manager: feedback_manager.clone(),
-        upload_queue: upload_queue.clone(),
-        sync_loop_cancel: sync_loop_cancel.clone(),
+        signals_handle: signals_handle.clone(),
         agent: std::cell::RefCell::new(agent),
         last_reported_branch: Arc::new(Mutex::new(None)),
         git_head_enabled: fs_watch_caps.git_head,
@@ -1745,7 +1670,6 @@ pub(crate) async fn spawn_session_actor(
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace_ops.clone(),
-        trace_config_template: std::cell::RefCell::new(None),
     });
     if goal_was_restored {
         let current_tokens = session.chat_state_handle.get_total_tokens().await as i64;
@@ -1884,7 +1808,7 @@ pub(crate) async fn spawn_session_actor(
                     }
                 }
                 tracing::info!(
-                    target: grow_telemetry::memory_log::TARGET,
+                    target: grow_diagnostics::memory_log::TARGET,
                     files = files.len(),
                     "MEMORY_REINDEX: background reindex complete"
                 );
@@ -1903,8 +1827,8 @@ pub(crate) async fn spawn_session_actor(
                 } else {
                     0
                 };
-                grow_telemetry::session_ctx::log_event(
-                    grow_telemetry::memory_telemetry::MemoryReindex {
+                grow_diagnostics::session_ctx::log_event(
+                    grow_diagnostics::memory_events::MemoryReindex {
                         session_id: session_id_for_reindex.clone(),
                         source: "init".to_owned(),
                         added: total_added,
@@ -1919,21 +1843,6 @@ pub(crate) async fn spawn_session_actor(
                     .fetch_add(total_added as u64, std::sync::atomic::Ordering::Relaxed);
             }
         });
-    }
-    if let Some(cancel) = sync_loop_cancel {
-        tracing::info!(
-            session_id = %session_info.id.0,
-            "Spawning feedback sync loop"
-        );
-        let fm = feedback_manager.clone();
-        tokio::spawn(async move {
-            fm.run_sync_loop(cancel).await;
-        });
-    } else {
-        tracing::debug!(
-            session_id = %session_info.id.0,
-            "No feedback client available, skipping sync loop"
-        );
     }
     {
         use agent_client_protocol::Client as _;
@@ -2022,31 +1931,30 @@ pub(crate) async fn spawn_session_actor(
         });
     }
     let (session_done_tx, session_done_rx) = tokio::sync::oneshot::channel::<()>();
-    let telemetry_ctx = grow_telemetry::session_ctx::TelemetryCtx::new(
+    let diagnostics_ctx = grow_diagnostics::session_ctx::DiagnosticCtx::new(
         session.session_info.id.0.to_string(),
         session.tool_context.prompt_index.clone(),
     );
     if let Some(metrics) = harness_metrics {
-        let hooks: Vec<super::telemetry::HookRegInfo> = session
+        let hooks: Vec<super::diagnostics::HookRegInfo> = session
             .hook_registry
             .borrow()
             .as_ref()
             .map(|reg| {
                 reg.all_hooks()
                     .iter()
-                    .map(|s| super::telemetry::HookRegInfo::from_spec(s))
+                    .map(|s| super::diagnostics::HookRegInfo::from_spec(s))
                     .collect()
             })
             .unwrap_or_default();
-        let telemetry_enabled = session.telemetry_enabled;
         tokio::spawn(async move {
             let ev = metrics.into_event(hooks).await;
-            grow_telemetry::session_ctx::log_event_dual(telemetry_enabled, ev);
+            grow_diagnostics::session_ctx::log_event(ev);
         });
     }
     tokio::task::spawn_local(async move {
-        grow_telemetry::session_ctx::with_session_ctx(
-            telemetry_ctx,
+        grow_diagnostics::session_ctx::with_session_ctx(
+            diagnostics_ctx,
             run_session(
                 session,
                 cmd_rx,
@@ -2077,9 +1985,6 @@ pub(crate) async fn spawn_session_actor(
             mcp_servers,
             initial_client_mcp_servers,
             display_cwd: None,
-            feedback_manager: feedback_manager.clone(),
-            upload_queue: upload_queue.clone(),
-            upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_context: tool_context_for_handle,
             model_id: session_model_id,
             scheduler_background_loops,
@@ -2152,7 +2057,6 @@ pub(crate) async fn spawn_session_on_thread(
     parent_mcp_pool: Option<crate::session::mcp_servers::SharedMcpPool>,
     acp_mcp_servers: Vec<crate::session::mcp_servers::AcpServerEntry>,
     support_permission: bool,
-    telemetry_enabled: bool,
     auto_update: Option<bool>,
     persistence: PersistenceHandle,
     conversation: Vec<ConversationItem>,
@@ -2172,10 +2076,6 @@ pub(crate) async fn spawn_session_on_thread(
     codebase_indexes: std::sync::Arc<parking_lot::Mutex<CodebaseIndexManager>>,
     code_nav_enabled: bool,
     fs_watch_caps: fs_watch::FsWatchCapabilities,
-    feedback_proxy_url: Option<String>,
-    feedback_user_token: Option<String>,
-    feedback_alpha_test_key: Option<String>,
-    deployment_key: Option<String>,
     client_terminal_capable: bool,
     client_fs_capable: bool,
     gateway_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -2190,8 +2090,6 @@ pub(crate) async fn spawn_session_on_thread(
     persisted_workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
     persisted_announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     memory_config: Option<crate::config::MemoryConfig>,
-    loc_tracking_enabled: bool,
-    feedback_flags: crate::session::feedback_manager::FeedbackFlags,
     managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
     managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     managed_mcp_proxy_base_url: String,
@@ -2227,7 +2125,6 @@ pub(crate) async fn spawn_session_on_thread(
     plugin_registry: Option<std::sync::Arc<grow_agent::plugins::PluginRegistry>>,
     plugin_registry_handle: Option<grow_agent::plugins::SharedPluginRegistryHandle>,
     models_manager: crate::agent::models::ModelsManager,
-    parent_traceparent: Option<String>,
     inherited_permission_handle: Option<grow_workspace::permission::PermissionHandle>,
     api_key_provider: Option<grow_tools::types::SharedApiKeyProvider>,
     image_description_model: String,
@@ -2297,14 +2194,6 @@ pub(crate) async fn spawn_session_on_thread(
             };
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
-                let _trace_span = parent_traceparent.as_ref().map(|tp| {
-                    let meta = serde_json::json!({ "traceparent": tp })
-                        .as_object()
-                        .cloned()
-                        .unwrap_or_default();
-                    let span = xai_file_utils::trace_context::span_from_meta_traceparent(&meta);
-                    span.entered()
-                });
                 let (handle, permission_events_rx, system_prompt, session_done_rx) =
                     match spawn_session_actor(
                         session_info,
@@ -2321,7 +2210,6 @@ pub(crate) async fn spawn_session_on_thread(
                         parent_mcp_pool,
                         acp_mcp_servers,
                         support_permission,
-                        telemetry_enabled,
                         auto_update,
                         persistence,
                         conversation,
@@ -2343,10 +2231,6 @@ pub(crate) async fn spawn_session_on_thread(
                         codebase_indexes,
                         code_nav_enabled,
                         fs_watch_caps,
-                        feedback_proxy_url,
-                        feedback_user_token,
-                        feedback_alpha_test_key,
-                        deployment_key,
                         client_terminal_capable,
                         client_fs_capable,
                         gateway_enabled,
@@ -2361,8 +2245,6 @@ pub(crate) async fn spawn_session_on_thread(
                         persisted_workflow_runs,
                         persisted_announcement_state,
                         memory_config,
-                        loc_tracking_enabled,
-                        feedback_flags,
                         managed_mcp_handle,
                         managed_mcp_expires_at,
                         managed_mcp_proxy_base_url,

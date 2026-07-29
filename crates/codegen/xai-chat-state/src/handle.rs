@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use grow_sampling_types::{
     ConversationItem, ConversationRequest, DanglingToolCallReason, SamplingConfig, TokenUsage,
-    ToolSpec, TraceContext,
+    ToolSpec,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -336,18 +336,12 @@ impl ChatStateHandle {
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
         persist_memory_reminder: bool,
-        trace: Option<Box<dyn TraceContext>>,
-        conv_id: String,
-        req_id: String,
     ) -> Option<ConversationRequest> {
         self.query("BuildConversationRequest", |reply| {
             ChatStateCommand::BuildConversationRequest {
                 tool_definitions,
                 memory_reminder,
                 persist_memory_reminder,
-                trace,
-                conv_id,
-                req_id,
                 reply,
             }
         })
@@ -635,7 +629,7 @@ impl ChatStateHandle {
     /// Get item counts for the conversation by role.
     ///
     /// Returns a [`ConversationCounts`] struct without cloning any items.
-    /// Suitable for telemetry / logging that only needs totals.
+    /// Suitable for diagnostics / logging that only needs totals.
     pub async fn get_conversation_counts(&self) -> ConversationCounts {
         self.query("GetConversationCounts", |reply| {
             ChatStateCommand::GetConversationCounts { reply }

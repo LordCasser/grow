@@ -2457,7 +2457,6 @@ mod tests {
                 kind: turn_hook::BEFORE_TURN_KIND.to_string(),
                 payload: serde_json::to_value(&payload).unwrap(),
             },
-            trace_context: None,
         };
         handler
             .handle_hook(SessionId::new("main").unwrap(), frame)
@@ -2492,7 +2491,6 @@ mod tests {
                 kind: turn_hook::AFTER_TURN_KIND.to_string(),
                 payload: serde_json::to_value(&payload).unwrap(),
             },
-            trace_context: None,
         };
         handler
             .handle_hook(SessionId::new("main").unwrap(), frame)
@@ -2511,7 +2509,6 @@ mod tests {
                 kind: turn_hook::BEFORE_TURN_KIND.to_string(),
                 payload: serde_json::json!({"garbage": true}),
             },
-            trace_context: None,
         };
         handler
             .handle_hook(SessionId::new("main").unwrap(), frame)
@@ -2530,7 +2527,6 @@ mod tests {
                 kind: "unknown_kind".to_string(),
                 payload: serde_json::json!({}),
             },
-            trace_context: None,
         };
         handler
             .handle_hook(SessionId::new("main").unwrap(), frame)
@@ -2573,7 +2569,6 @@ mod tests {
             call_id: None,
             hook_id: None,
             event: HookEvent::Cancel,
-            trace_context: None,
         };
         handler
             .handle_hook(SessionId::new("main").unwrap(), frame)
@@ -2700,7 +2695,6 @@ mod tests {
                 call_id: None,
                 hook_id: None,
                 event,
-                trace_context: None,
             };
             handler
                 .handle_hook(SessionId::new("main").unwrap(), frame)

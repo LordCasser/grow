@@ -125,7 +125,7 @@ pub(super) fn dispatch_permission_select(
     resolve_permission_queue_transition(agent);
 
     // "Enable always-approve" side effect: flip YOLO + persist + notify.
-    // Reuses the existing `set_yolo_mode` pipeline so telemetry, queue
+    // Reuses the existing `set_yolo_mode` pipeline so diagnostics, queue
     // drain, toast, modal refresh, config persistence, and ACP
     // notification all flow through one well-tested code path.
     //

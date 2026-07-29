@@ -64,8 +64,6 @@ impl AgentTask {
         prompt_id: String,
         input: Vec<ContentBlock>,
         prompt_mode: PromptMode,
-        trace_gcs_config: Option<crate::save::TraceExportConfig>,
-        artifact_tracker: Option<crate::save::ArtifactTracker>,
         client_identifier: Option<String>,
         screen_mode: Option<String>,
         verbatim: bool,
@@ -82,8 +80,6 @@ impl AgentTask {
                     session.clone(),
                     input,
                     prompt_mode,
-                    trace_gcs_config,
-                    artifact_tracker,
                     client_identifier,
                     screen_mode,
                     verbatim,
@@ -146,8 +142,6 @@ async fn run_task(
     session: Arc<SessionActor>,
     input: Vec<ContentBlock>,
     prompt_mode: PromptMode,
-    trace_gcs_config: Option<crate::save::TraceExportConfig>,
-    artifact_tracker: Option<crate::save::ArtifactTracker>,
     client_identifier: Option<String>,
     screen_mode: Option<String>,
     verbatim: bool,
@@ -162,8 +156,6 @@ async fn run_task(
             &prompt_id,
             input,
             prompt_mode,
-            trace_gcs_config,
-            artifact_tracker,
             client_identifier,
             screen_mode,
             verbatim,
@@ -221,7 +213,7 @@ impl SessionActor {
             gate.set(false);
         }
         self.state.lock().await.notifications_suppressed = false;
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "shell.task_wake.gate_cleared",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({ "reason": "send_now" })),
@@ -242,7 +234,7 @@ impl SessionActor {
             }
             let mut state = self.state.try_lock().expect("session state is actor-owned");
             state.notifications_suppressed = true;
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "shell.task_wake.cancel_barrier",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
@@ -276,7 +268,7 @@ impl SessionActor {
             .expect("current_prompt_id mutex poisoned")
             .clone();
         {
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "shell.cancel.processing",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
@@ -372,7 +364,7 @@ impl SessionActor {
                     gate.set(false);
                 }
                 state.notifications_suppressed = false;
-                grow_telemetry::unified_log::info(
+                grow_diagnostics::unified_log::info(
                     "shell.task_wake.gate_cleared",
                     Some(self.session_info.id.0.as_ref()),
                     Some(serde_json::json!({ "reason": "rewind" })),
@@ -452,7 +444,7 @@ impl SessionActor {
             };
             // Whether a user prompt remains queued behind the just-cancelled
             // turn. It distinguishes the next turn's redirect kind for
-            // telemetry: `queued_after_cancel` (a queued prompt is promoted)
+            // diagnostics: `queued_after_cancel` (a queued prompt is promoted)
             // vs `cancel_then_send` (the user types a fresh prompt). Synthetic
             // inputs (auto-wake / nudges) are not user redirects.
             let had_queued_user_prompt = state

@@ -1739,17 +1739,17 @@ impl PromptWidget {
             PromptEvent::Edited
         } else {
             // Backspace/Delete pressed but produced no effect on non-empty text.
-            // This is the telemetry hook for diagnosing the "backspace lock" bug.
+            // This is the diagnostics hook for diagnosing the "backspace lock" bug.
             let is_backspace_key = matches!(
                 key.code,
                 KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('\x08' | '\x7f')
             ) || (key.code == KeyCode::Char('h')
                 && key.modifiers.contains(KeyModifiers::CONTROL));
             if is_backspace_key && !old_text.is_empty() {
-                use grow_telemetry::events::BackspaceNoEffect;
-                use grow_telemetry::session_ctx::log_event;
+                use grow_diagnostics::events::BackspaceNoEffect;
+                use grow_diagnostics::session_ctx::log_event;
                 let evt = BackspaceNoEffect {
-                    terminal: crate::terminal::terminal_context().telemetry_snapshot(),
+                    terminal: crate::terminal::terminal_context().diagnostics_snapshot(),
                     key_code: format!("{:?}", key.code),
                     key_modifiers: format!("{:?}", key.modifiers),
                     key_kind: format!("{:?}", key.kind),
@@ -1757,7 +1757,7 @@ impl PromptWidget {
                     text_len: old_text.len(),
                     has_selection: old_has_selection,
                 };
-                // Structured warn for the product telemetry pipeline.
+                // Structured warn for the product diagnostics pipeline.
                 tracing::warn!(
                     terminal.brand = %evt.terminal.brand,
                     terminal.multiplexer = %evt.terminal.multiplexer,
@@ -1773,7 +1773,7 @@ impl PromptWidget {
                     textarea.has_selection = evt.has_selection,
                     "backspace_no_effect"
                 );
-                // Product analytics event (when telemetry is enabled).
+                // Product analytics event (when diagnostics is enabled).
                 log_event(evt);
             }
             PromptEvent::Ignored

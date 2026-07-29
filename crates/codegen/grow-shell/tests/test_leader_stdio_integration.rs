@@ -3051,7 +3051,7 @@ async fn raw_recv_acp(reader: &mut tokio::io::ReadHalf<UnixStream>) -> serde_jso
 /// pid+request-id fence keeps the counting sound regardless of what else is
 /// in the file. (Bazel sandboxes HOME, so CI writes stay test-scoped.)
 fn orphan_log_count(request_id: &str) -> usize {
-    let Some(bytes) = grow_telemetry::unified_log::snapshot_log() else {
+    let Some(bytes) = grow_diagnostics::unified_log::snapshot_log() else {
         return 0;
     };
     String::from_utf8_lossy(&bytes)
@@ -3085,7 +3085,7 @@ async fn wait_for_orphan_log(request_id: &str) -> usize {
 async fn wait_for_client_disconnected_log(client_id: u64) -> bool {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let seen = grow_telemetry::unified_log::snapshot_log().is_some_and(|bytes| {
+        let seen = grow_diagnostics::unified_log::snapshot_log().is_some_and(|bytes| {
             String::from_utf8_lossy(&bytes).lines().any(|line| {
                 serde_json::from_str::<serde_json::Value>(line).is_ok_and(|entry| {
                     entry["msg"] == "leader.client.disconnected"

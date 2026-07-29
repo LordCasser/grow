@@ -15,7 +15,7 @@
 //!   handles it.
 //! - `Extensions` (a typed `HashMap<TypeId, Box<dyn Any + Send + Sync>>`)
 //!   is explicitly "in-process only; not serialized" per the doc. It
-//!   carries tracing spans and telemetry context that have no wire
+//!   carries tracing spans and diagnostics context that have no wire
 //!   representation -- they belong with the runtime.
 //!
 //! So this crate exposes `RequestMessage<T>`: just the parts that need

@@ -58,7 +58,7 @@ impl Default for DisplayRefreshPolicy {
 pub struct AutoCadenceDecision {
     /// Derived cadence when auto applies; `None` when gated off / fail-closed.
     pub ms: Option<u64>,
-    /// Stable reason token for telemetry: `flag_off` | `disabled` |
+    /// Stable reason token for diagnostics: `flag_off` | `disabled` |
     /// `probe_skip` | `hz_out_of_range` | `applied`.
     pub reason: &'static str,
 }

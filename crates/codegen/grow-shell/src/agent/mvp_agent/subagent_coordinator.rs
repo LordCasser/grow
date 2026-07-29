@@ -2,7 +2,6 @@
 //! The shared coordinator actor lives in `grow-tools`; this module plugs
 //! its `!Send` local-session runner into `spawn_local`.
 use super::*;
-use crate::save::UploadMethod;
 struct ShellChildRunner {
     agent_ref: LocalRef<MvpAgent>,
 }
@@ -182,23 +181,6 @@ impl MvpAgent {
                 )
                 .run(),
         );
-        let (trace_tx, mut trace_rx) = tokio::sync::mpsc::unbounded_channel::<
-            crate::save::SyntheticTurnTraceRequest,
-        >();
-        self.subagent_presentation.borrow_mut().synthetic_trace_tx = Some(trace_tx);
-        tokio::task::spawn_local({
-            let agent_ref = agent_ref.clone();
-            async move {
-                while let Some(request) = trace_rx.recv().await {
-                    tokio::task::spawn_local({
-                        let agent_ref = agent_ref.clone();
-                        async move {
-                            handle_synthetic_turn_trace(agent_ref, request).await;
-                        }
-                    });
-                }
-            }
-        });
     }
     /// Lightweight context for the `SubagentEvent::ValidateType` drain arm;
     /// tolerates evicted parent sessions (returns built-in defaults + warns).
@@ -356,25 +338,6 @@ impl MvpAgent {
                 .map(|h| h.ask_user_question_enabled)
                 .unwrap_or_else(|| self.cfg.borrow().resolve_ask_user_question().value)
         };
-        let (gcs_upload_method, gcs_bucket_url) = match self.trace_upload_config_snapshot() {
-            Some(method) => {
-                let bucket = match &method {
-                    UploadMethod::Direct { .. } => self
-                        .cfg
-                        .borrow()
-                        .endpoints
-                        .resolve_trace_bucket_url()
-                        .map(|r| r.value),
-                    UploadMethod::Proxy { .. } => Some("proxy-managed".to_string()),
-                    UploadMethod::S3 { bucket, .. } => Some(format!("s3://{bucket}")),
-                };
-                match bucket {
-                    Some(url) => (Some(method), Some(url)),
-                    None => (None, None),
-                }
-            }
-            None => (None, None),
-        };
         let project_trusted = crate::agent::folder_trust::project_scope_allowed(&parent_cwd);
         let (base_roles, base_personas, subagent_model_overrides, subagent_toggle) = {
             let cfg = self.cfg.borrow();
@@ -475,9 +438,7 @@ impl MvpAgent {
                     None
                 }
             },
-            gcs_bucket_url,
             agent_config: Some(self.cfg.borrow().clone()),
-            gcs_upload_method,
             hook_registry: parent_hook_registry,
             permission_handle: {
                 let sessions = self.sessions.borrow();
@@ -512,12 +473,6 @@ impl MvpAgent {
                 sessions
                     .get(&parent_sid)
                     .and_then(|h| h.tool_context.task_completion_reservations.clone())
-            },
-            synthetic_trace_tx: {
-                let sessions = self.sessions.borrow();
-                sessions
-                    .get(&parent_sid)
-                    .and_then(|h| h.tool_context.synthetic_trace_tx.clone())
             },
             task_output_tool_name: {
                 let sessions = self.sessions.borrow();

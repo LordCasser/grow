@@ -98,7 +98,6 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
-        telemetry_enabled: false,
         supports_backend_search: std::cell::Cell::new(false),
         tool_overrides: std::cell::RefCell::new(None),
         resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
@@ -162,9 +161,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         }),
         client_identifier: None,
         origin_client: None,
-        feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-        upload_queue: Arc::new(OnceLock::new()),
-        sync_loop_cancel: None,
+        signals_handle: Default::default(),
         agent: std::cell::RefCell::new(test_agent_default().await),
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         git_head_enabled: false,
@@ -248,7 +245,6 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: grow_workspace::WorkspaceOps::for_test(),
-        trace_config_template: std::cell::RefCell::new(None),
     };
     ReplaySendUpdateFixture {
         actor,
@@ -305,19 +301,10 @@ async fn send_update_buffers_streaming_chunks_and_flush_sends_merged_notificatio
         })
         .await;
 }
-/// Regression for the cancel-during-long-reasoning trace upload gap:
-/// the `SessionCommand::Cancel` and `SessionCommand::CopyFile` handlers
-/// in `run_session` must flush the actor-owned `ReplayBuffer` so streamed
-/// chunks (notably `AgentThoughtChunk` reasoning) still pending at cancel
-/// time are persisted to `updates.jsonl` before `mvp_agent` issues
-/// `CopyFile` to snapshot the session directory for the trace upload.
-///
-/// Without the flush, the tail of a long reasoning stream sitting in the
-/// buffer when the user hits Ctrl+C never reaches disk before
-/// `copy_session_dir_to_memory` reads `updates.jsonl`. This test
-/// exercises the exact code added to both match arms.
+/// A cancel must flush the actor-owned replay buffer so the tail of a streamed
+/// reasoning response reaches local session persistence.
 #[tokio::test(flavor = "current_thread")]
-async fn cancel_and_copyfile_handlers_flush_buffered_chunks_to_persistence() {
+async fn cancel_flushes_buffered_chunks_to_persistence() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -362,15 +349,13 @@ async fn cancel_and_copyfile_handlers_flush_buffered_chunks_to_persistence() {
             assert_eq!(
                 got_chunk_text.as_deref(),
                 Some("partial reasoning tail"),
-                "Cancel/CopyFile handler flush must persist the buffered \
-                     reasoning chunk before the trace upload snapshots \
-                     updates.jsonl"
+                "cancel flush must persist the buffered reasoning chunk"
             );
             drop(actor);
         })
         .await;
 }
-/// Negative control for `cancel_and_copyfile_handlers_flush_buffered_chunks_to_persistence`:
+/// Negative control for `cancel_flushes_buffered_chunks_to_persistence`:
 /// without the flush, a buffered chunk does NOT reach persistence on its
 /// own — proving the flush call is load-bearing in the cancel path.
 #[tokio::test(flavor = "current_thread")]
@@ -405,7 +390,7 @@ async fn buffered_chunk_does_not_reach_persistence_without_explicit_flush() {
                 !saw_update,
                 "without an explicit flush, the buffered chunk must \
                      remain stranded in `replay_buffer.pending` — this is \
-                     the exact bug the Cancel/CopyFile patch fixes",
+                     the cancel path would otherwise lose it",
             );
             drop(actor);
         })
@@ -472,7 +457,7 @@ async fn available_commands_update_is_forwarded_but_not_persisted() {
 }
 /// `handle_sampling_event::ChannelToken` for `Reasoning` and `Text`
 /// channels must accumulate into the session's streaming capture so
-/// the trace upload can serialize it even when the canonical
+/// local diagnostics can inspect it even when the canonical
 /// `record_assistant_response` path is skipped (cancel / max tokens).
 #[tokio::test(flavor = "current_thread")]
 async fn channel_tokens_accumulate_into_streaming_capture() {

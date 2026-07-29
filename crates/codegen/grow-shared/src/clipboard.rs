@@ -248,7 +248,7 @@ pub fn mime_from_bytes(data: &[u8]) -> &'static str {
     }
 }
 
-/// Per-leg outcome of a native clipboard write (for telemetry).
+/// Per-leg outcome of a native clipboard write (for diagnostics).
 ///
 /// On Linux, every viable CLI backend for the session is attempted (see
 /// `linux_write_tool_specs`). `cli_tools_tried` lists each tool invoked;
@@ -273,7 +273,7 @@ pub struct NativeWriteOutcome {
     pub any_ok: bool,
 }
 
-/// Write text and return per-leg outcomes for telemetry callers.
+/// Write text and return per-leg outcomes for diagnostics callers.
 pub fn set_text_with_outcome(text: &str) -> NativeWriteOutcome {
     platform::set_text_with_outcome(text)
 }
@@ -1539,7 +1539,7 @@ mod platform {
             return decided;
         }
         // Probing while holding the lock serializes concurrent callers (UI
-        // copy vs. the spawn_blocking telemetry snapshot): the second waits
+        // copy vs. the spawn_blocking diagnostics snapshot): the second waits
         // for the first's answer — bounded by the probe's own
         // DISPLAY_CONN_WAIT deadline — instead of double-probing, racing the
         // cap count past PROBE_INDEFINITE_MAX in one wall-clock burst, or

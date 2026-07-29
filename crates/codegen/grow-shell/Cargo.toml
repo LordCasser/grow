@@ -151,9 +151,8 @@ grow-memory = { workspace = true }
 grow-hooks = { path = "../grow-hooks" }
 xai-hooks-plugins-types = { path = "../xai-hooks-plugins-types" }
 grow-plugin-marketplace = { path = "../grow-plugin-marketplace" }
-xai-file-utils = { path = "../xai-file-utils" }
 grow-auth = { workspace = true, features = ["middleware"] }
-grow-telemetry = { workspace = true }
+grow-diagnostics = { workspace = true }
 grow-http = { workspace = true }
 grow-models = { workspace = true }
 prod-mc-cli-chat-proxy-types = { path = "../../../prod/mc/cli-chat-proxy-types" }

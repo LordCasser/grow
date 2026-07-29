@@ -30,7 +30,7 @@ impl AgentView {
     /// extensions/agents modals, the goal-detail overlay, or an open prompt
     /// dropdown — a short terminal, the unknown size before the first draw, or a
     /// pending re-measure right after a resize event) so counts, TTL, and
-    /// telemetry never burn on an invisible tip.
+    /// diagnostics never burn on an invisible tip.
     pub fn show_ephemeral_tip(
         &mut self,
         tip: crate::tips::EphemeralTip,

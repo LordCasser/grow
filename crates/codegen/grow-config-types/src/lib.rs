@@ -464,9 +464,6 @@ pub struct RemoteSettings {
     /// Fallback when no local `[cli] channel` or `--alpha`/`--stable` flag is set.
     #[serde(default)]
     pub release_channel: Option<String>,
-    /// When `Some(true)`, enable LOC attribution tracking for this session.
-    #[serde(default)]
-    pub loc_tracking: Option<bool>,
     /// Enable the experimental memory system remotely.
     #[serde(default)]
     pub memory_enabled: Option<bool>,
@@ -697,37 +694,9 @@ pub struct RemoteSettings {
     pub managed_mcps_enabled: Option<bool>,
     #[serde(default)]
     pub managed_mcp_gateway_tools_enabled: Option<bool>,
-    /// Remote-policy disable lever for the **external OTEL** stream (customer
-    /// collectors); feeds `ExternalOtelRemotePolicy.force_disable`.
-    /// Restrictive-only by construction: there is deliberately
-    /// no `external_otel_enabled` remote field — remote settings are fetched
-    /// per-run and never persisted, so a remote "enable" could never reach
-    /// init; org-wide enable ships via managed config instead. Applied
-    /// in-process (tighten-only) via
-    /// `grow_telemetry::external::apply_remote_policy`.
-    #[serde(default)]
-    pub external_otel_disabled: Option<bool>,
-    /// Force the external stream's content gates (`OTEL_LOG_USER_PROMPTS`,
-    /// `OTEL_LOG_TOOL_DETAILS`) off regardless of local env/config.
-    /// Tighten-only, like `external_otel_disabled`.
-    #[serde(default)]
-    pub external_otel_content_gates_locked: Option<bool>,
     /// `Some(false)` disarms managed-config signature verification (remote kill-switch).
     #[serde(default)]
     pub managed_config_signature_verification: Option<bool>,
-    #[serde(default)]
-    pub telemetry_enabled: Option<bool>,
-    /// Telemetry mode override (string): `"session-metrics"`, `"full"`, `"off"`.
-    /// Takes precedence over `telemetry_enabled` (bool) when present.
-    #[serde(default)]
-    pub telemetry_mode: Option<String>,
-    #[serde(default)]
-    pub trace_upload_enabled: Option<bool>,
-    /// Enable user-facing feedback (heuristic popups, `/feedback` command).
-    /// Session analytics (signal sync, turn deltas) are gated separately
-    /// by `telemetry_enabled`.
-    #[serde(default)]
-    pub feedback_enabled: Option<bool>,
     /// Two-pass (prefire) compaction. When approaching the auto-compact
     /// threshold the shell speculatively summarizes the history prefix in the
     /// background (pass 1 → NOTE₁); at compaction it summarizes NOTE₁ + the
@@ -1034,17 +1003,6 @@ pub struct RemoteSettings {
     /// `Some(true)` enables it; `None`/`Some(false)` (the default) keep it off.
     #[serde(default)]
     pub workspace_command_enabled: Option<bool>,
-    /// Master switch for jemalloc heap sampling + threshold dumps.
-    /// `Some(true)` enables, `Some(false)` kill-switch, `None` = client default off.
-    #[serde(default)]
-    pub jemalloc_heap_profile_enabled: Option<bool>,
-    /// Resident-byte thresholds (e.g. 2G/5G/10G as byte counts).
-    /// `None` and `[]` are distinct on the wire.
-    #[serde(default)]
-    pub jemalloc_heap_profile_thresholds_bytes: Option<Vec<u64>>,
-    /// Stats poll interval in seconds when set.
-    #[serde(default)]
-    pub jemalloc_heap_profile_poll_interval_secs: Option<u64>,
 }
 impl RemoteSettings {
     /// Denylist check for an optional imagine tool. Returns `true` when the

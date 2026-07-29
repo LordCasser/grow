@@ -284,7 +284,6 @@ fn apply_mock_url(env: &mut BTreeMap<OsString, OsString>, url: String) {
         "GROW_INFERENCE_BASE_URL",
         "GROW_MODELS_BASE_URL",
         "GROW_FEEDBACK_BASE_URL",
-        "GROW_TRACE_UPLOAD_URL",
         "GROW_MANAGED_CONFIG_URL",
         "GROW_CODE_WEB_URL",
         "GROW_CONVERSATIONS_BASE_URL",
@@ -333,13 +332,9 @@ fn baseline_env_from_parent(
         env.insert(key.into(), value.as_os_str().to_owned());
     }
     for (key, value) in [
-        ("GROW_TELEMETRY_ENABLED", "false"),
-        ("GROW_TELEMETRY_TRACE_UPLOAD", "false"),
         ("GROW_FEEDBACK_ENABLED", "false"),
-        ("GROW_TRACE_UPLOAD", "false"),
         ("GROW_INSTRUMENTATION", "disabled"),
-        ("OTEL_SDK_DISABLED", "true"),
-        ("DISABLE_TELEMETRY", "1"),
+        ("DISABLE_DIAGNOSTICS", "1"),
         ("DISABLE_FEEDBACK_COMMAND", "1"),
         ("GROW_DISABLE_AUTOUPDATER", "1"),
         ("GROW_PROMPT_SUGGESTIONS", "false"),
@@ -706,10 +701,6 @@ mod tests {
         assert_eq!(
             env_value(&sandbox, "GROW_DISABLE_AUTOUPDATER").as_deref(),
             Some(OsStr::new("1"))
-        );
-        assert_eq!(
-            env_value(&sandbox, "GROW_TELEMETRY_TRACE_UPLOAD").as_deref(),
-            Some(OsStr::new("false"))
         );
         assert_eq!(
             env_value(&sandbox, "NO_PROXY").as_deref(),

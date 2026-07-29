@@ -3,7 +3,6 @@ pub mod grok_auth_credentials;
 pub mod hooks;
 pub mod limits;
 pub(crate) mod subprocess;
-pub(crate) mod user_identity;
 
 // The foundation utilities live in `grow-shell-base` (upstream of this
 // crate so they build in parallel). Re-exported at the original paths so

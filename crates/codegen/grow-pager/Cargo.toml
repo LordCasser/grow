@@ -94,7 +94,7 @@ grow-config = { workspace = true }
 grow-shell = { workspace = true }
 grow-workspace = { workspace = true }
 xai-token-estimation = { workspace = true }
-grow-telemetry = { workspace = true }
+grow-diagnostics = { workspace = true }
 xai-fast-worktree = { path = "../xai-fast-worktree", features = ["metadata"] }
 backon = { workspace = true }
 chrono = { workspace = true }

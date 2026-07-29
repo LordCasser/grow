@@ -1074,14 +1074,12 @@ async fn test_stream_error_during_responses_streaming() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_request_includes_headers() {
+async fn test_request_includes_auth_without_product_tracking_headers() {
     let server = MockInferenceServer::start().await.unwrap();
     server.set_response("OK");
     let client = create_test_client(&server.url(), ApiBackend::ChatCompletions);
 
-    let request = ConversationRequest::from_items(vec![ConversationItem::user("Hello")])
-        .with_conv_id("conv-12345")
-        .with_req_id("req-67890");
+    let request = ConversationRequest::from_items(vec![ConversationItem::user("Hello")]);
 
     let (mut stream, _metadata) = client.conversation_stream(request).await.unwrap();
     while stream.next().await.is_some() {}
@@ -1089,8 +1087,8 @@ async fn test_request_includes_headers() {
     let request = server.requests().pop().unwrap();
 
     assert_eq!(request.header("authorization"), Some("Bearer test-api-key"));
-    assert_eq!(request.header("x-grow-conv-id"), Some("conv-12345"));
-    assert_eq!(request.header("x-grow-req-id"), Some("req-67890"));
+    assert_eq!(request.header("x-grow-conv-id"), None);
+    assert_eq!(request.header("x-grow-req-id"), None);
 }
 
 /// The session writes the resolved `x-compaction-at` value into

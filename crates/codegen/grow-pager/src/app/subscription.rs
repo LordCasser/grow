@@ -2,7 +2,7 @@
 //!
 //! All gate transitions go through [`AppView::impose_gate`] /
 //! [`AppView::lift_gate`] so the defer-vs-show decision and the lift
-//! bookkeeping (focus, telemetry, JWT-refresh check) live in one place.
+//! bookkeeping (focus, diagnostics, JWT-refresh check) live in one place.
 //!
 //! Design constraints that are not obvious from the code:
 //! - Gates arriving from cached auth meta, prefetched settings, or settings
@@ -174,7 +174,7 @@ impl AppView {
             None,
             Some(serde_json::json!({ "tier": self.subscription_tier })),
         );
-        grow_telemetry::session_ctx::log_event(grow_telemetry::events::SubscriptionActivated {
+        grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::SubscriptionActivated {
             auth_method: self.login_method_id.as_ref().map(|id| id.0.to_string()),
             upsell_shown_this_session: self.access_gate_shown_logged,
         });

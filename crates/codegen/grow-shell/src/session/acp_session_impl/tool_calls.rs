@@ -519,7 +519,7 @@ impl SessionActor {
                         Ok(tool_result) => !tool_result.output.is_error(),
                         Err(_) => false,
                     };
-                    grow_telemetry::unified_log::info(
+                    grow_diagnostics::unified_log::info(
                         "shell.tool.exec_done",
                         Some(session_id.as_ref()),
                         Some(serde_json::json!({
@@ -722,25 +722,10 @@ impl SessionActor {
                     },
                 )
                 .await;
-            let (ext_file_path, ext_parameters) = if grow_telemetry::external::is_active() {
-                let parsed: Option<serde_json::Value> =
-                    serde_json::from_str(&prepared.raw_arguments).ok();
-                let file_path = parsed.as_ref().and_then(|v| {
-                    ["file_path", "target_file", "filePath", "path"]
-                        .iter()
-                        .find_map(|k| v.get(*k).and_then(|p| p.as_str()))
-                        .map(str::to_owned)
-                });
-                (file_path, parsed)
-            } else {
-                (None, None)
-            };
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::ToolCallCompleted {
+            grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::ToolCallCompleted {
                 tool_name: prepared.tool_name.clone(),
                 outcome: tool_outcome.into(),
                 duration_ms,
-                file_path: ext_file_path,
-                parameters: ext_parameters,
             });
             tracing::info_span!(
                 "tool.execution",
@@ -986,7 +971,7 @@ impl SessionActor {
                     &pre_result.results,
                 )
                 .await;
-                self.emit_hook_executed_telemetry(
+                self.emit_hook_executed_diagnostics(
                     "pre_tool_use",
                     Some(&resolved_tool_name),
                     &pre_result.results,
@@ -1044,29 +1029,29 @@ impl SessionActor {
                     .raw_input(perm_raw_input),
             )
             .meta(self.stamp_tool_meta(None, &call.function.name, Some(&tool_input)));
-            let (telemetry_access_kind, _access_detail) = match &access_kind {
+            let (diagnostics_access_kind, _access_detail) = match &access_kind {
                 grow_workspace::permission::AccessKind::Read(p) => (
-                    grow_telemetry::events::AccessKind::Read,
+                    grow_diagnostics::events::AccessKind::Read,
                     p.clone().unwrap_or_default(),
                 ),
                 grow_workspace::permission::AccessKind::Edit(p) => {
-                    (grow_telemetry::events::AccessKind::Edit, p.clone())
+                    (grow_diagnostics::events::AccessKind::Edit, p.clone())
                 }
                 grow_workspace::permission::AccessKind::Bash(cmd) => {
-                    (grow_telemetry::events::AccessKind::Bash, cmd.clone())
+                    (grow_diagnostics::events::AccessKind::Bash, cmd.clone())
                 }
                 grow_workspace::permission::AccessKind::Grep { path, glob } => (
-                    grow_telemetry::events::AccessKind::Grep,
+                    grow_diagnostics::events::AccessKind::Grep,
                     path.clone().or_else(|| glob.clone()).unwrap_or_default(),
                 ),
                 grow_workspace::permission::AccessKind::MCPTool { name, .. } => {
-                    (grow_telemetry::events::AccessKind::Mcp, name.clone())
+                    (grow_diagnostics::events::AccessKind::Mcp, name.clone())
                 }
                 grow_workspace::permission::AccessKind::WebFetch(u) => {
-                    (grow_telemetry::events::AccessKind::Web, u.clone())
+                    (grow_diagnostics::events::AccessKind::Web, u.clone())
                 }
                 grow_workspace::permission::AccessKind::WebSearch(q) => {
-                    (grow_telemetry::events::AccessKind::Web, q.clone())
+                    (grow_diagnostics::events::AccessKind::Web, q.clone())
                 }
             };
             let subagent_session_id = if self.startup_hints.is_subagent {
@@ -1075,19 +1060,21 @@ impl SessionActor {
                 None
             };
             let perm_mode = if self.permissions.is_yolo_mode() {
-                grow_telemetry::enums::PermissionMode::AlwaysApprove
+                grow_diagnostics::enums::PermissionMode::AlwaysApprove
             } else if self.permissions.is_auto_mode() {
-                grow_telemetry::enums::PermissionMode::Auto
+                grow_diagnostics::enums::PermissionMode::Auto
             } else {
-                grow_telemetry::enums::PermissionMode::Ask
+                grow_diagnostics::enums::PermissionMode::Ask
             };
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::PermissionPrompted {
-                tool_name: call.function.name.clone(),
-                access_kind: telemetry_access_kind,
-                permission_mode: perm_mode,
-                subagent_session_id: subagent_session_id.clone(),
-                subagent_type: None,
-            });
+            grow_diagnostics::session_ctx::log_event(
+                grow_diagnostics::events::PermissionPrompted {
+                    tool_name: call.function.name.clone(),
+                    access_kind: diagnostics_access_kind,
+                    permission_mode: perm_mode,
+                    subagent_session_id: subagent_session_id.clone(),
+                    subagent_type: None,
+                },
+            );
             let perm_start = self.events.permission_requested(&call.function.name);
             debug_assert!(
                 !self.session_info.id.0.is_empty(),
@@ -1154,15 +1141,17 @@ impl SessionActor {
             let wait_ms = perm_start.elapsed().as_millis() as u64;
             let (decision_outcome, _reject_reason) = match &decision {
                 Decision::Allow | Decision::Ask => {
-                    (grow_telemetry::events::PermissionOutcome::Allow, None)
+                    (grow_diagnostics::events::PermissionOutcome::Allow, None)
                 }
                 Decision::Reject(reason) | Decision::PolicyDeny(reason) => (
-                    grow_telemetry::events::PermissionOutcome::Deny,
+                    grow_diagnostics::events::PermissionOutcome::Deny,
                     Some(reason.to_string()),
                 ),
-                Decision::Cancelled => (grow_telemetry::events::PermissionOutcome::Cancelled, None),
+                Decision::Cancelled => {
+                    (grow_diagnostics::events::PermissionOutcome::Cancelled, None)
+                }
                 Decision::FollowupMessage(_) => {
-                    (grow_telemetry::events::PermissionOutcome::Followup, None)
+                    (grow_diagnostics::events::PermissionOutcome::Followup, None)
                 }
             };
             tracing::info_span!(
@@ -1170,22 +1159,22 @@ impl SessionActor {
                 tool_name = %call.function.name,
                 tool_use_id = %call.id,
                 decision = decision_outcome.as_str(),
-                source = crate::session::telemetry::permission_decision_source(
+                source = crate::session::diagnostics::permission_decision_source(
                     &decision,
                     self.permissions.is_yolo_mode(),
                 ),
                 wait_ms = wait_ms as i64,
             )
             .in_scope(|| {});
-            grow_telemetry::session_ctx::log_event(
-                grow_telemetry::events::PermissionDecisionPayload {
+            grow_diagnostics::session_ctx::log_event(
+                grow_diagnostics::events::PermissionDecisionPayload {
                     tool_name: call.function.name.clone(),
-                    access_kind: telemetry_access_kind,
+                    access_kind: diagnostics_access_kind,
                     decision: decision_outcome,
                     wait_ms,
                     permission_mode: perm_mode,
                     source: Some(
-                        crate::session::telemetry::permission_decision_source(
+                        crate::session::diagnostics::permission_decision_source(
                             &decision,
                             self.permissions.is_yolo_mode(),
                         )
@@ -1571,8 +1560,6 @@ impl SessionActor {
             mode,
             None,
             None,
-            None,
-            None,
             false,
             None,
             false,
@@ -1737,10 +1724,12 @@ impl SessionActor {
                 vec![],
             ),
             ToolInput::Skill(skill) => {
-                grow_telemetry::session_ctx::log_event(grow_telemetry::events::SkillDispatched {
-                    skill_name: skill.skill.clone(),
-                    plugin_source: None,
-                });
+                grow_diagnostics::session_ctx::log_event(
+                    grow_diagnostics::events::SkillDispatched {
+                        skill_name: skill.skill.clone(),
+                        plugin_source: None,
+                    },
+                );
                 tracing::info_span!(
                     "skill.activated",
                     skill_name = %skill.skill,
@@ -2067,13 +2056,13 @@ impl SessionActor {
         }
     }
     /// Record git/PR ops from a successful tool result into session signals
-    /// (`turn_result.json`) and telemetry. Detection runs here at the shell's
+    /// (`turn_result.json`) and diagnostics. Detection runs here at the shell's
     /// tool-result chokepoint over the command + prompt output (nothing is
     /// wired through the tool's output schema): successful foreground bash
     /// commands, plus MCP `create_pull_request` results (url/number parsed
     /// from the result text). Backgrounded commands are not scanned.
     fn record_git_pr_signals(&self, effective_tool_name: &str, result: &ToolRunResult) {
-        use grow_telemetry::enums::PrCreationSource;
+        use grow_diagnostics::enums::PrCreationSource;
         use grow_tools::util::git_detect;
         match &result.output {
             grow_tools::types::output::ToolOutput::Bash(b) if b.exit_code == 0 => {
@@ -2088,7 +2077,7 @@ impl SessionActor {
                 }
                 if ops.pr_merged {
                     self.signals_handle().record_pr_merged();
-                    grow_telemetry::session_ctx::log_event(grow_telemetry::events::PrMerged {});
+                    grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::PrMerged {});
                 }
             }
             grow_tools::types::output::ToolOutput::MCP(m)
@@ -2105,13 +2094,12 @@ impl SessionActor {
     /// `had_commit_in_session` is provisional here: the signals actor
     /// reconciles it at `TakeTurnEndSnapshot`, after every event of the turn
     /// has been processed, so out-of-order parallel tool results (a create
-    /// landing before a sibling commit) cannot mis-attribute. The Mixpanel
-    /// `pr_created` event is emitted from the reconciled turn-end delta in
-    /// `finalize_turn_bookkeeping`.
+    /// landing before a sibling commit) cannot mis-attribute. The reconciled
+    /// result is recorded during `finalize_turn_bookkeeping`.
     fn record_pr_created(
         &self,
         pr: grow_tools::util::git_detect::PrRef,
-        source: grow_telemetry::enums::PrCreationSource,
+        source: grow_diagnostics::enums::PrCreationSource,
     ) {
         self.signals_handle()
             .record_pr_created(crate::session::signals::PrCreatedSignal {
@@ -2598,7 +2586,7 @@ impl SessionActor {
                     self.signals_handle()
                         .record_doom_loop_recovery_attempt(triggers, doom_loop_aborted_at_chunk);
                 }
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "shell.turn.inference_retry",
                     Some(self.session_info.id.0.as_ref()),
                     Some(serde_json::json!({
@@ -2619,7 +2607,7 @@ impl SessionActor {
                 .await;
             }
             SamplingEvent::Failed { request_id, error } => {
-                grow_telemetry::unified_log::error(
+                grow_diagnostics::unified_log::error(
                     "shell.turn.inference_failed",
                     Some(self.session_info.id.0.as_ref()),
                     Some(serde_json::json!({

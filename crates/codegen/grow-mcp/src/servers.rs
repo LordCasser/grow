@@ -1030,9 +1030,9 @@ pub fn parse_mcp_meta_config(
         .unwrap_or_default()
 }
 
-/// MCP initialization strategy. Defined in `grow-telemetry`; re-exported
+/// MCP initialization strategy. Defined in `grow-diagnostics`; re-exported
 /// here so existing call sites continue to work.
-pub use grow_telemetry::enums::McpInitStrategy;
+pub use grow_diagnostics::enums::McpInitStrategy;
 
 /// Parse a non-empty `server__tool` ID with one overlap-aware delimiter and
 /// valid [`xai_tool_protocol::ToolId`] syntax.
@@ -1440,7 +1440,7 @@ impl xai_tool_runtime::Tool for McpErasedTool {
 
         let success = !is_error;
         let duration_ms = mcp_call_start.elapsed().as_millis() as u64;
-        grow_telemetry::session_ctx::log_event(grow_telemetry::events::McpToolCalled {
+        grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::McpToolCalled {
             server_name: server.clone(),
             tool_name: tool.clone(),
             qualified_name,
@@ -1756,7 +1756,7 @@ pub struct HttpConfig {
 /// - **Wire silence:** a bad line is skipped without replying, whereas rmcp
 ///   answers shape-mismatched JSON with a -32600 error — a reply an off-spec
 ///   server could echo back as more invalid input.
-/// - **Telemetry:** each skip emits an `McpTransportDecodeError` event (with a
+/// - **Diagnostic:** each skip emits an `McpTransportDecodeError` event (with a
 ///   truncated sample of the offending line) so the failure is visible in the
 ///   session trace — rmcp's own tracing is not captured there.
 ///
@@ -1801,11 +1801,7 @@ where
     R: AsyncRead + Send + Unpin,
     W: AsyncWrite + Send + Unpin + 'static,
 {
-    fn new(
-        read: R,
-        write: W,
-        server_name: String,
-    ) -> Self {
+    fn new(read: R, write: W, server_name: String) -> Self {
         Self {
             read: BufReader::new(read),
             write: Arc::new(Mutex::new(Some(write))),
@@ -3144,7 +3140,7 @@ impl McpClient {
         let mut result = self.try_handshake(pending).await;
 
         let handshake_elapsed = handshake_start.elapsed().as_micros() as u64;
-        tracing::info!(target: grow_telemetry::instrumentation::TARGET, event = "timing", name = "mcp_try_handshake", elapsed_us = handshake_elapsed);
+        tracing::info!(target: grow_diagnostics::instrumentation::TARGET, event = "timing", name = "mcp_try_handshake", elapsed_us = handshake_elapsed);
         // On handshake failure, if we have an auth_manager, try
         // refreshing the token and retrying once. Handles expired
         // access tokens loaded from disk — the handshake fails at the
@@ -3692,13 +3688,13 @@ impl McpClient {
         &self,
         mcp_state: Arc<Mutex<McpState>>,
     ) -> Result<Vec<McpToolRegistration>, McpError> {
-        let _ensure_init_timer = grow_telemetry::instrumentation::timer("mcp_ensure_initialized");
+        let _ensure_init_timer = grow_diagnostics::instrumentation::timer("mcp_ensure_initialized");
         let mcp_service = self.ensure_initialized().await?;
 
         let mut all_tools = Vec::new();
         let mut cursor: Option<String> = None;
 
-        let _list_tools_timer = grow_telemetry::instrumentation::timer("mcp_list_tools");
+        let _list_tools_timer = grow_diagnostics::instrumentation::timer("mcp_list_tools");
         loop {
             let list_tools_result = mcp_service
                 .list_tools(Some(
@@ -3953,7 +3949,7 @@ pub async fn start_mcp_server(
     byo_config: Option<&McpOAuthConfig>,
     mode: OauthInteractivity,
 ) -> Result<McpClient, McpError> {
-    let _per_server_timer = grow_telemetry::instrumentation::timer("mcp_start_one_server");
+    let _per_server_timer = grow_diagnostics::instrumentation::timer("mcp_start_one_server");
     match mcp_server {
         acp::McpServer::Stdio(acp::McpServerStdio {
             name,
@@ -3969,7 +3965,7 @@ pub async fn start_mcp_server(
             let (startup_timeout, _, _) = McpClient::load_timeouts(overrides, meta_config);
             let command_str = command.to_string_lossy().into_owned();
             let spawn_start = std::time::Instant::now();
-            let _stdio_spawn_timer = grow_telemetry::instrumentation::timer("mcp_stdio_spawn");
+            let _stdio_spawn_timer = grow_diagnostics::instrumentation::timer("mcp_stdio_spawn");
             let path_override = stdio_path_override(&env);
             let (program, spawn_args) = plan_stdio_spawn(&command_str, &args, cfg!(windows), |c| {
                 if let Some(path) = path_override
@@ -3987,23 +3983,22 @@ pub async fn start_mcp_server(
             }
             grow_tools::util::detach_command(&mut cmd);
 
-            let (transport, stderr_handle) = SafeTokioChildProcess::spawn(
-                cmd,
-                name.clone(),
-            )
-            .map_err(|e| {
-                tracing::error!("Failed to spawn MCP server '{}': {}", name, e);
-                grow_telemetry::session_ctx::log_event(grow_telemetry::events::McpServerFailed {
-                    server_name: name.clone(),
-                    error_type: grow_telemetry::events::McpErrorType::SpawnFailed,
-                    duration_ms: spawn_start.elapsed().as_millis() as u64,
-                    timeout_sec: startup_timeout,
-                });
-                McpError::SpawnFailed {
-                    server: name.clone(),
-                    source: e,
-                }
-            })?;
+            let (transport, stderr_handle) = SafeTokioChildProcess::spawn(cmd, name.clone())
+                .map_err(|e| {
+                    tracing::error!("Failed to spawn MCP server '{}': {}", name, e);
+                    grow_diagnostics::session_ctx::log_event(
+                        grow_diagnostics::events::McpServerFailed {
+                            server_name: name.clone(),
+                            error_type: grow_diagnostics::events::McpErrorType::SpawnFailed,
+                            duration_ms: spawn_start.elapsed().as_millis() as u64,
+                            timeout_sec: startup_timeout,
+                        },
+                    );
+                    McpError::SpawnFailed {
+                        server: name.clone(),
+                        source: e,
+                    }
+                })?;
 
             tracing::debug!("MCP server '{}' spawned: PID={:?}", name, transport.id());
 
@@ -4047,7 +4042,7 @@ pub async fn start_mcp_server(
                 HttpOauthPrep::NoOauthSupport
             } else {
                 let _auth_discovery_timer =
-                    grow_telemetry::instrumentation::timer("mcp_http_auth_discovery");
+                    grow_diagnostics::instrumentation::timer("mcp_http_auth_discovery");
                 match tokio::time::timeout(
                     OAUTH_DISCOVERY_TIMEOUT,
                     discover_and_prepare_auth(&name, &url, mode),
@@ -4103,7 +4098,7 @@ pub async fn start_mcp_servers(
     oauth_config_map: &crate::oauth_config::McpOAuthConfigMap,
     mode: OauthInteractivity,
 ) -> Vec<Result<McpClient, McpError>> {
-    let _mcp_start_timer = grow_telemetry::instrumentation::timer("mcp_start_servers");
+    let _mcp_start_timer = grow_diagnostics::instrumentation::timer("mcp_start_servers");
 
     if !meta_config_map.is_empty() {
         tracing::info!(
@@ -4302,11 +4297,8 @@ mod tests {
         // `server_out` is the writer half (the fake server's stdout); the
         // transport reads framed JSON-RPC from `client_in`.
         let (mut server_out, client_in) = tokio::io::duplex(64 * 1024);
-        let mut transport = ResilientRwTransport::new(
-            client_in,
-            tokio::io::sink(),
-            "fwbuild".to_string(),
-        );
+        let mut transport =
+            ResilientRwTransport::new(client_in, tokio::io::sink(), "fwbuild".to_string());
 
         let valid = r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#;
         // A stray non-JSON log line — the shape that, under rmcp's stock
@@ -4484,11 +4476,8 @@ mod tests {
             let mut cmd = Command::new("sleep");
             cmd.arg("30").kill_on_drop(true);
             grow_tools::util::detach_command(&mut cmd);
-            let (transport, _stderr) = SafeTokioChildProcess::spawn(
-                cmd,
-                "test".to_string(),
-            )
-            .expect("spawn test child");
+            let (transport, _stderr) =
+                SafeTokioChildProcess::spawn(cmd, "test".to_string()).expect("spawn test child");
             let pid = transport.id().expect("spawned child pid");
             (transport, pid)
         });
@@ -6669,12 +6658,7 @@ mod tests {
         let mut reconnect_attempted = false;
         let mut is_timeout = false;
         let result = erased
-            .try_call_tool(
-                &client,
-                &raw,
-                &mut reconnect_attempted,
-                &mut is_timeout,
-            )
+            .try_call_tool(&client, &raw, &mut reconnect_attempted, &mut is_timeout)
             .await
             .expect("retry after reconnect should succeed");
 
@@ -6731,7 +6715,7 @@ mod tests {
         assert!(state.auth_required.contains("oauth-srv"));
         assert!(!state.init_failed.contains_key("oauth-srv"));
 
-        // AuthRequired carries the AuthRequired telemetry category, not ClientError.
+        // AuthRequired carries the AuthRequired diagnostics category, not ClientError.
         let err = McpError::AuthRequired {
             server: "oauth-srv".into(),
         };

@@ -748,8 +748,6 @@ fn load_managed_settings() -> ManagedSettings {
 fn parse_managed_settings_json(json: &serde_json::Value, path: &Path) -> ManagedSettings {
     let env = json.get("env");
     let features = ManagedSettingsFeatures {
-        disable_telemetry: json_env_flag(env, "DISABLE_TELEMETRY"),
-        disable_feedback: json_env_flag(env, "DISABLE_FEEDBACK_COMMAND"),
         disable_yolo: parse_disable_bypass_permissions(json),
         source_path: Some(path.to_path_buf()),
     };
@@ -916,8 +914,6 @@ fn read_managed_settings_json(path: &Path) -> Option<serde_json::Value> {
 
 #[derive(Debug, Default)]
 pub struct ManagedSettingsFeatures {
-    pub disable_telemetry: Option<bool>,
-    pub disable_feedback: Option<bool>,
     pub disable_yolo: Option<bool>,
     pub source_path: Option<std::path::PathBuf>,
 }
@@ -2119,10 +2115,6 @@ mod tests {
     #[test]
     fn parse_managed_settings_json_end_to_end() {
         let json = serde_json::json!({
-            "env": {
-                "DISABLE_TELEMETRY": 1,
-                "DISABLE_FEEDBACK_COMMAND": 1
-            },
             "permissions": {
                 "disableBypassPermissionsMode": "disable",
                 "deny": ["Read(**/.env*)"]
@@ -2138,8 +2130,6 @@ mod tests {
         let path = std::path::Path::new("/test/managed-settings.json");
         let ms = parse_managed_settings_json(&json, path);
 
-        assert_eq!(ms.features.disable_telemetry, Some(true));
-        assert_eq!(ms.features.disable_feedback, Some(true));
         assert_eq!(ms.features.disable_yolo, Some(true));
 
         assert!(ms.mcp_allowlist.is_restricted());
@@ -3266,7 +3256,7 @@ allow = ["Bash(evil *)"]
         let p = Path::new("test-requirements.toml");
         let pinned = layer("[ui]\ndisable_bypass_permissions_mode = true\n");
         let enabled = layer("[ui]\ndisable_bypass_permissions_mode = false\n");
-        let unrelated = layer("[features]\ntelemetry = false\n");
+        let unrelated = layer("[features]\ndiagnostics = false\n");
 
         // Any layer setting the key true activates the block; false/unrelated don't.
         assert_eq!(

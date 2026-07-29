@@ -272,7 +272,7 @@ impl xai_tool_runtime::Tool for SearchTool {
         let limit = input.limit.unwrap_or(5) as usize;
         let snapshot = tool_index.search_snapshot(&input.query, limit);
 
-        // Event: search_tool.search (telemetry — before grouping)
+        // Event: search_tool.search (diagnostics — before grouping)
         let all_results_json: Vec<serde_json::Value> = snapshot
             .results
             .iter()

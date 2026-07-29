@@ -139,8 +139,6 @@ impl ChatModelsClient {
         if let Some(email) = &auth.email {
             builder = builder.header("x-email", email);
         }
-        let builder = xai_file_utils::trace_context::inject_trace_context_into_request(builder);
-
         let response = builder.send().await?;
         let status = response.status();
         if !status.is_success() {

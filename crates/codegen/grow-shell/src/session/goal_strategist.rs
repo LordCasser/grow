@@ -18,7 +18,7 @@
 //! restore). This makes contract corruption hard, not literally
 //! impossible: a restore I/O failure or a symlink planted at the path is
 //! refused and surfaced via `GoalStrategistContractRestoreFailed`
-//! telemetry rather than silently corrupting the contract.
+//! diagnostics rather than silently corrupting the contract.
 
 use crate::session::events::{GoalStrategistFailReason, GoalStrategistRestoreFailReason};
 use crate::session::goal_planner::{
@@ -64,7 +64,7 @@ const GOAL_STRATEGIST_RECOMMENDATION_MAX_CHARS: usize = 4096;
 #[derive(Debug, Clone)]
 #[expect(
     dead_code,
-    reason = "`latency_ms` is consumed by telemetry / future use"
+    reason = "`latency_ms` is consumed by diagnostics / future use"
 )]
 pub(crate) enum GoalStrategistOutcome {
     Advised {
@@ -124,7 +124,7 @@ pub(crate) struct ChannelSpawner {
     /// Resolved per-role model+toolset override. Default (inherit) keeps the
     /// historic `::default()` spawn behavior.
     pub(crate) role_override: RoleSpawnOverride,
-    // Event sink for the spawn-and-retry-once fail-open telemetry; removed
+    // Event sink for the spawn-and-retry-once fail-open diagnostics; removed
     // (EventWriter no longer exists).
     // pub(crate) events: Option<EventWriter>,
 }
@@ -250,7 +250,7 @@ pub(crate) struct GoalStrategistInputs<'a> {
     pub attempt: u32,
     pub consecutive_failures: u32,
     /// Resolved strategist cadence N (fires every N consecutive `NotAchieved`
-    /// verifications). Telemetry-only on `GoalStrategistFired`; the firing
+    /// verifications). Diagnostic-only on `GoalStrategistFired`; the firing
     /// decision uses `goal_strategist_every` at the actor.
     pub every: u32,
     pub model_id: &'a str,
@@ -318,9 +318,9 @@ pub(crate) async fn run_goal_strategist(
     // Restore plan.md byte-for-byte ONCE, regardless of spawn outcome (the
     // guard is idempotent; its `Drop` is the cancellation safety net if the
     // await above is dropped). On a restore failure, surface it via
-    // telemetry — not just a log — so a corrupted contract is observable.
+    // diagnostics — not just a log — so a corrupted contract is observable.
     if let Some(_reason) = plan_guard.restore() {
-        // GoalStrategistContractRestoreFailed telemetry removed (Event type gone).
+        // GoalStrategistContractRestoreFailed diagnostics removed (Event type gone).
     }
 
     let response = match spawn_result {
@@ -345,12 +345,7 @@ pub(crate) async fn run_goal_strategist(
                 cancelled,
                 "goal strategist: subagent runtime error; failing open",
             );
-            return record_fail_open(
-                reason,
-                inputs.attempt,
-                inputs.consecutive_failures,
-                started,
-            );
+            return record_fail_open(reason, inputs.attempt, inputs.consecutive_failures, started);
         }
     };
 
@@ -451,7 +446,7 @@ impl<'a> PlanGuard<'a> {
     /// contract sections) and disarm. Idempotent (a second call, incl. the
     /// `Drop` follow-up, is a no-op). Returns `Some(reason)` when the
     /// contract could NOT be guaranteed (write/remove failed, or a symlink
-    /// was found) so the caller can emit telemetry.
+    /// was found) so the caller can emit diagnostics.
     fn restore(&mut self) -> Option<GoalStrategistRestoreFailReason> {
         if !self.armed {
             return None;
@@ -517,7 +512,7 @@ impl<'a> PlanGuard<'a> {
 impl Drop for PlanGuard<'_> {
     fn drop(&mut self) {
         // Cancellation safety net: if `restore` was never called (the runner
-        // future was dropped mid-await), restore now. Telemetry can't be
+        // future was dropped mid-await), restore now. Diagnostic can't be
         // emitted from here (no event sink), so a failure is logged at ERROR.
         if let Some(reason) = self.restore() {
             tracing::error!(

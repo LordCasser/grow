@@ -157,11 +157,7 @@ async fn connect_and_auth() -> acp::ClientSideConnection {
         acp::AgentSideConnection::new(agent, a2c_a.compat_write(), agent_incoming, |fut| {
             tokio::task::spawn_local(fut);
         });
-    tokio::task::spawn_local(
-        GatewayReceiver::new(gw_rx, agent_conn)
-            .with_on_meta(grow_shell::trace_context::span_from_meta_traceparent)
-            .run(),
-    );
+    tokio::task::spawn_local(GatewayReceiver::new(gw_rx, agent_conn).run());
     tokio::task::spawn_local(agent_io);
     let client_incoming = LineBufferedRead::spawn_local(a2c_b.compat());
     let (client_conn, client_io) = acp::ClientSideConnection::new(
@@ -238,9 +234,6 @@ fn session_churn_returns_registry_snapshot_to_baseline() {
         std::env::set_var("GROW_CLI_CHAT_PROXY_BASE_URL", server.url());
         std::env::set_var("GROW_INFERENCE_BASE_URL", server.url());
         std::env::set_var("GROW_API_KEY", "test-key-for-ci");
-        std::env::set_var("GROW_TELEMETRY_ENABLED", "false");
-        std::env::set_var("GROW_FEEDBACK_ENABLED", "false");
-        std::env::set_var("GROW_TRACE_UPLOAD", "false");
     }
     let agent_rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

@@ -999,7 +999,7 @@ pub struct AppView {
     /// `announcement_hide_key` (stable even for id-less items, unlike the
     /// event's `id`).
     pub announcement_cta_impressions_logged:
-        std::collections::BTreeSet<(String, grow_telemetry::events::AnnouncementCtaSurface)>,
+        std::collections::BTreeSet<(String, grow_diagnostics::events::AnnouncementCtaSurface)>,
     /// Access gate from `grow_build_access_gate`. `Some` = blocked.
     pub gate: Option<grow_shell::auth::GateInfo>,
     /// User-friendly subscription tier name (e.g. "Provider Plan", "Free").
@@ -1199,10 +1199,12 @@ impl AppView {
         self.gate = meta.gate.clone();
         if was_gated && self.gate.is_none() {
             self.paywall_check_started = None;
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::SubscriptionActivated {
-                auth_method: self.login_method_id.as_ref().map(|id| id.0.to_string()),
-                upsell_shown_this_session: self.access_gate_shown_logged,
-            });
+            grow_diagnostics::session_ctx::log_event(
+                grow_diagnostics::events::SubscriptionActivated {
+                    auth_method: self.login_method_id.as_ref().map(|id| id.0.to_string()),
+                    upsell_shown_this_session: self.access_gate_shown_logged,
+                },
+            );
         }
         self.subscription_tier = meta.subscription_tier.clone();
         self.is_api_key_auth = meta.auth_mode.as_deref().is_some_and(is_api_key_label)
@@ -3087,7 +3089,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         if matches!(ctx.auth_state, AuthState::Done) {
             if ctx.upgrade_cta_keyboard && key!('o', CONTROL).matches(key) {
                 return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                    grow_telemetry::events::AnnouncementCtaSurface::Keyboard,
+                    grow_diagnostics::events::AnnouncementCtaSurface::Keyboard,
                 ));
             }
             if key!('w', CONTROL).matches(key) && ctx.cwd_has_git_ancestor {
@@ -3301,7 +3303,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
                 {
                     return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                        grow_telemetry::events::AnnouncementCtaSurface::Welcome,
+                        grow_diagnostics::events::AnnouncementCtaSurface::Welcome,
                     ));
                 }
                 if let Some(rect) = ctx.privacy_banner_accept_rect
@@ -4000,10 +4002,10 @@ impl AppView {
                         }
                         if !has_access && !self.access_gate_shown_logged {
                             self.access_gate_shown_logged = true;
-                            grow_telemetry::session_ctx::log_event(
-                                grow_telemetry::events::SubscriptionUpsellShown {
+                            grow_diagnostics::session_ctx::log_event(
+                                grow_diagnostics::events::SubscriptionUpsellShown {
                                     source:
-                                        grow_telemetry::events::SubscriptionUpsell::WelcomeScreen,
+                                        grow_diagnostics::events::SubscriptionUpsell::WelcomeScreen,
                                     auth_method: self
                                         .login_method_id
                                         .as_ref()
@@ -4344,7 +4346,7 @@ impl AppView {
         self.log_announcement_cta_impressions();
         self.maybe_evict_offscreen_caches();
     }
-    /// Log [`grow_telemetry::events::AnnouncementCtaShown`] for each
+    /// Log [`grow_diagnostics::events::AnnouncementCtaShown`] for each
     /// surface whose CTA button is painted this frame (armed hit rect, not
     /// covered by a frame occluder — the click/OSC 8 truth the impression
     /// pairs with), once per (announcement, surface) per pager process
@@ -4352,7 +4354,7 @@ impl AppView {
     /// the click dispatch, so a critical preempting the slot or a hidden
     /// promo emits nothing.
     pub(crate) fn log_announcement_cta_impressions(&mut self) {
-        use grow_telemetry::events::AnnouncementCtaSurface;
+        use grow_diagnostics::events::AnnouncementCtaSurface;
         let (banner, welcome, header, dashboard) = match self.active_view {
             ActiveView::Welcome => (false, self.welcome_upgrade_cta_rect.is_some(), false, false),
             ActiveView::Agent(agent_id) => match self.agents.get(&agent_id) {
@@ -4399,8 +4401,8 @@ impl AppView {
                 .announcement_cta_impressions_logged
                 .insert((key.clone(), surface))
             {
-                grow_telemetry::session_ctx::log_event(
-                    grow_telemetry::events::AnnouncementCtaShown {
+                grow_diagnostics::session_ctx::log_event(
+                    grow_diagnostics::events::AnnouncementCtaShown {
                         id: id.clone(),
                         source: surface,
                     },
@@ -4621,9 +4623,9 @@ impl AppView {
             &mut self.tip_seen_counts,
         ) {
             self.clipboard_focus_tip.note_fired(&outcome, now);
-            grow_telemetry::session_ctx::log_event(grow_telemetry::events::ContextualTip {
-                tip: grow_telemetry::events::ContextualTipKind::ImageInput,
-                action: grow_telemetry::events::ContextualTipAction::Shown,
+            grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::ContextualTip {
+                tip: grow_diagnostics::events::ContextualTipKind::ImageInput,
+                action: grow_diagnostics::events::ContextualTipAction::Shown,
             });
             return true;
         }

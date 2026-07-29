@@ -134,8 +134,8 @@ impl WaitingReason {
             Self::Sleep => "Sleeping…".to_string(),
         }
     }
-    /// Short, stable snake_case label for telemetry / phase-transition logs.
-    pub fn as_telemetry_label(&self) -> &'static str {
+    /// Short, stable snake_case label for diagnostics / phase-transition logs.
+    pub fn as_diagnostics_label(&self) -> &'static str {
         match self {
             Self::Model => "waiting_model",
             Self::Subagent => "waiting_subagent",
@@ -187,7 +187,7 @@ pub enum TurnActivity {
     Waiting(WaitingReason),
 }
 impl TurnActivity {
-    /// Short, stable label for telemetry / profiling logs.
+    /// Short, stable label for diagnostics / profiling logs.
     pub fn as_label(&self) -> &'static str {
         match self {
             Self::Thinking => "thinking",
@@ -195,7 +195,7 @@ impl TurnActivity {
             Self::ToolRunning { .. } => "tool_running",
             Self::AutoCompacting => "compacting",
             Self::Retrying { .. } => "retrying",
-            Self::Waiting(reason) => reason.as_telemetry_label(),
+            Self::Waiting(reason) => reason.as_diagnostics_label(),
         }
     }
 }

@@ -125,7 +125,7 @@ pub struct PermissionsReport {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnforcedPolicy {
-    /// Stable key: "alwaysApprove" | "telemetry" | "feedback".
+    /// Stable key: "alwaysApprove" | "diagnostics" | "feedback".
     pub setting: String,
     /// The enforced value.
     pub enabled: bool,
@@ -592,11 +592,7 @@ async fn list_permissions(cwd: &Path, project_trusted: bool) -> PermissionsRepor
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "managed-settings.json".to_string());
-        for (flag, setting) in [
-            (ms.features.disable_yolo, "alwaysApprove"),
-            (ms.features.disable_telemetry, "telemetry"),
-            (ms.features.disable_feedback, "feedback"),
-        ] {
+        for (flag, setting) in [(ms.features.disable_yolo, "alwaysApprove")] {
             if flag == Some(true) {
                 enforced.push(EnforcedPolicy {
                     setting: setting.to_string(),
@@ -679,7 +675,7 @@ fn list_hooks(
         .into_iter()
         .map(|h| {
             // Classify via the shared `hook_origin` (typed provenance + file-tier
-            // name prefix), the same classifier telemetry uses, so admin/system
+            // name prefix), the same classifier diagnostics uses, so admin/system
             // hooks aren't mislabeled and the two surfaces can't diverge.
             use grow_hooks::config::HookOrigin as O;
             // Config-layer hooks store the layer's directory in `source_dir`;
@@ -1211,7 +1207,7 @@ fn format_force_login_team(team: &Option<ForceLoginTeam>) -> String {
 fn enforced_label(p: &EnforcedPolicy) -> String {
     let name = match p.setting.as_str() {
         "alwaysApprove" => "Permissions mode: always-approve",
-        "telemetry" => "Telemetry",
+        "diagnostics" => "Diagnostic",
         "feedback" => "Feedback",
         other => other,
     };
@@ -1775,7 +1771,7 @@ mod tests {
 
         // A file with real content contributes config and has no note.
         let with_content = dir.path().join("content.toml");
-        std::fs::write(&with_content, "[telemetry]\nmode = \"disabled\"\n").unwrap();
+        std::fs::write(&with_content, "[diagnostics]\nmode = \"disabled\"\n").unwrap();
         let (_, note) = describe_config_file(&with_content).unwrap();
         assert!(note.is_none());
 
@@ -1814,7 +1810,7 @@ mod tests {
         ));
 
         let mut tbl = toml::map::Map::new();
-        tbl.insert("telemetry".into(), toml::Value::Boolean(true));
+        tbl.insert("diagnostics".into(), toml::Value::Boolean(true));
         let full = layer(toml::Value::Table(tbl));
         assert!(requirements_layer_contributes(
             std::slice::from_ref(&full),

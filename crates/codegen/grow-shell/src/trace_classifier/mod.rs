@@ -26,8 +26,8 @@ use crate::session::{
     CollectedTodoGateInput, DebugDecision, LAZINESS_CLASSIFIER_PROMPT,
     LAZINESS_CLASSIFIER_TIMEOUT_MS, LAZINESS_CONTEXT_ITEM_LIMIT, LAZINESS_DEFAULT_MIN_CONFIDENCE,
     LAZINESS_INCLUDE_REASONING, LAZINESS_MAX_OUTPUT_TOKENS, LAZINESS_MIN_ASSISTANT_TURNS,
-    LAZINESS_MIN_USER_TURNS, LAZINESS_REQ_ID_PREFIX, LAZINESS_USER_PREAMBLE, TodoGateDecision,
-    TodoGateReason, classify_debug_decision, evaluate_todo_gate, flatten_transcript_for_classifier,
+    LAZINESS_MIN_USER_TURNS, LAZINESS_USER_PREAMBLE, TodoGateDecision, TodoGateReason,
+    classify_debug_decision, evaluate_todo_gate, flatten_transcript_for_classifier,
     format_runtime_state_line, laziness_window_start, parse_classifier_output,
 };
 use crate::tools::todo::{TodoItem, TodoPriority, TodoState, TodoStatus};
@@ -553,8 +553,7 @@ impl ClassifierClient for SamplerClassifierClient {
 /// Build the two-item `[System, User]` classifier request. Matches
 /// `maybe_fire_laziness_check` exactly: same prompt, same wrapper
 /// text ([`LAZINESS_USER_PREAMBLE`]), same `temperature: 0.0`, same
-/// `reasoning_effort: None`, same telemetry headers shape (random
-/// [`LAZINESS_REQ_ID_PREFIX`]`-<uuid>` req id).
+/// `reasoning_effort: None`.
 ///
 /// `classifier_backing_task_count` is the *Layer-3* count (terminal
 /// tasks only — no subagents); see [`BackingCounts`] and F1.
@@ -562,7 +561,6 @@ pub fn build_classifier_request(
     items: &[ConversationItem],
     classifier_backing_task_count: usize,
     model_id: &str,
-    session_id: Option<&str>,
     include_reasoning: bool,
     turn_elapsed_seconds: Option<u64>,
 ) -> ConversationRequest {
@@ -589,7 +587,6 @@ pub fn build_classifier_request(
         }),
     ];
 
-    let session_id_str = session_id.map(str::to_owned);
     ConversationRequest {
         items: convo_items,
         tools: vec![],
@@ -599,10 +596,6 @@ pub fn build_classifier_request(
         temperature: Some(0.0),
         max_output_tokens: Some(LAZINESS_MAX_OUTPUT_TOKENS),
         reasoning_effort: None,
-        x_grok_conv_id: Some(format!("trace-classifier-{}", uuid::Uuid::new_v4())),
-        x_grok_req_id: Some(format!("{LAZINESS_REQ_ID_PREFIX}{}", uuid::Uuid::new_v4())),
-        x_grok_session_id: session_id_str,
-        x_grok_agent_id: Some(grow_telemetry::id::agent_id()),
         ..ConversationRequest::default()
     }
 }
@@ -657,7 +650,6 @@ async fn classify_turn(
     items: &[ConversationItem],
     classifier_backing_task_count: usize,
     model_id: &str,
-    session_id: Option<&str>,
     min_confidence: f32,
     include_reasoning: bool,
     turn_elapsed_seconds: Option<u64>,
@@ -667,7 +659,6 @@ async fn classify_turn(
         items,
         classifier_backing_task_count,
         model_id,
-        session_id,
         include_reasoning,
         turn_elapsed_seconds,
     );
@@ -856,7 +847,6 @@ pub async fn process_turn<'a>(
         trimmed,
         counts.terminal_only,
         model_id,
-        record.trace.metadata.session_id.as_deref(),
         min_confidence,
         include_reasoning,
         turn_elapsed_seconds,
@@ -1067,7 +1057,7 @@ async fn non_interactive_auth_key(grow_home: &Path) -> Result<Option<String>> {
     let config = ServiceAuthConfig::default();
     let auth_provider_command = config.auth_provider_command.clone();
     let manager = std::sync::Arc::new(AuthManager::new(grow_home, config));
-    manager.configure_refresher(auth_provider_command, None);
+    manager.configure_refresher(auth_provider_command);
     match manager.auth().await {
         Ok(auth) => {
             let trimmed = auth.key.trim();
@@ -1864,33 +1854,6 @@ mod tests {
         assert!(req.tools.is_empty());
         assert!(req.hosted_tools.is_empty());
         assert!(req.tool_choice.is_none());
-
-        let conv_id = req.x_grok_conv_id.as_deref().expect("conv id");
-        let conv_suffix = conv_id
-            .strip_prefix("trace-classifier-")
-            .expect("conv id starts with trace-classifier-");
-        assert_eq!(
-            uuid::Uuid::parse_str(conv_suffix)
-                .expect("conv suffix parses as UUID")
-                .get_version_num(),
-            4,
-        );
-        assert_eq!(req.x_grok_session_id.as_deref(), Some("sess-x"));
-        let req_id = req.x_grok_req_id.as_deref().expect("req id");
-        // N3: shared const for the prefix.
-        let suffix = req_id
-            .strip_prefix(LAZINESS_REQ_ID_PREFIX)
-            .expect("req_id starts with shared prefix const");
-        // N8: actually parse the suffix as a UUIDv4 — length-only was
-        // a weak proxy.
-        let parsed = uuid::Uuid::parse_str(suffix).expect("suffix parses as UUID");
-        assert_eq!(parsed.get_version_num(), 4, "UUIDv4");
-        assert!(!parsed.is_nil());
-
-        assert_eq!(
-            req.x_grok_agent_id.as_deref(),
-            Some(grow_telemetry::id::agent_id().as_str())
-        );
     }
 
     /// N11: the captured transcript ends with the most recent item's

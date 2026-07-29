@@ -3,7 +3,7 @@
 //! Called by the CLI (`plugin_cmd.rs`). The in-session slash commands
 //! (`acp_session.rs`) currently inline similar logic and should migrate here.
 //!
-//! Callers own output formatting and telemetry.
+//! Callers own output formatting and diagnostics.
 
 use std::path::{Path, PathBuf};
 
@@ -32,13 +32,13 @@ pub struct InstallOutcome {
     pub repo_key: String,
     pub plugin_names: Vec<String>,
     pub warnings: Vec<String>,
-    /// Whether the source was a local path (vs git). For telemetry `InstallKind`.
+    /// Whether the source was a local path (vs git). For diagnostics `InstallKind`.
     pub is_local: bool,
 }
 
-/// Parse, clone/symlink, register, and enable a plugin. Does not emit telemetry.
+/// Parse, clone/symlink, register, and enable a plugin. Does not emit diagnostics.
 /// Classify an install source as local (filesystem) vs git (remote) without
-/// installing — used for telemetry `install_kind` on the failure path, where no
+/// installing — used for diagnostics `install_kind` on the failure path, where no
 /// [`InstallOutcome`] is available.
 pub fn install_source_is_local(source: &str, cwd: &Path) -> bool {
     matches!(
@@ -521,7 +521,7 @@ fn looks_like_local_path(s: &str) -> bool {
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
 }
 
-/// Classify an install error for telemetry. Strings match `acp_session.rs` exactly.
+/// Classify an install error for diagnostics. Strings match `acp_session.rs` exactly.
 pub fn classify_install_error(err: &InstallError) -> String {
     match err {
         InstallError::AlreadyInstalled { .. } => "already_installed",
@@ -582,7 +582,7 @@ pub enum MarketplaceInstallError {
 }
 
 impl MarketplaceInstallError {
-    /// Stable telemetry category, reusing [`classify_install_error`] for the
+    /// Stable diagnostics category, reusing [`classify_install_error`] for the
     /// underlying install failure.
     pub fn category(&self) -> String {
         match self {
@@ -1412,7 +1412,7 @@ mod tests {
 
     #[test]
     fn classify_error_strings_match_canonical() {
-        // Must match acp_session.rs::classify_install_error exactly — prevents telemetry drift.
+        // Must match acp_session.rs::classify_install_error exactly — prevents diagnostics drift.
         assert_eq!(
             classify_install_error(&InstallError::AlreadyInstalled { key: "k".into() }),
             "already_installed"

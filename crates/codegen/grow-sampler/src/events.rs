@@ -72,7 +72,7 @@ pub enum SamplingEvent {
         /// (e.g. the shell's doom-loop recovery counter).
         kind: SamplingErrorKind,
         reason: String,
-        /// Doom-loop telemetry payload when `kind == DoomLoopDetected`:
+        /// Doom-loop diagnostics payload when `kind == DoomLoopDetected`:
         /// raw trigger labels + the chunk index the mid-stream abort fired
         /// at (`None` for terminal-response detections). Labels only.
         doom_loop_triggers: Option<Vec<String>>,
@@ -136,7 +136,7 @@ pub struct SamplingErrorInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doom_loop_triggers: Option<Vec<String>>,
     /// Stream chunk index the mid-stream doom-loop abort fired at.
-    /// Telemetry only; `None` for terminal-response detections.
+    /// Diagnostic only; `None` for terminal-response detections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doom_loop_aborted_at_chunk: Option<u64>,
 }
@@ -162,7 +162,7 @@ pub enum SamplingErrorKind {
 }
 
 impl SamplingErrorKind {
-    /// Stable, lowercase string form suitable for telemetry tags
+    /// Stable, lowercase string form suitable for diagnostics tags
     /// (e.g., analytics `error_type` columns and signals histograms).
     /// Mirrors the strings used in the shell's
     /// `stream_conversation_with_retries` error classifier so tags stay

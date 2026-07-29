@@ -38,7 +38,7 @@ async fn handle_list() -> ExtResult {
             format!("{}={}", s.name, url)
         })
         .collect();
-    grow_telemetry::unified_log::info(
+    grow_diagnostics::unified_log::info(
         "marketplace handle_list: sources loaded",
         None,
         Some(serde_json::json!({
@@ -76,7 +76,7 @@ async fn handle_list() -> ExtResult {
             .iter()
             .filter(|p| p.components.is_some())
             .count();
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "marketplace handle_list: source scanned",
             None,
             Some(serde_json::json!({
@@ -93,7 +93,7 @@ async fn handle_list() -> ExtResult {
         results.push(scan);
     }
 
-    grow_telemetry::unified_log::info(
+    grow_diagnostics::unified_log::info(
         "marketplace handle_list: complete",
         None,
         Some(serde_json::json!({
@@ -667,7 +667,7 @@ fn scan_source(
                 Ok(cache_lease) => {
                     let cached_path = cache_lease.path.clone();
                     lease = Some(cache_lease);
-                    grow_telemetry::unified_log::info(
+                    grow_diagnostics::unified_log::info(
                         "scan_source: git sync done",
                         None,
                         Some(serde_json::json!({

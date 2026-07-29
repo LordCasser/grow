@@ -1075,23 +1075,12 @@ pub trait StorageAdapter: Send + Sync {
         reasoning_effort: Option<Option<ReasoningEffort>>,
     ) -> io::Result<()>;
 
-    /// Update the collection ID for telemetry tracing
-    async fn update_collection_id(&self, info: &Info, collection_id: &str) -> io::Result<()>;
-
     /// Update the persisted HEAD commit and branch in summary
     async fn update_git_head(
         &self,
         info: &Info,
         commit: Option<String>,
         branch: Option<String>,
-    ) -> io::Result<()>;
-
-    /// Update the monotonic telemetry trace turn counter ("next turn" value).
-    async fn update_next_trace_turn(
-        &self,
-        info: &Info,
-        next_trace_turn: u64,
-        request_id: Option<&str>,
     ) -> io::Result<()>;
 
     /// Write/update the plan state
@@ -1158,9 +1147,6 @@ pub trait StorageAdapter: Send + Sync {
     /// Load all rewind points for a session
     async fn load_rewind_points(&self, info: &Info) -> io::Result<Vec<RewindPoint>>;
 
-    /// Sync all session files to disk. Called before CopyFile to ensure all writes are persisted.
-    async fn sync_session_files(&self, info: &Info) -> io::Result<()>;
-
     /// Truncate rewind points from a specific prompt index (inclusive)
     /// Used when rewinding to remove future history
     async fn truncate_rewind_points_from(&self, info: &Info, from_index: usize) -> io::Result<()>;
@@ -1212,13 +1198,6 @@ pub trait StorageAdapter: Send + Sync {
     /// on-disk layout, so callers must use this rather than recomputing the path
     /// (it differs for non-default storage modes, e.g. subagent/fork sessions).
     fn rewind_points_file_path(&self, info: &Info) -> Option<std::path::PathBuf>;
-
-    /// Append a feedback entry (user feedback) to feedback.jsonl
-    async fn append_feedback(
-        &self,
-        info: &Info,
-        entry: &crate::session::persistence::LocalFeedbackEntry,
-    ) -> io::Result<()>;
 
     /// Append a /btw side question entry to btw_history.jsonl
     async fn append_btw(

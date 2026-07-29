@@ -79,7 +79,7 @@ pub enum Event {
     /// records which automatic trigger fired: user cancel, infra-classified
     /// turn error, consecutive-failed-turn back-off, or verification block.
     GoalAutoPaused {
-        reason: GoalPauseReasonTelemetry,
+        reason: GoalPauseReasonDiagnostic,
     },
     /// Runtime TodoGate nudged the model because a content-only turn ended
     /// with pending or unbacked in_progress todos. `reason` is the
@@ -131,7 +131,7 @@ pub enum Event {
     /// Goal-achievement classifier returned a parsed verdict (Achieved or
     /// NotAchieved). `latency_ms` is the spawn-to-parse wall clock.
     GoalClassifierVerdict {
-        verdict: GoalClassifierVerdictTelemetry,
+        verdict: GoalClassifierVerdictDiagnostic,
         attempt: u32,
         latency_ms: u64,
     },
@@ -506,17 +506,17 @@ pub struct McpConfigServer {
     pub source: String,
 }
 
-/// Telemetry mirror of `grow-shell`'s `GoalClassifierVerdict`. Two
+/// Diagnostic mirror of `grow-shell`'s `GoalClassifierVerdict`. Two
 /// crates due to the orphan rule; the conversion lives in
 /// `grow-shell/src/session/events.rs`.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GoalClassifierVerdictTelemetry {
+pub enum GoalClassifierVerdictDiagnostic {
     Achieved,
     NotAchieved,
 }
 
-/// Telemetry mirror of `grow-shell`'s `GoalPauseReason`. The two types
+/// Diagnostic mirror of `grow-shell`'s `GoalPauseReason`. The two types
 /// live in separate crates (orphan rule); the conversion lives in
 /// `grow-shell/src/session/events.rs`.
 ///
@@ -525,7 +525,7 @@ pub enum GoalClassifierVerdictTelemetry {
 /// shell side catches the drift at build time.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GoalPauseReasonTelemetry {
+pub enum GoalPauseReasonDiagnostic {
     User,
     BackOff,
     /// Verification stage saw no fingerprint change in the flagged gaps
@@ -564,7 +564,7 @@ pub enum ToolOutcome {
     Cancelled,
 }
 
-impl From<ToolOutcome> for grow_telemetry::events::ToolOutcome {
+impl From<ToolOutcome> for grow_diagnostics::events::ToolOutcome {
     fn from(o: ToolOutcome) -> Self {
         match o {
             ToolOutcome::Success => Self::Success,
@@ -740,13 +740,13 @@ mod tests {
     }
 
     #[test]
-    fn goal_pause_reason_telemetry_serializes_snake_case() {
+    fn goal_pause_reason_diagnostics_serializes_snake_case() {
         for (variant, expected) in [
-            (GoalPauseReasonTelemetry::User, "\"user\""),
-            (GoalPauseReasonTelemetry::BackOff, "\"back_off\""),
-            (GoalPauseReasonTelemetry::NoProgress, "\"no_progress\""),
-            (GoalPauseReasonTelemetry::Verification, "\"verification\""),
-            (GoalPauseReasonTelemetry::Infra, "\"infra\""),
+            (GoalPauseReasonDiagnostic::User, "\"user\""),
+            (GoalPauseReasonDiagnostic::BackOff, "\"back_off\""),
+            (GoalPauseReasonDiagnostic::NoProgress, "\"no_progress\""),
+            (GoalPauseReasonDiagnostic::Verification, "\"verification\""),
+            (GoalPauseReasonDiagnostic::Infra, "\"infra\""),
         ] {
             let json = serde_json::to_string(&variant).unwrap();
             assert_eq!(json, expected, "{variant:?} must serialize to {expected}");

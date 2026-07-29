@@ -278,19 +278,19 @@ impl TracingModel {
 /// this target must be wrapped in [`LazyJson`] so serialization only happens
 /// inside a recording subscriber: the dev pane filter (dev builds) or the
 /// firehose (`GROW_DEBUG_LOG` / `GROW_LOG_FILE`).
-pub use grow_telemetry::debug_log::ACP_UPDATE_PAYLOAD_TARGET;
+pub use grow_diagnostics::debug_log::ACP_UPDATE_PAYLOAD_TARGET;
 /// Target for the always-on compact ACP update summary line (kind, ids,
 /// status, payload sizes). Cheap to format at streaming rate.
 ///
-/// Defined in `grow-telemetry` so the firehose directives and the pager
+/// Defined in `grow-diagnostics` so the firehose directives and the pager
 /// filter share one constant (re-exported here for callsites).
-pub use grow_telemetry::debug_log::ACP_UPDATE_TARGET;
+pub use grow_diagnostics::debug_log::ACP_UPDATE_TARGET;
 /// Lazily JSON-serializes a value inside `Display::fmt`.
 ///
 /// Use as a `%`-captured event field so `serde_json::to_string` runs only
 /// when a layer whose filter passed actually records the field. A bare
 /// `serde_json::to_string(..)` macro argument is NOT lazy: the registry
-/// includes filterless layers (e.g. the disabled-telemetry `NoOpLayer`s)
+/// includes filterless layers (e.g. the disabled-diagnostics `NoOpLayer`s)
 /// whose default `register_callsite` reports `Interest::always()`, globally
 /// enabling the callsite — per-layer filters only gate recording, not
 /// argument evaluation.
@@ -407,7 +407,7 @@ pub struct TracingHandle {
 /// }
 /// ```
 pub fn init_tracing() -> TracingHandle {
-    use grow_telemetry::debug_log::RMCP_SSE_NOISE_TARGET;
+    use grow_diagnostics::debug_log::RMCP_SSE_NOISE_TARGET;
     use tracing_subscriber::{
         EnvFilter, Layer as _, filter::LevelFilter, fmt, layer::SubscriberExt as _,
     };
@@ -423,32 +423,15 @@ pub fn init_tracing() -> TracingHandle {
         .with_target(true)
         .with_ansi(true)
         .with_writer(make_writer);
-    let otel_layer = grow_telemetry::otel_layer::build_otel_layer(
-        grow_telemetry::otel_layer::OtelClientInfo {
-            client_name: "grow-pager",
-            client_version: grow_version::VERSION,
-            service_version: env!("VERSION_WITH_COMMIT"),
-            app_entrypoint: "tui",
-        },
-        grow_shell::auth::credential_provider::build_default_otel_layer_config(),
-    );
-    let instrumentation_layer = grow_telemetry::instrumentation::layer();
-    let sampling_log_layer = grow_telemetry::sampling_log::layer();
-    let hooks_log_layer = grow_telemetry::hooks_log::layer();
+    let instrumentation_layer = grow_diagnostics::instrumentation::layer();
+    let sampling_log_layer = grow_diagnostics::sampling_log::layer();
+    let hooks_log_layer = grow_diagnostics::hooks_log::layer();
     let registry = tracing_subscriber::registry()
         .with(fmt_layer.with_filter(env_filter))
         .with(instrumentation_layer)
         .with(sampling_log_layer)
-        .with(hooks_log_layer)
-        .with(otel_layer);
-    grow_telemetry::debug_log::install_firehose(registry, "tui");
-    grow_telemetry::external::init(grow_shell::agent::config::resolve_external_otel_config(
-        grow_telemetry::external::config::ExternalClientInfo {
-            service_version: env!("VERSION_WITH_COMMIT").to_owned(),
-            client_version: grow_version::VERSION.to_owned(),
-            app_entrypoint: "tui".to_owned(),
-        },
-    ));
+        .with(hooks_log_layer);
+    grow_diagnostics::debug_log::install_firehose(registry, "tui");
     TracingHandle { rx }
 }
 #[cfg(test)]
@@ -464,7 +447,7 @@ mod tests {
         }
     }
     /// Filterless layer with all-default methods, mirroring the disabled
-    /// telemetry `NoOpLayer`s in the production registry: its default
+    /// diagnostics `NoOpLayer`s in the production registry: its default
     /// `register_callsite` reports `Interest::always()`, keeping every
     /// callsite globally enabled. This is the condition that defeats a bare
     /// (non-lazy) macro argument.

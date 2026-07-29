@@ -847,7 +847,7 @@ pub struct AgentView {
     /// Cached server-reported context state.
     pub context_state: Option<grow_shell::session::ContextInfo>,
     /// Gateway light-frontend session (`kind: "chat"` / `--chat` / conversation
-    /// resume). Suppresses Build credits / local sampler context telemetry so the
+    /// resume). Suppresses Build credits / local sampler context diagnostics so the
     /// status bar and prompt never imply remote usage from wrong metrics.
     pub chat_kind: bool,
     /// Process-wide `--chat` (mirrors `AppView::chat_mode`; set via
@@ -1670,10 +1670,10 @@ fn translate_local_submit(
             let choice = choices
                 .get(*idx)
                 .copied()
-                .unwrap_or(grow_telemetry::events::CreditLimitChoice::PayAsYouGo);
-            grow_telemetry::session_ctx::log_event(
-                grow_telemetry::events::CreditLimitUpsellClicked {
-                    surface: grow_telemetry::events::CreditLimitUpsellSurface::QuestionModal,
+                .unwrap_or(grow_diagnostics::events::CreditLimitChoice::PayAsYouGo);
+            grow_diagnostics::session_ctx::log_event(
+                grow_diagnostics::events::CreditLimitUpsellClicked {
+                    surface: grow_diagnostics::events::CreditLimitUpsellSurface::QuestionModal,
                     choice,
                 },
             );
@@ -1686,8 +1686,8 @@ fn translate_local_submit(
                 .and_then(|q| q.options.get(*idx))
                 .and_then(|o| o.id.as_deref())
                 .unwrap_or(super::dispatch::UPSELL_URL_UPGRADE);
-            grow_telemetry::session_ctx::log_event(
-                grow_telemetry::events::SubscriptionUpsellClicked {
+            grow_diagnostics::session_ctx::log_event(
+                grow_diagnostics::events::SubscriptionUpsellClicked {
                     source,
                     auth_method: None,
                 },
@@ -1713,10 +1713,10 @@ fn translate_project_select(
     skipped: bool,
 ) -> InputOutcome {
     use crate::views::question_view::QuestionSelection;
-    use grow_telemetry::events::{ProjectPickerOutcome, ProjectPickerSelected};
+    use grow_diagnostics::events::{ProjectPickerOutcome, ProjectPickerSelected};
     let project_dir_options = resolved_paths.len().saturating_sub(1);
     let emit = |outcome: ProjectPickerOutcome| {
-        grow_telemetry::session_ctx::log_event(ProjectPickerSelected {
+        grow_diagnostics::session_ctx::log_event(ProjectPickerSelected {
             outcome,
             picked_project: outcome.picked_project(),
             project_dir_options,

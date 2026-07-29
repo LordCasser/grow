@@ -96,7 +96,7 @@ where
         call().await
     } else {
         tracing::warn!(tool = tool_name, "auth recovery: tool 401, refresh failed");
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "auth recovery: tool 401, refresh failed",
             None,
             Some(serde_json::json!({ "tool": tool_name })),
@@ -289,7 +289,7 @@ impl SessionActor {
                     model = %model_id,
                     "auth provider pre-turn refresh failed"
                 );
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "auth provider pre-turn refresh failed",
                     Some(self.session_info.id.0.as_ref()),
                     Some(serde_json::json!({
@@ -319,7 +319,7 @@ impl SessionActor {
                 provider = %provider.name,
                 "auth recovery: sampler 401, provider re-mint declined or failed"
             );
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "auth recovery: sampler 401, provider re-mint declined or failed",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({ "provider": provider.name })),
@@ -331,7 +331,7 @@ impl SessionActor {
             provider = %provider.name,
             "auth recovery: sampler 401, auth provider re-mint, retrying"
         );
-        grow_telemetry::unified_log::info(
+        grow_diagnostics::unified_log::info(
             "auth recovery: sampler 401, auth provider re-mint, retrying",
             Some(self.session_info.id.0.as_ref()),
             None,
@@ -376,13 +376,13 @@ impl SessionActor {
         });
         let sid = Some(self.session_info.id.0.as_ref());
         if refresh_active {
-            grow_telemetry::unified_log::info(
+            grow_diagnostics::unified_log::info(
                 "auth gate: Unknown BYOK on first-party endpoint — session-token refresh kept active",
                 sid,
                 Some(ctx),
             );
         } else {
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "auth gate: Unknown BYOK on non-first-party endpoint — refresh withheld (may surface stale-token 401)",
                 sid,
                 Some(ctx),
@@ -394,18 +394,6 @@ impl SessionActor {
     /// URL-derived headers (cli-chat-proxy auth, the staging auth header)
     /// so the sampler crate stays URL-agnostic.
     pub(super) async fn reconstruct_full_config(&self) -> SamplingConfig {
-        #[allow(clippy::items_after_statements)]
-        #[derive(Debug)]
-        struct TraceContextInjector;
-        impl grow_sampler::HeaderInjector for TraceContextInjector {
-            fn inject(&self, headers: &mut reqwest::header::HeaderMap) {
-                if let Some(tp) = xai_file_utils::trace_context::current_traceparent()
-                    && let Ok(v) = reqwest::header::HeaderValue::from_str(&tp)
-                {
-                    headers.insert("traceparent", v);
-                }
-            }
-        }
         #[allow(clippy::items_after_statements)]
         struct AuthManagerBearerResolver(std::sync::Arc<crate::auth::AuthManager>);
         impl std::fmt::Debug for AuthManagerBearerResolver {
@@ -497,22 +485,11 @@ impl SessionActor {
             query_params: cfg.query_params.clone(),
             env_http_headers: cfg.env_http_headers.clone(),
             context_window: cfg.context_window.get(),
-            client_version: creds.client_version,
             reasoning_effort: cfg.reasoning_effort,
             force_http1: false,
             max_retries: Some(self.max_retries),
             stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),
             idle_timeout_secs: None,
-            client_identifier: self.client_identifier.clone(),
-            deployment_id: crate::managed_config::resolve_deployment_id(
-                crate::managed_config::resolve_deployment_key().as_deref(),
-            ),
-            user_id: self
-                .auth_manager
-                .as_ref()
-                .and_then(|am| am.current_or_expired())
-                .filter(|a| a.is_service_auth())
-                .map(|a| a.user_id),
             origin_client: self.origin_client.clone(),
             attribution_callback: self.attribution_callback.clone(),
             bearer_resolver: if use_bearer_resolver {
@@ -528,7 +505,6 @@ impl SessionActor {
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
-            header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
         }
     }
     /// Install auto-mode permission classifier with a live LLM side-query
@@ -617,10 +593,6 @@ impl SessionActor {
                             grow_workspace::permission::classifier_output_json_schema(),
                         ),
                         reasoning_effort: classifier_reasoning_effort,
-                        x_grok_conv_id: Some(format!("perm-classifier-{}", uuid::Uuid::new_v4())),
-                        x_grok_req_id: Some(format!("xai-perm-auto-{}", uuid::Uuid::new_v4())),
-                        x_grok_session_id: Some(session_id),
-                        x_grok_agent_id: Some(grow_telemetry::id::agent_id()),
                         ..ConversationRequest::default()
                     };
                     let fut = sampling_client.conversation_collect(request);
@@ -679,7 +651,6 @@ impl SessionActor {
             session_key.as_deref(),
             disable_api_key_auth,
             creds.alpha_test_key.clone(),
-            creds.client_version.clone(),
         )
     }
     /// Resolve a dedicated sampler for the Auto-mode classifier model `slug`,
@@ -696,7 +667,6 @@ impl SessionActor {
         crate::agent::config::stamp_session_local_sampler_fields(
             &mut cfg,
             &active_session_config,
-            self.client_identifier.clone(),
             Some(self.max_retries),
         );
         let model = cfg.model.clone();
@@ -751,7 +721,7 @@ impl SessionActor {
             .as_ref()
             .and_then(|am| am.current_or_expired());
         let reauthable = is_reauthable_failure(Some(error_type));
-        grow_telemetry::unified_log::warn(
+        grow_diagnostics::unified_log::warn(
             "turn.terminal_failure",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
@@ -887,7 +857,7 @@ impl SessionActor {
                     endpoint_is_first_party = gate.endpoint_is_first_party,
                     "auth recovery: sampler 401 not refreshable (api-key auth) — surfacing 401",
                 );
-                grow_telemetry::unified_log::warn(
+                grow_diagnostics::unified_log::warn(
                     "auth recovery: sampler 401 not eligible (api-key auth)",
                     Some(self.session_info.id.0.as_ref()),
                     Some(serde_json::json!({
@@ -910,7 +880,7 @@ impl SessionActor {
             && auth_provider.is_none()
             && !auth_recovery_eligible
         {
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "auth recovery: sampler 401 not eligible (non-auth error kind)",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
@@ -939,7 +909,7 @@ impl SessionActor {
                         error = %e,
                         "auth recovery: sampler 401, devbox re-mint failed"
                     );
-                    grow_telemetry::unified_log::warn(
+                    grow_diagnostics::unified_log::warn(
                         "auth recovery: sampler 401, devbox re-mint failed",
                         Some(self.session_info.id.0.as_ref()),
                         Some(serde_json::json!({ "error": format!("{e}") })),
@@ -953,7 +923,7 @@ impl SessionActor {
                 .await
             {
                 tracing::info!(session_id = %self.session_info.id.0, "auth recovery: sampler 401, recovered, retrying");
-                grow_telemetry::unified_log::info(
+                grow_diagnostics::unified_log::info(
                     "auth recovery: sampler 401, recovered, retrying",
                     Some(self.session_info.id.0.as_ref()),
                     None,
@@ -962,7 +932,7 @@ impl SessionActor {
                 return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
             }
             tracing::warn!(session_id = %self.session_info.id.0, "auth recovery: sampler 401, refresh failed");
-            grow_telemetry::unified_log::warn(
+            grow_diagnostics::unified_log::warn(
                 "auth recovery: sampler 401, refresh failed",
                 Some(self.session_info.id.0.as_ref()),
                 None,
@@ -1231,7 +1201,7 @@ impl SessionActor {
                             model = %model_id,
                             "auth: preflight get_valid_token failed"
                         );
-                        grow_telemetry::unified_log::warn(
+                        grow_diagnostics::unified_log::warn(
                             "auth.preflight.refresh_failed",
                             Some(self.session_info.id.0.as_ref()),
                             Some(serde_json::json!({
@@ -1245,7 +1215,7 @@ impl SessionActor {
                 }
             }
         } else {
-            grow_telemetry::unified_log::debug(
+            grow_diagnostics::unified_log::debug(
                 "token refresh skipped: no auth manager",
                 Some(self.session_info.id.0.as_ref()),
                 None,

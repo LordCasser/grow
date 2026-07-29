@@ -37,7 +37,7 @@ use xai_tool_protocol::{
 };
 use xai_tool_runtime::{
     BehaviorVersion, Cancellation, Cwd, ToolCallContext, ToolError, ToolProgress, ToolStream,
-    ToolStreamItem, TraceContext, TypedToolOutput,
+    ToolStreamItem, TypedToolOutput,
 };
 use xai_tool_types::ToolDescription;
 
@@ -551,7 +551,6 @@ impl ToolServerBuilder {
             disconnect_epoch,
             admission,
             cancels: Arc::new(DashMap::new()),
-            donation_pumps: parking_lot::Mutex::new(DonationPumps::default()),
         });
         Ok(ToolServer { inner: Some(inner) })
     }
@@ -640,19 +639,6 @@ struct ToolServerInner {
     /// drained-and-cancelled on `unbind_session` / `shutdown` so detached
     /// `execute_call` tasks wind down promptly.
     cancels: Arc<DashMap<SessionId, Arc<CancelRegistry>>>,
-    /// Trace/log/metric donation pump senders, fenced by
-    /// [`ToolServer::flush_donations`] on unbind/shutdown.
-    donation_pumps: parking_lot::Mutex<DonationPumps>,
-}
-
-/// The three symmetric donation pump senders. Each is fenced
-/// independently by `flush_donations_inner` so a teardown never abandons
-/// a queued batch.
-#[derive(Default)]
-struct DonationPumps {
-    traces: Option<mpsc::Sender<crate::donate_pump::PumpMsg>>,
-    logs: Option<mpsc::Sender<crate::donate_pump::PumpMsg>>,
-    metrics: Option<mpsc::Sender<crate::donate_pump::PumpMsg>>,
 }
 
 impl Clone for ToolServer {
@@ -1197,100 +1183,6 @@ impl ToolServer {
         }
     }
 
-    /// Fire-and-forget `traces.donate`: `Ok` = queued; rejects surface
-    /// only in server metrics. `otlp_request_b64` is a base64
-    /// `ExportTraceServiceRequest` with a server-allowlisted `service.name`.
-    pub async fn donate_traces(&self, otlp_request_b64: &str) -> Result<(), ClientError> {
-        /// Borrowed wire shape so retried payloads are never cloned.
-        #[derive(serde::Serialize)]
-        struct ParamsRef<'a> {
-            otlp_request: &'a str,
-        }
-        let session = self
-            .inner()
-            .active_sessions
-            .lock()
-            .first()
-            .cloned()
-            .ok_or_else(|| {
-                ClientError::InvalidConfig(
-                    "donate_traces requires at least one bound session".to_owned(),
-                )
-            })?;
-        let connection = self.inner().borrow.connection();
-        let notification = xai_tool_protocol::JsonRpcNotification {
-            jsonrpc: JsonRpcVersion,
-            session_id: Some(session),
-            seq: None,
-            method: Method::TracesDonate.as_wire_str().to_owned(),
-            params: ParamsRef {
-                otlp_request: otlp_request_b64,
-            },
-        };
-        let text = serde_json::to_string(&notification).map_err(ClientError::from)?;
-        connection.send_outbound(text).await
-    }
-
-    /// Fire-and-forget `logs.donate`: `Ok` = queued; rejects surface
-    /// only in server metrics. `otlp_request_b64` is a base64
-    /// `ExportLogsServiceRequest` with a server-allowlisted `service.name`.
-    /// Requires a bound session (mirrors [`Self::donate_traces`]).
-    pub async fn donate_logs(&self, otlp_request_b64: &str) -> Result<(), ClientError> {
-        /// Borrowed wire shape so retried payloads are never cloned.
-        #[derive(serde::Serialize)]
-        struct ParamsRef<'a> {
-            otlp_request: &'a str,
-        }
-        let session = self
-            .inner()
-            .active_sessions
-            .lock()
-            .first()
-            .cloned()
-            .ok_or_else(|| {
-                ClientError::InvalidConfig(
-                    "donate_logs requires at least one bound session".to_owned(),
-                )
-            })?;
-        let connection = self.inner().borrow.connection();
-        let notification = xai_tool_protocol::JsonRpcNotification {
-            jsonrpc: JsonRpcVersion,
-            session_id: Some(session),
-            seq: None,
-            method: Method::LogsDonate.as_wire_str().to_owned(),
-            params: ParamsRef {
-                otlp_request: otlp_request_b64,
-            },
-        };
-        let text = serde_json::to_string(&notification).map_err(ClientError::from)?;
-        connection.send_outbound(text).await
-    }
-
-    /// Fire-and-forget `metrics.donate`: `Ok` = queued; rejects surface
-    /// only in server metrics. `otlp_request_b64` is a base64
-    /// `ExportMetricsServiceRequest` with a server-allowlisted `service.name`.
-    /// Unlike [`Self::donate_logs`], metrics are process-aggregate, so
-    /// this does **not** require a bound session.
-    pub async fn donate_metrics(&self, otlp_request_b64: &str) -> Result<(), ClientError> {
-        /// Borrowed wire shape so retried payloads are never cloned.
-        #[derive(serde::Serialize)]
-        struct ParamsRef<'a> {
-            otlp_request: &'a str,
-        }
-        let connection = self.inner().borrow.connection();
-        let notification = xai_tool_protocol::JsonRpcNotification {
-            jsonrpc: JsonRpcVersion,
-            session_id: None,
-            seq: None,
-            method: Method::MetricsDonate.as_wire_str().to_owned(),
-            params: ParamsRef {
-                otlp_request: otlp_request_b64,
-            },
-        };
-        let text = serde_json::to_string(&notification).map_err(ClientError::from)?;
-        connection.send_outbound(text).await
-    }
-
     /// Drive the inbound loop until either the connection actor
     /// signals shutdown OR [`Self::shutdown`] is called.
     ///
@@ -1466,8 +1358,6 @@ impl ToolServer {
                         let server = server_for_notif.clone();
                         let conn = connection_for_notif.clone();
                         tokio::spawn(async move {
-                            // Unbind precedes hibernate: flush while up.
-                            server.flush_donations().await;
                             let _ = server.unbind_session(&sid).await;
 
                             // Respond so session.close returns synchronously.
@@ -1625,75 +1515,8 @@ impl ToolServer {
         if !self.inner().borrow.begin_teardown() {
             return Ok(());
         }
-        // Real teardown: flush AND clear the pumps to break the reference cycle.
-        flush_donations_inner(self.inner().as_ref(), true).await;
         teardown_sessions(self.inner().as_ref()).await;
         Ok(())
-    }
-
-    pub(crate) fn set_donation_pump(&self, tx: mpsc::Sender<crate::donate_pump::PumpMsg>) {
-        self.inner().donation_pumps.lock().traces = Some(tx);
-    }
-
-    pub(crate) fn set_log_donation_pump(&self, tx: mpsc::Sender<crate::donate_pump::PumpMsg>) {
-        self.inner().donation_pumps.lock().logs = Some(tx);
-    }
-
-    #[cfg(feature = "metrics")]
-    pub(crate) fn set_metric_donation_pump(&self, tx: mpsc::Sender<crate::donate_pump::PumpMsg>) {
-        self.inner().donation_pumps.lock().metrics = Some(tx);
-    }
-
-    /// Clone of the connection's shutdown token so the periodic metric
-    /// reporter (the only perpetually-running donation task) can stop on
-    /// teardown instead of gathering and sending forever.
-    #[cfg(feature = "metrics")]
-    pub(crate) fn shutdown_token(&self) -> CancellationToken {
-        self.inner().borrow.shutdown_token().clone()
-    }
-
-    /// Flush each producer and fence its donation pump; no-op without a
-    /// pump. Drives all three signals so a teardown never abandons a batch.
-    pub async fn flush_donations(&self) {
-        flush_donations_inner(self.inner().as_ref(), false).await;
-    }
-}
-
-/// Fence each donation pump. `clear_pumps` only from `shutdown` / `Drop`.
-async fn flush_donations_inner(inner: &ToolServerInner, clear_pumps: bool) {
-    let (traces, logs, metrics) = {
-        let pumps = inner.donation_pumps.lock();
-        (
-            pumps.traces.clone(),
-            pumps.logs.clone(),
-            pumps.metrics.clone(),
-        )
-    };
-    if let Some(tx) = traces {
-        fastrace::flush();
-        crate::donate_pump::drain_via(&tx).await;
-    }
-    if let Some(tx) = logs {
-        crate::log_donate::flush_log_layer();
-        crate::donate_pump::drain_via(&tx).await;
-    }
-    if let Some(tx) = metrics {
-        #[cfg(feature = "metrics")]
-        crate::metric_donate::gather_and_send();
-        crate::donate_pump::drain_via(&tx).await;
-    }
-
-    // Teardown only: drop pump senders so pump tasks exit. Keep them on
-    // while-running unbind flushes (`clear_pumps = false`).
-    if clear_pumps {
-        {
-            let mut pumps = inner.donation_pumps.lock();
-            pumps.traces = None;
-            pumps.logs = None;
-            pumps.metrics = None;
-        }
-        #[cfg(feature = "metrics")]
-        crate::metric_donate::clear_active_exporter();
     }
 }
 
@@ -1711,7 +1534,6 @@ impl Drop for ToolServer {
         }
         if tokio::runtime::Handle::try_current().is_ok() {
             tokio::spawn(async move {
-                flush_donations_inner(&owned, true).await;
                 teardown_sessions(&owned).await;
             });
         }
@@ -1901,16 +1723,7 @@ async fn handle_notification(
                 return;
             }
         };
-        let hook_span = frame
-            .trace_context
-            .as_deref()
-            .and_then(fastrace::collector::SpanContext::decode_w3c_traceparent)
-            .map(|parent| {
-                // Lets the server scope this span to its owning session.
-                fastrace::Span::root("tool_server.hook", parent)
-                    .with_property(|| ("session_id", session_id.as_str().to_owned()))
-            })
-            .unwrap_or_else(fastrace::Span::noop);
+        let hook_span = fastrace::Span::noop();
         if let Some(hook_id) = frame.hook_id.clone() {
             use fastrace::future::FutureExt as _;
             // Spawned: a hook-request handler may legitimately take seconds
@@ -2087,21 +1900,7 @@ async fn execute_call(
         Err(crate::admission::Overloaded::Shutdown) => return,
     };
 
-    let call_span = params
-        .trace_context
-        .as_deref()
-        .and_then(fastrace::collector::SpanContext::decode_w3c_traceparent)
-        .map(|parent| {
-            fastrace::Span::root("tool_server.tool_call", parent).with_properties(|| {
-                [
-                    ("tool_id", params.tool_id.as_str().to_owned()),
-                    ("tool_call_id", params.tool_call_id.as_str().to_owned()),
-                    // Lets the server scope this span to its owning session.
-                    ("session_id", session_id.as_str().to_owned()),
-                ]
-            })
-        })
-        .unwrap_or_else(fastrace::Span::noop);
+    let call_span = fastrace::Span::noop();
 
     let mut ctx = ToolCallContext::new(params.tool_call_id.clone());
     ctx.extensions.insert(xai_tool_runtime::SessionContext(
@@ -2112,9 +1911,6 @@ async fn execute_call(
     }
     if let Some(version) = params.behavior_version {
         ctx.extensions.insert(BehaviorVersion(version));
-    }
-    if let Some(trace) = params.trace_context {
-        ctx.extensions.insert(TraceContext(trace));
     }
     // Expose the cancellation handle so cooperative tools can poll/await
     // it; the dispatcher still hard-cancels via the `select!` below.

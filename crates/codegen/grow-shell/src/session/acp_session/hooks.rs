@@ -20,8 +20,8 @@ use std::time::Duration;
 use agent_client_protocol as acp;
 use agent_client_protocol::Client as _;
 use futures::stream::{FuturesUnordered, StreamExt as _};
+use grow_diagnostics::events::ClientHookGateOutcome;
 use grow_hooks::event::{HookEventEnvelope, HookEventName, HookPayload};
-use grow_telemetry::events::ClientHookGateOutcome;
 use serde_json::value::RawValue;
 
 use super::{SessionActor, ToolLoop};
@@ -170,7 +170,7 @@ impl SessionActor {
     }
 
     /// Block a tool call denied by a `PreToolUse` hook (file- or client-side),
-    /// emitting the shared telemetry + UI side-effects and returning the
+    /// emitting the shared diagnostics + UI side-effects and returning the
     /// [`ToolLoop::HookDenied`] the caller should propagate.
     pub(super) async fn deny_tool(
         &self,
@@ -181,7 +181,7 @@ impl SessionActor {
         reason: String,
     ) -> Result<ToolLoop, acp::Error> {
         tracing::info!(%tool_name, %hook_name, %reason, "tool call denied by pre_tool_use hook");
-        grow_telemetry::session_ctx::log_event(grow_telemetry::events::HookBlocked {
+        grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::HookBlocked {
             hook_name: hook_name.clone(),
         });
         self.handle_tool_not_executed(
@@ -238,8 +238,8 @@ impl SessionActor {
                     let (response, gate_outcome) =
                         classify(self.send_hook_run(&dispatch, timeout).await);
                     let elapsed = started.elapsed();
-                    grow_telemetry::session_ctx::log_event(
-                        grow_telemetry::events::ClientHookGate {
+                    grow_diagnostics::session_ctx::log_event(
+                        grow_diagnostics::events::ClientHookGate {
                             callback_id: callback_id.to_string(),
                             tool_name: tool_name.map(str::to_string),
                             outcome: gate_outcome,
@@ -293,7 +293,7 @@ impl SessionActor {
                         &call.id,
                         tool_call_id,
                         tool_name.to_owned(),
-                        // Name the specific callback so telemetry / the UI annotation can
+                        // Name the specific callback so diagnostics / the UI annotation can
                         // attribute the block, not collapse every client hook to "client".
                         format!("client:{callback_id}"),
                         reason,
@@ -437,7 +437,7 @@ mod tests {
     }
 
     /// Only an explicit `deny` blocks; malformed/transport/timeout all proceed. The second
-    /// tuple element is the telemetry outcome, distinct per fail-open mode.
+    /// tuple element is the diagnostics outcome, distinct per fail-open mode.
     #[test]
     fn classify_only_deny_blocks() {
         let (denied, outcome) = classify(ReverseOutcome::Responded(raw(

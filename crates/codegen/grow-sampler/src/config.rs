@@ -81,10 +81,6 @@ pub struct SamplerConfig {
 
     // Client identity
     pub origin_client: Option<OriginClientInfo>,
-    pub client_identifier: Option<String>,
-    pub deployment_id: Option<String>,
-    pub user_id: Option<String>,
-    pub client_version: Option<String>,
 
     /// Optional hook invoked at every UNAUTHORIZED (401) response
     /// site. The sampler passes the bearer that was actually sent on
@@ -127,10 +123,6 @@ pub struct SamplerConfig {
     /// the decoder).
     #[serde(default)]
     pub doom_loop_recovery: Option<DoomLoopRecoveryPolicy>,
-
-    /// Per-request header injector (e.g. OTel traceparent). Called in `post()`.
-    #[serde(skip)]
-    pub header_injector: Option<SharedHeaderInjector>,
 }
 
 impl Default for SamplerConfig {
@@ -156,17 +148,12 @@ impl Default for SamplerConfig {
             idle_timeout_secs: None,
             reasoning_effort: None,
             origin_client: None,
-            client_identifier: None,
-            deployment_id: None,
-            user_id: None,
-            client_version: None,
             attribution_callback: None,
             bearer_resolver: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
-            header_injector: None,
         }
     }
 }
@@ -177,13 +164,6 @@ pub trait BearerResolver: Send + Sync + std::fmt::Debug {
 }
 
 pub type SharedBearerResolver = std::sync::Arc<dyn BearerResolver>;
-
-/// Per-request header injection (e.g. OTel `traceparent`).
-pub trait HeaderInjector: Send + Sync + std::fmt::Debug {
-    fn inject(&self, headers: &mut reqwest::header::HeaderMap);
-}
-
-pub type SharedHeaderInjector = std::sync::Arc<dyn HeaderInjector>;
 
 /// Retry knobs for the sampler's internal transport-error retry loop.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -307,10 +307,6 @@ async fn run_persistent_agent(
     // Restore managed policy right before bootstrap reads it — the agent is created lazily here,
     // so an earlier restore could go stale before the gate.
     crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
-    // Fail-closed external-OTEL gate: suppress until settings resolve, opening
-    // now only for a pure env-API-key user (no remote policy). Matches the
-    // stdio/leader boot; per-connection settings reopen it via `initialize`.
-    crate::agent::app::apply_otel_config(&auth_manager, &agent_config.auth);
     let agent = Rc::new(
         MvpAgent::new(gateway, &agent_config, auth_manager, prefetched_models)
             .unwrap_or_else(crate::agent::init::exit_on_config_error),
@@ -378,11 +374,7 @@ fn setup_acp_connection(
     let (conn, handle_io) = acp::AgentSideConnection::new(agent, outgoing, incoming, |fut| {
         tokio::task::spawn_local(fut);
     });
-    tokio::task::spawn_local(
-        GatewayReceiver::new(conn_gw_rx, conn)
-            .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
-            .run(),
-    );
+    tokio::task::spawn_local(GatewayReceiver::new(conn_gw_rx, conn).run());
 
     // Task: Forward WS messages → agent (incoming ACP bytes)
     tokio::task::spawn_local(async move {

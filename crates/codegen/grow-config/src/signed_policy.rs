@@ -482,7 +482,7 @@ fn write_envelope_at(path: &std::path::Path, sidecar: &SignatureEnvelope) -> std
 }
 
 /// Persisted envelope nonce for [`MANAGED_CONFIG_NONCE_ECHO_HEADER`] (unverified;
-/// telemetry only, never a trust input). Both guards fail open by skipping the
+/// diagnostics only, never a trust input). Both guards fail open by skipping the
 /// echo: only the server mint shape (header-safe, so a corrupt sidecar can't brick
 /// the fetch), and only a payload issued to `fetch_principal`. A leftover sidecar
 /// from a prior identity must not read as a cross-tenant replay upstream.

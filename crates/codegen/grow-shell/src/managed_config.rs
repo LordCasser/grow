@@ -340,7 +340,7 @@ async fn fetch_managed_config_once(
         .get(url)
         .header("Authorization", format!("Bearer {}", token))
         .timeout(std::time::Duration::from_secs(15));
-    // Replay-probe echo (telemetry only). Skip on invalid HeaderValue so a
+    // Replay-probe echo (diagnostics only). Skip on invalid HeaderValue so a
     // corrupt sidecar never bricks the fetch (echo is fail-open).
     if let Some(nonce) = grow_config::signed_policy::stored_envelope_nonce(
         &crate::util::grow_home::grow_home(),
@@ -436,9 +436,8 @@ pub fn spawn_sync(cancel: tokio_util::sync::CancellationToken) {
     });
 }
 
-/// Deployment id reported for `deployment_key` on chat requests, credential
-/// snapshots, and OTel: the **server** GrowDeployment UUID (the id
-/// server-side dashboards filter on) when the managed-config sync marker was
+/// Deployment id associated with `deployment_key` in credential snapshots:
+/// the server GrowDeployment UUID when the managed-config sync marker was
 /// written by this same key (fingerprint match), else UUIDv5 of the key.
 /// `None` key (team/OAuth) → `None`, never a stale marker value.
 pub fn resolve_deployment_id(deployment_key: Option<&str>) -> Option<String> {

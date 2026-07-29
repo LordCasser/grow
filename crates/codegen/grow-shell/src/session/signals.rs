@@ -1,8 +1,7 @@
-//! Session signals tracking for feedback heuristics.
+//! Local session signals used for runtime decisions and diagnostics.
 //!
-//! This module tracks session-level signals that inform feedback request decisions.
-//! Signals are collected locally in the agent and periodically synced to the
-//! backend for analytics / telemetry persistence.
+//! Signals are collected by the session actor and persisted with the local
+//! session so recovery and diagnostic records use consistent counters.
 //!
 //! Uses a channel-based actor pattern to avoid locks:
 //! - `SessionSignalsHandle` is a cheap, cloneable sender for reporting signals
@@ -75,9 +74,9 @@ pub struct ToolDuration {
     pub duration_ms: u64,
 }
 
-/// How a PR creation was performed (shared with the `pr_created` telemetry
+/// How a PR creation was performed (shared with the `pr_created` diagnostics
 /// event so signal and event values can never diverge).
-pub use grow_telemetry::enums::PrCreationSource;
+pub use grow_diagnostics::enums::PrCreationSource;
 
 /// A PR created during a turn, recorded for PR metrics.
 ///
@@ -146,8 +145,6 @@ pub struct SessionSignalsDelta {
     pub delta_regenerations: i64,
     pub delta_compactions: i64,
     pub delta_edit_and_retries: i64,
-    pub delta_positive_ratings: i64,
-    pub delta_negative_ratings: i64,
     pub delta_assistant_messages: i64,
     pub delta_long_pauses: i64,
     pub delta_successful_tool_uses: i64,
@@ -211,7 +208,7 @@ pub struct SessionSignalsDelta {
 /// Session signals that inform feedback request heuristics.
 ///
 /// These signals are tracked locally in the agent and periodically synced
-/// to the backend for analytics / telemetry persistence.
+/// to the backend for analytics / diagnostics persistence.
 ///
 /// Field names are aligned with the backend analytics schema for session signals.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -313,38 +310,6 @@ pub struct SessionSignals {
     /// Configured idle timeout threshold (seconds) — set once at session start.
     #[serde(default)]
     pub inference_idle_timeout_configured_secs: Option<u64>,
-
-    // === GCS Upload Queue ===
-    /// Total items enqueued for background upload.
-    #[serde(default)]
-    pub gcs_queue_enqueued: u64,
-    /// Successful background uploads.
-    #[serde(default)]
-    pub gcs_queue_uploaded: u64,
-    /// Items that exhausted retry budget (superset of expired).
-    #[serde(default)]
-    pub gcs_queue_failed: u64,
-    /// Enqueue failures that fell back to inline upload.
-    #[serde(default)]
-    pub gcs_queue_fallbacks: u64,
-    /// Circuit breaker activations.
-    #[serde(default)]
-    pub gcs_queue_circuit_breaker_trips: u64,
-    /// Current queue depth (snapshot gauge).
-    #[serde(default)]
-    pub gcs_queue_pending: u64,
-    /// Current disk usage of queue temp dir in bytes (snapshot gauge).
-    #[serde(default)]
-    pub gcs_queue_pending_bytes: u64,
-    /// Orphaned temp files cleaned up at startup.
-    #[serde(default)]
-    pub gcs_queue_orphans_cleaned: u64,
-
-    // === Ratings ===
-    /// Number of positive ratings (thumbs-up / stars >= 4)
-    pub positive_ratings: u32,
-    /// Number of negative ratings (thumbs-down / stars <= 2)
-    pub negative_ratings: u32,
 
     // === Engagement ===
     /// Number of long pauses between turns (idle > 60 s)
@@ -491,25 +456,6 @@ pub enum SignalEvent {
         inference_idle_timeout_configured_secs: u64,
     },
 
-    /// Snapshot GCS upload queue stats into signals. The actor reads the atomics
-    /// once and stores plain u64 values — the Arc is not retained in actor state.
-    RecordGcsQueueSnapshot {
-        enqueued: u64,
-        uploaded: u64,
-        failed: u64,
-        fallbacks: u64,
-        circuit_breaker_trips: u64,
-        pending: u64,
-        pending_bytes: u64,
-        orphans_cleaned: u64,
-    },
-
-    // === Rating Events ===
-    /// Record a positive rating (thumbs-up / stars >= 4)
-    RecordPositiveRating,
-    /// Record a negative rating (thumbs-down / stars <= 2)
-    RecordNegativeRating,
-
     // === Context Events ===
     /// Record a compaction, including the token count before compaction.
     RecordCompaction { tokens_before: u64 },
@@ -586,8 +532,6 @@ pub enum SignalEvent {
     RestoreSignals(SessionSignals),
     /// Request a snapshot of current signals
     GetSnapshot(oneshot::Sender<SessionSignals>),
-    /// Check if sync is needed and mark as synced if so
-    CheckAndMarkSync(oneshot::Sender<bool>),
     /// Shutdown the actor
     Shutdown,
 }
@@ -666,7 +610,7 @@ impl SessionSignalsHandle {
         });
     }
 
-    /// Record a bare echo/printf command for telemetry.
+    /// Record a bare echo/printf command for diagnostics.
     /// Called from `execute_tool_calls` when `BashOutput.was_bare_echo` is true.
     /// Runs independently of doom loop detector config.
     pub fn record_bare_echo(&self) {
@@ -755,39 +699,9 @@ impl SessionSignalsHandle {
         });
     }
 
-    /// Snapshot GCS upload queue stats into signals.
-    ///
-    /// Reads the atomics from `UploadQueueStats` once and sends plain u64 values
-    /// to the actor — the Arc is NOT retained in the signal event.
-    pub fn snapshot_gcs_queue(&self, stats: &crate::save::UploadQueueStats) {
-        use std::sync::atomic::Ordering;
-        let _ = self.tx.send(SignalEvent::RecordGcsQueueSnapshot {
-            enqueued: stats.enqueued.load(Ordering::Relaxed),
-            uploaded: stats.uploaded.load(Ordering::Relaxed),
-            failed: stats.failed.load(Ordering::Relaxed),
-            fallbacks: stats.enqueue_fallbacks.load(Ordering::Relaxed),
-            circuit_breaker_trips: stats.circuit_breaker_trips.load(Ordering::Relaxed),
-            pending: stats.pending.load(Ordering::Relaxed),
-            pending_bytes: stats.pending_bytes.load(Ordering::Relaxed),
-            orphans_cleaned: 0,
-        });
-    }
-
     /// Mark that the user has reverted changes.
     pub fn mark_reverted(&self) {
         let _ = self.tx.send(SignalEvent::MarkReverted);
-    }
-
-    // === Rating Methods ===
-
-    /// Record a positive rating (thumbs-up / stars >= 4).
-    pub fn record_positive_rating(&self) {
-        let _ = self.tx.send(SignalEvent::RecordPositiveRating);
-    }
-
-    /// Record a negative rating (thumbs-down / stars <= 2).
-    pub fn record_negative_rating(&self) {
-        let _ = self.tx.send(SignalEvent::RecordNegativeRating);
     }
 
     // === Context Methods ===
@@ -944,18 +858,6 @@ impl SessionSignalsHandle {
         rx.await.unwrap_or_default()
     }
 
-    /// Check if sync should be performed and mark as synced.
-    ///
-    /// Returns true if sync should be performed (enough time has passed).
-    /// Automatically marks the sync time if returning true.
-    pub async fn check_and_mark_sync(&self) -> bool {
-        let (tx, rx) = oneshot::channel();
-        if self.tx.send(SignalEvent::CheckAndMarkSync(tx)).is_err() {
-            return false;
-        }
-        rx.await.unwrap_or(false)
-    }
-
     // === LOC Attribution Methods ===
 
     /// Record a LOC change from the LOC sink bridge.
@@ -1007,10 +909,6 @@ pub struct SessionSignalsActor {
     models_set: HashSet<String>,
     /// Session start time (for calculating duration)
     session_start: Instant,
-    /// Last sync timestamp
-    last_sync: Option<Instant>,
-    /// Minimum interval between syncs
-    sync_interval: Duration,
     /// Sum of all time-to-first-token values (for computing average)
     ttft_sum_ms: u64,
     /// Sum of all response time values (for computing average)
@@ -1066,7 +964,7 @@ pub struct SessionSignalsActor {
 }
 
 /// Fold `new` trigger labels into `current`, keeping the tightest
-/// (lowest-threshold) raw label overall. Labels only — telemetry-safe.
+/// (lowest-threshold) raw label overall. Labels only — diagnostics-safe.
 pub(crate) fn merge_tightest_trigger(current: Option<String>, new: &[String]) -> Option<String> {
     grow_sampling_types::doom_loop::DoomLoopSignal::tightest(
         current
@@ -1076,7 +974,7 @@ pub(crate) fn merge_tightest_trigger(current: Option<String>, new: &[String]) ->
     )
 }
 
-/// Telemetry-only per-turn doom-loop recovery tally, accumulated on the
+/// Diagnostic-only per-turn doom-loop recovery tally, accumulated on the
 /// session actor by the sampling-event drainer and taken at turn end for the
 /// per-turn analytics event. Never influences recovery behavior.
 #[derive(Debug, Default, Clone)]
@@ -1108,17 +1006,6 @@ impl SessionSignalsActor {
     /// Returns a tuple of (handle, actor). The actor must be spawned
     /// as a background task using `actor.run()`.
     pub fn new() -> (SessionSignalsHandle, Self) {
-        Self::with_sync_interval(Duration::from_secs(60))
-    }
-
-    /// Fold `triggers` into the session's tightest-observed trigger label.
-    fn merge_doom_loop_top_trigger(&mut self, triggers: &[String]) {
-        let current = self.signals.doom_loop_recovery_top_trigger.take();
-        self.signals.doom_loop_recovery_top_trigger = merge_tightest_trigger(current, triggers);
-    }
-
-    /// Create a new actor with a custom sync interval.
-    pub fn with_sync_interval(sync_interval: Duration) -> (SessionSignalsHandle, Self) {
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = SessionSignalsHandle { tx };
         let actor = Self {
@@ -1127,8 +1014,6 @@ impl SessionSignalsActor {
             tools_set: HashSet::new(),
             models_set: HashSet::new(),
             session_start: Instant::now(),
-            last_sync: None,
-            sync_interval,
             ttft_sum_ms: 0,
             response_time_sum_ms: 0,
             last_turn_time: None,
@@ -1150,6 +1035,12 @@ impl SessionSignalsActor {
             human_files_set: HashSet::new(),
         };
         (handle, actor)
+    }
+
+    /// Fold `triggers` into the session's tightest-observed trigger label.
+    fn merge_doom_loop_top_trigger(&mut self, triggers: &[String]) {
+        let current = self.signals.doom_loop_recovery_top_trigger.take();
+        self.signals.doom_loop_recovery_top_trigger = merge_tightest_trigger(current, triggers);
     }
 
     /// Run the actor, processing events until shutdown.
@@ -1199,26 +1090,6 @@ impl SessionSignalsActor {
                     self.signals.inference_idle_timeout_configured_secs =
                         Some(inference_idle_timeout_configured_secs);
                 }
-                SignalEvent::RecordGcsQueueSnapshot {
-                    enqueued,
-                    uploaded,
-                    failed,
-                    fallbacks,
-                    circuit_breaker_trips,
-                    pending,
-                    pending_bytes,
-                    orphans_cleaned,
-                } => {
-                    self.signals.gcs_queue_enqueued = enqueued;
-                    self.signals.gcs_queue_uploaded = uploaded;
-                    self.signals.gcs_queue_failed = failed;
-                    self.signals.gcs_queue_fallbacks = fallbacks;
-                    self.signals.gcs_queue_circuit_breaker_trips = circuit_breaker_trips;
-                    self.signals.gcs_queue_pending = pending;
-                    self.signals.gcs_queue_pending_bytes = pending_bytes;
-                    self.signals.gcs_queue_orphans_cleaned = orphans_cleaned;
-                }
-
                 // === Tool Events ===
                 SignalEvent::RecordToolCall(tool_name) => {
                     self.signals.tool_call_count += 1;
@@ -1291,14 +1162,6 @@ impl SessionSignalsActor {
                 }
                 SignalEvent::MarkReverted => {
                     self.signals.has_reverted = true;
-                }
-
-                // === Rating Events ===
-                SignalEvent::RecordPositiveRating => {
-                    self.signals.positive_ratings += 1;
-                }
-                SignalEvent::RecordNegativeRating => {
-                    self.signals.negative_ratings += 1;
                 }
 
                 // === Context Events ===
@@ -1457,10 +1320,6 @@ impl SessionSignalsActor {
                             - prev.map_or(0, |p| p.compaction_count as i64),
                         delta_edit_and_retries: self.signals.edit_and_retry_count as i64
                             - prev.map_or(0, |p| p.edit_and_retry_count as i64),
-                        delta_positive_ratings: self.signals.positive_ratings as i64
-                            - prev.map_or(0, |p| p.positive_ratings as i64),
-                        delta_negative_ratings: self.signals.negative_ratings as i64
-                            - prev.map_or(0, |p| p.negative_ratings as i64),
                         delta_assistant_messages: self.signals.assistant_message_count as i64
                             - prev.map_or(0, |p| p.assistant_message_count as i64),
                         delta_long_pauses: self.signals.long_pauses_count as i64
@@ -1716,19 +1575,6 @@ impl SessionSignalsActor {
 
                     let _ = respond_to.send(self.signals.clone());
                 }
-                SignalEvent::CheckAndMarkSync(respond_to) => {
-                    let should_sync = match self.last_sync {
-                        None => true,
-                        Some(last) => last.elapsed() >= self.sync_interval,
-                    };
-                    if should_sync {
-                        self.last_sync = Some(Instant::now());
-                        // Update duration on sync
-                        self.signals.session_duration_seconds =
-                            self.session_start.elapsed().as_secs();
-                    }
-                    let _ = respond_to.send(should_sync);
-                }
                 SignalEvent::Shutdown => {
                     break;
                 }
@@ -1830,7 +1676,7 @@ impl SessionSignalsActor {
     /// non-serializable TDigest couldn't be persisted), we preserve the
     /// existing `itl_p50_ms`/`itl_p99_ms` values — they may have been
     /// faithfully restored from a persisted snapshot.  Clearing them to
-    /// `None` would silently discard historical ITL telemetry.
+    /// `None` would silently discard historical ITL diagnostics.
     fn update_session_itl_percentiles(&mut self) {
         if let Some(digest) = &self.signals.itl_digest {
             self.signals.itl_p50_ms = Some(digest.estimate_quantile(0.50) as u64);
@@ -1851,12 +1697,7 @@ impl SessionSignalsActor {
 /// This is a convenience function that creates and spawns the actor
 /// in one step using `tokio::spawn`.
 pub fn spawn_signals_actor() -> SessionSignalsHandle {
-    spawn_signals_actor_with_interval(Duration::from_secs(30))
-}
-
-/// Spawn a new signals actor with a custom sync interval.
-pub fn spawn_signals_actor_with_interval(sync_interval: Duration) -> SessionSignalsHandle {
-    let (handle, actor) = SessionSignalsActor::with_sync_interval(sync_interval);
+    let (handle, actor) = SessionSignalsActor::new();
     tokio::spawn(actor.run());
     handle
 }
@@ -2087,27 +1928,6 @@ mod tests {
         let snapshot = handle.snapshot().await.unwrap();
         // Duration tracking works (u64 so always >= 0)
         assert!(snapshot.session_duration_seconds < 100); // Sanity check - not hours old
-
-        handle.shutdown();
-        actor_handle.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_check_and_mark_sync() {
-        let (handle, actor) = SessionSignalsActor::with_sync_interval(Duration::from_millis(50));
-        let actor_handle = tokio::spawn(actor.run());
-
-        // First sync should be allowed
-        assert!(handle.check_and_mark_sync().await);
-
-        // Immediate check should return false
-        assert!(!handle.check_and_mark_sync().await);
-
-        // Wait for sync interval
-        tokio::time::sleep(Duration::from_millis(60)).await;
-
-        // Now should be allowed again
-        assert!(handle.check_and_mark_sync().await);
 
         handle.shutdown();
         actor_handle.await.unwrap();
@@ -3018,36 +2838,6 @@ mod tests {
 
         let snap = handle.snapshot().await.unwrap();
         assert_eq!(snap.inference_idle_timeout_configured_secs, Some(300));
-
-        handle.shutdown();
-        actor_handle.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_gcs_queue_snapshot() {
-        let (handle, actor) = SessionSignalsActor::new();
-        let actor_handle = tokio::spawn(actor.run());
-
-        let _ = handle.tx.send(SignalEvent::RecordGcsQueueSnapshot {
-            enqueued: 50,
-            uploaded: 48,
-            failed: 1,
-            fallbacks: 1,
-            circuit_breaker_trips: 0,
-            pending: 3,
-            pending_bytes: 1_048_576,
-            orphans_cleaned: 5,
-        });
-
-        let snap = handle.snapshot().await.unwrap();
-        assert_eq!(snap.gcs_queue_enqueued, 50);
-        assert_eq!(snap.gcs_queue_uploaded, 48);
-        assert_eq!(snap.gcs_queue_failed, 1);
-        assert_eq!(snap.gcs_queue_fallbacks, 1);
-        assert_eq!(snap.gcs_queue_circuit_breaker_trips, 0);
-        assert_eq!(snap.gcs_queue_pending, 3);
-        assert_eq!(snap.gcs_queue_pending_bytes, 1_048_576);
-        assert_eq!(snap.gcs_queue_orphans_cleaned, 5);
 
         handle.shutdown();
         actor_handle.await.unwrap();

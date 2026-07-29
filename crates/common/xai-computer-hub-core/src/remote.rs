@@ -235,8 +235,6 @@ async fn dispatch_via_connection(
         deadline_ms: None,
         behavior_version,
         cwd,
-        // The ctx `TraceContext` extension is receive-side state.
-        trace_context: None,
     };
 
     let request = JsonRpcRequest {

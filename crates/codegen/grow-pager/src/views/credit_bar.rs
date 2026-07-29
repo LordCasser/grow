@@ -163,7 +163,7 @@ const PAY_AS_YOU_GO_CRITICAL_CENTS: i64 = 500;
 ///
 /// Gateway light-frontend (`kind: "chat"`) sessions must not surface Build
 /// coding-credit warnings — use [`usage_warning_for_session`] with
-/// `gateway_chat = true` so the prompt shows no fake local sampler telemetry.
+/// `gateway_chat = true` so the prompt shows no fake local sampler diagnostics.
 pub fn usage_warning(
     balance: &CreditBalance,
     autotopup: Option<&AutoTopupInfo>,
@@ -248,7 +248,7 @@ pub fn usage_warning_for_session(
 /// Gateway light-frontend (`kind: "chat"`) sessions must not show Build coding
 /// credits — use [`credit_bar_line_for_session`] with `gateway_chat = true`
 /// (returns `None`). remote settings / managed opt-in for chat entry can share the
-/// same gate later; for now it only zeros/suppresses misleading local telemetry.
+/// same gate later; for now it only zeros/suppresses misleading local diagnostics.
 pub fn credit_bar_line(balance: &CreditBalance, hovered: bool, theme: &Theme) -> Line<'static> {
     credit_bar_line_for_session(balance, hovered, theme, false)
         .expect("non-chat credit_bar_line always renders")

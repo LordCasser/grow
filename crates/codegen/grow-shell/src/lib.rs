@@ -8,7 +8,7 @@
 #[cfg(all(test, feature = "dhat-heap"))]
 #[global_allocator]
 static DHAT_ALLOC: dhat::Alloc = dhat::Alloc;
-pub(crate) use grow_telemetry::unified_log;
+pub(crate) use grow_diagnostics::unified_log;
 pub use xai_tracing_macros::{teprintln, timed, tprintln};
 pub mod active_sessions;
 pub mod agent;
@@ -31,7 +31,6 @@ pub mod leader;
 pub mod managed_config;
 pub mod mcp_doctor;
 pub use grow_models as models;
-pub use xai_file_utils::trace_context;
 pub mod plugin;
 pub mod relay;
 pub mod remote;
@@ -44,4 +43,3 @@ pub mod tier;
 pub mod tools;
 pub mod trace_classifier;
 pub mod util;
-pub mod save;

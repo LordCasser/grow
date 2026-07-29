@@ -60,9 +60,7 @@ pub use headless::{
 pub use inference_override::{InferenceEndpoint, InferenceExpectation, InferenceRequestMatcher};
 #[cfg(unix)]
 pub use leader::LeaderFixture;
-pub use mock_server::{
-    MockInferenceServer, MockModelEntry, ScriptedResponse, SseEvent, StorageUpload,
-};
+pub use mock_server::{MockInferenceServer, MockModelEntry, ScriptedResponse, SseEvent};
 #[cfg(unix)]
 pub use process::process_has_exited_without_reap;
 pub use process::{
