@@ -128,14 +128,6 @@ fn apply_yolo_mode_to_matching_sessions(
     }
     updated
 }
-/// Marks a notification's meta field with `isReplay: true` for replayed session updates.
-/// If `persist_data` is provided, it will be included in the meta under `grow/persist`.
-/// Extract the numeric `tier` claim from a JWT access token (no signature
-/// verification). Maps the `prod_auth.SubscriptionTier` proto enum values
-/// to display-style strings that `normalize_tier` in the diagnostics crate
-fn parse_session_computer_sessions(_meta: Option<&acp::Meta>) -> Option<Vec<()>> {
-    None
-}
 pub(crate) struct SessionSpawnOptions<'a> {
     pub session_info: SessionInfo,
     pub cwd: AbsPathBuf,

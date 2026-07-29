@@ -888,10 +888,6 @@ impl acp::Agent for MvpAgent {
             .as_ref()
             .and_then(|m| m.get("modelId").and_then(|v| v.as_str()))
             .filter(|s| !s.is_empty());
-        #[allow(unused_variables)]
-        let session_computer_sessions = parse_session_computer_sessions(
-            arguments.meta.as_ref(),
-        );
         let session_yolo_mode = arguments
             .meta
             .as_ref()
@@ -1372,10 +1368,6 @@ impl acp::Agent for MvpAgent {
             request_meta.as_ref(),
             self.default_auto_mode,
             session_yolo_mode,
-        );
-        #[allow(unused_variables)]
-        let session_computer_sessions = parse_session_computer_sessions(
-            request_meta.as_ref(),
         );
         let restore_code_requested = request_meta
             .as_ref()
