@@ -27,9 +27,10 @@ Location: `~/.grow/config.toml`. If the file is missing, Grow uses its built-in 
 auto_update = true                     # check for updates on launch
 
 [models]
-default = "grow-4.5"                   # model used for new sessions
+default = "example/model-a"           # provider/model used for new sessions
+default_reasoning_effort = "high"     # only used when the model declares this effort
 
-# Defaults applied to every model; a per-model [model.<id>] value always wins.
+# Defaults applied to every model; a provider model value always wins.
 # See "Custom Models" for the per-model overrides and full details.
 extra_headers = { "X-Request-Tags" = "team=example,env=prod" }
 temperature = 0.7
@@ -60,14 +61,14 @@ screen_mode = "fullscreen"             # default render mode: "fullscreen" | "mi
                                        # (unset → fullscreen); set via /settings → Default screen mode
 
 [features]
-diagnostics = false                      # anonymous usage diagnostics
-feedback = true                        # feedback system (default: true)
 lsp_tools = false                      # expose the lsp tool
 codebase_indexing = true               # code graph indexing (default: true)
 two_pass_compaction = false            # prefire two-pass compaction (default: false, opt-in)
-remote_fetch = true                    # allow optional online model-catalog fetches (default: true;
-                                       # set false for firewalled/air-gapped deployments; background
-                                       # managed-config sync has its own switch: managed_config)
+remote_fetch = false                   # disable optional catalog/settings fetches; explicit BYOK
+                                       # provider requests are unaffected
+
+[diagnostics]
+crash_handler = true                   # local crash capture; Grow has no telemetry exporter
 
 [session]
 auto_compact_threshold_percent = 85    # auto-compact at this % of context window (default: 85)
@@ -204,7 +205,7 @@ timeout_secs = 1800                    # seconds to wait when enabled (default: 
 
 [toolset.web_fetch]
 proxy_endpoint = "https://proxy.example.com"   # egress proxy URL
-allowed_domains = ["docs.rs", "x.ai"]          # override the built-in allowlist
+allowed_domains = ["docs.rs", "example.com"]   # override the built-in allowlist
 allow_local = false                            # true = allow localhost / 127.0.0.0/8 / ::1 only
 ```
 
@@ -214,49 +215,46 @@ allow_local = false                            # true = allow localhost / 127.0.
 
 ### Authentication
 
-See [Authentication](02-authentication.md) for the full story.
+Credentials are provider-scoped. Prefer an environment variable declared by `env_key`; use
+`api_key` only when storing a secret in TOML is acceptable. OAuth and credential helpers are
+optional provider mechanisms, not a global Grow login requirement. See
+[Authentication](02-authentication.md) for the full story.
 
 ```toml
-[auth]
-auth_provider_command = "/usr/local/bin/my-auth-provider"
-auth_provider_label = "Acme Corp"
-auth_token_ttl = 3600
-
-[auth.oidc]
-issuer = "https://acme.okta.com"
-client_id = "0oa1b2c3d4e5f6g7h8i9"
-# scopes = ["openid", "profile", "email", "offline_access", "api:access"]
-# audience = "https://api.acme.com"
+[provider.example.options]
+base_url = "https://api.example.com/v1"
+env_key = "EXAMPLE_API_KEY"
 ```
 
 ### Custom models
 
-Add custom model endpoints to use alternative providers or self-hosted models.
+Every selectable model belongs to an explicit provider. The provider chooses the wire backend and
+owns shared endpoint/credential options; each model owns its API identifier and local limits.
 
 ```toml
-[model.my-model]
-model = "model-id"                    # model identifier sent to API
-base_url = "https://api.example.com/v1"  # OpenAI-compatible endpoint
-name = "Display Name"                 # shown in model picker
-description = "Model description"      # optional
-api_key = "sk-..."                    # API key for this provider
-env_key = "GROW_API_KEY"               # env var(s) holding the API key; string or array (first set, non-empty wins)
-temperature = 0.7                     # sampling temperature (0.0-2.0)
-top_p = 0.95                          # nucleus sampling parameter
-output_limit = 8192          # max tokens per response
-context_window = 128000               # context window size (for auto-compact)
-query_params = { api-version = "2026-07-22" } # query params appended to every request URL
-env_http_headers = { "X-Tenant" = "TENANT_TOKEN" }    # request headers from env vars, resolved at client build
+[models]
+default = "example/model-a"
+output_limit = 8192
+
+[provider.example]
+api_backend = "responses"             # chat_completions | responses | messages
+
+[provider.example.options]
+base_url = "https://api.example.com/v1"
+env_key = "EXAMPLE_API_KEY"           # string or ordered array of env-var names
+query_params = { api-version = "2026-07-22" }
+env_http_headers = { "X-Tenant" = "TENANT_TOKEN" }
+
+[provider.example.models.model-a]
+name = "Model A"
+context_window = 128000                # local context management / auto-compact
+output_limit = 16384                   # overrides [models].output_limit
+reasoning_efforts = ["none", "high"]
 ```
 
-Credential resolution: `api_key` > `env_key` > signed-in session token > `GROW_API_KEY`. See [Custom Models](11-custom-models.md#request-query-parameters) for `query_params` and `env_http_headers`, and [Sandbox Mode](18-sandbox.md#shell-environment-policy) for `[shell_environment_policy]`, which restricts the environment variables tool subprocesses inherit.
-
-To override a built-in model, use its name as the section key and set only the fields you need:
-
-```toml
-[model.grow-build]
-api_key = "my-api-key"
-```
+There is no built-in model to override. `output_limit` maps to `max_tokens` for Chat Completions and
+Messages, and `max_output_tokens` for Responses. See [Custom Models](11-custom-models.md) and the
+repository's [`config.example.toml`](../../../../../config.example.toml) for complete examples.
 
 ### MCP servers
 

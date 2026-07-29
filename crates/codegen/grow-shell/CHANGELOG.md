@@ -1,5 +1,30 @@
 # Changelog
 
+# 1.0.0 — 2026-07-30
+
+## Breaking Changes
+
+- **Grow is provider-neutral and BYOK-first.** No Grok model, inference endpoint, credential, billing path, or xAI product service is built in.
+- **Configuration uses explicit providers.** Models live under `[provider.<id>.models]`; new sessions use `[models].default`, while restored sessions keep their last model and reasoning effort.
+- **Distribution is GitHub Release only.** The supported targets are macOS arm64, Linux arm64, and Linux amd64.
+
+## Features
+
+- **Multi-provider model selection** supports Chat Completions, Responses, and Messages backends, provider-scoped API keys or OAuth, model-specific reasoning efforts, and backend-neutral `output_limit`.
+- **Agent selection** loads user Agents and Skills from `~/.config/.grow` with `~/.agent` fallback and keeps Agent definitions independent from provider and model selection.
+- **Local announcements and diagnostics** retain the existing TUI surfaces without remote delivery or telemetry exporters.
+- **Replaceable integrations** allow users to configure marketplace sources and MCP servers, including MCP-provided Web Search.
+
+## Removed Product Features
+
+- Telemetry upload, remote trace storage, billing, credits, subscriptions, upsells, hosted Web Search, remote conversations, remote announcements, computer-hub remote connections, voice, and image/video generation.
+- xAI-bound plugin marketplace registration, product announcements, and Grok-specific protocol identifiers.
+
+## Build and Release
+
+- All `grow-*` workspace crates now inherit version `1.0.0` from the workspace package metadata.
+- Release builds embed a verified ripgrep binary and are published with checksums by the GitHub release workflow.
+
 # 0.2.112 — 2026-07-24
 
 ## Breaking Changes

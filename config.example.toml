@@ -1,0 +1,85 @@
+# Grow 1.0.0 example configuration
+# Copy this file to ~/.grow/config.toml and set the referenced environment
+# variables before starting Grow. No provider or model is built in.
+
+[cli]
+auto_update = false
+
+[ui]
+permission_mode = "ask" # ask | auto | always-approve
+max_thoughts_width = 120
+show_thinking_blocks = true
+
+[models]
+# New sessions start with this provider/model pair. Existing sessions restore
+# the model and reasoning effort that were active when they last exited.
+default = "deepseek/deepseek-chat"
+default_reasoning_effort = "high"
+output_limit = 65536
+
+[provider.deepseek]
+# chat_completions -> /chat/completions
+# responses        -> /responses
+# messages         -> /messages
+api_backend = "chat_completions"
+
+[provider.deepseek.options]
+base_url = "https://api.deepseek.com/v1"
+# The value is an environment-variable name, not the API key itself.
+env_key = "DEEPSEEK_API_KEY"
+# For local-only experiments you may use: api_key = "sk-..."
+
+[provider.deepseek.models.deepseek-chat]
+name = "DeepSeek Chat"
+context_window = 128000
+# A model-level value overrides [models].output_limit.
+output_limit = 65536
+
+[[provider.deepseek.models.deepseek-chat.reasoning_efforts]]
+value = "high"
+label = "High"
+default = true
+
+[[provider.deepseek.models.deepseek-chat.reasoning_efforts]]
+value = "max"
+label = "Max"
+
+# Add more providers beside the first one. Ctrl+X then m, or /model, only
+# shows models declared in this file.
+[provider.local]
+api_backend = "chat_completions"
+
+[provider.local.options]
+base_url = "http://127.0.0.1:11434/v1"
+
+[provider.local.models.qwen3-coder]
+name = "Qwen3 Coder (local)"
+context_window = 131072
+output_limit = 16384
+
+# Grow does not download announcements. This local array completely replaces
+# the built-in default announcement; use `announcements = []` at the top level
+# instead if you want no announcements.
+[[announcements]]
+id = "team-notice"
+title = "Grow"
+message = "Local configuration is active."
+severity = "info"
+dismissible = true
+persistent = false
+
+# Grow has no built-in or xAI-bound marketplace. A bootstrap source is optional
+# and fully replaceable.
+[marketplace.bootstrap]
+name = "My Marketplace"
+git = "https://github.com/example/plugin-marketplace.git"
+branch = "main"
+
+# Web Search is intentionally not built in. Configure any MCP server that
+# exposes search tools; Grow does not require a fixed server or tool name.
+[mcp_servers.web-search]
+command = "/absolute/path/to/search-mcp-server"
+args = []
+enabled = false
+startup_timeout_sec = 30
+tool_timeout_sec = 600

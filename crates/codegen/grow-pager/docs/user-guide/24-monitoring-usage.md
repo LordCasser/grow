@@ -18,6 +18,7 @@ permissions, MCP lifecycle, compaction, goals, subagents, and authentication
 errors. Event payloads remain on the local machine and follow the same file
 permissions and retention policy as the selected log file.
 
-Grow intentionally has no `[telemetry]`, `[diagnostics]`, webhook, OTLP, or
-upload configuration. Forwarding a local log elsewhere is an operator-owned
-action outside Grow.
+Grow intentionally has no `[telemetry]`, webhook, OTLP, or upload configuration.
+The optional `[diagnostics] crash_handler = true` setting only enables local crash
+capture; it does not add a network sink. Forwarding a local log elsewhere is an
+operator-owned action outside Grow.

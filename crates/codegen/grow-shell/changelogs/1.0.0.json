@@ -1,0 +1,32 @@
+[
+  {
+    "category": "breaking",
+    "description": "**Grow is provider-neutral and BYOK-first.** Grok models, inference endpoints, product credentials, billing paths, and xAI services are no longer built in.",
+    "breaking_change": true
+  },
+  {
+    "category": "breaking",
+    "description": "**Models use explicit provider configuration.** New sessions follow `[models].default`; restored sessions keep their last model and reasoning effort.",
+    "breaking_change": true
+  },
+  {
+    "category": "features",
+    "description": "**Multi-provider inference** supports Chat Completions, Responses, and Messages backends with provider-scoped credentials, reasoning efforts, and `output_limit`.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Agent and Skill discovery** prefers `~/.config/.grow` and falls back to `~/.agent`, while Agents remain independent from provider and model selection.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Local-only product surfaces** retain announcements, diagnostics, sessions, marketplaces, and MCP integrations without remote delivery or telemetry upload.",
+    "breaking_change": false
+  },
+  {
+    "category": "breaking",
+    "description": "**GitHub Release is the only distribution channel.** Grow 1.0.0 supports macOS arm64, Linux arm64, and Linux amd64.",
+    "breaking_change": true
+  }
+]

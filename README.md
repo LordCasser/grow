@@ -28,6 +28,25 @@ Grow 不是 xAI 官方产品，也不内置 Grok 模型、推理端点或推理�
 Grow 的 ACP 扩展协议使用 `grow/*`（转发层使用 `_grow/*`）。上游名称只保留在来源说明、
 许可证和历史 changelog 中，不再作为运行时服务或协议命名。
 
+## 1.0.0 里程碑
+
+`1.0.0` 是 Grow 脱离 Grok 产品运行时后的第一个里程碑版本。所有 `grow-*` crate 共享同一
+workspace 版本，发布 tag 必须使用 `v1.0.0` 并与 `grow-pager-bin` 的 Cargo 版本严格一致。
+
+这个里程碑明确收敛到代码和计算机任务：BYOK、多 Provider、Agent/Skill、MCP、LSP、Shell、
+文件工具、browser/computer、视觉输入和本地 Session 是核心能力；遥测上传、计费/订阅、托管
+Web Search、远程会话同步、远程公告以及图片/视频生成不属于 Grow 1.0.0。诊断信息只落到本地，
+Web Search 由用户配置 MCP Server 提供。
+
+准备 release 时：
+
+1. 确认 `cargo metadata --locked --no-deps` 中所有 `grow-*` 包均为 `1.0.0`。
+2. 按本文的 release 构建方式验证三个支持目标，并确认产物内嵌 `rg`。
+3. 创建并发布 `v1.0.0` GitHub Release；workflow 会校验 tag、构建资产并生成 `SHA256SUMS`。
+
+完整可复制配置见 [config.example.toml](config.example.toml)。示例不包含真实密钥，默认通过
+`env_key` 读取环境变量。
+
 ## 网络边界
 
 Grow 没有内置的 xAI/Grok 服务端点、OAuth issuer 或 OAuth client。未在本地显式开启
@@ -44,7 +63,7 @@ Grow 会像发现其他 MCP 工具一样发现它，不要求固定的服务器�
 - `grow/*` 与 `_grow/*` 是本地 ACP wire protocol，不表示任何外部服务。
 
 Grow 不包含遥测、产品分析、Sentry、OTLP exporter 或 trace upload。诊断事件只写入用户指定
-的本地日志；详见用户指南的 Local Diagnostics 章节。
+的本地日志；详见 [Local Diagnostics](crates/codegen/grow-pager/docs/user-guide/24-monitoring-usage.md)。
 
 ## 配置 LLM（BYOK）
 
@@ -80,6 +99,8 @@ Grow 不设置可选的输出限制。`context_window` 只用于本地上下文�
 `chat_completions`/`messages` 使用 `max_tokens`，`responses` 使用 `max_output_tokens`。
 完整字段和 session 继承规则见
 [LLM Providers and BYOK](crates/codegen/grow-pager/docs/user-guide/11-custom-models.md)。
+多 Provider、模型思考强度、本地公告、可替换 marketplace 和 MCP Web Search 的组合示例见
+[config.example.toml](config.example.toml)。
 
 ### 配置模型思考强度
 
