@@ -699,7 +699,7 @@ impl AgentView {
             let cancel_with_draft =
                 matches!(action_id, ActionId::CancelTurn) && !self.prompt.text().is_empty();
             if !cancel_with_draft {
-                let outcome = self.handle_agent_action_with_registry(action_id, registry);
+                let outcome = self.handle_agent_action(action_id);
                 // Only consume the key if the agent action actually did
                 // something. When idle, runtime-guarded actions like
                 // CancelTurn return Unchanged so the key can fall through

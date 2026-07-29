@@ -140,7 +140,6 @@ Actions that affect the agent session, available from the agent screen.
 | `!` | Prompt focused | Enter shell mode (type `!` on an empty prompt) |
 | `Ctrl+X`, then `M` | Agent screen | Open the configured-model picker |
 | `Ctrl+X`, then `A` | Agent screen | Open the enabled-Agent picker |
-| `Ctrl+.` / `/?` fallback | Agent screen | Open the keyboard shortcuts help |
 | `F2` (alt: `Ctrl+,` / `Cmd+,`) | Agent screen | Open the settings modal |
 
 **Note:** `Ctrl+X` is a two-key leader with a two-second timeout. An unknown continuation cancels the leader and is consumed. `/model` and `/agents` remain available.
@@ -153,7 +152,7 @@ session unchanged and shows a short explanation. `/effort` remains available for
 
 **Note:** `Ctrl+'` is a Windows alt for `Ctrl+;` — some Windows consoles drop the `Ctrl` modifier on punctuation keys.
 
-**Note:** `Ctrl+.` needs the Kitty keyboard protocol (or tmux `extended-keys on` so that protocol can pass through). Grow displays `/?` when the terminal cannot deliver `Ctrl+.`; `/shortcuts` is its longer equivalent, and the command palette also exposes **Keyboard shortcuts**. Run `/doctor` if modified keys misbehave in tmux.
+Run `/shortcuts` to open the keyboard shortcuts help. It closes with `Esc`.
 
 ---
 

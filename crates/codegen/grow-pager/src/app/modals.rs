@@ -97,18 +97,7 @@ impl AgentView {
     ///
     /// Matches the pressed character against the modal's options and resolves
     /// the result. All non-matching keys are consumed (blocked).
-    #[cfg(test)]
     pub(super) fn handle_modal_key(&mut self, key: &KeyEvent) -> InputOutcome {
-        let registry = crate::actions::ActionRegistry::defaults();
-        self.handle_modal_key_with_registry(key, &registry)
-    }
-
-    /// Handle modal input using the live action registry that dispatched it.
-    pub(super) fn handle_modal_key_with_registry(
-        &mut self,
-        key: &KeyEvent,
-        registry: &crate::actions::ActionRegistry,
-    ) -> InputOutcome {
         use crate::views::modal::ActiveModal;
         use crate::views::modal_window::{self as mw, ModalWindowOutcome};
 
@@ -178,7 +167,7 @@ impl AgentView {
                         return self.handle_doc_input(&ev);
                     }
                     let ev = crossterm::event::Event::Key(*key);
-                    return self.handle_palette_or_arg_input_with_registry(&ev, registry);
+                    return self.handle_palette_or_arg_input(&ev);
                 }
                 ModalWindowOutcome::Unhandled => {
                     // Non-Esc key (including Left/Right/h/l):
@@ -188,7 +177,7 @@ impl AgentView {
                         return self.handle_doc_input(&ev);
                     }
                     let ev = crossterm::event::Event::Key(*key);
-                    return self.handle_palette_or_arg_input_with_registry(&ev, registry);
+                    return self.handle_palette_or_arg_input(&ev);
                 }
                 _ => return InputOutcome::Changed,
             }
@@ -488,11 +477,7 @@ impl AgentView {
         }
     }
 
-    pub(super) fn handle_modal_paste(
-        &mut self,
-        text: &str,
-        registry: &crate::actions::ActionRegistry,
-    ) -> InputOutcome {
+    pub(super) fn handle_modal_paste(&mut self, text: &str) -> InputOutcome {
         use crate::views::modal::ActiveModal;
 
         let event = crossterm::event::Event::Paste(text.to_owned());
@@ -507,7 +492,7 @@ impl AgentView {
                     | ActiveModal::SessionPicker { .. }
             )
         ) {
-            return self.handle_palette_or_arg_input_with_registry(&event, registry);
+            return self.handle_palette_or_arg_input(&event);
         }
 
         if let Some(ActiveModal::ShortcutsHelp { state, mode, .. }) = self.active_modal.as_mut() {
@@ -686,17 +671,7 @@ impl AgentView {
     }
 
     /// Unified input handler for command palette and arg picker modals.
-    #[cfg(test)]
     fn handle_palette_or_arg_input(&mut self, ev: &crossterm::event::Event) -> InputOutcome {
-        let registry = crate::actions::ActionRegistry::defaults();
-        self.handle_palette_or_arg_input_with_registry(ev, &registry)
-    }
-
-    fn handle_palette_or_arg_input_with_registry(
-        &mut self,
-        ev: &crossterm::event::Event,
-        registry: &crate::actions::ActionRegistry,
-    ) -> InputOutcome {
         use crate::views::modal::{ActiveModal, PaletteCommand};
         use crate::views::picker::{PickerConfig, PickerOutcome, handle_picker_input};
 
@@ -794,7 +769,6 @@ impl AgentView {
                                     Some(crate::views::modal::howto_list_modal(prev));
                                 InputOutcome::Changed
                             }
-                            PaletteCommand::KeyboardShortcuts => self.open_shortcuts_help(registry),
                             PaletteCommand::Memory => {
                                 self.active_modal = None;
                                 InputOutcome::Action(Action::OpenMemoryModal)
@@ -1368,10 +1342,9 @@ impl AgentView {
     ///
     /// Click on a button → same as pressing that key.
     /// Hover → update `modal_hovered_key` for highlight.
-    pub(super) fn handle_modal_mouse_with_registry(
+    pub(super) fn handle_modal_mouse(
         &mut self,
         mouse: &crossterm::event::MouseEvent,
-        registry: &crate::actions::ActionRegistry,
     ) -> InputOutcome {
         use crate::views::modal::ActiveModal;
         use crate::views::modal_window::{self as mw, ModalWindowOutcome};
@@ -1521,7 +1494,7 @@ impl AgentView {
                         };
                     }
                     let ev = crossterm::event::Event::Mouse(*mouse);
-                    return self.handle_palette_or_arg_input_with_registry(&ev, registry);
+                    return self.handle_palette_or_arg_input(&ev);
                 }
                 _ => return InputOutcome::Changed,
             }
@@ -1620,7 +1593,7 @@ impl AgentView {
                 for btn in &self.modal_buttons {
                     if btn.rect.contains((mouse.column, mouse.row).into()) {
                         let key = KeyEvent::new(KeyCode::Char(btn.key), KeyModifiers::NONE);
-                        return self.handle_modal_key_with_registry(&key, registry);
+                        return self.handle_modal_key(&key);
                     }
                 }
                 InputOutcome::Changed
@@ -2769,64 +2742,6 @@ mod command_palette_vim_input_tests {
     }
 
     #[test]
-    fn minimal_palette_shortcuts_uses_live_configured_registry() {
-        let mut agent = make_agent();
-        agent
-            .prompt
-            .set_screen_mode(crate::app::ScreenMode::Minimal);
-        agent.active_modal = Some(ActiveModal::CommandPalette {
-            entries: crate::views::modal::default_palette_entries(
-                agent.sharing_enabled,
-                crate::app::ScreenMode::Minimal,
-            ),
-            state: {
-                let mut state = PickerState::input_active();
-                state.set_query("keyboard shortcuts");
-                state.selected = 1; // matching section header is row 0
-                state
-            },
-            window: crate::views::modal_window::ModalWindowState::new(),
-        });
-        // Start from the real minimal set, then inject the existing config-gated
-        // action in a supported context. This pins that modal dispatch preserves
-        // the exact live registry rather than reconstructing any defaults.
-        let mut actions =
-            crate::actions::ActionRegistry::defaults_for(crate::app::ScreenMode::Minimal)
-                .all()
-                .to_vec();
-        let mut config_gated = crate::actions::ActionRegistry::defaults_with_config(true)
-            .find(crate::actions::ActionId::ToggleMouseCapture)
-            .expect("config-gated action")
-            .clone();
-        config_gated.context = crate::actions::When::AgentScreen;
-        actions.push(config_gated);
-        let registry = crate::actions::ActionRegistry::new(actions);
-        let out = agent.handle_modal_key_with_registry(
-            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &registry,
-        );
-        assert!(matches!(out, InputOutcome::Changed));
-
-        let Some(ActiveModal::ShortcutsHelp { entries, .. }) = &agent.active_modal else {
-            panic!("expected shortcuts help modal");
-        };
-        let action_ids: Vec<_> = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                crate::views::shortcuts_help::ShortcutsHelpEntry::Hint {
-                    action_id: Some(id),
-                    ..
-                } => Some(*id),
-                _ => None,
-            })
-            .collect();
-        assert!(action_ids.contains(&crate::actions::ActionId::EditPromptExternal));
-        assert!(!action_ids.contains(&crate::actions::ActionId::ToggleTasks));
-        assert!(action_ids.contains(&crate::actions::ActionId::ToggleMouseCapture));
-        assert!(!action_ids.contains(&crate::actions::ActionId::OpenDashboard));
-    }
-
-    #[test]
     fn minimal_edit_prompt_palette_selection_preserves_draft() {
         let mut agent = make_agent();
         agent
@@ -2983,7 +2898,6 @@ mod command_palette_vim_input_tests {
         assert_eq!(agent.prompt.text(), "hidden prompt");
         crate::appearance::cache::set_vim_mode(false);
     }
-
 }
 
 #[cfg(test)]

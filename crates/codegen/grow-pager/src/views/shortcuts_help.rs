@@ -1,4 +1,4 @@
-//! All-shortcuts cheatsheet modal (Ctrl+. / `/?` fallback).
+//! All-shortcuts cheatsheet modal opened by `/shortcuts`.
 //!
 //! Registry-driven: `build_entries(registry)` pulls every `ActionDef` from
 //! `ActionRegistry`, groups them by `Category` in onboarding-friendly order
@@ -9,7 +9,7 @@
 //! Two ways to read a binding's help: pattern A expands an inline help line under
 //! the selected hint (e/Space/l/h/arrows); pattern B opens an in-modal man-style
 //! detail page on Enter, where Esc (or h/Left/Backspace) returns to the browse list.
-//! Section headers collapse/expand; close via Esc in browse or `Ctrl+.`.
+//! Section headers collapse/expand; close via Esc in browse.
 //! Rendered via `ModalWindow` chrome (same appearance as the command palette).
 //!
 //! Entry points from `AgentView`:
@@ -502,7 +502,7 @@ fn picker_config(non_sel: &[bool]) -> PickerConfig<'_> {
 /// modal, re-dispatching a synthesized key into `handle_input`, etc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutsHelpOutcome {
-    /// User asked to close the modal (Esc in browse, Ctrl+., [x] click).
+    /// User asked to close the modal (Esc in browse or [x] click).
     Close,
     /// Toggle the filter (show all vs hide dimmed).
     ToggleFilter,
@@ -611,11 +611,7 @@ pub fn modal_footer_detail() -> Vec<crate::views::modal_window::Shortcut<'static
             id: 0,
         },
         Shortcut {
-            label: if crate::actions::ctrl_dot_unreliable() {
-                "Esc Esc close"
-            } else {
-                "Ctrl+. close"
-            },
+            label: "Esc Esc close",
             clickable: false,
             id: 0,
         },
@@ -796,10 +792,6 @@ pub fn handle_input(
     mode: &mut ShortcutsHelpMode,
 ) -> ShortcutsHelpOutcome {
     use crossterm::event::{Event, KeyCode};
-
-    if crate::input::key::is_ctrl_dot(key) {
-        return ShortcutsHelpOutcome::Close;
-    }
 
     if mode.is_detail() {
         // Back-to-browse keys handled before borrowing `scroll` so we can replace `mode`.
@@ -1359,8 +1351,7 @@ pub fn render_modal(
 /// chrome + picker pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalKeyOutcome {
-    /// User asked to close the modal (Esc in browse, Ctrl+.,
-    /// or the close chrome button).
+    /// User asked to close the modal (Esc in browse or the close chrome button).
     Close,
     /// `f` was pressed — caller should flip `filter_active`.
     ToggleFilter,
@@ -2572,35 +2563,6 @@ mod tests {
         }
     }
 
-    /// `detail_from_entry` surfaces the action's `long_help` as the detail body
-    /// (not the description), proving the populated copy reaches the screen.
-    #[test]
-    fn detail_from_entry_uses_long_help_for_body() {
-        let registry = ActionRegistry::defaults();
-        let def = registry
-            .find(ActionId::ShortcutsHelp)
-            .expect("ShortcutsHelp is registered");
-        let expected = def.long_help.expect("ShortcutsHelp has long_help");
-        let entries = build_entries(&all_contexts(), &registry, true);
-        let entry = entries
-            .iter()
-            .find(|e| hint_expand_action_id(e) == Some(ActionId::ShortcutsHelp))
-            .expect("ShortcutsHelp row is present");
-        let ShortcutsHelpMode::Detail { body, .. } =
-            detail_from_entry(entry).expect("registry hint yields a detail")
-        else {
-            panic!("expected Detail mode");
-        };
-        assert_eq!(
-            body, expected,
-            "detail body must surface the action's long_help"
-        );
-        assert_ne!(
-            body, def.description,
-            "detail body must be the long_help, not the description"
-        );
-    }
-
     /// Scroll clamp counts WRAPPED rows: a body that wraps well past the viewport
     /// can scroll to its last wrapped row (a logical-line clamp could not reach it).
     #[test]
@@ -2922,33 +2884,6 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_dot_closes_from_detail_mode() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let mut mode = ShortcutsHelpMode::Detail {
-            title: "Send".into(),
-            keys_line: "Enter".into(),
-            body: "body".into(),
-            dimmed_note: false,
-            scroll: 3,
-        };
-        let entries: Vec<ShortcutsHelpEntry> = vec![];
-        let mut state = PickerState::default();
-        let key = KeyEvent::new(KeyCode::Char('.'), KeyModifiers::CONTROL);
-        let result = handle_input(
-            &key,
-            &entries,
-            &mut state,
-            false,
-            &no_collapsed(),
-            &no_expanded(),
-            &mut mode,
-        );
-        assert_eq!(result, ShortcutsHelpOutcome::Close);
-        // mode is unchanged by handle_input; caller clears the modal.
-        assert!(mode.is_detail());
-    }
-
-    #[test]
     fn f1_is_not_a_shortcuts_close_key() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let entries = vec![header("Nav", 0, 1), hint("send", key!(Enter))];
@@ -3231,20 +3166,6 @@ mod tests {
     fn build_entries_sets_action_id_on_registry_hints() {
         let registry = ActionRegistry::defaults();
         let entries = build_entries(&all_contexts(), &registry, true);
-        let shortcuts_id = entries.iter().find_map(|e| match e {
-            ShortcutsHelpEntry::Hint {
-                item,
-                action_id: Some(id),
-                ..
-            } if item.description.as_deref() == Some("Keyboard shortcuts") => Some(*id),
-            _ => None,
-        });
-        assert_eq!(
-            shortcuts_id,
-            Some(ActionId::ShortcutsHelp),
-            "registry-backed hints must carry their ActionId for expand/detail"
-        );
-
         // Registry rows carry ActionId; known display-only rows stay action-less.
         let search_key = key!('/');
         let paste_key = key!('v', CONTROL);

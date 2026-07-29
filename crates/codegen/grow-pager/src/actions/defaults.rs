@@ -7,21 +7,6 @@ use crate::terminal::{TerminalName, terminal_context};
 
 use super::{ActionDef, ActionId, Category, When};
 
-/// True when `Ctrl+.` cannot be delivered reliably by the active terminal.
-///
-/// The agent screen advertises the `/?` command in these environments; the
-/// dashboard promotes its always-deliverable `?` alternate. `Ctrl+.` remains
-/// registered so a terminal that can deliver it despite conservative detection
-/// still works.
-///
-/// Driven by [`crate::terminal::TerminalContext::ctrl_dot_unreliable`]
-/// (any KKP skip — brand, tmux `extended-keys off`, screen, unknown host),
-/// plus host-OS signals: native Windows on a non-branded console, or a
-/// Linux binary inside Win32's console pipeline (WSL).
-pub fn ctrl_dot_unreliable() -> bool {
-    terminal_context().ctrl_dot_unreliable() || cfg!(target_os = "windows") || crate::host::is_wsl()
-}
-
 /// Choose the one agent-screen action that owns Ctrl+G for this mode.
 fn mode_ctrl_g_action(screen_mode: crate::app::ScreenMode) -> ActionDef {
     if screen_mode.is_minimal() {
@@ -73,7 +58,6 @@ pub(super) fn default_actions(
     let in_vscode_family = ctx.brand.is_vscode_family();
     let in_vscode = in_vscode_family;
     let in_apple_terminal = ctx.brand == TerminalName::AppleTerminal;
-    let ctrl_dot_unreliable = ctrl_dot_unreliable();
     let send_to_background_help = if screen_mode.is_minimal() {
         "Detaches the running foreground Execute so it keeps working in the background while you read, queue prompts, or start something else.\nTrack background work with /tasks.\nOnly meaningful while a foreground Execute is actually running."
     } else {
@@ -776,25 +760,6 @@ pub(super) fn default_actions(
             ),
         },
         ActionDef {
-            id: ActionId::ShortcutsHelp,
-            label: "shortcuts",
-            description: "Keyboard shortcuts",
-            default_key: key!('.', CONTROL),
-            alt_keys: vec![],
-            category: Category::GettingStarted,
-            context: When::AgentScreen,
-            hint_priority: None,
-            hint_key_display: if ctrl_dot_unreliable {
-                Some("/?")
-            } else {
-                None
-            },
-            requires_confirmation: false,
-            long_help: Some(
-                "Opens this keyboard cheatsheet.\nUse Ctrl+. when the terminal supports extended keys; otherwise enter /?.\nBrowse with j/k, expand a row's inline help with e, or press Enter for a shortcut's full detail page.",
-            ),
-        },
-        ActionDef {
             id: ActionId::ModelPicker,
             label: "model",
             description: "Pick model",
@@ -1028,29 +993,6 @@ pub(super) fn default_actions(
             requires_confirmation: false,
             long_help: None,
         },
-        ActionDef {
-            id: ActionId::DashboardShortcutsHelp,
-            label: "shortcuts",
-            description: "Show shortcuts overlay",
-            // Ctrl+. / `?` dual-bound; primary follows ctrl_dot_unreliable.
-            // Ctrl+X is DashboardStop — never an alt here.
-            default_key: if ctrl_dot_unreliable {
-                key!('?')
-            } else {
-                key!('.', CONTROL)
-            },
-            alt_keys: vec![if ctrl_dot_unreliable {
-                key!('.', CONTROL)
-            } else {
-                key!('?')
-            }],
-            category: Category::Dashboard,
-            context: When::DashboardFocused,
-            hint_priority: None,
-            hint_key_display: None,
-            requires_confirmation: false,
-            long_help: None,
-        },
         // `DashboardExit` is registered as a discoverable
         // action with its DEFAULT key set to Esc, but the in-dashboard
         // Esc behaviour is a multi-tier cascade (peek → input/filter
@@ -1202,8 +1144,7 @@ pub(super) fn default_actions(
         },
         // Dashboard-parity stop inside the session overlay — state
         // machine documented at `dispatch_dashboard_overlay_stop`.
-        // Ctrl+X is the overlay's stop chord. Ctrl+. remains the distinct
-        // shortcuts-cheatsheet chord inherited from the agent screen.
+        // Ctrl+X is the overlay's stop chord.
         ActionDef {
             id: ActionId::DashboardOverlayStop,
             label: "stop",
@@ -1216,7 +1157,7 @@ pub(super) fn default_actions(
             hint_key_display: Some("Ctrl+x"),
             requires_confirmation: true,
             long_help: Some(
-                "Inside a session overlay, stops the attached agent and closes it, returning you to the dashboard list.\nRequires confirmation: press Ctrl+X twice.\nCtrl+. still opens the cheatsheet here; only Ctrl+X is taken over by stop.",
+                "Inside a session overlay, stops the attached agent and closes it, returning you to the dashboard list.\nRequires confirmation: press Ctrl+X twice.",
             ),
         },
     ]);

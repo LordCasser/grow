@@ -99,7 +99,6 @@ the row list instead of being dispatched.
 | `Shift+↑` / `Shift+↓` | Reorder pinned rows |
 | `Esc` | Step back one level: cancel search → close peek (clear reply draft, then unselect) → clear filter → **unfocus the dispatch input** (so `↑`/`↓`, `j`/`k` navigate the list) → unselect row (→ `[+ New Agent]`) → exit dashboard. Esc never clears your typed dispatch draft — use `Ctrl+U` / `Ctrl+C` for that |
 | `Ctrl+\` | Return to the dashboard from the details view, or exit dashboard |
-| `Ctrl+.` (alt: `?`) | Open the keyboard shortcuts cheatsheet. Footer advertises `?` when `Ctrl+.` cannot be delivered. Bare `?` opens help when list-focused or the draft is empty (otherwise types); `Ctrl+X` remains stop |
 
 When grouping by state, each group has a **section title** (e.g. `Working`,
 `Idle`) with a `▸`/`▾` disclosure marker. Section titles are part of the
@@ -134,8 +133,8 @@ close this session", and a second press within 2 seconds closes the
 session and returns you to the dashboard. Pressing any other key
 cancels the confirmation, and a turn that starts inside the window
 downgrades the confirmed press to a cancel instead of closing. The
-shortcuts cheatsheet remains a separate `Ctrl+.` binding inside the
-details view.
+shortcuts cheatsheet remains available through `/shortcuts` inside the details
+view.
 
 For the full behavioural specification (including the registry-lookup
 rules and the mouse-event intercept matrix) see plan

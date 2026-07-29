@@ -705,14 +705,14 @@ pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView)
 /// Open the dashboard's shortcuts cheatsheet modal.
 ///
 /// Builds the entry list from the registry, scoped to the `DashboardFocused`
-/// + `Always` contexts. Mirrors `ActionId::ShortcutsHelp`'s agent-view handler.
+/// + `Always` contexts. Reached only through the `/shortcuts` dispatch path.
 pub(super) fn dispatch_dashboard_open_shortcuts_help(app: &mut AppView) {
     let Some(d) = app.dashboard.as_mut() else {
         return;
     };
     if d.shortcuts_modal.is_some() {
-        // Idempotent — re-pressing Ctrl+. while the modal is
-        // already open is a no-op (rather than blowing away the
+        // Idempotent — reopening while the modal is already open is a no-op
+        // (rather than blowing away the
         // user's search query / scroll position with a fresh
         // build).
         return;

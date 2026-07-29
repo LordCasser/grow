@@ -21,8 +21,6 @@ use crossterm::event::KeyEvent;
 use crate::input::key::KeyShortcut;
 use crate::views::shortcuts_bar::HintItem;
 
-pub use defaults::ctrl_dot_unreliable;
-
 #[cfg(test)]
 pub(crate) fn default_actions(
     screen_mode: crate::app::ScreenMode,
@@ -110,7 +108,6 @@ pub enum ActionId {
     CommandPalette,
     ModelPicker,
     AgentPicker,
-    ShortcutsHelp,
 
     // Settings
     OpenSettings,
@@ -126,7 +123,6 @@ pub enum ActionId {
     DashboardToggleGrouping,
     DashboardReorderUp,
     DashboardReorderDown,
-    DashboardShortcutsHelp,
     DashboardExit,
     DashboardOverlayExit,
     DashboardOverlayPrev,
@@ -880,25 +876,5 @@ mod tests {
     fn exit_session_is_command_only() {
         let registry = ActionRegistry::defaults();
         assert!(registry.find(ActionId::ExitSession).is_none());
-    }
-
-    #[test]
-    fn shortcuts_help_registers_ctrl_dot_without_f1_or_ctrl_x() {
-        let registry = ActionRegistry::defaults();
-        let def = registry
-            .find(ActionId::ShortcutsHelp)
-            .expect("ShortcutsHelp action should be registered");
-        assert_eq!(def.label, "shortcuts");
-        assert!(!def.requires_confirmation);
-
-        let ctrl_dot = KeyEvent::new(KeyCode::Char('.'), KeyModifiers::CONTROL);
-        let f1 = KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE);
-        let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
-        assert_eq!(
-            registry.lookup(&ctrl_dot, When::AgentScreen),
-            Some(ActionId::ShortcutsHelp)
-        );
-        assert_eq!(registry.lookup(&f1, When::AgentScreen), None);
-        assert_eq!(registry.lookup(&ctrl_x, When::AgentScreen), None);
     }
 }

@@ -26,10 +26,8 @@ Two of those deserve a second look:
 ## The command palette
 
 Press **`Ctrl+P`** (or `?` from the scrollback) to open the command palette —
-one searchable list of every command, shortcut, and skill. There's also a
-full shortcuts cheatsheet on `Ctrl+.`. Grow displays `/?` instead when the
-terminal cannot deliver that extended key chord; `/shortcuts` and the command
-palette's **Keyboard Shortcuts** entry open the same modal.
+one searchable list of every command and skill. Use `/shortcuts` to open the
+full shortcuts cheatsheet.
 
 You don't need to memorize anything: `/` and `Ctrl+P` will always show you
 what's available.

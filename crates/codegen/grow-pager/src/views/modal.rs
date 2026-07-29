@@ -351,8 +351,6 @@ pub enum PaletteCommand {
     SectionHeader(String),
     /// Open the how-to documentation picker.
     HowTo,
-    /// Open the keyboard shortcuts cheatsheet (Ctrl+. / `/?` fallback).
-    KeyboardShortcuts,
     /// Open the memory browser modal.
     Memory,
     /// Open the Extensions modal on a specific tab. Used by palette
@@ -537,15 +535,6 @@ pub(crate) fn default_palette_entries(
             label: "Settings".into(),
             shortcut: "F2".into(),
             command: PaletteCommand::OpenSettings,
-        },
-        PaletteEntry {
-            label: "Keyboard Shortcuts".into(),
-            shortcut: if crate::actions::ctrl_dot_unreliable() {
-                "/?".into()
-            } else {
-                "Ctrl+.".into()
-            },
-            command: PaletteCommand::KeyboardShortcuts,
         },
         PaletteEntry {
             label: "How-to Guides".into(),

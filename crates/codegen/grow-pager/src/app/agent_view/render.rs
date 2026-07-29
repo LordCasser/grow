@@ -128,7 +128,7 @@ impl AgentView {
     ///
     /// Single source of truth for context-sensitive shortcuts (pane, overlays,
     /// sub-modes, selection state, turn running, plan/queue). Both the bar
-    /// renderer and the Ctrl+. cheatsheet Current section delegate here, so
+    /// renderer and the `/shortcuts` cheatsheet Current section delegate here, so
     /// they are guaranteed identical and every shortcut makes sense in the
     /// active context.
     ///
@@ -3199,18 +3199,8 @@ impl AgentView {
                 );
                 hints.insert(0, HintItem::new(key!('\\', CONTROL), "dashboard"));
             }
-            let help_hint = registry.find(ActionId::ShortcutsHelp).map(|def| {
-                let mut hint = def.hint();
-                if in_dashboard_overlay
-                    && def.default_key == key!('x', CONTROL)
-                    && let Some(alt) = def.alt_keys.first()
-                {
-                    hint.keys = vec![*alt];
-                }
-                hint
-            });
             ShortcutsBar::new(&hints)
-                .compact(5, help_hint)
+                .compact(5, None)
                 .with_pending(pending_hint)
                 .render(layout.shortcuts, buf);
         }

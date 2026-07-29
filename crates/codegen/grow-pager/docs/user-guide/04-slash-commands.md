@@ -303,8 +303,7 @@ Open the live workflows **run** dashboard — active and retained runs, not a ca
 
 ### `/shortcuts`
 
-Open the searchable keyboard-shortcuts modal. Alias: `/?`. Grow advertises `/?`
-instead of `Ctrl+.` when the terminal cannot reliably deliver that modified key.
+Open the searchable keyboard-shortcuts modal. This is the only entry point.
 
 ### `/theme`
 

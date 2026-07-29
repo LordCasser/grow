@@ -3407,10 +3407,6 @@ fn render_footer(
             registry.find(id).map(|d| d.default_key).unwrap_or(fallback)
         };
         let stop = key_for(crate::actions::ActionId::DashboardStop, key!('x', CONTROL));
-        let help = key_for(
-            crate::actions::ActionId::DashboardShortcutsHelp,
-            key!('.', CONTROL),
-        );
         // The ↑/↓ (and vim j/k) nav chip is intentionally omitted — the
         // overview is obviously arrow-navigable, and dropping it frees
         // the bottom bar for the action hints (open / stop).
@@ -3428,7 +3424,7 @@ fn render_footer(
                 HintItem::new(key!(Tab), "input"),
             ];
             ShortcutsBar::new(&hints)
-                .compact(4, Some(HintItem::new(help, "shortcuts")))
+                .compact(4, None)
                 .render(inner, buf);
             return;
         }
@@ -3446,7 +3442,7 @@ fn render_footer(
                 HintItem::new(key!(Tab), "input"),
             ];
             ShortcutsBar::new(&hints)
-                .compact(4, Some(HintItem::new(help, "shortcuts")))
+                .compact(4, None)
                 .render(inner, buf);
             return;
         }
@@ -3460,7 +3456,7 @@ fn render_footer(
             hints.push(HintItem::new(stop, stop_label).pinned());
         }
         ShortcutsBar::new(&hints)
-            .compact(4, Some(HintItem::new(help, "shortcuts")))
+            .compact(4, None)
             .render(inner, buf);
         return;
     }
@@ -3486,13 +3482,6 @@ fn render_footer(
         enter
     };
     let stop = resolve(crate::actions::ActionId::DashboardStop, key!('x', CONTROL));
-    let help = resolve(
-        crate::actions::ActionId::DashboardShortcutsHelp,
-        key!('.', CONTROL),
-    );
-
-    let help_hint = HintItem::new(help, "shortcuts");
-
     // Submit chord is `send_key` (Enter, or Shift/Alt+Enter in multiline).
     // Ctrl+S is send+open. Empty draft: create/open on the submit chord;
     // non-empty: send.
@@ -3696,7 +3685,7 @@ fn render_footer(
     };
 
     ShortcutsBar::new(&hints)
-        .compact(4, Some(help_hint))
+        .compact(4, None)
         .render(inner, buf);
 }
 
@@ -5505,43 +5494,6 @@ mod tests {
         );
     }
 
-    /// The footer hint always includes the rename
-    /// shortcut. Stops a regression where the footer dropped the
-    /// rename shortcut behind a feature flag or omitted it during a
-    /// conditional rebuild.
-    #[test]
-    fn render_footer_surfaces_shortcuts_link() {
-        // Trailing shortcuts chip must match the registry primary key.
-        let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
-        let theme = Theme::current();
-        let state = DashboardState::new();
-        let registry = crate::actions::ActionRegistry::defaults();
-        render_footer(
-            &mut buf,
-            Rect::new(0, 0, 200, 1),
-            &theme,
-            &state,
-            &registry,
-            None,
-            false,
-            None,
-        );
-        let content = buf_to_text(&buf);
-        assert!(
-            content.contains("shortcuts"),
-            "footer must mention `shortcuts` (the help chip), got: {content:?}",
-        );
-        let primary = registry
-            .find(crate::actions::ActionId::DashboardShortcutsHelp)
-            .map(|d| d.default_key.display())
-            .unwrap_or_else(|| "Ctrl+.".into());
-        let expected = format!("{primary}:shortcuts");
-        assert!(
-            content.contains(&expected),
-            "footer must include `{expected}` chip (registry primary), got: {content:?}",
-        );
-    }
-
     /// The location picker opens input-default, but under vim `Esc`
     /// drops it to NAV — so its footer must surface the `i search` hint (and
     /// hide it in input mode / when vim is off).
@@ -5588,42 +5540,6 @@ mod tests {
         assert!(
             !buf_to_text(&buf_off).contains("i search"),
             "no `i search` hint when vim-mode is off",
-        );
-    }
-
-    /// Pressing the help key returns the
-    /// `DashboardOpenShortcutsHelp` action so the dispatcher can
-    /// build the modal state. No `error_toast` is set (the
-    /// an earlier polish iteration surfaced a hint via the dispatch
-    /// input placeholder, which the user explicitly rejected
-    /// because it conflicted with their typing slot).
-    #[test]
-    fn dashboard_shortcuts_help_action_opens_modal() {
-        use super::super::state::DashboardState;
-        let mut state = DashboardState::new();
-        let registry = crate::actions::ActionRegistry::defaults();
-        use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-        let key = KeyEvent {
-            code: KeyCode::Char('.'),
-            modifiers: KeyModifiers::CONTROL,
-            kind: KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
-        };
-        let outcome = state.handle_input(&Event::Key(key), &registry);
-        assert!(
-            matches!(
-                outcome,
-                crate::app::app_view::InputOutcome::Action(
-                    crate::app::actions::Action::DashboardOpenShortcutsHelp,
-                )
-            ),
-            "shortcuts key must emit DashboardOpenShortcutsHelp, got: {outcome:?}",
-        );
-        assert!(
-            state.error_toast.is_none(),
-            "no error_toast should be set — the modal carries the help, \
-             not the dispatch input placeholder. Got: {:?}",
-            state.error_toast,
         );
     }
 
@@ -7860,7 +7776,7 @@ mod tests {
 
     /// Fresh `DashboardState` defaults to button-focused
     /// with an empty prompt. The footer surfaces `Enter:create`
-    /// (single primary action) and the trailing shortcuts chip. The
+    /// (single primary action). The
     /// ↑/↓ nav chip is no longer shown (dropped to save space), and no
     /// send / send+open chip is shown because there's nothing to send.
     #[test]
@@ -8567,10 +8483,6 @@ mod tests {
         assert!(
             !content.contains(":open") && !content.contains(":stop") && !content.contains(":close"),
             "list-focused section footer must NOT show open/stop chips, got: {content:?}",
-        );
-        assert!(
-            content.contains(":shortcuts"),
-            "list-focused section footer keeps the shortcuts chip, got: {content:?}",
         );
     }
 

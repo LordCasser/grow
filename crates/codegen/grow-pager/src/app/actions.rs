@@ -569,8 +569,8 @@ pub enum Action {
     /// directly in `handle_agent_action`; this lets a slash command reach the
     /// same modal through dispatch.
     OpenCommandPalette,
-    /// Open the context-appropriate keyboard shortcuts modal (`/shortcuts`,
-    /// `/?`). Agent and dashboard surfaces share this slash-command action.
+    /// Open the context-appropriate keyboard shortcuts modal (`/shortcuts`).
+    /// Agent and dashboard surfaces share this slash-command action.
     OpenShortcutsHelp,
     /// Open the in-TUI How-to Guides doc picker (`/docs`, palette "How-to Guides").
     OpenHowtoGuides,
@@ -825,8 +825,8 @@ pub enum Action {
     /// Open the dashboard's shortcuts cheatsheet modal — the
     /// same searchable picker as the agent view's
     /// `ShortcutsHelp`, scoped to dashboard-context bindings.
-    /// Bound to Ctrl+. (default) and `?` (alt). Dispatch wires
-    /// it to the modal-state field on `DashboardState`; the
+    /// Opened by `/shortcuts`. Dispatch wires it to the modal-state field on
+    /// `DashboardState`; the
     /// renderer paints it on top of the row list.
     DashboardOpenShortcutsHelp,
     /// Close the dashboard's shortcuts cheatsheet modal. Routed

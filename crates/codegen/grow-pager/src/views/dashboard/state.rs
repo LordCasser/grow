@@ -616,7 +616,7 @@ pub struct DashboardState {
     /// filter rebuild, attach) so the viewport re-engages the
     /// selection follow.
     pub manual_scroll_active: bool,
-    /// `Ctrl+.` opens a searchable cheatsheet of every action
+    /// `/shortcuts` opens a searchable cheatsheet of every action
     /// bound for the dashboard, mirroring the agent view's
     /// `ShortcutsHelp` modal. `Some` while the modal is open;
     /// input is routed to it before the dashboard's own
@@ -2580,15 +2580,6 @@ impl DashboardState {
             }
         }
 
-        // Empty peek reply: shortcuts help opens instead of typing.
-        if matches!(
-            from_registry,
-            Some(crate::actions::ActionId::DashboardShortcutsHelp)
-        ) && self.peek_reply.text().is_empty()
-        {
-            return Some(InputOutcome::Action(Action::DashboardOpenShortcutsHelp));
-        }
-
         // Dashboard-owned chords fall through so the registry actions
         // (Ctrl+X stop, Ctrl+T pin, Shift+↑/↓ reorder, Shift+Tab mode,
         // …) and the hardcoded Ctrl+/ search toggle keep working with
@@ -3372,8 +3363,6 @@ impl DashboardState {
         //    (`j`/`k` additionally require vim-mode, gated upstream by
         //    `lookup_with_mode`.) In search mode every bare letter types
         //    into the query.
-        //  - Shortcuts help (`?`) is the exception: same convenience as
-        //    arrows (list focused or empty draft). Non-empty draft types.
         //  - Ctrl combos (pin/stop/group/…) and Shift+arrows (reorder)
         //    act regardless of focus — they can't be typed.
         if let Some(id) = from_registry {
@@ -3384,15 +3373,11 @@ impl DashboardState {
                 KeyCode::Char(_)
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
                 {
-                    if id == crate::actions::ActionId::DashboardShortcutsHelp {
-                        self.list_focused || (prompt_empty && !self.search_mode)
-                    } else {
-                        self.list_focused && !self.search_mode
-                    }
+                    self.list_focused && !self.search_mode
                 }
                 _ => true,
             };
-            if honor && let Some(outcome) = dashboard_action_for_id(id, &mut self.error_toast) {
+            if honor && let Some(outcome) = dashboard_action_for_id(id) {
                 return outcome;
             }
         }
@@ -4356,10 +4341,7 @@ fn compose_enter_is_newline(multiline: bool, mod_enter: bool) -> bool {
 /// build if you forget. A future refactor could carve a separate
 /// `DashboardActionId` enum to make this constraint type-system-enforced,
 /// but the current convention + exhaustive match is sufficient.
-fn dashboard_action_for_id(
-    id: crate::actions::ActionId,
-    error_toast: &mut Option<String>,
-) -> Option<InputOutcome> {
+fn dashboard_action_for_id(id: crate::actions::ActionId) -> Option<InputOutcome> {
     use crate::actions::ActionId;
     match id {
         ActionId::DashboardSelectNext => Some(InputOutcome::Action(Action::DashboardSelectNext)),
@@ -4382,19 +4364,6 @@ fn dashboard_action_for_id(
         }
         ActionId::DashboardReorderUp => Some(InputOutcome::Action(Action::DashboardReorderUp)),
         ActionId::DashboardReorderDown => Some(InputOutcome::Action(Action::DashboardReorderDown)),
-        ActionId::DashboardShortcutsHelp => {
-            // Open a real cheatsheet modal (mirroring the
-            // agent view's `ActiveModal::ShortcutsHelp`) instead
-            // of stuffing a single-line hint into the dispatch
-            // input via `error_toast`. The previous toast bled
-            // through the prompt-placeholder slot, which the user
-            // expected to be reserved for *their* typing target.
-            // The modal opens via the action dispatcher so the
-            // build-entries side-effect lives next to other
-            // dashboard dispatchers in `app::dispatch`.
-            let _ = error_toast;
-            Some(InputOutcome::Action(Action::DashboardOpenShortcutsHelp))
-        }
         ActionId::DashboardExit => {
             // Esc is handled in the cascade above. A user-rebind of
             // exit (e.g. F1) lands here.
@@ -4457,7 +4426,6 @@ fn dashboard_action_for_id(
         | ActionId::CommandPalette
         | ActionId::ModelPicker
         | ActionId::AgentPicker
-        | ActionId::ShortcutsHelp
         | ActionId::OpenSettings
         | ActionId::OpenDashboard
         // Overlay actions are intercepted at the AppView level
@@ -7482,56 +7450,6 @@ mod tests {
             InputOutcome::Action(Action::SetMultilineMode(false)) => {}
             other => panic!("Ctrl+M when on must emit SetMultilineMode(false), got {other:?}"),
         }
-    }
-
-    /// Bare `?` opens shortcuts when the draft is empty (input-focused) or
-    /// the list is focused; types into a non-empty draft.
-    #[test]
-    fn question_mark_honor_gate_matches_empty_or_list_focus() {
-        let reg = crate::actions::ActionRegistry::defaults();
-        let question = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
-
-        // Default: input-focused, empty → help.
-        let mut state = DashboardState::new();
-        assert!(!state.list_focused);
-        assert!(matches!(
-            state.handle_key(&question, &reg),
-            InputOutcome::Action(Action::DashboardOpenShortcutsHelp)
-        ));
-        assert!(state.dispatch.text().is_empty());
-
-        // Non-empty draft → type.
-        state.dispatch.set_text("hello");
-        let _ = state.handle_key(&question, &reg);
-        assert!(
-            state.dispatch.text().contains('?'),
-            "non-empty draft: `?` must type, got {:?}",
-            state.dispatch.text()
-        );
-
-        // List-focused with leftover draft → help, draft untouched.
-        state.list_focused = true;
-        state.dispatch.set_text("leftover");
-        assert!(matches!(
-            state.handle_key(&question, &reg),
-            InputOutcome::Action(Action::DashboardOpenShortcutsHelp)
-        ));
-        assert_eq!(state.dispatch.text(), "leftover");
-
-        // Empty peek reply → help; non-empty peek reply → type.
-        let mut peek = state_with_open_peek();
-        assert!(matches!(
-            peek.handle_key(&question, &reg),
-            InputOutcome::Action(Action::DashboardOpenShortcutsHelp)
-        ));
-        assert!(peek.peek_reply.text().is_empty());
-        peek.peek_reply.set_text("draft");
-        let _ = peek.handle_key(&question, &reg);
-        assert!(
-            peek.peek_reply.text().contains('?'),
-            "non-empty peek reply: `?` must type, got {:?}",
-            peek.peek_reply.text()
-        );
     }
 
     /// vim-mode OFF — `j`/`k` type into the dispatch input (they are

@@ -796,10 +796,10 @@ impl AgentView {
                     if registry.lookup(key, When::Always) == Some(ActionId::Quit) {
                         return InputOutcome::Unchanged;
                     }
-                    self.handle_modal_key_with_registry(key, registry)
+                    self.handle_modal_key(key)
                 }
-                Event::Mouse(mouse) => self.handle_modal_mouse_with_registry(mouse, registry),
-                Event::Paste(text) => self.handle_modal_paste(text, registry),
+                Event::Mouse(mouse) => self.handle_modal_mouse(mouse),
+                Event::Paste(text) => self.handle_modal_paste(text),
                 _ => InputOutcome::Changed,
             };
         }
@@ -984,8 +984,7 @@ impl AgentView {
                             || self.session.state.is_cancelling())
                     {
                         self.dismiss_jump_picker();
-                        return self
-                            .handle_agent_action_with_registry(ActionId::CancelTurn, registry);
+                        return self.handle_agent_action(ActionId::CancelTurn);
                     }
                     self.handle_jump_key(key)
                 }
@@ -1030,21 +1029,16 @@ impl AgentView {
             };
         }
         if let Event::Key(key) = ev
-            && crate::input::key::is_ctrl_dot(key)
-        {
-            return self.open_shortcuts_help(registry);
-        }
-        if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
         {
             if let Some(started_at) = self.leader_key_started_at.take()
                 && started_at.elapsed() <= LEADER_KEY_TIMEOUT
             {
                 if key!('m').matches(key) {
-                    return self.handle_agent_action_with_registry(ActionId::ModelPicker, registry);
+                    return self.handle_agent_action(ActionId::ModelPicker);
                 }
                 if key!('a').matches(key) {
-                    return self.handle_agent_action_with_registry(ActionId::AgentPicker, registry);
+                    return self.handle_agent_action(ActionId::AgentPicker);
                 }
                 // Esc, Backspace, and unknown continuations all cancel and
                 // consume the leader so they cannot leak into the composer.
@@ -1059,7 +1053,7 @@ impl AgentView {
             && key.kind != KeyEventKind::Release
             && registry.matches_id(ActionId::SendToBackground, key)
         {
-            return self.handle_agent_action_with_registry(ActionId::SendToBackground, registry);
+            return self.handle_agent_action(ActionId::SendToBackground);
         }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
@@ -1259,7 +1253,7 @@ impl AgentView {
                 );
             }
             if let Some(action_id) = registry.lookup(key, When::AgentScreen) {
-                return self.handle_agent_action_with_registry(action_id, registry);
+                return self.handle_agent_action(action_id);
             }
         }
         if let Event::Key(key) = ev
@@ -1276,19 +1270,8 @@ impl AgentView {
         }
         InputOutcome::Unchanged
     }
-    /// Handle an agent-level action using the compatibility fullscreen registry.
-    /// Runtime key dispatch uses [`Self::handle_agent_action_with_registry`].
-    #[cfg(test)]
+    /// Handle an agent-level action resolved by the caller's live registry.
     pub(super) fn handle_agent_action(&mut self, action_id: ActionId) -> InputOutcome {
-        let registry = ActionRegistry::defaults();
-        self.handle_agent_action_with_registry(action_id, &registry)
-    }
-    /// Handle an agent-level action (from registry lookup with `When::AgentScreen`).
-    pub(super) fn handle_agent_action_with_registry(
-        &mut self,
-        action_id: ActionId,
-        registry: &ActionRegistry,
-    ) -> InputOutcome {
         match action_id {
             ActionId::CancelTurn => {
                 if self.session.state.is_turn_running() {
@@ -1406,7 +1389,6 @@ impl AgentView {
                 });
                 InputOutcome::Changed
             }
-            ActionId::ShortcutsHelp => self.open_shortcuts_help(registry),
             ActionId::OpenSettings => InputOutcome::Action(Action::OpenSettings),
             ActionId::ToggleMouseCapture => {
                 crate::unified_log::info(
@@ -1752,71 +1734,6 @@ mod command_palette_input_default_tests {
             state.search_active,
             "command palette must open in input mode (search_active=true)"
         );
-    }
-}
-#[cfg(test)]
-mod shortcuts_help_input_tests {
-    use super::test_fixtures::make_agent;
-    use crate::actions::{ActionId, ActionRegistry};
-    use crate::app::app_view::InputOutcome;
-    use crate::views::modal::ActiveModal;
-    use crate::views::shortcuts_help::ShortcutsHelpEntry;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-
-    #[test]
-    fn ctrl_dot_opens_live_shortcuts_cheatsheet() {
-        let registry = ActionRegistry::defaults();
-        let mut agent = make_agent();
-        let outcome = agent.handle_input(
-            &Event::Key(KeyEvent::new(
-                KeyCode::Char('>'),
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            )),
-            &registry,
-        );
-        assert!(matches!(outcome, InputOutcome::Changed));
-        let Some(ActiveModal::ShortcutsHelp { entries, .. }) = &agent.active_modal else {
-            panic!("Ctrl+. must open the shortcuts cheatsheet");
-        };
-        let action_ids: Vec<_> = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                ShortcutsHelpEntry::Hint {
-                    action_id: Some(id),
-                    ..
-                } => Some(*id),
-                _ => None,
-            })
-            .collect();
-        assert!(action_ids.contains(&ActionId::CycleMode));
-        assert!(action_ids.contains(&ActionId::CycleReasoningEffort));
-        assert!(action_ids.contains(&ActionId::ToggleTodos));
-        assert!(action_ids.contains(&ActionId::ShortcutsHelp));
-
-        let displayed_key = |id| {
-            let index = entries
-                .iter()
-                .position(|entry| {
-                    matches!(
-                        entry,
-                        ShortcutsHelpEntry::Hint {
-                            action_id: Some(entry_id),
-                            ..
-                        } if *entry_id == id
-                    )
-                })
-                .expect("registered action must have a cheatsheet row");
-            crate::views::shortcuts_help::entry_display(entries, index).1
-        };
-        assert_eq!(displayed_key(ActionId::CycleMode), "Ctrl+R");
-        assert_eq!(displayed_key(ActionId::CycleReasoningEffort), "Shift+Tab");
-        assert_eq!(displayed_key(ActionId::ToggleTodos), "Ctrl+t");
-        let shortcuts_key = if crate::actions::ctrl_dot_unreliable() {
-            "/?"
-        } else {
-            "Ctrl+."
-        };
-        assert_eq!(displayed_key(ActionId::ShortcutsHelp), shortcuts_key);
     }
 }
 #[cfg(test)]

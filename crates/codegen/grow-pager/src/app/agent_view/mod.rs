@@ -2063,7 +2063,6 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::ToggleYolo => return None,
         ActionId::ToggleMultiline => return None,
         ActionId::InterjectPrompt => return None,
-        ActionId::ShortcutsHelp => return None,
         ActionId::OpenSettings => return None,
         ActionId::ToggleTodos
         | ActionId::ToggleTasks
@@ -2085,7 +2084,6 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         | ActionId::DashboardToggleGrouping
         | ActionId::DashboardReorderUp
         | ActionId::DashboardReorderDown
-        | ActionId::DashboardShortcutsHelp
         | ActionId::DashboardExit
         | ActionId::DashboardOverlayExit
         | ActionId::DashboardOverlayPrev

@@ -3775,7 +3775,7 @@ fn dashboard_stop_does_not_plant_error_toast() {
 /// `DashboardOpenShortcutsHelp` builds the modal state on
 /// `DashboardState`. Subsequent presses while the modal is
 /// open are no-ops (idempotent) so the user's search query
-/// and scroll position survive a stray Ctrl+. tap.
+/// and scroll position survive a duplicate open request.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_open_shortcuts_help_builds_modal_idempotently() {

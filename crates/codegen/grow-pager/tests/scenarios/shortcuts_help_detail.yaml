@@ -7,9 +7,8 @@ description: >
   long_help, return to the browse list with Esc (not close), then dismiss the
   modal with Esc.
 
-  The legacy PTY cannot encode Ctrl+., so this scenario enters through the
-  command palette. Unit coverage verifies the extended Ctrl+. key encodings;
-  this scenario remains focused on the modal interaction flow.
+  The scenario enters through the sole `/shortcuts` entry point and remains
+  focused on the modal interaction flow.
 terminal:
   rows: 40
   cols: 110
@@ -27,11 +26,8 @@ steps:
   - action: wait_for_text
     text: MOCK_SHORTCUTS_E2E
     timeout_ms: 30000
-  # Open the cheatsheet through the command palette; this PTY has no KKP.
-  - action: keys
-    keys: "<C-p>"
   - action: type_text
-    text: "keyboard shortcuts"
+    text: "/shortcuts"
   - action: keys
     keys: "<Enter>"
   - action: wait_for_text
