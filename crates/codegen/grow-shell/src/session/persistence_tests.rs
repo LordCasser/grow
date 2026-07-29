@@ -14,14 +14,6 @@ impl ActorGuard {
 }
 
 fn test_actor(info: Info, storage: Arc<dyn StorageAdapter>) -> ActorGuard {
-    test_actor_with_remote_sync(info, storage, None)
-}
-
-fn test_actor_with_remote_sync(
-    info: Info,
-    storage: Arc<dyn StorageAdapter>,
-    remote_sync: Option<RemoteSync>,
-) -> ActorGuard {
     let (tx, rx) = mpsc::unbounded_channel();
     let summary_tx = tx.clone();
     let sampling_client = OaiCompatClient::new(grow_sampler::SamplerConfig::default()).unwrap();
@@ -31,9 +23,6 @@ fn test_actor_with_remote_sync(
             storage,
             pending_notification: None,
             rx,
-            remote_sync,
-            // Resumed-style actor for these tests; upgrade backfill is fresh-only.
-            created_fresh: false,
             relay_sync: None,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
@@ -42,7 +31,6 @@ fn test_actor_with_remote_sync(
                     persistence_tx: summary_tx,
                 },
             ),
-            registry_title_sync: None,
             gateway: None,
         }
         .run(),
@@ -66,50 +54,10 @@ fn neutral_update(info: &Info, text: &str) -> SessionUpdate {
     SessionUpdate::Acp(Box::new(notification(info, text)))
 }
 
-#[tokio::test]
-async fn writeback_backfill_is_fresh_only_and_acp_only() {
-    let info = Info {
-        id: acp::SessionId::new("wb-backfill"),
-        cwd: "/test".into(),
-    };
-
-    // Fresh session: every ACP update is queued to the writeback sync.
-    let (sync, mut observed) = RemoteSync::test_observer();
-    let updates = vec![neutral_update(&info, "a"), neutral_update(&info, "b")];
-    let n = backfill_updates_to_sync(true, updates, &sync);
-    assert_eq!(n, 2, "a fresh session backfills its full local ACP history");
-    for _ in 0..2 {
-        tokio::time::timeout(std::time::Duration::from_secs(1), observed.recv())
-            .await
-            .expect("backfilled notification not observed within 1s")
-            .expect("observer channel closed unexpectedly");
-    }
-
-    // Resumed session: nothing is backfilled (prior history may already be synced).
-    let (sync2, mut observed2) = RemoteSync::test_observer();
-    let n2 = backfill_updates_to_sync(false, vec![neutral_update(&info, "a")], &sync2);
-    assert_eq!(n2, 0, "a resumed session is forward-only, no backfill");
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(200), observed2.recv())
-            .await
-            .is_err(),
-        "resumed session must not re-send any prior history",
-    );
-}
-
 fn break_summary_writes(dir: &std::path::Path) {
     let summary = dir.join("summary.json");
     std::fs::remove_file(&summary).unwrap();
     std::fs::create_dir(summary).unwrap();
-}
-
-async fn recv_observed(
-    observed: &mut tokio::sync::mpsc::UnboundedReceiver<acp::SessionNotification>,
-) -> acp::SessionNotification {
-    tokio::time::timeout(std::time::Duration::from_secs(1), observed.recv())
-        .await
-        .expect("remote sync timed out")
-        .expect("remote sync observer closed")
 }
 
 #[test]
@@ -167,99 +115,6 @@ async fn noop_handle_rejects_durable_append() {
         Err(DurableAppendError::NotCommitted(error))
             if error.kind() == io::ErrorKind::Unsupported
     ));
-}
-
-#[tokio::test]
-async fn pending_drain_disposition_controls_remote_sync() {
-    let info = Info {
-        id: acp::SessionId::new("pending-remote-sync"),
-        cwd: "/test".into(),
-    };
-    let storage = JsonlStorageAdapter::with_update_append_probe("/unused".into(), |_| {
-        Err(io::Error::other("append failed"))
-    });
-    let (remote_sync, mut observed) = RemoteSync::test_observer();
-    let actor = test_actor_with_remote_sync(info.clone(), Arc::new(storage), Some(remote_sync));
-    actor
-        .handle
-        .tx
-        .send(PersistenceMsg::Update(neutral_update(&info, "pending")))
-        .unwrap();
-    assert!(matches!(
-        actor
-            .handle
-            .append_update_durably(neutral_update(&info, "durable"))
-            .await,
-        Err(DurableAppendError::NotCommitted(_))
-    ));
-    assert!(observed.try_recv().is_err());
-    actor.stop().await;
-
-    let dir = tempfile::tempdir().unwrap();
-    let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let observed_attempts = attempts.clone();
-    let storage = Arc::new(JsonlStorageAdapter::with_update_append_probe(
-        dir.path().to_path_buf(),
-        move |durability| {
-            observed_attempts.lock().unwrap().push(durability);
-            Ok(())
-        },
-    ));
-    storage
-        .init_session(&info, default_model_id())
-        .await
-        .unwrap();
-    let (remote_sync, mut observed) = RemoteSync::test_observer();
-    let actor = test_actor_with_remote_sync(info.clone(), storage, Some(remote_sync));
-    actor
-        .handle
-        .tx
-        .send(PersistenceMsg::Update(neutral_update(&info, "pending")))
-        .unwrap();
-    break_summary_writes(dir.path());
-    assert!(matches!(
-        actor
-            .handle
-            .append_update_durably(neutral_update(&info, "durable"))
-            .await,
-        Err(DurableAppendError::Committed(_))
-    ));
-    let synced = recv_observed(&mut observed).await;
-    assert_eq!(synced.session_id, info.id);
-    assert!(matches!(
-        attempts.lock().unwrap().as_slice(),
-        [AppendDurability::Buffered]
-    ));
-    actor.stop().await;
-}
-
-#[tokio::test]
-async fn durable_append_committed_failure_is_synced() {
-    let dir = tempfile::tempdir().unwrap();
-    let info = Info {
-        id: acp::SessionId::new("durable-remote-sync"),
-        cwd: "/test".into(),
-    };
-    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
-        dir.path().to_path_buf(),
-    ));
-    storage
-        .init_session(&info, default_model_id())
-        .await
-        .unwrap();
-    break_summary_writes(dir.path());
-    let (remote_sync, mut observed) = RemoteSync::test_observer();
-    let actor = test_actor_with_remote_sync(info.clone(), storage, Some(remote_sync));
-    assert!(matches!(
-        actor
-            .handle
-            .append_update_durably(neutral_update(&info, "durable"))
-            .await,
-        Err(DurableAppendError::Committed(_))
-    ));
-    let synced = recv_observed(&mut observed).await;
-    assert_eq!(synced.session_id, info.id);
-    actor.stop().await;
 }
 
 #[tokio::test]

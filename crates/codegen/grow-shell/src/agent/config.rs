@@ -4,7 +4,7 @@ use crate::agent::model_providers::{
 };
 use crate::auth::{AuthManager, OidcAuthConfig, ServiceAuthConfig};
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
-use crate::{config::StorageMode, sampling::ApiBackend, tools::config::ShellToolsetConfig};
+use crate::{sampling::ApiBackend, tools::config::ShellToolsetConfig};
 use agent_client_protocol as acp;
 use grow_agent::prompt::skills::SkillsConfig;
 use grow_sampler::{AuthScheme, SamplerConfig};
@@ -332,8 +332,6 @@ pub struct RuntimeResolutionContext<'a> {
     /// per-model gate / nudge cap) and writes a JSONL line per fire.
     /// Observation-only. Session-scoped — not persisted.
     pub laziness_debug_log: Option<&'a std::path::Path>,
-    /// CLI `--storage-mode` override. `None` = defer to env/remote/default.
-    pub storage_mode: Option<&'a str>,
 }
 /// First-party credential env vars scrubbed from a BYOK auth-provider helper's
 /// environment so it can't inherit the keys Grow uses for its own first-party
@@ -643,8 +641,6 @@ pub struct CliConfig {
     pub show_tips: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_registry: Option<bool>,
     /// Env `GROW_MINIMUM_VERSION`. See [`crate::util::config::VersionPolicy`] for
     /// the version-policy knobs. (Unrelated to
     /// `version_overrides[].maximum_version`, which gates config patches.)
@@ -1095,11 +1091,6 @@ pub struct Config {
     /// `[diagnostics]` — crash handler toggle (`load_crash_handler_enabled_sync`).
     #[serde(default, skip_serializing)]
     pub diagnostics: DiagnosticsConfig,
-    /// Storage mode for session persistence.
-    /// When running in relay/headless mode, this should be set to Writeback.
-    /// Defaults to reading from GROW_STORAGE_MODE env var.
-    #[serde(skip)]
-    pub storage_mode: StorageMode,
     /// CLI override for the default model ID.
     #[serde(skip)]
     pub default_model_override: Option<String>,
@@ -1450,7 +1441,6 @@ impl Default for Config {
             suggestions: SuggestionsConfig::default(),
             marketplace: MarketplaceConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
-            storage_mode: StorageMode::resolve(None, None),
             default_model_override: None,
             reasoning_effort_override: None,
             session_summary_model_override: None,
@@ -1828,7 +1818,6 @@ impl Config {
     /// - session_summary_model / image_description_model /
     ///   prompt_suggest_model_pin via `ModelOverrideConfig::resolve`
     /// - memory_config via `MemoryConfig::resolve`
-    /// - storage_mode via `StorageMode::resolve`
     /// - path_not_found_hints from remote_settings
     ///
     /// Note: `worktree_type` is resolved directly in `MvpAgent::new` via
@@ -1880,8 +1869,6 @@ impl Config {
         self.memory_config = if mem.enabled { Some(mem) } else { None };
         self.todo_gate = ctx.todo_gate;
         self.laziness_debug_log = ctx.laziness_debug_log.map(std::path::Path::to_path_buf);
-        self.storage_mode =
-            crate::config::StorageMode::resolve(ctx.storage_mode, ctx.remote_settings);
         if let Some(v) = ctx.remote_settings.and_then(|s| s.path_not_found_hints) {
             self.path_not_found_hints = v;
         }
@@ -1912,7 +1899,6 @@ impl Config {
             cli_no_memory: self.cli_no_memory,
             todo_gate: self.todo_gate,
             laziness_debug_log: laziness_debug_log.as_deref(),
-            storage_mode: None,
         };
         self.resolve_runtime_fields(&ctx);
         crate::util::config::set_remote_campaigns_from_settings(self.remote_settings.as_ref());
@@ -4555,7 +4541,6 @@ reasoning_effort = "low"
                 cli_no_memory: false,
                 todo_gate: false,
                 laziness_debug_log: None,
-                storage_mode: None,
             }
         }
         let empty: toml::Value = toml::Value::Table(toml::map::Map::new());
@@ -9491,7 +9476,6 @@ hooks = true
             cli_no_memory: false,
             todo_gate: false,
             laziness_debug_log: None,
-            storage_mode: None,
         });
         assert!(!config.compat_resolved.cursor.sessions);
         assert!(!config.compat_resolved.claude.sessions);
@@ -9514,7 +9498,6 @@ hooks = true
             cli_no_memory: false,
             todo_gate: false,
             laziness_debug_log: None,
-            storage_mode: None,
         });
         assert!(cfg.subagents_enabled);
         assert!(!cfg.respect_gitignore);
@@ -9543,7 +9526,6 @@ hooks = true
             cli_no_memory: false,
             todo_gate: false,
             laziness_debug_log: None,
-            storage_mode: None,
         });
         assert!(
             !cfg.managed_mcps_enabled,
@@ -9572,7 +9554,6 @@ hooks = true
             cli_no_memory: false,
             todo_gate: false,
             laziness_debug_log: None,
-            storage_mode: None,
         });
         assert!(cfg.managed_mcp_gateway_tools_enabled);
     }
@@ -9592,7 +9573,6 @@ hooks = true
             cli_no_memory: false,
             todo_gate: false,
             laziness_debug_log: None,
-            storage_mode: None,
         });
         assert!(cfg.subagents_enabled);
     }
@@ -9612,7 +9592,6 @@ hooks = true
             cli_no_memory: false,
             todo_gate: false,
             laziness_debug_log: None,
-            storage_mode: None,
         });
         assert!(cfg.subagents_enabled);
     }
@@ -9633,7 +9612,6 @@ hooks = true
             cli_no_memory: false,
             todo_gate: false,
             laziness_debug_log: None,
-            storage_mode: None,
         });
         assert!(!cfg.respect_gitignore);
         clear_runtime_env_vars();
@@ -9654,7 +9632,6 @@ hooks = true
             cli_no_memory: false,
             todo_gate: false,
             laziness_debug_log: None,
-            storage_mode: None,
         });
         assert_eq!(cfg.session_summary_model, Some("custom-ss".to_owned()));
     }
@@ -9678,7 +9655,6 @@ hooks = true
             cli_no_memory: false,
             todo_gate: false,
             laziness_debug_log: None,
-            storage_mode: None,
         });
         assert!(cfg.path_not_found_hints);
     }
@@ -9698,7 +9674,6 @@ hooks = true
             cli_no_memory: false,
             todo_gate: false,
             laziness_debug_log: None,
-            storage_mode: None,
         };
         cfg.resolve_runtime_fields(&ctx);
         let first_subagents = cfg.subagents_enabled;

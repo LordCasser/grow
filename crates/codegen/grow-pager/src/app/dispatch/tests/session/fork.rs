@@ -177,10 +177,7 @@ fn worktree_forked_with_restore_failure_shows_warning_banner() {
 #[test]
 fn fork_initiation_supersedes_open_reload_window() {
     let mut app = test_app();
-    dispatch(
-        Action::LoadSession("sess-old".into(), None, false),
-        &mut app,
-    );
+    dispatch(Action::LoadSession("sess-old".into(), None), &mut app);
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -302,7 +299,6 @@ fn auth_complete_resume_plus_worktree_creates_worktree_with_session() {
         Some(crate::app::session_startup::DeferredSessionStartup::Load {
             session_id: "test-session".into(),
             session_cwd: None,
-            chat_kind: false,
         });
     app.deferred_startup.worktree = true;
 
@@ -1026,7 +1022,6 @@ fn fork_session_ready_emits_load_session_with_new_id() {
                 agent_id,
                 session_id,
                 session_cwd,
-                chat_kind,
             },
         ] => {
             assert_eq!(*agent_id, AgentId(1));
@@ -1034,10 +1029,6 @@ fn fork_session_ready_emits_load_session_with_new_id() {
             assert_eq!(
                 session_cwd.as_deref(),
                 Some(std::path::Path::new("/tmp/forked"))
-            );
-            assert!(
-                !*chat_kind,
-                "LoadSession chat_kind is conversation-entry only, not sticky --chat"
             );
         }
         other => panic!("expected LoadSession, got {other:?}"),
@@ -1054,38 +1045,6 @@ fn fork_session_ready_emits_load_session_with_new_id() {
         "new-sid-123"
     );
     assert!(app.agents[&AgentId(1)].session.loading_replay);
-}
-
-/// No-worktree fork under sticky `--chat` must refuse a local Build row
-/// (same gate as WorktreeForked / dispatch_load_session_ungated).
-#[test]
-fn fork_session_ready_refuses_local_build_under_chat_mode() {
-    let mut app = fork_test_app();
-    insert_placeholder_agent(&mut app, AgentId(1));
-    app.agents.get_mut(&AgentId(1)).unwrap().session.session_id = None;
-    app.agents.get_mut(&AgentId(1)).unwrap().chat_kind = false;
-    app.chat_mode = true;
-    let cwd = app.cwd.clone();
-    let session_id = format!("fork-build-{}", std::process::id());
-    let sess_dir = plant_local_build_session(&cwd, &session_id);
-
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::ForkSessionReady {
-            agent_id: AgentId(1),
-            new_session_id: session_id.clone().into(),
-            cwd: cwd.clone(),
-        }),
-        &mut app,
-    );
-    let _ = std::fs::remove_dir_all(&sess_dir);
-    assert!(
-        effects.is_empty(),
-        "ForkSessionReady under --chat must refuse local Build, got {effects:?}"
-    );
-    assert!(
-        !app.agents.contains_key(&AgentId(1)),
-        "refuse tears down the placeholder agent"
-    );
 }
 
 #[test]

@@ -62,7 +62,6 @@ use grow_sampling_types::{
 };
 use crate::agent::update_chunk_merge;
 use crate::auth::AuthManager;
-use crate::config::StorageMode;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use grow_diagnostics::session_ctx::log_event;
 use grow_workspace::file_system::{AcpSessionFs, CodebaseIndexManager, LocalFs};
@@ -185,64 +184,6 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub session_auto_mode: bool,
     pub prompt_display_cwd: Option<String>,
 }
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-pub(crate) enum BridgeAttach {
-    /// No session handle, or no gateway URL and no pre-existing bridge.
-    NotAttached,
-    /// A bridge already existed — the caller's options (incl. any
-    /// `initial_model` seed) were dropped.
-    AlreadyAttached,
-    /// This call spawned the bridge; its options took effect.
-    Spawned,
-}
-impl BridgeAttach {
-    #[allow(dead_code)]
-    pub(crate) fn attached(self) -> bool {
-        !matches!(self, Self::NotAttached)
-    }
-}
-/// `_meta["grow/session"].kind` → [`SessionKind`]; absent/unknown/malformed → `Build`.
-fn parse_session_kind(
-    meta: Option<&acp::Meta>,
-) -> crate::session::unified_list::SessionKind {
-    use crate::session::unified_list::SessionKind;
-    use serde::Deserialize;
-    meta.and_then(|m| m.get("grow/session"))
-        .and_then(|s| s.get("kind"))
-        .and_then(|k| SessionKind::deserialize(k).ok())
-        .unwrap_or(SessionKind::Build)
-}
-/// Hard-off in release builds: `kind: "chat"` meta is ignored and
-/// sessions stay on the local Build path.
-fn is_chat_session_kind(meta: Option<&acp::Meta>) -> bool {
-    false
-}
-fn chat_initial_model(
-    is_chat_kind: bool,
-    custom_model_id: Option<&str>,
-) -> Option<String> {
-    if is_chat_kind { custom_model_id.map(str::to_owned) } else { None }
-}
-fn chat_new_session_model_state(
-    mut state: acp::SessionModelState,
-    requested: Option<String>,
-) -> acp::SessionModelState {
-    let Some(requested) = requested else {
-        return state;
-    };
-    if !state.available_models.is_empty()
-        && !state.available_models.iter().any(|m| m.model_id.0.as_ref() == requested)
-    {
-        tracing::warn!(
-            requested_model = %requested,
-            "chat session/new _meta.modelId not in the /rest/modes catalog; \
-             reporting it as current anyway (picker may diverge from catalog)"
-        );
-    }
-    state.current_model_id = acp::ModelId::new(requested);
-    state
-}
 /// `session/new` / `session/load` `_meta` key carrying per-session plugin roots.
 pub(crate) const SESSION_PLUGIN_DIRS_META_KEY: &str = "pluginDirs";
 /// `initialize` response `_meta` key advertising [`SESSION_PLUGIN_DIRS_META_KEY`] support.
@@ -280,48 +221,6 @@ pub(crate) fn parse_session_plugin_dirs(
         }
     }
     dirs
-}
-/// Thin chat-kind profile shared by [`MvpAgent::load_chat_session`] and
-/// chat-kind `session/new` (K10): noop persistence, no MCP, no client
-/// FS / terminal / code-nav. Keeps spawn options from drifting between
-/// new and load.
-pub(crate) fn chat_session_spawn_options<'a>(
-    session_info: SessionInfo,
-    cwd: AbsPathBuf,
-    session_meta: Option<&'a acp::Meta>,
-    persisted_agent_name: Option<&'a str>,
-    session_model_id: acp::ModelId,
-    session_yolo_mode: bool,
-) -> SessionSpawnOptions<'a> {
-    SessionSpawnOptions {
-        session_info,
-        cwd,
-        mcp_servers: Vec::new(),
-        initial_client_mcp_servers: Vec::new(),
-        mcp_meta_config_map: Default::default(),
-        persistence: crate::session::persistence::PersistenceHandle::noop(),
-        chat_history: Vec::new(),
-        rewind_points_file_path: None,
-        initial_total_tokens: 0,
-        origin_client: None,
-        client_code_nav_enabled: false,
-        client_terminal: false,
-        client_fs_read: false,
-        client_fs_write: false,
-        preloaded_envrc: None,
-        persisted_signals: None,
-        persisted_plan_mode: None,
-        persisted_goal_mode: None,
-        persisted_workflow_runs: Vec::new(),
-        persisted_announcement_state: None,
-        session_meta,
-        managed_mcp_expires_at: None,
-        persisted_agent_name,
-        session_model_id,
-        session_yolo_mode,
-        session_auto_mode: false,
-        prompt_display_cwd: None,
-    }
 }
 /// `_meta.noReplay` → skip gateway replay (client already has the transcript).
 fn parse_no_replay(meta: Option<&acp::Meta>) -> bool {
@@ -611,9 +510,6 @@ pub struct MvpAgent {
     pub(crate) sampling_config: RefCell<SamplingConfig>,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) models_manager: crate::agent::models::ModelsManager,
-    /// service.example.com chat-product catalog (`/rest/modes`) for chat sessions; distinct
-    /// from `models_manager` (the build `/v1/models` catalog).
-    pub(crate) chat_modes: crate::agent::chat_modes::ChatModesManager,
     /// Single-flight guard for interactive login (device poll / loopback
     /// wait). Owns the active attempt's cancel token and its code/url
     /// channels; a new `authenticate` or `grow/auth/cancel` cancels the
@@ -651,11 +547,6 @@ pub struct MvpAgent {
     /// into the detached prompt task; cleared for a workspace on GUI untrust
     /// (`execute_hooks_action`) so a later re-open can re-prompt.
     interactive_trust_prompted: Rc<RefCell<std::collections::HashSet<PathBuf>>>,
-    /// Writeback vs local. `Cell` so [`Self::reapply_storage_mode`] can
-    /// upgrade it when remote settings land; persistence reads the live value.
-    /// Authoritative post-construction — `Config.storage_mode` is only the
-    /// boot seed.
-    storage_mode: std::cell::Cell<StorageMode>,
     /// Default YOLO mode - when true, sessions start with auto-approve enabled.
     /// Per-session YOLO tracking lives in SessionHandle.yolo_mode.
     default_yolo_mode: bool,
@@ -710,10 +601,6 @@ pub struct MvpAgent {
     pub(crate) worktree_type: crate::util::config::WorktreeType,
     /// Restore codebase state on worktree resume (resolved: local config > remote > default false).
     pub(crate) restore_code: bool,
-    /// Local session-registry override: `GROW_SESSION_REGISTRY` env, else
-    /// `[cli] session_registry`.
-    /// `Some(true)` enables, `Some(false)` disables, `None` defers to remote settings.
-    session_registry_local: Option<bool>,
     /// Managed MCP configs and gateway tool catalog; lazily fetched.
     managed_mcp_cache: crate::session::managed_mcp::ManagedMcpStateHandle,
     /// Agent-level MCP server state. LEADER-SAFE(shared): MCP servers are
@@ -820,12 +707,6 @@ pub struct MvpAgent {
     /// without touching this, so their changes still get pushed on the next
     /// gate call. LEADER-SAFE(shared): one agent-wide push stream.
     last_emitted_announcements: RefCell<Vec<grow_announcements::RemoteAnnouncement>>,
-    /// Test-only spy recording every session id whose cloud replica was
-    /// finalized via `finalize_session_replica`. Lets the no-evict tests assert
-    /// that `finalize()` does NOT fire on a mere client disconnect (only on a
-    /// terminal/explicit close).
-    #[cfg(test)]
-    finalize_spy: RefCell<Vec<String>>,
     /// Test-only spy recording every terminal roster delta `(session_id,
     /// final_state)` emitted by `record_roster_delta` (reap → `DeadFailed`,
     /// explicit close → `Completed`). Lets tests observe a terminal demotion

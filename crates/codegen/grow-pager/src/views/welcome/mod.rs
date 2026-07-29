@@ -608,9 +608,6 @@ pub struct WelcomeRenderParams<'a> {
     pub session_picker_grouped: bool,
     /// Source filter for the session picker.
     pub session_picker_source_filter: crate::views::session_picker::SourceFilter,
-    /// Process-wide `--chat`: the picker lists backend conversations only, so
-    /// the source filter and local deep search are hidden.
-    pub chat_mode: bool,
     /// Live working directory (tracks `Effect::SetWorkingDir`), used to pin
     /// the current repo's session group to the top of the picker.
     pub cwd: &'a std::path::Path,
@@ -1720,12 +1717,11 @@ fn render_welcome_done(
         } else {
             // Reserve a row for the pinned hidden-external hint when shown.
             let hint_row = u16::from(
-                !p.chat_mode
-                    && crate::views::session_picker::hidden_external_hint(
-                        p.session_picker,
-                        p.session_picker_source_filter,
-                    )
-                    .is_some(),
+                crate::views::session_picker::hidden_external_hint(
+                    p.session_picker,
+                    p.session_picker_source_filter,
+                )
+                .is_some(),
             );
             (picker_count as u16).min(15) + 3 + hint_row // +3 for title + search + gap
         }
@@ -1782,7 +1778,6 @@ fn render_welcome_done(
                 tick: p.welcome_tick,
                 grouped: p.session_picker_grouped,
                 source_filter: p.session_picker_source_filter,
-                chat_mode: p.chat_mode,
                 cwd: p.cwd,
             },
         );
@@ -2045,9 +2040,6 @@ pub(crate) struct SessionPickerRenderCtx<'a> {
     pub(crate) grouped: bool,
     /// Source filter for filtering session entries.
     pub(crate) source_filter: crate::views::session_picker::SourceFilter,
-    /// Process-wide `--chat`: hides the source-filter chip and the
-    /// deep-search/filter footer hints (see `WelcomeRenderParams::chat_mode`).
-    pub(crate) chat_mode: bool,
 }
 
 /// Render the session picker list on the welcome screen.
@@ -2211,29 +2203,23 @@ pub(crate) fn render_session_picker(
         }));
     }
 
-    let hidden_hint = if ctx.chat_mode {
-        None
-    } else {
-        crate::views::session_picker::hidden_external_hint(ctx.sessions, ctx.source_filter)
-    };
+    let hidden_hint =
+        crate::views::session_picker::hidden_external_hint(ctx.sessions, ctx.source_filter);
 
-    // Build shortcuts for fullscreen mode. Chat mode drops the worktree /
-    // deep-search / filter hints (local-Build-row actions).
+    // Build shortcuts for fullscreen mode.
     let worktree_shortcut: &'static str = "ctrl+w";
     use crate::views::shortcuts_bar::HintItem;
     let mut default_shortcuts: Vec<HintItem> = vec![
         HintItem::new(crate::key!(Esc), "back"),
         HintItem::new(crate::key!(Enter), "select"),
     ];
-    if !ctx.chat_mode {
-        default_shortcuts.push(HintItem {
-            keys: vec![],
-            label: "worktree".into(),
-            custom_display: Some(worktree_shortcut),
-            description: None,
-            pinned: false,
-        });
-    }
+    default_shortcuts.push(HintItem {
+        keys: vec![],
+        label: "worktree".into(),
+        custom_display: Some(worktree_shortcut),
+        description: None,
+        pinned: false,
+    });
     default_shortcuts.push(HintItem {
         keys: vec![],
         label: "navigate".into(),
@@ -2241,15 +2227,13 @@ pub(crate) fn render_session_picker(
         description: None,
         pinned: false,
     });
-    if !ctx.chat_mode {
-        default_shortcuts.push(HintItem {
-            keys: vec![],
-            label: "filter".into(),
-            custom_display: Some("f"),
-            description: None,
-            pinned: false,
-        });
-    }
+    default_shortcuts.push(HintItem {
+        keys: vec![],
+        label: "filter".into(),
+        custom_display: Some("f"),
+        description: None,
+        pinned: false,
+    });
 
     let config = PickerConfig {
         title: Some("Resume session"),
@@ -2263,9 +2247,9 @@ pub(crate) fn render_session_picker(
         shortcuts_area: ctx.shortcuts_area,
         tabs: None,
         active_tab: 0,
-        filter_label: (!ctx.chat_mode).then(|| ctx.source_filter.label()),
-        filter_key_hint: (!ctx.chat_mode).then_some("f"),
-        filter_active: !ctx.chat_mode && ctx.source_filter.is_active(),
+        filter_label: Some(ctx.source_filter.label()),
+        filter_key_hint: Some("f"),
+        filter_active: ctx.source_filter.is_active(),
         header_note: hidden_hint.as_deref(),
         action_keys: &[],
         disable_search: false,
@@ -2579,7 +2563,6 @@ mod tests {
             welcome_tick: 0,
             session_picker_grouped: false,
             session_picker_source_filter: crate::views::session_picker::SourceFilter::default(),
-            chat_mode: false,
             cwd: std::path::Path::new("/repo"),
             changelog_bullets: &[],
             changelog_has_full_notes: false,
@@ -2751,7 +2734,6 @@ mod tests {
                     tick: 0,
                     grouped: false,
                     source_filter: crate::views::session_picker::SourceFilter::default(),
-                    chat_mode: true,
                 },
             );
             (0..area.height)
@@ -2788,10 +2770,9 @@ mod tests {
 
     /// The hidden-external hint stays pinned on the welcome picker's default
     /// Grow view when scanned foreign rows exist — even when the native list
-    /// overflows the viewport — and never renders under `--chat` (foreign
-    /// scanning is disabled there, so the hint is dead weight).
+    /// overflows the viewport.
     #[test]
-    fn hidden_external_hint_renders_outside_chat_mode() {
+    fn hidden_external_hint_stays_pinned() {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
@@ -2806,7 +2787,7 @@ mod tests {
         foreign.source = "claude".into();
         entries.push(foreign);
 
-        let render = |chat_mode: bool| -> String {
+        let render = || -> String {
             let mut buf = Buffer::empty(area);
             let mut state = PickerState::default();
             render_session_picker(
@@ -2826,7 +2807,6 @@ mod tests {
                     tick: 0,
                     grouped: false,
                     source_filter: crate::views::session_picker::SourceFilter::default(),
-                    chat_mode,
                 },
             );
             (0..area.height)
@@ -2842,7 +2822,7 @@ mod tests {
                 .join("\n")
         };
 
-        let build_mode = render(false);
+        let build_mode = render();
         assert!(
             build_mode.contains("1 external session hidden \u{b7} f to show"),
             "default Grow filter must pin the hidden-external hint:\n{build_mode}"
@@ -2854,12 +2834,6 @@ mod tests {
         assert!(
             !build_mode.contains("Claude work"),
             "the foreign row itself stays hidden under the default filter:\n{build_mode}"
-        );
-
-        let chat = render(true);
-        assert!(
-            !chat.contains("external session"),
-            "chat mode must not render the hidden-external hint:\n{chat}"
         );
     }
 

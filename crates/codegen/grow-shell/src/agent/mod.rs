@@ -1,7 +1,6 @@
 pub mod activity;
 pub mod app;
 pub mod auth_method;
-pub mod chat_modes;
 pub mod config;
 pub mod config_model_override_parse;
 mod ext_parsers;
@@ -18,7 +17,6 @@ pub mod roster;
 pub mod server;
 pub mod session_config;
 pub(crate) mod session_metrics;
-pub mod session_registry_client;
 pub(crate) mod subagent;
 pub(crate) mod update_chunk_merge;
 

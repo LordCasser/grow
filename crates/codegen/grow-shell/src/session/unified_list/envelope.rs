@@ -7,14 +7,12 @@ use serde::{Deserialize, Serialize};
 pub enum SessionKind {
     #[default]
     Build,
-    Chat,
 }
 
 impl SessionKind {
     pub fn as_str(self) -> &'static str {
         match self {
             SessionKind::Build => "build",
-            SessionKind::Chat => "chat",
         }
     }
 }

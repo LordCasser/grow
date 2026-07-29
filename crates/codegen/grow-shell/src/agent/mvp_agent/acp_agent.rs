@@ -420,11 +420,7 @@ impl acp::Agent for MvpAgent {
                 agent_ref.get().emit_announcements(AnnouncementsPushMode::SeedNewClient);
             });
         }
-        let init_model_state = if crate::agent::chat_modes::process_chat_mode_enabled() {
-            self.chat_modes.model_state().await
-        } else {
-            self.model_state(None)
-        };
+        let init_model_state = self.model_state(None);
         Ok(
             acp::InitializeResponse::new(acp::ProtocolVersion::V1)
                 .agent_capabilities(
@@ -560,9 +556,6 @@ impl acp::Agent for MvpAgent {
                 }
                 self.set_auth_method(arguments.method_id.clone());
                 self.sync_process_static_api_key(None);
-                if crate::agent::chat_modes::process_chat_mode_enabled() {
-                    self.chat_modes.warm_in_background();
-                }
                 emit_login_span(true, "api_key", None, None);
                 log_event(grow_diagnostics::events::Login {
                     auth_method: "api_key".to_string(),
@@ -700,9 +693,6 @@ impl acp::Agent for MvpAgent {
                     );
                 }
                 self.set_auth_method(arguments.method_id.clone());
-                if crate::agent::chat_modes::process_chat_mode_enabled() {
-                    self.chat_modes.warm_in_background();
-                }
                 let uid = self.auth_manager.current().map(|a| a.user_id);
                 emit_login_span(true, "cached_token", uid.as_deref(), None);
                 log_event(grow_diagnostics::events::Login {
@@ -839,9 +829,6 @@ impl acp::Agent for MvpAgent {
                 );
                 self.set_auth_method(arguments.method_id.clone());
                 self.models_manager.on_auth_changed().await;
-                if crate::agent::chat_modes::process_chat_mode_enabled() {
-                    self.chat_modes.warm_in_background();
-                }
                 emit_login_span(
                     true,
                     arguments.method_id.0.as_ref(),
@@ -905,7 +892,6 @@ impl acp::Agent for MvpAgent {
         let session_computer_sessions = parse_session_computer_sessions(
             arguments.meta.as_ref(),
         );
-        let is_chat_kind = is_chat_session_kind(arguments.meta.as_ref());
         let session_yolo_mode = arguments
             .meta
             .as_ref()
@@ -960,18 +946,11 @@ impl acp::Agent for MvpAgent {
         };
         let mut session_sampling_override: Option<SamplingConfig> = None;
         let mut disallowed_custom: Option<String> = None;
-        let session_initial_model = chat_initial_model(is_chat_kind, custom_model_id);
-        let build_custom_model_id = if is_chat_kind { None } else { custom_model_id };
-        let campaign_nudge = if is_chat_kind {
-            None
-        } else {
-            crate::util::config::campaign_driven_models_default()
-                    .filter(|c| {
-                        build_custom_model_id.is_none()
-                            || build_custom_model_id == c.pre_campaign.as_deref()
-                            || build_custom_model_id == Some(c.value.as_str())
-                    })
-        };
+        let campaign_nudge = crate::util::config::campaign_driven_models_default().filter(|c| {
+            custom_model_id.is_none()
+                || custom_model_id == c.pre_campaign.as_deref()
+                || custom_model_id == Some(c.value.as_str())
+        });
         let campaign_nudged = campaign_nudge.is_some();
         if let Some(c) = &campaign_nudge {
             tracing::info!(
@@ -982,7 +961,7 @@ impl acp::Agent for MvpAgent {
         }
         let build_custom_model_id: Option<String> = campaign_nudge
             .map(|c| c.value)
-            .or_else(|| build_custom_model_id.map(str::to_owned));
+            .or_else(|| custom_model_id.map(str::to_owned));
         let resolved_custom_model = build_custom_model_id
             .as_deref()
             .and_then(|custom_model| match self
@@ -1045,42 +1024,21 @@ impl acp::Agent for MvpAgent {
         } else {
             None
         };
-        let model_id = match &session_initial_model {
-            Some(chat_model) => acp::ModelId::new(chat_model.clone()),
-            None => {
-                resolved_custom_model
-                    .map(acp::ModelId::new)
-                    .unwrap_or_else(|| self.models_manager.current_model_id())
-            }
-        };
+        let model_id = resolved_custom_model
+            .map(acp::ModelId::new)
+            .unwrap_or_else(|| self.models_manager.current_model_id());
         let session_model_id = model_id.clone();
-        let persistence = if is_chat_kind {
-            crate::session::persistence::PersistenceHandle::noop()
-        } else {
-            let _timer = crate::instrumentation_timer!("session.persistence_init");
-            let registry_title_sync = self
-                .session_registry_client()
-                .map(|client| crate::session::persistence::RegistryGeneratedTitleSync {
-                    client,
-                    suppress_for_zdr: self
-                        .auth_manager
-                        .current_or_expired()
-                        .is_some_and(|a| a.is_zdr_team()),
-                });
-            crate::session::persistence::new(
-                    &session_info,
-                    model_id,
-                    summary_client,
-                    self.storage_mode.get(),
-                    Some(self.auth_manager.clone()),
-                    relay_sync,
-                    Some(self.gateway.clone()),
-                    summary_model,
-                    registry_title_sync,
-                )
-                .await
-                .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?
-        };
+        let _timer = crate::instrumentation_timer!("session.persistence_init");
+        let persistence = crate::session::persistence::new(
+            &session_info,
+            model_id,
+            summary_client,
+            relay_sync,
+            Some(self.gateway.clone()),
+            summary_model,
+        )
+        .await
+        .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?;
         self.session_turn_numbers.borrow_mut().insert(session_id.clone(), 0u64);
         let chat_history = vec![];
         let client_code_nav_enabled = arguments
@@ -1096,17 +1054,7 @@ impl acp::Agent for MvpAgent {
         let spawn_res = {
             let mut timer = crate::instrumentation_timer!("session.spawn_session_actor");
             timer.with_field("session_id", session_id.0.as_ref());
-            let spawn_opts = if is_chat_kind {
-                chat_session_spawn_options(
-                    session_info.clone(),
-                    cwd.clone(),
-                    arguments.meta.as_ref(),
-                    None,
-                    session_model_id,
-                    session_yolo_mode,
-                )
-            } else {
-                SessionSpawnOptions {
+            let spawn_opts = SessionSpawnOptions {
                         session_info: session_info.clone(),
                         cwd: cwd.clone(),
                         mcp_servers,
@@ -1134,7 +1082,6 @@ impl acp::Agent for MvpAgent {
                         session_yolo_mode,
                         session_auto_mode: session_auto_mode && !session_yolo_mode,
                         prompt_display_cwd: None,
-                    }
             };
             self.spawn_and_register_session(init, spawn_opts).await
         };
@@ -1145,7 +1092,6 @@ impl acp::Agent for MvpAgent {
             cwd.as_path(),
             remote_settings.as_ref(),
         );
-        let bridge_attach = BridgeAttach::NotAttached;
         {
             let sid = session_id.0.to_string();
             let ci = client_identifier.clone();
@@ -1231,15 +1177,7 @@ impl acp::Agent for MvpAgent {
             Some(session_id.0.as_ref()),
             Some(serde_json::json!({"cwd": cwd.as_str()})),
         );
-        let models = if is_chat_kind {
-            chat_new_session_model_state(
-                self.chat_modes.model_state().await,
-                session_initial_model
-                    .filter(|_| matches!(bridge_attach, BridgeAttach::Spawned)),
-            )
-        } else {
-            self.model_state(Some(&session_id))
-        };
+        let models = self.model_state(Some(&session_id));
         let mut meta = serde_json::json!({
             "currentWorkingDirectory": cwd.as_str().to_owned(),
             "codebaseIndexed": indexed_roots,
@@ -1375,33 +1313,12 @@ impl acp::Agent for MvpAgent {
         };
         let mut persistence_timer = crate::instrumentation_timer!("session.load_light");
         persistence_timer.with_field("session_id", session_id.0.as_ref());
-        let backend = if self.build_registry_config().is_some() {
-            Some(
-                crate::remote::BackendClient::new()
-                    .with_auth_manager(self.auth_manager.clone()),
-            )
-        } else {
-            None
-        };
-        let registry_title_sync = self
-            .session_registry_client()
-            .map(|client| crate::session::persistence::RegistryGeneratedTitleSync {
-                client,
-                suppress_for_zdr: self
-                    .auth_manager
-                    .current_or_expired()
-                    .is_some_and(|a| a.is_zdr_team()),
-            });
         let (persistence_info, persistence) = crate::session::persistence::load_light(
                 &session_info,
                 summary_client,
-                self.storage_mode.get(),
-                Some(self.auth_manager.clone()),
-                backend.as_ref(),
                 relay_sync,
                 Some(self.gateway.clone()),
                 summary_model,
-                registry_title_sync,
             )
             .await
             .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?;
@@ -1491,12 +1408,6 @@ impl acp::Agent for MvpAgent {
             .and_then(|m| m.get("grow/restore_code"))
             .and_then(|v| v.as_bool())
             .unwrap_or(self.restore_code);
-        let registry_client_for_restore = self.session_registry_client();
-        if restore_code_requested && registry_client_for_restore.is_none() {
-            grow_workspace::session::git::warn_registry_disabled_restore(
-                session_id.0.as_ref(),
-            );
-        }
         let restore_checkout_allowed = grow_workspace::session::git::restore_code_checkout_allowed(
             cwd.as_path(),
             Some(summary.info.cwd.as_str()),
@@ -1536,16 +1447,10 @@ impl acp::Agent for MvpAgent {
                     session_id.0.as_ref(),
                 )
                 .await;
-            let kind = if !outcome.checked_out {
-                RestoreKind::CheckoutFailed
+            let kind = if outcome.checked_out {
+                RestoreKind::RegistryOff
             } else {
-                match registry_client_for_restore {
-                        None => RestoreKind::RegistryOff,
-                        Some(registry_client) => {
-                            let _ = registry_client;
-                            RestoreKind::RegistryOff
-                        }
-                    }
+                RestoreKind::CheckoutFailed
             };
             code_restore_info = crate::agent::restore_code::build_code_restore_meta(
                 target_sha,
@@ -2435,9 +2340,6 @@ impl acp::Agent for MvpAgent {
             | "grow/sessions/list" => {
                 crate::agent::handlers::session::handle(self, &args).await
             }
-            "grow/workspaces/list" => {
-                crate::agent::handlers::workspaces::handle(self, &args).await
-            }
             "grow/session/updates" => {
                 crate::extensions::session_updates::handle(&args, &self.gateway).await
             }
@@ -2453,8 +2355,7 @@ impl acp::Agent for MvpAgent {
             "grow/session/search" => {
                 crate::extensions::session_search::handle(&args).await
             }
-            "grow/session/resolve_local_for_worktree_resume"
-            | "grow/session/rehydrate" => {
+            "grow/session/resolve_local_for_worktree_resume" => {
                 let ops = self.resolve_workspace_ops()?;
                 crate::extensions::worktree::handle(self, &ops, &args).await
             }

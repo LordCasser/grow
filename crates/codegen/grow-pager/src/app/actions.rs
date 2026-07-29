@@ -92,13 +92,9 @@ pub enum Action {
     /// Load (resume) an existing session by ID (strict — never create).
     /// The optional `PathBuf` overrides the CWD for sessions stored under a
     /// different directory (e.g., a worktree).
-    ///
-    /// `chat_kind` is the **conversation-entry** bit only (`source ==
-    /// "conversation"` / restore preserve) — **not** sticky `--chat`.
-    /// Process-wide chat mode still stamps kind=chat via SessionFlags in the
-    /// load effect; under `--chat`, local Build disk rows are refused in
-    /// dispatch (never coerced).
-    LoadSession(String, Option<std::path::PathBuf>, bool),
+    /// The final boolean is retained internally until the local load action is
+    /// simplified; production callers always pass `false`.
+    LoadSession(String, Option<std::path::PathBuf>),
     /// Create a new session with a client-chosen session ID (`--session-id`).
     NewSessionWithId(String),
     /// Startup `--fork-session`: fork `parent` then load the child.
@@ -1327,10 +1323,6 @@ pub enum Effect {
         model_id: Option<acp::ModelId>,
         /// Client-chosen session ID (`--session-id` / `meta.sessionId`).
         preferred_session_id: Option<String>,
-        /// Gateway light-frontend for **this** session only (`/chat` one-shot
-        /// or CLI `--chat` via `SessionFlags.chat_mode`). Does not sticky-set
-        /// process-wide mode.
-        chat_kind: bool,
     },
     /// Change the process working directory (project-picker selection).
     SetWorkingDir { path: std::path::PathBuf },
@@ -1352,9 +1344,6 @@ pub enum Effect {
         /// the worktree/session id and `meta.sessionId` on fresh create.
         /// Ignored when `load_session_id` is set (resume path owns the id).
         preferred_session_id: Option<String>,
-        /// One-shot `/chat` or sticky `--chat` — stamp `_meta` kind=chat on
-        /// fresh create (resume uses `LoadSession.chat_kind` instead).
-        chat_kind: bool,
     },
     /// Load (resume) an existing ACP session by ID.
     ///
@@ -1364,14 +1353,10 @@ pub enum Effect {
     ///
     /// Strict load — does not create if missing.
     ///
-    /// `chat_kind` is the conversation-entry bit; effects also stamp kind=chat
-    /// when [`SessionFlags::chat_mode`] (`--chat`) is set.
     LoadSession {
         agent_id: AgentId,
         session_id: String,
         session_cwd: Option<std::path::PathBuf>,
-        /// Conversation-entry bit (`source == "conversation"`), not sticky `--chat`.
-        chat_kind: bool,
     },
     /// Scan enabled foreign session stores without delaying the native list.
     ScanForeignSessions {
@@ -1395,9 +1380,8 @@ pub enum Effect {
     },
     /// Fetch session list for the welcome screen session picker.
     FetchSessionList {
-        /// Text search pushed down to `grow/session/list` as `query` (chat
-        /// mode: forwarded to the backend conversations search). `None`
-        /// fetches the unfiltered list.
+        /// Text search pushed down to `grow/session/list` as `query`.
+        /// `None` fetches the unfiltered list.
         query: Option<String>,
         /// Snapshot of [`crate::app::app_view::AppView::session_picker_list_seq`];
         /// the response is dropped when no longer current, so out-of-order
@@ -1424,13 +1408,6 @@ pub enum Effect {
         session_id: String,
         cwd: String,
         generation: u64,
-    },
-    /// Restore a remote session from GCS then load it. Only Build rows reach
-    /// this effect: conversation rows have no GCS archive.
-    RestoreAndLoadSession {
-        agent_id: AgentId,
-        session_id: String,
-        session_cwd: String,
     },
     /// Send a prompt to the agent.
     SendPrompt {
@@ -2161,9 +2138,6 @@ pub enum TaskResult {
     /// Session list fetched for the welcome screen picker.
     SessionListLoaded {
         sessions: Vec<crate::app::app_view::SessionPickerEntry>,
-        /// Degraded conversations lane (`_meta["grow/partial"]`), surfaced
-        /// as an actionable picker notice instead of a silent empty list.
-        partial: Option<crate::app::effects::ConversationsPartial>,
         /// Directory scope `sessions` were drawn from (`grow/listScope`).
         scope: grow_shell::session::unified_list::ListScope,
         /// Echo of [`Effect::FetchSessionList::seq`]; stale results are dropped.
@@ -2227,23 +2201,6 @@ pub enum TaskResult {
         session_id: String,
         generation: u64,
         detail: crate::app::app_view::CardDetail,
-    },
-    /// Remote session restored successfully — now load it. Always a Build
-    /// disk row (see [`Effect::RestoreAndLoadSession`]).
-    SessionRestored {
-        agent_id: AgentId,
-        /// The local session ID (may differ from remote ID).
-        local_session_id: String,
-    },
-    /// Remote session restore failed.
-    SessionRestoreFailed {
-        agent_id: AgentId,
-        error: String,
-    },
-    /// Incremental progress during remote session restore.
-    SessionRestoreProgress {
-        agent_id: AgentId,
-        message: String,
     },
     /// Prompt response received (turn ended).
     PromptResponse {

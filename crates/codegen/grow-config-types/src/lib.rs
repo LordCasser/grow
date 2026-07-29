@@ -511,8 +511,6 @@ pub struct RemoteSettings {
     pub dream_min_sessions: Option<u64>,
     #[serde(default)]
     pub dream_check_interval_secs: Option<u64>,
-    #[serde(default)]
-    pub writeback_enabled: Option<bool>,
     /// OAuth2 provider issuer URL (e.g., "https://login.example.com"). When present
     /// together with `oauth2_client_id`, the client uses OAuth2 authorization code
     /// flow. Controlled via remote settings for gradual rollout.
@@ -557,10 +555,6 @@ pub struct RemoteSettings {
     /// and `config.toml [mcp] max_output_bytes`. Built-in default 20_000.
     #[serde(default)]
     pub max_mcp_output_bytes: Option<u64>,
-    /// When `Some(true)`, enable session registry hooks (register, update, finalize, memory upload).
-    /// When absent or `Some(false)`, all hooks are disabled (default: disabled).
-    #[serde(default)]
-    pub session_registry_enabled: Option<bool>,
     /// The remote settings `doom_loop_recovery` JSON object; see
     /// [`DoomLoopRecoverySettings`]. Absent ⇒ every knob falls through to
     /// TOML/defaults; a partial object falls through per-field.

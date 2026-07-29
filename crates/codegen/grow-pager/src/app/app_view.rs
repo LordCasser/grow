@@ -820,11 +820,6 @@ pub struct AppView {
     /// Enable the ask-user-question tool for new sessions (`--ask-user`).
     /// Automatically enabled by `plan_mode`.
     pub ask_user: bool,
-    /// Process-wide gateway light-frontend from CLI `--chat` only.
-    /// Stamps `_meta["grow/session"].kind = "chat"` and omits Build agent
-    /// profiles on create/load while set. `/chat` does **not** set this
-    /// (uses [`Self::deferred_startup`] one-shot state instead).
-    pub chat_mode: bool,
     /// Whether mouse capture is currently enabled. Disabled during the
     /// Authenticating state so the terminal handles native text selection.
     pub mouse_captured: bool,
@@ -1226,7 +1221,6 @@ impl AppView {
             plan_mode: false,
             subagents: false,
             ask_user: false,
-            chat_mode: false,
             mouse_captured: true,
             new_worktree_dialog: None,
             contextual_hints: Default::default(),
@@ -1950,7 +1944,6 @@ impl AppView {
                     cwd_has_git_ancestor: self.cwd_has_git_ancestor,
                     session_picker_grouped: self.session_picker_grouped,
                     sp_source_filter: &mut self.session_picker_source_filter,
-                    chat_mode: self.chat_mode,
                 },
             ),
             ActiveView::Agent(id) => {
@@ -2540,9 +2533,6 @@ struct WelcomeInputCtx<'a> {
     cwd_has_git_ancestor: bool,
     session_picker_grouped: bool,
     sp_source_filter: &'a mut crate::views::session_picker::SourceFilter,
-    /// Process-wide `--chat`: the session picker hides its source filter
-    /// (conversations-only list), so `f` must not cycle it.
-    chat_mode: bool,
 }
 /// Welcome view input -- auth-state-aware routing.
 fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutcome {
@@ -2713,9 +2703,9 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             shortcuts_area: None,
             tabs: None,
             active_tab: 0,
-            filter_label: (!ctx.chat_mode).then(|| source_filter.label()),
-            filter_key_hint: (!ctx.chat_mode).then_some("f"),
-            filter_active: !ctx.chat_mode && source_filter.is_active(),
+            filter_label: Some(source_filter.label()),
+            filter_key_hint: Some("f"),
+            filter_active: source_filter.is_active(),
             header_note: None,
             action_keys: &[],
             disable_search: false,
@@ -2772,7 +2762,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             PickerOutcome::SubmitQuery => {
                 let query = ctx.sp_state.query().trim().to_string();
                 if !query.is_empty() {
-                    return InputOutcome::Action(Action::LoadSession(query, None, false));
+                    return InputOutcome::Action(Action::LoadSession(query, None));
                 }
                 return InputOutcome::Unchanged;
             }
@@ -3708,7 +3698,6 @@ impl AppView {
                             welcome_tick: self.welcome_tick,
                             session_picker_grouped: self.session_picker_grouped,
                             session_picker_source_filter: self.session_picker_source_filter,
-                            chat_mode: self.chat_mode,
                             is_api_key_auth: self.is_api_key_auth,
                             changelog_bullets: &self.changelog_bullets,
                             changelog_has_full_notes: self.changelog_markdown.is_some(),
@@ -5055,7 +5044,6 @@ pub(crate) mod tests {
             plan_mode: false,
             subagents: false,
             ask_user: false,
-            chat_mode: false,
             mouse_captured: true,
             new_worktree_dialog: None,
             contextual_hints: Default::default(),
@@ -10602,49 +10590,5 @@ pub(crate) mod tests {
         app.project_picker_disabled = false;
         app.cwd = std::path::PathBuf::from("/tmp");
         assert!(app.needs_project_picker());
-    }
-    /// Chat mode hides the welcome picker's source filter, so `f` must not
-    /// cycle it; Build mode keeps the cycle.
-    #[test]
-    fn welcome_picker_f_cycle_disabled_under_chat_mode() {
-        let conversation_entry = SessionPickerEntry {
-            id: "conv-welcome-f".into(),
-            summary: "chat".into(),
-            updated_at: chrono::Utc::now(),
-            created_at: chrono::Utc::now(),
-            cwd: String::new(),
-            hostname: None,
-            source: "conversation".into(),
-            model_id: None,
-            num_messages: 0,
-            last_active_at: None,
-            branch: None,
-            repo_name: "r".into(),
-            worktree_label: None,
-            card_detail: None,
-        };
-        let f_key = Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
-        crate::appearance::cache::set_vim_mode(false);
-        let mut app = test_app();
-        app.session_picker_entries = Some(vec![conversation_entry]);
-        app.chat_mode = true;
-        let _ = app.handle_input(&f_key);
-        assert_eq!(
-            app.session_picker_source_filter,
-            crate::views::session_picker::SourceFilter::Grow,
-            "f must not cycle the hidden source filter under chat mode"
-        );
-        assert_eq!(
-            app.session_picker_state.query(),
-            "f",
-            "under chat mode `f` keeps its normal typing/search meaning"
-        );
-        app.session_picker_state.reset();
-        app.chat_mode = false;
-        let outcome = app.handle_input(&f_key);
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::CycleSessionSourceFilter)
-        ));
     }
 }

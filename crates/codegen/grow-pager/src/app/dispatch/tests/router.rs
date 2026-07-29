@@ -391,7 +391,6 @@ fn resume_foreign_session_stashes_prompt_behind_trust_and_auth() {
             Some(crate::app::session_startup::DeferredSessionStartup::Load {
                 session_id: "must-not-load".into(),
                 session_cwd: Some(std::path::PathBuf::from("/other")),
-                chat_kind: true,
             });
         app.deferred_startup.worktree = true;
         app.deferred_startup.worktree_label = Some("stale".into());
@@ -400,7 +399,6 @@ fn resume_foreign_session_stashes_prompt_behind_trust_and_auth() {
         app.deferred_startup.new_session = true;
         app.deferred_startup.prompt = Some("stale prompt".into());
         app.deferred_startup.open_dashboard = true;
-        app.deferred_startup.pending_chat = true;
         assert!(
             app.foreign_resume_hint().is_some(),
             "the explicit nudge remains available to supersede deferred intents"
@@ -416,7 +414,6 @@ fn resume_foreign_session_stashes_prompt_behind_trust_and_auth() {
         assert!(app.deferred_startup.preferred_session_id.is_none());
         assert!(!app.deferred_startup.new_session);
         assert!(!app.deferred_startup.open_dashboard);
-        assert!(!app.deferred_startup.pending_chat);
     }
 }
 #[test]
@@ -943,40 +940,6 @@ fn switch_agent_dispatch_preserves_model_and_emits_session_effect() {
     assert_eq!(app.agents[&id].session.models.current, Some(model_id));
 }
 #[test]
-fn switch_model_allowed_when_agent_chat_kind() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    app.agents.get_mut(&id).unwrap().chat_kind = true;
-    let model_id = acp::ModelId::new(std::sync::Arc::from("auto"));
-    let effects = dispatch(
-        Action::SwitchModel {
-            model_id: model_id.clone(),
-            effort: None,
-        },
-        &mut app,
-    );
-    assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::SwitchModel { model_id: mid, .. } if mid == &model_id));
-    assert!(app.agents[&id].session.model_switch_pending);
-}
-#[test]
-fn switch_model_allowed_when_app_chat_mode() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    app.chat_mode = true;
-    let model_id = acp::ModelId::new(std::sync::Arc::from("auto"));
-    let effects = dispatch(
-        Action::SwitchModel {
-            model_id: model_id.clone(),
-            effort: None,
-        },
-        &mut app,
-    );
-    assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::SwitchModel { model_id: mid, .. } if mid == &model_id));
-    assert!(app.agents[&id].session.model_switch_pending);
-}
-#[test]
 fn deferred_model_switch_still_works_for_cli_override() {
     let mut app = test_app();
     let cli_model = acp::ModelId::new(std::sync::Arc::from("cli-override"));
@@ -1364,7 +1327,7 @@ fn all_constructor_paths_initialize_slash_fields() {
         assert_eq!(s.available_commands_generation, 1);
         assert!(!s.model_switch_pending);
     }
-    dispatch(Action::LoadSession("sess-1".into(), None, false), &mut app);
+    dispatch(Action::LoadSession("sess-1".into(), None), &mut app);
     {
         let s = &app.agents[&AgentId(1)].session;
         assert_eq!(s.available_commands_generation, 1);
@@ -1424,93 +1387,6 @@ fn request_bundle_status_emits_effect() {
     let effects = dispatch(Action::RequestBundleStatus, &mut app);
     assert_eq!(effects.len(), 1);
     assert!(matches!(&effects[0], Effect::FetchBundleStatus));
-}
-/// Conversation-entry resume stamps LoadSession.chat_kind; process chat_mode
-/// alone does not set the entry bit (effects still stamp via SessionFlags).
-#[test]
-fn conversation_entry_load_sets_chat_kind_bit() {
-    let mut app = test_app();
-    let effects = dispatch(Action::LoadSession("conv-id".into(), None, true), &mut app);
-    assert!(matches!(
-        &effects[..],
-        [Effect::LoadSession {
-            session_id,
-            chat_kind: true,
-            ..
-        }] if session_id == "conv-id"
-    ));
-    let agent = app.agents.values().next().expect("agent");
-    assert!(agent.chat_kind, "conversation entry → agent chat_kind");
-}
-/// Process-wide `--chat` + non-conversation resume of a non-disk id still
-/// loads (gateway conversation) with agent chat_kind from sticky mode.
-#[test]
-fn chat_mode_resume_without_local_disk_loads_as_chat() {
-    let mut app = test_app();
-    app.chat_mode = true;
-    let effects = dispatch(
-        Action::LoadSession("remote-conv-only".into(), None, false),
-        &mut app,
-    );
-    assert!(matches!(
-        &effects[..],
-        [Effect::LoadSession {
-            session_id,
-            chat_kind: false,
-            ..
-        }] if session_id == "remote-conv-only"
-    ));
-    let agent = app.agents.values().next().expect("agent");
-    assert!(
-        agent.chat_kind,
-        "sticky --chat must set agent chat_kind even without entry bit"
-    );
-    assert!(
-        agent.app_chat_mode,
-        "app.chat_mode must propagate to AgentView::app_chat_mode"
-    );
-}
-/// Process-wide `--chat` refuses local Build disk rows (no LoadSession).
-#[test]
-fn chat_mode_refuses_local_build_disk_load() {
-    let cwd = PathBuf::from(format!(
-        "/tmp/chat-mode-build-refuse-{}",
-        std::process::id()
-    ));
-    let session_id = format!("build-disk-{}", std::process::id());
-    let sess_dir = plant_local_build_session(&cwd, &session_id);
-    let mut app = test_app();
-    app.cwd = cwd;
-    app.chat_mode = true;
-    let effects = dispatch(Action::LoadSession(session_id, None, false), &mut app);
-    let _ = std::fs::remove_dir_all(&sess_dir);
-    assert!(
-        effects.is_empty(),
-        "local Build under --chat must refuse, got {effects:?}"
-    );
-    assert!(
-        app.agents.is_empty(),
-        "refuse must not allocate an agent slot"
-    );
-}
-/// Conversation entry under `--chat` still loads even if a local path exists.
-#[test]
-fn chat_mode_allows_conversation_entry_even_if_local_path() {
-    let cwd = PathBuf::from(format!("/tmp/chat-mode-conv-ok-{}", std::process::id()));
-    let session_id = format!("conv-also-local-{}", std::process::id());
-    let sess_dir = plant_local_build_session(&cwd, &session_id);
-    let mut app = test_app();
-    app.cwd = cwd;
-    app.chat_mode = true;
-    let effects = dispatch(Action::LoadSession(session_id, None, true), &mut app);
-    let _ = std::fs::remove_dir_all(&sess_dir);
-    assert!(matches!(
-        &effects[..],
-        [Effect::LoadSession {
-            chat_kind: true,
-            ..
-        }]
-    ));
 }
 #[test]
 fn view_catalog_entry_emits_fetch_effect() {
@@ -2343,68 +2219,6 @@ fn mouse_click_on_peek_close_rect_clears_peek() {
     assert!(d.peek.is_none());
     assert!(d.peek_close_rect.is_none());
 }
-/// Same refusal at the content-hit worktree entry point.
-#[test]
-fn pick_content_session_in_worktree_refuses_conversation_row() {
-    let mut app = test_app_with_agent();
-    open_session_picker_with(&mut app, vec![make_conversation_entry("conv-wt-2")]);
-    let effects = dispatch(
-        Action::PickContentSessionInWorktree {
-            session_id: "conv-wt-2".into(),
-            cwd: String::new(),
-        },
-        &mut app,
-    );
-    assert!(effects.is_empty(), "no worktree effects, got {effects:?}");
-    assert!(
-        !app.deferred_startup.pending_chat,
-        "refusal must not set the one-shot chat bit"
-    );
-    assert!(read_toast(&app).contains("worktree"));
-}
-/// Delete acts on local disk + registry; conversation rows have neither.
-#[test]
-fn delete_session_refuses_conversation_row() {
-    let mut app = test_app_with_agent();
-    open_session_picker_with(&mut app, vec![make_conversation_entry("conv-del-1")]);
-    let effects = dispatch(
-        Action::DeleteSession {
-            source: "conversation".into(),
-            session_id: "conv-del-1".into(),
-            cwd: String::new(),
-        },
-        &mut app,
-    );
-    assert!(
-        effects.is_empty(),
-        "no DeleteSession effect for a conversation row, got {effects:?}"
-    );
-    assert!(read_toast(&app).contains("isn't supported"));
-}
-/// Expanding a conversation card must not read `chat_history.jsonl`
-/// (it doesn't exist); the row still toggles open.
-#[test]
-fn expand_conversation_card_skips_detail_load() {
-    use crate::views::modal::ActiveModal;
-    let mut app = test_app_with_agent();
-    open_session_picker_with(&mut app, vec![make_conversation_entry("conv-exp-1")]);
-    let effects = dispatch(
-        Action::ExpandSessionCard {
-            source: "conversation".into(),
-            session_id: "conv-exp-1".into(),
-        },
-        &mut app,
-    );
-    assert!(
-        effects.is_empty(),
-        "no LoadCardDetail for a conversation row, got {effects:?}"
-    );
-    let agent = get_active_agent(&app).expect("active agent");
-    let Some(ActiveModal::SessionPicker { state, .. }) = agent.active_modal.as_ref() else {
-        panic!("expected SessionPicker modal");
-    };
-    assert!(state.expanded.contains(&0), "row still toggles open");
-}
 /// Canary: Build rows still lazy-load card detail on expand.
 #[test]
 fn expand_build_card_still_loads_detail() {
@@ -2414,40 +2228,6 @@ fn expand_build_card_still_loads_detail() {
         Action::ExpandSessionCard {
             source: "local".into(),
             session_id: "local-exp-1".into(),
-        },
-        &mut app,
-    );
-    assert!(
-        matches!(&effects[..], [Effect::LoadCardDetail { .. }]),
-        "expected LoadCardDetail, got {effects:?}"
-    );
-}
-/// Welcome-screen variants of the conversation-card expand exemption.
-#[test]
-fn welcome_expand_conversation_card_skips_detail_load() {
-    let mut app = test_app();
-    app.session_picker_entries = Some(vec![make_conversation_entry("conv-exp-w1")]);
-    let effects = dispatch(
-        Action::ExpandSessionCard {
-            source: "conversation".into(),
-            session_id: "conv-exp-w1".into(),
-        },
-        &mut app,
-    );
-    assert!(
-        effects.is_empty(),
-        "no LoadCardDetail for a welcome conversation row, got {effects:?}"
-    );
-    assert!(
-        app.session_picker_state.expanded.contains(&0),
-        "row still toggles open"
-    );
-    let mut app = test_app();
-    app.session_picker_entries = Some(vec![make_picker_entry("local-exp-w1", "/r")]);
-    let effects = dispatch(
-        Action::ExpandSessionCard {
-            source: "local".into(),
-            session_id: "local-exp-w1".into(),
         },
         &mut app,
     );

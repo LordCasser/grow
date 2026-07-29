@@ -817,7 +817,6 @@ pub(crate) async fn run(
     app.plan_mode = !args.no_plan;
     app.subagents = !args.no_subagents;
     app.ask_user = !args.no_ask_user;
-    app.chat_mode = args.chat();
     app.restore_code = args.restore_code.then_some(true);
     if let Some(ref agent) = args.agent {
         match crate::headless::resolve_agent_arg(agent) {
@@ -1424,9 +1423,6 @@ pub(crate) async fn run(
     let connection_cancel = connection.cancel;
     let mut leader_status_rx = connection.leader_status_rx;
     let mut tasks: JoinSet<TaskResult> = JoinSet::new();
-    let (progress_tx, mut progress_rx) =
-        tokio::sync::mpsc::unbounded_channel::<effects::RestoreProgressMsg>();
-
     // Animation tick: only scheduled when there are running entries.
     let mut tick_interval = tick_interval;
     let mut animation_tick_at: Option<Instant> = None;
@@ -1470,19 +1466,18 @@ pub(crate) async fn run(
     // status only; shell auto-syncs post-auth
     if matches!(app.auth_state, AuthState::Done) {
         let effs = dispatch::dispatch(Action::RequestBundleStatus, &mut app);
-        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+        if process_effects(effs, &mut tasks, &mut app) {
             return Ok(make_run_result(&app));
         }
         // Fetch changelog off the render path so the welcome screen
         // can display bullets and /release-notes uses the cached result.
         let effs = vec![super::actions::Effect::FetchChangelog];
-        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+        if process_effects(effs, &mut tasks, &mut app) {
             return Ok(make_run_result(&app));
         }
     }
 
-    if !post_render_effects.is_empty()
-        && process_effects(post_render_effects, &mut tasks, &mut app, &progress_tx)
+    if !post_render_effects.is_empty() && process_effects(post_render_effects, &mut tasks, &mut app)
     {
         return Ok(make_run_result(&app));
     }
@@ -1512,15 +1507,7 @@ pub(crate) async fn run(
             })
         }
         MaterializedStartup::Resume { session_id, .. } => {
-            // CLI resume has no roster entry: `chat_kind` on LoadSession is the
-            // conversation-entry bit only (false here). Process-wide `--chat`
-            // still stamps kind=chat via SessionFlags.chat_mode in the load
-            // effect; local Build disk rows are refused in dispatch / startup.
-            Some(Action::LoadSession(
-                session_id.clone(),
-                session_cwd.clone(),
-                false,
-            ))
+            Some(Action::LoadSession(session_id.clone(), session_cwd.clone()))
         }
         MaterializedStartup::NewWithId { session_id } if args.worktree.is_some() => {
             // Stash preferred id; `dispatch_new_worktree_session` consumes it and
@@ -1558,7 +1545,7 @@ pub(crate) async fn run(
 
     if let Some(action) = startup_action {
         let effs = dispatch::dispatch(action, &mut app);
-        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+        if process_effects(effs, &mut tasks, &mut app) {
             return Ok(make_run_result(&app));
         }
         presenter.request_presentation(&mut app, terminal, false);
@@ -1572,7 +1559,7 @@ pub(crate) async fn run(
             },
             &mut app,
         );
-        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+        if process_effects(effs, &mut tasks, &mut app) {
             return Ok(make_run_result(&app));
         }
         presenter.request_presentation(&mut app, terminal, false);
@@ -1589,7 +1576,7 @@ pub(crate) async fn run(
             app.deferred_startup.prompt = Some(initial_prompt.to_string());
         } else if !app.is_zdr_blocked() {
             let effs = dispatch::dispatch_initial_prompt(&mut app, initial_prompt.to_string());
-            if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+            if process_effects(effs, &mut tasks, &mut app) {
                 return Ok(make_run_result(&app));
             }
             presenter.request_presentation(&mut app, terminal, false);
@@ -1604,7 +1591,7 @@ pub(crate) async fn run(
         unsafe { std::env::remove_var("GROW_OPEN_DASHBOARD_AT_STARTUP") };
         if app.session_startup_allowed() {
             let effs = dispatch::dispatch(Action::OpenDashboard, &mut app);
-            if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+            if process_effects(effs, &mut tasks, &mut app) {
                 return Ok(make_run_result(&app));
             }
             presenter.request_presentation(&mut app, terminal, false);
@@ -1632,7 +1619,7 @@ pub(crate) async fn run(
             // Already authenticated + trusted: open the empty session now so the
             // user lands directly at the prompt.
             let effs = dispatch::dispatch(Action::NewSession, &mut app);
-            if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+            if process_effects(effs, &mut tasks, &mut app) {
                 return Ok(make_run_result(&app));
             }
             presenter.request_presentation(&mut app, terminal, false);
@@ -1649,7 +1636,7 @@ pub(crate) async fn run(
 
     // Startup intents are now fully classified; only an untouched welcome can nudge.
     if let Some(effect) = app.begin_foreign_resume_detection()
-        && process_effects(vec![effect], &mut tasks, &mut app, &progress_tx)
+        && process_effects(vec![effect], &mut tasks, &mut app)
     {
         return Ok(make_run_result(&app));
     }
@@ -1845,7 +1832,7 @@ pub(crate) async fn run(
             // biased order so a SIGTERM quit isn't starved by an ACP firehose.
             _ = quit_notify.notified() => {
                 let effs = dispatch::dispatch(Action::Quit, &mut app);
-                let _ = process_effects(effs, &mut tasks, &mut app, &progress_tx);
+                let _ = process_effects(effs, &mut tasks, &mut app);
                 break;
             }
 
@@ -1875,7 +1862,7 @@ pub(crate) async fn run(
                 let mut state_changed = acp_handler::handle(msg, &mut app);
                 if !app.pending_effects.is_empty() {
                     let effs = std::mem::take(&mut app.pending_effects);
-                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                    if process_effects(effs, &mut tasks, &mut app) {
                         break;
                     }
                 }
@@ -1893,7 +1880,7 @@ pub(crate) async fn run(
                     state_changed |= acp_handler::handle(msg, &mut app);
                     if !app.pending_effects.is_empty() {
                         let effs = std::mem::take(&mut app.pending_effects);
-                        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                        if process_effects(effs, &mut tasks, &mut app) {
                             return Ok(make_run_result(&app));
                         }
                     }
@@ -1915,7 +1902,7 @@ pub(crate) async fn run(
                 match join_result {
                     Ok(result) => {
                         let effs = dispatch::dispatch(Action::TaskComplete(result), &mut app);
-                        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                        if process_effects(effs, &mut tasks, &mut app) {
                             break;
                         }
                         schedule_tick(&mut animation_tick_at, &app, tick_interval);
@@ -1932,18 +1919,6 @@ pub(crate) async fn run(
                         }
                     }
                 }
-            }
-
-            Some(msg) = progress_rx.recv() => {
-                let result = TaskResult::SessionRestoreProgress {
-                    agent_id: msg.agent_id,
-                    message: msg.message,
-                };
-                let effs = dispatch::dispatch(Action::TaskComplete(result), &mut app);
-                if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                    break;
-                }
-                presenter.request(false);
             }
 
             // Background update check completed.
@@ -1977,7 +1952,7 @@ pub(crate) async fn run(
                 // near the top of this function. `None` means that thread ended.
                 let Some(ev) = maybe_ev else { break };
                 let result = drain_and_process(
-                    ev, &mut input_rx, &mut app, &mut tasks, &progress_tx,
+                    ev, &mut input_rx, &mut app, &mut tasks,
                     &mut csi_filter, &mut xt_filter,
                 ).await;
                 if result.should_quit {
@@ -1985,7 +1960,7 @@ pub(crate) async fn run(
                 }
                 if !app.pending_effects.is_empty() {
                     let effs = std::mem::take(&mut app.pending_effects);
-                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                    if process_effects(effs, &mut tasks, &mut app) {
                         break;
                     }
                 }
@@ -2064,7 +2039,7 @@ pub(crate) async fn run(
                 // keeps ticks alive while reconcile is armed.
                 let reconciled = dispatch::reconcile_overdue_turn_ends(&mut app);
                 if let Some(effs) = reconciled {
-                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                    if process_effects(effs, &mut tasks, &mut app) {
                         break;
                     }
                     presenter.request(false);
@@ -2090,7 +2065,7 @@ pub(crate) async fn run(
                     } else {
                         Effect::FetchDashboardSessions
                     };
-                    if process_effects(vec![eff], &mut tasks, &mut app, &progress_tx) {
+                    if process_effects(vec![eff], &mut tasks, &mut app) {
                         break;
                     }
                     roster_poll_at = Some(Instant::now() + ROSTER_POLL_INTERVAL);
@@ -2102,7 +2077,7 @@ pub(crate) async fn run(
             _ = recap_poll => {
                 if should_pregenerate_away_recap(&app) {
                     let effs = dispatch::dispatch(Action::SendRecap { auto: true }, &mut app);
-                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                    if process_effects(effs, &mut tasks, &mut app) {
                         break;
                     }
                 }
@@ -2485,7 +2460,7 @@ pub(crate) async fn run(
                 // an unrestored session would be wrong.
                 if active_restored {
                     let drain_effects = dispatch::dispatch(Action::DrainQueue, &mut app);
-                    if process_effects(drain_effects, &mut tasks, &mut app, &progress_tx) {
+                    if process_effects(drain_effects, &mut tasks, &mut app) {
                         return Ok(make_run_result(&app));
                     }
                 }
@@ -2722,7 +2697,6 @@ async fn drain_and_process(
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TimedInputEvent>,
     app: &mut AppView,
     tasks: &mut JoinSet<TaskResult>,
-    progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
     csi_filter: &mut super::csi_filter::CsiFragmentFilter,
     xt_filter: &mut super::xt_filter::XtversionFilter,
 ) -> DrainResult {
@@ -2828,7 +2802,7 @@ async fn drain_and_process(
                                 crate::app::actions::Action::SendRecap { auto: true },
                                 app,
                             );
-                            if process_effects(effs, tasks, app, progress_tx) {
+                            if process_effects(effs, tasks, app) {
                                 return true;
                             }
                             needs_draw = true;
@@ -2870,7 +2844,7 @@ async fn drain_and_process(
         ) {
             InputOutcome::Action(action) => {
                 let effs = dispatch::dispatch(action, app);
-                if process_effects(effs, tasks, app, progress_tx) {
+                if process_effects(effs, tasks, app) {
                     return true;
                 }
                 needs_draw = true;
@@ -2881,7 +2855,7 @@ async fn drain_and_process(
                 // the same event through the now-active view so the input
                 // (character, paste) lands in the session's prompt.
                 let effs = dispatch::dispatch(action, app);
-                if process_effects(effs, tasks, app, progress_tx) {
+                if process_effects(effs, tasks, app) {
                     return true;
                 }
                 if let InputOutcome::Action(follow_up) = app.handle_input_at_with_paste_provenance(
@@ -2890,7 +2864,7 @@ async fn drain_and_process(
                     routed.paste_provenance,
                 ) {
                     let effs = dispatch::dispatch(follow_up, app);
-                    if process_effects(effs, tasks, app, progress_tx) {
+                    if process_effects(effs, tasks, app) {
                         return true;
                     }
                 }
@@ -2901,11 +2875,11 @@ async fn drain_and_process(
                 // Dispatch both in order; first must fully resolve
                 // before second (e.g. revert preview then open reset).
                 let effs = dispatch::dispatch(first, app);
-                if process_effects(effs, tasks, app, progress_tx) {
+                if process_effects(effs, tasks, app) {
                     return true;
                 }
                 let effs = dispatch::dispatch(second, app);
-                if process_effects(effs, tasks, app, progress_tx) {
+                if process_effects(effs, tasks, app) {
                     return true;
                 }
                 needs_draw = true;
@@ -3242,7 +3216,6 @@ fn process_effects(
     effs: Vec<super::actions::Effect>,
     tasks: &mut JoinSet<TaskResult>,
     app: &mut AppView,
-    progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
 ) -> bool {
     let flags = effects::SessionFlags {
         plan_mode: app.plan_mode,
@@ -3255,13 +3228,12 @@ fn process_effects(
             app.default_yolo,
             matches!(app.current_ui.permission_mode.as_deref(), Some("auto")),
         ),
-        chat_mode: app.chat_mode,
         screen_mode_label: Some(app.screen_mode.meta_label()),
         is_api_key_auth: app.is_api_key_auth,
         resume_local_miss: app.resume_local_miss.clone(),
     };
     for eff in effs {
-        let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags, progress_tx);
+        let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags);
         // Install auth abort handle if the current auth state still matches.
         if let Some((seq, abort_handle)) = meta.auth_abort_handle
             && let super::app_view::AuthState::Authenticating {

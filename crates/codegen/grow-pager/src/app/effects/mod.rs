@@ -10,13 +10,12 @@ use super::actions;
 use super::session_title_resolve::worktree_resume_failure_message;
 #[allow(unused_imports)]
 use super::{agent, dispatch};
-pub use helpers::ConversationsPartial;
 pub(super) use helpers::{
     parse_session_load_running_prompt_id, parse_session_scheduler_background_loops,
 };
 pub(crate) use helpers::{
-    EffectMeta, RestoreProgressMsg, SessionFlags, persist_permission_mode_and_notify,
-    persist_setting, sanitize_user_error,
+    EffectMeta, SessionFlags, persist_permission_mode_and_notify, persist_setting,
+    sanitize_user_error,
 };
 use helpers::*;
 use std::path::{Path, PathBuf};
@@ -37,7 +36,6 @@ pub(crate) fn execute(
     acp_tx: &AcpAgentTx,
     cwd: &Path,
     session_flags: &SessionFlags,
-    progress_tx: &tokio::sync::mpsc::UnboundedSender<RestoreProgressMsg>,
 ) -> (bool, EffectMeta) {
     let mut meta = EffectMeta::default();
     let effect_is_send_now = matches!(effect, Effect::SendPromptNow { .. });
@@ -102,7 +100,6 @@ pub(crate) fn execute(
             cwd: session_cwd,
             model_id,
             preferred_session_id,
-            chat_kind,
         } => {
             let tx = acp_tx.clone();
             let compat = grow_tools::types::compat::CompatConfig::default();
@@ -113,10 +110,6 @@ pub(crate) fn execute(
             let mcp_count = mcp_servers.len();
             #[allow(unused_mut)]
             let mut meta = session_flags.to_meta();
-            let is_chat_path = chat_kind || session_flags.chat_mode;
-            if is_chat_path {
-                apply_chat_kind_meta(&mut meta);
-            }
             if let Some(ref mid) = model_id {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("modelId".into(), serde_json::json!(mid.0));
@@ -124,9 +117,6 @@ pub(crate) fn execute(
             if let Some(ref sid) = preferred_session_id {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("sessionId".into(), serde_json::json!(sid));
-            }
-            if is_chat_path {
-                scrub_chat_workspace_bind_meta(&mut meta);
             }
             let preferred_for_preflight = preferred_session_id.clone();
             tasks
@@ -205,18 +195,10 @@ pub(crate) fn execute(
             git_ref,
             model_id,
             preferred_session_id,
-            chat_kind,
         } => {
             let tx = acp_tx.clone();
             let cwd = cwd.to_path_buf();
             let mut meta = session_flags.to_meta();
-            if chat_kind || session_flags.chat_mode {
-                meta.get_or_insert_with(acp::Meta::new)
-                    .insert(
-                        "grow/session".into(),
-                        serde_json::json!({ "kind": "chat" }),
-                    );
-            }
             if let Some(ref mid) = model_id {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("modelId".into(), serde_json::json!(mid.0));
@@ -488,14 +470,9 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::LoadSession { agent_id, session_id, session_cwd, chat_kind } => {
+        Effect::LoadSession { agent_id, session_id, session_cwd } => {
             let tx = acp_tx.clone();
             let mut meta = session_flags.to_meta();
-            let is_chat_path = chat_kind || session_flags.chat_mode;
-            if is_chat_path {
-                apply_chat_kind_meta(&mut meta);
-                scrub_chat_workspace_bind_meta(&mut meta);
-            }
             if let Some(true) = session_flags.restore_code {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("grow/restore_code".into(), serde_json::Value::Bool(true));
@@ -722,11 +699,9 @@ pub(crate) fn execute(
                             }
                             let payload = wrapper.get("result").unwrap_or(&wrapper);
                             let sessions = parse_session_picker_entries(payload);
-                            let partial = parse_session_list_partial(payload);
                             let scope = parse_session_list_scope(payload);
                             TaskResult::SessionListLoaded {
                                 sessions,
-                                partial,
                                 scope,
                                 seq,
                                 query,
@@ -835,149 +810,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::RestoreAndLoadSession { agent_id, session_id, session_cwd: _ } => {
-            use grow_shell::agent::session_registry_client::SessionRegistryClient;
-            use grow_shell::session::restore::restore_session_with_storage;
-            let setup_started = std::time::Instant::now();
-            let raw_config = grow_shell::config::load_effective_config();
-            let setup = raw_config
-                .ok()
-                .and_then(|raw| {
-                    let cfg = grow_shell::agent::config::Config::new_from_toml_cfg(
-                            &raw,
-                        )
-                        .ok()?;
-                    let proxy_base = cfg.endpoints.proxy_url();
-                    let deployment_key = cfg.endpoints.deployment_key.clone();
-                    let alpha_test_key = cfg.endpoints.alpha_test_key.clone();
-                    let auth_manager = crate::app::session_startup::pre_acp_auth_manager(
-                        &cfg,
-                    );
-                    let registry = SessionRegistryClient::new(&proxy_base, String::new())
-                        .with_deployment_key(deployment_key.clone())
-                        .with_alpha_test_key(alpha_test_key.clone())
-                        .with_session_id(session_id.clone())
-                        .with_auth(auth_manager.clone());
-                    Some((auth_manager, registry))
-                });
-            tracing::info!(
-                elapsed_ms = setup_started.elapsed().as_millis() as u64,
-                ok = setup.is_some(),
-                "restore: auth/client setup"
-            );
-            let target_cwd = cwd.to_path_buf();
-            let ptx = progress_tx.clone();
-            tasks
-                .spawn(async move {
-                    let Some((auth_manager, registry_client)) = setup
-                    else {
-                        return TaskResult::SessionRestoreFailed {
-                            agent_id,
-                            error: "Failed to load configuration.".into(),
-                        };
-                    };
-                    let _ = auth_manager.auth().await;
-                    let progress: Option<
-                        grow_shell::session::restore::ProgressCallback,
-                    > = {
-                        use grow_shell::session::restore::{PhaseStep, RestorePhase};
-                        Some(
-                            Box::new(move |event| {
-                                let msg = match (event.phase, event.step) {
-                                    (RestorePhase::Download, PhaseStep::Start) => {
-                                        Some("Downloading session archives...".to_string())
-                                    }
-                                    (RestorePhase::Download, PhaseStep::End) => {
-                                        Some(
-                                            format!(
-                                "Downloads finished ({}).",
-                                format_restore_elapsed(event.elapsed),
-                            ),
-                                        )
-                                    }
-                                    (RestorePhase::Codebase, PhaseStep::Start) => {
-                                        Some("Restoring code...".to_string())
-                                    }
-                                    (RestorePhase::Codebase, PhaseStep::End) => {
-                                        event
-                                            .detail
-                                            .as_ref()
-                                            .map(|detail| format!("Code restored ({detail})."))
-                                    }
-                                    (RestorePhase::Memory, PhaseStep::Start) => {
-                                        Some("Restoring memory...".to_string())
-                                    }
-                                    (RestorePhase::SessionState, PhaseStep::Start) => {
-                                        Some("Restoring session state...".to_string())
-                                    }
-                                    (RestorePhase::SessionState, PhaseStep::End) => {
-                                        event
-                                            .detail
-                                            .as_ref()
-                                            .map(|detail| format!("Session state restored ({detail})."))
-                                    }
-                                    (RestorePhase::Finalize, _) => {
-                                        let elapsed_secs = event.elapsed.as_secs();
-                                        let status = if event.incomplete {
-                                            "Restore incomplete"
-                                        } else {
-                                            "Restore complete"
-                                        };
-                                        if elapsed_secs >= 60 {
-                                            Some(
-                                                format!(
-                                        "{status} ({}m{:02}s).",
-                                        elapsed_secs / 60,
-                                        elapsed_secs % 60
-                                    ),
-                                            )
-                                        } else {
-                                            Some(format!("{status} ({elapsed_secs}s)."))
-                                        }
-                                    }
-                                    _ => None,
-                                };
-                                if let Some(text) = msg {
-                                    let _ = ptx
-                                        .send(RestoreProgressMsg {
-                                            agent_id,
-                                            message: text,
-                                        });
-                                }
-                            }),
-                        )
-                    };
-                    let cwd_str = target_cwd.to_string_lossy().to_string();
-                    match restore_session_with_storage(
-                        &registry_client,
-                        &session_id,
-                        &cwd_str,
-                        None,
-                        progress,
-                    )
-                        .await
-                    {
-                        Ok(result) => {
-                            let effective_id = if result.local_session_id.is_empty() {
-                                session_id
-                            } else {
-                                result.local_session_id
-                            };
-                            TaskResult::SessionRestored {
-                                agent_id,
-                                local_session_id: effective_id,
-                            }
-                        }
-                        Err(e) => {
-                            TaskResult::SessionRestoreFailed {
-                                agent_id,
-                                error: format!("{e:#}"),
-                            }
-                        }
-                    }
-                });
-        }
-        Effect::LoadCardDetail { source, session_id, cwd, generation } => {
+       Effect::LoadCardDetail { source, session_id, cwd, generation } => {
             tasks
                 .spawn(async move {
                     use crate::app::app_view::CardDetail;

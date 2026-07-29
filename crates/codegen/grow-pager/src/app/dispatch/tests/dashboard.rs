@@ -4907,36 +4907,7 @@ fn dashboard_attach_roster_focuses_existing_local_agent() {
     assert!(app.agents[&id].active_subagent.is_none());
     assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, Some(id));
 }
-/// A conversation-origin roster row attaches via the direct chat load —
-/// never local resolution or GCS restore.
-#[test]
-fn dashboard_attach_conversation_roster_row_loads_as_chat() {
-    let mut app = test_app();
-    app.leader_mode = false;
-    let mut entry = idle_roster_entry("conv-dash-1", "Backend chat");
-    entry.cwd = String::new();
-    entry.origin.kind = "conversation".into();
-    app.dashboard_local_sessions = vec![entry];
-    let effects = dispatch_dashboard_attach(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::Roster {
-            session_id: "conv-dash-1".into(),
-        },
-    );
-    assert!(
-        matches!(
-            &effects[..],
-            [Effect::LoadSession {
-                session_id,
-                session_cwd: None,
-                chat_kind: true,
-                ..
-            }] if session_id == "conv-dash-1"
-        ),
-        "expected direct chat LoadSession, got {effects:?}"
-    );
-}
-/// Canary: Build roster rows keep the cross-cwd disk resume.
+/// Roster rows keep the cross-cwd disk resume.
 #[test]
 fn dashboard_attach_build_roster_row_keeps_disk_resume() {
     let mut app = test_app();
@@ -4954,7 +4925,6 @@ fn dashboard_attach_build_roster_row_keeps_disk_resume() {
             [Effect::LoadSession {
                 session_id,
                 session_cwd: Some(cwd),
-                chat_kind: false,
                 ..
             }] if session_id == "build-dash-1" && cwd == std::path::Path::new("/repo")
         ),

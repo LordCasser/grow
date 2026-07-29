@@ -1,5 +1,5 @@
 //! Fork and project-selection dispatchers and fork placeholder builders.
-use super::lifecycle::{dispatch_new_session_inner_with_id, refuse_chat_mode_build_agent};
+use super::lifecycle::dispatch_new_session_inner_with_id;
 use crate::acp::tracker::AcpUpdateTracker;
 use crate::app::actions::Effect;
 use crate::app::agent::{AgentCommand, AgentId, AgentSession, AgentState};
@@ -7,9 +7,7 @@ use crate::app::agent_view::{AgentView, McpInitProgress};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::app::dispatch::ctx::{SwitchCause, switch_to_agent};
 use crate::app::dispatch::modes::inherit_auto_mode;
-use crate::app::dispatch::prompt::{
-    consume_chat_kind, dispatch_send_prompt, supersede_open_reload_window,
-};
+use crate::app::dispatch::prompt::{dispatch_send_prompt, supersede_open_reload_window};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
 use crate::scrollback::state::ScrollbackState;
@@ -193,7 +191,6 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
         Some(d) => format!("Forked: {d}"),
         None => "Forked".to_string(),
     };
-    let parent_chat_kind = parent.chat_kind || app.chat_mode;
     app.agents.insert(new_id, new_agent);
     {
         let agent = app
@@ -209,11 +206,9 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
         agent.set_session_recap_available(app.session_recap_available);
         agent.apply_app_scoped_gates(
             app.sharing_enabled,
-            app.chat_mode,
             app.screen_mode,
             &app.active_announcements,
         );
-        agent.chat_kind = parent_chat_kind;
         agent
             .prompt
             .slash_controller
@@ -251,7 +246,6 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             // Fork resumes the parent session, which carries its own model.
             model_id: None,
             preferred_session_id: None,
-            chat_kind: parent_chat_kind,
         }]
     } else {
         vec![Effect::ForkSession {
@@ -355,16 +349,11 @@ pub(in crate::app::dispatch) fn dispatch_project_selected(
         agent.session.prompt_history_loading = true;
     }
     let preferred_session_id = app.deferred_startup.preferred_session_id.take();
-    let chat_kind = consume_chat_kind(app);
-    if let Some(agent) = app.agents.get_mut(&id) {
-        agent.chat_kind = chat_kind;
-    }
     effects.push(Effect::CreateSession {
         agent_id: id,
         cwd: path,
         model_id: None,
         preferred_session_id,
-        chat_kind,
     });
     effects.extend(dispatch_send_prompt(app, stashed_prompt));
     effects
@@ -503,18 +492,6 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
     restore_degree: Option<grow_workspace::session::git::RestoreDegree>,
 ) -> Vec<Effect> {
     let session_id_str = session_id.0.to_string();
-    let pending_entry = std::mem::take(&mut app.deferred_startup.pending_chat);
-    let agent_entry = app.agents.get(&agent_id).is_some_and(|a| a.chat_kind);
-    let conversation_entry = pending_entry || agent_entry;
-    if crate::app::session_startup::chat_mode_refuses_local_build_load(
-        app.chat_mode,
-        conversation_entry,
-        &session_id_str,
-        &app.cwd,
-    ) {
-        refuse_chat_mode_build_agent(app, agent_id);
-        return vec![];
-    }
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         supersede_open_reload_window(agent, agent_id, "WorktreeForked");
         agent.session.finish_command();
@@ -544,13 +521,10 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
             }
             _ => {}
         }
-        let effective_chat = conversation_entry || app.chat_mode;
-        agent.chat_kind = effective_chat;
         return vec![Effect::LoadSession {
             agent_id,
             session_id: session_id_str,
             session_cwd: Some(session_cwd),
-            chat_kind: conversation_entry,
         }];
     }
     vec![]
@@ -562,18 +536,6 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
     cwd: std::path::PathBuf,
 ) -> Vec<Effect> {
     let session_id_str = new_session_id.0.to_string();
-    let pending_entry = std::mem::take(&mut app.deferred_startup.pending_chat);
-    let agent_entry = app.agents.get(&agent_id).is_some_and(|a| a.chat_kind);
-    let conversation_entry = pending_entry || agent_entry;
-    if crate::app::session_startup::chat_mode_refuses_local_build_load(
-        app.chat_mode,
-        conversation_entry,
-        &session_id_str,
-        &app.cwd,
-    ) {
-        refuse_chat_mode_build_agent(app, agent_id);
-        return vec![];
-    }
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         supersede_open_reload_window(agent, agent_id, "ForkSessionReady");
         agent.session.finish_command();
@@ -582,13 +544,10 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
         agent.scrollback.begin_batch();
         agent.begin_replay_window();
         agent.session.cwd = cwd.clone();
-        let effective_chat = conversation_entry || app.chat_mode;
-        agent.chat_kind = effective_chat;
         return vec![Effect::LoadSession {
             agent_id,
             session_id: session_id_str,
             session_cwd: Some(cwd),
-            chat_kind: conversation_entry,
         }];
     }
     vec![]

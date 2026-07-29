@@ -194,10 +194,8 @@ fn resume_body_rows(agent: &AgentView, width: u16) -> u16 {
         Some(current_repo.as_str()),
     );
     // Reserve a row for the pinned hidden-external hint when shown.
-    let hint_row = u16::from(
-        !agent.app_chat_mode
-            && minimal_api::hidden_external_hint(entries.as_deref(), *source_filter).is_some(),
-    );
+    let hint_row =
+        u16::from(minimal_api::hidden_external_hint(entries.as_deref(), *source_filter).is_some());
     measure_entries(&picker_entries).saturating_add(hint_row)
 }
 
@@ -208,7 +206,6 @@ fn render_resume(
     theme: &Theme,
 ) -> Option<(u16, u16)> {
     let cwd = agent.session.cwd.to_string_lossy().to_string();
-    let chat_mode = agent.app_chat_mode;
     let Some(ActiveModal::SessionPicker {
         entries,
         state,
@@ -244,9 +241,7 @@ fn render_resume(
         state,
         Some(current_repo.as_str()),
     );
-    let hidden_hint = (!chat_mode)
-        .then(|| minimal_api::hidden_external_hint(entries.as_deref(), *source_filter))
-        .flatten();
+    let hidden_hint = minimal_api::hidden_external_hint(entries.as_deref(), *source_filter);
 
     render_title(buf, title_row, theme, "Resume session");
     // Focus-aware search bar (cursor only when search is focused).

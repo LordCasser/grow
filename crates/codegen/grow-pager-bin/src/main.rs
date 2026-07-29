@@ -1098,7 +1098,6 @@ async fn run_agent_command(
         cli_no_memory: false,
         todo_gate: false,
         laziness_debug_log: None,
-        storage_mode: None,
     });
     let agent_memory_config = agent_config.memory_config.clone();
     let leader_eligible = matches!(
@@ -1726,11 +1725,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     }
     if let Some(ref detail) = args.compaction_detail {
         unsafe { std::env::set_var("GROW_COMPACTION_DETAIL", detail) };
-    }
-    if args.chat() {
-        unsafe {
-            std::env::set_var(grow_shell::agent::chat_modes::GROW_CHAT_MODE_ENV, "1");
-        }
     }
     if let Some(ref socket) = args.leader_socket {
         unsafe { std::env::set_var(grow_shell::leader::LEADER_SOCKET_ENV, socket) };

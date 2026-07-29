@@ -3,13 +3,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::config::StorageMode;
-
-use crate::remote::RemoteSync;
-
 use crate::sampling::Client as OaiCompatClient;
 use crate::sampling::ConversationItem;
-use crate::session::export::ExportedMetadata;
 use grow_workspace::session::file_state::RewindPoint;
 
 use crate::session::signals::SessionSignals;
@@ -38,13 +33,6 @@ impl PersistenceContentChunk {
     pub fn new(content_chunks: Vec<acp::ContentBlock>) -> Self {
         Self { content_chunks }
     }
-}
-
-/// Mirrors generated titles to the session registry after local persistence succeeds.
-#[derive(Clone)]
-pub(crate) struct RegistryGeneratedTitleSync {
-    pub client: crate::agent::session_registry_client::SessionRegistryClient,
-    pub suppress_for_zdr: bool,
 }
 
 use crate::session::storage::SessionUpdate;
@@ -164,11 +152,6 @@ pub enum PersistenceMsg {
     /// Routed back through the persistence channel so the storage write
     /// stays sequential with other summary.json mutations.
     GeneratedTitle(String),
-    /// Enable remote writeback for a session created `Local` before remote
-    /// settings resolved (non-blocking startup); backfills its local history.
-    UpgradeToWriteback {
-        auth_manager: Arc<crate::auth::AuthManager>,
-    },
     Flush,
     /// Flush all pending writes, then signal the caller once the flush is complete.
     /// Unlike `Flush` (fire-and-forget), this is a **sync barrier**: the caller's
@@ -189,10 +172,7 @@ fn storage_view(sessions_root: &Path) -> RelocationResult<RelocationView> {
 
 /// Check if a session exists locally under the given cwd.
 ///
-/// This is the correct check for the `-r` resume path: a session is only
-/// "already local" if it lives under the **same** cwd as the current invocation.
-/// A session stored under a different cwd does NOT satisfy this check — the
-/// caller must still run the remote restore into the requested cwd.
+/// A session is considered present here only when it lives under the exact cwd.
 pub fn session_exists_for_cwd(session_id: &str, cwd: &str) -> bool {
     let sessions_root = crate::util::grow_home::grow_home().join("sessions");
     session_exists_for_cwd_in_root(session_id, cwd, &sessions_root)
@@ -214,38 +194,9 @@ fn session_exists_for_cwd_in_root(session_id: &str, cwd: &str, sessions_root: &P
     is_persisted_session_dir(&session_path)
 }
 
-/// Find the local child session id that was previously restored from `remote_session_id`
-/// in the given `cwd`.
-///
-/// When a remote session is restored, a new local child is created with
-/// `summary.parent_session_id == remote_session_id`.  On a second
-/// `grow -r <remote_id>` in the same cwd, this function returns the already-restored
-/// child so no duplicate restore is performed.
-///
-/// If multiple children match (e.g., from pre-fix duplicate restores), the
-/// most recently used one is returned.  Selection is fully deterministic:
-/// 1. Newest `updated_at` timestamp in `summary.json`
-/// 2. Newest session directory mtime as a tie-breaker (catches equal timestamps)
-/// 3. Lexicographically largest session id as the final stable tie-breaker
-///
-/// Returns `Some(local_child_id)` when at least one matching child is found.
-/// Returns `None` when no child with `parent_session_id == remote_session_id` exists.
-pub fn find_local_child_for_remote(remote_session_id: &str, cwd: &str) -> Option<String> {
-    let sessions_root = crate::util::grow_home::grow_home().join("sessions");
-    find_local_child_for_remote_in_root(remote_session_id, cwd, &sessions_root)
-}
-
-/// Resolve a session ID to one that is available locally under `cwd`.
-///
-/// Checks in order:
-///   1. `session_id` exists directly under `cwd` → returns it as-is.
-///   2. A previously restored child of `session_id` exists → returns the child ID.
-///   3. Neither found → returns `None` (caller should restore from remote).
+/// Resolve a session only when it exists in the requested local cwd.
 pub fn resolve_local_session(session_id: &str, cwd: &str) -> Option<String> {
-    if session_exists_for_cwd(session_id, cwd) {
-        return Some(session_id.to_string());
-    }
-    find_local_child_for_remote(session_id, cwd)
+    session_exists_for_cwd(session_id, cwd).then(|| session_id.to_owned())
 }
 
 // Repo-wide session resolution (for worktree resume)
@@ -254,9 +205,7 @@ pub fn resolve_local_session(session_id: &str, cwd: &str) -> Option<String> {
 #[serde(rename_all = "camelCase")]
 pub enum LocalSessionResolutionKind {
     ExactCwd,
-    RestoredChildInExactCwd,
     SameRepoDifferentCwd,
-    RestoredChildInSameRepoDifferentCwd,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -301,76 +250,8 @@ pub fn resolve_local_session_for_repo_in_root(
                 },
             });
         }
-
-        if let Some(child_id) = find_local_child_for_remote_in_root(session_id, cwd, sessions_root)
-        {
-            return Some(ResolvedLocalSession {
-                session_id: child_id,
-                cwd: cwd.to_owned(),
-                resolution_kind: if is_exact {
-                    LocalSessionResolutionKind::RestoredChildInExactCwd
-                } else {
-                    LocalSessionResolutionKind::RestoredChildInSameRepoDifferentCwd
-                },
-            });
-        }
     }
     None
-}
-fn find_local_child_for_remote_in_root(
-    remote_session_id: &str,
-    cwd: &str,
-    sessions_root: &Path,
-) -> Option<String> {
-    let encoded = crate::util::grow_home::encode_cwd_dirname(cwd);
-    let cwd_dir = sessions_root.join(&encoded);
-    if !cwd_dir.exists() {
-        return None;
-    }
-
-    // Collect all matching children.  Multiple can exist when a user ran
-    // `grow -r <remote_id>` before this fix was deployed.
-    // Tuple: (updated_at, dir_mtime_nanos, session_id) — all sorted descending.
-    let mut candidates: Vec<(String, u128, String)> = Vec::new();
-
-    let entries = std::fs::read_dir(&cwd_dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let summary_path = path.join("summary.json");
-        if !summary_path.exists() {
-            continue;
-        }
-        // Parse minimum fields without deserializing the full Summary,
-        // so we don't fail on missing/extra fields from older/newer formats.
-        if let Ok(raw) = std::fs::read_to_string(&summary_path)
-            && let Ok(partial) = serde_json::from_str::<serde_json::Value>(&raw)
-            && partial.get("parent_session_id").and_then(|v| v.as_str()) == Some(remote_session_id)
-            && let Some(session_id) = path.file_name().and_then(|n| n.to_str())
-        {
-            let updated_at = partial
-                .get("updated_at")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            // Directory mtime as a tie-breaker for equal updated_at values.
-            let dir_mtime = std::fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .map(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(0)
-                })
-                .unwrap_or(0);
-            candidates.push((updated_at, dir_mtime, session_id.to_string()));
-        }
-    }
-
-    // Sort descending by all three keys for full determinism.
-    candidates.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(b.2.cmp(&a.2)));
-    candidates.into_iter().next().map(|(_, _, id)| id)
 }
 
 /// Check if a session exists locally by session ID.
@@ -543,11 +424,8 @@ fn local_summaries_for_cwd_sync_in_root(
 /// the (irreversible) OS sandbox is applied.
 ///
 /// - `session_id`: the explicit id from `--resume <id>` / `--load <id>` /
-///   `-s <id>`. Resolved directly across all cwds, then — for a remote id that
-///   was restored into a local child — via that child's `parent_session_id`.
-/// - `cwd`: the current working directory. Used to resolve a remote id to its
-///   local child, and as the lookup key for `-c` / `--continue` and bare
-///   `--resume` (most-recent-for-cwd).
+///   `-s <id>`, resolved directly across all local cwd directories.
+/// - `cwd`: the lookup key for `-c` / `--continue` and bare `--resume`.
 ///
 /// Returns `None` when not resuming, the session isn't found locally, or it has
 /// no persisted profile (sessions created before this was tracked) — callers
@@ -568,15 +446,6 @@ fn resumed_session_sandbox_profile_in_root(
         // Direct match by id (across all cwds).
         if let Some(summary) = find_summary_by_session_id_in_root(id, sessions_root) {
             return summary.sandbox_profile;
-        }
-        // A remote id resumes into a local child (fresh id, `parent_session_id`
-        // = remote id). Mirror the canonical resume path so the peek doesn't
-        // miss the restored session's saved profile.
-        if let Some(cwd) = cwd
-            && let Some(child) = find_local_child_for_remote_in_root(id, cwd, sessions_root)
-        {
-            return find_summary_by_session_id_in_root(&child, sessions_root)
-                .and_then(|s| s.sandbox_profile);
         }
         return None;
     }
@@ -1370,16 +1239,11 @@ struct SessionPersistence {
     /// Pending ACP notification for merging consecutive text chunks
     pending_notification: Option<acp::SessionNotification>,
     rx: mpsc::UnboundedReceiver<PersistenceMsg>,
-    remote_sync: Option<RemoteSync>,
-    /// True only for sessions created this run (not resumed); gates the
-    /// writeback backfill so a resumed, already-synced session isn't re-sent.
-    created_fresh: bool,
     /// WebSocket-based relay sync for real-time session sharing.
     /// This streams updates to the relay backend in addition to local persistence.
     relay_sync: Option<crate::relay::RelaySync>,
     /// Session title generation lifecycle.
     summary: crate::session::summary::SummaryGenerator,
-    registry_title_sync: Option<RegistryGeneratedTitleSync>,
     /// Client gateway for `SessionSummaryGenerated` notifications. Used to
     /// announce an auto-generated title only once it has actually been adopted
     /// (see the `GeneratedTitle` handler), so a title rejected for racing a
@@ -1485,59 +1349,9 @@ impl SessionPersistence {
     }
 
     fn queue_acp_sync(&self, notification: acp::SessionNotification) {
-        if let Some(sync) = &self.remote_sync {
-            sync.queue(notification.clone());
-        }
         if let Some(relay) = &self.relay_sync {
             relay.queue(notification);
         }
-    }
-
-    /// Enable writeback for a session created `Local` before settings resolved:
-    /// build the sync and (for a fresh session) backfill its local-only history.
-    /// No-op once syncing, so a repeat upgrade is harmless.
-    async fn upgrade_to_writeback(&mut self, auth_manager: Arc<crate::auth::AuthManager>) {
-        if self.remote_sync.is_some() {
-            return;
-        }
-        // Flush the merge-pending notification so the backfill re-reads it.
-        self.flush_pending().await;
-        let persisted = match self.storage.load_session(&self.info).await {
-            Ok(persisted) => persisted,
-            Err(error) => {
-                tracing::warn!(%error, "writeback upgrade: failed to load session for backfill");
-                return;
-            }
-        };
-        let remote_sync = match init_remote_sync(
-            &persisted.summary,
-            StorageMode::Writeback,
-            Some(auth_manager),
-        ) {
-            Ok(Some(remote_sync)) => remote_sync,
-            // ZDR team, or nothing to do: leave the session local-only.
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(%error, "writeback upgrade: remote sync init failed");
-                return;
-            }
-        };
-        // Fresh-only backfill; see `backfill_updates_to_sync`.
-        let backfilled =
-            backfill_updates_to_sync(self.created_fresh, persisted.updates, &remote_sync);
-        if self.created_fresh {
-            tracing::info!(
-                session_id = %self.info.id,
-                backfilled,
-                "writeback enabled after settings arrival; backfilled local-only history",
-            );
-        } else {
-            tracing::info!(
-                session_id = %self.info.id,
-                "writeback enabled for resumed session; forward-only, no backfill",
-            );
-        }
-        self.remote_sync = Some(remote_sync);
     }
 
     fn finish_pending_append(
@@ -1600,13 +1414,10 @@ impl SessionPersistence {
         result
     }
 
-    /// Flush any pending merged ACP notification to disk and remote sync.
+    /// Flush any pending merged ACP notification to disk and an explicitly configured relay.
     async fn flush_pending(&mut self) {
         if let Err(error) = self.drain_pending().await {
             tracing::warn!(%error, "failed to write pending update");
-        }
-        if let Some(sync) = &self.remote_sync {
-            sync.flush();
         }
         if let Some(relay) = &self.relay_sync {
             relay.flush();
@@ -1626,9 +1437,6 @@ impl SessionPersistence {
                 spawn_worktree_touch(&self.info);
             }
             match msg {
-                PersistenceMsg::UpgradeToWriteback { auth_manager } => {
-                    self.upgrade_to_writeback(auth_manager).await;
-                }
                 PersistenceMsg::Flush => {
                     self.flush_pending().await;
                 }
@@ -1725,9 +1533,6 @@ impl SessionPersistence {
                     {
                         tracing::warn!(?e, "failed to update current model");
                     }
-                    if let Some(sync) = &self.remote_sync {
-                        sync.set_model_id(model_id.0.to_string());
-                    }
                 }
                 PersistenceMsg::PlanState(state) => {
                     if let Err(e) = self.storage.write_plan_state(&self.info, &state).await {
@@ -1821,33 +1626,6 @@ impl SessionPersistence {
                                 &self.info,
                                 &title,
                             );
-                            if let Some(sync) = &self.remote_sync {
-                                sync.set_title(title.clone());
-                            }
-                            if let Some(reg) = self.registry_title_sync.as_ref()
-                                && !reg.suppress_for_zdr
-                            {
-                                let client = reg.client.clone();
-                                let sid = self.info.id.to_string();
-                                let t = title;
-                                tokio::spawn(async move {
-                                    let req =
-                                        crate::agent::session_registry_client::UpdateRequest {
-                                            summary: Some(t),
-                                            first_prompt: None,
-                                            last_turn_number: None,
-                                            repo_head_at_end: None,
-                                            restorable_turn_number: None,
-                                        };
-                                    if let Err(e) = client.update(&sid, &req).await {
-                                        tracing::warn!(
-                                            error = %e,
-                                            session_id = %sid,
-                                            "session registry summary sync failed after title generation"
-                                        );
-                                    }
-                                });
-                            }
                         }
                         Ok(false) => {
                             tracing::debug!(
@@ -1950,95 +1728,6 @@ impl SessionPersistence {
     }
 }
 
-/// Queue a fresh session's local-only ACP history to `remote_sync` (xAI updates
-/// are never synced), returning the count. Resumed sessions are forward-only:
-/// their prior history may already be on the backend (which appends by content,
-/// no per-message id), so re-sending would duplicate.
-fn backfill_updates_to_sync(
-    created_fresh: bool,
-    updates: Vec<SessionUpdate>,
-    remote_sync: &RemoteSync,
-) -> usize {
-    if !created_fresh {
-        return 0;
-    }
-    let mut backfilled = 0usize;
-    for update in updates {
-        if let SessionUpdate::Acp(notification) = update {
-            remote_sync.queue(*notification);
-            backfilled += 1;
-        }
-    }
-    remote_sync.flush();
-    backfilled
-}
-
-fn init_remote_sync(
-    summary: &Summary,
-    storage_mode: StorageMode,
-    auth_manager: Option<Arc<crate::auth::AuthManager>>,
-) -> io::Result<Option<RemoteSync>> {
-    match storage_mode {
-        StorageMode::Local => Ok(None),
-        StorageMode::Writeback => {
-            let auth_manager = auth_manager.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "Writeback storage mode requires authentication. Run 'grow login' first.",
-                )
-            })?;
-            if let Some(auth) = auth_manager.current_or_expired() {
-                if auth.is_zdr_team() {
-                    tracing::debug!("ZDR team: skipping remote sync");
-                    return Ok(None);
-                }
-            } else {
-                tracing::warn!(
-                    "writeback: no auth loaded yet, ZDR check skipped (backend enforces server-side)"
-                );
-            }
-            tracing::info!("Writeback mode enabled, syncing to backend");
-            let client =
-                crate::remote::BackendClient::new().with_auth_manager(auth_manager.clone());
-            let metadata = ExportedMetadata::from_summary(summary);
-            Ok(Some(RemoteSync::new(
-                summary.info.id.to_string(),
-                metadata,
-                client,
-            )))
-        }
-    }
-}
-
-/// Pull a session from the backend if not found locally. Returns the pulled
-/// session's [`Info`] (cwd may differ from caller's on different machines),
-/// or `None` if not found or on error.
-async fn try_pull_from_remote(info: &Info, client: &crate::remote::BackendClient) -> Option<Info> {
-    // BackendClient resolves auth internally via its auth_manager.
-    client.auth_manager.as_ref()?;
-
-    tracing::info!(session_id = %info.id, "Session not found locally, trying backend");
-
-    match crate::remote::pull_session_to_local(&info.id.0, client).await {
-        Ok(crate::remote::PullResult::Hydrated(pulled_info)) => {
-            tracing::info!(
-                session_id = %info.id,
-                pulled_cwd = %pulled_info.cwd,
-                "Pulled session from backend"
-            );
-            Some(pulled_info)
-        }
-        Ok(crate::remote::PullResult::NotFound) => {
-            tracing::debug!(session_id = %info.id, "Session not found on backend either");
-            None
-        }
-        Err(e) => {
-            tracing::warn!(session_id = %info.id, error = %e, "Backend pull failed");
-            None
-        }
-    }
-}
-
 /// Map a persistence `io::Error` into an `acp::Error` with a human-friendly
 /// `message` and a stable `data.code` for log aggregation.
 pub(crate) fn io_error_to_acp(e: &io::Error) -> acp::Error {
@@ -2129,12 +1818,9 @@ pub(crate) async fn new(
     info: &Info,
     model_id: acp::ModelId,
     sampling_client: OaiCompatClient,
-    storage_mode: StorageMode,
-    auth_manager: Option<Arc<crate::auth::AuthManager>>,
     relay_sync: Option<crate::relay::RelaySync>,
     gateway: Option<GatewaySender>,
     session_summary_model: String,
-    registry_title_sync: Option<RegistryGeneratedTitleSync>,
 ) -> io::Result<PersistenceHandle> {
     let root_dir = grow_home();
     let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
@@ -2153,7 +1839,6 @@ pub(crate) async fn new(
 
     let info_clone = info.clone();
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
-    let remote_sync = init_remote_sync(&summary, storage_mode, auth_manager)?;
     let handle = PersistenceHandle {
         tx: tx.clone(),
         noop: false,
@@ -2165,8 +1850,6 @@ pub(crate) async fn new(
             storage: storage.clone(),
             pending_notification: None,
             rx,
-            remote_sync: remote_sync.clone(),
-            created_fresh: true,
             relay_sync,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
@@ -2175,7 +1858,6 @@ pub(crate) async fn new(
                     persistence_tx: tx,
                 },
             ),
-            registry_title_sync,
             gateway,
         };
         persistence.run().await;
@@ -2236,8 +1918,6 @@ pub async fn new_with_explicit_dir(
             storage: storage.clone(),
             pending_notification: None,
             rx,
-            remote_sync: None,
-            created_fresh: false,
             relay_sync: None,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
@@ -2246,7 +1926,6 @@ pub async fn new_with_explicit_dir(
                     persistence_tx: tx,
                 },
             ),
-            registry_title_sync: None,
             gateway: None,
         };
         persistence.run().await;
@@ -2288,44 +1967,19 @@ pub struct PersistedInfoLight {
     pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
 }
 
-/// On NotFound, try pulling from backend. Returns pulled info or the original error.
-async fn pull_on_miss(
-    info: &Info,
-    client: &crate::remote::BackendClient,
-    err: io::Error,
-) -> io::Result<Info> {
-    if err.kind() != io::ErrorKind::NotFound {
-        return Err(err);
-    }
-    try_pull_from_remote(info, client).await.ok_or(err)
-}
-
 #[expect(dead_code, reason = "wired when session restore flow calls load")]
 pub(crate) async fn load(
     info: &Info,
     sampling_client: OaiCompatClient,
-    storage_mode: StorageMode,
-    auth_manager: Option<Arc<crate::auth::AuthManager>>,
-    backend: Option<&crate::remote::BackendClient>,
     relay_sync: Option<crate::relay::RelaySync>,
     gateway: Option<GatewaySender>,
     session_summary_model: String,
-    registry_title_sync: Option<RegistryGeneratedTitleSync>,
 ) -> io::Result<(PersistedInfo, PersistenceHandle)> {
     let root_dir = grow_home();
     let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
 
-    let (persisted, loaded_info) = match storage.load_session(info).await {
-        Ok(p) => (p, info.clone()),
-        Err(e) => match backend {
-            Some(client) => {
-                let pulled = pull_on_miss(info, client, e).await?;
-                let p = storage.load_session(&pulled).await?;
-                (p, pulled)
-            }
-            None => return Err(e),
-        },
-    };
+    let persisted = storage.load_session(info).await?;
+    let loaded_info = info.clone();
     // Touch on load too: resuming must reset the worktree's gc expiry clock.
     touch_worktree_for_session(&loaded_info).await;
 
@@ -2342,7 +1996,6 @@ pub(crate) async fn load(
     let (tx, rx) = mpsc::unbounded_channel::<PersistenceMsg>();
 
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
-    let remote_sync = init_remote_sync(&persisted_info.summary, storage_mode, auth_manager)?;
 
     let has_title = !persisted_info.summary.display_title().is_empty();
     let handle = PersistenceHandle {
@@ -2365,11 +2018,8 @@ pub(crate) async fn load(
             storage: storage.clone(),
             pending_notification: None,
             rx,
-            remote_sync: remote_sync.clone(),
-            created_fresh: false,
             relay_sync,
             summary: summary_gen,
-            registry_title_sync,
             gateway,
         };
         persistence.run().await;
@@ -2384,29 +2034,16 @@ pub(crate) async fn load(
 pub(crate) async fn load_light(
     info: &Info,
     sampling_client: OaiCompatClient,
-    storage_mode: StorageMode,
-    auth_manager: Option<Arc<crate::auth::AuthManager>>,
-    backend: Option<&crate::remote::BackendClient>,
     relay_sync: Option<crate::relay::RelaySync>,
     gateway: Option<GatewaySender>,
     session_summary_model: String,
-    registry_title_sync: Option<RegistryGeneratedTitleSync>,
 ) -> io::Result<(PersistedInfoLight, PersistenceHandle)> {
     let root_dir = grow_home();
     let storage: Box<dyn StorageAdapter> =
         Box::new(JsonlStorageAdapter::with_root(root_dir.clone()));
 
-    let (persisted, loaded_info) = match storage.load_session_without_updates(info).await {
-        Ok(p) => (p, info.clone()),
-        Err(e) => match backend {
-            Some(client) => {
-                let pulled = pull_on_miss(info, client, e).await?;
-                let p = storage.load_session_without_updates(&pulled).await?;
-                (p, pulled)
-            }
-            None => return Err(e),
-        },
-    };
+    let persisted = storage.load_session_without_updates(info).await?;
+    let loaded_info = info.clone();
     // Touch on load too: resuming must reset the worktree's gc expiry clock.
     touch_worktree_for_session(&loaded_info).await;
 
@@ -2429,7 +2066,6 @@ pub(crate) async fn load_light(
     let (tx, rx) = mpsc::unbounded_channel::<PersistenceMsg>();
 
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
-    let remote_sync = init_remote_sync(&persisted_info.summary, storage_mode, auth_manager)?;
 
     let has_title = !persisted_info.summary.display_title().is_empty();
     let handle = PersistenceHandle {
@@ -2452,11 +2088,8 @@ pub(crate) async fn load_light(
             storage: storage.clone(),
             pending_notification: None,
             rx,
-            remote_sync: remote_sync.clone(),
-            created_fresh: false,
             relay_sync,
             summary: summary_gen,
-            registry_title_sync,
             gateway,
         };
         persistence.run().await;
@@ -2482,75 +2115,36 @@ pub async fn list_summaries(cwd: Option<&str>) -> io::Result<Vec<Summary>> {
     storage.list_sessions(cwd).await
 }
 
-/// Failure modes of [`delete_session_history`].
-///
-/// Kept distinct so callers can surface a precise message: a remote
-/// failure is reported separately from a local-disk failure because the
-/// remote delete runs first and aborts the whole operation (see the doc
-/// on [`delete_session_history`]).
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteSessionError {
     /// Listing local summaries (to resolve the on-disk session dir) failed.
     #[error("failed to list sessions: {0}")]
     List(#[source] io::Error),
-    /// The remote (writeback) copy could not be deleted; local bits were
-    /// left untouched so the operation can be retried.
-    #[error("failed to delete remote session data: {0}")]
-    Remote(#[source] crate::remote::client::BackendError),
     /// The local on-disk session directory could not be removed.
     #[error("failed to delete session: {0}")]
     Local(#[source] io::Error),
 }
 
-/// Where a session copy was actually removed by [`delete_session_history`].
-///
-/// Both fields are `false` when nothing existed to delete (still a
-/// success). Callers use [`Self::any_removed`] to decide between a
-/// "deleted" and a "not found" message without conflating a remote-only
-/// delete with a no-op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SessionDeletion {
-    /// A local on-disk session directory was found and removed.
     pub local_removed: bool,
-    /// A remote (writeback) copy was found and removed. `false` when
-    /// `needs_remote` was not set, or the remote copy was already absent
-    /// (the backend returned `404`).
-    pub remote_removed: bool,
 }
 
 impl SessionDeletion {
     /// `true` when a copy was removed from at least one location.
     pub fn any_removed(self) -> bool {
-        self.local_removed || self.remote_removed
+        self.local_removed
     }
 }
 
-/// Permanently delete a session's history: the remote (writeback) copy
-/// when `needs_remote`, the local on-disk session directory, and the
-/// FTS search-index entry.
-///
-/// Idempotent: a session that is missing locally (e.g. remote-only)
-/// still succeeds, and a remote `404` (copy already gone) is treated as
-/// success rather than an error. When `needs_remote` is set the remote
-/// delete runs *first* and is authoritative — only on its success (or a
-/// `404`) are the local bits removed. This ordering prevents a partial
-/// delete where the local copy is nuked but the remote copy lingers and
-/// re-appears on the next session list.
-///
-/// Returns a [`SessionDeletion`] recording which copies (local / remote)
-/// were actually removed; both fields `false` means nothing existed
-/// (still `Ok`).
+/// Permanently delete a local session directory and its search-index entry.
+/// Missing sessions are treated as an idempotent success.
 pub async fn delete_session_history(
     session_id: &str,
     cwd: Option<&str>,
-    needs_remote: bool,
-    auth_manager: Arc<crate::auth::AuthManager>,
 ) -> Result<SessionDeletion, DeleteSessionError> {
     let sid = acp::SessionId::new(Arc::from(session_id));
 
-    // Resolve the local session info, scoping to cwd if provided. A
-    // remote-only session won't be found here — that's fine, the remote
-    // delete (if applicable) still runs.
     let summaries = list_summaries(cwd)
         .await
         .map_err(DeleteSessionError::List)?;
@@ -2559,25 +2153,8 @@ pub async fn delete_session_history(
         .find(|s| s.info.id == sid)
         .map(|s| s.info.clone());
 
-    // Remote delete first (authoritative for cloud history). A genuine
-    // failure aborts before any local mutation so the row does not
-    // reappear; a `404` means the copy is already gone, so deletion stays
-    // idempotent and falls through to local cleanup.
-    let remote_removed = if needs_remote {
-        let result = crate::remote::client::BackendClient::new()
-            .with_auth_manager(auth_manager)
-            .delete_session_data(session_id)
-            .await;
-        classify_remote_delete(result)?
-    } else {
-        false
-    };
-
     let Some(info) = local_info else {
-        return Ok(SessionDeletion {
-            local_removed: false,
-            remote_removed,
-        });
+        return Ok(SessionDeletion::default());
     };
 
     JsonlStorageAdapter::default()
@@ -2591,91 +2168,12 @@ pub async fn delete_session_history(
 
     Ok(SessionDeletion {
         local_removed: true,
-        remote_removed,
     })
-}
-
-/// Classify a remote `delete_session_data` result, reporting whether a
-/// remote copy was actually removed: a `2xx` means a copy was deleted
-/// (`Ok(true)`), a `404` means it was already gone so deletion stays
-/// idempotent (`Ok(false)`), and any other backend error aborts the
-/// delete (`Err`) so local bits are left untouched and it can be retried.
-fn classify_remote_delete(
-    result: Result<(), crate::remote::client::BackendError>,
-) -> Result<bool, DeleteSessionError> {
-    use crate::remote::client::BackendError;
-    match result {
-        Ok(()) => Ok(true),
-        Err(BackendError::RequestFailed { status: 404, .. }) => Ok(false),
-        Err(e) => Err(DeleteSessionError::Remote(e)),
-    }
 }
 
 #[cfg(test)]
 #[path = "persistence_tests.rs"]
 mod durable_update_tests;
-
-#[cfg(test)]
-mod delete_session_history_tests {
-    use super::{DeleteSessionError, SessionDeletion, classify_remote_delete};
-    use crate::remote::client::BackendError;
-
-    #[test]
-    fn remote_ok_reports_removed() {
-        assert!(
-            classify_remote_delete(Ok(())).unwrap(),
-            "a 2xx delete must report that a remote copy was removed"
-        );
-    }
-
-    #[test]
-    fn remote_404_is_treated_as_already_deleted() {
-        let removed = classify_remote_delete(Err(BackendError::RequestFailed {
-            status: 404,
-            body: "not found".into(),
-        }))
-        .expect("a 404 means the remote copy is gone — deletion must stay idempotent");
-        assert!(
-            !removed,
-            "a 404 must report that nothing was removed remotely"
-        );
-    }
-
-    #[test]
-    fn remote_non_404_request_failure_aborts() {
-        let res = classify_remote_delete(Err(BackendError::RequestFailed {
-            status: 500,
-            body: "boom".into(),
-        }));
-        assert!(matches!(res, Err(DeleteSessionError::Remote(_))));
-    }
-
-    #[test]
-    fn remote_auth_failure_aborts() {
-        let res = classify_remote_delete(Err(BackendError::Auth("denied".into())));
-        assert!(matches!(res, Err(DeleteSessionError::Remote(_))));
-    }
-
-    #[test]
-    fn any_removed_reflects_either_location() {
-        assert!(!SessionDeletion::default().any_removed());
-        assert!(
-            SessionDeletion {
-                local_removed: true,
-                remote_removed: false,
-            }
-            .any_removed()
-        );
-        assert!(
-            SessionDeletion {
-                local_removed: false,
-                remote_removed: true,
-            }
-            .any_removed(),
-            "a remote-only delete must count as removed"
-        );
-    }
-}
 
 /// List the `limit` most recently modified session summaries across all
 /// workspaces. Uses stat-based mtime sorting to avoid reading every
@@ -3305,40 +2803,6 @@ mod resumed_sandbox_profile_tests {
     }
 
     #[test]
-    fn explicit_remote_id_resolves_local_child_profile() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("sessions");
-        let cwd = "/work/remote";
-        // A remote session restored into a local child: the child has a fresh
-        // id and records `parent_session_id` = the remote id.
-        let encoded = crate::util::grow_home::encode_cwd_dirname(cwd);
-        let dir = root.join(&encoded).join("local-child");
-        fs::create_dir_all(&dir).unwrap();
-        let summary = serde_json::json!({
-            "info": { "id": "local-child", "cwd": cwd },
-            "session_summary": "",
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "num_messages": 0,
-            "current_model_id": "grow-3",
-            "parent_session_id": "remote-xyz",
-            "sandbox_profile": "workspace",
-        });
-        fs::write(dir.join("summary.json"), summary.to_string()).unwrap();
-
-        // No session dir is named "remote-xyz"; resolve via the child (cwd-scoped).
-        assert_eq!(
-            resumed_session_sandbox_profile_in_root(Some("remote-xyz"), Some(cwd), &root),
-            Some("workspace".to_string())
-        );
-        // Without a cwd the child can't be located -> None.
-        assert_eq!(
-            resumed_session_sandbox_profile_in_root(Some("remote-xyz"), None, &root),
-            None
-        );
-    }
-
-    #[test]
     fn empty_or_missing_id_and_no_cwd_is_none() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("sessions");
@@ -3624,14 +3088,8 @@ mod session_exists_for_cwd_tests {
 
     /// Regression test for the cross-cwd false-positive.
     ///
-    /// Before the fix, `restore_if_not_local` used `session_exists_by_id` which
-    /// scanned ALL cwd directories.  A session present only under cwd-A would cause
-    /// it to skip remote restore when the user resumed from cwd-B — then the
-    /// `LoadSession` call would fail because the session directory did not exist
-    /// under cwd-B.
-    ///
-    /// The cwd-specific check (`session_exists_for_cwd`) must return `false` for
-    /// cwd-B even when the global scan returns `true` (because it finds cwd-A).
+    /// A cwd-specific lookup must not confuse a same-id session from another cwd
+    /// with the requested local session.
     #[test]
     fn session_under_different_cwd_is_not_considered_present() {
         let tmp = TempDir::new().unwrap();
@@ -3653,7 +3111,7 @@ mod session_exists_for_cwd_tests {
         // Cwd-specific check must return false for cwd-B
         assert!(
             !session_exists_for_cwd_in_root(session_id, "/project/beta", &root),
-            "cwd-specific check must return false for cwd-B; remote restore must not be skipped"
+            "cwd-specific check must return false for cwd-B"
         );
 
         // And true for cwd-A (sanity)
@@ -3714,459 +3172,57 @@ mod session_exists_for_cwd_tests {
 }
 
 #[cfg(test)]
-mod find_local_child_tests {
-    use super::find_local_child_for_remote_in_root;
-    use filetime::{self, FileTime};
-    use std::fs;
-    use tempfile::TempDir;
-
-    fn make_session_with_parent(
-        root: &std::path::Path,
-        cwd: &str,
-        session_id: &str,
-        parent_id: &str,
-    ) {
-        let encoded = crate::util::grow_home::encode_cwd_dirname(cwd);
-        let dir = root.join(&encoded).join(session_id);
-        fs::create_dir_all(&dir).unwrap();
-        let summary = serde_json::json!({ "parent_session_id": parent_id });
-        fs::write(dir.join("summary.json"), summary.to_string()).unwrap();
-    }
-
-    #[test]
-    fn returns_child_id_when_parent_matches() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("sessions");
-        make_session_with_parent(root.as_path(), "/work", "local-child-uuid", "remote-abc");
-
-        let found = find_local_child_for_remote_in_root("remote-abc", "/work", &root);
-        assert_eq!(found.as_deref(), Some("local-child-uuid"));
-    }
-
-    #[test]
-    fn returns_none_when_no_child_exists() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("sessions");
-        let encoded = crate::util::grow_home::encode_cwd_dirname("/work");
-        fs::create_dir_all(root.join(&encoded)).unwrap();
-
-        let found = find_local_child_for_remote_in_root("remote-abc", "/work", &root);
-        assert!(found.is_none());
-    }
-
-    #[test]
-    fn returns_none_for_different_parent() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("sessions");
-        make_session_with_parent(root.as_path(), "/work", "local-child-uuid", "remote-xyz");
-
-        let found = find_local_child_for_remote_in_root("remote-abc", "/work", &root);
-        assert!(found.is_none());
-    }
-
-    /// Regression: a second `grow -r <remote_id>` must return the existing child
-    /// without creating a new restore, not return `None`.
-    #[test]
-    fn repeated_resume_returns_existing_child() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("sessions");
-        make_session_with_parent(root.as_path(), "/project", "child-1", "remote-parent");
-
-        let first = find_local_child_for_remote_in_root("remote-parent", "/project", &root);
-        let second = find_local_child_for_remote_in_root("remote-parent", "/project", &root);
-        assert_eq!(first, second);
-        assert_eq!(first.as_deref(), Some("child-1"));
-    }
-
-    /// With multiple pre-existing children, the function must return the newest
-    /// one deterministically rather than picking an arbitrary filesystem order.
-    #[test]
-    fn duplicate_children_returns_newest_by_updated_at() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("sessions");
-        let cwd = "/project";
-        let encoded = crate::util::grow_home::encode_cwd_dirname(cwd);
-
-        // Older child — earlier timestamp.
-        let old_dir = root.join(&encoded).join("old-child");
-        fs::create_dir_all(&old_dir).unwrap();
-        fs::write(
-            old_dir.join("summary.json"),
-            r#"{"parent_session_id":"remote-parent","updated_at":"2026-01-01T10:00:00Z"}"#,
-        )
-        .unwrap();
-
-        // Newer child — later timestamp.
-        let new_dir = root.join(&encoded).join("new-child");
-        fs::create_dir_all(&new_dir).unwrap();
-        fs::write(
-            new_dir.join("summary.json"),
-            r#"{"parent_session_id":"remote-parent","updated_at":"2026-06-01T10:00:00Z"}"#,
-        )
-        .unwrap();
-
-        let found = find_local_child_for_remote_in_root("remote-parent", cwd, &root);
-        assert_eq!(
-            found.as_deref(),
-            Some("new-child"),
-            "must return the newest child by updated_at"
-        );
-    }
-
-    /// When two children share the same `updated_at` the tie must be broken
-    /// deterministically, not by filesystem enumeration order.
-    /// The lexicographically largest session id is the final stable tie-breaker.
-    #[test]
-    fn duplicate_children_equal_timestamps_stable_tiebreak() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("sessions");
-        let cwd = "/project-tie";
-        let encoded = crate::util::grow_home::encode_cwd_dirname(cwd);
-        let same_ts = "2026-03-15T12:00:00Z";
-
-        let mut dirs = Vec::new();
-        for name in ["aaaa-uuid", "zzzz-uuid", "mmmm-uuid"] {
-            let dir = root.join(&encoded).join(name);
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(
-                dir.join("summary.json"),
-                format!(r#"{{"parent_session_id":"remote-tie","updated_at":"{same_ts}"}}"#),
-            )
-            .unwrap();
-            dirs.push(dir);
-        }
-
-        // Force all directories to have *exactly* the same mtime so the
-        // lexicographic session_id comparison is the actual tie-breaker.
-        // Without this, nanosecond-precision filesystem mtimes can differ.
-        let fixed_mtime = FileTime::from_unix_time(1700000000, 0);
-        for dir in &dirs {
-            filetime::set_file_mtime(dir, fixed_mtime).unwrap();
-        }
-
-        let found = find_local_child_for_remote_in_root("remote-tie", cwd, &root);
-        // All share the same updated_at and mtime.
-        // The lexicographic tie-breaker must always pick "zzzz-uuid".
-        assert_eq!(
-            found.as_deref(),
-            Some("zzzz-uuid"),
-            "lexicographically largest id must win the three-way tie"
-        );
-    }
-}
-
-#[cfg(test)]
-mod resolve_local_session_tests {
-    use super::{find_local_child_for_remote_in_root, session_exists_for_cwd_in_root};
-    use std::fs;
-    use tempfile::TempDir;
-
-    // resolve_local_session delegates to the same _in_root helpers tested above,
-    // so we test the composition logic via the public function indirectly by
-    // setting up the on-disk structures under a fake grow home.
-    // For unit isolation, we test the equivalent logic via the inner helpers.
-
-    fn setup_session(root: &std::path::Path, cwd: &str, session_id: &str) {
-        let encoded = crate::util::grow_home::encode_cwd_dirname(cwd);
-        let dir = root.join(&encoded).join(session_id);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("summary.json"), b"{}").unwrap();
-    }
-
-    fn setup_child_session(root: &std::path::Path, cwd: &str, child_id: &str, parent_id: &str) {
-        let encoded = crate::util::grow_home::encode_cwd_dirname(cwd);
-        let dir = root.join(&encoded).join(child_id);
-        fs::create_dir_all(&dir).unwrap();
-        let summary = serde_json::json!({ "parent_session_id": parent_id });
-        fs::write(dir.join("summary.json"), summary.to_string()).unwrap();
-    }
-
-    #[test]
-    fn exact_match_returns_original_id() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("sessions");
-        let cwd = "/project/alpha";
-        let sid = "sess-123";
-
-        setup_session(&root, cwd, sid);
-
-        // Exact match: session_exists_for_cwd → true
-        assert!(session_exists_for_cwd_in_root(sid, cwd, &root));
-        // The composed function should return the original id.
-        // (We can't call resolve_local_session directly because it uses grow_home(),
-        //  but the logic is: if session_exists → Some(session_id.to_string()),
-        //  else find_local_child → child_id. Tested via inner helpers.)
-        assert_eq!(
-            Some(sid.to_string()),
-            if session_exists_for_cwd_in_root(sid, cwd, &root) {
-                Some(sid.to_string())
-            } else {
-                find_local_child_for_remote_in_root(sid, cwd, &root)
-            }
-        );
-    }
-
-    #[test]
-    fn child_match_returns_child_id() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("sessions");
-        let cwd = "/project/beta";
-        let remote_id = "remote-abc";
-        let child_id = "local-child-xyz";
-
-        setup_child_session(&root, cwd, child_id, remote_id);
-
-        assert!(!session_exists_for_cwd_in_root(remote_id, cwd, &root));
-        assert_eq!(
-            Some(child_id.to_string()),
-            find_local_child_for_remote_in_root(remote_id, cwd, &root)
-        );
-    }
-
-    #[test]
-    fn no_match_returns_none() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("sessions");
-        let cwd = "/project/gamma";
-        fs::create_dir_all(root.join(crate::util::grow_home::encode_cwd_dirname(cwd))).unwrap();
-
-        assert!(!session_exists_for_cwd_in_root("missing", cwd, &root));
-        assert_eq!(
-            None,
-            find_local_child_for_remote_in_root("missing", cwd, &root)
-        );
-    }
-
-    #[test]
-    fn exact_match_takes_priority_over_child() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("sessions");
-        let cwd = "/project/delta";
-        let sid = "sess-both";
-
-        // Create both an exact session and a child of the same remote id.
-        setup_session(&root, cwd, sid);
-        setup_child_session(&root, cwd, "local-child-from-same", sid);
-
-        // Exact match should take priority.
-        assert!(session_exists_for_cwd_in_root(sid, cwd, &root));
-    }
-}
-
-#[cfg(test)]
 mod repo_wide_resolution_tests {
     use super::*;
-    use std::fs;
 
     fn setup_session(root: &Path, cwd: &str, session_id: &str) {
         let encoded = crate::util::grow_home::encode_cwd_dirname(cwd);
-        let dir = root.join(&encoded).join(session_id);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("summary.json"), b"{}").unwrap();
-    }
-
-    fn setup_child_session(root: &Path, cwd: &str, child_id: &str, parent_id: &str) {
-        let encoded = crate::util::grow_home::encode_cwd_dirname(cwd);
-        let dir = root.join(&encoded).join(child_id);
-        fs::create_dir_all(&dir).unwrap();
-        let summary = format!(
-            r#"{{"session_id":"{child_id}","parent_session_id":"{parent_id}","updated_at":"2024-01-01T00:00:00Z"}}"#
-        );
-        fs::write(dir.join("summary.json"), summary).unwrap();
+        let dir = root.join(encoded).join(session_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("summary.json"), "{}").unwrap();
     }
 
     #[test]
-    fn exact_cwd_takes_priority_over_same_repo() {
+    fn resolves_exact_before_later_cwd() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().to_path_buf();
-        let exact_cwd = "/repo/main";
-        let other_cwd = "/repo/worktree-1";
-
-        setup_session(&root, exact_cwd, "sess-A");
-        setup_session(&root, other_cwd, "sess-A");
-
-        let result =
-            resolve_local_session_for_repo_in_root("sess-A", &[exact_cwd, other_cwd], &root);
-        let r = result.unwrap();
-        assert_eq!(r.session_id, "sess-A");
-        assert_eq!(r.cwd, exact_cwd);
-        assert_eq!(r.resolution_kind, LocalSessionResolutionKind::ExactCwd);
-    }
-
-    /// An `images/`-only stub in the exact cwd is skipped; resolution anchors to
-    /// the real session in a sibling cwd. Mirrors the cross-dir resume bug.
-    #[test]
-    fn skips_images_only_stub_and_resolves_real_sibling() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().to_path_buf();
-        let exact_cwd = "/repo/main";
-        let sibling_cwd = "/repo/worktree-1";
-
-        let encoded = crate::util::grow_home::encode_cwd_dirname(exact_cwd);
-        let images = root.join(&encoded).join("sess-A").join("images");
-        fs::create_dir_all(&images).unwrap();
-        fs::write(images.join("image-1.png"), b"png").unwrap();
-        setup_session(&root, sibling_cwd, "sess-A");
-
-        let result =
-            resolve_local_session_for_repo_in_root("sess-A", &[exact_cwd, sibling_cwd], &root);
-        let r = result.expect("must skip the stub and find the real sibling session");
-        assert_eq!(r.cwd, sibling_cwd);
+        setup_session(tmp.path(), "/repo/main", "session");
+        setup_session(tmp.path(), "/repo/other", "session");
+        let resolved = resolve_local_session_for_repo_in_root(
+            "session",
+            &["/repo/main", "/repo/other"],
+            tmp.path(),
+        )
+        .unwrap();
+        assert_eq!(resolved.cwd, "/repo/main");
         assert_eq!(
-            r.resolution_kind,
+            resolved.resolution_kind,
+            LocalSessionResolutionKind::ExactCwd
+        );
+    }
+
+    #[test]
+    fn resolves_same_repo_different_cwd() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        setup_session(tmp.path(), "/repo/other", "session");
+        let resolved = resolve_local_session_for_repo_in_root(
+            "session",
+            &["/repo/main", "/repo/other"],
+            tmp.path(),
+        )
+        .unwrap();
+        assert_eq!(resolved.cwd, "/repo/other");
+        assert_eq!(
+            resolved.resolution_kind,
             LocalSessionResolutionKind::SameRepoDifferentCwd
         );
     }
 
     #[test]
-    fn falls_back_to_same_repo_cwd_when_not_in_exact() {
+    fn returns_none_without_local_match() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().to_path_buf();
-        let exact_cwd = "/repo/main";
-        let other_cwd = "/repo/worktree-1";
-
-        // Session only exists in other_cwd
-        setup_session(&root, other_cwd, "sess-B");
-
-        let result =
-            resolve_local_session_for_repo_in_root("sess-B", &[exact_cwd, other_cwd], &root);
-        let r = result.unwrap();
-        assert_eq!(r.session_id, "sess-B");
-        assert_eq!(r.cwd, other_cwd);
-        assert_eq!(
-            r.resolution_kind,
-            LocalSessionResolutionKind::SameRepoDifferentCwd
-        );
-    }
-
-    #[test]
-    fn finds_restored_child_in_exact_cwd() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().to_path_buf();
-        let exact_cwd = "/repo/main";
-
-        setup_child_session(&root, exact_cwd, "local-child", "remote-sess");
-
-        let result = resolve_local_session_for_repo_in_root("remote-sess", &[exact_cwd], &root);
-        let r = result.unwrap();
-        assert_eq!(r.session_id, "local-child");
-        assert_eq!(r.cwd, exact_cwd);
-        assert_eq!(
-            r.resolution_kind,
-            LocalSessionResolutionKind::RestoredChildInExactCwd
-        );
-    }
-
-    #[test]
-    fn finds_restored_child_in_same_repo_different_cwd() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().to_path_buf();
-        let exact_cwd = "/repo/main";
-        let other_cwd = "/repo/worktree-2";
-
-        // Restored child only in other_cwd
-        setup_child_session(&root, other_cwd, "restored-child", "remote-sess");
-
-        let result =
-            resolve_local_session_for_repo_in_root("remote-sess", &[exact_cwd, other_cwd], &root);
-        let r = result.unwrap();
-        assert_eq!(r.session_id, "restored-child");
-        assert_eq!(r.cwd, other_cwd);
-        assert_eq!(
-            r.resolution_kind,
-            LocalSessionResolutionKind::RestoredChildInSameRepoDifferentCwd
-        );
-    }
-
-    #[test]
-    fn returns_none_when_no_candidate_has_session() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().to_path_buf();
-
-        let result = resolve_local_session_for_repo_in_root(
-            "nonexistent",
-            &["/cwd-1", "/cwd-2", "/cwd-3"],
-            &root,
-        );
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn direct_session_preferred_over_restored_child_in_same_cwd() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().to_path_buf();
-        let cwd = "/repo/main";
-
-        // Both exist: direct session AND a restored child for the same remote
-        setup_session(&root, cwd, "sess-X");
-        setup_child_session(&root, cwd, "child-of-X", "sess-X");
-
-        let result = resolve_local_session_for_repo_in_root("sess-X", &[cwd], &root);
-        let r = result.unwrap();
-        // Direct match should win
-        assert_eq!(r.session_id, "sess-X");
-        assert_eq!(r.resolution_kind, LocalSessionResolutionKind::ExactCwd);
-    }
-
-    #[test]
-    fn direct_in_later_cwd_preferred_over_child_in_same_later_cwd() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().to_path_buf();
-        let exact_cwd = "/repo/main";
-        let other_cwd = "/repo/worktree-1";
-
-        // Nothing in exact_cwd; both direct and child in other_cwd
-        setup_session(&root, other_cwd, "sess-Y");
-        setup_child_session(&root, other_cwd, "child-of-Y", "sess-Y");
-
-        let result =
-            resolve_local_session_for_repo_in_root("sess-Y", &[exact_cwd, other_cwd], &root);
-        let r = result.unwrap();
-        assert_eq!(r.session_id, "sess-Y");
-        assert_eq!(
-            r.resolution_kind,
-            LocalSessionResolutionKind::SameRepoDifferentCwd
-        );
-    }
-
-    #[test]
-    fn empty_candidates_returns_none() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().to_path_buf();
-
-        let result = resolve_local_session_for_repo_in_root("any-sess", &[], &root);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn resolution_kind_serde_round_trip() {
-        let kinds = [
-            LocalSessionResolutionKind::ExactCwd,
-            LocalSessionResolutionKind::RestoredChildInExactCwd,
-            LocalSessionResolutionKind::SameRepoDifferentCwd,
-            LocalSessionResolutionKind::RestoredChildInSameRepoDifferentCwd,
-        ];
-        for kind in &kinds {
-            let json = serde_json::to_string(kind).unwrap();
-            let deser: LocalSessionResolutionKind = serde_json::from_str(&json).unwrap();
-            assert_eq!(*kind, deser);
-        }
-    }
-
-    #[test]
-    fn resolved_local_session_serde_round_trip() {
-        let resolved = ResolvedLocalSession {
-            session_id: "sess-123".into(),
-            cwd: "/repo/main".into(),
-            resolution_kind: LocalSessionResolutionKind::SameRepoDifferentCwd,
-        };
-        let json = serde_json::to_string(&resolved).unwrap();
-        let deser: ResolvedLocalSession = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser.session_id, "sess-123");
-        assert_eq!(deser.cwd, "/repo/main");
-        assert_eq!(
-            deser.resolution_kind,
-            LocalSessionResolutionKind::SameRepoDifferentCwd
+        assert!(
+            resolve_local_session_for_repo_in_root("missing", &["/repo/main"], tmp.path(),)
+                .is_none()
         );
     }
 }

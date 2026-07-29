@@ -708,7 +708,6 @@ auto_update = true
         "use_leader",
         "show_tips",
         "worktree_type",
-        "session_registry",
         "minimum_version",
         "maximum_version",
         "required_minimum_version",

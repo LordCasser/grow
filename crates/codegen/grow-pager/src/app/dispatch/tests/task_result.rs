@@ -2011,30 +2011,6 @@ fn rollback_to_always_approve_blocked_by_policy_pin() {
     assert!(!app.default_yolo);
 }
 
-// -- Degraded conversations lane (SessionListLoaded.partial) ----------
-
-/// A degraded conversations lane surfaces an actionable notice instead of
-/// the misleading "No sessions found" toast.
-#[test]
-fn session_list_partial_no_oauth_surfaces_login_hint() {
-    let mut app = test_app_with_agent();
-    open_session_picker_with(&mut app, vec![]);
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::SessionListLoaded {
-            scope: ListScope::Cwd,
-            sessions: vec![],
-            partial: Some(crate::app::effects::ConversationsPartial::NoOauth),
-            seq: 0,
-            query: None,
-        }),
-        &mut app,
-    );
-    assert!(
-        read_toast(&app).contains("/login"),
-        "no_oauth must point at /login"
-    );
-}
-
 /// Notice fires once per relaxed run; survives search, re-arms on a cwd-scoped browse.
 #[test]
 fn session_list_relax_surfaces_notice_once() {
@@ -2042,7 +2018,6 @@ fn session_list_relax_surfaces_notice_once() {
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::Repo,
             sessions: vec![make_picker_entry("local-other-cwd-1", "/elsewhere")],
-            partial: None,
             seq: 0,
             query: None,
         })
@@ -2067,7 +2042,6 @@ fn session_list_relax_surfaces_notice_once() {
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::Cwd,
             sessions: vec![],
-            partial: None,
             seq: 0,
             query: Some("needle".into()),
         }),
@@ -2083,7 +2057,6 @@ fn session_list_relax_surfaces_notice_once() {
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::Cwd,
             sessions: vec![make_picker_entry("local-here-1", "/here")],
-            partial: None,
             seq: 0,
             query: None,
         }),
@@ -2105,7 +2078,6 @@ fn session_list_relax_on_welcome_does_not_latch() {
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::All,
             sessions: vec![make_picker_entry("local-other-cwd-1", "/elsewhere")],
-            partial: None,
             seq: 0,
             query: None,
         }),
@@ -2125,7 +2097,6 @@ fn session_list_relax_renotifies_when_cwd_changes() {
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::Repo,
             sessions: vec![make_picker_entry("local-other-cwd-1", "/elsewhere")],
-            partial: None,
             seq: 0,
             query: None,
         })
@@ -2159,107 +2130,10 @@ fn session_list_empty_without_partial_keeps_generic_toast() {
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::Cwd,
             sessions: vec![],
-            partial: None,
             seq: 0,
             query: None,
         }),
         &mut app,
     );
     assert!(read_toast(&app).contains("No sessions found"));
-}
-
-/// Non-empty degraded list under chat mode (welcome-fallback branch):
-/// entries land AND the retry notice surfaces; Build mode stays silent.
-#[test]
-fn session_list_nonempty_partial_toasts_retry_in_chat_mode_only() {
-    let mut app = test_app_with_agent();
-    app.chat_mode = true;
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::SessionListLoaded {
-            scope: ListScope::Cwd,
-            sessions: vec![make_conversation_entry("conv-part-1")],
-            partial: Some(crate::app::effects::ConversationsPartial::Timeout),
-            seq: 0,
-            query: None,
-        }),
-        &mut app,
-    );
-    assert!(
-        app.session_picker_entries.is_some(),
-        "entries must still land on a degraded lane"
-    );
-    assert!(
-        read_toast(&app).contains("retry"),
-        "timeout must surface the retry notice"
-    );
-
-    // Build-mode canary: stays silent on a degraded lane.
-    let mut app = test_app_with_agent();
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::SessionListLoaded {
-            scope: ListScope::Cwd,
-            sessions: vec![make_picker_entry("local-part-1", "/r")],
-            partial: Some(crate::app::effects::ConversationsPartial::Timeout),
-            seq: 0,
-            query: None,
-        }),
-        &mut app,
-    );
-    assert!(
-        app.agents[&AgentId(0)].toast.is_none(),
-        "Build-mode non-empty degraded list stays silent"
-    );
-}
-
-/// Modal variant of the non-empty degraded-lane notice: same chat-mode-only
-/// gating as the welcome-fallback branch.
-#[test]
-fn session_list_nonempty_partial_modal_toasts_in_chat_mode_only() {
-    use crate::views::modal::ActiveModal;
-    let mut app = test_app_with_agent();
-    app.chat_mode = true;
-    open_session_picker_with(&mut app, vec![]);
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::SessionListLoaded {
-            scope: ListScope::Cwd,
-            sessions: vec![make_conversation_entry("conv-part-m1")],
-            partial: Some(crate::app::effects::ConversationsPartial::Timeout),
-            seq: 0,
-            query: None,
-        }),
-        &mut app,
-    );
-    let agent = get_active_agent(&app).expect("active agent");
-    assert!(
-        matches!(
-            agent.active_modal.as_ref(),
-            Some(ActiveModal::SessionPicker {
-                entries: Some(list),
-                ..
-            }) if list.len() == 1
-        ),
-        "entries must land in the open modal on a degraded lane"
-    );
-    assert!(
-        read_toast(&app).contains("retry"),
-        "chat-mode modal must surface the retry notice"
-    );
-
-    // Build-mode canary: the open modal stays silent.
-    let mut app = test_app_with_agent();
-    open_session_picker_with(&mut app, vec![]);
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::SessionListLoaded {
-            scope: ListScope::Cwd,
-            sessions: vec![make_picker_entry("local-part-m1", "/r")],
-            partial: Some(crate::app::effects::ConversationsPartial::Timeout),
-            seq: 0,
-            query: None,
-        }),
-        &mut app,
-    );
-    assert!(
-        app.agents[&AgentId(0)].toast.is_none(),
-        "Build-mode modal non-empty degraded list stays silent"
-    );
 }

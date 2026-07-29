@@ -24,7 +24,6 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
 
 use super::search_fts::{SessionDoc, SessionSearchIndex, SessionSearchRow};
-use super::search_remote_sync;
 use super::{
     ContentPeek, PromptExtractEvent, RawLinePeek, RawParamsPeek, StorageAdapter,
     XAI_SESSION_UPDATE_METHOD, collect_prompts_from_events,
@@ -274,10 +273,32 @@ fn search_db_path(root_dir: &Path) -> PathBuf {
     // Best-effort: the journal-mode classifier statfs's the parent dir.
     let _ = std::fs::create_dir_all(&sessions);
     let path = sessions.join("session_search.sqlite");
-    // Pre-resolve the per-host sibling (network mounts) so search_remote_sync's
-    // raw file ops (exists/compress/replace) target the same file the index
-    // opens; resolution is idempotent, so the open re-resolving is a no-op.
+    // Pre-resolve the per-host sibling used on network mounts. Resolution is
+    // idempotent, so the index opening the same path again is a no-op.
     xai_sqlite_journal::JournalMode::for_db_path(&path).effective_db_path(&path)
+}
+
+const META_KEY_LAST_BOOTSTRAP: &str = "last_bootstrap_at";
+
+fn try_read_last_bootstrap_at(db_path: &Path) -> Result<Option<i64>, String> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let index = SessionSearchIndex::open_or_create(db_path).map_err(|e| e.to_string())?;
+    let value = index
+        .get_meta(META_KEY_LAST_BOOTSTRAP)
+        .map_err(|e| e.to_string())?;
+    Ok(value.and_then(|value| value.parse::<i64>().ok()))
+}
+
+fn write_last_bootstrap_at(db_path: &Path) -> io::Result<()> {
+    let index = SessionSearchIndex::open_or_create(db_path).map_err(sqlite_to_io_error)?;
+    index
+        .set_meta(
+            META_KEY_LAST_BOOTSTRAP,
+            &chrono::Utc::now().timestamp().to_string(),
+        )
+        .map_err(sqlite_to_io_error)
 }
 
 fn sqlite_to_io_error(error: rusqlite::Error) -> io::Error {
@@ -443,7 +464,7 @@ async fn handle_job(
 async fn has_completed_bootstrap_marker(root_dir: &Path) -> Option<bool> {
     let db_path = search_db_path(root_dir);
     tokio::task::spawn_blocking(move || {
-        search_remote_sync::try_read_last_bootstrap_at(&db_path)
+        try_read_last_bootstrap_at(&db_path)
             .map(|marker| marker.is_some())
             .ok()
     })
@@ -776,10 +797,9 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
 
     progress.bootstrapping.store(false, Ordering::Release);
 
-    // Record bootstrap completion timestamp in the meta table.
-    // Used by remote sync to determine local index staleness.
+    // Record bootstrap completion so later searches can skip a full rebuild.
     let db_path_meta = search_db_path(root_dir);
-    if let Err(e) = search_remote_sync::write_last_bootstrap_at(&db_path_meta) {
+    if let Err(e) = write_last_bootstrap_at(&db_path_meta) {
         tracing::warn!(error = %e, "failed to write last_bootstrap_at metadata");
     }
 
@@ -1992,7 +2012,7 @@ mod tests {
         assert_eq!(has_completed_bootstrap_marker(root).await, Some(false));
 
         // A completed bootstrap at the current schema version → marker set.
-        search_remote_sync::write_last_bootstrap_at(&db_path).unwrap();
+        write_last_bootstrap_at(&db_path).unwrap();
         assert_eq!(has_completed_bootstrap_marker(root).await, Some(true));
 
         // Simulate an older (pre-ratchet) binary having wiped and re-stamped
@@ -2011,7 +2031,7 @@ mod tests {
         );
 
         // A subsequent completed bootstrap restores the marker.
-        search_remote_sync::write_last_bootstrap_at(&db_path).unwrap();
+        write_last_bootstrap_at(&db_path).unwrap();
         assert_eq!(has_completed_bootstrap_marker(root).await, Some(true));
     }
 

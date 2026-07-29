@@ -22,13 +22,6 @@ use crate::slash::command::DoctorRequest;
 use agent_client_protocol as acp;
 use grow_diagnostics::session_ctx::log_event;
 
-/// Chat kind for the next create: CLI `--chat` (`app.chat_mode`) or one-shot
-/// `/chat` (`deferred_startup.pending_chat`, consumed here).
-pub(super) fn consume_chat_kind(app: &mut AppView) -> bool {
-    let pending = std::mem::take(&mut app.deferred_startup.pending_chat);
-    app.chat_mode || pending
-}
-
 /// Enqueue a prompt and try to drain immediately.
 ///
 /// The prompt is always pushed to the queue first. If the agent is idle

@@ -842,16 +842,6 @@ pub struct AgentView {
     pub(crate) modal_hovered_key: Option<char>,
     /// Cached server-reported context state.
     pub context_state: Option<grow_shell::session::ContextInfo>,
-    /// Gateway light-frontend session (`kind: "chat"` / `--chat` / conversation
-    /// resume). Suppresses local sampler usage/context diagnostics so the
-    /// status bar and prompt never imply remote usage from wrong metrics.
-    pub chat_kind: bool,
-    /// Process-wide `--chat` (mirrors `AppView::chat_mode`; set via
-    /// [`Self::apply_app_scoped_gates`]). UI policy only: hides picker
-    /// source filter / delete / deep search on a conversations-only list.
-    /// Unlike `chat_kind`, stays `false` for a `/chat` one-shot session in
-    /// a Build process, whose picker still lists local sessions.
-    pub app_chat_mode: bool,
     /// Current goal orchestration state. Set by `GoalUpdated` session
     /// notifications, cleared when a new session starts.
     pub goal_state: Option<super::agent::GoalDisplayState>,

@@ -944,9 +944,6 @@ impl AgentView {
                     _ => false,
                 };
 
-                // Chat-mode picker lists conversations only: the source
-                // filter and local-disk delete are dead weight there.
-                let chat_mode = self.app_chat_mode;
                 let config = PickerConfig {
                     title: Some("Resume session"),
                     show_search_hint: true,
@@ -959,11 +956,11 @@ impl AgentView {
                     shortcuts_area: None,
                     tabs: None,
                     active_tab: 0,
-                    filter_label: (!chat_mode).then(|| source_filter.label()),
-                    filter_key_hint: (!chat_mode).then_some("f"),
-                    filter_active: !chat_mode && source_filter.is_active(),
+                    filter_label: Some(source_filter.label()),
+                    filter_key_hint: Some("f"),
+                    filter_active: source_filter.is_active(),
                     header_note: None,
-                    action_keys: if chat_mode || focused_is_foreign {
+                    action_keys: if focused_is_foreign {
                         &[]
                     } else {
                         &[('d', "delete")]
@@ -1061,7 +1058,7 @@ impl AgentView {
                         let query = state.query().trim().to_string();
                         if !query.is_empty() {
                             self.active_modal = None;
-                            InputOutcome::Action(Action::LoadSession(query, None, false))
+                            InputOutcome::Action(Action::LoadSession(query, None))
                         } else {
                             InputOutcome::Unchanged
                         }
@@ -1827,9 +1824,7 @@ impl AgentView {
                 };
                 // While a delete confirmation is armed, the footer swaps to a
                 // "y confirm / n cancel" prompt. Otherwise show the normal
-                // hints plus the `d delete` action. Chat mode drops the
-                // deep-search / filter / delete hints (local-disk-row actions).
-                let chat_mode = self.app_chat_mode;
+                // hints plus the `d delete` action.
                 let mut session_shortcuts: Vec<Shortcut> = if pending_delete.is_some() {
                     vec![
                         Shortcut {
@@ -1865,19 +1860,17 @@ impl AgentView {
                             },
                         ]);
                     }
-                    if !chat_mode {
+                    shortcuts.push(Shortcut {
+                        label: "f filter",
+                        clickable: false,
+                        id: 0,
+                    });
+                    if !external {
                         shortcuts.push(Shortcut {
-                            label: "f filter",
+                            label: "d delete",
                             clickable: false,
                             id: 0,
                         });
-                        if !external {
-                            shortcuts.push(Shortcut {
-                                label: "d delete",
-                                clickable: false,
-                                id: 0,
-                            });
-                        }
                     }
                     shortcuts
                 };
@@ -1916,24 +1909,18 @@ impl AgentView {
                         true,
                         Some(theme.bg_base),
                     );
-                    // Render filter indicator on the search bar row (hidden in
-                    // chat mode — every row is a conversation).
-                    if chat_mode {
-                        state.filter_area = None;
-                    } else {
-                        let filter_rect = picker::render_filter_indicator(
-                            buf,
-                            content_area.x,
-                            content_area.y,
-                            content_area.width,
-                            &theme,
-                            source_filter.label(),
-                            "f",
-                            source_filter.is_active(),
-                            state.filter_hovered,
-                        );
-                        state.filter_area = Some(filter_rect);
-                    }
+                    let filter_rect = picker::render_filter_indicator(
+                        buf,
+                        content_area.x,
+                        content_area.y,
+                        content_area.width,
+                        &theme,
+                        source_filter.label(),
+                        "f",
+                        source_filter.is_active(),
+                        state.filter_hovered,
+                    );
+                    state.filter_area = Some(filter_rect);
                     // Divider — spans full inner width.
                     let sep_y = content_area.y + 1;
                     if sep_y < content_area.y + content_area.height {
@@ -2064,14 +2051,10 @@ impl AgentView {
                         non_sel_flags.push(false);
                     }
 
-                    let hidden_hint = if chat_mode {
-                        None
-                    } else {
-                        crate::views::session_picker::hidden_external_hint(
-                            entries.as_deref(),
-                            *source_filter,
-                        )
-                    };
+                    let hidden_hint = crate::views::session_picker::hidden_external_hint(
+                        entries.as_deref(),
+                        *source_filter,
+                    );
 
                     let mut entries_area = Rect {
                         x: content_area.x,
@@ -2491,32 +2474,6 @@ mod session_picker_delete_tests {
         assert!(agent.active_modal.is_none(), "modal cleared on close");
     }
 
-    /// Chat-mode picker is conversations-only: `d` (local delete) must not
-    /// arm a confirmation and `f` must not cycle the hidden source filter.
-    #[test]
-    fn chat_mode_disables_delete_and_filter_keys() {
-        let mut agent = make_agent();
-        agent.app_chat_mode = true;
-        open_picker(&mut agent, vec![entry("c0"), entry("c1")]);
-
-        agent.handle_palette_or_arg_input(&key('d'));
-        assert!(
-            pending(&agent).is_none(),
-            "d must not arm delete under chat mode"
-        );
-
-        agent.handle_palette_or_arg_input(&key('f'));
-        let filter = match agent.active_modal.as_ref() {
-            Some(ActiveModal::SessionPicker { source_filter, .. }) => *source_filter,
-            _ => panic!("expected open session picker"),
-        };
-        assert_eq!(
-            filter,
-            crate::views::session_picker::SourceFilter::Grow,
-            "f must not cycle the hidden source filter under chat mode"
-        );
-    }
-
     #[test]
     fn ctrl_w_resumes_session_while_search_is_focused() {
         let mut agent = make_agent();
@@ -2575,16 +2532,14 @@ mod session_picker_delete_tests {
         );
     }
 
-    /// A server search matches conversation *content* too: a hit whose title
+    /// A session search matches transcript content too: a hit whose title
     /// doesn't fuzzy-match the query must stay pickable in the modal
     /// (`effective_filter_query` skips the local re-filter).
     #[test]
     fn server_search_hit_with_unrelated_title_is_pickable() {
         let mut agent = make_agent();
-        agent.app_chat_mode = true;
-        let mut e = entry("conv-content-1");
+        let mut e = entry("content-1");
         e.summary = "Quarterly roadmap notes".into(); // no "hit" in the title
-        e.source = "conversation".into();
         open_picker(&mut agent, vec![e]);
         if let Some(ActiveModal::SessionPicker {
             state,
@@ -2614,10 +2569,8 @@ mod session_picker_delete_tests {
     #[test]
     fn unstamped_entries_keep_local_fuzzy_filter() {
         let mut agent = make_agent();
-        agent.app_chat_mode = true;
-        let mut e = entry("conv-content-1");
+        let mut e = entry("content-1");
         e.summary = "Quarterly roadmap notes".into();
-        e.source = "conversation".into();
         open_picker(&mut agent, vec![e]);
         if let Some(ActiveModal::SessionPicker { state, .. }) = agent.active_modal.as_mut() {
             state.set_query("hit");

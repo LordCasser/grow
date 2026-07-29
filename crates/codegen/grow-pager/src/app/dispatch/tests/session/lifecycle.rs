@@ -916,7 +916,6 @@ fn finish_trust_resolves_and_replays_startup() {
         Some(crate::app::session_startup::DeferredSessionStartup::Load {
             session_id: "deferred-session".into(),
             session_cwd: None,
-            chat_kind: false,
         });
     let effects = finish_trust(&mut app);
     assert!(matches!(app.trust_state, TrustState::Done));
@@ -972,7 +971,6 @@ fn auth_complete_defers_startup_until_trust_resolved() {
         Some(crate::app::session_startup::DeferredSessionStartup::Load {
             session_id: "deferred-session".into(),
             session_cwd: None,
-            chat_kind: false,
         });
     let effects = dispatch(
         Action::TaskComplete(TaskResult::AuthComplete {
@@ -1024,7 +1022,6 @@ fn trust_answered_first_defers_startup_until_auth_completes() {
         Some(crate::app::session_startup::DeferredSessionStartup::Load {
             session_id: "deferred-session".into(),
             session_cwd: None,
-            chat_kind: false,
         });
     let effects = finish_trust(&mut app);
     assert!(matches!(app.trust_state, TrustState::Done));
@@ -1087,23 +1084,6 @@ fn new_session_is_gated_while_trust_pending() {
         "the deferred new session replays exactly once after trust resolves",
     );
 }
-/// Sticky `--chat` first create (NewSession) stamps chat_kind.
-#[test]
-fn chat_mode_new_session_creates_with_chat_kind() {
-    let mut app = test_app();
-    app.chat_mode = true;
-    let effects = dispatch(Action::NewSession, &mut app);
-    assert!(
-        effects.iter().any(|e| matches!(
-            e,
-            Effect::CreateSession {
-                chat_kind: true,
-                ..
-            }
-        )),
-        "expected chat CreateSession under --chat, got {effects:?}"
-    );
-}
 /// Atomicity: when several startup intents coexist (e.g. CLI
 /// `--resume` + an incidental `Ctrl+N` deferred during the trust question),
 /// `drain_startup_actions` replays the highest-priority one and leaves NO
@@ -1115,7 +1095,6 @@ fn drain_clears_all_startup_fields_even_when_intents_coexist() {
         Some(crate::app::session_startup::DeferredSessionStartup::Load {
             session_id: "deferred-session".into(),
             session_cwd: None,
-            chat_kind: false,
         });
     app.deferred_startup.new_session = true;
     app.deferred_startup.worktree_label = Some("stray".into());
@@ -1194,10 +1173,7 @@ fn gated_worktree_without_load_id_preserves_stashed_resume() {
     app.trust_state = TrustState::Pending {
         workspace: PathBuf::from("/x"),
     };
-    let effects = dispatch(
-        Action::LoadSession("resume-me".into(), None, false),
-        &mut app,
-    );
+    let effects = dispatch(Action::LoadSession("resume-me".into(), None), &mut app);
     assert!(effects.is_empty(), "a gated resume produces no effects");
     assert_eq!(
         app.deferred_startup.session.as_ref().and_then(|d| match d {

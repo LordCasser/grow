@@ -235,32 +235,6 @@ fn cancel_before_first_activity_resets_state_and_discards_orphan_response() {
     assert!(app.agents[&id].session.state.is_idle());
     assert_eq!(app.agents[&id].scrollback.len(), 0);
 }
-#[test]
-fn set_default_model_allowed_when_agent_chat_kind() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    let model_id = acp::ModelId::new(std::sync::Arc::from("auto"));
-    app.agents
-        .get_mut(&id)
-        .unwrap()
-        .session
-        .models
-        .available
-        .insert(
-            model_id.clone(),
-            acp::ModelInfo::new(model_id.clone(), "Auto".to_string()),
-        );
-    app.agents.get_mut(&id).unwrap().chat_kind = true;
-    let effects = dispatch(Action::SetDefaultModel(model_id.clone()), &mut app);
-    assert!(
-        effects.iter().any(|e| matches!(
-            e,
-            Effect::SwitchModel { model_id: mid, .. } if mid == &model_id
-        )),
-        "chat_kind must still emit SwitchModel for live chat mode switches"
-    );
-    assert!(app.agents[&id].session.model_switch_pending);
-}
 /// `/model <name>` dispatches `SetDefaultModel` which routes
 /// through both `PersistSetting` and `SwitchModel`.
 #[test]

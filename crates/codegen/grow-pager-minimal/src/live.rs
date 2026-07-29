@@ -95,12 +95,8 @@ pub(super) fn prompt_style(
 /// Draw the pinned live region (tail + status + prompt) into the inline viewport.
 pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
     let force_todos = minimal_api::minimal_show_todos(app);
-    let auth_hint = crate::auth::minimal_auth_hint(
-        &app.auth_state,
-        &app.trust_state,
-        app.has_access(),
-        app.is_zdr_blocked(),
-    );
+    let auth_hint =
+        crate::auth::minimal_auth_hint(&app.auth_state, &app.trust_state, app.is_zdr_blocked());
     let pending_hint = minimal_pending_hint(&app.pending_action);
     let transcript_hint = if minimal_api::minimal_ctrl_o_opens_transcript(app) {
         "ctrl+o transcript"

@@ -534,59 +534,6 @@ impl MvpAgent {
             );
         }
     }
-    /// Build a `RegistryConfig` if the feature is enabled (for passing to persistence actor).
-    pub(super) fn build_registry_config(
-        &self,
-    ) -> Option<crate::session::RegistryConfig> {
-        let remote = self
-            .cfg
-            .borrow()
-            .remote_settings
-            .as_ref()
-            .and_then(|s| s.session_registry_enabled);
-        if !self.session_registry_local.or(remote).unwrap_or(false) {
-            return None;
-        }
-        let auth = self.auth_manager.current_or_expired()?;
-        if !auth.is_service_auth() {
-            return None;
-        }
-        let key = auth.key.clone();
-        let cfg = self.cfg.borrow();
-        Some(crate::session::RegistryConfig {
-            base_url: cfg.endpoints.proxy_url(),
-            user_token: key,
-            deployment_key: cfg.endpoints.deployment_key.clone(),
-            alpha_test_key: cfg.endpoints.alpha_test_key.clone(),
-        })
-    }
-    /// Build a `SessionRegistryClient` if the feature is enabled.
-    /// Delegates to `build_registry_config()` for the enabled check + config.
-    pub(crate) fn session_registry_client(
-        &self,
-    ) -> Option<crate::agent::session_registry_client::SessionRegistryClient> {
-        let cfg = self.build_registry_config()?;
-        Some(
-            crate::agent::session_registry_client::SessionRegistryClient::new(
-                    cfg.base_url,
-                    cfg.user_token,
-                )
-                .with_deployment_key(cfg.deployment_key)
-                .with_alpha_test_key(cfg.alpha_test_key)
-                .with_auth(self.auth_manager.clone()),
-        )
-    }
-    pub(crate) fn conversations_client(
-        &self,
-    ) -> Option<crate::remote::ConversationsClient> {
-        if !crate::session::unified_list::conversations_lane_active() {
-            return None;
-        }
-        Some(crate::remote::ConversationsClient::new(self.auth_manager.clone()))
-    }
-    pub(crate) fn workspaces_client(&self) -> crate::remote::WorkspacesClient {
-        crate::remote::WorkspacesClient::new(self.auth_manager.clone())
-    }
     /// Pre-session command availability snapshot.
     ///
     /// Used by the `grow/commands/list` ext method and the
@@ -632,10 +579,6 @@ impl MvpAgent {
         &self,
     ) -> &grow_agent::plugins::SharedPluginRegistryHandle {
         &self.plugin_registry_handle
-    }
-    /// `true` when the agent runs in writeback storage mode.
-    pub(crate) fn is_writeback_storage(&self) -> bool {
-        matches!(self.storage_mode.get(), StorageMode::Writeback)
     }
     /// Resolved cli-chat-proxy base for session features (via
     /// `proxy_url`). Not for the deployment-config fetch.
@@ -794,7 +737,6 @@ impl MvpAgent {
         crate::agent::config::apply_remote_settings_side_effects(
             self.cfg.borrow().remote_settings.as_ref(),
         );
-        self.reapply_storage_mode();
         {
             let cfg_snapshot = self.cfg.borrow().clone();
             if self.sessions.borrow().is_empty() {
@@ -805,38 +747,6 @@ impl MvpAgent {
         }
         self.emit_settings_update_notification();
         self.emit_announcements(AnnouncementsPushMode::IfChanged);
-    }
-    /// Upgrade storage mode from newly-arrived remote settings. Mirrors the
-    /// `resolve_config` gate: only upgrades from `Local`, writeback needs xai auth.
-    fn reapply_storage_mode(&self) {
-        if self.storage_mode.get() != StorageMode::Local {
-            return;
-        }
-        let resolved_mode = {
-            let cfg = self.cfg.borrow();
-            if cfg.mode == crate::agent::config::AgentMode::Generic {
-                return;
-            }
-            let has_service_auth = self
-                .auth_manager
-                .current_or_expired()
-                .is_some_and(|a| a.is_service_auth());
-            StorageMode::from_remote_gated(cfg.remote_settings.as_ref(), has_service_auth)
-        };
-        if resolved_mode == self.storage_mode.get() {
-            return;
-        }
-        tracing::info!(?resolved_mode, "storage mode upgraded from remote settings");
-        self.storage_mode.set(resolved_mode);
-        if resolved_mode == StorageMode::Writeback {
-            for handle in self.sessions.borrow().values() {
-                let _ = handle
-                    .persistence_tx
-                    .send(crate::session::persistence::PersistenceMsg::UpgradeToWriteback {
-                        auth_manager: self.auth_manager.clone(),
-                    });
-            }
-        }
     }
     /// Run the blocking `/settings` fetch for `auth` off the runtime thread.
     async fn fetch_settings(
@@ -1450,7 +1360,6 @@ impl MvpAgent {
                     byok_from_models(&models, None, current.0.as_ref()),
                 );
         }
-        let storage_mode = cfg.storage_mode;
         let default_yolo_mode = cfg.default_yolo_mode;
         let default_auto_mode = cfg.default_auto_mode;
         let tui_mode = cfg.mode == crate::agent::config::AgentMode::Tui;
@@ -1469,9 +1378,6 @@ impl MvpAgent {
         let restore_code = crate::util::config::resolve_restore_code(
             raw,
             cfg.remote_settings.as_ref(),
-        );
-        let session_registry_local = crate::util::config::session_registry_local_override(
-            config_root.as_ref(),
         );
         tracing::info!(
             worktree_type = ?worktree_type,
@@ -1507,15 +1413,6 @@ impl MvpAgent {
             ),
             plugin_registry_initialized: std::cell::Cell::new(false),
             models_manager,
-            chat_modes: {
-                let chat_modes = crate::agent::chat_modes::ChatModesManager::new(
-                    auth_manager.clone(),
-                );
-                if crate::agent::chat_modes::process_chat_mode_enabled() {
-                    chat_modes.warm_in_background();
-                }
-                chat_modes
-            },
             cfg: RefCell::new(cfg.clone()),
             auth_method_id: crate::agent::auth_method::new_shared_auth_method_id(None),
             sampling_config: RefCell::new(sampling_config),
@@ -1527,7 +1424,6 @@ impl MvpAgent {
             interactive_trust_prompted: Rc::new(
                 RefCell::new(std::collections::HashSet::new()),
             ),
-            storage_mode: std::cell::Cell::new(storage_mode),
             default_yolo_mode,
             default_auto_mode,
             memory_config: None,
@@ -1543,7 +1439,6 @@ impl MvpAgent {
             session_index_claims: RefCell::new(HashMap::new()),
             worktree_type,
             restore_code,
-            session_registry_local,
             managed_mcp_cache: Default::default(),
             agent_mcp_state: std::sync::Arc::new(
                 tokio::sync::Mutex::new(
@@ -1569,7 +1464,6 @@ impl MvpAgent {
             announcements_gen: std::cell::Cell::new(0),
             last_emitted_announcements: RefCell::new(Vec::new()),
             #[cfg(test)]
-            finalize_spy: RefCell::new(Vec::new()),
             #[cfg(test)]
             roster_delta_spy: RefCell::new(Vec::new()),
             #[cfg(test)]
@@ -1785,10 +1679,6 @@ impl MvpAgent {
     /// Returns the default YOLO mode setting for new sessions
     pub fn default_yolo_mode(&self) -> bool {
         self.default_yolo_mode
-    }
-    /// Returns the storage mode configured for this agent
-    pub fn storage_mode(&self) -> StorageMode {
-        self.storage_mode.get()
     }
     /// Returns the background copy context for managing background file copy tasks.
     pub fn background_copy_context(&self) -> BackgroundCopyContext {

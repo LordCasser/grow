@@ -115,8 +115,6 @@ pub struct ConnectFlags {
     /// given JSONL file. Observation-only (no nudges). Prototype/eval
     /// use only; not persisted to config.toml.
     pub laziness_debug_log: Option<std::path::PathBuf>,
-    /// Storage mode override.
-    pub storage_mode: Option<String>,
     /// Client identifier for ACP Initialize metadata.
     pub client_identifier: Option<String>,
     /// Hunk tracker mode for ACP Initialize capabilities.
@@ -168,7 +166,6 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         cli_no_memory: flags.no_memory,
         todo_gate: flags.todo_gate,
         laziness_debug_log: flags.laziness_debug_log.as_deref(),
-        storage_mode: flags.storage_mode.as_deref(),
     });
 
     // Permission mode seeds for every session this agent creates (CLI / config).
@@ -387,9 +384,6 @@ fn unsupported_leader_flags(flags: &ConnectFlags) -> Vec<&'static str> {
     }
     if flags.no_memory {
         out.push("--no-memory");
-    }
-    if flags.storage_mode.is_some() {
-        out.push("--storage-mode");
     }
     if flags.subagents {
         out.push("--subagents");
@@ -1033,7 +1027,6 @@ mod tests {
         let flags = ConnectFlags {
             experimental_memory: true,
             no_memory: true,
-            storage_mode: Some("writeback".into()),
             subagents: true,
             ..Default::default()
         };

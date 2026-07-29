@@ -15,8 +15,7 @@ pub use self::commands::*;
 pub use self::fork::{ForkSessionRequest, ForkSessionResponse, fork_session};
 pub use self::handle::*;
 pub use self::persistence::{
-    find_local_child_for_remote, resolve_local_session, resolve_local_session_any_cwd,
-    session_exists_for_cwd,
+    resolve_local_session, resolve_local_session_any_cwd, session_exists_for_cwd,
 };
 pub use self::result::{Empty, ExtMethodResult};
 pub use self::share::{ShareSessionRequest, ShareSessionResponse};
@@ -290,15 +289,6 @@ pub mod share {
         pub share_url: String,
     }
 }
-/// Proxy config for the session registry client.
-/// Shared between `acp_session` (slash commands) and `persistence` (title generation).
-#[derive(Clone)]
-pub(crate) struct RegistryConfig {
-    pub base_url: String,
-    pub user_token: String,
-    pub deployment_key: Option<String>,
-    pub alpha_test_key: Option<String>,
-}
 pub mod acp_conversion;
 pub mod acp_mcp;
 pub(crate) mod acp_session;
@@ -344,8 +334,6 @@ pub mod prompt_history;
 pub mod prompt_parser;
 pub(crate) mod prompt_timing;
 pub(crate) mod replay_events;
-#[path = "restore_stub.rs"]
-pub mod restore;
 pub mod result;
 pub mod signals;
 pub(crate) mod slash_commands;

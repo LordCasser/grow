@@ -653,9 +653,6 @@ pub struct PagerArgs {
     /// Sandbox profile for filesystem and network access.
     #[arg(long, env = "GROW_SANDBOX", value_name = "PROFILE")]
     pub sandbox: Option<String>,
-    /// Session storage mode: local or writeback.
-    #[arg(long = "storage-mode", value_name = "MODE", hide = true)]
-    pub storage_mode: Option<String>,
     /// Override the client identifier sent to the agent.
     #[arg(long = "client-identifier", value_name = "ID", hide = true)]
     pub client_identifier: Option<String>,
@@ -797,11 +794,6 @@ impl PagerArgs {
         }
         Ok(self)
     }
-    /// Optional-flag accessor; always `false` in builds without the optional
-    /// feature, so call sites need no `cfg` of their own.
-    pub fn chat(&self) -> bool {
-        false
-    }
     /// Get the session ID to resume, from either --resume or --load (hidden alias).
     ///
     /// Returns `None` when `--resume` was used without a value (the empty-string
@@ -872,9 +864,6 @@ impl PagerArgs {
     /// Same as [`Self::pin_local_resume_target`] with an explicit cwd, so
     /// tests never mutate the process cwd.
     pub fn pin_local_resume_target_for_cwd(&mut self, cwd: Option<&str>) -> anyhow::Result<()> {
-        if self.chat() {
-            return Ok(());
-        }
         let Some(target) = self.session_to_resume().map(str::to_owned) else {
             return Ok(());
         };

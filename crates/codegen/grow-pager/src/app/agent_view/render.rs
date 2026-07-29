@@ -1317,7 +1317,7 @@ impl AgentView {
             ctx_total,
             self.hit_context.hovered,
             &theme,
-            self.chat_kind,
+            false,
         ) {
             status.push("context", ctx_line);
         }

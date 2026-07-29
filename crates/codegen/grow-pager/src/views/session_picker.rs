@@ -143,20 +143,16 @@ pub(crate) fn loading_spinner_active(
 // Source filter
 // ---------------------------------------------------------------------------
 
-/// Filter session entries by native, remote, or external source.
+/// Filter session entries by native or external source.
 ///
-/// Default is [`Self::Grow`]: native Grow sessions only (local / remote /
-/// conversation), so `/resume` does not mix Claude/Codex/Cursor foreign
-/// sessions into the list. `f` cycles Grow → External → All → Local →
-/// Remote — External first so one press from the default reveals foreign
-/// sessions.
+/// Default is [`Self::Grow`]: native Grow sessions only, so `/resume` does not
+/// mix Claude/Codex/Cursor sessions into the list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceFilter {
     /// Native Grow sessions only — excludes Claude/Codex/Cursor foreign rows.
     #[default]
     Grow,
     Local,
-    Remote,
     External,
     /// Every source, including foreign agent sessions.
     All,
@@ -167,7 +163,6 @@ impl SourceFilter {
         match self {
             Self::Grow => "Grow",
             Self::Local => "Local",
-            Self::Remote => "Remote",
             Self::External => "External",
             Self::All => "All",
         }
@@ -178,8 +173,7 @@ impl SourceFilter {
             Self::Grow => Self::External,
             Self::External => Self::All,
             Self::All => Self::Local,
-            Self::Local => Self::Remote,
-            Self::Remote => Self::Grow,
+            Self::Local => Self::Grow,
         }
     }
 
@@ -190,15 +184,11 @@ impl SourceFilter {
 
     /// Returns `true` if a session with the given `source` string passes the filter.
     ///
-    /// service.example.com conversations carry `source == "conversation"` and live remotely,
-    /// so they pass the `Remote` filter (and `Grow` / `All`) but not `Local`.
-    /// Foreign sources (`claude` / `codex` / `cursor`) only pass `External` and
-    /// `All`.
+    /// Foreign sources (`claude` / `codex` / `cursor`) only pass `External` and `All`.
     pub fn matches(self, source: &str) -> bool {
         match self {
             Self::Grow => !crate::app::is_foreign_picker_source(source),
-            Self::Local => source == "local" || source == "both",
-            Self::Remote => source == "remote" || source == "both" || source == "conversation",
+            Self::Local => source == "local",
             Self::External => crate::app::is_foreign_picker_source(source),
             Self::All => true,
         }
@@ -1343,42 +1333,22 @@ mod tests {
     fn source_filter_matches() {
         // Default Grow filter: native only (not Claude/Codex/Cursor).
         assert!(SourceFilter::Grow.matches("local"));
-        assert!(SourceFilter::Grow.matches("remote"));
-        assert!(SourceFilter::Grow.matches("both"));
-        assert!(SourceFilter::Grow.matches("conversation"));
         assert!(!SourceFilter::Grow.matches("claude"));
         assert!(!SourceFilter::Grow.matches("codex"));
         assert!(!SourceFilter::Grow.matches("cursor"));
 
         assert!(SourceFilter::All.matches("local"));
-        assert!(SourceFilter::All.matches("remote"));
-        assert!(SourceFilter::All.matches("both"));
         assert!(SourceFilter::All.matches("claude"));
         assert!(SourceFilter::All.matches("codex"));
         assert!(SourceFilter::All.matches("cursor"));
 
         assert!(SourceFilter::Local.matches("local"));
-        assert!(SourceFilter::Local.matches("both"));
-        assert!(!SourceFilter::Local.matches("remote"));
         assert!(!SourceFilter::Local.matches("claude"));
-
-        assert!(SourceFilter::Remote.matches("remote"));
-        assert!(SourceFilter::Remote.matches("both"));
-        assert!(!SourceFilter::Remote.matches("local"));
-        assert!(!SourceFilter::Remote.matches("cursor"));
-
-        // service.example.com conversations are remote: visible under Grow + All + Remote, not Local.
-        assert!(SourceFilter::All.matches("conversation"));
-        assert!(SourceFilter::Remote.matches("conversation"));
-        assert!(!SourceFilter::Local.matches("conversation"));
 
         assert!(SourceFilter::External.matches("claude"));
         assert!(SourceFilter::External.matches("codex"));
         assert!(SourceFilter::External.matches("cursor"));
         assert!(!SourceFilter::External.matches("local"));
-        assert!(!SourceFilter::External.matches("remote"));
-        assert!(!SourceFilter::External.matches("both"));
-        assert!(!SourceFilter::External.matches("conversation"));
     }
 
     #[test]
@@ -1387,8 +1357,7 @@ mod tests {
         assert_eq!(SourceFilter::Grow.next(), SourceFilter::External);
         assert_eq!(SourceFilter::External.next(), SourceFilter::All);
         assert_eq!(SourceFilter::All.next(), SourceFilter::Local);
-        assert_eq!(SourceFilter::Local.next(), SourceFilter::Remote);
-        assert_eq!(SourceFilter::Remote.next(), SourceFilter::Grow);
+        assert_eq!(SourceFilter::Local.next(), SourceFilter::Grow);
         assert_eq!(SourceFilter::Grow.label(), "Grow");
         assert_eq!(SourceFilter::External.label(), "External");
         assert_eq!(SourceFilter::default(), SourceFilter::Grow);
@@ -1403,43 +1372,36 @@ mod tests {
         }
         let entries = vec![
             entry_with_source("s0", "local"),
-            entry_with_source("s1", "remote"),
-            entry_with_source("s2", "both"),
-            entry_with_source("s3", "claude"),
-            entry_with_source("s4", "codex"),
-            entry_with_source("s5", "cursor"),
+            entry_with_source("s1", "claude"),
+            entry_with_source("s2", "codex"),
+            entry_with_source("s3", "cursor"),
         ];
 
         let grow = filter_session_entries(Some(&entries), "", SourceFilter::Grow);
-        assert_eq!(grow, vec![0, 1, 2]); // local + remote + both, no foreign
+        assert_eq!(grow, vec![0]);
 
         let all = filter_session_entries(Some(&entries), "", SourceFilter::All);
-        assert_eq!(all, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(all, vec![0, 1, 2, 3]);
 
         let local = filter_session_entries(Some(&entries), "", SourceFilter::Local);
-        assert_eq!(local, vec![0, 2]); // local + both
-
-        let remote = filter_session_entries(Some(&entries), "", SourceFilter::Remote);
-        assert_eq!(remote, vec![1, 2]); // remote + both
+        assert_eq!(local, vec![0]);
 
         let external = filter_session_entries(Some(&entries), "", SourceFilter::External);
-        assert_eq!(external, vec![3, 4, 5]);
+        assert_eq!(external, vec![1, 2, 3]);
     }
 
     #[test]
     fn source_filter_empty_and_unknown_source() {
         // Empty / unknown source (e.g. from old data or test fixtures) is not
-        // foreign, so it passes Grow + All but never Local, Remote, or External.
+        // foreign, so it passes Grow + All but never Local or External.
         assert!(SourceFilter::Grow.matches(""));
         assert!(SourceFilter::All.matches(""));
         assert!(!SourceFilter::Local.matches(""));
-        assert!(!SourceFilter::Remote.matches(""));
         assert!(!SourceFilter::External.matches(""));
 
         assert!(SourceFilter::Grow.matches("unknown"));
         assert!(SourceFilter::All.matches("unknown"));
         assert!(!SourceFilter::Local.matches("unknown"));
-        assert!(!SourceFilter::Remote.matches("unknown"));
         assert!(!SourceFilter::External.matches("unknown"));
     }
 
@@ -1447,7 +1409,6 @@ mod tests {
     fn source_filter_is_active() {
         assert!(!SourceFilter::Grow.is_active());
         assert!(SourceFilter::Local.is_active());
-        assert!(SourceFilter::Remote.is_active());
         assert!(SourceFilter::External.is_active());
         assert!(SourceFilter::All.is_active());
     }
@@ -1471,7 +1432,6 @@ mod tests {
             Some("2 external sessions hidden \u{b7} f to show")
         );
         assert!(hidden_external_hint(Some(&entries), SourceFilter::Local).is_none());
-        assert!(hidden_external_hint(Some(&entries), SourceFilter::Remote).is_none());
 
         // Singular count.
         let one = vec![
@@ -1517,21 +1477,16 @@ mod tests {
         }
         let entries = vec![
             entry_with_source("alpha", "local"),
-            entry_with_source("beta", "remote"),
-            entry_with_source("gamma", "both"),
+            entry_with_source("beta", "claude"),
         ];
 
         // Text query "alpha" + Local filter: only alpha matches both criteria.
         let result = filter_session_entries(Some(&entries), "alpha", SourceFilter::Local);
         assert_eq!(result, vec![0]);
 
-        // Text query "alpha" + Remote filter: alpha is local-only, so no matches.
-        let result = filter_session_entries(Some(&entries), "alpha", SourceFilter::Remote);
-        assert!(result.is_empty());
-
-        // Text query matching all + Local filter: local + both pass.
+        // Text query matching all + Local filter: only local rows pass.
         let result = filter_session_entries(Some(&entries), "", SourceFilter::Local);
-        assert_eq!(result, vec![0, 2]);
+        assert_eq!(result, vec![0]);
     }
 
     #[test]
@@ -1543,11 +1498,10 @@ mod tests {
         }
         let entries = vec![
             entry_with_source("s0", "repo-a", "local"),
-            entry_with_source("s1", "repo-a", "remote"),
-            entry_with_source("s2", "repo-b", "both"),
+            entry_with_source("s1", "repo-b", "local"),
         ];
 
-        // Local filter: s0 (local) + s2 (both), grouped by repo.
+        // Local rows are grouped by repo.
         let map = build_entry_map(
             Some(&entries),
             None,
@@ -1557,7 +1511,7 @@ mod tests {
             SourceFilter::Local,
             None,
         );
-        // repo-a header + s0 + repo-b header + s2 = 4
+        // repo-a header + s0 + repo-b header + s1 = 4
         assert_eq!(map.len(), 4);
         assert!(map[0].is_none()); // repo-a header
         assert!(matches!(
@@ -1567,29 +1521,7 @@ mod tests {
         assert!(map[2].is_none()); // repo-b header
         assert!(matches!(
             map[3],
-            Some(PickerItem::Fuzzy { original_index: 2 })
-        ));
-
-        // Remote filter: s1 (remote) + s2 (both).
-        let map = build_entry_map(
-            Some(&entries),
-            None,
-            "",
-            true,
-            false,
-            SourceFilter::Remote,
-            None,
-        );
-        assert_eq!(map.len(), 4);
-        assert!(map[0].is_none()); // repo-a header
-        assert!(matches!(
-            map[1],
             Some(PickerItem::Fuzzy { original_index: 1 })
-        ));
-        assert!(map[2].is_none()); // repo-b header
-        assert!(matches!(
-            map[3],
-            Some(PickerItem::Fuzzy { original_index: 2 })
         ));
     }
 

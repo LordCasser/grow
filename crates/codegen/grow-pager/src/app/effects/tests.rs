@@ -81,39 +81,6 @@ fn interject_params_omit_content_when_no_blocks() {
     assert_eq!(obj.len(), 3, "no extra keys on the legacy shape");
 }
 #[test]
-fn picker_keeps_conversation_with_empty_cwd_and_missing_updated_at() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "conv_abc",
-                "cwd": "",
-                "summary": "Compare GPU vendors",
-                "source": "conversation",
-                "_meta": { "grow/session": { "kind": "chat" } }
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 1, "conversation must not vanish");
-    assert_eq!(entries[0].id, "conv_abc");
-    assert_eq!(entries[0].cwd, "");
-    assert_eq!(entries[0].source, "conversation");
-}
-#[test]
-fn picker_keeps_old_conversation_past_cutoff() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "conv_old",
-                "cwd": "",
-                "summary": "Ancient chat",
-                "source": "conversation",
-                "updatedAt": "2020-01-01T00:00:00Z",
-                "_meta": { "grow/session": { "kind": "chat" } }
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 1, "old conversation must still render");
-    assert_eq!(entries[0].source, "conversation");
-}
-#[test]
 fn picker_drops_local_with_missing_updated_at() {
     let payload = serde_json::json!({
             "sessions": [{
@@ -130,23 +97,6 @@ fn picker_drops_local_with_missing_updated_at() {
         );
 }
 /// Untitled service.example.com chats must stay listed, rendered as "Untitled".
-#[test]
-fn picker_keeps_untitled_conversation_as_untitled() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "conv_untitled",
-                "cwd": "",
-                "summary": "",
-                "source": "conversation",
-                "updatedAt": "2026-07-01T00:00:00Z",
-                "_meta": { "grow/session": { "kind": "chat" } }
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 1, "untitled conversation must not vanish");
-    assert_eq!(entries[0].summary, "Untitled");
-    assert_eq!(entries[0].source, "conversation");
-}
 /// Canary: the empty-summary drop still applies to Build rows.
 #[test]
 fn picker_still_drops_build_row_with_empty_summary() {
@@ -161,41 +111,6 @@ fn picker_still_drops_build_row_with_empty_summary() {
         });
     let entries = parse_session_picker_entries(&payload);
     assert!(entries.is_empty(), "empty-summary Build rows stay dropped");
-}
-#[test]
-fn session_list_partial_parses_reasons() {
-    let payload = |reason: &str| {
-        serde_json::json!({
-                "sessions": [],
-                "_meta": { "grow/partial": { "conversations": true, "reason": reason } }
-            })
-    };
-    assert_eq!(
-            parse_session_list_partial(&payload("no_oauth")),
-            Some(ConversationsPartial::NoOauth)
-        );
-    assert_eq!(
-            parse_session_list_partial(&payload("timeout")),
-            Some(ConversationsPartial::Timeout)
-        );
-    assert_eq!(
-            parse_session_list_partial(&payload("error")),
-            Some(ConversationsPartial::Error)
-        );
-    assert_eq!(
-            parse_session_list_partial(&payload("something_new")),
-            Some(ConversationsPartial::Error)
-        );
-}
-#[test]
-fn session_list_partial_absent_for_healthy_or_meta_less_responses() {
-    let healthy = serde_json::json!({
-            "sessions": [],
-            "_meta": { "grow/partial": { "conversations": false } }
-        });
-    assert_eq!(parse_session_list_partial(&healthy), None);
-    let legacy = serde_json::json!({ "sessions": [] });
-    assert_eq!(parse_session_list_partial(&legacy), None);
 }
 /// The agent serializes `ExtMethodResult<KillTaskResponse>`: the outcome
 /// lives at `result.outcome`. Probing the top level (the pre-fix code)
@@ -1065,7 +980,6 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
         }
     });
     let mut tasks = JoinSet::new();
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
     execute(
         Effect::CheckMarketplaceUpdates {
             agent_id: AgentId(7),
@@ -1075,7 +989,6 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
         &tx,
         Path::new("."),
         &SessionFlags::default(),
-        &progress_tx,
     );
     let result = tasks
         .join_next()
@@ -1097,7 +1010,6 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
 #[tokio::test]
 async fn foreign_scan_task_echoes_sequence_without_enabled_sources() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut tasks = JoinSet::new();
     let app_coordinator = crate::app::ForeignScanCoordinator::default();
     app_coordinator.begin_request(41);
@@ -1113,7 +1025,6 @@ async fn foreign_scan_task_echoes_sequence_without_enabled_sources() {
         &tx,
         Path::new("."),
         &SessionFlags::default(),
-        &progress_tx,
     );
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::ForeignSessionsScanned { entries, seq } => {
@@ -1127,7 +1038,6 @@ async fn foreign_scan_task_echoes_sequence_without_enabled_sources() {
 #[tokio::test]
 async fn foreign_resume_detection_runs_as_task_result() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut tasks = JoinSet::new();
     let (quit, _) = execute(
         Effect::CanonicalizeForeignResumeCwd {
@@ -1138,7 +1048,6 @@ async fn foreign_resume_detection_runs_as_task_result() {
         &tx,
         Path::new("."),
         &SessionFlags::default(),
-        &progress_tx,
     );
     assert!(!quit);
     match tasks.join_next().await.expect("task").expect("no panic") {
@@ -1165,7 +1074,6 @@ async fn foreign_resume_detection_runs_as_task_result() {
         &tx,
         Path::new("."),
         &SessionFlags::default(),
-        &progress_tx,
     );
     assert!(!quit);
     match tasks.join_next().await.expect("task").expect("no panic") {
@@ -1221,7 +1129,6 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
             }
         }
     });
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
     let run = |effect: Effect| {
         let mut tasks = JoinSet::new();
         execute(
@@ -1230,7 +1137,6 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
             &tx,
             Path::new("."),
             &SessionFlags::default(),
-            &progress_tx,
         );
         tasks
     };
@@ -1327,7 +1233,6 @@ async fn fetch_workflows_list_sends_session_id() {
     });
     let session_id = acp::SessionId::new(Arc::from("test-session"));
     let mut tasks = JoinSet::new();
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
     execute(
         Effect::FetchWorkflowsList {
             agent_id: AgentId(3),
@@ -1337,7 +1242,6 @@ async fn fetch_workflows_list_sends_session_id() {
         &tx,
         Path::new("."),
         &SessionFlags::default(),
-        &progress_tx,
     );
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::WorkflowsListLoaded {
@@ -1362,7 +1266,6 @@ async fn fetch_workflows_list_sends_session_id() {
 #[tokio::test]
 async fn debounce_session_search_echoes_query_and_seq() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut tasks = JoinSet::new();
     execute(
         Effect::DebounceSessionSearch {
@@ -1373,7 +1276,6 @@ async fn debounce_session_search_echoes_query_and_seq() {
         &tx,
         Path::new("."),
         &SessionFlags::default(),
-        &progress_tx,
     );
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionSearchDebounceExpired { query, seq } => {
@@ -1682,102 +1584,6 @@ fn to_meta_always_emits_yolo_mode_explicitly() {
                 "yoloMode must be explicit (yolo={yolo}); meta={meta:?}"
             );
     }
-}
-#[test]
-fn to_meta_chat_mode_stamps_kind_and_omits_agent_profile() {
-    let flags = SessionFlags {
-        chat_mode: true,
-        plan_mode: true,
-        subagents: true,
-        ask_user: true,
-        ..Default::default()
-    };
-    let meta = flags.to_meta().expect("chat_mode must emit meta");
-    assert_eq!(meta["grow/session"]["kind"], "chat");
-    assert!(
-            meta.get("agentProfile").is_none(),
-            "K12: chat mode must omit Build agentProfile"
-        );
-    assert_chat_meta_has_no_workspace_bind_keys(
-        &serde_json::Value::Object(meta.clone()),
-    );
-}
-/// Load meta merge: explicit `chat_kind` alone (no process-wide chat_mode)
-/// stamps kind and strips agentProfile — conversation resume acceptance.
-#[test]
-fn load_meta_chat_kind_alone_stamps_kind_and_strips_profile() {
-    let flags = SessionFlags {
-        chat_mode: false,
-        plan_mode: true,
-        subagents: true,
-        ask_user: true,
-        ..Default::default()
-    };
-    let mut meta = flags.to_meta();
-    let chat_kind = true;
-    if chat_kind || flags.chat_mode {
-        apply_chat_kind_meta(&mut meta);
-        scrub_chat_workspace_bind_meta(&mut meta);
-    }
-    let meta = meta.expect("chat_kind must produce meta");
-    assert_eq!(meta["grow/session"]["kind"], "chat");
-    assert!(
-            meta.get("agentProfile").is_none(),
-            "entry chat_kind must strip Build agentProfile"
-        );
-    assert_chat_meta_has_no_workspace_bind_keys(
-        &serde_json::Value::Object(meta.clone()),
-    );
-}
-/// Chat create/load meta must never include client workspace-bind keys
-/// (`envId`, Direct hub id, gateway attach), even if cloud fields are
-/// present on the effect — backend owns workspace for `kind=chat`.
-fn assert_chat_meta_has_no_workspace_bind_keys(meta: &serde_json::Value) {
-    for key in CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS {
-        assert!(
-                meta.get(*key).is_none(),
-                "chat meta must not include workspace-bind key {key:?}: {meta}"
-            );
-    }
-}
-#[test]
-fn chat_create_meta_never_includes_workspace_bind_keys_when_cloud_fields_set() {
-    let flags = SessionFlags {
-        chat_mode: true,
-        ..Default::default()
-    };
-    let mut meta = flags.to_meta();
-    apply_chat_kind_meta(&mut meta);
-    scrub_chat_workspace_bind_meta(&mut meta);
-    let meta = meta.expect("chat create must emit meta");
-    assert_eq!(meta["grow/session"]["kind"], "chat");
-    assert_chat_meta_has_no_workspace_bind_keys(
-        &serde_json::Value::Object(meta.clone()),
-    );
-}
-#[test]
-fn chat_load_meta_never_includes_workspace_bind_keys() {
-    let flags = SessionFlags::default();
-    let mut meta = flags.to_meta();
-    apply_chat_kind_meta(&mut meta);
-    {
-        let obj = meta.get_or_insert_with(acp::Meta::new);
-        obj.insert("envId".into(), serde_json::json!("env-poison"));
-        obj.insert("grow/cloud_server_id".into(), serde_json::json!("srv-poison"));
-        obj.insert(
-            "grow/cloud_existing_workspace".into(),
-            serde_json::json!({
-                    "server_id": "srv-poison",
-                    "cwd": "/ws",
-                }),
-        );
-    }
-    scrub_chat_workspace_bind_meta(&mut meta);
-    let meta = meta.expect("chat load must emit meta");
-    assert_eq!(meta["grow/session"]["kind"], "chat");
-    assert_chat_meta_has_no_workspace_bind_keys(
-        &serde_json::Value::Object(meta.clone()),
-    );
 }
 #[test]
 fn to_meta_yolo_suppresses_auto_mode() {

@@ -42,7 +42,7 @@ use super::prompt::{
 };
 use super::session::fork::build_child_fork_marker;
 use super::session::lifecycle::{dispatch_new_session_inner, drain_startup_actions, finish_trust};
-use super::session::load::{dispatch_load_session_with_restore, reanchor_grouped_selection};
+use super::session::load::reanchor_grouped_selection;
 use super::session::modal::{dispatch_rename_session, dispatch_sessions_confirm_close};
 use super::settings::setters::set_default_model_inner;
 use super::settings::ui::{action_for_reset, apply_setting_rollback};
@@ -110,7 +110,6 @@ fn test_app() -> AppView {
         screen_mode_switch_hint: None,
         require_plan_approval: false,
         plan_mode: false,
-        chat_mode: false,
         subagents: false,
         ask_user: false,
         mouse_captured: true,
@@ -460,16 +459,6 @@ pub(super) fn end_turn() -> Action {
         prompt_id: None,
     })
 }
-/// Plant a Build session under the process `grow_home()` (OnceLock-cached;
-/// do not rely on setting `GROW_HOME` mid-process). Caller must remove `sess_dir`.
-fn plant_local_build_session(cwd: &std::path::Path, session_id: &str) -> std::path::PathBuf {
-    let home = grow_shell::util::grow_home::grow_home();
-    let encoded = grow_shell::util::grow_home::encode_cwd_dirname(&cwd.to_string_lossy());
-    let sess_dir = home.join("sessions").join(encoded).join(session_id);
-    std::fs::create_dir_all(&sess_dir).expect("plant session dir");
-    std::fs::write(sess_dir.join("summary.json"), b"{}").expect("plant summary");
-    sess_dir
-}
 /// Extract the in-flight auth request sequence, panicking if the auth
 /// state is not `Authenticating`.
 fn authenticating_seq(app: &AppView) -> u64 {
@@ -728,11 +717,6 @@ fn make_picker_entry(id: &str, cwd: &str) -> crate::app::app_view::SessionPicker
         worktree_label: None,
         card_detail: None,
     }
-}
-fn make_conversation_entry(id: &str) -> crate::app::app_view::SessionPickerEntry {
-    let mut e = make_picker_entry(id, "");
-    e.source = "conversation".into();
-    e
 }
 /// Open a SessionPicker modal on the active agent seeded with `entries`.
 fn open_session_picker_with(

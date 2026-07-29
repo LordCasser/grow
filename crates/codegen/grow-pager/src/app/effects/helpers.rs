@@ -11,12 +11,6 @@ use grow_shell::sampling::error::{
 };
 use grow_shell::session::ExtMethodResult;
 use grow_shell::session::unified_list::ListScope;
-/// Typed progress message for session restore.
-/// Keeps the progress channel from accepting arbitrary `TaskResult` variants.
-pub(crate) struct RestoreProgressMsg {
-    pub agent_id: AgentId,
-    pub message: String,
-}
 pub(super) fn log_prompt_result(
     session_id: &acp::SessionId,
     result: &Result<acp::PromptResponse, acp::Error>,
@@ -99,15 +93,6 @@ pub(super) fn format_acp_error(err: &acp::Error, _is_api_key_auth: bool) -> Stri
         return msg;
     }
     sanitize_user_error(&err.to_string())
-}
-/// Format a Duration for user-visible restore progress messages.
-pub(super) fn format_restore_elapsed(d: std::time::Duration) -> String {
-    let secs = d.as_secs();
-    if secs >= 60 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{}.{:01}s", secs, d.subsec_millis() / 100)
-    }
 }
 /// CANONICAL wire parser for the worktree resume response. Any other code
 /// consuming the `codeRestored` / `restoreSummary` / `restoreDegree` shape
@@ -246,9 +231,6 @@ pub(crate) fn sanitize_user_error(raw: &str) -> String {
 /// | true  | false     | true     | `grow-build-plan-no-subagents` | omitted (shell gate) |
 /// | true  | true      | true     | `grow-build-plan`              | omitted (shell gate) |
 ///
-/// When [`Self::chat_mode`] is set (gateway light-frontend / `--chat`), Build
-/// `agentProfile` injection is omitted (K12) and `_meta["grow/session"].kind`
-/// is stamped `"chat"` so the shell takes `require_gateway` / thin profile.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SessionFlags {
     pub plan_mode: bool,
@@ -264,10 +246,6 @@ pub(crate) struct SessionFlags {
     /// Auto (classifier) permission mode (`_meta.autoMode`). Mutually exclusive
     /// with `yolo_mode` on the agent; both may be set only if yolo wins at spawn.
     pub auto_mode: bool,
-    /// Gateway light-frontend (`kind: "chat"`) — `--chat` / `/chat`.
-    /// Mutual exclusivity with Build plan profiles: profiles are omitted and a
-    /// warn is logged when plan flags are also set (K12).
-    pub chat_mode: bool,
     /// Effective screen mode label (`ScreenMode::meta_label`), stamped into
     /// every `PromptRequest._meta.screenMode` for minimal-vs-regular usage
     /// diagnostics. `None` (key omitted) only under `Default` in tests; real
@@ -285,12 +263,8 @@ impl SessionFlags {
     /// Resolve the agent profile name from the flags.
     ///
     /// Returns `None` for the default `grow-build` profile (no `_meta`
-    /// needed; it already includes TaskTool). Chat mode never injects a
-    /// Build profile (remote owns agent behavior).
+    /// needed; it already includes TaskTool).
     pub(super) fn agent_profile(&self) -> Option<&'static str> {
-        if self.chat_mode {
-            return None;
-        }
         match (self.plan_mode, self.subagents, self.ask_user) {
             (true, true, _) => Some("grow-build-plan"),
             (true, false, _) => Some("grow-build-plan-no-subagents"),
@@ -305,25 +279,14 @@ impl SessionFlags {
     /// emit-site comment below). `--no-ask-user` always forces
     /// `askUserQuestion: false` into the meta, even when paired with
     /// `GROW_AGENT` — the env var chooses the *agent*, but the tool-strip is
-    /// independent. Chat mode additionally stamps `grow/session.kind`.
+    /// independent.
     pub(super) fn to_meta(&self) -> Option<acp::Meta> {
         let mut meta = serde_json::Map::new();
-        if self.chat_mode {
-            if self.plan_mode || self.agent_override.is_some()
-                || std::env::var("GROW_AGENT").ok().is_some_and(|s| !s.trim().is_empty())
-            {
-                tracing::warn!(
-                    "chat mode active: omitting Build agentProfile (plan/agent override ignored)"
-                );
-            }
-        } else if let Some(ref profile) = self.agent_override {
+        if let Some(ref profile) = self.agent_override {
             meta.insert("agentProfile".into(), profile.clone());
         } else if std::env::var("GROW_AGENT").ok().is_some_and(|s| !s.trim().is_empty())
         {} else if let Some(profile) = self.agent_profile() {
             meta.insert("agentProfile".into(), serde_json::json!(profile));
-        }
-        if self.chat_mode {
-            meta.insert("grow/session".into(), serde_json::json!({ "kind": "chat" }));
         }
         if !self.ask_user {
             meta.insert("askUserQuestion".into(), serde_json::json!(false));
@@ -337,28 +300,6 @@ impl SessionFlags {
             )),
         );
         if meta.is_empty() { None } else { Some(meta) }
-    }
-}
-/// Workspace-bind `_meta` keys forbidden on chat create/load: backend owns
-/// workspace for `kind=chat`; the client must not bind Direct/envId/attach.
-pub(super) const CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS: &[&str] = &[
-    "envId",
-    "grow/cloud_server_id",
-    "grow/cloud_existing_workspace",
-];
-/// Stamp `_meta["grow/session"].kind = "chat"` and strip Build `agentProfile` (K12).
-pub(super) fn apply_chat_kind_meta(meta: &mut Option<acp::Meta>) {
-    let obj = meta.get_or_insert_with(acp::Meta::new);
-    obj.insert("grow/session".into(), serde_json::json!({ "kind": "chat" }));
-    obj.remove("agentProfile");
-}
-/// Remove client workspace-bind keys from chat create/load meta (defense in depth).
-pub(super) fn scrub_chat_workspace_bind_meta(meta: &mut Option<acp::Meta>) {
-    let Some(obj) = meta.as_mut() else {
-        return;
-    };
-    for key in CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS {
-        obj.remove(*key);
     }
 }
 /// Metadata returned from effect execution so the event loop can patch
@@ -440,41 +381,6 @@ pub(super) fn count_chat_history_stats(history_path: &Path) -> (usize, usize) {
     }
     (turn_count, tool_call_count)
 }
-/// Degraded conversations lane on `grow/session/list`, parsed from the
-/// response's `_meta["grow/partial"]` envelope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConversationsPartial {
-    NoOauth,
-    Timeout,
-    Error,
-}
-impl ConversationsPartial {
-    /// Actionable picker notice for a degraded conversations lane.
-    pub(crate) fn picker_notice(self) -> &'static str {
-        match self {
-            Self::NoOauth => "Couldn't load your chats \u{2014} log in with /login",
-            Self::Timeout | Self::Error => "Couldn't load conversations \u{2014} retry",
-        }
-    }
-}
-/// Read `_meta["grow/partial"]` from a session-list payload. `None` when the
-/// conversations lane completed (or was skipped); unknown reasons degrade to
-/// [`ConversationsPartial::Error`].
-pub(super) fn parse_session_list_partial(
-    payload: &serde_json::Value,
-) -> Option<ConversationsPartial> {
-    let partial = payload.get("_meta")?.get("grow/partial")?;
-    if partial.get("conversations").and_then(|v| v.as_bool()) != Some(true) {
-        return None;
-    }
-    Some(
-        match partial.get("reason").and_then(|v| v.as_str()) {
-            Some("no_oauth") => ConversationsPartial::NoOauth,
-            Some("timeout") => ConversationsPartial::Timeout,
-            _ => ConversationsPartial::Error,
-        },
-    )
-}
 /// Reads `_meta["grow/listScope"]` from a session-list payload.
 pub(super) fn parse_session_list_scope(payload: &serde_json::Value) -> ListScope {
     match payload
@@ -524,11 +430,6 @@ pub(super) fn parse_session_picker_entries(
                 .or_else(|| v.get("first_prompt"))
                 .and_then(|s| s.as_str())
                 .map(String::from);
-            let is_conversation = v
-                .get("_meta")
-                .and_then(|m| m.get("grow/session"))
-                .and_then(|s| s.get("kind"))
-                .and_then(|k| k.as_str()) == Some("chat");
             let parsed_updated: Option<chrono::DateTime<chrono::Utc>> = v
                 .get("updatedAt")
                 .or_else(|| v.get("updated_at"))
@@ -541,17 +442,12 @@ pub(super) fn parse_session_picker_entries(
                 .and_then(|s| s.parse().ok());
             let updated_at: chrono::DateTime<chrono::Utc> = match parsed_updated {
                 Some(ts) => {
-                    if !is_conversation && ts < cutoff {
+                    if ts < cutoff {
                         return None;
                     }
                     ts
                 }
-                None => {
-                    if !is_conversation {
-                        return None;
-                    }
-                    parsed_created.unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH)
-                }
+                None => return None,
             };
             use grow_tools::implementations::skills::skill::extract_skill_display_text;
             let display = if let Some(ref fp) = first_prompt {
@@ -584,11 +480,7 @@ pub(super) fn parse_session_picker_entries(
                 .unwrap_or_default()
                 .to_string();
             let hostname = v.get("hostname").and_then(|s| s.as_str()).map(String::from);
-            let source = if is_conversation {
-                "conversation".to_string()
-            } else {
-                v.get("source").and_then(|s| s.as_str()).unwrap_or("local").to_string()
-            };
+            let source = v.get("source").and_then(|s| s.as_str()).unwrap_or("local").to_string();
             let model_id = v
                 .get("modelId")
                 .or_else(|| v.get("model_id"))
@@ -628,22 +520,7 @@ pub(super) fn parse_session_picker_entries(
                 card_detail: None,
             })
         })
-        .filter_map(|mut e| {
-            if e.summary.is_empty() {
-                if e.source == "conversation" {
-                    e.summary = "Untitled".to_string();
-                } else {
-                    return None;
-                }
-            }
-            if e.source == "remote"
-                && grow_shell::session::resolve_local_session_any_cwd(&e.id)
-                    .is_some()
-            {
-                e.source = "local".to_string();
-            }
-            Some(e)
-        })
+        .filter(|e| !e.summary.is_empty())
         .collect()
 }
 /// Convert a resume-picker session into a dormant dashboard roster row.

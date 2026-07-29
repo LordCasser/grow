@@ -264,7 +264,6 @@ fn auth_complete_with_deferred_load_also_fetches_status() {
         Some(crate::app::session_startup::DeferredSessionStartup::Load {
             session_id: "test-session".into(),
             session_cwd: None,
-            chat_kind: false,
         });
 
     let effects = dispatch(

@@ -598,9 +598,6 @@ pub async fn run(
     if let Some(profile) = disabled_by_confinement {
         warn_leader_disabled_by_sandbox(profile);
     }
-    if session_startup::chat_mode_conflicts_with_leader(args.chat(), use_leader) {
-        anyhow::bail!("{}", session_startup::CHAT_MODE_LEADER_CONFLICT);
-    }
     if args.trust {
         match std::env::current_dir() {
             Ok(cwd) => grow_shell::agent::folder_trust::grant_folder_trust(&cwd),
@@ -612,11 +609,6 @@ pub async fn run(
     if let Some(reason) = policy_disable_reason {
         tokio::spawn(grow_shell::leader::kill_stale_reachable_leaders(reason));
     }
-    if let Some(err) =
-        session_startup::chat_mode_flag_conflict(args.chat(), args.fork_session, args.restore_code)
-    {
-        anyhow::bail!("{err}");
-    }
     let intent = args
         .session_startup_intent()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -625,17 +617,6 @@ pub async fn run(
         intent,
     )
     .await?;
-    if args.chat()
-        && let session_startup::MaterializedStartup::Resume { session_id, .. } = &materialized
-    {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        if session_startup::chat_mode_refuses_local_build_load(true, false, session_id, &cwd) {
-            anyhow::bail!(
-                "{} (session id: {session_id})",
-                session_startup::CHAT_MODE_LOCAL_BUILD_REFUSAL
-            );
-        }
-    }
     let mut session_title = match &materialized {
         session_startup::MaterializedStartup::Resume { title, .. }
         | session_startup::MaterializedStartup::Fork {
@@ -654,7 +635,6 @@ pub async fn run(
         _ => None,
     };
     if session_title.is_none()
-        && !args.chat()
         && let Some(id) = title_lookup_id
     {
         let summaries = grow_shell::session::persistence::list_summaries(None).await?;
@@ -701,7 +681,6 @@ pub async fn run(
         no_memory: args.no_memory,
         todo_gate: args.todo_gate,
         laziness_debug_log: None,
-        storage_mode: args.storage_mode.clone(),
         client_identifier: args.client_identifier.clone(),
         hunk_tracker_mode,
         terminal: args.terminal,
@@ -1969,26 +1948,12 @@ mod tests {
         assert!(!args.continue_last_session);
         assert!(args.worktree.is_none());
         assert_eq!(args.session_to_resume(), None);
-        assert!(!args.chat());
     }
     /// Without the optional feature the flag must not exist at all: a stable
     /// binary given that flag fails clap parsing instead of silently ignoring.
     #[test]
     fn cli_chat_flag_rejected_without_feature() {
         assert!(try_parse_pager(&["grow-pager", "--chat"]).is_err());
-    }
-    #[test]
-    fn chat_mode_leader_guard_truth_table() {
-        assert!(session_startup::chat_mode_conflicts_with_leader(true, true));
-        assert!(!session_startup::chat_mode_conflicts_with_leader(
-            true, false
-        ));
-        assert!(!session_startup::chat_mode_conflicts_with_leader(
-            false, true
-        ));
-        assert!(!session_startup::chat_mode_conflicts_with_leader(
-            false, false
-        ));
     }
     #[test]
     fn cli_worktree_flag_parses() {

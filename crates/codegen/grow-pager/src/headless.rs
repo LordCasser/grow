@@ -802,18 +802,13 @@ async fn apply_headless_model_and_effort(
 
 // ── Main entry point ─────────────────────────────────────────────────────
 
-/// Startup-materialization context for headless (`-p`) runs. Never chat:
-/// `HeadlessOptions` carries no chat flag, so headless resume targets are
-/// always disk/GCS Build sessions.
+/// Startup-materialization context for headless (`-p`) runs.
 fn headless_materialize_ctx(
     has_worktree: bool,
     resume_title_pinned: bool,
 ) -> crate::app::session_startup::MaterializeCtx {
     crate::app::session_startup::MaterializeCtx {
         has_worktree,
-        allow_remote_restore:
-            crate::app::session_startup::MaterializeCtx::default_allow_remote_restore(),
-        chat_mode: false,
         title_resolution: if resume_title_pinned {
             crate::app::session_startup::TitleResolution::PinnedPreSandbox
         } else {
@@ -870,7 +865,6 @@ pub async fn run_single_turn(
         cli_no_memory: false,
         todo_gate: false,
         laziness_debug_log: None,
-        storage_mode: None,
     });
 
     agent_config.mode = grow_shell::agent::config::AgentMode::Headless;
@@ -1846,16 +1840,14 @@ mod tests {
         v.to_owned()
     }
 
-    /// Headless materialization is never chat, regardless of worktree flag —
-    /// resume targets stay disk/GCS Build sessions. The pre-sandbox pin flag
-    /// must carry through so a pinned target is never re-title-selected.
+    /// The pre-sandbox pin flag must carry through so a pinned target is never
+    /// re-title-selected.
     #[test]
-    fn headless_materialize_ctx_stays_non_chat() {
+    fn headless_materialize_ctx_preserves_pin_state() {
         use crate::app::session_startup::TitleResolution;
         for has_worktree in [false, true] {
             for pinned in [false, true] {
                 let ctx = headless_materialize_ctx(has_worktree, pinned);
-                assert!(!ctx.chat_mode);
                 assert_eq!(ctx.has_worktree, has_worktree);
                 assert_eq!(
                     ctx.title_resolution,

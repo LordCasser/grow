@@ -828,60 +828,6 @@ impl ToolsConfig {
         result
     }
 }
-/// Storage mode for session persistence.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum StorageMode {
-    /// Local JSONL only (default)
-    #[default]
-    Local,
-    /// Local + HTTP flush at end of turn
-    Writeback,
-}
-impl StorageMode {
-    /// Resolve from all sources: CLI > env var > remote settings > default (Local).
-    pub fn resolve(
-        cli_override: Option<&str>,
-        remote: Option<&crate::util::config::RemoteSettings>,
-    ) -> Self {
-        if let Some(mode) = cli_override {
-            match mode {
-                "writeback" => return Self::Writeback,
-                "local" => return Self::Local,
-                other => {
-                    tracing::warn!(mode = other, "unknown --storage-mode value, ignoring");
-                }
-            }
-        }
-        match std::env::var("GROW_STORAGE_MODE").as_deref() {
-            Ok("writeback") => return Self::Writeback,
-            Ok("local") => return Self::Local,
-            _ => {}
-        }
-        if let Some(remote) = remote
-            && remote.writeback_enabled == Some(true)
-        {
-            return Self::Writeback;
-        }
-        Self::Local
-    }
-    /// Resolve from remote settings, enforcing the rule that `Writeback`
-    /// requires service.example.com auth (it syncs to grow-code-backend). This is the
-    /// single home for that gate, used at boot ([`crate::agent::init`]) and by
-    /// the post-readiness self-heal (`MvpAgent::reapply_storage_mode`).
-    pub fn from_remote_gated(
-        remote: Option<&crate::util::config::RemoteSettings>,
-        has_service_auth: bool,
-    ) -> Self {
-        match Self::resolve(None, remote) {
-            Self::Writeback if !has_service_auth => Self::Local,
-            mode => mode,
-        }
-    }
-    /// Returns true if this mode syncs to the backend.
-    pub fn is_writeback(&self) -> bool {
-        matches!(self, Self::Writeback)
-    }
-}
 pub use grow_config::ConfigLayers;
 pub use grow_config::{
     MDM_REQUIREMENTS_SOURCE, RequirementsLayer, RequirementsSource, ServingIdentity, SyncMarker,

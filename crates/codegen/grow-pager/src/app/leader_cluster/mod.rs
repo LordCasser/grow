@@ -100,8 +100,6 @@ struct ClusterClient {
     app: AppView,
     rx: AcpClientRx,
     tasks: JoinSet<TaskResult>,
-    progress_tx: tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
-    _progress_rx: tokio::sync::mpsc::UnboundedReceiver<effects::RestoreProgressMsg>,
     bridge_cancel: CancellationToken,
     /// Present when the client was built with a reconnector: observes
     /// generation bumps after a leader kill/respawn.
@@ -149,7 +147,6 @@ impl ClusterClient {
                 self.app.default_yolo,
                 matches!(self.app.current_ui.permission_mode.as_deref(), Some("auto")),
             ),
-            chat_mode: self.app.chat_mode,
             screen_mode_label: Some(self.app.screen_mode.meta_label()),
             is_api_key_auth: self.app.is_api_key_auth,
             resume_local_miss: self.app.resume_local_miss.clone(),
@@ -161,7 +158,6 @@ impl ClusterClient {
                 &self.app.acp_tx,
                 &self.app.cwd,
                 &flags,
-                &self.progress_tx,
             );
         }
         self.drain_pending_effects();
@@ -223,7 +219,7 @@ impl ClusterClient {
     /// Attach to an existing session (viewer path) and wait for the replay to
     /// land.
     async fn load_session(&mut self, sid: &str) {
-        self.act(Action::LoadSession(sid.to_string(), None, false));
+        self.act(Action::LoadSession(sid.to_string(), None));
         let sid_owned = sid.to_string();
         self.pump_until("session/load completes", move |app| {
             app.agents.values().any(|a| {
@@ -593,13 +589,10 @@ impl PagerLeaderCluster {
         app.project_picker_shown = true;
         app.cwd = self.workdir.path().to_path_buf();
 
-        let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
         ClusterClient {
             app,
             rx,
             tasks: JoinSet::new(),
-            progress_tx,
-            _progress_rx: progress_rx,
             bridge_cancel: cancel,
             status_rx,
         }

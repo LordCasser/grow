@@ -11,8 +11,7 @@ use super::cta::{
 use super::ctx::{find_agent_by_session_id, get_active_agent_mut};
 use super::notes::{handle_btw_response, handle_memory_note_saved};
 use super::prompt::{
-    defer_to_open_reload_window, handle_compact_complete, handle_prompt_response,
-    handle_suggestion_debounce_expired,
+    handle_compact_complete, handle_prompt_response, handle_suggestion_debounce_expired,
 };
 use super::rewind::{
     dispatch_rewind_success, handle_rewind_execute_failed, handle_rewind_points_loaded,
@@ -31,8 +30,7 @@ use super::session::lifecycle::{
 };
 use super::session::load::{
     handle_card_detail_loaded, handle_deep_search_results, handle_session_load_failed,
-    handle_session_loaded, handle_session_restore_failed, handle_session_restored,
-    handle_session_search_debounce_expired, remove_session_from_pickers,
+    handle_session_loaded, handle_session_search_debounce_expired, remove_session_from_pickers,
 };
 use super::settings::ui::apply_setting_rollback;
 use super::status::{
@@ -333,11 +331,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         } => handle_session_load_failed(app, agent_id, session_id, error),
         TaskResult::SessionListLoaded {
             sessions,
-            partial,
             scope,
             seq,
             query,
-        } => handle_session_list_loaded(app, sessions, partial, scope, seq, query),
+        } => handle_session_list_loaded(app, sessions, scope, seq, query),
         TaskResult::ForeignSessionsScanned { entries, seq } => {
             handle_foreign_sessions_scanned(app, entries, seq)
         }
@@ -395,21 +392,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             generation,
             detail,
         } => handle_card_detail_loaded(app, source, session_id, generation, detail),
-        TaskResult::SessionRestored {
-            agent_id,
-            local_session_id,
-        } => handle_session_restored(app, agent_id, local_session_id),
-        TaskResult::SessionRestoreFailed { agent_id, error } => {
-            handle_session_restore_failed(app, agent_id, error)
-        }
-        TaskResult::SessionRestoreProgress { agent_id, message } => {
-            if let Some(agent) = app.agents.get_mut(&agent_id)
-                && !defer_to_open_reload_window(agent, agent_id, "SessionRestoreProgress")
-            {
-                agent.scrollback.push_block(RenderBlock::system(message));
-            }
-            vec![]
-        }
         TaskResult::PromptResponse {
             agent_id,
             result,

@@ -8,10 +8,10 @@ use crate::session::ExtMethodResult;
 use crate::session::persistence::LocalSessionResolutionKind;
 use crate::session::worktree::{
     ApplyWorktreeRequest, CreateWorktreeFromWorktreeRequest, CreateWorktreeRequest,
-    CreateWorktreeResponse, RehydrateSessionRequest, RemoveWorktreeRequest,
-    ResumeSessionInWorktreeRequest, WorktreeNotificationSender, WorktreeStatus, WorktreeType,
-    create_jj_workspace, create_worktree_async, create_worktree_from_worktree_async,
-    rehydrate_session_in_worktree, resolve_session_repo_wide, resume_session_in_worktree,
+    CreateWorktreeResponse, RemoveWorktreeRequest, ResumeSessionInWorktreeRequest,
+    WorktreeNotificationSender, WorktreeStatus, WorktreeType, create_jj_workspace,
+    create_worktree_async, create_worktree_from_worktree_async, resolve_session_repo_wide,
+    resume_session_in_worktree,
 };
 
 type ExtResult = Result<acp::ExtResponse, acp::Error>;
@@ -318,20 +318,9 @@ pub async fn handle(
                 worktree_type_default,
                 req.worktree_type.unwrap_or(worktree_type_default.into()),
             );
-            let registry_client = agent.session_registry_client();
-            let agent_id = grow_diagnostics::id::agent_id();
-
             to_response(
-                resume_session_in_worktree(
-                    &req,
-                    ops,
-                    worktree_type_default,
-                    restore_code_default,
-                    registry_client.as_ref(),
-                    Some(agent.auth_manager.clone()),
-                    &agent_id,
-                )
-                .await,
+                resume_session_in_worktree(&req, ops, worktree_type_default, restore_code_default)
+                    .await,
             )
         }
         // ── Repo-wide session resolution ─────────────────────────────────
@@ -357,13 +346,6 @@ pub async fn handle(
                         .data(format!("repo-wide resolution failed: {e}")))
                 }
             }
-        }
-        // ── Session rehydration (devbox recovery) ─────────────────────────
-        "grow/session/rehydrate" => {
-            let req = serde_json::from_str::<RehydrateSessionRequest>(args.params.get())?;
-            let registry_client = agent.session_registry_client();
-
-            to_response(rehydrate_session_in_worktree(&req, ops, registry_client.as_ref()).await)
         }
         // ── Worktree management methods ──────────────────────────────────
         "grow/git/worktree/list" => {

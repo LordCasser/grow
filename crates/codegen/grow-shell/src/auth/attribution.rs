@@ -3,7 +3,7 @@
 //! Every 401 emit site in the shell joins the bearer the client
 //! actually sent on the wire (the `Authorization` value for OAI-compat
 //! backends, `x-api-key` for Anthropic Messages, the API proxy
-//! `Authorization` header for registry / idle-resume) with the live
+//! `Authorization` header for idle-resume) with the live
 //! [`AuthManager::current_api_key`] value. Records
 //! are written to the local unified log and the process-local `tracing`
 //! subscriber.
@@ -17,9 +17,7 @@
 //!   "mint_age_seconds": <i64; current time minus auth.create_time, or -1>,
 //!   "expires_at_seconds_from_now": <i64; auth.expires_at minus now,
 //!                                 or 0 when no current token>,
-//!   "consumer": "OaiCompatClient.<endpoint>"
-//!             | "SessionRegistryClient.<op>"
-//!             | "IdleResumeModelRefresh",
+//!   "consumer": "OaiCompatClient.<endpoint>" | "IdleResumeModelRefresh",
 //!   "is_stale_snapshot": <bool; true iff sent_prefix differs from a *known* current_prefix>
 //! }
 //! ```
@@ -31,7 +29,7 @@
 //! its six 401 arms; this module provides [`ShellAttribution`], the
 //! concrete impl that the shell wires into
 //! [`grow_sampler::SamplerConfig::attribution_callback`] at every
-//! sampler-construction site. Non-sampler sites (registry / idle-resume) call
+//! sampler-construction site. Non-sampler sites call
 //! [`record_consumer_401`]
 //! directly with their `(consumer_kind, op)` pair.
 
@@ -189,9 +187,6 @@ pub(crate) enum ConsumerKind {
     /// Sampler-side OpenAI-compat / Anthropic Messages emit. The op
     /// string is the [`SamplingConsumer::as_endpoint`] return value.
     OaiCompatClient,
-    /// Session registry register/update sites in
-    /// `agent/session_registry_client.rs`.
-    SessionRegistryClient,
     /// Idle-resume model-metadata refresh in
     /// `session/acp_session.rs::maybe_refresh_model_metadata_on_resume`.
     /// No per-op discriminator -- the consumer string is just
@@ -213,7 +208,6 @@ impl ConsumerKind {
     fn prefix(self) -> &'static str {
         match self {
             Self::OaiCompatClient => "OaiCompatClient",
-            Self::SessionRegistryClient => "SessionRegistryClient",
             Self::IdleResumeModelRefresh => "IdleResumeModelRefresh",
             Self::ImageGen => "ImageGen",
             Self::VideoGen => "VideoGen",
@@ -242,11 +236,7 @@ fn format_consumer(kind: ConsumerKind, op: &str) -> String {
 /// Emit a single `auth 401 attribution` event for a per-consumer 401.
 ///
 /// Wraps [`record_auth_401`] with the design-doc `consumer` formatting
-/// (e.g., `"SessionRegistryClient.register"`).
-/// All 401 emit sites in `grow-shell` go through this helper -- the
-/// per-client `record_401_attribution` wrappers in
-/// `agent/session_registry_client.rs` each
-/// resolve their bearer and call this with the right `(kind, op)`.
+/// All 401 emit sites in `grow-shell` go through this helper.
 ///
 /// `sent_bearer` may be either a full bearer (passed by the
 /// non-sampler call sites listed above, which read directly from the
@@ -284,7 +274,7 @@ pub(crate) fn record_consumer_401(
 ///
 /// `consumer` should be one of the canonical strings used by the
 /// per-client wrappers, e.g. `"OaiCompatClient.chat_completions_stream"`,
-/// `"SessionRegistryClient.register"`, `"IdleResumeModelRefresh"`. Most call
+/// `"IdleResumeModelRefresh"`. Most call
 /// sites should go through [`record_consumer_401`] which formats the
 /// consumer string from a [`ConsumerKind`] for them.
 pub(crate) fn record_auth_401(

@@ -114,8 +114,6 @@ impl AgentView {
             modal_buttons: Vec::new(),
             modal_hovered_key: None,
             context_state: None,
-            chat_kind: false,
-            app_chat_mode: false,
             goal_state: None,
             workflow_blocks: std::collections::HashMap::new(),
             workflow_runs: Vec::new(),
@@ -792,25 +790,13 @@ impl AgentView {
     }
     /// Update context state with a full snapshot from live callers.
     ///
-    /// No-op for gateway/chat-kind sessions — local GetSessionInfo / sampler
-    /// breakdowns must not populate the context bar (remote owns context).
     pub fn apply_full_context_info(&mut self, next: grow_shell::session::ContextInfo) {
-        if self.chat_kind {
-            self.context_state = None;
-            return;
-        }
         self.context_state = Some(next);
     }
     /// Update context state from a streaming notification carrying only
     /// `used` and `total` fields.
     ///
-    /// No-op for gateway/chat-kind sessions (same policy as
-    /// [`Self::apply_full_context_info`]).
     pub fn apply_context_used(&mut self, used: u64, total: u64) {
-        if self.chat_kind {
-            self.context_state = None;
-            return;
-        }
         let total = if total > 0 {
             total
         } else {
@@ -910,12 +896,10 @@ impl AgentView {
     pub(crate) fn apply_app_scoped_gates(
         &mut self,
         sharing_enabled: bool,
-        chat_mode: bool,
         screen_mode: crate::app::ScreenMode,
         announcements: &[grow_announcements::RemoteAnnouncement],
     ) {
         self.set_sharing_enabled(sharing_enabled);
-        self.app_chat_mode = chat_mode;
         self.prompt.set_screen_mode(screen_mode);
         self.set_dashboard_visible(crate::views::dashboard::dashboard_enabled());
         self.set_has_session_announcements(crate::views::announcements::has_session_announcements(

@@ -201,8 +201,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ImportClaudeConfirm => dispatch_import_claude_confirm(app),
         Action::ImportClaudeCancel => dispatch_import_claude_cancel(app),
         Action::DismissClaudeImport => dispatch_dismiss_claude_import(app),
-        Action::LoadSession(session_id, session_cwd, chat_kind) => {
-            dispatch_load_session(app, session_id, session_cwd, chat_kind)
+        Action::LoadSession(session_id, session_cwd) => {
+            dispatch_load_session(app, session_id, session_cwd)
         }
         Action::NewSessionWithId(session_id) => dispatch_new_session_with_id(app, session_id),
         Action::StartupForkSession {
@@ -218,11 +218,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PickSessionInWorktree(index) => dispatch_pick_session_in_worktree(app, index),
         Action::CopySessionId(index) => dispatch_copy_session_id(app, index),
         Action::ExpandSessionCard { source, session_id } => {
-            let native_source = matches!(source.as_str(), "local" | "remote" | "both");
-            let conversation_source = source == "conversation";
+            let native_source = source == "local";
             if session_picker_external_filter_active(app)
                 || crate::app::foreign_sessions::is_foreign_picker_source(&source)
-                || (!native_source && !conversation_source)
+                || !native_source
             {
                 return vec![];
             }
@@ -1113,13 +1112,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 app.show_toast("External sessions can't be deleted");
                 return vec![];
             }
-            if source == "conversation" {
-                app.show_toast("Deleting chat conversations isn't supported yet");
-                return vec![];
-            }
-            if !matches!(source.as_str(), "local" | "remote" | "both")
-                || !session_picker_entry_matches(app, &source, &session_id)
-            {
+            if source != "local" || !session_picker_entry_matches(app, &source, &session_id) {
                 return vec![];
             }
             app.show_toast("Deleting session\u{2026}");

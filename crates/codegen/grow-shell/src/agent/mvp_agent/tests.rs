@@ -2023,105 +2023,6 @@ async fn auth_info_returns_profile_when_token_expired() {
     assert_eq!(info["firstName"], "Test");
 }
 
-/// `parse_session_kind` routes `session/load` to the gateway Chat path vs. the
-/// disk-backed Build path. Anything but an explicit `kind: "chat"` is Build.
-#[test]
-fn parse_session_kind_matrix() {
-    use crate::session::unified_list::SessionKind;
-    use serde_json::json;
-    let cases: &[(&str, serde_json::Value, SessionKind)] = &[
-        (
-            "chat",
-            json!({"grow/session": {"kind": "chat"}}),
-            SessionKind::Chat,
-        ),
-        (
-            "build",
-            json!({"grow/session": {"kind": "build"}}),
-            SessionKind::Build,
-        ),
-        (
-            "chat_malformed_sibling",
-            json!({"grow/session": {"kind": "chat", "facets": "not-a-map"}}),
-            SessionKind::Chat,
-        ),
-        (
-            "unknown_kind",
-            json!({"grow/session": {"kind": "frob"}}),
-            SessionKind::Build,
-        ),
-        ("absent", json!({}), SessionKind::Build),
-    ];
-    for (label, meta, expected) in cases {
-        assert_eq!(parse_session_kind(meta.as_object()), *expected, "[{label}]");
-    }
-    assert_eq!(parse_session_kind(None), SessionKind::Build, "[none]");
-}
-#[test]
-fn chat_initial_model_matrix() {
-    let cases: &[(&str, bool, Option<&str>, Option<&str>)] = &[
-        ("chat_with_model", true, Some("grow-4.5"), Some("grow-4.5")),
-        ("chat_without_model", true, None, None),
-        ("build_with_model", false, Some("grow-4.5"), None),
-        ("build_without_model", false, None, None),
-    ];
-    for (label, is_chat_kind, custom_model_id, expected) in cases {
-        assert_eq!(
-            chat_initial_model(*is_chat_kind, *custom_model_id).as_deref(),
-            *expected,
-            "[{label}]"
-        );
-    }
-}
-#[test]
-fn chat_new_session_model_state_matrix() {
-    fn state_with(current: &str, available: &[&str]) -> acp::SessionModelState {
-        acp::SessionModelState::new(
-            acp::ModelId::new(current.to_owned()),
-            available
-                .iter()
-                .map(|id| {
-                    acp::ModelInfo::new(acp::ModelId::new((*id).to_owned()), (*id).to_owned())
-                })
-                .collect(),
-        )
-    }
-    let cases: &[(&str, acp::SessionModelState, Option<&str>, &str)] = &[
-        (
-            "requested_in_catalog",
-            state_with("auto", &["auto", "grow-4"]),
-            Some("grow-4"),
-            "grow-4",
-        ),
-        (
-            "no_request_keeps_catalog_default",
-            state_with("auto", &["auto", "grow-4"]),
-            None,
-            "auto",
-        ),
-        (
-            "requested_not_in_catalog",
-            state_with("auto", &["auto"]),
-            Some("grow-4.5"),
-            "grow-4.5",
-        ),
-        (
-            "requested_with_empty_catalog",
-            state_with("", &[]),
-            Some("grow-4"),
-            "grow-4",
-        ),
-    ];
-    for (label, state, requested, expected) in cases {
-        let out = chat_new_session_model_state(state.clone(), requested.map(str::to_owned));
-        assert_eq!(out.current_model_id.0.as_ref(), *expected, "[{label}]");
-        assert_eq!(
-            out.available_models.len(),
-            state.available_models.len(),
-            "[{label}] override must not mutate the catalog"
-        );
-    }
-}
 /// `spawn_gateway_bridge` uses `tokio::task::spawn_local`.
 fn run_local_for_bridge_test<F, Fut, T>(body: F) -> T
 where
@@ -2134,35 +2035,6 @@ where
         .expect("test runtime must build");
     let local = tokio::task::LocalSet::new();
     local.block_on(&rt, body())
-}
-#[test]
-fn chat_session_spawn_options_matches_thin_profile() {
-    let sid = acp::SessionId::new(std::sync::Arc::from("00000000-0000-0000-0000-000000000099"));
-    let cwd = grow_paths::AbsPathBuf::new(std::env::temp_dir()).expect("temp cwd");
-    let opts = chat_session_spawn_options(
-        SessionInfo {
-            id: sid,
-            cwd: cwd.as_str().to_owned(),
-        },
-        cwd,
-        None,
-        None,
-        acp::ModelId::new(std::sync::Arc::from("test-model")),
-        false,
-    );
-    assert!(opts.mcp_servers.is_empty());
-    assert!(opts.initial_client_mcp_servers.is_empty());
-    assert!(!opts.client_code_nav_enabled);
-    assert!(!opts.client_terminal);
-    assert!(!opts.client_fs_read);
-    assert!(!opts.client_fs_write);
-    assert!(opts.chat_history.is_empty());
-    assert!(opts.managed_mcp_expires_at.is_none());
-    assert!(!opts.session_auto_mode);
-    assert!(
-        opts.persistence.is_noop(),
-        "K10 thin profile must use PersistenceHandle::noop()"
-    );
 }
 /// `remove_session` releases the workspace binding and drains the
 /// per-session side maps. Test agents default to `workspace_ops = None`,
@@ -2438,10 +2310,6 @@ fn disconnect_keeps_live_session_resident_without_finalize() {
             ),
             "the resident session's receiver must observe the delivered command"
         );
-        assert!(
-            agent.finalize_spy.borrow().is_empty(),
-            "finalize() must NOT fire on client disconnect"
-        );
         assert_eq!(
             agent.session_live_state_for(&sid),
             Some(SessionLiveState::Working),
@@ -2524,10 +2392,6 @@ fn disconnect_unloads_idle_session_without_finalize() {
         assert!(
             matches!(shutdown, TestSessionCommand::Shutdown),
             "idle-unload must send SessionCommand::Shutdown"
-        );
-        assert!(
-            agent.finalize_spy.borrow().is_empty(),
-            "idle-unload on disconnect must NOT finalize the cloud replica"
         );
         assert_eq!(
             agent.session_live_state_for(&sid),
@@ -2692,10 +2556,6 @@ fn disconnect_mixed_batch_keeps_busy_unloads_idle() {
             ),
             "the busy session must not be sent Shutdown in a mixed batch"
         );
-        assert!(
-            agent.finalize_spy.borrow().is_empty(),
-            "neither batch outcome may finalize on a mere disconnect"
-        );
     });
 }
 /// The bounded `session_live_state` map does not grow without bound
@@ -2719,13 +2579,10 @@ fn session_live_state_map_is_bounded_across_cycles() {
         );
     });
 }
-/// Finalize fires on a genuine terminal close — driven through the **real**
-/// `grow/session/close` dispatch (`ext_method` → `handle_session_close`),
-/// not the internal helper. Proves finalize was *moved* (not removed) and
-/// guards the handler's `existed` gate. (Finalize assertion is
-/// invocation-level; see note in `finalize_session_replica`.)
+/// A genuine terminal close driven through the real `grow/session/close`
+/// dispatch shuts down the actor, drops local state, and updates the roster.
 #[test]
-fn explicit_close_finalizes_the_replica() {
+fn explicit_close_removes_the_local_session() {
     run_local_for_bridge_test(|| async {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-close");
@@ -2734,21 +2591,12 @@ fn explicit_close_finalizes_the_replica() {
         drive_close(&agent, "no-such-session")
             .await
             .expect("close of a missing session must succeed as a no-op");
-        assert!(
-            agent.finalize_spy.borrow().is_empty(),
-            "closing a missing session must NOT finalize"
-        );
         drive_close(&agent, sid.0.as_ref())
             .await
             .expect("session close must be handled");
         assert!(
             matches!(cmd_rx.try_recv(), Ok(TestSessionCommand::Shutdown)),
             "handle_session_close must send Shutdown to the actor"
-        );
-        assert_eq!(
-            agent.finalize_spy.borrow().as_slice(),
-            &[sid.0.to_string()],
-            "explicit close must finalize the cloud replica exactly once"
         );
         assert!(
             !agent.sessions.borrow().contains_key(&sid),
@@ -2772,7 +2620,7 @@ fn explicit_close_finalizes_the_replica() {
 /// Join-handle supervisor: a *resident* actor that panics is reaped
 /// promptly — removed from `sessions`/`session_threads`, demoted to
 /// `DeadFailed` (observed via the roster delta, since the live-state entry
-/// is dropped on removal), and NOT finalized (the conversation persists).
+/// is dropped on removal), while the durable local session remains available.
 ///
 /// Polls in real time (the panic unwinds on a real OS thread, independent of
 /// the tokio clock); the reap lands within a small number of supervisor
@@ -2819,33 +2667,7 @@ fn supervisor_reaps_panicked_resident_actor() {
                 .any(|(id, st)| id == sid.0.as_ref() && *st == SessionLiveState::DeadFailed),
             "a reaped resident actor must emit a DeadFailed roster delta"
         );
-        assert!(
-            agent.finalize_spy.borrow().is_empty(),
-            "reaping a dead actor must NOT finalize (conversation persists)"
-        );
     });
-}
-/// Regression: writeback must self-correct once remote settings arrive
-/// (the field used to be frozen at construction).
-#[tokio::test]
-#[serial_test::serial]
-async fn storage_mode_self_corrects_to_writeback_when_settings_arrive() {
-    let _env = crate::env::EnvVarGuard::remove("GROW_STORAGE_MODE");
-    let auth = crate::auth::ProviderAuth {
-        auth_mode: crate::auth::AuthMode::Oidc,
-        oidc_issuer: Some("https://login.example.com".to_string()),
-        key: "test-token".to_string(),
-        ..Default::default()
-    };
-    let agent = build_agent_with_auth(auth);
-    agent.cfg.borrow_mut().mode = crate::agent::config::AgentMode::Leader;
-    assert_eq!(agent.storage_mode(), StorageMode::Local);
-    agent.cfg.borrow_mut().remote_settings = Some(crate::util::config::RemoteSettings {
-        writeback_enabled: Some(true),
-        ..Default::default()
-    });
-    agent.on_remote_settings_changed();
-    assert_eq!(agent.storage_mode(), StorageMode::Writeback);
 }
 /// `spawn_settings_reapply` coalesces: while one reapply is in flight,
 /// repeated calls (boot + rapid `/new`) do not spawn overlapping tasks.
@@ -2952,77 +2774,6 @@ fn drained_settings_update(
         }
     }
     found
-}
-/// First-party xAI auth + `writeback_enabled` settings → storage upgrades to
-/// Writeback; the settings arrival also emits `grow/settings/update`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial]
-async fn post_auth_settings_xai_upgrades_writeback_and_emits() {
-    use crate::agent::config::AgentMode;
-    use crate::auth::{ProviderAuth, TEST_OAUTH2_ISSUER};
-    let _storage_env = crate::env::EnvVarGuard::remove("GROW_STORAGE_MODE");
-    let server = grow_test_support::MockInferenceServer::start()
-        .await
-        .unwrap();
-    server.set_settings(serde_json::json!({
-        "writeback_enabled": true,
-    }));
-    let xai_auth = ProviderAuth {
-        oidc_issuer: Some(TEST_OAUTH2_ISSUER.to_string()),
-        ..ProviderAuth::test_default()
-    };
-    assert!(xai_auth.is_service_auth(), "precondition: first-party xAI auth");
-    let (agent, mut rx) =
-        build_agent_with_auth_and_proxy(xai_auth, server.url(), AgentMode::Leader);
-    assert_eq!(
-        agent.storage_mode(),
-        StorageMode::Local,
-        "precondition: leader boots in Local storage mode"
-    );
-    agent.maybe_fetch_post_auth_settings().await;
-    assert_eq!(
-        agent.storage_mode(),
-        StorageMode::Writeback,
-        "xai auth + writeback_enabled settings must upgrade storage to Writeback"
-    );
-    assert!(
-        drained_settings_update(&mut rx),
-        "settings arrival must push grow/settings/update to clients"
-    );
-}
-/// BYOK auth must not be upgraded to `Writeback` even when the server
-/// advertises it; the settings push still fires.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial]
-async fn post_auth_settings_third_party_keeps_local_but_still_emits() {
-    use crate::agent::config::AgentMode;
-    use crate::auth::{AuthMode, ProviderAuth};
-    let server = grow_test_support::MockInferenceServer::start()
-        .await
-        .unwrap();
-    server.set_settings(serde_json::json!({
-        "writeback_enabled": true,
-    }));
-    let api_auth = ProviderAuth {
-        auth_mode: AuthMode::ApiKey,
-        ..ProviderAuth::test_default()
-    };
-    assert!(
-        !api_auth.is_service_auth(),
-        "precondition: non-first-party auth"
-    );
-    let (agent, mut rx) =
-        build_agent_with_auth_and_proxy(api_auth, server.url(), AgentMode::Leader);
-    agent.maybe_fetch_post_auth_settings().await;
-    assert_eq!(
-        agent.storage_mode(),
-        StorageMode::Local,
-        "non-xai auth must stay Local even when writeback is advertised remotely"
-    );
-    assert!(
-        drained_settings_update(&mut rx),
-        "settings arrival must push grow/settings/update for non-xai auth too"
-    );
 }
 /// A `/settings` 401 from a token that rotated mid-flight must self-heal:
 /// refresh once and, if the token changed, re-fetch with it. Without the

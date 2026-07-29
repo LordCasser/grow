@@ -395,17 +395,13 @@ async fn run_forked_rewind_scenario() {
     let source_dir = crate::session::persistence::session_dir(&source_info);
     write_compacted_session_fixture(&source_dir, "ckptf");
 
-    fork_session(
-        ForkSessionRequest {
-            source_session_id: source_info.id.to_string(),
-            source_cwd: source_info.cwd.clone(),
-            new_cwd: actor.session_info.cwd.clone(),
-            new_session_id: Some(fork_id.clone()),
-            ..Default::default()
-        },
-        "test-agent",
-        None,
-    )
+    fork_session(ForkSessionRequest {
+        source_session_id: source_info.id.to_string(),
+        source_cwd: source_info.cwd.clone(),
+        new_cwd: actor.session_info.cwd.clone(),
+        new_session_id: Some(fork_id.clone()),
+        ..Default::default()
+    })
     .await
     .expect("fork_session ok");
 

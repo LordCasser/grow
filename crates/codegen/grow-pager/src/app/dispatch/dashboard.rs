@@ -379,36 +379,23 @@ pub(super) fn dispatch_dashboard_attach(
             // leader-hosted, possibly cross-cwd session into THIS cwd's
             // recent list would be wrong.
 
-            // Resolve cwd + origin first (also drives kind for focus-if-open).
-            let (session_cwd, conversation_entry) = app
+            let session_cwd = app
                 .leader_roster
                 .iter()
                 .chain(app.dashboard_local_sessions.iter())
                 .find(|e| e.session_id == session_id)
-                .map(|e| {
-                    let is_conversation = e.origin.kind == "conversation";
-                    (
-                        // Conversation rows have no cwd to re-home into.
-                        (!is_conversation).then(|| std::path::PathBuf::from(&e.cwd)),
-                        is_conversation,
-                    )
-                })
-                .unwrap_or((None, false));
+                .map(|e| std::path::PathBuf::from(&e.cwd));
 
             // Already local (e.g. double-click after the row converted): focus only.
-            if let Some(existing_id) =
-                focus_if_session_already_open(app, session_id.as_str(), conversation_entry)
-            {
+            if let Some(existing_id) = focus_if_session_already_open(app, session_id.as_str()) {
                 log_dashboard_attached(&DashboardRowId::TopLevel(existing_id));
                 return vec![];
             }
 
             // Mirror the picker resume path: allocate a new local agent and
             // emit `Effect::LoadSession` (strict load). `dispatch_load_session`
-            // already sets `app.active_view` to the new agent. Conversation-
-            // origin roster rows carry the conversation-entry bit so they take
-            // the direct chat load, never local/GCS resolution.
-            let effects = dispatch_load_session(app, session_id, session_cwd, conversation_entry);
+            // already sets `app.active_view` to the new agent.
+            let effects = dispatch_load_session(app, session_id, session_cwd);
             if let Some(new_id) = effects.iter().find_map(|e| match e {
                 Effect::LoadSession { agent_id, .. } => Some(*agent_id),
                 _ => None,

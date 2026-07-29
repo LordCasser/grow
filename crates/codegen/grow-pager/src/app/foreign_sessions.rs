@@ -33,7 +33,6 @@ impl AppView {
             && self.auth_return_view.is_none()
             && self.agents.is_empty()
             && self.next_agent_id == 0
-            && !self.chat_mode
             && !self.is_zdr_blocked()
             && self.pending_update_version.is_none()
     }
@@ -324,13 +323,9 @@ pub(crate) fn is_foreign_picker_source(source: &str) -> bool {
 }
 
 pub(crate) fn badge_for_picker_source(source: &str) -> &'static str {
-    if source == "conversation" {
-        "chat"
-    } else {
-        ForeignPickerSource::from_picker_source(source)
-            .map(ForeignPickerSource::picker_source)
-            .unwrap_or("")
-    }
+    ForeignPickerSource::from_picker_source(source)
+        .map(ForeignPickerSource::picker_source)
+        .unwrap_or("")
 }
 
 pub(crate) fn foreign_tool_display_label(tool: ForeignSessionTool) -> &'static str {
@@ -795,7 +790,7 @@ mod tests {
             assert_eq!(source.resume_prompt("native-id"), prompt);
             assert_eq!(ForeignPickerSource::from_picker_source(wire), Some(source));
         }
-        assert_eq!(badge_for_picker_source("conversation"), "chat");
+        assert_eq!(badge_for_picker_source("conversation"), "");
         assert_eq!(badge_for_picker_source("local"), "");
     }
 

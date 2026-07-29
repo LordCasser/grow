@@ -20,7 +20,6 @@ pub mod jsonl;
 pub(crate) mod relocation;
 pub mod search;
 pub mod search_fts;
-pub mod search_remote_sync;
 pub(crate) mod summary_write;
 
 /// On-disk file names, relative to a session directory. Single source of truth for

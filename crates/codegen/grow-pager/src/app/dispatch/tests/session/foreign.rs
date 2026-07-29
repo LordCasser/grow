@@ -222,7 +222,6 @@ fn native_empty_waits_for_foreign_and_foreign_only_rows_survive() {
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::Cwd,
             sessions: vec![],
-            partial: None,
             seq: 1,
             query: None,
         }),
@@ -270,7 +269,6 @@ fn foreign_empty_then_native_empty_finishes_once_without_resurrecting() {
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::Cwd,
             sessions: vec![],
-            partial: None,
             seq: 3,
             query: None,
         }),
@@ -335,7 +333,6 @@ fn modal_empty_notice_waits_until_both_lanes_are_empty() {
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::Cwd,
             sessions: vec![],
-            partial: None,
             seq: 9,
             query: None,
         }),
@@ -449,7 +446,6 @@ fn modal_selection_survives_native_and_foreign_completion_races() {
                 at(make_picker_entry("a", "/repo"), 20),
                 at(make_picker_entry("b", "/repo"), 10),
             ],
-            partial: None,
             seq: 2,
             query: None,
         }),
@@ -610,8 +606,8 @@ fn modal_external_filter_clears_native_content_and_blocks_forced_search() {
 
 #[test]
 fn cycle_reaches_every_filter_with_foreign_present() {
-    // One press from the default reveals externals, and Local/Remote stay
-    // reachable on the same plain cycle even with foreign rows loaded.
+    // One press from the default reveals externals, with every local filter
+    // reachable on the same cycle.
     let mut app = test_app();
     app.session_picker_entries = Some(vec![
         make_picker_entry("native", "/repo"),
@@ -621,7 +617,6 @@ fn cycle_reaches_every_filter_with_foreign_present() {
         SourceFilter::External,
         SourceFilter::All,
         SourceFilter::Local,
-        SourceFilter::Remote,
         SourceFilter::Grow,
     ] {
         let _ = dispatch(Action::CycleSessionSourceFilter, &mut app);
@@ -870,7 +865,6 @@ fn gated_foreign_pick_replaces_all_prior_startup_intents() {
         Some(crate::app::session_startup::DeferredSessionStartup::Load {
             session_id: "must-not-load".into(),
             session_cwd: Some(PathBuf::from("/other")),
-            chat_kind: true,
         });
     app.deferred_startup.worktree = true;
     app.deferred_startup.worktree_label = Some("stale".into());
@@ -878,7 +872,6 @@ fn gated_foreign_pick_replaces_all_prior_startup_intents() {
     app.deferred_startup.preferred_session_id = Some("stale-id".into());
     app.deferred_startup.new_session = true;
     app.deferred_startup.prompt = Some("stale prompt".into());
-    app.deferred_startup.pending_chat = true;
     open_session_picker_with(
         &mut app,
         vec![make_foreign_entry("codex-deferred", "codex", "/repo")],
@@ -898,7 +891,6 @@ fn gated_foreign_pick_replaces_all_prior_startup_intents() {
     assert!(app.deferred_startup.preferred_session_id.is_none());
     assert!(!app.deferred_startup.new_session);
     assert!(app.deferred_startup.prompt.is_none());
-    assert!(!app.deferred_startup.pending_chat);
 
     app.trust_state = TrustState::Done;
     app.new_session_worktree_mode = crate::app::app_view::WorktreeMode::Always;
@@ -998,31 +990,6 @@ fn foreign_selection_and_mutation_guards_remain_central() {
         .is_empty()
     );
     assert!(app.agents[&AgentId(0)].active_modal.is_some());
-}
-
-#[test]
-fn chat_picker_never_launches_or_accepts_foreign_scan() {
-    let mut app = test_app();
-    app.chat_mode = true;
-    app.foreign_session_compat = grow_workspace::foreign_sessions::EnabledForeignSessionSources {
-        claude: true,
-        codex: true,
-        cursor: true,
-    };
-    let effects = dispatch(Action::FetchSessionList, &mut app);
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::FetchSessionList { .. }]
-    ));
-    app.session_picker_entries = Some(vec![make_conversation_entry("chat")]);
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::ForeignSessionsScanned {
-            entries: vec![make_foreign_entry("foreign", "claude", "/repo")],
-            seq: app.foreign_session_scan_seq,
-        }),
-        &mut app,
-    );
-    assert_eq!(app.session_picker_entries.as_ref().unwrap().len(), 1);
 }
 
 #[test]

@@ -215,30 +215,6 @@ pub struct ShareResponse {
     pub permission_id: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoadDataResponse {
-    pub messages: Option<Vec<LoadedMessage>>,
-    pub session: Option<SessionInfo>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoadedMessage {
-    pub id: String,
-    pub content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<String>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionInfo {
-    pub session_id: String,
-    pub title: Option<String>,
-    pub cwd: Option<String>,
-    pub status: Option<String>,
-    pub created_at: Option<String>,
-    pub updated_at: Option<String>,
-    #[serde(default)]
-    pub metadata: Option<serde_json::Value>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveDataRequest {
     pub messages: Vec<ExportedMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -269,13 +245,6 @@ pub enum BackendError {
     RequestFailed { status: u16, body: String },
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
-    #[error("Session not found: {session_id}")]
-    SessionNotFound { session_id: String },
-    #[error("Hydration I/O error at {path}: {source}")]
-    Hydration {
-        path: std::path::PathBuf,
-        source: std::io::Error,
-    },
     #[error("Auth error: {0}")]
     Auth(String),
 }
@@ -384,22 +353,6 @@ impl BackendClient {
         let share_response = self.create_share_link(&session.session_id).await?;
         Ok(share_url(&share_response.permission_id))
     }
-    /// Sync session to backend without creating a share link.
-    pub async fn sync_session(
-        &self,
-        session: &ExportedSession,
-        agent_id: &str,
-    ) -> Result<(), BackendError> {
-        self.upsert_session(&session.session_id, &session.metadata, agent_id)
-            .await?;
-        self.save_session_data(
-            &session.session_id,
-            &session.messages,
-            Some(&session.metadata),
-        )
-        .await?;
-        Ok(())
-    }
     /// Build auth + identity headers.
     /// Must include X-Grow-Token-Auth so nginx auth subrequest routes to authenticate_grow_cli_token.
     /// See: crates/codegen/grow-shell/src/agent/app.rs:run_headless
@@ -496,41 +449,6 @@ impl BackendClient {
         }
         Ok(())
     }
-    /// List all sessions for the authenticated user. `GET /sessions`
-    pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>, BackendError> {
-        let url = format!("{}/sessions", self.base_url);
-        let response = self.send_with_auth(self.reqwest_client.get(&url)).await?;
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(BackendError::RequestFailed { status, body });
-        }
-        #[derive(Deserialize)]
-        struct ListResponse {
-            sessions: Vec<SessionInfo>,
-        }
-        let data: ListResponse = response.json().await?;
-        Ok(data.sessions)
-    }
-    pub async fn load_session_data(
-        &self,
-        session_id: &str,
-    ) -> Result<LoadDataResponse, BackendError> {
-        let url = format!("{}/sessions/{}/data", self.base_url, session_id);
-        let response = self.send_with_auth(self.reqwest_client.get(&url)).await?;
-        if response.status().as_u16() == 404 {
-            return Err(BackendError::SessionNotFound {
-                session_id: session_id.to_string(),
-            });
-        }
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(BackendError::RequestFailed { status, body });
-        }
-        let data: LoadDataResponse = response.json().await?;
-        Ok(data)
-    }
     pub async fn create_share_link(&self, session_id: &str) -> Result<ShareResponse, BackendError> {
         let url = format!("{}/sessions/{}/share", self.base_url, session_id);
         let response = self.send_with_auth(self.reqwest_client.post(&url)).await?;
@@ -541,18 +459,6 @@ impl BackendClient {
         }
         let share_response: ShareResponse = response.json().await?;
         Ok(share_response)
-    }
-    pub async fn delete_session_data(&self, session_id: &str) -> Result<(), BackendError> {
-        let url = format!("{}/sessions/{}/data", self.base_url, session_id);
-        let response = self
-            .send_with_auth(self.reqwest_client.delete(&url))
-            .await?;
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(BackendError::RequestFailed { status, body });
-        }
-        Ok(())
     }
 }
 /// Outcome of a blocking settings fetch.
@@ -2101,7 +2007,7 @@ mod tests {
     }
     /// `BackendClient::save_session_data` resolves auth from the attached
     /// `AuthManager` and sends the token as `Bearer <key>` on the wire.
-    /// This is the writeback path used on every session flush.
+    /// This path is currently used only by explicit session sharing.
     #[tokio::test(flavor = "current_thread")]
     async fn backend_client_resolves_auth_from_auth_manager() {
         let captured_auth = Arc::new(Mutex::new(None::<String>));

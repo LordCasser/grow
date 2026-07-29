@@ -10,7 +10,6 @@ use indexmap::IndexMap;
 use crate::agent::config::{self, Config as AgentConfig, ModelEntry};
 use crate::agent::models::ModelsManager;
 use crate::auth::AuthManager;
-use crate::config::StorageMode;
 
 /// Resolve config, init process singletons, build the model catalog.
 ///
@@ -84,9 +83,8 @@ fn ensure_remote_settings_side_effects(cfg: &mut AgentConfig, sync_managed: bool
     crate::agent::config::apply_remote_settings_side_effects(cfg.remote_settings.as_ref());
 }
 
-/// Config transform: apply managed settings, fetch remote settings,
-/// resolve storage mode.
-fn resolve_config(cfg: &AgentConfig, auth_manager: &AuthManager) -> AgentConfig {
+/// Config transform: apply managed settings and fetch remote settings.
+fn resolve_config(cfg: &AgentConfig, _auth_manager: &AuthManager) -> AgentConfig {
     let mut cfg = cfg.clone();
 
     if let Ok(layers) = crate::config::ConfigLayers::load()
@@ -123,20 +121,6 @@ fn resolve_config(cfg: &AgentConfig, auth_manager: &AuthManager) -> AgentConfig 
     ensure_remote_settings_side_effects(&mut cfg, true);
     if !cfg!(test) {
         crate::util::config::sync_campaign_fields(&mut cfg);
-    }
-
-    // env var > remote settings > Local. Skip remote settings for Generic (grow -p, subagents).
-    let has_service_auth = auth_manager.current().is_some_and(|a| a.is_service_auth());
-    if cfg.storage_mode == StorageMode::Local
-        && cfg.mode != crate::agent::config::AgentMode::Generic
-    {
-        cfg.storage_mode =
-            StorageMode::from_remote_gated(cfg.remote_settings.as_ref(), has_service_auth);
-    }
-    // A CLI/env-set Writeback still requires service.example.com auth.
-    if cfg.storage_mode == StorageMode::Writeback && !has_service_auth {
-        tracing::info!("Writeback is disabled: requires auth with service.example.com");
-        cfg.storage_mode = StorageMode::Local;
     }
 
     if let Some(rs) = cfg.remote_settings.as_ref()
