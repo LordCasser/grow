@@ -668,8 +668,8 @@ impl WorkspaceRpc for GitCollectChangesReq {
 }
 
 /// Response containing collected repository changes as serializable wire types.
-/// The conversion is lossless for all fields needed by the shell to build the
-/// archive and upload.
+/// The conversion is lossless for all fields needed by the shell to build a
+/// local changes archive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitCollectChangesResponse {

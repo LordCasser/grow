@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 /// The public cwd-taking delegators (`find_project_configs`,
 /// `project_plugin_dirs`, `project_agent_dirs`, …) now resolve through this
 /// chain too, so their non-gate callers (config watcher, reloader, the mcp/
-/// config loaders, inspect, upload, mcp_doctor) gain the per-level canonicalize
+/// config loaders, inspect, and mcp_doctor) gain the per-level canonicalize
 /// below. That is deliberate: all those callers are cold (startup / file-change /
 /// session-setup / manual commands), never per-keystroke, and the canonical stop
 /// is strictly more correct.

@@ -499,7 +499,7 @@ mod tests {
         assert_eq!(http_status_from_error(&err), Some(401));
     }
 
-    /// The typed max-tokens kind round-trips through `acp::Error.data` to the uploaded stop_reason.
+    /// The typed max-tokens kind round-trips through `acp::Error.data` to the serialized stop reason.
     #[test]
     fn stop_reason_for_turn_error_distinguishes_max_tokens() {
         let err = map_sampling_err_to_acp(SamplingError::MaxTokensTruncation);

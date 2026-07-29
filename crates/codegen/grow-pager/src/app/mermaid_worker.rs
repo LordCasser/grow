@@ -416,7 +416,7 @@ fn map_run_result(
 /// requested diagram and return `Some(exit_code)`; otherwise `None` (it is a
 /// normal pager invocation).
 ///
-/// Intercepted at the very top of `main`, before any TUI/agent/tokio/sentry
+/// Intercepted at the very top of `main`, before any TUI, agent, async runtime, or diagnostics
 /// init, so the child stays minimal and a panic (abort) or runaway render is
 /// contained to this short-lived process. Reads the source from stdin and the
 /// theme/width/height from argv, renders source → SVG → PNG, writes the PNG
