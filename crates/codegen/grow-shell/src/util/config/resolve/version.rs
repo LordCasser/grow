@@ -1,7 +1,7 @@
 use semver::Version;
 use toml::Value as TomlValue;
 
-/// Machine-readable channel name derived from the GCS stable pointer cache.
+/// Machine-readable channel name derived from the updater's local version cache.
 ///
 /// Reads `stable_version` from `~/.grow/version.json` (written by the
 /// auto-updater) and compares the compiled-in version against it:

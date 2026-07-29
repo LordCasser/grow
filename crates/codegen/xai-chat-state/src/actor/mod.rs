@@ -266,12 +266,6 @@ impl ChatStateActor {
                     compaction_occurred: false,
                 });
             }
-            ChatStateCommand::AppendHarnessTraceItems { items } => {
-                self.state.harness_trace_buffer.extend(items);
-            }
-            ChatStateCommand::FlushHarnessTraceTurn => {
-                self.state.seal_harness_trace_turn();
-            }
             ChatStateCommand::RepairDanglingAfterHarnessHalt { class } => {
                 self.repair_dangling_after_harness_halt(class);
             }
@@ -348,10 +342,6 @@ impl ChatStateActor {
                 self.truncate_to_prompt_index(target_prompt_index);
                 self.state.turn_capture = None;
                 self.state.prompt_usage = None;
-                // `harness_trace_buffer` / `harness_trace_turns` intentionally
-                // survive a rewind: the goal planner / verifier subagents
-                // genuinely ran, so their sealed trace turns stay uploadable as
-                // siblings even when the live turn that triggered them is undone.
                 let _ = reply.send(());
             }
             ChatStateCommand::CheckAutoCompactNeeded {
@@ -381,13 +371,6 @@ impl ChatStateActor {
                 });
                 let _ = reply.send(result);
             }
-            ChatStateCommand::TakeHarnessTraceTurns { reply } => {
-                // Defensive seal: a phase that recorded items but never flushed
-                // still rides its own turn rather than stranding.
-                self.state.seal_harness_trace_turn();
-                let _ = reply.send(std::mem::take(&mut self.state.harness_trace_turns));
-            }
-
             // ─── Narrow targeted queries ──────────────────────────────────
             ChatStateCommand::GetConversationLen { reply } => {
                 let _ = reply.send(self.get_conversation_len());

@@ -1081,7 +1081,6 @@ impl SessionActor {
         // Fork owns history; fail-open stays OBJECTIVE-only (no last-assistant CONTEXT).
         let context = String::new();
 
-        let task_tool_name = self.resolve_goal_tool_names().await.task;
         // Tag the planner with the goal-creation turn's prompt id so its
         // `subagent.json` / parent `subagents_spawned` ref link to this turn,
         // matching how model-spawned subagents attach to their parent.
@@ -1118,7 +1117,6 @@ impl SessionActor {
                 parent_session_id: self.session_id_string(),
                 parent_prompt_id,
                 cwd: Some(self.tool_context.cwd.as_str().to_owned()),
-                trace_sink: Some((self.chat_state_handle.clone(), task_tool_name)),
                 role_override,
             });
 
@@ -1142,11 +1140,6 @@ impl SessionActor {
             },
         )
         .await;
-
-        // Seal the planner's synthetic `task` pair into its own harness trace
-        // turn so it uploads as a sibling `turn_{N}` artifact (the planner is
-        // represented by its own turn). No-op when the spawn recorded nothing.
-        self.chat_state_handle.flush_harness_trace_turn();
 
         match outcome {
             crate::session::goal_planner::GoalPlannerOutcome::Planned { plan_file, .. } => {
@@ -1260,7 +1253,6 @@ impl SessionActor {
             .map(|c| c.model)
             .unwrap_or_default();
 
-        let task_tool_name = self.resolve_goal_tool_names().await.task;
         let parent_prompt_id = self
             .current_prompt_id
             .lock()
@@ -1288,7 +1280,6 @@ impl SessionActor {
                 parent_session_id: self.session_id_string(),
                 parent_prompt_id,
                 cwd: Some(self.tool_context.cwd.as_str().to_owned()),
-                trace_sink: Some((self.chat_state_handle.clone(), task_tool_name)),
                 role_override,
             });
 
@@ -1312,11 +1303,6 @@ impl SessionActor {
             },
         )
         .await;
-
-        // Seal the strategist's synthetic `task` pair into its own harness
-        // trace turn (sibling of the planner / skeptic turns). No-op when the
-        // spawn recorded nothing.
-        self.chat_state_handle.flush_harness_trace_turn();
 
         // Fail-OPEN: persist on success; any other exit leaves `bonus_guard`
         // armed (the runner already emitted diagnostics + warning).
@@ -1372,7 +1358,6 @@ impl SessionActor {
             .await
             .map(|c| c.model)
             .unwrap_or_default();
-        let task_tool_name = self.resolve_goal_tool_names().await.task;
         let parent_prompt_id = self
             .current_prompt_id
             .lock()
@@ -1391,7 +1376,6 @@ impl SessionActor {
                 parent_session_id: self.session_id_string(),
                 parent_prompt_id,
                 cwd: Some(self.tool_context.cwd.as_str().to_owned()),
-                trace_sink: Some((self.chat_state_handle.clone(), task_tool_name)),
             });
 
         let outcome = crate::session::goal_summarizer::run_goal_summarizer(
@@ -1407,10 +1391,6 @@ impl SessionActor {
             },
         )
         .await;
-
-        // Seal the summarizer's synthetic `task` pair into its own harness
-        // trace turn (sibling of the planner / skeptic / strategist turns).
-        self.chat_state_handle.flush_harness_trace_turn();
 
         // Fail-OPEN: surface the summary on success; any other outcome already
         // emitted diagnostics and is skipped. The chunk persists via

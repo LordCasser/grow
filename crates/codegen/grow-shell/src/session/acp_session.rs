@@ -562,9 +562,6 @@ impl PreparedToolCall {
             .unwrap_or(&self.tool_name)
     }
 }
-#[cfg(test)]
-pub(crate) use crate::session::streaming_capture::STREAMING_CAPTURE_MAX_BYTES;
-pub(crate) use crate::session::streaming_capture::StreamingTurnCapture;
 /// One memoized model's auth state, keyed by model id; see
 /// [`SessionActor::model_auth_memo`] for the invalidation contract.
 #[derive(Clone)]
@@ -941,32 +938,6 @@ pub(crate) struct SessionActor {
     /// for per-session decisions). `Arc` so it can be re-checked inside the
     /// chat-state actor's `RepairHistory` handler.
     pub(crate) session_turn_active: Arc<std::sync::atomic::AtomicBool>,
-    /// Per-turn accumulator for the model's streamed generations, populated by
-    /// `handle_sampling_event` while the sampler is streaming. Each
-    /// `SamplingEvent::Completed` discards the in-progress generation (committed
-    /// to `afterStateHistory`) without wiping the capture, so a same-turn
-    /// doomloop retry's earlier uncommitted generations are preserved.
-    ///
-    /// On user-cancel mid-stream, a sampler terminal failure (e.g.
-    /// `MaxTokensTruncation`), or a doomloop, the consumer takes the capture via
-    /// `SessionCommand::TakeStreamingCapture`, which `finalize_for_upload`s the
-    /// uncommitted generations and uploads them as
-    /// `{session_id}/turn_N/streaming_partial.json` for trace inspection. See
-    /// [`crate::session::streaming_capture`].
-    ///
-    /// **This is deliberately out-of-band from `chat_state`.** The partial
-    /// is never returned by `BuildConversationRequest`, never pushed via
-    /// `push_assistant_response`, and never sent to the model on subsequent
-    /// turns. Trace-only, inspection-only.
-    ///
-    /// **Known tail race:** if a queued prompt's `StreamStarted` arrives at
-    /// the actor's `select!` between cancel-time and `TakeStreamingCapture`,
-    /// the live slot is reset with the new turn's prompt-id before the
-    /// take. The take handler then sees a prompt-id mismatch and returns
-    /// `None`, dropping the cancelled turn's `streaming_partial.json`.
-    /// A `tracing::warn!` tripwire in the handler logs every occurrence so
-    /// we can quantify the loss in production before investing in a stash.
-    pub(crate) streaming_turn_capture: parking_lot::Mutex<StreamingTurnCapture>,
     /// Per-turn barrier that orders the streamed message against the turn's
     /// tool calls.
     ///
@@ -1014,9 +985,6 @@ pub(crate) struct SessionActor {
     /// goal totals via [`Self::goal_tokens`].
     pub(crate) subagent_token_records: parking_lot::Mutex<HashMap<String, SubagentTokenRecord>>,
     pub(crate) workspace_ops: grow_workspace::WorkspaceOps,
-    /// Template for building trace configs on synthetic auto-wake turns.
-    /// Captured from the first real user prompt's trace config so synthetic
-    /// turns can upload artifacts using the same bucket/method.
     /// Layer-3 LazinessDetector: monotonic counter bumped whenever a
     /// fresh (non-synthetic) user prompt arrives at the actor.
     /// `maybe_fire_laziness_check` snapshots the value at start and

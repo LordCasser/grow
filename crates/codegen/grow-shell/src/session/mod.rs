@@ -333,7 +333,6 @@ pub mod result;
 pub mod signals;
 pub(crate) mod slash_commands;
 pub mod storage;
-pub(crate) mod streaming_capture;
 pub(crate) mod summary;
 #[cfg(feature = "test-support")]
 pub mod testkit;

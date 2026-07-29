@@ -623,11 +623,8 @@ impl SessionActor {
                     total_tokens,
                     turn_snapshot: None,
                     completion_kind: PromptCompletionKind::Cancelled {
-                        // Previously hard-coded `None`, which dropped the
-                        // category on the abort path so `streaming_partial.json`
-                        // recorded a bare `"cancelled"`. Carry `MidTurnAbort`
-                        // so the partial's `reason` and any downstream consumer
-                        // match what `emit_turn_ended` wrote to `events.jsonl`.
+                        // Preserve the cancellation category so local turn
+                        // diagnostics match the terminal notification.
                         category: Some(crate::session::events::CancellationCategory::MidTurnAbort),
                         // Thread the trigger on the running turn only (idx 0);
                         // MvpAgent stamps it on the `PromptResponse` `_meta`.

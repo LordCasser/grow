@@ -703,33 +703,6 @@ pub enum SessionCommand {
     TakeTurnMessages {
         respond_to: oneshot::Sender<Option<xai_chat_state::TurnCapture>>,
     },
-    /// Drain the sealed harness trace turns (goal planner + verifier panels)
-    /// from the chat state actor (proxied from mvp_agent). Routed through the
-    /// session actor — like `TakeTurnMessages` — so the drain is ordered ahead
-    /// of any subsequent turn's harness recording. Each `Vec` is one turn's
-    /// synthetic `task` pairs, uploaded as its own sibling `turn_{N}` artifact.
-    TakeHarnessTraceTurns {
-        respond_to: oneshot::Sender<Vec<Vec<grow_sampling_types::conversation::ConversationItem>>>,
-    },
-    /// Take and clear the session actor's out-of-band streaming-turn capture.
-    ///
-    /// Returns `Some(...)` when the model streamed reasoning or text in the
-    /// current turn but the canonical assistant response never reached
-    /// `chat_state` (user cancel mid-stream, sampler terminal failure such as
-    /// `MaxTokensTruncation`). The consumer uploads it as
-    /// `streaming_partial.json` for trace inspection; `chat_state` is never
-    /// mutated by this command.
-    ///
-    /// `prompt_id` is passed so the handler can detect a race where a queued
-    /// turn's `StreamStarted` reset the live slot to a different prompt
-    /// between cancel and take. On mismatch the handler emits a
-    /// `tracing::warn!` tripwire and returns `None`; there is no stash, so
-    /// the tail-race data is dropped rather than misattributed.
-    TakeStreamingCapture {
-        prompt_id: String,
-        #[allow(private_interfaces)]
-        respond_to: oneshot::Sender<Option<crate::session::acp_session::StreamingTurnCapture>>,
-    },
     /// Persist the current git HEAD commit and branch to summary.json.
     ///
     /// Sent at the end of each prompt turn so `--restore-code` sees the latest

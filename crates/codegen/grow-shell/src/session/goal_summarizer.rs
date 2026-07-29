@@ -94,9 +94,6 @@ pub(crate) struct ChannelSpawner {
     pub(crate) parent_session_id: String,
     pub(crate) parent_prompt_id: Option<String>,
     pub(crate) cwd: Option<String>,
-    /// Trace-artifact sink + resolved `task` tool name; `None` disables
-    /// recording. See [`crate::session::goal_classifier::record_subagent_trace`].
-    pub(crate) trace_sink: Option<(xai_chat_state::ChatStateHandle, String)>,
     // Event sink for the spawn-and-retry-once fail-open diagnostics; removed
     // (EventWriter no longer exists).
     // pub(crate) events: Option<EventWriter>,
@@ -109,42 +106,17 @@ impl GoalSummarizerSpawner for ChannelSpawner {
         id: &str,
         prompt: RoleRenderedPrompt,
     ) -> Result<String, SpawnError> {
-        // Clone the primary render for the trace pair only when tracing.
-        let trace_prompt = self.trace_sink.as_ref().map(|_| prompt.primary.clone());
         // The summarizer always inherits the current model + general-purpose
         // toolset (no per-role model key), so the wrapper runs a single attempt.
         let override_ = RoleSpawnOverride::default();
-        let outcome = spawn_with_fail_open_retry(
+        spawn_with_fail_open_retry(
             "summarizer",
             None,
             &override_,
             prompt,
             |model, harness, prompt| self.send_one(id, prompt, model, harness),
         )
-        .await;
-
-        match &outcome {
-            Ok(text) => crate::session::goal_classifier::record_subagent_trace(
-                self.trace_sink.as_ref(),
-                id,
-                GOAL_SUMMARIZER_SUBAGENT_TYPE,
-                GOAL_SUMMARIZER_SUBAGENT_DESCRIPTION,
-                trace_prompt.as_deref(),
-                text,
-            ),
-            Err(SpawnError::Runtime { message, .. }) => {
-                crate::session::goal_classifier::record_subagent_trace(
-                    self.trace_sink.as_ref(),
-                    id,
-                    GOAL_SUMMARIZER_SUBAGENT_TYPE,
-                    GOAL_SUMMARIZER_SUBAGENT_DESCRIPTION,
-                    trace_prompt.as_deref(),
-                    message,
-                )
-            }
-            Err(SpawnError::Transport(_)) => {}
-        }
-        outcome
+        .await
     }
 }
 
@@ -581,7 +553,6 @@ mod tests {
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
             cwd: None,
-            trace_sink: None,
         };
         let handle = tokio::spawn(async move {
             let _ = spawner

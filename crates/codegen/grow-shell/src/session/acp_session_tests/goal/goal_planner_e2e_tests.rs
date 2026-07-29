@@ -361,66 +361,6 @@ async fn planner_snapshots_plan_baseline_once_and_does_not_overwrite() {
 
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn planner_records_own_harness_trace_turn_with_footer() {
-    // Option B: the planner subagent is represented by its OWN trace turn.
-    // After `maybe_run_goal_planner`, the chat-state side buffer holds exactly
-    // one sealed harness trace turn carrying the synthetic `task` call + result
-    // pair, and the result keeps the `<subagent_result>` footer (with the child
-    // session id) so the trace viewer can discover the planner subagent.
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (tx, _spawn_count) =
-                spawn_planner_coordinator(SpawnBehaviour::WritePlanThenDone { body: b"# Plan\n" });
-            let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
-            create_test_goal(&actor);
-
-            actor.maybe_run_goal_planner("do X").await;
-
-            let turns = actor.chat_state_handle.take_harness_trace_turns().await;
-            assert_eq!(turns.len(), 1, "planner rides its own trace turn");
-            let items = &turns[0];
-            assert_eq!(items.len(), 2, "synthetic task call + result pair");
-            assert!(
-                matches!(
-                    &items[0],
-                    crate::sampling::ConversationItem::Assistant(a) if !a.tool_calls.is_empty()
-                ),
-                "first item is the synthetic task call",
-            );
-            let result_text = items[1].text_content();
-            assert!(
-                result_text.contains("<subagent_result>"),
-                "footer present for trace-viewer / subagent discovery: {result_text}",
-            );
-            assert!(
-                result_text.contains("subagent_id:"),
-                "subagent_id present in footer: {result_text}",
-            );
-        })
-        .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[serial]
-async fn planner_disabled_records_no_harness_trace_turn() {
-    // Non-goal / planner-off fast path: no harness trace turn is produced.
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (actor, _tmp) = make_planner_actor(None, false).await;
-            create_test_goal(&actor);
-
-            actor.maybe_run_goal_planner("do X").await;
-
-            let turns = actor.chat_state_handle.take_harness_trace_turns().await;
-            assert!(turns.is_empty(), "planner disabled — no trace turn");
-        })
-        .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[serial]
 async fn planner_success_sets_then_clears_planning_flag() {
     // The transient "planning…" badge fires before the subagent runs
     // (planning=Some(true)) and is cleared on the success exit path

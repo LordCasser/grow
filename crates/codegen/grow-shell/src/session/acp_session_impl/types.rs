@@ -236,31 +236,3 @@ pub(crate) enum StopGateDecision {
     AllowStop,
     KeepWorking { feedback: String },
 }
-
-/// Which part of the model's streaming lifecycle the capture was tied to
-/// when it was last touched — i.e. what the model was doing at the moment
-/// the turn was cut off. Serialized onto `streaming_partial.json` so trace
-/// inspection can tell whether the abort interrupted thinking, the visible
-/// response, or tool-call emission.
-///
-/// There is deliberately **no `ToolExecution` variant**: on
-/// `SamplingEvent::Completed` (the point at which the canonical assistant
-/// message is committed) the in-progress generation is discarded from the
-/// capture, and `Completed` always fires before the turn loop dispatches
-/// tools. A streaming partial can therefore only ever be tied to one of the
-/// model's own emission phases below — never to tool execution, whose
-/// interruptions are covered by the canonical `record_assistant_response`
-/// path instead.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum CapturePhase {
-    /// Stream opened (`StreamStarted`) but no channel token observed yet.
-    #[default]
-    Pending,
-    /// Reasoning ("thinking") tokens were the most recent output.
-    Reasoning,
-    /// Visible response-text tokens were the most recent output.
-    ResponseText,
-    /// The model had begun emitting a tool call (`ToolCallDelta`).
-    ToolCall,
-}

@@ -161,18 +161,6 @@ pub(crate) struct ChatState {
     /// Cleared on `TakeTurnMessages` (consumed), `BeginTurnCapture` (new turn),
     /// and `TruncateToPromptIndex` (rewind abandons the turn).
     pub(super) turn_capture: Option<TurnCaptureState>,
-    /// Accumulator for the in-progress harness-subagent trace phase (the goal
-    /// planner at `setup_goal`, or one verifier skeptic panel). Synthetic
-    /// `task` pairs recorded via `AppendHarnessTraceItems` land here;
-    /// `FlushHarnessTraceTurn` seals the accumulated items into one entry of
-    /// `harness_trace_turns`. Independent of `turn_capture` (the planner runs
-    /// ahead of `BeginTurnCapture`) and never enters the live `conversation`.
-    pub(super) harness_trace_buffer: Vec<ConversationItem>,
-    /// Sealed harness trace turns awaiting drain by the agent, which uploads
-    /// each as its own sibling `turn_{N}` artifact so orchestrators can
-    /// discover harness subagents via their `<subagent_result>` footer.
-    /// Drained by `TakeHarnessTraceTurns` at the end of the user-facing turn.
-    pub(super) harness_trace_turns: Vec<Vec<ConversationItem>>,
 }
 
 /// Tracks which conversation items belong to the current turn without
@@ -243,19 +231,6 @@ impl ChatState {
             prompt_usage: None,
             session_usage: UsageLedger::default(),
             turn_capture: None,
-            harness_trace_buffer: Vec::new(),
-            harness_trace_turns: Vec::new(),
-        }
-    }
-
-    /// Seal the items accumulated since the last flush into one harness trace
-    /// turn. No-op when nothing was recorded since the last seal. Shared by the
-    /// explicit `FlushHarnessTraceTurn` (one call per harness phase) and the
-    /// defensive seal in `TakeHarnessTraceTurns`.
-    pub(super) fn seal_harness_trace_turn(&mut self) {
-        if !self.harness_trace_buffer.is_empty() {
-            let turn = std::mem::take(&mut self.harness_trace_buffer);
-            self.harness_trace_turns.push(turn);
         }
     }
 }

@@ -1998,7 +1998,7 @@ mod progress_publisher_tests {
 /// Metadata stored as `meta.json` in the child session directory.
 /// Links the child session back to its parent.
 ///
-/// For the GCS-persisted artifact (`subagent.json`), see [`SubagentSessionMetadata`].
+/// For the local session artifact (`subagent.json`), see [`SubagentSessionMetadata`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SubagentMeta {
     pub subagent_id: String,
@@ -2053,11 +2053,11 @@ pub(crate) struct SubagentMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_model_id: Option<String>,
 }
-/// Canonical subagent metadata for GCS persistence (`subagent.json`).
+/// Canonical subagent metadata for local persistence (`subagent.json`).
 ///
 /// Contains the full subagent identity, provenance, and execution state.
-/// Uploaded to `{session_id}/subagent.json` in GCS and optionally mirrored
-/// locally. Schema is versioned for forward compatibility.
+/// Stored as `{session_id}/subagent.json`. Schema is versioned for forward
+/// compatibility.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubagentSessionMetadata {

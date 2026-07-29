@@ -2104,9 +2104,8 @@ impl SessionActor {
     ///
     /// Writes `{session_dir}/compaction_requests/{request_id}.json` containing
     /// the exact ConversationItem list sent to the compaction model plus the
-    /// summary (or final error) it produced. The file rides on
-    /// the post-turn session archive to cloud storage via the existing per-turn upload
-    /// pipeline — no separate upload path is needed.
+    /// summary (or final error) it produced. The artifact remains local under
+    /// the session directory.
     ///
     /// `created_at` is taken from the caller-supplied `started_at` (captured
     /// before the retry loop) rather than `Utc::now()` here, so transient
@@ -2466,9 +2465,6 @@ mod inline_auto_compact_flow_tests {
             recap_in_flight: std::cell::Cell::new(false),
             recap_epoch: std::cell::Cell::new(0),
             session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            streaming_turn_capture: parking_lot::Mutex::new(
-                crate::session::acp_session::StreamingTurnCapture::default(),
-            ),
             turn_stream_drained: parking_lot::Mutex::new(None),
             sampler_handle: grow_sampler::SamplerHandle::noop(),
             rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),

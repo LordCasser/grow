@@ -404,8 +404,7 @@ impl SessionActor {
     /// Persist a recap request artifact for offline prompt / garble analysis.
     /// Writes `{session_dir}/recap_requests/{request_id}.json` containing the
     /// exact `ConversationItem` list sent to the model plus the cleaned
-    /// summary and raw assistant text (or error). Rides on the post-turn
-    /// session archive to cloud storage like compaction request artifacts.
+    /// summary and raw assistant text (or error) in the local session directory.
     /// Best-effort: send-failures are logged at `warn` and never surfaced —
     /// clear the loading spinner it is showing instead of animating forever.
     /// a missing artifact must never disrupt recap display.

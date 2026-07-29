@@ -1156,9 +1156,8 @@ pub struct Config {
     pub respect_gitignore: bool,
     /// Whether to enrich path-not-found errors with CWD reminders,
     /// "dropped repo folder" correction, and similar-name suggestions.
-    /// Default `false`. Enabled via remote settings.
-    /// Serialized to `config.json` on GCS so traces can distinguish
-    /// which sessions had path-not-found hints active.
+    /// Default `false`. Enabled via remote settings and retained in local
+    /// session configuration for diagnostics.
     #[serde(default)]
     pub path_not_found_hints: bool,
     /// Whether to fetch managed MCP configs from the managed connectors service at startup.

@@ -439,9 +439,6 @@ impl ChatStateActor {
             cap.compaction_occurred = true;
         }
         let pre_replace_total = self.state.total_tokens;
-        // `harness_trace_buffer` / `harness_trace_turns` intentionally untouched:
-        // the planner/verifier subagents ran, so their sealed trace turns survive
-        // a conversation replace (same intent as the `TruncateToPromptIndex` arm).
         self.persistence.replace_history(&items);
         let base_estimate = super::state::estimate_conversation_tokens(&items);
         let mut estimated_tokens =

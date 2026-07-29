@@ -186,18 +186,6 @@ pub enum ChatStateCommand {
     /// Start capturing turn messages. Clears any previous buffer.
     BeginTurnCapture,
 
-    /// Append synthetic `task` pairs for a harness-spawned subagent (goal
-    /// planner / verifier skeptic) to the in-progress harness trace phase.
-    /// Accumulated independently of the live `conversation` and of
-    /// `turn_capture`; sealed into a standalone trace turn by
-    /// `FlushHarnessTraceTurn`.
-    AppendHarnessTraceItems { items: Vec<ConversationItem> },
-
-    /// Seal the harness items accumulated since the last flush into one
-    /// standalone trace turn. Issued once per harness phase (after the planner,
-    /// after each verifier panel). No-op when nothing was recorded.
-    FlushHarnessTraceTurn,
-
     /// Repair dangling tool calls after a harness-initiated halt.
     RepairDanglingAfterHarnessHalt { class: &'static str },
 
@@ -292,14 +280,6 @@ pub enum ChatStateCommand {
     /// Returns `None` if no capture was active.
     TakeTurnMessages {
         reply: oneshot::Sender<Option<TurnCapture>>,
-    },
-
-    /// Drain the sealed harness trace turns (goal planner + verifier panels).
-    /// Each `Vec` is one turn's synthetic `task` pairs, uploaded by the agent
-    /// as its own sibling `turn_{N}` artifact. Seals a trailing un-flushed
-    /// accumulator before draining.
-    TakeHarnessTraceTurns {
-        reply: oneshot::Sender<Vec<Vec<ConversationItem>>>,
     },
 
     // ═══ Narrow targeted queries (avoid full-conversation clone) ═══

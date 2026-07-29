@@ -2372,18 +2372,6 @@ impl SessionActor {
         use grow_sampler::{SamplingChannel, SamplingEvent};
         match event {
             SamplingEvent::StreamStarted { timestamp_ms, .. } => {
-                {
-                    let prompt_id = self
-                        .current_prompt_id
-                        .lock()
-                        .expect("current_prompt_id mutex poisoned")
-                        .clone();
-                    let mut cap = self.streaming_turn_capture.lock();
-                    if cap.prompt_id.as_deref() != prompt_id.as_deref() {
-                        cap.begin_turn(prompt_id, self.current_turn_number.get());
-                    }
-                    cap.start_stream(timestamp_ms);
-                }
                 self.chat_state_handle.record_stream_start(timestamp_ms);
             }
             SamplingEvent::FirstToken { .. } => {
@@ -2396,19 +2384,6 @@ impl SessionActor {
                 ..
             } => match channel {
                 SamplingChannel::Text => {
-                    {
-                        let mut cap = self.streaming_turn_capture.lock();
-                        if cap.prompt_id.is_none() {
-                            let prompt_id = self
-                                .current_prompt_id
-                                .lock()
-                                .expect("current_prompt_id mutex poisoned")
-                                .clone();
-                            cap.begin_turn(prompt_id, self.current_turn_number.get());
-                            cap.attempt_count += 1;
-                        }
-                        cap.append(false, &text);
-                    }
                     self.emit_event(crate::session::events::Event::PhaseChanged {
                         phase: crate::session::events::Phase::StreamingText,
                     });
@@ -2421,19 +2396,6 @@ impl SessionActor {
                     .await;
                 }
                 SamplingChannel::Reasoning => {
-                    {
-                        let mut cap = self.streaming_turn_capture.lock();
-                        if cap.prompt_id.is_none() {
-                            let prompt_id = self
-                                .current_prompt_id
-                                .lock()
-                                .expect("current_prompt_id mutex poisoned")
-                                .clone();
-                            cap.begin_turn(prompt_id, self.current_turn_number.get());
-                            cap.attempt_count += 1;
-                        }
-                        cap.append(true, &text);
-                    }
                     self.emit_event(crate::session::events::Event::PhaseChanged {
                         phase: crate::session::events::Phase::StreamingReasoning,
                     });
@@ -2447,12 +2409,6 @@ impl SessionActor {
                 arguments_delta,
                 ..
             } => {
-                {
-                    let mut cap = self.streaming_turn_capture.lock();
-                    if cap.prompt_id.is_some() {
-                        cap.phase = CapturePhase::ToolCall;
-                    }
-                }
                 self.send_buffered_xai_update(XaiSessionUpdate::ToolCallDeltaChunk {
                     tool_call_id: id,
                     tool_index,
@@ -2480,21 +2436,12 @@ impl SessionActor {
                                 Some(tally.attempts)
                             }
                         };
-                        if let Some(attempts) = attempts {
-                            self.streaming_turn_capture.lock().stamp_doom_loop(
-                                crate::session::streaming_capture::DoomLoopSegmentStamp {
-                                    doom_loop_triggers: triggers.clone(),
-                                    attempt: attempts + 1,
-                                    aborted_at_chunk: None,
-                                    action: "accepted_after_budget".to_string(),
-                                },
-                            );
+                        if attempts.is_some() {
                             self.signals_handle()
                                 .record_doom_loop_accepted_after_budget(triggers);
                         }
                     }
                 }
-                self.streaming_turn_capture.lock().clear_current_segment();
                 self.record_api_request_time();
                 self.signals_handle().record_inference_metrics(metrics);
             }
@@ -2512,20 +2459,11 @@ impl SessionActor {
             } => {
                 if kind == grow_sampler::SamplingErrorKind::DoomLoopDetected {
                     let triggers = doom_loop_triggers.unwrap_or_default();
-                    let attempt_number = {
+                    {
                         let mut tally = self.doom_loop_turn_tally.lock();
                         tally.attempts += 1;
                         tally.merge_triggers(&triggers);
-                        tally.attempts
-                    };
-                    self.streaming_turn_capture.lock().stamp_doom_loop(
-                        crate::session::streaming_capture::DoomLoopSegmentStamp {
-                            doom_loop_triggers: triggers.clone(),
-                            attempt: attempt_number,
-                            aborted_at_chunk: doom_loop_aborted_at_chunk,
-                            action: "resampled".to_string(),
-                        },
-                    );
+                    }
                     self.signals_handle()
                         .record_doom_loop_recovery_attempt(triggers, doom_loop_aborted_at_chunk);
                 }

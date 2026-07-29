@@ -184,8 +184,8 @@ mod cli_catchall_drop_tests {
 }
 /// Spawns a session actor and returns the session handle plus a receiver for permission events.
 ///
-/// The permission events receiver should be used to collect diagnostics about permission
-/// decisions (YOLO mode, user accept/reject, etc.) for upload to GCS.
+/// The permission events receiver feeds local diagnostics for decisions such
+/// as YOLO mode and user accept/reject.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(
     name = "session.spawn",
@@ -1586,7 +1586,6 @@ pub(crate) async fn spawn_session_actor(
         recap_in_flight: std::cell::Cell::new(false),
         recap_epoch: std::cell::Cell::new(0),
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
         sampler_handle,
         rebuild_spec: rebuild_spec.clone(),

@@ -286,7 +286,7 @@ impl SessionActor {
     /// Emit a unified-log breadcrumb whenever the session-token refresh gate is
     /// evaluated with an **`Unknown`** per-model BYOK status on a session-based
     /// method — the condition that (pre-fix) silently demoted live sessions to
-    /// stale-token 401s. The uploaded per-turn unified log then shows whether
+    /// stale-token 401s. The local unified log then shows whether
     /// the first-party-endpoint fallback kept refresh active or withheld it, so
     /// we can confirm the fix works (or catch a residual demotion) per session
     /// even when server-side metrics only show the aggregate 401. No-op for a
@@ -893,13 +893,6 @@ impl SessionActor {
                     "empty response after retries exhausted: {reason}",
                     reason = ctx.reason,
                 );
-                {
-                    let mut cap = self.streaming_turn_capture.lock();
-                    cap.reasoning_tokens = ctx.reasoning_tokens;
-                    cap.completion_tokens = ctx.completion_tokens;
-                    cap.finish_reason = ctx.finish_reason.clone();
-                    cap.empty_reason = Some(ctx.reason.as_str().to_owned());
-                }
             }
             self.signals_handle().record_error_typed("empty_response");
         }

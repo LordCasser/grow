@@ -262,9 +262,6 @@ pub(crate) struct ChannelSpawner {
     pub(crate) parent_session_id: String,
     pub(crate) parent_prompt_id: Option<String>,
     pub(crate) cwd: Option<String>,
-    /// Trace-artifact sink + resolved `task` tool name; `None` disables
-    /// recording. See [`super::goal_classifier::record_subagent_trace`].
-    pub(crate) trace_sink: Option<(xai_chat_state::ChatStateHandle, String)>,
     /// Resolved per-role model+toolset override. Default (inherit) keeps the
     /// historic `::default()` spawn behavior.
     pub(crate) role_override: RoleSpawnOverride,
@@ -281,42 +278,14 @@ impl GoalPlannerSpawner for ChannelSpawner {
         id: &str,
         prompt: RoleRenderedPrompt,
     ) -> Result<String, SpawnError> {
-        // Clone the primary render for the trace pair only when tracing; the
-        // wrapper moves each render into its attempt (no other clone).
-        let trace_prompt = self.trace_sink.as_ref().map(|_| prompt.primary.clone());
-        let outcome = spawn_with_fail_open_retry(
+        spawn_with_fail_open_retry(
             "planner",
             None,
             &self.role_override,
             prompt,
             |model, harness, prompt| self.send_one(id, prompt, model, harness),
         )
-        .await;
-
-        // Trace the FINAL attempt's output / runtime error (transport errors
-        // carry no subagent output, matching the prior behavior).
-        match &outcome {
-            Ok(text) => crate::session::goal_classifier::record_subagent_trace(
-                self.trace_sink.as_ref(),
-                id,
-                GOAL_PLANNER_SUBAGENT_TYPE,
-                GOAL_PLANNER_SUBAGENT_DESCRIPTION,
-                trace_prompt.as_deref(),
-                text,
-            ),
-            Err(SpawnError::Runtime { message, .. }) => {
-                crate::session::goal_classifier::record_subagent_trace(
-                    self.trace_sink.as_ref(),
-                    id,
-                    GOAL_PLANNER_SUBAGENT_TYPE,
-                    GOAL_PLANNER_SUBAGENT_DESCRIPTION,
-                    trace_prompt.as_deref(),
-                    message,
-                )
-            }
-            Err(SpawnError::Transport(_)) => {}
-        }
-        outcome
+        .await
     }
 }
 
@@ -594,7 +563,6 @@ mod tests {
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
             cwd: None,
-            trace_sink: None,
             role_override: RoleSpawnOverride::default(),
         };
         let handle = tokio::spawn(async move {
@@ -1134,7 +1102,6 @@ mod tests {
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
             cwd: None,
-            trace_sink: None,
             role_override: RoleSpawnOverride {
                 model: Some("cfg-model".into()),
                 agent_type: Some("cursor".into()),
@@ -1440,7 +1407,6 @@ mod tests {
             parent_session_id: "p".into(),
             parent_prompt_id: None,
             cwd: None,
-            trace_sink: None,
             role_override: RoleSpawnOverride {
                 model: Some("cfg-model".into()),
                 agent_type: Some("general-purpose".into()),
@@ -1500,7 +1466,6 @@ mod tests {
             parent_session_id: "p".into(),
             parent_prompt_id: None,
             cwd: None,
-            trace_sink: None,
             role_override: RoleSpawnOverride {
                 model: Some("cfg-model".into()),
                 agent_type: Some("general-purpose".into()),

@@ -139,12 +139,10 @@ pub enum PersistenceMsg {
     /// `compaction_requests/{request_id}.json`. Used for offline prompt
     /// iteration — captures the exact ConversationItem list sent to the
     /// compaction model plus the summary it returned (or the final error).
-    /// The file rides on the post-turn session archive to cloud storage automatically;
-    /// no separate upload path is needed.
+    /// Stored under the local session directory for offline diagnostics.
     CompactionRequest(crate::extensions::notification::CompactionRequestFile),
     /// Persist a recap request+response artifact to
-    /// `recap_requests/{request_id}.json`. Same GCS ride-along as
-    /// compaction requests; enables offline recap prompt / garble replay.
+    /// `recap_requests/{request_id}.json` for offline recap prompt / garble replay.
     RecapRequest(crate::extensions::notification::RecapRequestFile),
     /// Persist a compaction segment (`Segments` mode).
     CompactionSegment(crate::extensions::notification::CompactionSegmentFile),

@@ -440,78 +440,11 @@ pub(crate) async fn capture_git_baseline(workspace_root: &Path) -> Option<String
     Some(sha)
 }
 
-// Trace-only recording for harness-spawned subagents
-
-/// Build the synthetic `task` tool_call + tool_result pair for a
-/// harness-spawned subagent, shaped like a model-issued `task` spawn.
-///
-/// The tool_result MUST carry the real task tool's `<subagent_result>` footer
-/// (via [`xai_tool_types::format_resume_footer`]): trace tooling
-/// discovers subagents by scanning tool_result bodies for that
-/// `subagent_id:` block, so without it the harness subagent never shows in the
-/// session tree. The footer id equals the child session id, so the viewer can
-/// fetch its uploaded trace.
-pub(crate) fn build_subagent_trace_items(
-    task_tool_name: &str,
-    subagent_id: &str,
-    subagent_type: &str,
-    description: &str,
-    prompt: &str,
-    output: &str,
-) -> Vec<grow_sampling_types::conversation::ConversationItem> {
-    use grow_sampling_types::conversation::{ConversationItem, ToolCall};
-    let arguments = serde_json::json!({
-        "description": description,
-        "subagent_type": subagent_type,
-        "prompt": prompt,
-    })
-    .to_string();
-    let call = ConversationItem::assistant_tool_calls(vec![ToolCall {
-        id: std::sync::Arc::from(subagent_id),
-        name: task_tool_name.to_string(),
-        arguments: std::sync::Arc::from(arguments),
-    }]);
-    let footer = xai_tool_types::format_resume_footer(subagent_id, subagent_type, None);
-    let result = ConversationItem::tool_result(subagent_id, format!("{output}\n\n{footer}"));
-    vec![call, result]
-}
-
-/// Record a harness-spawned subagent into the in-progress harness trace phase
-/// as a synthetic `task` call (see [`build_subagent_trace_items`]). The items
-/// accumulate in a side buffer (never the live model context); the caller seals
-/// the phase via [`xai_chat_state::ChatStateHandle::flush_harness_trace_turn`]
-/// so it uploads as its own sibling `turn_{N}` artifact. No-op when tracing is
-/// off (`sink` absent) or no prompt was captured. `sink` carries the chat-state
-/// handle and the resolved `task` tool name.
-pub(crate) fn record_subagent_trace(
-    sink: Option<&(xai_chat_state::ChatStateHandle, String)>,
-    subagent_id: &str,
-    subagent_type: &str,
-    description: &str,
-    prompt: Option<&str>,
-    output: &str,
-) {
-    if let (Some((handle, task_tool)), Some(prompt)) = (sink, prompt) {
-        handle.append_harness_trace_items(build_subagent_trace_items(
-            task_tool,
-            subagent_id,
-            subagent_type,
-            description,
-            prompt,
-            output,
-        ));
-    }
-}
-
 // Production spawner — wraps the subagent coordinator channel
 
 /// Production spawner. Sends a `SubagentEvent::Spawn` to the session's
 /// coordinator and awaits the result on a fresh oneshot. The parent model
-/// never sees the spawn live — it is direct (no `task` tool call). When a
-/// `trace_sink` is wired, each skeptic is recorded as a synthetic `task` call
-/// (see [`record_subagent_trace`]) into the harness trace phase; the caller
-/// seals the panel into its own sibling trace turn so the subagents are
-/// discoverable in data collection.
+/// never sees the spawn live — it is direct (no `task` tool call).
 pub(crate) struct ChannelSpawner {
     pub(crate) event_tx: tokio::sync::mpsc::UnboundedSender<
         grow_tools::implementations::grow_build::task::types::SubagentEvent,
@@ -521,9 +454,6 @@ pub(crate) struct ChannelSpawner {
     pub(crate) parent_session_id: String,
     pub(crate) parent_prompt_id: Option<String>,
     pub(crate) cwd: Option<String>,
-    /// Trace-artifact sink + the resolved `task` tool name. `None` disables
-    /// trace recording (tests, or sessions without trace capture).
-    pub(crate) trace_sink: Option<(xai_chat_state::ChatStateHandle, String)>,
     /// Per-skeptic-index resolved model+toolset override, indexed by
     /// `skeptic_idx`. An out-of-range index (or `Default`) inherits the
     /// current model — round-robin expansion + auth/capability fail-open is
@@ -545,44 +475,20 @@ impl GoalClassifierSpawner for ChannelSpawner {
         _details_path: &Path,
         resume_from: Option<&str>,
     ) -> Result<String, SpawnError> {
-        // Clone the primary render for the trace pair only when tracing; the
-        // wrapper moves each render into its attempt (no other clone).
-        let trace_prompt = self.trace_sink.as_ref().map(|_| prompt.primary.clone());
         // Per-index override; out-of-range ⇒ inherit (defensive).
         let inherit = RoleSpawnOverride::default();
         let override_ = self
             .skeptic_overrides
             .get(skeptic_idx as usize)
             .unwrap_or(&inherit);
-        let outcome = spawn_with_fail_open_retry(
+        spawn_with_fail_open_retry(
             "skeptic",
             Some(skeptic_idx),
             override_,
             prompt,
             |model, harness, prompt| self.send_one(id, prompt, model, harness, resume_from),
         )
-        .await;
-
-        match &outcome {
-            Ok(text) => record_subagent_trace(
-                self.trace_sink.as_ref(),
-                id,
-                GOAL_CLASSIFIER_SUBAGENT_TYPE,
-                GOAL_CLASSIFIER_SUBAGENT_DESCRIPTION,
-                trace_prompt.as_deref(),
-                text,
-            ),
-            Err(SpawnError::Runtime { message, .. }) => record_subagent_trace(
-                self.trace_sink.as_ref(),
-                id,
-                GOAL_CLASSIFIER_SUBAGENT_TYPE,
-                GOAL_CLASSIFIER_SUBAGENT_DESCRIPTION,
-                trace_prompt.as_deref(),
-                message,
-            ),
-            Err(SpawnError::Transport(_)) => {}
-        }
-        outcome
+        .await
     }
 }
 
@@ -2428,7 +2334,6 @@ mod tests {
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
             cwd: None,
-            trace_sink: None,
             skeptic_overrides: Vec::new(),
         };
         let handle = tokio::spawn(async move {
@@ -2476,7 +2381,6 @@ mod tests {
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
             cwd: None,
-            trace_sink: None,
             skeptic_overrides: vec![
                 RoleSpawnOverride {
                     model: Some("pool-0-model".into()),
@@ -2544,7 +2448,6 @@ mod tests {
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
             cwd: None,
-            trace_sink: None,
             skeptic_overrides: vec![RoleSpawnOverride::default()],
         };
         let handle = tokio::spawn(async move {
@@ -2572,51 +2475,6 @@ mod tests {
         assert_eq!(request.subagent_type, GOAL_CLASSIFIER_SUBAGENT_TYPE);
         let _ = request.result_tx.send(SubagentResult::default());
         handle.await.unwrap();
-    }
-
-    #[test]
-    fn build_subagent_trace_items_shapes_a_task_call_pair() {
-        use grow_sampling_types::conversation::ConversationItem;
-
-        let items = build_subagent_trace_items(
-            "spawn_subagent",
-            "verifier-7",
-            "goal-verifier",
-            "Verify goal completion",
-            "Adversarially verify the objective.",
-            "Refuted",
-        );
-        assert_eq!(items.len(), 2);
-
-        let ConversationItem::Assistant(asst) = &items[0] else {
-            panic!("first item must be an assistant tool-call message");
-        };
-        assert_eq!(asst.tool_calls.len(), 1);
-        let call = &asst.tool_calls[0];
-        assert_eq!(&*call.id, "verifier-7");
-        assert_eq!(call.name, "spawn_subagent");
-        let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap();
-        assert_eq!(args["subagent_type"], "goal-verifier");
-        assert_eq!(args["description"], "Verify goal completion");
-        assert_eq!(args["prompt"], "Adversarially verify the objective.");
-
-        let ConversationItem::ToolResult(res) = &items[1] else {
-            panic!("second item must be a tool result");
-        };
-        assert_eq!(&*res.tool_call_id, "verifier-7");
-        assert!(res.content.contains("Refuted"), "must carry the raw output");
-        // The `<subagent_result>` footer is the discovery anchor trace tooling
-        // scans for; its `subagent_id` must equal the child session id.
-        assert!(
-            res.content.contains("<subagent_result>"),
-            "tool_result must carry the subagent_result footer:\n{}",
-            res.content
-        );
-        assert!(
-            res.content.contains("subagent_id: verifier-7"),
-            "footer must expose the subagent/child-session id:\n{}",
-            res.content
-        );
     }
 
     /// The allowed prefix is exactly the injected temp root — pinned
@@ -5667,7 +5525,6 @@ mod tests {
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
             cwd: None,
-            trace_sink: None,
             // pool[0] → skeptic 0's frozen model; idx 1 inherits.
             skeptic_overrides: vec![
                 RoleSpawnOverride {
@@ -6034,7 +5891,6 @@ mod tests {
             parent_session_id: "parent-session".into(),
             parent_prompt_id: None,
             cwd: None,
-            trace_sink: None,
             skeptic_overrides: Vec::new(),
         };
         let spawn_task = tokio::spawn(async move {

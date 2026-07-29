@@ -1917,50 +1917,6 @@ pub(super) async fn run_session(
                             let result = session.chat_state_handle.take_turn_messages().await;
                             let _ = respond_to.send(result);
                         }
-                        SessionCommand::TakeHarnessTraceTurns { respond_to } => {
-                            let result = session.chat_state_handle.take_harness_trace_turns().await;
-                            let _ = respond_to.send(result);
-                        }
-                        SessionCommand::TakeStreamingCapture { prompt_id, respond_to } => {
-                            // Out-of-band: never touches `chat_state`. The
-                            // live slot is the only source of truth — there
-                            // is no stash, so a queued prompt's
-                            // `StreamStarted` racing this take will reset
-                            // the slot to the new prompt-id and we'll log a
-                            // tripwire before returning `None`.
-                            let taken = {
-                                let mut cap = session.streaming_turn_capture.lock();
-                                if cap.prompt_id.as_deref() == Some(prompt_id.as_str()) {
-                                    Some(std::mem::take(&mut *cap))
-                                } else {
-                                    // Race: live slot now belongs to a
-                                    // different turn. Drop this take rather
-                                    // than misattribute the partial. The
-                                    // warn! is a production tripwire — if
-                                    // we ever see it fire in real traffic
-                                    // we should add a per-prompt stash.
-                                    if !cap.is_empty() {
-                                        tracing::warn!(
-                                            requested_prompt_id = %prompt_id,
-                                            slot_prompt_id = ?cap.prompt_id,
-                                            "streaming_capture race: live slot belongs to a different prompt; \
-                                             dropping streaming_partial.json for the requested turn",
-                                        );
-                                    }
-                                    None
-                                }
-                            };
-                            // Consolidate outside the lock — `finalize_for_upload`
-                            // builds an up-to-8MB joined string, so it must not run
-                            // while sampler events for a racing same-session turn
-                            // contend for the mutex. Keep only uncommitted
-                            // generations; empty afterwards ⇒ nothing to upload.
-                            let result = taken.and_then(|mut cap| {
-                                cap.finalize_for_upload();
-                                (!cap.is_empty()).then_some(cap)
-                            });
-                            let _ = respond_to.send(result);
-                        }
                         SessionCommand::PersistGitHead { commit, branch } => {
                             let _ = session.notifications.persistence_tx.send(
                                 PersistenceMsg::GitHead { commit, branch },
@@ -1973,8 +1929,7 @@ pub(super) async fn run_session(
                             // (e.g. reasoning text from a sampler stream
                             // racing with a CLI exit / harness teardown)
                             // are committed to updates.jsonl before the
-                            // session directory is snapshotted for trace
-                            // upload. Mirrors the same flush in the
+                            // local session directory is finalized. Mirrors the same flush in the
                             // Cancel, CopyFile, and FlushComplete arms.
                             if let Some(notification) = replay_buffer.flush() {
                                 session.emit_buffered(notification).await;

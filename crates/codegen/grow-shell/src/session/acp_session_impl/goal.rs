@@ -574,7 +574,6 @@ impl SessionActor {
             .lock()
             .expect("current_prompt_id mutex poisoned")
             .clone();
-        let task_tool_name = self.resolve_goal_tool_names().await.task;
 
         let n = self.goal_verifier_skeptic_count.clamp(
             crate::session::goal_classifier::GOAL_VERIFIER_SKEPTIC_MIN,
@@ -642,7 +641,6 @@ impl SessionActor {
                 parent_session_id: self.session_id_string(),
                 parent_prompt_id,
                 cwd: Some(self.tool_context.cwd.as_str().to_owned()),
-                trace_sink: Some((self.chat_state_handle.clone(), task_tool_name)),
                 skeptic_overrides,
             });
 
@@ -671,7 +669,6 @@ impl SessionActor {
         };
 
         let result = run_verification_stage(spawner, inputs).await;
-        self.chat_state_handle.flush_harness_trace_turn();
         if result.panel_ran
             && let Some(o) = self.goal_tracker.lock().snapshot_mut()
         {

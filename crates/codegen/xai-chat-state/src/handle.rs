@@ -274,28 +274,6 @@ impl ChatStateHandle {
         let _ = self.cmd_tx.send(ChatStateCommand::BeginTurnCapture);
     }
 
-    /// Append synthetic `task` pairs for a harness-spawned subagent (goal
-    /// planner / verifier skeptic) to the in-progress harness trace phase. They
-    /// are sealed into a standalone trace turn by [`Self::flush_harness_trace_turn`]
-    /// and never enter the live `conversation` sent to the model. No-op on
-    /// empty input.
-    pub fn append_harness_trace_items(&self, items: Vec<ConversationItem>) {
-        if items.is_empty() {
-            return;
-        }
-        let _ = self
-            .cmd_tx
-            .send(ChatStateCommand::AppendHarnessTraceItems { items });
-    }
-
-    /// Seal the harness items accumulated since the last flush into one trace
-    /// turn. Call once per harness phase (after the planner, after a verifier
-    /// panel) so each phase becomes its own uploaded `turn_{N}` artifact. No-op
-    /// when nothing was recorded since the last flush.
-    pub fn flush_harness_trace_turn(&self) {
-        let _ = self.cmd_tx.send(ChatStateCommand::FlushHarnessTraceTurn);
-    }
-
     /// Repair dangling tool calls after a harness-initiated halt.
     pub fn repair_dangling_after_harness_halt(&self, class: &'static str) {
         let _ = self
@@ -503,19 +481,6 @@ impl ChatStateHandle {
         })
         .await
         .flatten()
-    }
-
-    /// Drain the sealed harness trace turns (goal planner + verifier panels).
-    /// Each returned `Vec` is one turn's worth of synthetic `task` pairs,
-    /// destined to be uploaded as its own sibling `turn_{N}` artifact. A
-    /// trailing un-flushed accumulator is sealed defensively before draining.
-    /// Returns empty when nothing was recorded (the common, non-goal case).
-    pub async fn take_harness_trace_turns(&self) -> Vec<Vec<ConversationItem>> {
-        self.query("TakeHarnessTraceTurns", |reply| {
-            ChatStateCommand::TakeHarnessTraceTurns { reply }
-        })
-        .await
-        .unwrap_or_default()
     }
 
     /// Check if auto-compact is needed.

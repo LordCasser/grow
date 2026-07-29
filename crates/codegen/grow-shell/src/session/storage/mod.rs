@@ -544,8 +544,8 @@ pub(crate) const XAI_SESSION_UPDATE_METHOD: &str = "_grow/session/update";
 /// A unified session update that can be either an ACP notification or an xAI extension notification.
 /// This allows storing all session updates in chronological order.
 ///
-/// Note: The `Serialize` implementation produces a format without timestamp (for GCS uploads, etc.).
-/// For disk storage with timestamps, use `SessionUpdateEnvelope` via the JSONL adapter methods.
+/// Note: The `Serialize` implementation produces a format without timestamp.
+/// For local JSONL storage with timestamps, use `SessionUpdateEnvelope`.
 #[derive(Debug, Clone)]
 pub enum SessionUpdate {
     /// Standard ACP session/update notification (boxed due to large size)
