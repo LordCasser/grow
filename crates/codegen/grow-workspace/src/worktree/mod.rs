@@ -1,8 +1,7 @@
 //! Git worktree operations: create, list, remove, apply.
 //!
-//! Moved from `grow-shell/src/session/worktree.rs` into the workspace
-//! crate so that the remote workspace-server can drive worktree lifecycle
-//! without pulling in the full shell.
+//! Shared by the local workspace and shell so worktree mechanics stay in one
+//! place.
 //!
 //! Session-aware operations (`resume_session_in_worktree`,
 //! `rehydrate_session_in_worktree`, `resolve_session_repo_wide`) remain in
@@ -91,9 +90,7 @@ fn get_head_commit(repo: &Repository) -> Result<String> {
 // In-progress tracking
 // ============================================================================
 
-// Process-local, best-effort dedup of duplicate async spawns within one process —
-// NOT a cross-process lock: in proxy mode `prepare` (hub) and creation (shell) are
-// different processes, so correctness does not depend on it.
+// Process-local, best-effort dedup of duplicate async spawns.
 static WORKTREE_IN_PROGRESS: OnceLock<TokioMutex<HashSet<String>>> = OnceLock::new();
 
 fn worktree_registry() -> &'static TokioMutex<HashSet<String>> {
@@ -106,10 +103,9 @@ pub async fn is_worktree_in_progress(session_id: &str) -> bool {
 
 /// Atomically claim `session_id` for an in-flight creation: returns `true` if
 /// the caller won the claim (no prior owner) and `false` if a creation is
-/// already in progress. `prepare_*` deliberately only *reads* the marker (a
-/// marker set in prepare would never clear in proxy mode, wedging retries), so a
-/// `prepare` race can spawn two async creators for one session; doing
-/// contains+insert under one lock here lets the loser bail, leaving one creator.
+/// already in progress. `prepare_*` deliberately only reads the marker; the
+/// async creation entry point owns the claim and its cleanup. A prepare race can
+/// therefore schedule two creators, but this atomic claim lets one proceed.
 pub async fn claim_worktree_in_progress(session_id: &str) -> bool {
     worktree_registry()
         .lock()
@@ -820,9 +816,7 @@ pub async fn prepare_worktree_creation(req: &CreateWorktreeRequest) -> PrepareWo
         };
     }
 
-    // Don't set the marker here: in proxy mode the shell never spawns
-    // `create_worktree_async`, so a marker set here would never clear and would wedge
-    // every retry in `Creating`. The async entrypoint owns it; `prepare` only reads it.
+    // The async entry point owns and clears the marker; prepare only reads it.
     PrepareWorktreeResult {
         response: Ok(CreateWorktreeResponse::Creating {
             session_id: req.session_id.clone(),
@@ -1497,9 +1491,7 @@ pub async fn prepare_worktree_from_worktree(
         };
     }
 
-    // Don't set the marker here: in proxy mode the shell never spawns
-    // `create_worktree_from_worktree_async`, so a marker set here would never clear and
-    // would wedge the session. The async entrypoint owns it; `prepare` only reads it.
+    // The async entry point owns and clears the marker; prepare only reads it.
     PrepareWorktreeResult {
         response: Ok(CreateWorktreeResponse::Creating {
             session_id: req.new_session_id.clone(),
@@ -2619,17 +2611,6 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// Defaults preserve today's behavior: 30s request, 5s connect. These are
-    /// the values the pager's factory closure feeds into the snapshot helper
-    /// (which stores them verbatim), so this guards the helper RPC timeout
-    /// defaults without referencing the delegate crate.
-    #[test]
-    fn default_status_config_timeouts_match_legacy_hardcoded_values() {
-        let cfg = crate::StatusConfig::default();
-        assert_eq!(cfg.agent_rpc_timeout, Duration::from_secs(30));
-        assert_eq!(cfg.agent_connect_timeout, Duration::from_secs(5));
-    }
-
     // ── snapshot_and_remove_subagent_worktree ────────────────────────────
 
     /// Run a git command in `dir` and return trimmed stdout (test-only helper).
@@ -2954,9 +2935,8 @@ mod tests {
         );
     }
 
-    /// `prepare_worktree_creation` must not leave the in-progress marker set when no
-    /// async creation follows: in proxy mode the shell never spawns the async task, so
-    /// a marker set in prepare would never clear and would wedge every retry in `Creating`.
+    /// `prepare_worktree_creation` must not claim the marker before the async
+    /// creation entry point starts.
     #[tokio::test]
     async fn prepare_does_not_strand_in_progress_marker() {
         xai_test_utils::require_git!();

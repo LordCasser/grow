@@ -155,7 +155,6 @@ When a non-`off` sandbox profile is **requested** (CLI, `GROW_SANDBOX`, config, 
 
 - The agent runs **in-process**, not through the shared leader, so tool calls stay in this process when the profile is enforced. If leader mode would otherwise have been on, a one-line note at startup says so
 - If a built-in profile fails to apply, Grow warns and continues without enforcement (see [Platform Support](#platform-support)), but still refuses the leader so tools are not delegated elsewhere
-- `grow workspace start`, `restart`, and `resume` are unavailable; `pause`, `stop`, and `status` still work
 
 Disable the profile at the source that selected it to use the refused commands.
 

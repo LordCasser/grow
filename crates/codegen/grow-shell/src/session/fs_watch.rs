@@ -224,7 +224,7 @@ async fn refresh_codebase_graph_after_head_change(
 // ── capabilities / deps / plan ────────────────────────────────────────────
 
 /// What the client wants from the watcher: pure, `Copy`, mode-independent.
-/// Proxy/hub gating of the actual spawn lives at the call site, not here.
+/// Gating of the actual spawn lives at the call site, not here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FsWatchCapabilities {
     pub client_notify: bool,

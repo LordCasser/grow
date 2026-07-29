@@ -167,12 +167,11 @@ fn wait_tasks_tool_config() -> ToolConfig {
 fn kill_task_tool_config() -> ToolConfig {
     ToolConfig::from(&grow_build::KillTaskTool).with_name("kill_command_or_subagent")
 }
-/// Complete workspace-executable toolset for hub registration.
+/// Complete toolset executed by the local workspace.
 ///
 /// Extends `default_grow_build_toolset()` with tools that are dynamically
 /// injected by `AgentBuilder::build()` or only available in specific modes.
-/// In proxy mode, the workspace server executes ALL tools — the shell has
-/// zero local dispatch.
+/// This includes tools dynamically injected by the agent builder.
 pub fn workspace_grow_build_toolset() -> ToolServerConfig {
     let mut tools = default_grow_build_toolset().tools;
     tools.push((&opencode::OpenCodeWriteTool).into());

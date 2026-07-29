@@ -1,5 +1,5 @@
 //! Encodes a byte payload as a base64 string instead of a JSON integer array
-//! (~4x smaller), for bash output streamed over the hub WebSocket via
+//! (~4x smaller), for compact persistence of bash output via
 //! `BashNotificationBase.output`.
 //!
 //! The deserializer accepts both the base64 string and the legacy integer-array

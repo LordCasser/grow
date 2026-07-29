@@ -628,7 +628,8 @@ impl MvpAgent {
         &self,
     ) -> Result<grow_workspace::WorkspaceOps, acp::Error> {
         let ops = self.ensure_local_workspace_ops()?;
-        if let Some(handle) = ops.workspace_handle() && !handle.has_client_ext_sink() {
+        let handle = ops.workspace_handle();
+        if !handle.has_client_ext_sink() {
             let gw = self.gateway.clone();
             handle
                 .set_client_ext_sink(
@@ -2106,7 +2107,6 @@ impl MvpAgent {
             prompt_display_cwd,
         } = spec;
         let _timer = crate::instrumentation_timer!("session.spawn_and_register");
-        reject_direct_hub_cloud_meta(session_meta)?;
         let spawn_remote_settings = self.cfg.borrow().remote_settings.clone();
         folder_trust::resolve_and_record(
             cwd.as_path(),

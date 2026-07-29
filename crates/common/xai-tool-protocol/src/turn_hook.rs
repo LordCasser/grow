@@ -1,22 +1,18 @@
-//! Turn lifecycle hook payload types for `HookEvent::Custom`.
-//!
-//! These types ride inside `HookEvent::Custom { kind, payload }` and
-//! provide typed serialization for `before_turn` and `after_turn`
-//! custom hook payloads. They are NOT new `HookEvent` variants.
+//! Turn lifecycle payloads exchanged between the shell and local workspace.
 
 use serde::{Deserialize, Serialize};
 
-/// Well-known `HookEvent::Custom` kind string for before-turn hooks.
+/// Well-known kind string for before-turn hooks.
 pub const BEFORE_TURN_KIND: &str = "before_turn";
 
-/// Well-known `HookEvent::Custom` kind string for after-turn hooks.
+/// Well-known kind string for after-turn hooks.
 pub const AFTER_TURN_KIND: &str = "after_turn";
 
-/// Default `session_relationship` wire value (mirrors
+/// Default `session_relationship` value (mirrors
 /// `xai_file_utils::events::SessionRelationship::Primary`).
 pub const DEFAULT_SESSION_RELATIONSHIP: &str = "primary";
 
-/// Default `schema_version` wire value. Bare literal (not the
+/// Default `schema_version` value. Bare literal (not the
 /// `xai-file-utils` constant) to avoid a dependency cycle.
 pub const DEFAULT_SCHEMA_VERSION: &str = "1.0";
 
@@ -136,7 +132,7 @@ pub enum TurnHookOutcome {
 /// `HookEvent::Custom` kind for the request/response turn hook.
 pub const TURN_HOOK_KIND: &str = "turn_hook";
 
-/// Request/response turn hook (sampler → bound workspace), internally tagged on `phase`.
+/// Request/response turn hook (sampler → local workspace), internally tagged on `phase`.
 /// `phase` is a reserved key — `BeforeTurnPayload`/`AfterTurnPayload` must not define a field of that name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]

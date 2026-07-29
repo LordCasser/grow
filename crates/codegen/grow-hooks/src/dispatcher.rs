@@ -467,12 +467,6 @@ fn record_dispatch_counts(span: &tracing::Span, results: &[HookRunResult]) {
     span.record("total_duration_ms", total_duration_ms);
 }
 
-/// `"hook.<snake_case_event_name>"` for hub-forwarded events, or `None` for
-/// local-only events (`PreToolUse`).
-pub fn hub_hook_kind(event: HookEventName) -> Option<String> {
-    event.traits().hub_forward.then(|| format!("hook.{event}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1097,66 +1091,5 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(matches!(results[0], HookRunResult::Failed { .. }));
         assert!(matches!(results[1], HookRunResult::Success { .. }));
-    }
-
-    #[test]
-    fn hub_hook_kind_maps_all_hub_forwarded_events() {
-        assert_eq!(hub_hook_kind(HookEventName::PreToolUse), None);
-
-        let cases: &[(HookEventName, &str)] = &[
-            (HookEventName::SessionStart, "hook.session_start"),
-            (HookEventName::SessionEnd, "hook.session_end"),
-            (HookEventName::Stop, "hook.stop"),
-            (HookEventName::StopFailure, "hook.stop_failure"),
-            (HookEventName::PostToolUse, "hook.post_tool_use"),
-            (
-                HookEventName::PostToolUseFailure,
-                "hook.post_tool_use_failure",
-            ),
-            (HookEventName::PermissionDenied, "hook.permission_denied"),
-            (HookEventName::UserPromptSubmit, "hook.user_prompt_submit"),
-            (HookEventName::Notification, "hook.notification"),
-            (HookEventName::SubagentStart, "hook.subagent_start"),
-            (HookEventName::SubagentStop, "hook.subagent_stop"),
-            (HookEventName::SubagentEnd, "hook.subagent_stop"),
-            (HookEventName::PreCompact, "hook.pre_compact"),
-            (HookEventName::PostCompact, "hook.post_compact"),
-        ];
-
-        // Exhaustive match: adding a new HookEventName variant causes a
-        // compiler error here, forcing this test to be updated.
-        let total_variants = |e: HookEventName| -> usize {
-            match e {
-                HookEventName::SessionStart
-                | HookEventName::SessionEnd
-                | HookEventName::Stop
-                | HookEventName::StopFailure
-                | HookEventName::PreToolUse
-                | HookEventName::PostToolUse
-                | HookEventName::PostToolUseFailure
-                | HookEventName::PermissionDenied
-                | HookEventName::UserPromptSubmit
-                | HookEventName::Notification
-                | HookEventName::SubagentStart
-                | HookEventName::SubagentStop
-                | HookEventName::SubagentEnd
-                | HookEventName::PreCompact
-                | HookEventName::PostCompact => 15,
-            }
-        };
-        assert_eq!(
-            cases.len() + 1, // +1 for PreToolUse (blocking, tested separately)
-            total_variants(HookEventName::SessionStart),
-            "update hub_hook_kind test when new HookEventName variants are added"
-        );
-
-        for (event, expected) in cases {
-            let kind = hub_hook_kind(*event);
-            assert_eq!(
-                kind.as_deref(),
-                Some(*expected),
-                "hub_hook_kind wrong for {event:?}"
-            );
-        }
     }
 }

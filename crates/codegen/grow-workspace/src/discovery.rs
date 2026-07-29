@@ -201,8 +201,7 @@ fn toml_to_json(v: &toml::Value) -> Value {
 /// managed_config.toml, config.toml, and `.claude/settings.json`.
 ///
 /// `project_trusted` gates project-tier permission sources (same contract as
-/// env/hooks/plugins). Hub/cloud callers outside the local folder-trust model
-/// should pass `true`.
+/// env/hooks/plugins).
 ///
 /// Returns a JSON object with `sources`, `loaded` (rule count), and
 /// `skipped` (unrecognized rules). Returns `Value::Null` if no

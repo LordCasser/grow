@@ -7,8 +7,8 @@ use prometheus::{IntCounterVec, register_int_counter_vec};
 use crate::activity::ActivityTracker;
 use crate::session::WorkspaceSession;
 
-/// Toolset installs/swaps by trigger (`create`/`fork`/`owner_rebind`/
-/// `update_tool_config`/`mcp_snapshot`/`hub_tools`/`other`) plus the guard
+/// Toolset installs/swaps by trigger (`create`/`fork`/
+/// `update_tool_config`/`mcp_snapshot`/`other`) plus the guard
 /// state at swap time; record via [`record_toolset_swap`] only.
 pub(crate) static WORKSPACE_TOOLSET_SWAP_TOTAL: std::sync::LazyLock<IntCounterVec> =
     std::sync::LazyLock::new(|| {
@@ -22,7 +22,7 @@ pub(crate) static WORKSPACE_TOOLSET_SWAP_TOTAL: std::sync::LazyLock<IntCounterVe
 
 /// Toolset swaps rejected by the turn-safety guards, by reason
 /// (`turn_active` = RPC entry check, `turn_active_late` = post-resolve
-/// re-check, `in_flight` = owner-rebind keep-old) and trigger.
+/// re-check) and trigger.
 pub(crate) static WORKSPACE_TOOLSET_SWAP_REJECTED_TOTAL: std::sync::LazyLock<IntCounterVec> =
     std::sync::LazyLock::new(|| {
         register_int_counter_vec!(
@@ -33,26 +33,11 @@ pub(crate) static WORKSPACE_TOOLSET_SWAP_REJECTED_TOTAL: std::sync::LazyLock<Int
         .unwrap()
     });
 
-/// Rebinds (`session.bind` against an existing session) that carried a changed
-/// explicit toolset and re-resolved it, by result. A steady `ok` stream is the
-/// resume path correcting sessions that were created by metadata-less binds.
-static WORKSPACE_BIND_REBIND_RERESOLVE_TOTAL: std::sync::LazyLock<IntCounterVec> =
-    std::sync::LazyLock::new(|| {
-        register_int_counter_vec!(
-            "grow_workspace_bind_rebind_reresolve_total",
-            "session.bind rebinds that re-resolved a changed explicit toolset, by result",
-            &["result"]
-        )
-        .unwrap()
-    });
-
 /// Zero-init this module's metric families. See [`crate::init_metrics`].
 pub(crate) fn init_metrics() {
     const TRIGGERS: &[SwapTrigger] = &[
-        SwapTrigger::OwnerRebind,
         SwapTrigger::UpdateRpc,
         SwapTrigger::McpSnapshot,
-        SwapTrigger::HubTools,
         SwapTrigger::Other,
     ];
     for trigger in TRIGGERS {
@@ -64,20 +49,13 @@ pub(crate) fn init_metrics() {
             }
         }
     }
-    // Only these reason/trigger pairs are reachable: in-flight guards owner
-    // rebinds; the two turn-active guards fire on the update RPC.
+    // The two turn-active guards fire on local tool-config updates.
     for (reason, trigger) in [
-        (DeferReason::InFlightCalls, SwapTrigger::OwnerRebind),
         (DeferReason::TurnActive, SwapTrigger::UpdateRpc),
         (DeferReason::TurnActiveLate, SwapTrigger::UpdateRpc),
     ] {
         WORKSPACE_TOOLSET_SWAP_REJECTED_TOTAL
             .with_label_values(&[reason.metric_reason(), trigger.metric_label()])
-            .inc_by(0);
-    }
-    for result in ["skipped_externally_owned", "ok", "error"] {
-        WORKSPACE_BIND_REBIND_RERESOLVE_TOTAL
-            .with_label_values(&[result])
             .inc_by(0);
     }
 }
@@ -100,15 +78,10 @@ fn bool_label(v: bool) -> &'static str {
 /// `trigger` label and the guard set the policy applies (see the module table).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SwapTrigger {
-    /// Hub `session.bind` against an existing session that carried a changed
-    /// explicit toolset (`WorkspaceHandle::rebind_existing_hub_session`).
-    OwnerRebind,
     /// The `workspace.update_tool_config` RPC.
     UpdateRpc,
     /// `re_resolve_all_sessions` after an MCP snapshot change.
     McpSnapshot,
-    /// `re_resolve_all_sessions` after a remote tools change/notification.
-    HubTools,
     /// `re_resolve_all_sessions` from an unrecognized source (test callers
     /// only today). Snapshot-rebuild policy, `other` metric label.
     Other,
@@ -118,7 +91,6 @@ impl SwapTrigger {
     pub(crate) fn from_rebuild_source(source: &str) -> Self {
         match source {
             "mcp_snapshot_changed" => Self::McpSnapshot,
-            "hub_tools_changed" | "hub_notification" => Self::HubTools,
             _ => Self::Other,
         }
     }
@@ -128,17 +100,15 @@ impl SwapTrigger {
     /// exact values.
     pub(crate) fn metric_label(self) -> &'static str {
         match self {
-            Self::OwnerRebind => "owner_rebind",
             Self::UpdateRpc => "update_tool_config",
             Self::McpSnapshot => "mcp_snapshot",
-            Self::HubTools => "hub_tools",
             Self::Other => "other",
         }
     }
 
     /// Whether the apply path re-evaluates post-resolve, pre-install. Only the
-    /// update RPC: a turn can start mid-resolve (turn hooks are lock-free);
-    /// owner rebinds must answer inside the server's ack budget, so they don't.
+    /// update path: a turn can start mid-resolve because turn hooks are
+    /// lock-free.
     pub(crate) fn rechecks_after_resolve(self) -> bool {
         self == Self::UpdateRpc
     }
@@ -155,10 +125,6 @@ pub(crate) enum SkipReason {
 /// Why a swap was deferred (existing toolset kept; a later attempt applies).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeferReason {
-    /// Owner rebind arrived while the session had tool calls in flight, with
-    /// either an `explicit → different-explicit` change or a stale-heal
-    /// identical re-apply.
-    InFlightCalls,
     /// The session's turn is active and the config differs (update-RPC entry
     /// check); retryable at the turn boundary.
     TurnActive,
@@ -171,7 +137,6 @@ impl DeferReason {
     /// The `reason` label on [`WORKSPACE_TOOLSET_SWAP_REJECTED_TOTAL`].
     pub(crate) fn metric_reason(self) -> &'static str {
         match self {
-            Self::InFlightCalls => "in_flight",
             Self::TurnActive => "turn_active",
             Self::TurnActiveLate => "turn_active_late",
         }
@@ -231,7 +196,6 @@ pub(crate) struct SessionSnapshot {
     /// current baseline (snapshot-driven triggers), never Reuse-exempt.
     transition: Option<BindFingerprintTransition>,
     turn_active: bool,
-    in_flight_calls: u32,
     toolset_terminal_session_owned: bool,
     /// The last snapshot-driven rebuild failed and kept a stale toolset
     /// ([`WorkspaceSession::stale_resolve`]): an identical fingerprint does
@@ -240,14 +204,13 @@ pub(crate) struct SessionSnapshot {
 }
 
 impl SessionSnapshot {
-    /// Capture against a candidate bind-config fingerprint (`None` = default
-    /// resolution) — the owner-rebind and update-RPC triggers.
+    /// Capture against a candidate config fingerprint for a local update.
     pub(crate) async fn capture(
         session: &WorkspaceSession,
         tracker: &ActivityTracker,
         candidate_fingerprint: Option<&serde_json::Value>,
     ) -> Self {
-        let transition = classify(&session.bind_tool_config_fingerprint, candidate_fingerprint);
+        let transition = classify(&session.tool_config_fingerprint, candidate_fingerprint);
         Self::with_transition(session, tracker, Some(transition)).await
     }
 
@@ -270,15 +233,9 @@ impl SessionSnapshot {
         Self {
             transition,
             turn_active: tracker.is_turn_active(session_id),
-            in_flight_calls: tracker.session_active_tool_calls(session_id),
             toolset_terminal_session_owned: session.toolset_terminal_is_session_owned().await,
             stale_resolve: session.stale_resolve(),
         }
-    }
-
-    /// Tool calls in flight at capture time.
-    pub(crate) fn in_flight_calls(&self) -> u32 {
-        self.in_flight_calls
     }
 }
 
@@ -291,27 +248,10 @@ impl SwapPolicy {
     /// table. Pure function of the snapshot — callers act on the decision
     /// under the same `update_lock` hold the snapshot was captured under.
     pub(crate) fn evaluate(snap: &SessionSnapshot, trigger: SwapTrigger) -> SwapDecision {
-        use BindFingerprintTransition::{FromExplicit, Unchanged};
+        use BindFingerprintTransition::Unchanged;
         match (trigger, snap.transition) {
-            (SwapTrigger::UpdateRpc | SwapTrigger::OwnerRebind, Some(Unchanged))
-                if !snap.stale_resolve =>
-            {
-                SwapDecision::Reuse
-            }
-            (
-                SwapTrigger::McpSnapshot | SwapTrigger::HubTools | SwapTrigger::Other,
-                Some(Unchanged),
-            ) => SwapDecision::Reuse,
-
-            (SwapTrigger::OwnerRebind, Some(FromExplicit | Unchanged))
-                if snap.in_flight_calls > 0 =>
-            {
-                SwapDecision::Defer(DeferReason::InFlightCalls)
-            }
-            (SwapTrigger::OwnerRebind, _) if !snap.toolset_terminal_session_owned => {
-                SwapDecision::Skip(SkipReason::ExternallyOwned)
-            }
-            (SwapTrigger::OwnerRebind, _) => SwapDecision::Apply,
+            (SwapTrigger::UpdateRpc, Some(Unchanged)) if !snap.stale_resolve => SwapDecision::Reuse,
+            (SwapTrigger::McpSnapshot | SwapTrigger::Other, Some(Unchanged)) => SwapDecision::Reuse,
 
             (SwapTrigger::UpdateRpc, _) if snap.turn_active => {
                 SwapDecision::Defer(DeferReason::TurnActive)
@@ -321,14 +261,12 @@ impl SwapPolicy {
             }
             (SwapTrigger::UpdateRpc, _) => SwapDecision::Apply,
 
-            (SwapTrigger::McpSnapshot | SwapTrigger::HubTools | SwapTrigger::Other, _)
+            (SwapTrigger::McpSnapshot | SwapTrigger::Other, _)
                 if !snap.toolset_terminal_session_owned =>
             {
                 SwapDecision::Skip(SkipReason::ExternallyOwned)
             }
-            (SwapTrigger::McpSnapshot | SwapTrigger::HubTools | SwapTrigger::Other, _) => {
-                SwapDecision::Apply
-            }
+            (SwapTrigger::McpSnapshot | SwapTrigger::Other, _) => SwapDecision::Apply,
         }
     }
 }
@@ -348,9 +286,7 @@ pub(crate) enum SwapAction {
     ApplyFailed,
 }
 
-/// The single chokepoint all three swap metric families emit from (swap
-/// total on `Applied`, rejected total on `Deferred`, rebind-reresolve on
-/// owner-rebind results), so label values cannot drift per call site.
+/// The single chokepoint for swap metrics.
 pub(crate) fn record_swap_decision(
     tracker: &ActivityTracker,
     trigger: SwapTrigger,
@@ -363,28 +299,11 @@ pub(crate) fn record_swap_decision(
                 .with_label_values(&[reason.metric_reason(), trigger.metric_label()])
                 .inc();
         }
-        SwapAction::Skipped(SkipReason::ExternallyOwned) => {
-            if trigger == SwapTrigger::OwnerRebind {
-                WORKSPACE_BIND_REBIND_RERESOLVE_TOTAL
-                    .with_label_values(&["skipped_externally_owned"])
-                    .inc();
-            }
-        }
+        SwapAction::Skipped(SkipReason::ExternallyOwned) => {}
         SwapAction::Applied => {
             record_toolset_swap(tracker, trigger.metric_label(), session_id);
-            if trigger == SwapTrigger::OwnerRebind {
-                WORKSPACE_BIND_REBIND_RERESOLVE_TOTAL
-                    .with_label_values(&["ok"])
-                    .inc();
-            }
         }
-        SwapAction::ApplyFailed => {
-            if trigger == SwapTrigger::OwnerRebind {
-                WORKSPACE_BIND_REBIND_RERESOLVE_TOTAL
-                    .with_label_values(&["error"])
-                    .inc();
-            }
-        }
+        SwapAction::ApplyFailed => {}
     }
 }
 
@@ -395,384 +314,84 @@ mod tests {
     fn snap(
         transition: Option<BindFingerprintTransition>,
         turn_active: bool,
-        in_flight_calls: u32,
         owned: bool,
         stale_resolve: bool,
     ) -> SessionSnapshot {
         SessionSnapshot {
             transition,
             turn_active,
-            in_flight_calls,
             toolset_terminal_session_owned: owned,
             stale_resolve,
         }
     }
 
-    const ALL_TRIGGERS: [SwapTrigger; 5] = [
-        SwapTrigger::OwnerRebind,
-        SwapTrigger::UpdateRpc,
-        SwapTrigger::McpSnapshot,
-        SwapTrigger::HubTools,
-        SwapTrigger::Other,
-    ];
-
-    const ALL_TRANSITIONS: [Option<BindFingerprintTransition>; 4] = [
-        Some(BindFingerprintTransition::Unchanged),
-        Some(BindFingerprintTransition::FromDefault),
-        Some(BindFingerprintTransition::FromExplicit),
-        None,
-    ];
-
-    /// Spec mirror of the module decision table, maintained independently of
-    /// [`SwapPolicy::evaluate`].
-    fn expected_decision(
-        trigger: SwapTrigger,
-        transition: Option<BindFingerprintTransition>,
-        turn_active: bool,
-        in_flight_calls: u32,
-        owned: bool,
-        stale_resolve: bool,
-    ) -> SwapDecision {
-        if transition == Some(BindFingerprintTransition::Unchanged)
-            && !(matches!(trigger, SwapTrigger::UpdateRpc | SwapTrigger::OwnerRebind)
-                && stale_resolve)
-        {
-            return SwapDecision::Reuse;
-        }
-        match trigger {
-            SwapTrigger::OwnerRebind => {
-                if matches!(
-                    transition,
-                    Some(
-                        BindFingerprintTransition::FromExplicit
-                            | BindFingerprintTransition::Unchanged
-                    )
-                ) && in_flight_calls > 0
-                {
-                    SwapDecision::Defer(DeferReason::InFlightCalls)
-                } else if !owned {
-                    SwapDecision::Skip(SkipReason::ExternallyOwned)
-                } else {
-                    SwapDecision::Apply
-                }
-            }
-            SwapTrigger::UpdateRpc => {
-                if turn_active {
-                    SwapDecision::Defer(DeferReason::TurnActive)
-                } else if !owned {
-                    SwapDecision::Skip(SkipReason::ExternallyOwned)
-                } else {
-                    SwapDecision::Apply
-                }
-            }
-            SwapTrigger::McpSnapshot | SwapTrigger::HubTools | SwapTrigger::Other => {
-                if !owned {
-                    SwapDecision::Skip(SkipReason::ExternallyOwned)
-                } else {
-                    SwapDecision::Apply
-                }
-            }
-        }
+    #[test]
+    fn unchanged_local_update_reuses_current_toolset() {
+        let unchanged = Some(BindFingerprintTransition::Unchanged);
+        assert_eq!(
+            SwapPolicy::evaluate(&snap(unchanged, false, true, false), SwapTrigger::UpdateRpc),
+            SwapDecision::Reuse
+        );
+        assert_eq!(
+            SwapPolicy::evaluate(&snap(unchanged, false, true, true), SwapTrigger::UpdateRpc),
+            SwapDecision::Apply
+        );
     }
 
     #[test]
-    fn evaluate_matches_decision_table_over_full_matrix() {
-        for trigger in ALL_TRIGGERS {
-            for transition in ALL_TRANSITIONS {
-                for turn_active in [false, true] {
-                    for in_flight_calls in [0u32, 2] {
-                        for owned in [true, false] {
-                            for stale_resolve in [false, true] {
-                                let got = SwapPolicy::evaluate(
-                                    &snap(
-                                        transition,
-                                        turn_active,
-                                        in_flight_calls,
-                                        owned,
-                                        stale_resolve,
-                                    ),
-                                    trigger,
-                                );
-                                let expected = expected_decision(
-                                    trigger,
-                                    transition,
-                                    turn_active,
-                                    in_flight_calls,
-                                    owned,
-                                    stale_resolve,
-                                );
-                                assert_eq!(
-                                    got, expected,
-                                    "trigger={trigger:?} transition={transition:?} \
-                                     turn_active={turn_active} in_flight={in_flight_calls} \
-                                     owned={owned} stale_resolve={stale_resolve}"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    fn local_update_is_turn_safe_and_requires_owned_terminal() {
+        let changed = Some(BindFingerprintTransition::FromExplicit);
+        assert_eq!(
+            SwapPolicy::evaluate(&snap(changed, true, true, false), SwapTrigger::UpdateRpc),
+            SwapDecision::Defer(DeferReason::TurnActive)
+        );
+        assert_eq!(
+            SwapPolicy::evaluate(&snap(changed, false, false, false), SwapTrigger::UpdateRpc),
+            SwapDecision::Skip(SkipReason::ExternallyOwned)
+        );
+        assert_eq!(
+            SwapPolicy::evaluate(&snap(changed, false, true, false), SwapTrigger::UpdateRpc),
+            SwapDecision::Apply
+        );
     }
 
     #[test]
-    fn identical_fingerprint_reuses_regardless_of_gates() {
-        for trigger in ALL_TRIGGERS {
-            let decision = SwapPolicy::evaluate(
-                &snap(
-                    Some(BindFingerprintTransition::Unchanged),
-                    true,
-                    3,
-                    false,
-                    false,
-                ),
-                trigger,
-            );
-            assert_eq!(decision, SwapDecision::Reuse, "trigger={trigger:?}");
-        }
-    }
-
-    #[test]
-    fn update_rpc_identical_reapply_recovers_after_failed_rebuild() {
-        let identical = Some(BindFingerprintTransition::Unchanged);
-        assert_eq!(
-            SwapPolicy::evaluate(
-                &snap(identical, false, 0, true, true),
-                SwapTrigger::UpdateRpc
-            ),
-            SwapDecision::Apply,
-            "idle + session-owned: the identical re-apply repairs the stale toolset"
-        );
-        assert_eq!(
-            SwapPolicy::evaluate(
-                &snap(identical, true, 0, true, true),
-                SwapTrigger::UpdateRpc
-            ),
-            SwapDecision::Defer(DeferReason::TurnActive),
-            "the recovery apply is turn-gated like any mutation"
-        );
-        assert_eq!(
-            SwapPolicy::evaluate(
-                &snap(identical, false, 0, false, true),
-                SwapTrigger::UpdateRpc
-            ),
-            SwapDecision::Skip(SkipReason::ExternallyOwned),
-            "an externally-owned toolset cannot be rebuilt, stale or not"
-        );
-        for trigger in [
-            SwapTrigger::McpSnapshot,
-            SwapTrigger::HubTools,
-            SwapTrigger::Other,
-        ] {
+    fn local_snapshot_rebuilds_ignore_turn_state() {
+        for trigger in [SwapTrigger::McpSnapshot, SwapTrigger::Other] {
             assert_eq!(
-                SwapPolicy::evaluate(&snap(identical, false, 0, true, true), trigger),
-                SwapDecision::Reuse,
-                "trigger={trigger:?}: snapshot triggers carry no recovery lever"
-            );
-        }
-    }
-
-    #[test]
-    fn owner_rebind_identical_reapply_recovers_after_failed_rebuild() {
-        let identical = Some(BindFingerprintTransition::Unchanged);
-        assert_eq!(
-            SwapPolicy::evaluate(
-                &snap(identical, false, 0, true, true),
-                SwapTrigger::OwnerRebind
-            ),
-            SwapDecision::Apply,
-            "a reconnect's identical rebind heals the stale toolset"
-        );
-        assert_eq!(
-            SwapPolicy::evaluate(
-                &snap(identical, false, 2, true, true),
-                SwapTrigger::OwnerRebind
-            ),
-            SwapDecision::Defer(DeferReason::InFlightCalls),
-            "the heal defers while tool calls are in flight"
-        );
-        assert_eq!(
-            SwapPolicy::evaluate(
-                &snap(identical, false, 0, false, true),
-                SwapTrigger::OwnerRebind
-            ),
-            SwapDecision::Skip(SkipReason::ExternallyOwned),
-            "an externally-owned toolset cannot be rebuilt, stale or not"
-        );
-        assert_eq!(
-            SwapPolicy::evaluate(
-                &snap(identical, false, 0, true, false),
-                SwapTrigger::OwnerRebind
-            ),
-            SwapDecision::Reuse,
-            "without the stale marker the identical rebind stays a no-op reuse"
-        );
-    }
-
-    #[test]
-    fn owner_rebind_from_default_applies_mid_turn_with_calls_in_flight() {
-        let decision = SwapPolicy::evaluate(
-            &snap(
-                Some(BindFingerprintTransition::FromDefault),
-                true,
-                2,
-                true,
-                false,
-            ),
-            SwapTrigger::OwnerRebind,
-        );
-        assert_eq!(decision, SwapDecision::Apply);
-    }
-
-    #[test]
-    fn owner_rebind_in_flight_defer_wins_over_external_ownership() {
-        let decision = SwapPolicy::evaluate(
-            &snap(
-                Some(BindFingerprintTransition::FromExplicit),
-                false,
-                1,
-                false,
-                false,
-            ),
-            SwapTrigger::OwnerRebind,
-        );
-        assert_eq!(decision, SwapDecision::Defer(DeferReason::InFlightCalls));
-    }
-
-    #[test]
-    fn update_rpc_turn_gate_wins_over_external_ownership() {
-        let decision = SwapPolicy::evaluate(
-            &snap(
-                Some(BindFingerprintTransition::FromDefault),
-                true,
-                0,
-                false,
-                false,
-            ),
-            SwapTrigger::UpdateRpc,
-        );
-        assert_eq!(decision, SwapDecision::Defer(DeferReason::TurnActive));
-    }
-
-    #[test]
-    fn owner_rebind_ignores_turn_active() {
-        let decision = SwapPolicy::evaluate(
-            &snap(
-                Some(BindFingerprintTransition::FromExplicit),
-                true,
-                0,
-                true,
-                false,
-            ),
-            SwapTrigger::OwnerRebind,
-        );
-        assert_eq!(decision, SwapDecision::Apply);
-    }
-
-    #[test]
-    fn snapshot_rebuilds_ignore_turn_and_in_flight_gates() {
-        for trigger in [
-            SwapTrigger::McpSnapshot,
-            SwapTrigger::HubTools,
-            SwapTrigger::Other,
-        ] {
-            assert_eq!(
-                SwapPolicy::evaluate(&snap(None, true, 4, true, false), trigger),
-                SwapDecision::Apply,
-                "trigger={trigger:?}"
+                SwapPolicy::evaluate(&snap(None, true, true, false), trigger),
+                SwapDecision::Apply
             );
             assert_eq!(
-                SwapPolicy::evaluate(&snap(None, true, 4, false, false), trigger),
-                SwapDecision::Skip(SkipReason::ExternallyOwned),
-                "trigger={trigger:?}"
+                SwapPolicy::evaluate(&snap(None, true, false, false), trigger),
+                SwapDecision::Skip(SkipReason::ExternallyOwned)
             );
         }
     }
 
     #[test]
-    fn metric_labels_are_locked() {
-        assert_eq!(SwapTrigger::OwnerRebind.metric_label(), "owner_rebind");
-        assert_eq!(SwapTrigger::UpdateRpc.metric_label(), "update_tool_config");
-        assert_eq!(SwapTrigger::McpSnapshot.metric_label(), "mcp_snapshot");
-        assert_eq!(SwapTrigger::HubTools.metric_label(), "hub_tools");
-        assert_eq!(SwapTrigger::Other.metric_label(), "other");
-        assert_eq!(DeferReason::InFlightCalls.metric_reason(), "in_flight");
-        assert_eq!(DeferReason::TurnActive.metric_reason(), "turn_active");
-        assert_eq!(
-            DeferReason::TurnActiveLate.metric_reason(),
-            "turn_active_late"
-        );
-    }
-
-    #[test]
-    fn only_update_rpc_rechecks_after_resolve() {
-        for trigger in ALL_TRIGGERS {
-            assert_eq!(
-                trigger.rechecks_after_resolve(),
-                trigger == SwapTrigger::UpdateRpc,
-                "trigger={trigger:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn rebuild_source_mapping_matches_legacy_labels() {
+    fn rebuild_source_and_metric_labels_are_local() {
         assert_eq!(
             SwapTrigger::from_rebuild_source("mcp_snapshot_changed"),
             SwapTrigger::McpSnapshot
         );
-        assert_eq!(
-            SwapTrigger::from_rebuild_source("hub_tools_changed"),
-            SwapTrigger::HubTools
-        );
-        assert_eq!(
-            SwapTrigger::from_rebuild_source("hub_notification"),
-            SwapTrigger::HubTools
-        );
-        assert_eq!(
-            SwapTrigger::from_rebuild_source("test_preserves_feed"),
-            SwapTrigger::Other
-        );
+        assert_eq!(SwapTrigger::from_rebuild_source("test"), SwapTrigger::Other);
+        assert_eq!(SwapTrigger::UpdateRpc.metric_label(), "update_tool_config");
+        assert_eq!(SwapTrigger::McpSnapshot.metric_label(), "mcp_snapshot");
+        assert_eq!(SwapTrigger::Other.metric_label(), "other");
     }
 
     #[test]
     fn classify_is_poison_safe() {
-        let stored: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Some(serde_json::json!({"a": 1}))));
+        let stored = std::sync::Arc::new(std::sync::Mutex::new(Some(serde_json::json!({"a": 1}))));
         let poisoner = stored.clone();
         let _ = std::thread::spawn(move || {
             let _guard = poisoner.lock().unwrap();
-            panic!("poison the fingerprint lock");
+            panic!("poison fingerprint lock");
         })
         .join();
-        assert!(stored.is_poisoned(), "precondition: the lock is poisoned");
-
-        let same = serde_json::json!({"a": 1});
-        let other = serde_json::json!({"b": 2});
         assert_eq!(
-            classify(&stored, Some(&same)),
-            BindFingerprintTransition::Unchanged
-        );
-        assert_eq!(
-            classify(&stored, Some(&other)),
-            BindFingerprintTransition::FromExplicit
-        );
-        assert_eq!(
-            classify(&stored, None),
-            BindFingerprintTransition::FromExplicit
-        );
-    }
-
-    #[test]
-    fn classify_from_default_transitions() {
-        let stored = std::sync::Mutex::new(None);
-        let candidate = serde_json::json!({"a": 1});
-        assert_eq!(
-            classify(&stored, Some(&candidate)),
-            BindFingerprintTransition::FromDefault
-        );
-        assert_eq!(
-            classify(&stored, None),
+            classify(&stored, Some(&serde_json::json!({"a": 1}))),
             BindFingerprintTransition::Unchanged
         );
     }

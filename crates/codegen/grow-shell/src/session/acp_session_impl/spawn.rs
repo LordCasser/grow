@@ -316,112 +316,84 @@ pub(crate) async fn spawn_session_actor(
     );
     let _ = support_permission;
     let owns_permission_manager = inherited_permission_handle.is_none();
-    let (permissions, permission_events_rx, deny_read_globs) = if let Some(handle) =
-        inherited_permission_handle
-    {
-        let (_dummy_tx, dummy_rx) = mpsc::unbounded_channel::<PermissionEvent>();
-        let deny_read_globs = handle.deny_read_globs();
-        (handle, dummy_rx, deny_read_globs)
-    } else {
-        let web_fetch_allowed_domains = match &web_fetch_config {
-            WebFetchConfig::Enabled { params } => params.allowed_domains(),
-            WebFetchConfig::Disabled => vec![],
-        };
-        let project_trusted =
-            crate::agent::folder_trust::project_scope_allowed(tool_context.cwd.as_path());
-        let mut permission_config =
-            grow_workspace::permission::resolution::resolve_permission_config_with_fallback(
-                tool_context.cwd.as_path(),
-                project_trusted,
-            )
-            .await;
-        let yolo_pin = grow_workspace::permission::resolution::yolo_disabled_by_policy();
-        let (cli_permission_rules, dropped_catchalls) =
-            drop_cli_catchall_allows(cli_permission_rules, yolo_pin);
-        if let Some(reason) = yolo_pin
-            && !dropped_catchalls.is_empty()
-        {
-            tracing::warn!(
-                reason,
-                dropped = dropped_catchalls.len(),
-                "CLI --allow catch-all ignored: always-approve disabled by managed policy"
-            );
-            if startup_hints.non_interactive {
-                eprintln!("grow: --allow catch-all ignored: {reason}");
-            }
-        }
-        if !cli_permission_rules.is_empty() {
-            match &mut permission_config {
-                Some(config) => {
-                    let mut merged = cli_permission_rules;
-                    merged.append(&mut config.rules);
-                    config.rules = merged;
-                }
-                None => {
-                    permission_config =
-                        Some(grow_workspace::permission::types::PermissionConfig::new(
-                            cli_permission_rules,
-                        ));
-                }
-            }
-        }
-        let deny_read_globs = permission_config
-            .as_ref()
-            .map(grow_workspace::permission::resolution::deny_read_globs_from_config)
-            .unwrap_or_default();
-        let hub_permission = if grow_workspace::permission::hitl_permission_live_enabled() {
-            let server = match workspace_ops.workspace_handle() {
-                Some(handle) => handle.hub_server_blocking().await,
-                None => None,
-            };
-            let transport = server
-                .and_then(|server| {
-                    grow_workspace::permission::ToolServerPermissionTransport::from_session_id(
-                        server,
-                        session_info.id.0.as_ref(),
-                    )
-                })
-                .map(|t| {
-                    std::sync::Arc::new(t)
-                        as std::sync::Arc<dyn grow_workspace::permission::PermissionHookTransport>
-                });
-            if transport.is_none() {
-                tracing::debug!(
-                    session_id = %session_info.id.0,
-                    "hitl permission live enabled but no remote transport available; using local prompt"
-                );
-            }
-            transport
+    let (permissions, permission_events_rx, deny_read_globs) =
+        if let Some(handle) = inherited_permission_handle {
+            let (_dummy_tx, dummy_rx) = mpsc::unbounded_channel::<PermissionEvent>();
+            let deny_read_globs = handle.deny_read_globs();
+            (handle, dummy_rx, deny_read_globs)
         } else {
-            None
-        };
-        let (permissions, permission_events_rx) =
-            grow_workspace::permission::spawn_permission_manager_with_hub(
-                session_info.id.clone(),
-                gateway.clone(),
-                tool_context.cwd.clone(),
-                client_type,
-                permission_config,
-                deny_read_globs.clone(),
-                web_fetch_allowed_domains,
-                session_yolo_mode,
-                session_client_identifier.clone(),
-                crate::util::config::remember_tool_approvals_from_disk(),
-                hub_permission,
-            );
-        if crate::util::config::auto_mode_session_active(
-            crate::util::config::auto_permission_mode_enabled_from_disk(),
-            session_auto_mode,
-            session_yolo_mode,
-        ) {
-            permissions.set_auto_mode(true);
-            let turns = build_classifier_turns(&conversation, CLASSIFIER_SPAWN_SEED_TURNS);
-            if !turns.is_empty() {
-                permissions.set_classifier_transcript(turns);
+            let web_fetch_allowed_domains = match &web_fetch_config {
+                WebFetchConfig::Enabled { params } => params.allowed_domains(),
+                WebFetchConfig::Disabled => vec![],
+            };
+            let project_trusted =
+                crate::agent::folder_trust::project_scope_allowed(tool_context.cwd.as_path());
+            let mut permission_config =
+                grow_workspace::permission::resolution::resolve_permission_config_with_fallback(
+                    tool_context.cwd.as_path(),
+                    project_trusted,
+                )
+                .await;
+            let yolo_pin = grow_workspace::permission::resolution::yolo_disabled_by_policy();
+            let (cli_permission_rules, dropped_catchalls) =
+                drop_cli_catchall_allows(cli_permission_rules, yolo_pin);
+            if let Some(reason) = yolo_pin
+                && !dropped_catchalls.is_empty()
+            {
+                tracing::warn!(
+                    reason,
+                    dropped = dropped_catchalls.len(),
+                    "CLI --allow catch-all ignored: always-approve disabled by managed policy"
+                );
+                if startup_hints.non_interactive {
+                    eprintln!("grow: --allow catch-all ignored: {reason}");
+                }
             }
-        }
-        (permissions, permission_events_rx, deny_read_globs)
-    };
+            if !cli_permission_rules.is_empty() {
+                match &mut permission_config {
+                    Some(config) => {
+                        let mut merged = cli_permission_rules;
+                        merged.append(&mut config.rules);
+                        config.rules = merged;
+                    }
+                    None => {
+                        permission_config =
+                            Some(grow_workspace::permission::types::PermissionConfig::new(
+                                cli_permission_rules,
+                            ));
+                    }
+                }
+            }
+            let deny_read_globs = permission_config
+                .as_ref()
+                .map(grow_workspace::permission::resolution::deny_read_globs_from_config)
+                .unwrap_or_default();
+            let (permissions, permission_events_rx) =
+                grow_workspace::permission::spawn_permission_manager(
+                    session_info.id.clone(),
+                    gateway.clone(),
+                    tool_context.cwd.clone(),
+                    client_type,
+                    permission_config,
+                    deny_read_globs.clone(),
+                    web_fetch_allowed_domains,
+                    session_yolo_mode,
+                    session_client_identifier.clone(),
+                    crate::util::config::remember_tool_approvals_from_disk(),
+                );
+            if crate::util::config::auto_mode_session_active(
+                crate::util::config::auto_permission_mode_enabled_from_disk(),
+                session_auto_mode,
+                session_yolo_mode,
+            ) {
+                permissions.set_auto_mode(true);
+                let turns = build_classifier_turns(&conversation, CLASSIFIER_SPAWN_SEED_TURNS);
+                if !turns.is_empty() {
+                    permissions.set_classifier_transcript(turns);
+                }
+            }
+            (permissions, permission_events_rx, deny_read_globs)
+        };
     let initial_prompt_index = conversation
         .iter()
         .filter(|item| matches!(item, ConversationItem::User(_)))

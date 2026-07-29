@@ -1,10 +1,8 @@
-//! Per-tool capabilities and notification schemas.
-
-use std::collections::HashMap;
+//! Capabilities used by the in-process tool runtime.
 
 use serde::{Deserialize, Serialize};
 
-/// Per-tool wire-traveling capabilities. Defaults conservatively (no
+/// Per-tool capabilities. Defaults conservatively (no
 /// progress, no cancel, single concurrency, no hooks).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolCapabilities {
@@ -34,8 +32,7 @@ pub struct ToolCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub behavior_version: Option<String>,
 
-    /// Per-tool override for the per-frame size cap. Service clamps to the
-    /// 16 MiB hard ceiling.
+    /// Per-tool override for the progress-frame size cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_frame_bytes: Option<u32>,
 
@@ -43,9 +40,7 @@ pub struct ToolCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 
-    /// Multi-agent write-coordination scope. Tools that mutate external
-    /// state must declare `Write` so the computer hub routes them to the
-    /// leader agent only. Absence is treated as `Read`.
+    /// Multi-agent write-coordination scope. Absence is treated as `Read`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_scope: Option<ToolScope>,
 }
@@ -81,8 +76,8 @@ pub enum HookKind {
 
 /// Multi-agent write-coordination scope.
 ///
-/// Tools that mutate external state must declare `Write` so the computer hub
-/// routes them to the leader agent only. Absence is treated as `Read`.
+/// Tools that mutate external state declare `Write`; absence is treated as
+/// `Read`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolScope {
@@ -90,17 +85,4 @@ pub enum ToolScope {
     Read,
     /// Tool mutates external state.
     Write,
-}
-
-/// Per-tool notification schemas. Keys are the notification `kind` strings
-/// the computer hub validates against.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct NotificationSchemas {
-    /// Schemas for notifications the tool emits to subscribers.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub outbound: HashMap<String, serde_json::Value>,
-
-    /// Schemas for notifications the harness sends to the tool.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub inbound: HashMap<String, serde_json::Value>,
 }

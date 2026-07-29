@@ -261,8 +261,8 @@ pub struct FsReadFileReq {
     #[serde(default)]
     pub length: Option<u64>,
     /// Per-chunk byte budget applied on top of `length` (default 1 MiB),
-    /// further clamped server-side so a single chunk fits the hub frame
-    /// after base64. Only consulted for ranged reads.
+    /// further clamped so a single base64 chunk remains bounded. Only
+    /// consulted for ranged reads.
     #[serde(default = "default_max_bytes")]
     pub max_bytes: u64,
     /// Transfer encoding for ranged reads (default `utf8`; non-UTF-8
@@ -498,8 +498,7 @@ pub struct ClientFsReadFileReq {
     #[serde(default)]
     pub length: Option<u64>,
     /// Per-chunk byte cap applied on top of `length` (default 1 MiB). The
-    /// server additionally clamps the effective budget to 4 MiB so a
-    /// single chunk always fits the hub's 8 MiB frame cap after base64.
+    /// implementation additionally clamps the effective budget to 4 MiB.
     #[serde(default = "default_max_bytes")]
     pub max_bytes: u64,
     /// Transfer encoding (default `utf8`, shell-compatible; chunked

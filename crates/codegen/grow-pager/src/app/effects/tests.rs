@@ -1750,7 +1750,7 @@ fn sanitize_user_error_strips_auth_prefixes() {
 fn sanitize_user_error_collapses_disk_full() {
     assert_eq!(
             sanitize_user_error(
-                "couldn't create worktree: Internal error: \"hub error: Worktree creation failed: not enough free disk space\""
+                "couldn't create worktree: Internal error: \"workspace operation failed: Worktree creation failed: not enough free disk space\""
             ),
             "No space left on device"
         );

@@ -1,24 +1,12 @@
-//! Per-session and connection-level activity tracking for tool server
-//! lifecycle status reporting.
+//! Local per-session activity tracking for tool calls and turns.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use dashmap::DashMap;
-use xai_tool_protocol::{ToolServerLifecycleStatus, ToolServerStatusPayload};
-
-const LIFECYCLE_NONE: u8 = 0;
-const LIFECYCLE_DRAINING: u8 = 1;
-const LIFECYCLE_SHUTTING_DOWN: u8 = 2;
 
 const DEFAULT_SESSION: &str = "__default__";
 const SESSION_IDLE_PRUNE_MS: u64 = 5 * 60 * 1000;
-
-/// How long recent preview-proxy traffic withholds `idle_since_ms` — a decaying
-/// window (not a reset), so a polled preview stays alive but a single stale poll
-/// can't pin it. Larger than the 5s status poll, smaller than the idle grace.
-pub(crate) const PREVIEW_ACTIVITY_WINDOW_MS: u64 = 60_000;
 
 struct SessionActivity {
     active_tool_calls: AtomicU32,
@@ -46,11 +34,29 @@ impl SessionActivity {
     }
 }
 
-/// Tracks in-flight tool calls and background tasks for
-/// [`ToolServerStatusPayload`] reporting.
-///
-/// All methods are `&self` — share via `Arc` across the tool handler, the
-/// activity feed, and the status publisher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityStatus {
+    Ready,
+    Busy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivitySnapshot {
+    pub status: ActivityStatus,
+    pub session_id: Option<String>,
+    pub active_tool_calls: u32,
+    pub active_tool_names: Vec<String>,
+    pub background_tasks: u32,
+    pub background_task_ids: Vec<String>,
+    pub last_tool_call_started_ms: u64,
+    pub last_tool_call_completed_ms: u64,
+    pub uptime_ms: u64,
+    pub idle_since_ms: Option<u64>,
+    pub turn_active: bool,
+    pub idle_ignores_background: bool,
+}
+
+/// Tracks in-flight tool calls and background tasks in the current process.
 pub struct ActivityTracker {
     active_tool_calls: AtomicU32,
     active_tools: DashMap<String, String>,
@@ -60,22 +66,9 @@ pub struct ActivityTracker {
     last_call_completed_ms: AtomicU64,
     idle_since_ms: AtomicU64,
     started_at: Instant,
-    lifecycle: AtomicU8,
-    /// `Arc` so the activity tracker can wake waiters via [`notify_handle`](Self::notify_handle).
-    notify: Arc<tokio::sync::Notify>,
-    /// Epoch ms a graceful drain began; `0` means "not draining".
-    drain_started_ms: AtomicU64,
     /// When set, the idle verdict ignores background tasks so `idle_since_ms`
-    /// tracks foreground tool-call activity only. Drain/`status` stay bg-aware.
+    /// tracks foreground tool-call activity only. Busy status stays bg-aware.
     idle_ignores_background: bool,
-    /// Window (ms) recent preview-proxy traffic withholds idle for; defaults to
-    /// [`PREVIEW_ACTIVITY_WINDOW_MS`], overridable via the builder.
-    preview_activity_window_ms: u64,
-    /// Epoch ms of the last scraped preview-proxy activity (`0` = none). Fed by
-    /// the preview-activity scraper (`preview_supervisor`); withholds idle within
-    /// [`preview_activity_window_ms`](Self::preview_activity_window_ms).
-    last_preview_activity_ms: AtomicU64,
-
     sessions: DashMap<String, SessionActivity>,
     /// call_id → session_id so `tool_call_completed` can decrement
     /// the right session without the caller repeating it.
@@ -108,12 +101,7 @@ impl ActivityTracker {
             last_call_completed_ms: AtomicU64::new(0),
             idle_since_ms: AtomicU64::new(now_ms()),
             started_at: Instant::now(),
-            lifecycle: AtomicU8::new(LIFECYCLE_NONE),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            drain_started_ms: AtomicU64::new(0),
             idle_ignores_background: false,
-            preview_activity_window_ms: PREVIEW_ACTIVITY_WINDOW_MS,
-            last_preview_activity_ms: AtomicU64::new(0),
             sessions: DashMap::new(),
             call_to_session: DashMap::new(),
             prune_window_ms: prune_window.as_millis() as u64,
@@ -127,47 +115,12 @@ impl ActivityTracker {
         self
     }
 
-    /// Override the preview-activity withhold window; the WorkspaceServer sources
-    /// it from `StatusConfig`.
-    pub fn with_preview_activity_window_ms(mut self, window_ms: u64) -> Self {
-        self.preview_activity_window_ms = window_ms;
-        self
-    }
-
-    /// Clone of the internal `Notify` for driving republishes.
-    pub fn notify_handle(&self) -> Arc<tokio::sync::Notify> {
-        self.notify.clone()
-    }
-
-    /// Record fresh preview-proxy traffic: withholds `idle_since_ms` for
-    /// [`preview_activity_window_ms`](Self::preview_activity_window_ms) and wakes
-    /// the status publisher so the renewed "active" status reaches the server promptly.
-    pub fn note_preview_activity(&self) {
-        self.last_preview_activity_ms
-            .store(now_ms(), Ordering::Relaxed);
-        self.notify.notify_waiters();
-    }
-
-    /// Whether a drain has been started (`set_draining` ran) in this process.
-    pub fn drain_started(&self) -> bool {
-        self.drain_started_ms.load(Ordering::Relaxed) != 0
-    }
-
     fn resolved_idle_since(&self, idle_since: u64) -> Option<u64> {
-        if idle_since == 0 || self.preview_withholds_idle(now_ms()) {
+        if idle_since == 0 {
             None
         } else {
             Some(idle_since)
         }
-    }
-
-    /// Whether recent preview-proxy traffic should currently withhold idle.
-    fn preview_withholds_idle(&self, now: u64) -> bool {
-        preview_activity_withholds_idle(
-            now,
-            self.last_preview_activity_ms.load(Ordering::Relaxed),
-            self.preview_activity_window_ms,
-        )
     }
 
     /// Whether any tracked session currently has an active turn (the aggregate
@@ -203,8 +156,6 @@ impl ActivityTracker {
             .insert(call_id.to_owned(), tool_name.to_owned());
         session.last_call_started_ms.store(now, Ordering::Relaxed);
         session.idle_since_ms.store(0, Ordering::Relaxed);
-
-        self.notify.notify_waiters();
     }
 
     /// Mark an in-flight tool call as completed.
@@ -240,7 +191,6 @@ impl ActivityTracker {
             }
         }
 
-        self.notify.notify_waiters();
         let _ = tool_name;
     }
 
@@ -258,7 +208,6 @@ impl ActivityTracker {
         } else {
             self.idle_since_ms.store(0, Ordering::Relaxed);
         }
-        self.notify.notify_waiters();
     }
 
     pub fn background_task_completed(&self, task_id: &str) {
@@ -272,7 +221,6 @@ impl ActivityTracker {
         {
             self.idle_since_ms.store(now_ms(), Ordering::Relaxed);
         }
-        self.notify.notify_waiters();
     }
 
     pub fn turn_started(&self, session_id: &str, turn_number: u64) {
@@ -282,7 +230,6 @@ impl ActivityTracker {
             .or_insert_with(SessionActivity::new);
         session.current_turn.store(turn_number, Ordering::Release);
         session.turn_active.store(true, Ordering::Release);
-        self.notify.notify_waiters();
     }
 
     pub fn turn_completed(&self, session_id: &str, turn_number: u64, _duration_ms: u64) {
@@ -290,7 +237,6 @@ impl ActivityTracker {
             && session.current_turn.load(Ordering::Acquire) == turn_number
         {
             session.turn_active.store(false, Ordering::Release);
-            self.notify.notify_waiters();
         }
     }
 
@@ -313,15 +259,14 @@ impl ActivityTracker {
         count
     }
 
-    /// Mark a session as ended: clear turn-active flag and notify waiters.
+    /// Mark a session as ended by clearing its turn-active flag.
     ///
     /// Called by [`crate::handle::WorkspaceHandle::on_session_ended()`] when
-    /// a `HookEvent::SessionEnded` arrives from the server.
+    /// a session-ended event arrives from the shell.
     pub fn session_ended(&self, session_id: &str) {
         if let Some(session) = self.sessions.get(session_id) {
             session.turn_active.store(false, Ordering::Release);
         }
-        self.notify.notify_waiters();
     }
 
     /// Whether a turn is currently active for the given session.
@@ -338,87 +283,6 @@ impl ActivityTracker {
         self.sessions
             .get(session_id)
             .map_or(0, |s| s.active_tool_calls.load(Ordering::Acquire))
-    }
-
-    pub fn set_active(&self) {
-        self.lifecycle.store(LIFECYCLE_NONE, Ordering::Release);
-        // Clear the drain stamp symmetrically with `set_draining`: leaving it set
-        // after a resume would make `drain_started_ms` mean "a drain ever began"
-        // rather than "currently draining".
-        self.drain_started_ms.store(0, Ordering::Release);
-        self.notify.notify_waiters();
-    }
-
-    pub fn set_draining(&self) {
-        self.lifecycle.store(LIFECYCLE_DRAINING, Ordering::Release);
-        // First transition wins, so `drain_started_ms` is stable across calls.
-        let _ = self.drain_started_ms.compare_exchange(
-            0,
-            now_ms(),
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        );
-        self.notify.notify_waiters();
-    }
-
-    pub fn set_shutting_down(&self) {
-        self.lifecycle
-            .store(LIFECYCLE_SHUTTING_DOWN, Ordering::Release);
-        self.notify.notify_waiters();
-    }
-
-    pub fn is_draining(&self) -> bool {
-        self.lifecycle.load(Ordering::Acquire) >= LIFECYCLE_DRAINING
-    }
-
-    /// Fully drained: draining, no active tool calls/background tasks.
-    pub fn is_drained(&self) -> bool {
-        self.is_draining() && self.total_active() == 0
-    }
-
-    /// Phase-1 drain condition: all in-flight tool calls and background tasks
-    /// finished.
-    pub fn tools_idle(&self) -> bool {
-        self.total_active() == 0
-    }
-
-    pub fn total_active(&self) -> u32 {
-        self.active_tool_calls.load(Ordering::Relaxed)
-            + self.background_tasks.load(Ordering::Relaxed)
-    }
-
-    pub async fn wait_for_change(&self, timeout: std::time::Duration) {
-        let _ = tokio::time::timeout(timeout, self.notify.notified()).await;
-    }
-
-    /// Wake the status publisher so it sends a heartbeat immediately.
-    pub fn poke(&self) {
-        self.notify.notify_waiters();
-    }
-
-    /// Wait until the tracker is both draining and all active work
-    /// (tool calls + background tasks) has completed.
-    pub async fn wait_until_drained(&self) {
-        loop {
-            if self.is_drained() {
-                return;
-            }
-            // `notify_waiters` stores no permit, so a wake between the check and
-            // this await is missed — safe because every caller is timeout-bounded.
-            self.notify.notified().await;
-        }
-    }
-
-    /// Wait until all in-flight tool calls and background tasks have finished
-    /// (phase 1 of the two-phase drain).
-    pub async fn wait_until_tools_idle(&self) {
-        loop {
-            if self.tools_idle() {
-                return;
-            }
-            // Same timeout-bounded missed-wakeup tolerance as `wait_until_drained`.
-            self.notify.notified().await;
-        }
     }
 
     /// Returns live session IDs. As a side-effect, prunes sessions
@@ -453,126 +317,85 @@ impl ActivityTracker {
         live
     }
 
-    /// Per-session snapshot. `background_task_ids` is the connection aggregate,
-    /// re-published to the session's client.
-    pub fn snapshot_session(&self, session_id: &str) -> ToolServerStatusPayload {
-        let lifecycle = self.lifecycle.load(Ordering::Acquire);
-        let bg = self.background_tasks.load(Ordering::Relaxed);
-
-        let (active, active_tool_names, last_started, last_completed, idle_since, turn_active) =
-            if let Some(session) = self.sessions.get(session_id) {
-                let a = session.active_tool_calls.load(Ordering::Relaxed);
-                let names: Vec<String> = session
+    pub fn snapshot_session(&self, session_id: &str) -> ActivitySnapshot {
+        let background_tasks = self.background_tasks.load(Ordering::Relaxed);
+        let (
+            active_tool_calls,
+            active_tool_names,
+            last_started,
+            last_completed,
+            idle_since,
+            turn_active,
+        ) = if let Some(session) = self.sessions.get(session_id) {
+            (
+                session.active_tool_calls.load(Ordering::Relaxed),
+                session
                     .active_tools
                     .iter()
-                    .map(|r| r.value().clone())
-                    .collect();
-                let started = session.last_call_started_ms.load(Ordering::Relaxed);
-                let completed = session.last_call_completed_ms.load(Ordering::Relaxed);
-                let idle = session.idle_since_ms.load(Ordering::Relaxed);
-                let turn = session.turn_active.load(Ordering::Acquire);
-                (a, names, started, completed, idle, turn)
+                    .map(|entry| entry.value().clone())
+                    .collect(),
+                session.last_call_started_ms.load(Ordering::Relaxed),
+                session.last_call_completed_ms.load(Ordering::Relaxed),
+                session.idle_since_ms.load(Ordering::Relaxed),
+                session.turn_active.load(Ordering::Acquire),
+            )
+        } else {
+            (0, Vec::new(), 0, 0, now_ms(), false)
+        };
+        ActivitySnapshot {
+            status: if active_tool_calls + background_tasks > 0 {
+                ActivityStatus::Busy
             } else {
-                (0, vec![], 0, 0, now_ms(), false)
-            };
-
-        let status = match lifecycle {
-            LIFECYCLE_SHUTTING_DOWN => ToolServerLifecycleStatus::ShuttingDown,
-            LIFECYCLE_DRAINING => ToolServerLifecycleStatus::Draining,
-            _ if active > 0 => ToolServerLifecycleStatus::Busy,
-            _ => ToolServerLifecycleStatus::Ready,
-        };
-
-        let background_task_ids: Vec<String> = self
-            .background_ids
-            .iter()
-            .map(|r| r.key().clone())
-            .collect();
-
-        let drain_started = match self.drain_started_ms.load(Ordering::Relaxed) {
-            0 => None,
-            ms => Some(ms),
-        };
-
-        let idle_since_ms = self.resolved_idle_since(idle_since);
-
-        ToolServerStatusPayload {
-            status,
-            session_id: xai_tool_protocol::SessionId::new(session_id).ok(),
-            connection_id: None,
-            active_tool_calls: active,
+                ActivityStatus::Ready
+            },
+            session_id: Some(session_id.to_owned()),
+            active_tool_calls,
             active_tool_names,
-            background_tasks: bg,
-            background_task_ids,
-            pending_tool_calls: 0,
+            background_tasks,
+            background_task_ids: self
+                .background_ids
+                .iter()
+                .map(|entry| entry.key().clone())
+                .collect(),
             last_tool_call_started_ms: last_started,
             last_tool_call_completed_ms: last_completed,
             uptime_ms: self.started_at.elapsed().as_millis() as u64,
-            idle_since_ms,
-            drain_started_ms: drain_started,
+            idle_since_ms: self.resolved_idle_since(idle_since),
             turn_active,
             idle_ignores_background: self.idle_ignores_background,
         }
     }
 
-    /// Aggregate snapshot across all sessions.
-    pub fn snapshot(&self) -> ToolServerStatusPayload {
-        let lifecycle = self.lifecycle.load(Ordering::Acquire);
-        let active = self.active_tool_calls.load(Ordering::Relaxed);
-        let bg = self.background_tasks.load(Ordering::Relaxed);
-
-        let status = match lifecycle {
-            LIFECYCLE_SHUTTING_DOWN => ToolServerLifecycleStatus::ShuttingDown,
-            LIFECYCLE_DRAINING => ToolServerLifecycleStatus::Draining,
-            _ if active + bg > 0 => ToolServerLifecycleStatus::Busy,
-            _ => ToolServerLifecycleStatus::Ready,
-        };
-
-        let active_tool_names: Vec<String> = self
-            .active_tools
-            .iter()
-            .map(|r| r.value().clone())
-            .collect();
-        let background_task_ids: Vec<String> = self
-            .background_ids
-            .iter()
-            .map(|r| r.key().clone())
-            .collect();
-
-        let idle_since = self.idle_since_ms.load(Ordering::Relaxed);
-
-        let drain_started = match self.drain_started_ms.load(Ordering::Relaxed) {
-            0 => None,
-            ms => Some(ms),
-        };
-
-        let idle_since_ms = self.resolved_idle_since(idle_since);
-
-        ToolServerStatusPayload {
-            status,
+    pub fn snapshot(&self) -> ActivitySnapshot {
+        let active_tool_calls = self.active_tool_calls.load(Ordering::Relaxed);
+        let background_tasks = self.background_tasks.load(Ordering::Relaxed);
+        ActivitySnapshot {
+            status: if active_tool_calls + background_tasks > 0 {
+                ActivityStatus::Busy
+            } else {
+                ActivityStatus::Ready
+            },
             session_id: None,
-            connection_id: None,
-            active_tool_calls: active,
-            active_tool_names,
-            background_tasks: bg,
-            background_task_ids,
-            pending_tool_calls: 0,
+            active_tool_calls,
+            active_tool_names: self
+                .active_tools
+                .iter()
+                .map(|entry| entry.value().clone())
+                .collect(),
+            background_tasks,
+            background_task_ids: self
+                .background_ids
+                .iter()
+                .map(|entry| entry.key().clone())
+                .collect(),
             last_tool_call_started_ms: self.last_call_started_ms.load(Ordering::Relaxed),
             last_tool_call_completed_ms: self.last_call_completed_ms.load(Ordering::Relaxed),
             uptime_ms: self.started_at.elapsed().as_millis() as u64,
-            idle_since_ms,
-            drain_started_ms: drain_started,
+            idle_since_ms: self.resolved_idle_since(self.idle_since_ms.load(Ordering::Relaxed)),
             turn_active: self.any_turn_active(),
             idle_ignores_background: self.idle_ignores_background,
         }
     }
-}
-
-/// Whether a preview-activity stamp still withholds idle at `now`: true while it
-/// is within `window` ms. A zero stamp (no activity recorded) never withholds,
-/// and the window is exclusive at the boundary so it decays rather than pins.
-fn preview_activity_withholds_idle(now: u64, last_activity_ms: u64, window_ms: u64) -> bool {
-    last_activity_ms != 0 && now.saturating_sub(last_activity_ms) < window_ms
 }
 
 fn now_ms() -> u64 {
@@ -590,7 +413,7 @@ mod tests {
     fn starts_ready() {
         let t = ActivityTracker::new();
         let s = t.snapshot();
-        assert_eq!(s.status, ToolServerLifecycleStatus::Ready);
+        assert_eq!(s.status, ActivityStatus::Ready);
         assert_eq!(s.active_tool_calls, 0);
         assert!(s.idle_since_ms.is_some());
         assert!(s.session_id.is_none());
@@ -601,7 +424,7 @@ mod tests {
         let t = ActivityTracker::new();
         t.tool_call_started("c1", "read_file", Some("sess-a"));
         let s = t.snapshot();
-        assert_eq!(s.status, ToolServerLifecycleStatus::Busy);
+        assert_eq!(s.status, ActivityStatus::Busy);
         assert_eq!(s.active_tool_calls, 1);
         assert_eq!(s.active_tool_names, vec!["read_file"]);
         assert!(s.idle_since_ms.is_none());
@@ -613,7 +436,7 @@ mod tests {
         t.tool_call_started("c1", "read_file", Some("sess-a"));
         t.tool_call_completed("c1", None);
         let s = t.snapshot();
-        assert_eq!(s.status, ToolServerLifecycleStatus::Ready);
+        assert_eq!(s.status, ActivityStatus::Ready);
         assert_eq!(s.active_tool_calls, 0);
         assert!(s.idle_since_ms.is_some());
     }
@@ -623,7 +446,7 @@ mod tests {
         let t = ActivityTracker::new();
         t.background_task_started("t1");
         let s = t.snapshot();
-        assert_eq!(s.status, ToolServerLifecycleStatus::Busy);
+        assert_eq!(s.status, ActivityStatus::Busy);
         assert_eq!(s.background_tasks, 1);
     }
 
@@ -692,7 +515,7 @@ mod tests {
         let t = ActivityTracker::new().with_idle_ignores_background(true);
         t.background_task_started("bg1");
         let s = t.snapshot();
-        assert_eq!(s.status, ToolServerLifecycleStatus::Busy);
+        assert_eq!(s.status, ActivityStatus::Busy);
         assert!(s.idle_since_ms.is_some());
     }
 
@@ -719,21 +542,6 @@ mod tests {
     }
 
     #[test]
-    fn drain_counts_background_tasks_regardless_of_flag() {
-        for flag in [false, true] {
-            let t = ActivityTracker::new().with_idle_ignores_background(flag);
-            t.background_task_started("bg1");
-            assert_eq!(t.total_active(), 1);
-            t.set_draining();
-            assert!(!t.is_drained());
-            assert!(!t.tools_idle());
-            t.background_task_completed("bg1");
-            assert!(t.is_drained());
-            assert!(t.tools_idle());
-        }
-    }
-
-    #[test]
     fn snapshot_payloads_report_idle_ignores_background_flag() {
         let on = ActivityTracker::new().with_idle_ignores_background(true);
         assert!(on.snapshot().idle_ignores_background);
@@ -742,61 +550,6 @@ mod tests {
         let off = ActivityTracker::new();
         assert!(!off.snapshot().idle_ignores_background);
         assert!(!off.snapshot_session("sess-a").idle_ignores_background);
-    }
-
-    #[test]
-    fn draining_overrides_busy() {
-        let t = ActivityTracker::new();
-        t.tool_call_started("c1", "grep", None);
-        t.set_draining();
-        assert_eq!(t.snapshot().status, ToolServerLifecycleStatus::Draining);
-    }
-
-    #[test]
-    fn set_active_clears_draining() {
-        let t = ActivityTracker::new();
-        t.set_draining();
-        assert_eq!(t.snapshot().status, ToolServerLifecycleStatus::Draining);
-        t.set_active();
-        assert_eq!(t.snapshot().status, ToolServerLifecycleStatus::Ready);
-    }
-
-    #[test]
-    fn shut_down_overrides_draining() {
-        let t = ActivityTracker::new();
-        t.set_draining();
-        assert_eq!(t.snapshot().status, ToolServerLifecycleStatus::Draining);
-        t.set_shutting_down();
-        assert_eq!(t.snapshot().status, ToolServerLifecycleStatus::ShuttingDown);
-    }
-
-    #[test]
-    fn drain_started_timestamp_is_stable() {
-        let t = ActivityTracker::new();
-        assert!(!t.drain_started());
-        t.set_draining();
-        assert!(t.drain_started());
-        let first = t.snapshot().drain_started_ms;
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        t.set_draining();
-        assert_eq!(
-            t.snapshot().drain_started_ms,
-            first,
-            "repeated set_draining must not advance drain_started_ms"
-        );
-        t.set_active();
-        assert!(!t.drain_started());
-    }
-
-    #[test]
-    fn is_drained_with_no_queue_uses_tools_only() {
-        let t = ActivityTracker::new();
-        t.set_draining();
-        assert!(t.is_drained(), "must be drained when tools are idle");
-        t.tool_call_started("c1", "grep", None);
-        assert!(!t.is_drained(), "active tool call blocks drain");
-        t.tool_call_completed("c1", None);
-        assert!(t.is_drained(), "drain cleared after tool call completes");
     }
 
     #[test]
@@ -848,9 +601,11 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_payload_fields_exist() {
+    fn snapshot_payload_fields_have_local_defaults() {
         let t = ActivityTracker::new();
         let s = t.snapshot();
-        // Just verify the payload has reasonable defaults.
+        assert!(s.active_tool_names.is_empty());
+        assert!(s.background_task_ids.is_empty());
+        assert!(!s.turn_active);
     }
 }

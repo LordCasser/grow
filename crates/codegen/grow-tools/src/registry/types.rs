@@ -326,7 +326,7 @@ type OutputConverter =
 /// `.await`.
 struct DispatchParts {
     /// Resolved `LocalRegistry` handle to dispatch through.
-    lr_handle: Arc<dyn xai_computer_hub_core::ToolHandle>,
+    lr_handle: Arc<dyn xai_tool_runtime::ToolHandle>,
     /// Runtime context built for the call (resources, renderer, cwd,
     /// behavior version, inner-dispatch).
     ctx: xai_tool_runtime::ToolCallContext,
@@ -369,7 +369,7 @@ struct ToolEntry {
     >,
     /// Registers this tool into a `LocalRegistry` using the concrete type.
     /// Captured at `register::<T>()` time when T is known.
-    register_in_local: Box<dyn Fn(&xai_computer_hub_core::LocalRegistry) + Send + Sync>,
+    register_in_local: Box<dyn Fn(&xai_tool_runtime::LocalRegistry) + Send + Sync>,
 }
 /// Per-reminder metadata stored in the builder.
 struct ReminderEntry {
@@ -425,7 +425,7 @@ pub struct FinalizedToolset {
     scheduler_cancel: Option<tokio_util::sync::CancellationToken>,
     /// Shared local registry for in-process dispatch.
     /// Contains only config-enabled tools. Can be shared with ToolHarness.
-    local_registry: xai_computer_hub_core::LocalRegistry,
+    local_registry: xai_tool_runtime::LocalRegistry,
     /// Lock-free access to the template renderer for tool name/param resolution.
     /// Cloned into `ToolCallContext::extensions` on each `call()` so tools
     /// can resolve names without acquiring the `resources` mutex.
@@ -494,7 +494,7 @@ impl RequirementError {
 pub struct ToolRegistryBuilder {
     tools: HashMap<String, ToolEntry>,
     reminders: Vec<ReminderEntry>,
-    shared_local_registry: Option<xai_computer_hub_core::LocalRegistry>,
+    shared_local_registry: Option<xai_tool_runtime::LocalRegistry>,
 }
 impl Default for ToolRegistryBuilder {
     fn default() -> Self {
@@ -588,7 +588,7 @@ impl ToolRegistryBuilder {
                     let typed = serde_json::from_value::<T::Args>(json)?;
                     Ok(typed.into())
                 }),
-                register_in_local: Box::new(|lr: &xai_computer_hub_core::LocalRegistry| {
+                register_in_local: Box::new(|lr: &xai_tool_runtime::LocalRegistry| {
                     lr.register(T::default());
                 }),
             },
@@ -604,8 +604,8 @@ impl ToolRegistryBuilder {
     }
     /// Fully-qualified tool id (`"Grow:read_file"`) → declared
     /// [`ToolKind`], for every registered tool. Lets consumers that receive
-    /// kind-less tool configs (e.g. hub `session.bind` wire entries) backfill
-    /// the kind from the binary's own registry before capability filtering.
+    /// kind-less tool configs backfill the kind from the binary's own registry
+    /// before capability filtering.
     pub fn known_tool_kinds(&self) -> HashMap<String, ToolKind> {
         self.tools
             .iter()
@@ -715,7 +715,7 @@ impl ToolRegistryBuilder {
         }
         b
     }
-    pub fn with_local_registry(mut self, registry: xai_computer_hub_core::LocalRegistry) -> Self {
+    pub fn with_local_registry(mut self, registry: xai_tool_runtime::LocalRegistry) -> Self {
         self.shared_local_registry = Some(registry);
         self
     }
@@ -1205,7 +1205,7 @@ impl FinalizedToolset {
             )),
             resources_persistence: Arc::new(ResourcesPersistence::noop()),
             scheduler_cancel: None,
-            local_registry: xai_computer_hub_core::LocalRegistry::new(),
+            local_registry: xai_tool_runtime::LocalRegistry::new(),
             renderer: Arc::new(TemplateRenderer::new(
                 std::collections::HashMap::new(),
                 std::collections::HashMap::new(),
@@ -1214,7 +1214,7 @@ impl FinalizedToolset {
             workspace_viewer_ctx: None,
         }
     }
-    pub fn local_registry(&self) -> &xai_computer_hub_core::LocalRegistry {
+    pub fn local_registry(&self) -> &xai_tool_runtime::LocalRegistry {
         &self.local_registry
     }
     /// Get all tool definitions to send to the client.
@@ -2644,8 +2644,8 @@ mod tests {
             "lookup is by fully-qualified id, not the bare tool id"
         );
     }
-    /// Consumers backfill kinds onto kind-less pinned toolsets (hub
-    /// `session.bind` wire entries) from this map before capability
+    /// Consumers backfill kinds onto kind-less pinned toolsets from this map
+    /// before capability
     /// filtering; a wrong or missing kind here silently changes which
     /// tools a `capability_mode` keeps.
     #[test]
@@ -4160,9 +4160,9 @@ mod tests {
             .await
             .expect("finalize")
     }
-    /// list_dir through the hub dispatch path returns valid output.
+    /// list_dir through the local bridge returns valid output.
     #[tokio::test]
-    async fn hub_dispatch_list_dir() {
+    async fn local_bridge_dispatches_list_dir() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("hello.txt"), "world").unwrap();
         let bridge = grow_build_bridge(&tmp).await;
@@ -4180,20 +4180,19 @@ mod tests {
             result.prompt_text
         );
     }
-    /// Parity: list_dir through hub dispatch produces the same prompt_text
-    /// as the legacy path (FinalizedToolset::call).
+    /// Bridge dispatch produces the same prompt text as direct toolset calls.
     #[tokio::test]
-    async fn hub_dispatch_parity_list_dir() {
+    async fn local_bridge_matches_direct_toolset_call() {
         let tmp = TempDir::new().unwrap();
         let test_dir = tmp.path().join("testdir");
         std::fs::create_dir_all(&test_dir).unwrap();
         std::fs::write(test_dir.join("parity.txt"), "test").unwrap();
         let args = serde_json::json!({ "target_directory": test_dir.to_str().unwrap() });
-        let hub_bridge = grow_build_bridge(&tmp).await;
-        let hub_result = hub_bridge
-            .call("list_dir", args.clone(), "hub-call")
+        let local_bridge = grow_build_bridge(&tmp).await;
+        let local_result = local_bridge
+            .call("list_dir", args.clone(), "bridge-call")
             .await
-            .expect("hub call");
+            .expect("bridge call");
         let legacy_tmp = TempDir::new().unwrap();
         let legacy_test_dir = legacy_tmp.path().join("testdir");
         std::fs::create_dir_all(&legacy_test_dir).unwrap();
@@ -4215,17 +4214,17 @@ mod tests {
             .await
             .expect("legacy call");
         assert!(
-            hub_result.prompt_text.contains("parity.txt"),
-            "hub output should contain parity.txt"
+            local_result.prompt_text.contains("parity.txt"),
+            "bridge output should contain parity.txt"
         );
         assert!(
             legacy_result.prompt_text.contains("parity.txt"),
             "legacy output should contain parity.txt"
         );
     }
-    /// search_replace (a write tool) works through hub dispatch.
+    /// search_replace (a write tool) works through local bridge dispatch.
     #[tokio::test]
-    async fn hub_dispatch_search_replace() {
+    async fn local_bridge_dispatches_search_replace() {
         let tmp = TempDir::new().unwrap();
         let file = tmp.path().join("editable.txt");
         std::fs::write(&file, "hello world").unwrap();
@@ -4258,16 +4257,16 @@ mod tests {
         let contents = std::fs::read_to_string(&file).unwrap();
         assert_eq!(contents, "goodbye world");
     }
-    /// bash (run_terminal_cmd) works through hub dispatch.
+    /// bash (run_terminal_cmd) works through local bridge dispatch.
     #[tokio::test]
-    async fn hub_dispatch_bash() {
+    async fn local_bridge_dispatches_bash() {
         let tmp = TempDir::new().unwrap();
         let bridge = grow_build_bridge(&tmp).await;
         let result = bridge
             .call(
                 "run_terminal_cmd",
                 serde_json::json!({
-                    "command": "echo hub_dispatch_test_sentinel",
+                    "command": "echo local_dispatch_test_sentinel",
                     "description": "test"
                 }),
                 "bash-call",
@@ -4275,14 +4274,14 @@ mod tests {
             .await
             .expect("bash should succeed");
         assert!(
-            result.prompt_text.contains("hub_dispatch_test_sentinel"),
+            result.prompt_text.contains("local_dispatch_test_sentinel"),
             "bash output should contain sentinel, got: {}",
             result.prompt_text
         );
     }
-    /// Invalid arguments through hub dispatch produce an error (not a panic).
+    /// Invalid arguments through local dispatch produce an error (not a panic).
     #[tokio::test]
-    async fn hub_dispatch_invalid_args() {
+    async fn local_bridge_rejects_invalid_args() {
         let tmp = TempDir::new().unwrap();
         let bridge = grow_build_bridge(&tmp).await;
         let result = bridge.call("grep", serde_json::json!({}), "bad-call").await;

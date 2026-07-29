@@ -82,8 +82,6 @@ use tokio_util::sync::CancellationToken;
 use grow_paths::AbsPathBuf;
 use grow_workspace::session::git::GitDiscoveryResult;
 use xai_hunk_tracker::HunkTrackerActor;
-/// Hard-error message for legacy Direct hub-bind sessions (`grow/cloud_server_id`).
-pub(crate) const DIRECT_HUB_CLOUD_REMOVED_MSG: &str = "Direct hub cloud removed; use Gateway (envId or existing-workspace attach)";
 
 fn parse_agent_profile_from_meta(meta: Option<&acp::Meta>) -> Option<grow_agent::AgentDefinition> {
     let value = meta?.get("agentProfile")?;
@@ -129,17 +127,6 @@ fn apply_yolo_mode_to_matching_sessions(
         }
     }
     updated
-}
-/// Reject session `_meta` that still requests Direct hub bind (D8).
-///
-/// Shared by `new_session` / `load_session` via [`MvpAgent::spawn_and_register_session`].
-pub(crate) fn reject_direct_hub_cloud_meta(
-    session_meta: Option<&acp::Meta>,
-) -> Result<(), acp::Error> {
-    if session_meta.and_then(|m| m.get("grow/cloud_server_id")).is_some() {
-        return Err(acp::Error::invalid_params().data(DIRECT_HUB_CLOUD_REMOVED_MSG));
-    }
-    Ok(())
 }
 /// Marks a notification's meta field with `isReplay: true` for replayed session updates.
 /// If `persist_data` is provided, it will be included in the meta under `grow/persist`.
@@ -622,8 +609,6 @@ pub struct MvpAgent {
     /// because the inner `sync_bundle_to_root` now uses `spawn_blocking`.
     bundle_sync_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// Local workspace ops, built lazily via [`Self::ensure_local_workspace_ops`].
-    /// The agent never opens Computer Hub as a harness/client; remote cloud
-    /// sandboxes are gateway-owned (`gateway_bridge` / `computer_sessions`).
     workspace_ops: RefCell<Option<grow_workspace::WorkspaceOps>>,
     /// Sessions opened with `require_gateway` / chat light-frontend (K13).
     /// Prompt-time guard consults this when the bridge map entry is missing,

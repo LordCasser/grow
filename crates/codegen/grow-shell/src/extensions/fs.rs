@@ -153,9 +153,7 @@ async fn confine_local(
     session_id: Option<&acp::SessionId>,
 ) -> Result<(PathBuf, Option<PathBuf>), acp::Error> {
     let ops = agent.resolve_workspace_ops()?;
-    let handle = ops.workspace_handle().ok_or_else(|| {
-        acp::Error::internal_error().data("no local workspace handle for fs confinement")
-    })?;
+    let handle = ops.workspace_handle();
     let workspace_err = match handle.confine_to_workspace_root(path).await {
         Ok(confined) => return Ok(confined),
         Err(e) => e,

@@ -1,11 +1,10 @@
 //! Tool config resolution pipeline.
 //!
-//! Five-step resolution:
+//! Four-step resolution:
 //! 1. `effective_tool_config = config.tool_config.unwrap_or_else(|| parent.effective_tool_config.clone())`
 //! 2. `merged = merge_mcp_tools(effective_tool_config, shared.mcp_servers.snapshot())`
-//! 3. `merged = merge_hub_tools(merged, shared.hub_tools_snapshot())`
-//! 4. `filtered = config.capability_mode.filter(merged)`
-//! 5. `toolset = build_finalized_toolset(filtered, &session.cwd, &session.session_env, ...)`
+//! 3. `filtered = config.capability_mode.filter(merged)`
+//! 4. `toolset = build_finalized_toolset(filtered, &session.cwd, &session.session_env, ...)`
 use crate::capability::{CapabilityMode, kind_allowed};
 use crate::config::SessionContextFactory;
 use crate::error::{WorkspaceError, WorkspaceResult};
@@ -20,18 +19,15 @@ use std::sync::Arc;
 /// [`resolve_session_toolset_rebuild`] around a FRESH factory-built
 /// session-lifetime terminal backend, and return that backend so the caller
 /// can store it on the session it is creating. Session-less resolves (the
-/// `__template__` catalog resolve in `connect_hub`) also use this entry and
-/// simply drop the returned backend with the toolset.
 pub(crate) fn resolve_session_toolset(
     effective_tool_config: ToolServerConfig,
     capability_mode: CapabilityMode,
     mcp_snapshot: &[ToolConfig],
-    hub_snapshot: &[ToolConfig],
     cwd: PathBuf,
     session_env: Arc<HashMap<String, String>>,
     session_id: &str,
     factory: &dyn SessionContextFactory,
-    local_registry: Option<xai_computer_hub_core::LocalRegistry>,
+    local_registry: Option<xai_tool_runtime::LocalRegistry>,
     lsp: Option<std::sync::Arc<dyn grow_tools::implementations::lsp::LspBackend>>,
     viewer_ctx: Option<xai_tool_runtime::WorkspaceViewerContext>,
     notification_handle: Option<grow_tools::notification::types::ToolNotificationHandle>,
@@ -45,7 +41,6 @@ pub(crate) fn resolve_session_toolset(
         effective_tool_config,
         capability_mode,
         mcp_snapshot,
-        hub_snapshot,
         cwd,
         session_env,
         session_id,
@@ -66,9 +61,9 @@ pub(crate) fn resolve_session_toolset(
 ///
 /// Returns the *unmodified* `effective_tool_config` (step-1 baseline) so
 /// the caller can store it on the session. The FinalizedToolset reflects
-/// MCP + hub merging and capability filtering on top of that baseline.
+/// MCP merging and capability filtering on top of that baseline.
 ///
-/// **MCP-origin and hub-origin `kind: None` tools are dropped under
+/// **MCP-origin `kind: None` tools are dropped under
 /// every non-`All` mode.** Baseline `kind: None` tools are always kept —
 /// but before filtering, kind-less baseline entries whose id the binary's
 /// registry knows get their [`ToolKind`] backfilled (see
@@ -78,12 +73,11 @@ pub(crate) fn resolve_session_toolset_rebuild(
     effective_tool_config: ToolServerConfig,
     capability_mode: CapabilityMode,
     mcp_snapshot: &[ToolConfig],
-    hub_snapshot: &[ToolConfig],
     cwd: PathBuf,
     session_env: Arc<HashMap<String, String>>,
     session_id: &str,
     factory: &dyn SessionContextFactory,
-    local_registry: Option<xai_computer_hub_core::LocalRegistry>,
+    local_registry: Option<xai_tool_runtime::LocalRegistry>,
     lsp: Option<std::sync::Arc<dyn grow_tools::implementations::lsp::LspBackend>>,
     viewer_ctx: Option<xai_tool_runtime::WorkspaceViewerContext>,
     notification_handle: Option<grow_tools::notification::types::ToolNotificationHandle>,
@@ -94,24 +88,7 @@ pub(crate) fn resolve_session_toolset_rebuild(
         builder = builder.with_local_registry(lr);
     }
     let baseline = backfill_tool_kinds(&effective_tool_config, &builder.known_tool_kinds());
-    let filtered = merge_and_filter(
-        &baseline,
-        mcp_snapshot,
-        hub_snapshot,
-        capability_mode,
-        session_id,
-    );
-    let hub_ids: std::collections::HashSet<&str> =
-        hub_snapshot.iter().map(|t| t.id.as_str()).collect();
-    let finalize_config = ToolServerConfig {
-        tools: filtered
-            .tools
-            .iter()
-            .filter(|t| !hub_ids.contains(t.id.as_str()))
-            .cloned()
-            .collect(),
-        behavior_preset: filtered.behavior_preset.clone(),
-    };
+    let filtered = merge_and_filter(&baseline, mcp_snapshot, capability_mode, session_id);
     let mut ctx = factory.build_session_context(session_id, cwd, session_env, terminal_backend);
     if let Some(lsp_handle) = lsp {
         ctx.lsp = Some(lsp_handle);
@@ -121,7 +98,7 @@ pub(crate) fn resolve_session_toolset_rebuild(
     }
     let toolset = builder
         .finalize_with_trunc_config(
-            finalize_config,
+            filtered,
             ctx,
             grow_tools::types::context::TruncationConfig::default(),
             viewer_ctx,
@@ -157,22 +134,20 @@ fn backfill_tool_kinds(
         behavior_preset: config.behavior_preset.clone(),
     }
 }
-/// Steps 2-4 of the resolution pipeline, without step 5 (`finalize`):
+/// Steps 2-3 of the resolution pipeline, without finalization:
 ///
 /// - **Step 2** -- MCP merge: append MCP-origin tools, skipping ID/name collisions with baseline.
-/// - **Step 3** -- Hub merge: append hub-origin tools, skipping ID/name collisions with baseline or MCP.
-/// - **Step 4** -- Capability filter: drop tools whose `kind` is not allowed by the mode.
-///   External (MCP/hub) `kind: None` tools are only kept under `CapabilityMode::All`.
+/// - **Step 3** -- Capability filter: drop tools whose `kind` is not allowed by the mode.
+///   MCP tools with `kind: None` are only kept under `CapabilityMode::All`.
 ///
-/// Priority on ID/name collision: baseline wins > MCP wins > hub is skipped.
+/// Priority on ID/name collision: baseline wins over MCP.
 pub(crate) fn merge_and_filter(
     baseline: &ToolServerConfig,
     mcp_snapshot: &[ToolConfig],
-    hub_snapshot: &[ToolConfig],
     mode: CapabilityMode,
     session_id: &str,
 ) -> ToolServerConfig {
-    if mcp_snapshot.is_empty() && hub_snapshot.is_empty() {
+    if mcp_snapshot.is_empty() {
         return mode.filter(baseline);
     }
     let baseline_ids: std::collections::HashSet<&str> =
@@ -187,7 +162,6 @@ pub(crate) fn merge_and_filter(
         .collect();
     let mut tagged: Vec<(ToolConfig, bool)> =
         baseline.tools.iter().cloned().map(|t| (t, false)).collect();
-    let mut mcp_tool_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for mcp_tool in mcp_snapshot {
         if baseline_ids.contains(mcp_tool.id.as_str()) {
             tracing::warn!(
@@ -207,37 +181,7 @@ pub(crate) fn merge_and_filter(
             );
             continue;
         }
-        mcp_tool_ids.insert(mcp_tool.id.as_str());
         tagged.push((mcp_tool.clone(), true));
-    }
-    for hub_tool in hub_snapshot {
-        if baseline_ids.contains(hub_tool.id.as_str()) {
-            tracing::debug!(
-                hub_id = %hub_tool.id,
-                session = %session_id,
-                "skipping remote tool: id collides with baseline"
-            );
-            continue;
-        }
-        if mcp_tool_ids.contains(hub_tool.id.as_str()) {
-            tracing::debug!(
-                hub_id = %hub_tool.id,
-                session = %session_id,
-                "skipping remote tool: id collides with MCP tool"
-            );
-            continue;
-        }
-        let client_name = hub_tool.resolve_client_name(&hub_tool.id);
-        if !taken_names.insert(client_name.clone()) {
-            tracing::debug!(
-                hub_id = %hub_tool.id,
-                client_name = %client_name,
-                session = %session_id,
-                "skipping remote tool: resolved client name collides with another tool"
-            );
-            continue;
-        }
-        tagged.push((hub_tool.clone(), true));
     }
     let kept: Vec<ToolConfig> = tagged
         .into_iter()
@@ -253,8 +197,6 @@ pub(crate) fn merge_and_filter(
         behavior_preset: baseline.behavior_preset.clone(),
     }
 }
-/// Alias for backward compatibility.
-pub type NoopSessionContextFactory = WorkspaceSessionContextFactory;
 /// Whether per-session `tool_state.json` persistence + per-turn upload is
 /// enabled (`GROW_WORKSPACE_TOOL_STATE_ENABLED=true`; any other value keeps
 /// legacy behavior).
@@ -302,10 +244,7 @@ fn ensure_session_dir(root: &std::path::Path, session_id: &str) -> (PathBuf, std
 /// hazard is the global `environ` array, not the variable's value).
 #[cfg(test)]
 pub(crate) use crate::ENV_TEST_LOCK as TOOL_STATE_ENV_LOCK;
-/// [`SessionContextFactory`] for workspace server sessions.
-///
-/// When constructed with an [`AuthProvider`], hub-backed tools can use the
-/// provider's current OAuth token.
+/// [`SessionContextFactory`] for local workspace sessions.
 ///
 /// When [`with_tool_state_home`](Self::with_tool_state_home) is set, each
 /// session's [`SessionContext::state_path`] is rooted at
@@ -323,7 +262,6 @@ pub(crate) use crate::ENV_TEST_LOCK as TOOL_STATE_ENV_LOCK;
 /// [`build_session_context`]: crate::config::SessionContextFactory::build_session_context
 /// [`LocalTerminalBackend`]: grow_tools::computer::local::LocalTerminalBackend
 pub struct WorkspaceSessionContextFactory {
-    auth: Option<xai_computer_hub_sdk::SharedAuthProvider>,
     /// Resolved `$GROW_WORKSPACE_HOME` when tool-state persistence is enabled;
     /// `None` disables it. Resolved once by the caller so the factory performs
     /// no per-build env reads.
@@ -337,14 +275,6 @@ impl Default for WorkspaceSessionContextFactory {
 impl WorkspaceSessionContextFactory {
     pub fn new() -> Self {
         Self {
-            auth: None,
-            tool_state_home: None,
-        }
-    }
-    /// Factory with auth for tools that access the connected computer hub.
-    pub fn with_auth(auth: xai_computer_hub_sdk::SharedAuthProvider) -> Self {
-        Self {
-            auth: Some(auth),
             tool_state_home: None,
         }
     }
@@ -570,7 +500,6 @@ mod tests {
             baseline,
             CapabilityMode::ReadWrite,
             &[],
-            &[],
             cwd,
             empty_env(),
             "main",
@@ -604,7 +533,6 @@ mod tests {
             baseline,
             CapabilityMode::ReadWrite,
             &snapshot,
-            &[],
             PathBuf::from("/tmp"),
             empty_env(),
             "main",
@@ -685,7 +613,6 @@ mod tests {
             baseline,
             CapabilityMode::ReadOnly,
             &[],
-            &[],
             PathBuf::from("/tmp"),
             empty_env(),
             "main",
@@ -722,13 +649,7 @@ mod tests {
             behavior_preset: None,
         };
         let mcp_edit = test_support::tc("mcp.editor", Some(ToolKind::Edit));
-        let filtered = merge_and_filter(
-            &baseline,
-            &[mcp_edit],
-            &[],
-            CapabilityMode::ReadOnly,
-            "test",
-        );
+        let filtered = merge_and_filter(&baseline, &[mcp_edit], CapabilityMode::ReadOnly, "test");
         assert!(!filtered.tools.iter().any(|t| t.id == "mcp.editor"));
     }
     #[tokio::test]
@@ -742,13 +663,7 @@ mod tests {
             behavior_preset: None,
         };
         let mcp = vec![test_support::tc("mcp.opaque", None)];
-        let filtered = merge_and_filter(
-            &baseline,
-            &mcp,
-            &[],
-            CapabilityMode::ReadOnly,
-            "test_session",
-        );
+        let filtered = merge_and_filter(&baseline, &mcp, CapabilityMode::ReadOnly, "test_session");
         let kept_ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
         assert!(
             kept_ids.contains(&"baseline.opaque"),
@@ -771,7 +686,7 @@ mod tests {
             behavior_preset: None,
         };
         let mcp = vec![test_support::tc("mcp.opaque", None)];
-        let filtered = merge_and_filter(&baseline, &mcp, &[], CapabilityMode::All, "test_session");
+        let filtered = merge_and_filter(&baseline, &mcp, CapabilityMode::All, "test_session");
         let kept_ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
         assert!(
             kept_ids.contains(&"mcp.opaque"),
@@ -789,13 +704,7 @@ mod tests {
         let mut mcp_b = test_support::tc("mcp.tool_b", Some(ToolKind::Read));
         mcp_b.name_override = Some("shared_name".into());
         let mcp = vec![mcp_a, mcp_b];
-        let filtered = merge_and_filter(
-            &baseline,
-            &mcp,
-            &[],
-            CapabilityMode::ReadOnly,
-            "test_session",
-        );
+        let filtered = merge_and_filter(&baseline, &mcp, CapabilityMode::ReadOnly, "test_session");
         let ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
         assert!(ids.contains(&"mcp.tool_a"), "first wins: {ids:?}");
         assert!(
@@ -803,96 +712,6 @@ mod tests {
             "duplicate name dropped: {ids:?}"
         );
     }
-    #[test]
-    fn hub_tool_merged_into_empty_baseline() {
-        let baseline = ToolServerConfig {
-            tools: vec![],
-            behavior_preset: None,
-        };
-        let hub = vec![test_support::tc("hub:remote_exec", None)];
-        let filtered = merge_and_filter(&baseline, &[], &hub, CapabilityMode::All, "test");
-        let ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(
-            ids.contains(&"hub:remote_exec"),
-            "remote tool should appear under All mode: {ids:?}"
-        );
-    }
-    #[test]
-    fn hub_tool_dropped_under_readonly_because_kind_none() {
-        let baseline = ToolServerConfig {
-            tools: vec![test_support::tc("Grow:read_file", Some(ToolKind::Read))],
-            behavior_preset: None,
-        };
-        let hub = vec![test_support::tc("hub:remote_exec", None)];
-        let filtered = merge_and_filter(&baseline, &[], &hub, CapabilityMode::ReadOnly, "test");
-        let ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(
-            !ids.contains(&"hub:remote_exec"),
-            "hub kind: None MUST be dropped under ReadOnly: {ids:?}"
-        );
-    }
-    #[test]
-    fn hub_tool_dedup_baseline_wins() {
-        let baseline = ToolServerConfig {
-            tools: vec![test_support::tc("hub:read_file", Some(ToolKind::Read))],
-            behavior_preset: None,
-        };
-        let hub = vec![test_support::tc("hub:read_file", None)];
-        let filtered = merge_and_filter(&baseline, &[], &hub, CapabilityMode::All, "test");
-        let count = filtered
-            .tools
-            .iter()
-            .filter(|t| t.id == "hub:read_file")
-            .count();
-        assert_eq!(count, 1, "duplicate should be deduped");
-    }
-    #[test]
-    fn hub_tool_dedup_mcp_wins_over_hub() {
-        let baseline = ToolServerConfig {
-            tools: vec![],
-            behavior_preset: None,
-        };
-        let mcp = vec![test_support::tc("hub:shared_tool", Some(ToolKind::Read))];
-        let hub = vec![test_support::tc("hub:shared_tool", None)];
-        let filtered = merge_and_filter(&baseline, &mcp, &hub, CapabilityMode::All, "test");
-        let count = filtered
-            .tools
-            .iter()
-            .filter(|t| t.id == "hub:shared_tool")
-            .count();
-        assert_eq!(count, 1, "MCP wins; hub duplicate skipped");
-        let tool = filtered
-            .tools
-            .iter()
-            .find(|t| t.id == "hub:shared_tool")
-            .unwrap();
-        assert_eq!(tool.kind, Some(ToolKind::Read));
-    }
-    #[test]
-    fn hub_tool_name_collision_with_baseline_skipped() {
-        let baseline = ToolServerConfig {
-            tools: vec![test_support::tc("Grow:read_file", Some(ToolKind::Read))],
-            behavior_preset: None,
-        };
-        let mut hub_tool = test_support::tc("hub:read_file_v2", None);
-        hub_tool.name_override = Some("read_file".into());
-        let hub = vec![hub_tool];
-        let filtered = merge_and_filter(&baseline, &[], &hub, CapabilityMode::All, "test");
-        let ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
-        assert!(
-            !ids.contains(&"hub:read_file_v2"),
-            "remote tool with colliding client name must be skipped: {ids:?}"
-        );
-    }
-    #[test]
-    fn empty_hub_snapshot_is_noop() {
-        let baseline = test_support::baseline_config();
-        let baseline_ids: Vec<String> = baseline.tools.iter().map(|t| t.id.clone()).collect();
-        let filtered = merge_and_filter(&baseline, &[], &[], CapabilityMode::ReadWrite, "test");
-        let filtered_ids: Vec<String> = filtered.tools.iter().map(|t| t.id.clone()).collect();
-        assert_eq!(filtered_ids, baseline_ids);
-    }
-    /// Only the literal `"true"` enables tool-state persistence.
     #[test]
     fn tool_state_enabled_only_true_enables() {
         let _guard = super::TOOL_STATE_ENV_LOCK
@@ -1047,7 +866,6 @@ mod tests {
             test_support::baseline_config(),
             CapabilityMode::ReadWrite,
             &[],
-            &[],
             cwd.clone(),
             empty_env(),
             "sess-A",
@@ -1068,7 +886,6 @@ mod tests {
         let (_eff, ts_b, _backend_b) = resolve_session_toolset(
             test_support::baseline_config(),
             CapabilityMode::ReadWrite,
-            &[],
             &[],
             cwd.clone(),
             empty_env(),
@@ -1093,7 +910,6 @@ mod tests {
         let (_eff, ts_c, _backend_c) = resolve_session_toolset(
             test_support::baseline_config(),
             CapabilityMode::ReadWrite,
-            &[],
             &[],
             cwd,
             empty_env(),

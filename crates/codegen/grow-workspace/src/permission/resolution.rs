@@ -286,7 +286,7 @@ fn managed_config_permissions(
 /// `project_trusted` gates project-tier `.claude/settings.json` and
 /// `.grow/config.toml` permission rules (mirrors [`load_claude_env_with_project`]).
 /// Global/user/admin tiers always load. Callers pass the folder-trust bridge
-/// verdict for local sessions; hub/cloud defaults trusted.
+/// verdict for local sessions.
 pub async fn resolve_permission_config_with_fallback(
     cwd: &Path,
     project_trusted: bool,

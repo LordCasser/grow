@@ -52,7 +52,6 @@ serde_path_to_error = { workspace = true }
 xai-tool-runtime = { workspace = true }
 xai-tool-types = { workspace = true }
 xai-tool-protocol = { workspace = true }
-xai-computer-hub-core = { workspace = true }
 
 futures = { workspace = true }
 similar = { workspace = true }

@@ -225,7 +225,7 @@ pub(crate) async fn stat(ws: &WorkspaceHandle, req: &FsStatReq) -> WorkspaceResu
             });
         }
         Err(e) => {
-            return Err(WorkspaceError::HubError(format!(
+            return Err(WorkspaceError::Operation(format!(
                 "stat failed for {}: {e}",
                 req.path
             )));
@@ -249,7 +249,7 @@ pub(crate) async fn stat(ws: &WorkspaceHandle, req: &FsStatReq) -> WorkspaceResu
             let (hash, _, _) = crate::handle::stream_hash_and_range(&abs, 0, 0)
                 .await
                 .map_err(|e| {
-                    WorkspaceError::HubError(format!("hash failed for {}: {e}", req.path))
+                    WorkspaceError::Operation(format!("hash failed for {}: {e}", req.path))
                 })?;
             if let Some(m) = mtime_ms {
                 memo.store(&abs, size, m, hash.clone());
@@ -282,10 +282,10 @@ pub(crate) async fn read_file(
 ) -> WorkspaceResult<FsReadFileRes> {
     let abs = resolve(ws, &req.path).await?;
     let read_err =
-        |e: std::io::Error| WorkspaceError::HubError(format!("read failed for {}: {e}", req.path));
+        |e: std::io::Error| WorkspaceError::Operation(format!("read failed for {}: {e}", req.path));
     let md = tokio::fs::metadata(&abs).await.map_err(read_err)?;
     if md.is_dir() {
-        return Err(WorkspaceError::HubError(format!(
+        return Err(WorkspaceError::Operation(format!(
             "not a file: {}",
             req.path
         )));
@@ -707,7 +707,7 @@ mod tests {
             )
             .await
             .expect_err("escape must be rejected");
-            assert!(matches!(err, WorkspaceError::HubError(_)), "{err:?}");
+            assert!(matches!(err, WorkspaceError::Operation(_)), "{err:?}");
         }
     }
 

@@ -1,34 +1,145 @@
-//! In-process registry used by Grow's local tool dispatcher.
-//!
-//! The registry owns type-erased tool handles and never opens a socket or
-//! performs remote discovery. Entries preserve registration order so the
-//! model-facing tool list remains deterministic.
+//! In-process tool registry and type-erased dispatch.
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use futures::StreamExt;
 use indexmap::IndexMap;
 use parking_lot::RwLock;
 use serde_json::Value;
-use xai_tool_protocol::ToolId;
-use xai_tool_runtime::{ListToolsContext, Tool, ToolCallContext, ToolStream, TypedToolOutput};
+use xai_tool_protocol::{ToolCapabilities, ToolId};
 use xai_tool_types::ToolDescription;
 
-use crate::{ErasedTool, ToolHandle};
+use crate::{
+    ListToolsContext, ModelOutputExtractor, Tool, ToolCallContext, ToolError, ToolOutput,
+    ToolStream, ToolStreamItem, TypedToolOutput, extractor_for, terminal_only,
+};
 
-/// Extracts model-facing content from a typed tool result.
-pub type ModelOutputExtractor =
-    Arc<dyn Fn(&Value) -> Option<Vec<xai_tool_runtime::ContentBlock>> + Send + Sync>;
+#[async_trait]
+pub trait ToolHandle: Send + Sync + std::fmt::Debug {
+    /// Stable identity used by the router to route calls.
+    fn id(&self) -> ToolId;
 
-/// Build a type-safe model-output extractor for a tool output type.
-pub fn extractor_for<T>() -> ModelOutputExtractor
+    /// Model-facing description of the tool's argument schema.
+    ///
+    /// Receives the per-turn [`ListToolsContext`] so handles backed by a
+    /// typed [`Tool`] can produce context-aware descriptions at listing
+    /// time. Callers outside a listing turn pass
+    /// [`ListToolsContext::default`].
+    fn description(&self, ctx: &ListToolsContext) -> ToolDescription;
+
+    /// Per-tool capability flags.
+    fn capabilities(&self) -> ToolCapabilities;
+
+    /// Per-turn listing predicate.
+    fn should_list(&self, _ctx: &ListToolsContext) -> bool {
+        true
+    }
+
+    /// Streaming execution entry point.
+    ///
+    /// Implementations encode the tool's typed `Output` to
+    /// [`serde_json::Value`] and surface argument-decoding failures as
+    /// [`ToolError::InvalidArguments`] within the terminal item.
+    async fn execute(&self, ctx: ToolCallContext, args: Value) -> ToolStream<TypedToolOutput>;
+}
+
+/// Type-erasing wrapper for any [`Tool`] implementation.
+///
+/// Decodes `args` into `T::Args`, drives `T::execute`, and re-encodes each
+/// `T::Output` (terminal and progress items pass through unchanged
+/// otherwise). The wrapper holds the inner tool by `Arc` so the same
+/// underlying instance can back multiple registrations cheaply.
+pub struct ErasedTool<T> {
+    inner: Arc<T>,
+}
+
+impl<T> ErasedTool<T> {
+    /// Wrap an `Arc<T>` for use as an [`ToolHandle`].
+    pub fn from_arc(inner: Arc<T>) -> Self {
+        Self { inner }
+    }
+
+    /// Wrap an owned tool, taking the `Arc` allocation internally.
+    pub fn new(inner: T) -> Self {
+        Self::from_arc(Arc::new(inner))
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for ErasedTool<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ErasedTool")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<T> Clone for ErasedTool<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+#[async_trait]
+impl<T> ToolHandle for ErasedTool<T>
 where
-    T: xai_tool_runtime::ToolOutput + serde::de::DeserializeOwned + 'static,
+    T: Tool + std::fmt::Debug + 'static,
+    T::Output: ToolOutput,
 {
-    Arc::new(|value: &Value| {
-        serde_json::from_value::<T>(value.clone())
-            .ok()
-            .map(|output| output.model_output().to_vec())
-    })
+    fn id(&self) -> ToolId {
+        self.inner.id()
+    }
+
+    fn description(&self, ctx: &ListToolsContext) -> ToolDescription {
+        self.inner.description(ctx)
+    }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn should_list(&self, ctx: &ListToolsContext) -> bool {
+        self.inner.should_list(ctx)
+    }
+
+    async fn execute(&self, ctx: ToolCallContext, args: Value) -> ToolStream<TypedToolOutput> {
+        let typed_args: T::Args = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => {
+                return terminal_only(Err(ToolError::invalid_arguments(e.to_string())));
+            }
+        };
+        let tool_id = self.inner.id();
+        let stream = self.inner.execute(ctx, typed_args).await;
+        let mapped = stream.map(move |item| match item {
+            ToolStreamItem::Progress(p) => ToolStreamItem::Progress(p),
+            ToolStreamItem::Terminal(Ok(out)) => match serde_json::to_value(&out) {
+                Ok(value) => {
+                    let custom = out.model_output();
+                    let model_output = if custom.is_empty() {
+                        crate::extract_content_blocks(&value)
+                    } else {
+                        custom
+                    };
+                    let chat_completion_output = out.chat_completion_output();
+                    ToolStreamItem::Terminal(Ok(TypedToolOutput {
+                        tool_id: tool_id.clone(),
+                        value,
+                        model_output,
+                        chat_completion_output,
+                    }))
+                }
+                Err(e) => ToolStreamItem::Terminal(Err(ToolError::custom(
+                    "output_encoding",
+                    e.to_string(),
+                ))),
+            },
+            ToolStreamItem::Terminal(Err(err)) => ToolStreamItem::Terminal(Err(err)),
+        });
+        Box::pin(mapped)
+    }
 }
 
 #[derive(Default)]
@@ -74,10 +185,7 @@ impl LocalRegistry {
         self.state.write().entries.insert(id, handle)
     }
 
-    pub fn register_dyn(
-        &self,
-        tool: Arc<dyn xai_tool_runtime::ToolDyn>,
-    ) -> Option<Arc<dyn ToolHandle>> {
+    pub fn register_dyn(&self, tool: Arc<dyn crate::ToolDyn>) -> Option<Arc<dyn ToolHandle>> {
         let id = tool.id();
         let handle: Arc<dyn ToolHandle> = Arc::new(DynToolAdapter(tool));
         self.state.write().entries.insert(id, handle)
@@ -86,7 +194,7 @@ impl LocalRegistry {
     pub fn register_with_model_output<T>(&self, tool: T) -> Option<Arc<dyn ToolHandle>>
     where
         T: Tool + std::fmt::Debug + 'static,
-        T::Output: xai_tool_runtime::ToolOutput + serde::de::DeserializeOwned + 'static,
+        T::Output: crate::ToolOutput + serde::de::DeserializeOwned + 'static,
     {
         let id = tool.id();
         self.register_extractor(id, extractor_for::<T::Output>());
@@ -135,7 +243,7 @@ impl LocalRegistry {
         &self,
         tool_id: &ToolId,
         output: &Value,
-    ) -> Option<Vec<xai_tool_runtime::ContentBlock>> {
+    ) -> Option<Vec<crate::ContentBlock>> {
         let extractor = self.state.read().extractors.get(tool_id).cloned()?;
         extractor(output)
     }
@@ -151,7 +259,7 @@ impl LocalRegistry {
     }
 }
 
-struct DynToolAdapter(Arc<dyn xai_tool_runtime::ToolDyn>);
+struct DynToolAdapter(Arc<dyn crate::ToolDyn>);
 
 impl std::fmt::Debug for DynToolAdapter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -187,9 +295,9 @@ impl ToolHandle for DynToolAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ToolError, ToolOutput};
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
-    use xai_tool_runtime::{ToolError, ToolOutput};
 
     #[derive(Debug, Deserialize, JsonSchema)]
     struct Args {

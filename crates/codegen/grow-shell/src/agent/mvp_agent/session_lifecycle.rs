@@ -411,7 +411,7 @@ impl MvpAgent {
                 .workspace_ops
                 .borrow()
                 .as_ref()
-                .and_then(|ops| ops.workspace_handle().map(|h| h.session_count())),
+                .map(|ops| ops.workspace_handle().session_count()),
         }
     }
 }

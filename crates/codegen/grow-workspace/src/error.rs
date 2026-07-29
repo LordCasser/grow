@@ -38,18 +38,14 @@ pub enum WorkspaceError {
     InvalidHunkAction(String),
     #[error("hunk action failed: {0}")]
     HunkActionFailed(String),
-    /// An error from the server connection or tool server.
-    #[error("hub error: {0}")]
-    HubError(String),
+    /// An internal workspace operation failed.
+    #[error("workspace operation failed: {0}")]
+    Operation(String),
     #[error("github export error: {message}")]
     ExportGithub {
         kind: grow_workspace_types::rpc::export_github::ExportGithubError,
         message: String,
     },
-    /// The workspace is draining/shutting down and is no longer accepting new
-    /// sessions. Surfaced when a `bind`/create races a terminal drain.
-    #[error("workspace is shutting down; not accepting new sessions")]
-    ShuttingDown,
     /// The session's toolset is externally owned — installed by a local
     /// (shell) bind, its `Terminal` resource is not the session-owned
     /// backend — so an RPC-driven toolset mutation is refused instead of
@@ -76,9 +72,8 @@ impl WorkspaceError {
             Self::JoinError(_) => "join_error",
             Self::InvalidHunkAction(_) => "invalid_hunk_action",
             Self::HunkActionFailed(_) => "hunk_action_failed",
-            Self::HubError(_) => "hub_error",
+            Self::Operation(_) => "operation",
             Self::ExportGithub { kind, .. } => kind.wire_code(),
-            Self::ShuttingDown => "shutting_down",
             Self::ToolsetExternallyOwned(_) => "toolset_externally_owned",
         }
     }
@@ -90,7 +85,7 @@ mod tests {
     use super::WorkspaceError;
     #[test]
     fn metric_kind_is_message_free() {
-        let err = WorkspaceError::HubError("something wildly unique 12345".into());
-        assert_eq!(err.metric_kind(), "hub_error");
+        let err = WorkspaceError::Operation("something wildly unique 12345".into());
+        assert_eq!(err.metric_kind(), "operation");
     }
 }

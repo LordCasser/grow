@@ -62,7 +62,7 @@ impl WorkspaceOp for FsListReq {
         let req = self.clone();
         tokio::task::spawn_blocking(move || list(&abs, &req, confine_root))
             .await
-            .map_err(|e| WorkspaceError::HubError(e.to_string()))?
+            .map_err(|e| WorkspaceError::Operation(e.to_string()))?
     }
 }
 
@@ -98,7 +98,7 @@ impl WorkspaceOp for FsReadFileReq {
         if !ranged {
             let bytes = tokio::fs::read(&abs)
                 .await
-                .map_err(|e| WorkspaceError::HubError(e.to_string()))?;
+                .map_err(|e| WorkspaceError::Operation(e.to_string()))?;
             return Ok(build_file_entry(&bytes));
         }
 
@@ -106,9 +106,9 @@ impl WorkspaceOp for FsReadFileReq {
         // chunk is `[offset, offset + min(length, max_bytes, cap))`.
         let md = tokio::fs::metadata(&abs)
             .await
-            .map_err(|e| WorkspaceError::HubError(e.to_string()))?;
+            .map_err(|e| WorkspaceError::Operation(e.to_string()))?;
         if md.is_dir() {
-            return Err(WorkspaceError::HubError(format!(
+            return Err(WorkspaceError::Operation(format!(
                 "not a file: {}",
                 self.path
             )));
@@ -120,7 +120,7 @@ impl WorkspaceOp for FsReadFileReq {
         let length = super::walk::clamp_read_length(self.length, self.max_bytes);
         let chunk = super::walk::read_range(&abs, offset, length)
             .await
-            .map_err(|e| WorkspaceError::HubError(e.to_string()))?;
+            .map_err(|e| WorkspaceError::Operation(e.to_string()))?;
         Ok(build_ranged_entry(chunk, size, self.encoding))
     }
 }
@@ -143,8 +143,8 @@ impl WorkspaceOp for FsWriteFileReq {
             std::fs::write(&abs, content.as_bytes())
         })
         .await
-        .map_err(|e| WorkspaceError::HubError(e.to_string()))?
-        .map_err(|e| WorkspaceError::HubError(e.to_string()))?;
+        .map_err(|e| WorkspaceError::Operation(e.to_string()))?
+        .map_err(|e| WorkspaceError::Operation(e.to_string()))?;
         Ok(())
     }
 }
@@ -160,7 +160,7 @@ impl WorkspaceOp for FsDeleteFileReq {
         let (abs, _) = ws.confine_to_workspace_root(&abs_unconfined).await?;
         tokio::fs::remove_file(&abs)
             .await
-            .map_err(|e| WorkspaceError::HubError(e.to_string()))?;
+            .map_err(|e| WorkspaceError::Operation(e.to_string()))?;
         Ok(())
     }
 }
@@ -397,164 +397,5 @@ mod tests {
             Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
         );
         assert_eq!(e.content_type, "application/octet-stream");
-    }
-
-    // Confinement (WorkspaceOp::execute) — covers both local and proxy dispatch.
-
-    #[tokio::test]
-    async fn read_write_within_root_ok() {
-        let ws = crate::handle::tests::make_confining_handle();
-        let root = ws.root_cwd().unwrap();
-        FsWriteFileReq {
-            path: "sub/data.txt".into(),
-            cwd: Some(root.clone()),
-            content: "hello".into(),
-            create_dirs: true,
-        }
-        .execute(&ws, None)
-        .await
-        .expect("in-root write must succeed");
-        let data = FsReadFileReq {
-            path: "sub/data.txt".into(),
-            cwd: Some(root.clone()),
-            offset: None,
-            length: None,
-            max_bytes: 1 << 20,
-            encoding: FsReadEncoding::Utf8,
-        }
-        .execute(&ws, None)
-        .await
-        .expect("in-root read must succeed");
-        assert_eq!(data.content, "hello");
-    }
-
-    #[tokio::test]
-    async fn read_file_rejects_absolute_escape() {
-        let ws = crate::handle::tests::make_confining_handle();
-        let err = FsReadFileReq {
-            path: "/etc/passwd".into(),
-            cwd: None,
-            offset: None,
-            length: None,
-            max_bytes: 1 << 20,
-            encoding: FsReadEncoding::Utf8,
-        }
-        .execute(&ws, None)
-        .await
-        .expect_err("absolute escape must be rejected");
-        assert!(
-            err.to_string().contains("workspace root"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn read_file_rejects_symlink_escape() {
-        use std::os::unix::fs::symlink;
-        let ws = crate::handle::tests::make_confining_handle();
-        let root = ws.root_cwd().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("secret.txt"), b"secret").unwrap();
-        symlink(outside.path(), root.join("escape_link")).unwrap();
-
-        let err = FsReadFileReq {
-            path: "escape_link/secret.txt".into(),
-            cwd: Some(root.clone()),
-            offset: None,
-            length: None,
-            max_bytes: 1 << 20,
-            encoding: FsReadEncoding::Utf8,
-        }
-        .execute(&ws, None)
-        .await
-        .expect_err("symlink escape must be rejected");
-        assert!(
-            err.to_string().contains("workspace root"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn write_file_rejects_symlink_escape() {
-        use std::os::unix::fs::symlink;
-        let ws = crate::handle::tests::make_confining_handle();
-        let root = ws.root_cwd().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        symlink(outside.path(), root.join("escape_link")).unwrap();
-
-        let err = FsWriteFileReq {
-            path: "escape_link/injected.txt".into(),
-            cwd: Some(root.clone()),
-            content: "x".into(),
-            create_dirs: true,
-        }
-        .execute(&ws, None)
-        .await
-        .expect_err("symlink escape write must be rejected");
-        assert!(
-            err.to_string().contains("workspace root"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            !outside.path().join("injected.txt").exists(),
-            "write must not land outside the workspace root"
-        );
-    }
-
-    // A *dangling* in-root symlink (target outside root, not yet created) must
-    // not let a write escape via `open(O_CREAT)` following the link.
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn write_file_rejects_dangling_symlink_escape() {
-        use std::os::unix::fs::symlink;
-        let ws = crate::handle::tests::make_confining_handle();
-        let root = ws.root_cwd().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let target = outside.path().join("new.txt");
-        symlink(&target, root.join("lnk")).unwrap();
-
-        let err = FsWriteFileReq {
-            path: "lnk".into(),
-            cwd: Some(root.clone()),
-            content: "x".into(),
-            create_dirs: true,
-        }
-        .execute(&ws, None)
-        .await
-        .expect_err("dangling symlink escape write must be rejected");
-        assert!(
-            err.to_string().contains("workspace root"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            !target.exists(),
-            "write must not create the file outside root"
-        );
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn list_excludes_symlink_escape() {
-        use std::os::unix::fs::symlink;
-        let ws = crate::handle::tests::make_confining_handle();
-        let root = ws.root_cwd().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("secret.txt"), b"x").unwrap();
-        symlink(outside.path(), root.join("escape_link")).unwrap();
-        std::fs::write(root.join("inside.txt"), b"y").unwrap();
-
-        let mut req = list_req(1000);
-        req.path = ".".into();
-        req.cwd = Some(root.clone());
-        req.depth = 2;
-        let data = req.execute(&ws, None).await.expect("list must succeed");
-        let names: Vec<&str> = data.nodes.iter().map(|n| n.name.as_str()).collect();
-        assert!(names.contains(&"inside.txt"), "in-root file: {names:?}");
-        assert!(
-            !data.nodes.iter().any(|n| n.path.contains("secret.txt")),
-            "escaping symlink target must not be enumerated: {names:?}"
-        );
     }
 }

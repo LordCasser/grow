@@ -1163,63 +1163,21 @@ fn session_grant_pre_decision(
     }
 }
 
-/// Spawns the permission manager actor, returning a handle and the diagnostics
-/// event receiver.
+/// Spawns the local permission manager actor, returning a handle and the
+/// diagnostics event receiver.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_permission_manager(
     session_id: acp::SessionId,
     gateway: GatewaySender,
     cwd: AbsPathBuf,
     client_type: ClientType,
-    // Permission policy from config; None loads from global Config.
-    permission_config: Option<crate::permission::types::PermissionConfig>,
-    // Grep Read-deny globs, stored on the handle for subagents to inherit.
-    deny_read_globs: Vec<String>,
-    // web_fetch allowlist from the resolved `WebFetchConfig`; empty when disabled.
-    web_fetch_allowed_domains: Vec<String>,
-    initial_yolo: bool,
-    client_identifier: Option<String>,
-) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
-    spawn_permission_manager_with_hub(
-        session_id,
-        gateway,
-        cwd,
-        client_type,
-        permission_config,
-        deny_read_globs,
-        web_fetch_allowed_domains,
-        initial_yolo,
-        client_identifier,
-        // Legacy/test entry point: preserve the full option set. Production uses
-        // `spawn_permission_manager_with_hub` with the resolved gate.
-        true,
-        None,
-    )
-}
-
-/// Like [`spawn_permission_manager`] but routes the permission prompt to chat
-/// over the server (the HITL live path) when `hub_permission` is `Some`. The
-/// caller builds the transport only when [`hitl_permission_live_enabled`] and a
-/// server is connected; `None` keeps the local ACP prompt.
-///
-/// [`hitl_permission_live_enabled`]: crate::permission::hitl_permission_live_enabled
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_permission_manager_with_hub(
-    session_id: acp::SessionId,
-    gateway: GatewaySender,
-    cwd: AbsPathBuf,
-    client_type: ClientType,
     permission_config: Option<crate::permission::types::PermissionConfig>,
     deny_read_globs: Vec<String>,
     web_fetch_allowed_domains: Vec<String>,
     initial_yolo: bool,
     client_identifier: Option<String>,
-    // Resolved `remember_tool_approvals` gate: shows the per-tool always-allow
-    // options and lets an explicit grant satisfy an `ask` rule (ask once, remember).
     remember_tool_approvals: bool,
-    hub_permission: Option<Arc<dyn crate::permission::PermissionHookTransport>>,
 ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
-    // Read the pin ONCE (file I/O) and cache it; never re-read per tool-call.
-    // Every yolo ingestion path funnels through construction or SetYoloMode.
     spawn_permission_manager_with_pin(
         session_id,
         gateway,
@@ -1232,10 +1190,8 @@ pub fn spawn_permission_manager_with_hub(
         client_identifier,
         remember_tool_approvals,
         crate::permission::resolution::yolo_disabled_by_policy(),
-        hub_permission,
     )
 }
-
 /// `yolo_pin` threaded for testability; production passes the live pin.
 #[allow(clippy::too_many_arguments)]
 fn spawn_permission_manager_with_pin(
@@ -1250,7 +1206,6 @@ fn spawn_permission_manager_with_pin(
     client_identifier: Option<String>,
     remember_tool_approvals: bool,
     yolo_pin: Option<&'static str>,
-    hub_permission: Option<Arc<dyn crate::permission::PermissionHookTransport>>,
 ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
     let (tx, mut rx) = mpsc::unbounded_channel::<PermissionCommand>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<PermissionEvent>();
@@ -1314,7 +1269,6 @@ fn spawn_permission_manager_with_pin(
         }
 
         let prompter = AcpPrompter::new(session_id.clone(), gateway.clone(), client_type)
-            .with_hub_permission(hub_permission)
             .with_remember_tool_approvals(remember_tool_approvals);
         let mut yolo_mode = initial_yolo;
         let mut auto_mode = seed_auto;
@@ -2416,7 +2370,6 @@ mod tests {
             None,
             true,
             yolo_pin,
-            None,
         )
     }
 
@@ -2437,7 +2390,6 @@ mod tests {
             initial_yolo,
             None,
             true,
-            None,
             None,
         )
     }
@@ -2506,316 +2458,6 @@ mod tests {
             .await;
     }
 
-    /// Like [`test_manager`] but routes prompts through a hub permission transport.
-    fn test_manager_with_hub(
-        cwd: &AbsPathBuf,
-        hub_permission: Arc<dyn crate::permission::PermissionHookTransport>,
-    ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        spawn_permission_manager_with_pin(
-            acp::SessionId::new(Arc::from("test-session")),
-            GatewaySender::new(tx),
-            cwd.clone(),
-            ClientType::Generic,
-            None,
-            vec![],
-            vec![],
-            false,
-            None,
-            true,
-            None,
-            Some(hub_permission),
-        )
-    }
-
-    /// Records every emitted payload and replies with a canned decision, so the
-    /// hub permission prompt path is exercised without a live hub.
-    struct FakeHubTransport {
-        reply: serde_json::Value,
-        seen: std::sync::Mutex<Vec<serde_json::Value>>,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::permission::PermissionHookTransport for FakeHubTransport {
-        async fn request_permission(
-            &self,
-            payload: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            self.seen.lock().unwrap().push(payload);
-            Ok(self.reply.clone())
-        }
-    }
-
-    fn fake_hub(reply: serde_json::Value) -> Arc<FakeHubTransport> {
-        Arc::new(FakeHubTransport {
-            reply,
-            seen: std::sync::Mutex::new(Vec::new()),
-        })
-    }
-
-    #[tokio::test]
-    async fn hub_permission_approve_allows_and_emits_payload() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let tmp = tempfile::tempdir().unwrap();
-                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let transport = fake_hub(serde_json::json!({ "outcome": "approve" }));
-                let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
-                let d = mgr
-                    .request(
-                        AccessKind::Edit("src/main.rs".into()),
-                        tool_call(),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-                assert_eq!(d, Decision::Allow);
-                let seen = transport.seen.lock().unwrap();
-                assert_eq!(seen.len(), 1, "exactly one permission hook emitted");
-                assert_eq!(seen[0]["tool_call_id"], "tc");
-                assert_eq!(seen[0]["tool_name"], "search_replace");
-                assert_eq!(seen[0]["description"], "Edit src/main.rs");
-                assert_eq!(seen[0]["scope"], "write");
-                assert_eq!(
-                    seen[0]["edit_file_paths"],
-                    serde_json::json!(["src/main.rs"])
-                );
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn session_edit_grant_excludes_protected_target() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let tmp = tempfile::tempdir().unwrap();
-                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let transport = fake_hub(serde_json::json!({ "outcome": "always_approve" }));
-                let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
-                for path in ["src/first.rs", "src/second.rs", "~/.zshrc"] {
-                    assert_eq!(
-                        mgr.request(AccessKind::Edit(path.into()), tool_call(), None, None, None)
-                            .await,
-                        Decision::Allow
-                    );
-                }
-                assert_eq!(transport.seen.lock().unwrap().len(), 2);
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn shared_manager_uses_request_edit_path_context() {
-        use std::os::unix::fs::symlink;
-
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let parent = tempfile::tempdir().unwrap();
-                let child = tempfile::tempdir().unwrap();
-                let display = tempfile::tempdir().unwrap();
-                symlink("/etc", child.path().join("link")).unwrap();
-                let parent_cwd = AbsPathBuf::new(parent.path().to_path_buf()).unwrap();
-                let transport = fake_hub(serde_json::json!({ "outcome": "approve" }));
-                let (mgr, _events) = test_manager_with_hub(&parent_cwd, transport.clone());
-                mgr.set_auto_mode(true);
-                let context = EditPathContext {
-                    real_cwd: child.path().to_path_buf(),
-                    display_cwd: Some(display.path().to_path_buf()),
-                };
-
-                for displayed in [
-                    display.path().join("link/hosts"),
-                    display.path().join("src.rs"),
-                ] {
-                    assert_eq!(
-                        mgr.request_with_edit_path_context(
-                            AccessKind::Edit(displayed.to_string_lossy().into_owned()),
-                            tool_call(),
-                            Some(context.clone()),
-                            None,
-                            None,
-                            None,
-                        )
-                        .await,
-                        Decision::Allow
-                    );
-                }
-                assert_eq!(
-                    transport.seen.lock().unwrap().len(),
-                    1,
-                    "child protected target prompts; ordinary displayed child path stays auto"
-                );
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn hub_permission_reject_aborts() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let tmp = tempfile::tempdir().unwrap();
-                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, _e) = test_manager_with_hub(
-                    &cwd,
-                    fake_hub(serde_json::json!({ "outcome": "reject" })),
-                );
-                let d = mgr
-                    .request(
-                        AccessKind::Edit("a.rs".into()),
-                        tool_call(),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-                assert!(
-                    matches!(d, Decision::Reject(_)),
-                    "reject must abort, got {d:?}"
-                );
-            })
-            .await;
-    }
-
-    /// `cancelled` reply (turn-end drain) → abort, distinct from a user reject.
-    #[tokio::test]
-    async fn hub_permission_cancelled_aborts_distinctly() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let tmp = tempfile::tempdir().unwrap();
-                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, _e) = test_manager_with_hub(
-                    &cwd,
-                    fake_hub(serde_json::json!({ "outcome": "cancelled" })),
-                );
-                let d = mgr
-                    .request(
-                        AccessKind::Edit("a.rs".into()),
-                        tool_call(),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-                assert_eq!(d, Decision::Cancelled);
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn hub_permission_always_approve_persists_scope() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let tmp = tempfile::tempdir().unwrap();
-                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let transport = fake_hub(serde_json::json!({
-                    "outcome": "always_approve",
-                    "scope": { "kind": "server_prefix", "value": "linear" },
-                }));
-                let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
-                let first = mgr
-                    .request(
-                        AccessKind::MCPTool {
-                            name: "linear__list".into(),
-                            input: serde_json::Value::Null,
-                        },
-                        tool_call(),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-                assert_eq!(first, Decision::Allow);
-                let second = mgr
-                    .request(
-                        AccessKind::MCPTool {
-                            name: "linear__create".into(),
-                            input: serde_json::Value::Null,
-                        },
-                        tool_call(),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-                assert_eq!(second, Decision::Allow);
-                assert_eq!(
-                    transport.seen.lock().unwrap().len(),
-                    1,
-                    "always_approve must persist so the second call needs no hook"
-                );
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn ambiguous_mcp_server_scope_downgrades_to_exact_persisted_grant() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                for (name, forged_server) in [("a__b__c", "a"), ("foo___bar", "foo")] {
-                    let tmp = tempfile::tempdir().unwrap();
-                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                    let transport = fake_hub(serde_json::json!({
-                        "outcome": "always_approve",
-                        "scope": { "kind": "server_prefix", "value": forged_server },
-                    }));
-                    let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
-                    let decision = mgr
-                        .request(
-                            AccessKind::MCPTool {
-                                name: name.into(),
-                                input: serde_json::Value::Null,
-                            },
-                            tool_call(),
-                            None,
-                            None,
-                            None,
-                        )
-                        .await;
-                    assert_eq!(decision, Decision::Allow);
-
-                    let persisted = load_state_from_disk(&cwd, None).await;
-                    assert!(persisted.allowed_mcp_servers.is_empty(), "{name}");
-                    assert!(persisted.allowed_mcp_tools.contains(name), "{name}");
-                    assert!(matches!(
-                        mcp_pre_decision(name, &persisted, false, false),
-                        Some(Decision::Allow)
-                    ));
-
-                    let replay_transport = fake_hub(serde_json::json!({ "outcome": "reject" }));
-                    let (reloaded, _e) = test_manager_with_hub(&cwd, replay_transport.clone());
-                    assert_eq!(
-                        reloaded
-                            .request(
-                                AccessKind::MCPTool {
-                                    name: name.into(),
-                                    input: serde_json::Value::Null,
-                                },
-                                tool_call(),
-                                None,
-                                None,
-                                None,
-                            )
-                            .await,
-                        Decision::Allow
-                    );
-                    assert!(replay_transport.seen.lock().unwrap().is_empty());
-                }
-            })
-            .await;
-    }
-
-    /// A managed `Ask` rule on a direct `Read`/`Grep` must reach the prompt, not
-    /// the unconditional auto-allow. With no responder wired, that surfaces as a
-    /// non-`Allow` decision; a non-ask read still auto-allows.
     #[tokio::test]
     async fn ask_rule_on_direct_read_is_not_auto_allowed() {
         use crate::permission::types::{
@@ -3294,7 +2936,6 @@ mod tests {
                     None,
                     true,
                     None,
-                    None,
                 );
                 assert_eq!(
                     handle.deny_read_globs(),
@@ -3463,7 +3104,6 @@ mod tests {
             false,
             None,
             remember_tool_approvals,
-            None,
             None,
         )
     }
@@ -4175,7 +3815,6 @@ mod tests {
                 false,
                 None,
                 true,
-                None,
                 None,
             )
         }
@@ -5387,7 +5026,6 @@ mod tests {
                     None,
                     true,
                     None,
-                    None,
                 );
                 let PermissionHandle::Actor { ref cmd_tx, .. } = mgr else {
                     panic!("manager must be actor-backed");
@@ -5578,7 +5216,6 @@ mod tests {
                     false,
                     None,
                     true,
-                    None,
                     None,
                 );
 

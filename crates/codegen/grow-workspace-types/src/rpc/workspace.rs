@@ -73,17 +73,11 @@ impl WorkspaceRpc for ResolveFileReferencesReq {
 
 /// `workspace.update_tool_config` — replace a session's tool config.
 ///
-/// Rejected with the retryable [`TURN_ACTIVE`](super::envelope::TURN_ACTIVE)
-/// wire code while the target session has an active turn and the new config
-/// differs; retry at the turn boundary.
+/// Rejected while the target session has an active turn and the new config
+/// differs; callers retry at the turn boundary.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateToolConfigReq {
-    /// Deprecated: self-attested and no longer trusted. The server derives
-    /// the caller from the hub-bound envelope session and only falls back to
-    /// this field when no envelope session is present (old call paths).
-    /// Empty means absent: skipped on serialize so typed clients that leave
-    /// the default do not send a self-attested `""` (the server also
-    /// filters empty to absent for old serializers).
+    /// Session performing the local update. Empty means absent.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub caller_session_id: String,
     pub session_id: String,
@@ -98,12 +92,7 @@ impl WorkspaceRpc for UpdateToolConfigReq {
 /// `workspace.drop_session` — drop a workspace session.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DropSessionReq {
-    /// Deprecated: self-attested and no longer trusted. The server derives
-    /// the caller from the hub-bound envelope session and only falls back to
-    /// this field when no envelope session is present (old call paths).
-    /// Empty means absent: skipped on serialize so typed clients that leave
-    /// the default do not send a self-attested `""` (the server also
-    /// filters empty to absent for old serializers).
+    /// Session performing the local operation. Empty means absent.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub caller_session_id: String,
     pub session_id: String,
@@ -167,8 +156,7 @@ pub struct ListBackgroundTasksResponse {
 
 /// `workspace.list_background_tasks` — list the outstanding background terminal
 /// commands for `session_id`, for post-compaction `<system-reminder>` state.
-/// `WorkspaceClient` is session-agnostic, so the caller supplies the hub-bound
-/// session id.
+/// The caller supplies the target local session id.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ListBackgroundTasksReq {
     pub session_id: String,
@@ -246,7 +234,7 @@ pub struct ListTodosResponse {
 }
 
 /// `workspace.list_todos` — list the session's TODO items for post-compaction
-/// `<system-reminder>` state. Caller supplies the hub-bound session id.
+/// `<system-reminder>` state. Caller supplies the local session id.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ListTodosReq {
     pub session_id: String,

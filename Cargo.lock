@@ -4281,7 +4281,6 @@ dependencies = [
  "url",
  "webbrowser",
  "which",
- "xai-computer-hub-core",
  "xai-tool-protocol",
  "xai-tool-runtime",
  "xai-tool-types",
@@ -4988,7 +4987,6 @@ dependencies = [
  "wildmatch",
  "windows 0.61.3",
  "wiremock",
- "xai-computer-hub-core",
  "xai-interjection-core",
  "xai-test-utils",
  "xai-token-estimation",
@@ -5052,23 +5050,19 @@ dependencies = [
  "arc-swap",
  "async-stream",
  "async-trait",
- "axum",
  "base64",
  "bstr",
  "chrono",
- "clap",
  "dashmap",
  "dirs 6.0.0",
  "dunce",
  "fastrace",
  "filetime",
- "flate2",
  "fs2",
  "futures",
  "git2",
  "glob",
  "grow-agent",
- "grow-auth",
  "grow-config",
  "grow-config-types",
  "grow-diagnostics",
@@ -5080,10 +5074,8 @@ dependencies = [
  "grow-tools",
  "grow-tools-api",
  "grow-version",
- "grow-workspace-client",
  "grow-workspace-types",
  "hashbrown 0.16.1",
- "humantime-serde",
  "ignore",
  "indexmap",
  "infer 0.19.0",
@@ -5094,22 +5086,17 @@ dependencies = [
  "parking_lot",
  "prometheus",
  "regex",
- "reqwest 0.12.24",
  "rusqlite",
  "rustc-hash 2.1.1",
- "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "smallvec",
- "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite 0.27.0",
  "tokio-util",
  "toml",
- "tonic",
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
@@ -5120,9 +5107,6 @@ dependencies = [
  "windows 0.61.3",
  "xai-acp-lib",
  "xai-codebase-graph",
- "xai-computer-hub-core",
- "xai-computer-hub-mcp-adapter",
- "xai-computer-hub-sdk",
  "xai-fast-worktree",
  "xai-file-utils",
  "xai-fsnotify",
@@ -5134,23 +5118,6 @@ dependencies = [
  "xai-tool-types",
  "xai-tty-utils",
  "zstd",
-]
-
-[[package]]
-name = "grow-workspace-client"
-version = "0.1.0"
-dependencies = [
- "grow-workspace-types",
- "schemars 1.0.4",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "xai-computer-hub-sdk",
- "xai-tool-protocol",
- "xai-tool-runtime",
- "xai-tool-types",
 ]
 
 [[package]]
@@ -5413,22 +5380,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
-name = "humantime"
-version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
-
-[[package]]
-name = "humantime-serde"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57a3db5ea5923d99402c94e9feb261dc5ee9b4efa158b0315f788cf549cc200c"
-dependencies = [
- "humantime",
- "serde",
-]
-
-[[package]]
 name = "hybrid-array"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5475,7 +5426,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.3",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -8531,7 +8482,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
- "webpki-roots 1.0.3",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -10575,7 +10526,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tungstenite 0.27.0",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -11766,15 +11716,6 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "0.26.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.3",
-]
-
-[[package]]
-name = "webpki-roots"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32b130c0d2d49f8b6889abc456e795e82525204f27c42cf767cf0d7734e089b8"
@@ -12710,76 +12651,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "xai-computer-hub-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "dashmap",
- "futures",
- "indexmap",
- "parking_lot",
- "schemars 1.0.4",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "xai-tool-protocol",
- "xai-tool-runtime",
- "xai-tool-types",
-]
-
-[[package]]
-name = "xai-computer-hub-mcp-adapter"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "prometheus",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "xai-computer-hub-sdk",
- "xai-tool-protocol",
- "xai-tool-runtime",
- "xai-tool-types",
-]
-
-[[package]]
-name = "xai-computer-hub-sdk"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "async-trait",
- "axum",
- "chrono",
- "dashmap",
- "fastrace",
- "futures",
- "http",
- "indexmap",
- "parking_lot",
- "prometheus",
- "reqwest 0.12.24",
- "schemars 1.0.4",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.27.0",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "url",
- "xai-computer-hub-core",
- "xai-tool-protocol",
- "xai-tool-runtime",
- "xai-tool-types",
-]
-
-[[package]]
 name = "xai-crash-handler"
 version = "0.1.0"
 dependencies = [
@@ -12994,7 +12865,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "uuid",
- "xai-tool-types",
 ]
 
 [[package]]
@@ -13004,7 +12874,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures",
- "grow-tools-api",
+ "indexmap",
+ "parking_lot",
  "schemars 1.0.4",
  "serde",
  "serde_json",

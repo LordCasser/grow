@@ -8,14 +8,14 @@ pub const MAX_PAYLOAD_SIZE: usize = 128 * 1024;
 /// Per row: `display` is the canonical rendering (may differ from the variant's
 /// snake_case, e.g. `SubagentEnd` -> `subagent_stop`); `aliases` are the exact
 /// `Deserialize` spellings (disjoint across variants); `traits` is the
-/// `(gate, matcher, hub)` triple. `Serialize` stays derived snake_case (wire unchanged).
+/// `(gate, matcher)` pair. `Serialize` stays derived snake_case.
 macro_rules! hook_events {
     ($(
         $(#[$vmeta:meta])*
         $variant:ident {
             display: $display:literal,
             aliases: [$($alias:literal),* $(,)?],
-            traits: ($gate:ident, $matcher:ident, $hub:literal $(,)?),
+            traits: ($gate:ident, $matcher:ident $(,)?),
         }
     ),* $(,)?) => {
         /// Hook event types. `Ord` follows table order (stable, keeps the
@@ -46,7 +46,6 @@ macro_rules! hook_events {
                     $(Self::$variant => EventTraits {
                         gate: $gate,
                         matcher: $matcher,
-                        hub_forward: $hub,
                     },)*
                 }
             }
@@ -90,12 +89,12 @@ hook_events! {
     SessionStart {
         display: "session_start",
         aliases: ["SessionStart", "session_start", "sessionStart"],
-        traits: (Observe, Tested, true),
+        traits: (Observe, Tested),
     },
     UserPromptSubmit {
         display: "user_prompt_submit",
         aliases: ["UserPromptSubmit", "user_prompt_submit", "beforeSubmitPrompt"],
-        traits: (Observe, Ignored, true),
+        traits: (Observe, Ignored),
     },
     PreToolUse {
         display: "pre_tool_use",
@@ -107,7 +106,7 @@ hook_events! {
             "beforeMCPExecution",
             "beforeReadFile",
         ],
-        traits: (Tool, Tested, false),
+        traits: (Tool, Tested),
     },
     PostToolUse {
         display: "post_tool_use",
@@ -121,45 +120,45 @@ hook_events! {
             "afterAgentResponse",
             "afterAgentThought",
         ],
-        traits: (Observe, Tested, true),
+        traits: (Observe, Tested),
     },
     PostToolUseFailure {
         display: "post_tool_use_failure",
         aliases: ["PostToolUseFailure", "post_tool_use_failure", "postToolUseFailure"],
-        traits: (Observe, Tested, true),
+        traits: (Observe, Tested),
     },
     PermissionDenied {
         display: "permission_denied",
         aliases: ["PermissionDenied", "permission_denied", "permissionDenied"],
-        traits: (Observe, Tested, true),
+        traits: (Observe, Tested),
     },
     /// Fires on a genuine turn-end with stop decision control (a hook can block);
     /// not on user interrupts (API-error turns fire `StopFailure`); observe-only at session end.
     Stop {
         display: "stop",
         aliases: ["Stop", "stop"],
-        traits: (Stop, Ignored, true),
+        traits: (Stop, Ignored),
     },
     /// Fires when the turn ends due to an API error. Output and exit code are ignored.
     StopFailure {
         display: "stop_failure",
         aliases: ["StopFailure", "stop_failure", "stopFailure"],
-        traits: (Observe, Tested, true),
+        traits: (Observe, Tested),
     },
     Notification {
         display: "notification",
         aliases: ["Notification", "notification"],
-        traits: (Observe, Tested, true),
+        traits: (Observe, Tested),
     },
     SubagentStart {
         display: "subagent_start",
         aliases: ["SubagentStart", "subagent_start", "subagentStart"],
-        traits: (Observe, Tested, true),
+        traits: (Observe, Tested),
     },
     SubagentStop {
         display: "subagent_stop",
         aliases: ["SubagentStop", "subagent_stop", "subagentStop"],
-        traits: (Stop, Tested, true),
+        traits: (Stop, Tested),
     },
     /// Legacy alias of `SubagentStop`: kept as a distinct variant so a hook
     /// registered under either spelling round-trips, then collapsed via
@@ -167,22 +166,22 @@ hook_events! {
     SubagentEnd {
         display: "subagent_stop",
         aliases: ["SubagentEnd", "subagent_end", "subagentEnd"],
-        traits: (Stop, Tested, true),
+        traits: (Stop, Tested),
     },
     PreCompact {
         display: "pre_compact",
         aliases: ["PreCompact", "pre_compact", "preCompact"],
-        traits: (Observe, Tested, true),
+        traits: (Observe, Tested),
     },
     PostCompact {
         display: "post_compact",
         aliases: ["PostCompact", "post_compact", "postCompact"],
-        traits: (Observe, Tested, true),
+        traits: (Observe, Tested),
     },
     SessionEnd {
         display: "session_end",
         aliases: ["SessionEnd", "session_end", "sessionEnd"],
-        traits: (Observe, Tested, true),
+        traits: (Observe, Tested),
     },
 }
 
@@ -207,8 +206,6 @@ pub enum MatcherPolicy {
 pub struct EventTraits {
     pub gate: GateKind,
     pub matcher: MatcherPolicy,
-    /// Whether hub custom hooks receive this event (see `dispatcher::hub_hook_kind`).
-    pub hub_forward: bool,
 }
 
 impl HookEventName {
@@ -656,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn event_traits_report_gate_matcher_and_hub_forward() {
+    fn event_traits_report_gate_and_matcher() {
         use super::{GateKind, MatcherPolicy};
 
         assert_eq!(HookEventName::PreToolUse.traits().gate, GateKind::Tool);
@@ -678,9 +675,6 @@ mod tests {
             HookEventName::SessionStart.traits().matcher,
             MatcherPolicy::Tested
         );
-
-        assert!(!HookEventName::PreToolUse.traits().hub_forward);
-        assert!(HookEventName::Stop.traits().hub_forward);
     }
 
     #[test]

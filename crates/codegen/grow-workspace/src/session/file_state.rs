@@ -611,7 +611,7 @@ impl FileStateTracker {
     /// This captures after-snapshots for all files that were touched during the prompt.
     ///
     /// The caller provides the explicit `prompt_index` so that end_prompt works
-    /// even when begin_prompt was never received (e.g. RPC failure in proxy mode).
+    /// even when `begin_prompt` was never received.
     pub async fn end_prompt(&self, fs: &AsyncFsWrapper, prompt_index: usize) {
         // Clear internal current-prompt tracking.
         {
@@ -911,8 +911,7 @@ pub use grow_workspace_types::rpc::session::{
 
 /// Rewind files to the state before `target_prompt_index`.
 ///
-/// Shared implementation used by both `hub_server.rs` (workspace-side)
-/// and potentially `acp_session.rs` (shell-side). Performs:
+/// Shared implementation for local workspace and ACP session operations. Performs:
 /// 1. Gather earliest before-snapshot per file from points >= target
 /// 2. Detect conflicts (external modifications since the agent's writes)
 /// 3. Revert files to their before-snapshot state

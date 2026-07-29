@@ -919,11 +919,6 @@ pub struct RemoteSettings {
     pub compaction_verbatim_input: Option<bool>,
     #[serde(default)]
     pub compaction_tool_choice: Option<String>,
-    /// remote settings gate for the `grow workspace` CLI command (Computer Hub
-    /// workspace exposure), from `grow_build_settings.workspace_command_enabled`.
-    /// `Some(true)` enables it; `None`/`Some(false)` (the default) keep it off.
-    #[serde(default)]
-    pub workspace_command_enabled: Option<bool>,
 }
 /// Remote enable tier for the per-tip contextual hints (mirrors the client's
 /// `[ui.contextual_hints]` shape). Each field is a soft default for one tip;
@@ -1615,24 +1610,6 @@ mod tests {
         assert_eq!(s.folder_trust_enabled, None);
     }
     #[test]
-    fn remote_settings_workspace_command_enabled_present() {
-        let json = r#"{"workspace_command_enabled": true}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.workspace_command_enabled, Some(true));
-    }
-    #[test]
-    fn remote_settings_workspace_command_enabled_false() {
-        let json = r#"{"workspace_command_enabled": false}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.workspace_command_enabled, Some(false));
-    }
-    #[test]
-    fn remote_settings_workspace_command_enabled_absent() {
-        let json = r#"{}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.workspace_command_enabled, None);
-    }
-    #[test]
     fn remote_settings_permission_mode_deserializes() {
         let s: RemoteSettings = serde_json::from_str(r#"{"permission_mode": "auto"}"#).unwrap();
         assert_eq!(s.permission_mode.as_deref(), Some("auto"));
@@ -1839,8 +1816,7 @@ mod tests {
             r#"{"jemalloc_heap_profile_poll_interval_secs": -1}"#,
             r#"{
                 "jemalloc_heap_profile_enabled": true,
-                "jemalloc_heap_profile_thresholds_bytes": "bad",
-                "workspace_command_enabled": true
+                "jemalloc_heap_profile_thresholds_bytes": "bad"
             }"#,
         ] {
             assert_remote_parse_err(json);

@@ -87,7 +87,7 @@ impl WorkspaceRpc for HunkGetFileSummariesReq {
 
 /// Response for a single-hunk action (accept/reject).
 ///
-/// The hub handler returns `null` on success; this struct provides a typed
+/// The operation returns `null` on success; this struct provides a typed
 /// alternative for `WorkspaceOp` dispatch.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HunkActionResponse {}

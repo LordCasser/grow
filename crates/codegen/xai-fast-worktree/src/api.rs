@@ -555,7 +555,7 @@ fn is_out_of_disk(err: &anyhow::Error) -> bool {
 
 /// Promote a disk-full reason to the top of the error chain.
 ///
-/// Downstream layers (the workspace hub, ACP) flatten the `anyhow` chain to its
+/// Downstream ACP layers flatten the `anyhow` chain to its
 /// top-level message via `Display`, discarding the root `io::Error`. Without
 /// this, a full disk surfaces to the user as an opaque
 /// `"failed to copy index from … to …"`. Promoting the reason to the outermost

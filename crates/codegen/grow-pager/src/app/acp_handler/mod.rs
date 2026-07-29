@@ -54,7 +54,7 @@ mod workflow_ingest;
 use permissions::{MCP_ARGS_MAX_LINE_CHARS, MCP_ARGS_MAX_LINES, mcp_args_lines};
 use permissions::{apply_recap_block, handle_permission_request, should_drop_late_auto_recap};
 
-// Hub + child modules (via `use super::*`) need sibling symbols in this scope.
+// Child modules using `super::*` need these sibling symbols in scope.
 use routing::{
     SessionMatch, find_session_match, interaction_target_agent, is_matched_agent_active,
     mcp_target_agent, resolve_notif_agent, resolve_target_view,

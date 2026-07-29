@@ -1,4 +1,4 @@
-//! xAI Computer Hub — unified runtime contract.
+//! Grow's in-process tool runtime contract.
 //!
 //! Single home for the `Tool` trait, `ToolDispatch`, `ToolError`,
 //! `ToolNotification`, `ToolSearchIndex`, `ToolCallContext`, `ToolStream`,
@@ -12,6 +12,7 @@ pub mod context;
 pub mod dispatch;
 pub mod error;
 pub mod notification;
+pub mod registry;
 pub mod render;
 pub mod search;
 pub mod streaming;
@@ -19,7 +20,7 @@ pub mod tool;
 
 pub use context::{
     BehaviorVersion, Cancellation, Cwd, ListToolsContext, SessionContext, ToolCallContext,
-    TypedExtensions, WorkspaceBindMetadata, WorkspaceViewerContext,
+    TypedExtensions, WorkspaceViewerContext,
 };
 pub use dispatch::ToolDispatch;
 pub use error::{ToolError, ToolErrorKind};
@@ -31,6 +32,7 @@ pub use notification::{
     ScheduledTaskRemoved, TaskKind, TaskSnapshot, ToolNotification, ToolNotificationHandle,
     UserQuestionAsked,
 };
+pub use registry::{ErasedTool, LocalRegistry, ToolHandle};
 pub use render::{
     ModelOutputExtractor, ToolChatCompletion, ToolChatCompletionResponse, ToolCodeExecutionResult,
     ToolOutput, ToolStreamError, extract_content_blocks, extractor_for,

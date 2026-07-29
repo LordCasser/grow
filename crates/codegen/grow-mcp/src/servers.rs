@@ -5195,7 +5195,7 @@ mod tests {
     /// into a `LocalRegistry` must preserve both entries (no silent overwrite).
     #[test]
     fn test_same_raw_name_different_servers_no_local_registry_collision() {
-        use xai_computer_hub_core::LocalRegistry;
+        use xai_tool_runtime::LocalRegistry;
         use xai_tool_runtime::Tool;
 
         let mcp_state = Arc::new(Mutex::new(McpState::new(vec![])));
@@ -6056,13 +6056,6 @@ mod tests {
                 None,
             ),
         }
-    }
-
-    fn event_types(jsonl: &str) -> Vec<serde_json::Value> {
-        jsonl
-            .lines()
-            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .collect()
     }
 
     #[tokio::test(flavor = "multi_thread")]

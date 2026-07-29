@@ -92,7 +92,7 @@ mod tests {
 
     #[test]
     fn export_error_rejects_unknown_code() {
-        assert_eq!(ExportGithubError::from_wire_code("hub_error"), None);
+        assert_eq!(ExportGithubError::from_wire_code("operation_error"), None);
         assert_eq!(ExportGithubError::from_wire_code(""), None);
     }
 }

@@ -54,7 +54,6 @@ members = [
     "crates/codegen/grow-update",
     "crates/codegen/grow-version",
     "crates/codegen/grow-workspace",
-    "crates/codegen/grow-workspace-client",
     "crates/codegen/grow-workspace-types",
     "crates/codegen/xai-hooks-plugins-types",
     "crates/codegen/xai-hunk-tracker",
@@ -67,9 +66,6 @@ members = [
     "crates/codegen/xai-tracing-macros",
     "crates/codegen/xai-tty-utils",
     "crates/codegen/xai-workflow",
-    "crates/common/xai-computer-hub-core",
-    "crates/common/xai-computer-hub-mcp-adapter",
-    "crates/common/xai-computer-hub-sdk",
     "crates/common/grow-compaction",
     "crates/common/xai-interjection-core",
     "crates/common/xai-test-utils",
@@ -264,8 +260,6 @@ wiremock = "0.6"
 wl-clipboard-rs = "0.9"
 xai-acp-lib = { path = "crates/codegen/xai-acp-lib" }
 xai-agent-lifecycle = { path = "crates/codegen/xai-agent-lifecycle" }
-xai-computer-hub-core = { path = "crates/common/xai-computer-hub-core" }
-xai-computer-hub-sdk = { path = "crates/common/xai-computer-hub-sdk" }
 xai-gix-status = { path = "crates/codegen/xai-gix-status" }
 grow-agent = { path = "crates/codegen/grow-agent" }
 grow-announcements = { path = "crates/codegen/grow-announcements" }
