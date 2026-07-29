@@ -1159,10 +1159,7 @@ fn session_grant_pre_decision(
             yolo_pin,
             BashGrantOpts::PRE_CLASSIFIER,
         ),
-        AccessKind::Read(_)
-        | AccessKind::Grep { .. }
-        | AccessKind::WebSearch(_)
-        | AccessKind::Edit(_) => None,
+        AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::Edit(_) => None,
     }
 }
 
@@ -1445,9 +1442,6 @@ fn spawn_permission_manager_with_pin(
                             Some(crate::permission::auto_mode::mcp_access_detail(name, input)),
                         ),
                         AccessKind::WebFetch(url) => ("web_fetch".to_owned(), Some(url.clone())),
-                        AccessKind::WebSearch(query) => {
-                            ("web_search".to_owned(), Some(query.clone()))
-                        }
                     };
 
                     let diagnostics = std::cell::Cell::new(PermissionDiagnosticSnapshot {
@@ -1938,7 +1932,6 @@ fn spawn_permission_manager_with_pin(
                             None
                         }
                         AccessKind::Read(_) => Some((Decision::Allow, reasons::SAFE_COMMAND)),
-                        AccessKind::WebSearch(_) => Some((Decision::Allow, reasons::SAFE_COMMAND)),
                         AccessKind::Grep { .. } => Some((Decision::Allow, reasons::SAFE_COMMAND)),
                         // CWE-862: MCP tools must prompt the user instead of
                         // being silently auto-approved. They can execute arbitrary

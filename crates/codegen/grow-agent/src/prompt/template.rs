@@ -108,7 +108,6 @@ mod tests {
                 "get_command_or_subagent_output",
             ),
             (ToolKind::KillTaskAction, "kill_command_or_subagent"),
-            (ToolKind::WebSearch, "web_search"),
         ]
         .into_iter()
         .map(|(k, v)| (k, v.to_string()))
@@ -404,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mid_session_switch_preserves_tool_overrides() {
+    fn test_mid_session_switch_preserves_tool_names() {
         let tools: HashMap<ToolKind, String> = [
             (ToolKind::Read, "view".to_string()),
             (ToolKind::Edit, "edit".to_string()),
@@ -514,11 +513,10 @@ mod tests {
         );
     }
 
-    // ── Web search disabled ─────────────────────────────────────────
+    // ── Optional tools absent ───────────────────────────────────────
 
     #[test]
-    fn test_web_search_disabled_renders_without_crash() {
-        // No Fetch tool
+    fn test_optional_tools_absent_renders_without_crash() {
         let tools: HashMap<ToolKind, String> = [
             (ToolKind::Read, "read_file".to_string()),
             (ToolKind::Plan, "todo_write".to_string()),

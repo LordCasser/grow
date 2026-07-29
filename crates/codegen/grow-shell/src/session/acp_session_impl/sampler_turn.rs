@@ -130,77 +130,9 @@ impl SessionActor {
     /// (`acp_session_impl/turn.rs`) and the `SnapshotToolDefinitions` handler, so
     /// a verbatim-fork child's tool prefix can never silently drift from what the
     /// parent turn actually sends. `defs` is the already-resolved tool list
-    /// (`prepare_tool_definitions_*`); this applies only the `web_search` drop
-    /// under backend search and the `ToolSpec::from` mapping.
+    /// (`prepare_tool_definitions_*`).
     pub(crate) fn turn_base_tool_specs(&self, defs: &[ToolDefinition]) -> Vec<ToolSpec> {
-        let backend_search_active = self.backend_search_active();
-        defs.iter()
-            .filter(|td| !backend_search_active || td.function.name != "web_search")
-            .cloned()
-            .map(ToolSpec::from)
-            .collect()
-    }
-    /// Hosted tools with overrides applied, plus the applied overrides to echo, in one pass.
-    fn resolve_hosted(
-        &self,
-    ) -> (
-        Vec<grow_sampling_types::HostedTool>,
-        grow_sampling_types::ToolOverrides,
-    ) {
-        let mut tools = self.agent.borrow().hosted_tools().to_vec();
-        let applied = grow_sampling_types::apply_tool_overrides(
-            &mut tools,
-            self.tool_overrides.borrow().as_ref(),
-        );
-        (tools, applied)
-    }
-    /// Ungated. Prefer [`Self::hosted_tools_for_turn`], which folds in the backend-search gate.
-    pub(crate) fn effective_hosted_tools(&self) -> Vec<grow_sampling_types::HostedTool> {
-        self.resolve_hosted().0
-    }
-    pub(crate) fn hosted_tools_for_turn(&self) -> Vec<grow_sampling_types::HostedTool> {
-        if self.backend_search_active() {
-            self.effective_hosted_tools()
-        } else {
-            Vec::new()
-        }
-    }
-    /// The applied overrides to echo, or `None` when backend search is off.
-    pub(crate) fn effective_tool_overrides(&self) -> Option<grow_sampling_types::ToolOverrides> {
-        if !self.backend_search_active() {
-            return None;
-        }
-        let applied = self.resolve_hosted().1;
-        (!applied.is_empty()).then_some(applied)
-    }
-    pub(crate) fn backend_search_active(&self) -> bool {
-        self.agent.borrow().backend_search_enabled() && self.supports_backend_search.get()
-    }
-    /// Set the per-turn override and emit it before any turn runs, so a subagent spawned this turn
-    /// inherits it.
-    pub(crate) fn set_tool_overrides(&self, overrides: grow_sampling_types::ToolOverrides) {
-        *self.tool_overrides.borrow_mut() = Some(overrides);
-        self.emit_resolved_tool_overrides();
-    }
-    /// Fold a per-turn update at promotion: an object sets, `null` clears to the seed, absent leaves.
-    pub(crate) fn apply_tool_overrides_update(
-        &self,
-        update: Option<grow_sampling_types::ToolOverridesUpdate>,
-    ) {
-        let Some(update) = update else { return };
-        {
-            let mut slot = self.tool_overrides.borrow_mut();
-            *slot = update.apply(slot.take());
-        }
-        self.emit_resolved_tool_overrides();
-    }
-    /// Store this session's cutoff in the cell a subagent spawn reads. Not gated on backend search,
-    /// so a bounded parent bounds a searching child even if it isn't searching.
-    pub(crate) fn emit_resolved_tool_overrides(&self) {
-        let seed = self.agent.borrow().definition().tool_overrides.clone();
-        let effective = resolve_configured_cutoff(seed, self.tool_overrides.borrow().as_ref());
-        self.resolved_tool_overrides
-            .store((!effective.is_empty()).then(|| std::sync::Arc::new(effective)));
+        defs.iter().cloned().map(ToolSpec::from).collect()
     }
     pub(super) async fn prepare_tool_definitions_inner(&self) -> Vec<ToolDefinition> {
         let bridge = self.agent.borrow().tool_bridge().clone();
@@ -501,7 +433,6 @@ impl SessionActor {
             } else {
                 None
             },
-            supports_backend_search: self.supports_backend_search.get(),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
@@ -584,7 +515,6 @@ impl SessionActor {
                     let request = ConversationRequest {
                         items,
                         tools: vec![],
-                        hosted_tools: vec![],
                         tool_choice: None,
                         model: Some(model),
                         temperature: None,
@@ -1375,115 +1305,5 @@ impl SessionActor {
         }
         self.chat_state_handle
             .push_assistant_response(assistant_item);
-    }
-}
-/// Per-tool precedence: a non-empty `over` wins, else the non-empty `seed`.
-fn prefer_non_empty<T>(
-    over: Option<T>,
-    seed: Option<T>,
-    is_empty: impl Fn(&T) -> bool,
-) -> Option<T> {
-    over.filter(|o| !is_empty(o))
-        .or_else(|| seed.filter(|s| !is_empty(s)))
-}
-/// The cutoff a subagent inherits: a non-empty per-turn `base` wins per tool, else the `seed`.
-fn resolve_configured_cutoff(
-    seed: Option<grow_sampling_types::ToolOverrides>,
-    base: Option<&grow_sampling_types::ToolOverrides>,
-) -> grow_sampling_types::ToolOverrides {
-    use grow_sampling_types::{ToolOverrides, WebSearchOptions, XSearchOptions};
-    let ToolOverrides {
-        x_search: seed_x,
-        web_search: seed_w,
-    } = seed.unwrap_or_default();
-    let (over_x, over_w) =
-        base.map_or((None, None), |b| (b.x_search.clone(), b.web_search.clone()));
-    ToolOverrides {
-        x_search: prefer_non_empty(over_x, seed_x, XSearchOptions::is_empty),
-        web_search: prefer_non_empty(over_w, seed_w, WebSearchOptions::is_empty),
-    }
-}
-#[cfg(test)]
-mod configured_cutoff_tests {
-    use grow_sampling_types::{SearchDateBound, ToolOverrides, WebSearchOptions, XSearchOptions};
-    fn x_cut(to: &str) -> XSearchOptions {
-        XSearchOptions {
-            date_bound: Some(SearchDateBound::new(None, Some(to.into())).unwrap()),
-        }
-    }
-    #[test]
-    fn seed_only_is_inherited_without_a_per_turn_update() {
-        let seed = ToolOverrides {
-            x_search: Some(x_cut("2020-01-01")),
-            web_search: None,
-        };
-        assert_eq!(
-            super::resolve_configured_cutoff(Some(seed.clone()), None),
-            seed
-        );
-    }
-    #[test]
-    fn non_empty_base_wins_per_tool_and_empty_reverts_to_seed() {
-        let seed = ToolOverrides {
-            x_search: Some(x_cut("2020-01-01")),
-            web_search: Some(WebSearchOptions {
-                allowed_domains: Some(vec!["x.com".into()]),
-            }),
-        };
-        let base = ToolOverrides {
-            x_search: Some(x_cut("2019-06-01")),
-            web_search: Some(WebSearchOptions {
-                allowed_domains: Some(vec![]),
-            }),
-        };
-        let got = super::resolve_configured_cutoff(Some(seed.clone()), Some(&base));
-        assert_eq!(got.x_search, Some(x_cut("2019-06-01")));
-        assert_eq!(got.web_search, seed.web_search);
-    }
-    /// The contamination invariant: `resolve_configured_cutoff` (inheritance) must resolve the same
-    /// bound the wire/echo path (`apply_tool_overrides`) does for the same seed and per-turn base.
-    /// Two independent precedence implementations, so drift on the inherited boundary fails CI.
-    #[test]
-    fn inherited_cutoff_agrees_with_the_wire_echo() {
-        use grow_sampling_types::{HostedTool, apply_tool_overrides};
-        let web = WebSearchOptions {
-            allowed_domains: Some(vec!["x.com".into()]),
-        };
-        let cases = [
-            (
-                Some(ToolOverrides {
-                    x_search: Some(x_cut("2020-01-01")),
-                    web_search: None,
-                }),
-                None,
-            ),
-            (
-                Some(ToolOverrides {
-                    x_search: Some(x_cut("2020-01-01")),
-                    web_search: Some(web.clone()),
-                }),
-                Some(ToolOverrides {
-                    x_search: Some(x_cut("2019-06-01")),
-                    web_search: None,
-                }),
-            ),
-            (
-                None,
-                Some(ToolOverrides {
-                    x_search: Some(x_cut("2018-01-01")),
-                    web_search: Some(web.clone()),
-                }),
-            ),
-        ];
-        for (seed, base) in cases {
-            let mut tools = vec![
-                HostedTool::WebSearch { options: None },
-                HostedTool::XSearch { options: None },
-            ];
-            apply_tool_overrides(&mut tools, seed.as_ref());
-            let wire_echo = apply_tool_overrides(&mut tools, base.as_ref());
-            let inherited = super::resolve_configured_cutoff(seed.clone(), base.as_ref());
-            assert_eq!(wire_echo, inherited, "seed={seed:?} base={base:?}");
-        }
     }
 }

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use super::config::LspServerConfig;
 use super::manager::DiagnosticsSummary;
 
-/// LSP configuration passed from shell. Same pattern as `WebSearchConfig`.
+/// LSP configuration passed from shell.
 #[derive(Debug, Clone, Default)]
 pub enum LspConfig {
     #[default]

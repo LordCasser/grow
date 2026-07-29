@@ -28,7 +28,6 @@ auto_update = true                     # check for updates on launch
 
 [models]
 default = "grow-4.5"                   # model used for new sessions
-web_search = "grow-4.5"                # model used by the web_search tool
 
 # Defaults applied to every model; a per-model [model.<id>] value always wins.
 # See "Custom Models" for the per-model overrides and full details.
@@ -235,6 +234,10 @@ api_key = "my-api-key"
 ```
 
 ### MCP servers
+
+Grow does not bundle a Web Search provider. Configure any MCP server that exposes search tools if
+you need web search; those tools are discovered like every other MCP tool and may use any server or
+tool name. The built-in `web_fetch` tool remains available for fetching a known URL.
 
 Configure external tool integrations over the Model Context Protocol.
 

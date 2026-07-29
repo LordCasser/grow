@@ -162,7 +162,6 @@ pub(crate) fn build_goal_evaluator_request(
             ConversationItem::user(input.to_string()),
         ],
         tools: vec![],
-        hosted_tools: vec![],
         tool_choice: None,
         model: Some(model),
         temperature: None,
@@ -235,7 +234,6 @@ mod tests {
     fn request_is_tool_free_and_schema_constrained() {
         let request = build_goal_evaluator_request("goal", "trace", None, "small".into(), "s");
         assert!(request.tools.is_empty());
-        assert!(request.hosted_tools.is_empty());
         assert!(request.json_schema.is_some());
         assert_eq!(request.model.as_deref(), Some("small"));
     }

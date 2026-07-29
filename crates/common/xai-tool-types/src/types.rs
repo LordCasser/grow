@@ -8,7 +8,7 @@ use crate::ext::Extensions;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ToolDescription {
-    /// Tool name (e.g. "web_search", "read_file") that is called by
+    /// Tool name (e.g. "read_file", "github_search") that is called by
     /// the model.
     pub name: String,
 
@@ -17,7 +17,7 @@ pub struct ToolDescription {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
 
-    /// Display name (e.g. "Web Search") can be shown to the model.
+    /// Display name (e.g. "GitHub Search") can be shown to the model.
     /// If absent, derive the title from 'name'.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,

@@ -471,16 +471,6 @@ impl ModelsManager {
             .unwrap_or_default()
     }
 
-    pub fn model_supports_backend_search(&self, model_id: &str) -> bool {
-        self.inner
-            .catalog
-            .read()
-            .models
-            .get(model_id)
-            .map(|e| e.info().supports_backend_search)
-            .unwrap_or(false)
-    }
-
     pub fn model_compactions_remaining(
         &self,
         model_id: &str,

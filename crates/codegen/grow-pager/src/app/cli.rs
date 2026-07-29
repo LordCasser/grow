@@ -627,9 +627,6 @@ pub struct PagerArgs {
         )
     )]
     pub permission_mode_flag: Option<String>,
-    /// Disable web search and web fetch tools.
-    #[arg(long = "disable-web-search")]
-    pub disable_web_search: bool,
     /// Exit as soon as the first agent turn ends, without waiting for pending
     /// background bash/monitor tasks or background subagents (headless only).
     /// Default for all `grow -p` runs is to wait (up to `--background-wait-timeout`)

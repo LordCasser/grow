@@ -435,9 +435,7 @@ impl HeuristicPermissionClassifier {
             // silently auto-approving; non-allowlisted MCP tools land
             // here too.
             AccessKind::Edit(_) | AccessKind::MCPTool { .. } => ClassifierVerdict::Block,
-            AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => {
-                ClassifierVerdict::Allow
-            }
+            AccessKind::Read(_) | AccessKind::Grep { .. } => ClassifierVerdict::Allow,
         }
     }
 }
@@ -1108,10 +1106,7 @@ pub type SharedClassifier = Arc<dyn PermissionClassifier>;
 /// Tools / access kinds that never need a classifier call (safe allowlist
 /// mapped to Grow access kinds + known names).
 pub fn is_auto_mode_allowlisted_access(access: &AccessKind) -> bool {
-    matches!(
-        access,
-        AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_)
-    )
+    matches!(access, AccessKind::Read(_) | AccessKind::Grep { .. })
 }
 
 /// Tool names that are metadata / coordination only (safe allowlist by name).
@@ -1333,7 +1328,6 @@ pub fn build_classifier_messages(
         AccessKind::Bash(_) => "bash",
         AccessKind::MCPTool { .. } => "mcp",
         AccessKind::WebFetch(_) => "web_fetch",
-        AccessKind::WebSearch(_) => "web_search",
     };
     let proposed_action =
         format!("tool: {tool_name}\naccess_kind: {access_kind}\ndetail: {detail}");

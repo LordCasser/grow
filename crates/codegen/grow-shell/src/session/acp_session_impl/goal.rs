@@ -835,7 +835,6 @@ impl SessionActor {
             bridge.tool_for_kind(ToolKind::Write).await,
             bridge.tool_for_kind(ToolKind::Edit).await,
             bridge.tool_for_kind(ToolKind::Execute).await,
-            bridge.tool_for_kind(ToolKind::WebSearch).await,
             bridge.tool_for_kind(ToolKind::WebFetch).await,
         )
     }
@@ -1465,7 +1464,6 @@ impl SessionActor {
                 json_schema: None,
                 origin: super::super::PromptOrigin::GoalSummary,
                 task_wake_fallback: None,
-                tool_overrides_update: None,
                 respond_to,
                 persist_ack: None,
                 parsed_prompt_tx: None,
@@ -2242,7 +2240,6 @@ mod role_tool_names_tests {
     fn inherit_names() -> RoleToolNames {
         RoleToolNames::from_parent(
             Some("parent_read".into()),
-            None,
             None,
             None,
             None,

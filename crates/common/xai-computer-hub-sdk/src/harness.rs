@@ -2591,7 +2591,7 @@ mod tests {
     fn local_registry_list_tools_preserves_insertion_order() {
         let registry = LocalRegistry::new();
         let names = [
-            "web_search",
+            "search_docs",
             "code_execution",
             "generate_image",
             "browse_page",

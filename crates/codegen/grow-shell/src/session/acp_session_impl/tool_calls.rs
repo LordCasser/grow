@@ -1050,9 +1050,6 @@ impl SessionActor {
                 grow_workspace::permission::AccessKind::WebFetch(u) => {
                     (grow_diagnostics::events::AccessKind::Web, u.clone())
                 }
-                grow_workspace::permission::AccessKind::WebSearch(q) => {
-                    (grow_diagnostics::events::AccessKind::Web, q.clone())
-                }
             };
             let subagent_session_id = if self.startup_hints.is_subagent {
                 Some(self.session_id_string())
@@ -1374,7 +1371,6 @@ impl SessionActor {
                         | ToolKind::List
                         | ToolKind::MemorySearch
                         | ToolKind::MemoryGet
-                        | ToolKind::WebSearch
                         | ToolKind::WebFetch
                         | ToolKind::EnterPlan
                         | ToolKind::ExitPlan
@@ -1564,7 +1560,6 @@ impl SessionActor {
             None,
             false,
             None,
-            None,
             respond_to,
             None,
             None,
@@ -1656,12 +1651,6 @@ impl SessionActor {
                 Vec::new(),
             ),
             ToolInput::Grep(gs) => (gs.pattern.clone(), acp::ToolKind::Search, vec![], vec![]),
-            ToolInput::WebSearch(ws) => (
-                format!("Web search: \"{}\"", ws.query),
-                acp::ToolKind::Search,
-                vec![],
-                vec![],
-            ),
             ToolInput::ImageGen(ig) => (
                 format!("imagine: {}", ig.prompt),
                 acp::ToolKind::Other,

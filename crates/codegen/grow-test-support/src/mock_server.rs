@@ -101,8 +101,6 @@ pub struct MockModelEntry {
     /// Optional API backend (e.g. `"messages"`). Emitted as `apiBackend`
     /// when set; absent means the shell's default backend.
     pub api_backend: Option<String>,
-    /// Emitted as `supportsBackendSearch` when true.
-    pub supports_backend_search: bool,
     /// Emitted as `supportsReasoningEffort` (top-level) when true.
     pub supports_reasoning_effort: bool,
     /// Emitted as `reasoningEffort` (top-level) when set.
@@ -119,7 +117,6 @@ impl MockModelEntry {
             id: id.into(),
             agent_type: None,
             api_backend: None,
-            supports_backend_search: false,
             supports_reasoning_effort: false,
             reasoning_effort: None,
             reasoning_efforts: Vec::new(),
@@ -135,11 +132,6 @@ impl MockModelEntry {
 
     pub fn with_api_backend(mut self, api_backend: impl Into<String>) -> Self {
         self.api_backend = Some(api_backend.into());
-        self
-    }
-
-    pub fn with_supports_backend_search(mut self, supports: bool) -> Self {
-        self.supports_backend_search = supports;
         self
     }
 
@@ -170,9 +162,6 @@ impl MockModelEntry {
         }
         if let Some(ref backend) = self.api_backend {
             obj["apiBackend"] = json!(backend);
-        }
-        if self.supports_backend_search {
-            obj["supportsBackendSearch"] = json!(true);
         }
         if self.supports_reasoning_effort {
             obj["supportsReasoningEffort"] = json!(true);

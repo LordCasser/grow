@@ -699,7 +699,6 @@ pub async fn run(
         subagents: !args.no_subagents,
         experimental_memory: args.experimental_memory,
         no_memory: args.no_memory,
-        disable_web_search: args.disable_web_search,
         todo_gate: args.todo_gate,
         laziness_debug_log: None,
         storage_mode: args.storage_mode.clone(),

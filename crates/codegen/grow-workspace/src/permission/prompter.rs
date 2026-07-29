@@ -775,7 +775,6 @@ pub(crate) fn tool_name_for_access(access: &AccessKind) -> String {
         AccessKind::Bash(_) => "run_terminal_command".to_owned(),
         AccessKind::MCPTool { name, .. } => format!("mcp:{name}"),
         AccessKind::WebFetch(_) => "web_fetch".to_owned(),
-        AccessKind::WebSearch(_) => "web_search".to_owned(),
     }
 }
 
@@ -1497,10 +1496,6 @@ mod tests {
         assert_eq!(
             tool_name_for_access(&AccessKind::WebFetch("https://x".into())),
             "web_fetch"
-        );
-        assert_eq!(
-            tool_name_for_access(&AccessKind::WebSearch("rust lang".into())),
-            "web_search"
         );
     }
 

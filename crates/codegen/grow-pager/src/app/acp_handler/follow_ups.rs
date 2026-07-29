@@ -39,7 +39,7 @@ pub(super) struct FollowUpsParams {
 }
 
 /// A single `grow/follow_ups` suggestion. Only the human-facing `label` is
-/// consumed; `properties` / `tool_overrides` (also in the wire shape) are
+/// consumed; additional wire-shape properties are
 /// ignored.
 #[derive(serde::Deserialize)]
 pub(super) struct FollowUpSuggestionParam {

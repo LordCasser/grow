@@ -127,7 +127,7 @@ git2 = { version = "0.20", default-features = false, features = [
 ] }
 urlencoding = { workspace = true }
 
-# Parsing (web_search)
+# Parsing
 url = { workspace = true }
 
 # Crash diagnostics

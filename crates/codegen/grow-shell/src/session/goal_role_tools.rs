@@ -43,8 +43,6 @@ pub(crate) struct RoleToolNames {
     pub write: String,
     /// `{EXECUTE_TOOL}` — `ToolKind::Execute` (terminal/bash maps here).
     pub execute: String,
-    /// `{WEB_SEARCH_TOOL}` — `ToolKind::WebSearch` (planner template only).
-    pub web_search: String,
     /// `{WEB_FETCH_TOOL}` — `ToolKind::WebFetch` (planner template only).
     pub web_fetch: String,
     /// `{TOOLSET_TOOLS}` block (verifier-only placeholder; the planner and
@@ -58,7 +56,6 @@ impl RoleToolNames {
     const SEARCH_FALLBACK: &'static str = "grep";
     const WRITE_FALLBACK: &'static str = "write";
     const EXECUTE_FALLBACK: &'static str = "run_terminal_command";
-    const WEB_SEARCH_FALLBACK: &'static str = "web_search";
     const WEB_FETCH_FALLBACK: &'static str = "web_fetch";
 
     /// Single fallback+sanitize applier shared by every constructor (no
@@ -70,7 +67,6 @@ impl RoleToolNames {
         search: Option<String>,
         write: Option<String>,
         execute: Option<String>,
-        web_search: Option<String>,
         web_fetch: Option<String>,
         toolset_tools: String,
     ) -> Self {
@@ -80,7 +76,6 @@ impl RoleToolNames {
             search: sanitized_or_default(search, Self::SEARCH_FALLBACK),
             write: sanitized_or_default(write, Self::WRITE_FALLBACK),
             execute: sanitized_or_default(execute, Self::EXECUTE_FALLBACK),
-            web_search: sanitized_or_default(web_search, Self::WEB_SEARCH_FALLBACK),
             web_fetch: sanitized_or_default(web_fetch, Self::WEB_FETCH_FALLBACK),
             toolset_tools,
         }
@@ -89,7 +84,7 @@ impl RoleToolNames {
     /// All-fallback names with an empty `{TOOLSET_TOOLS}` block. Used as the
     /// per-index default when no assignment exists, and by tests.
     pub(crate) fn inherit_defaults() -> Self {
-        Self::from_parts(None, None, None, None, None, None, None, String::new())
+        Self::from_parts(None, None, None, None, None, None, String::new())
     }
 
     /// Inherit / fail-open path: the role runs on the parent toolset, so the
@@ -106,7 +101,6 @@ impl RoleToolNames {
         write: Option<String>,
         edit: Option<String>,
         execute: Option<String>,
-        web_search: Option<String>,
         web_fetch: Option<String>,
     ) -> Self {
         Self::from_parts(
@@ -115,7 +109,6 @@ impl RoleToolNames {
             search,
             first_safe_tool_name(write, edit),
             execute,
-            web_search,
             web_fetch,
             String::new(),
         )
@@ -141,7 +134,6 @@ impl RoleToolNames {
             // shadowing a usable `Edit` name.
             first_safe_tool_name(get(ToolKind::Write), get(ToolKind::Edit)),
             get(ToolKind::Execute),
-            get(ToolKind::WebSearch),
             get(ToolKind::WebFetch),
             enumerate_toolset_tools(&summary.tool_names),
         )
@@ -167,7 +159,6 @@ impl RoleToolNames {
                 "SEARCH_TOOL" => self.search.as_str(),
                 "WRITE_TOOL" => self.write.as_str(),
                 "EXECUTE_TOOL" => self.execute.as_str(),
-                "WEB_SEARCH_TOOL" => self.web_search.as_str(),
                 "WEB_FETCH_TOOL" => self.web_fetch.as_str(),
                 "TOOLSET_TOOLS" => self.toolset_tools.as_str(),
                 _ => return None,
@@ -304,7 +295,6 @@ pub(crate) mod tests {
         assert_eq!(tn.search, "grep");
         assert_eq!(tn.write, "write");
         assert_eq!(tn.execute, "run_terminal_command");
-        assert_eq!(tn.web_search, "web_search");
         assert_eq!(tn.web_fetch, "web_fetch");
         assert_eq!(tn.toolset_tools, "", "inherit path omits the toolset block");
     }
@@ -339,51 +329,6 @@ pub(crate) mod tests {
         assert_eq!(tn.search, "cursor_grep");
         assert_eq!(tn.write, "cursor_write");
         assert_eq!(tn.execute, "cursor_shell");
-    }
-
-    #[test]
-    fn from_summary_resolves_cursor_web_search_name() {
-        // The alternate planner toolset exposes WebSearch/WebFetch under
-        // the client names "WebSearch"/"WebFetch"; the planner prompt must name
-        // THOSE, not the stock fallback — the case that left the alternate
-        // planner blind to the web tool and over-scoping from memory alone.
-        let tn = RoleToolNames::from_summary(&summary_with(&[
-            (ToolKind::WebSearch, "WebSearch"),
-            (ToolKind::WebFetch, "WebFetch"),
-        ]));
-        assert_eq!(tn.web_search, "WebSearch");
-        assert_eq!(tn.web_fetch, "WebFetch");
-    }
-
-    #[test]
-    fn from_parent_maps_web_search_and_fetch_to_distinct_fields() {
-        // Distinct values catch a web_search/web_fetch field swap that the
-        // all-None fallback cases cannot.
-        let tn = RoleToolNames::from_parent(
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("WS".into()),
-            Some("WF".into()),
-        );
-        assert_eq!(tn.web_search, "WS");
-        assert_eq!(tn.web_fetch, "WF");
-    }
-
-    #[test]
-    fn web_tools_fall_back_when_absent_from_the_toolset() {
-        // A summary / parent bridge without WebSearch/WebFetch ⇒ both resolve to
-        // the stock client names, so the planner prompt still names a real tool
-        // on the default grow-build host (the stock `web_search`/`web_fetch`).
-        let summary = RoleToolNames::from_summary(&summary_with(&[(ToolKind::Read, "rd")]));
-        assert_eq!(summary.web_search, "web_search");
-        assert_eq!(summary.web_fetch, "web_fetch");
-        let parent = RoleToolNames::from_parent(None, None, None, None, None, None, None, None);
-        assert_eq!(parent.web_search, "web_search");
-        assert_eq!(parent.web_fetch, "web_fetch");
     }
 
     #[test]
@@ -425,7 +370,6 @@ pub(crate) mod tests {
             Some("search_replace".into()),
             Some("run_terminal_command".into()),
             None,
-            None,
         );
         assert_eq!(tn.write, "search_replace");
     }
@@ -442,7 +386,6 @@ pub(crate) mod tests {
             Some("search_replace".into()),
             None,
             None,
-            None,
         );
         assert_eq!(tn.write, "write");
     }
@@ -451,7 +394,7 @@ pub(crate) mod tests {
     fn from_parent_write_falls_back_to_default_when_neither_present() {
         // Neither `Write` nor `Edit` on the bridge ⇒ the literal `write`
         // default (unchanged behavior for hosts with no mutator probe).
-        let tn = RoleToolNames::from_parent(None, None, None, None, None, None, None, None);
+        let tn = RoleToolNames::from_parent(None, None, None, None, None, None, None);
         assert_eq!(tn.write, "write");
     }
 
@@ -480,7 +423,6 @@ pub(crate) mod tests {
             Some("search_replace".into()),
             None,
             None,
-            None,
         );
         assert_eq!(tn.write, "search_replace");
     }
@@ -500,7 +442,6 @@ pub(crate) mod tests {
             None,
             Some("bad write".into()),
             Some("bad`edit".into()),
-            None,
             None,
             None,
         );
@@ -525,7 +466,6 @@ pub(crate) mod tests {
             None,
             Some("search_replace".into()),
             Some("run_terminal_command".into()),
-            None,
             None,
         );
         assert_eq!(primary.write, "search_replace");
@@ -570,13 +510,12 @@ pub(crate) mod tests {
             (ToolKind::Search, "gr"),
             (ToolKind::Write, "wr"),
             (ToolKind::Execute, "ex"),
-            (ToolKind::WebSearch, "ws"),
             (ToolKind::WebFetch, "wf"),
         ]));
         let template = "{READ_TOOL} {LIST_TOOL} {SEARCH_TOOL} {WRITE_TOOL} {EXECUTE_TOOL} \
-             {WEB_SEARCH_TOOL} {WEB_FETCH_TOOL}{TOOLSET_TOOLS}";
+             {WEB_FETCH_TOOL}{TOOLSET_TOOLS}";
         let out = tn.apply(template);
-        assert!(out.starts_with("rd ls gr wr ex ws wf"));
+        assert!(out.starts_with("rd ls gr wr ex wf"));
         assert!(out.contains("Tools available to you for this review:"));
         assert_no_tool_placeholders(&out);
     }

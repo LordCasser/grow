@@ -2,7 +2,7 @@
 //! them to the local filesystem so the model can reference them in code
 //! (e.g. `<img src="images/hero.jpg">`).
 //!
-//! Architecture follows the same pattern as `web_search`:
+//! Architecture uses an authenticated HTTP client:
 //!
 //! - [`ImageGenConfig`] is built from session credentials by the host and
 //!   injected into the tool registry.

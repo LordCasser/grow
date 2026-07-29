@@ -113,7 +113,7 @@ async fn subagent_inherits_session_cli_overrides() {
     config.cli_agents = vec![probe];
     config.cli_agent_overrides = crate::agent::config::CliAgentOverrides {
         tools: Some(vec!["read_file".into(), "grep".into()]),
-        disallowed_tools: Some(vec!["web_search".into(), "write".into()]),
+        disallowed_tools: Some(vec!["search_docs".into(), "write".into()]),
         permission_mode: Some(PermissionMode::AcceptEdits),
         ..Default::default()
     };
@@ -127,7 +127,7 @@ async fn subagent_inherits_session_cli_overrides() {
         );
     assert_eq!(
             def.session_tools_denylist.as_deref(),
-            Some(&["web_search".into(), "write".into()][..])
+            Some(&["search_docs".into(), "write".into()][..])
         );
     assert_eq!(def.disallowed_tools, vec!["write"]);
     assert_eq!(def.permission_mode, PermissionMode::AcceptEdits);
@@ -1739,7 +1739,6 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
-            supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,

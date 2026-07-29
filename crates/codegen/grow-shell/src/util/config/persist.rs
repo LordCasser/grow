@@ -135,7 +135,7 @@ pub(crate) fn atomic_write_string(path: &std::path::Path, content: &str) -> std:
 }
 /// Merge `[toolset.ask_user_question]` into the root table. `[toolset]` is
 /// deliberately NOT merged wholesale — it carries runtime-only structs
-/// (`web_search` sampler etc.) whose serialized defaults must never land in
+/// whose serialized defaults must never land in
 /// the user file — so only this settings-writable sub-table round-trips.
 fn merge_ask_user_question_section(
     table: &mut TomlMap<String, TomlValue>,
@@ -217,7 +217,7 @@ mod tests {
     use toml::map::Map as TomlMap;
     /// The `[toolset.ask_user_question]` settings write merges only that
     /// sub-table: the toggled field lands, hand-written sibling keys survive,
-    /// and no other `[toolset]` defaults (bash/web_search) are splatted into
+    /// and no other `[toolset]` defaults are splatted into
     /// the user file. All-None leaves the file untouched.
     #[test]
     fn ask_user_question_merge_writes_subtable_without_splatting_toolset() {
@@ -687,7 +687,6 @@ auto_update = true
         if let TomlValue::Table(t) = v {
             assert_eq!(t.len(), 1);
             assert!(t.contains_key("default"));
-            assert!(!t.contains_key("web_search"));
             assert!(!t.contains_key("session_summary"));
             assert!(!t.contains_key("image_description"));
             assert!(!t.contains_key("hidden_models"));
@@ -789,7 +788,10 @@ auto_update = true
     fn merge_section_models_only_updates_set_fields_preserves_others() {
         let mut table = TomlMap::new();
         let mut models = TomlMap::new();
-        models.insert("web_search".into(), TomlValue::String("old-search".into()));
+        models.insert(
+            "custom_model_setting".into(),
+            TomlValue::String("keep-me".into()),
+        );
         models.insert("unmodeled_foo".into(), TomlValue::String("keep-me".into()));
         table.insert("models".into(), TomlValue::Table(models));
         let cfg = crate::agent::config::ModelsConfig {
@@ -800,8 +802,8 @@ auto_update = true
         let m = table.get("models").unwrap().as_table().unwrap();
         assert_eq!(m.get("default").and_then(|v| v.as_str()), Some("grow-new"));
         assert_eq!(
-            m.get("web_search").and_then(|v| v.as_str()),
-            Some("old-search")
+            m.get("custom_model_setting").and_then(|v| v.as_str()),
+            Some("keep-me")
         );
         assert_eq!(
             m.get("unmodeled_foo").and_then(|v| v.as_str()),
@@ -811,7 +813,7 @@ auto_update = true
     }
     #[test]
     fn persist_preferred_model_flow_roundtrips_via_load_and_new_from_toml_cfg() {
-        let original = "[models]\ndefault = \"grow-old\"\nweb_search = \"some-search\"\n";
+        let original = "[models]\ndefault = \"grow-old\"\n";
         let root: TomlValue = toml::from_str(original).unwrap();
         let mut cfg = load_config_from_toml(&root);
         cfg.models.default = Some("grow-persisted".to_string());

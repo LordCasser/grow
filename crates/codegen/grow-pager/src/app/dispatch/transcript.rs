@@ -338,9 +338,6 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
             RenderBlock::ToolCall(ToolCallBlock::WebFetch(_)) => {
                 BlockViewerPane::for_web_fetch(entry.id, entry)
             }
-            RenderBlock::ToolCall(ToolCallBlock::WebSearch(_)) => {
-                BlockViewerPane::for_web_search(entry.id, entry)
-            }
             RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(_)) => {
                 BlockViewerPane::for_integration_search(entry.id, entry)
             }

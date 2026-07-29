@@ -407,11 +407,10 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
         use grow_tools::implementations::grow_build::deploy_app::AppBuilderDeployerConfig;
         use grow_tools::implementations::grow_build::image_gen::ImageGenConfig;
         use grow_tools::implementations::grow_build::video_gen::VideoGenConfig;
-        use grow_tools::implementations::web_search::WebSearchConfig;
         let fs = Arc::new(grow_tools::computer::local::LocalFs)
             as Arc<dyn grow_tools::computer::types::AsyncFileSystem>;
         let notification_handle = grow_tools::notification::ToolNotificationHandle::noop();
-        let (image_gen_config, video_gen_config, web_search_config, app_builder_deployer_config) =
+        let (image_gen_config, video_gen_config, app_builder_deployer_config) =
             if let (Some(auth), Some(url)) = (&self.auth, &self.api_base_url) {
                 let cred = auth.current();
                 match cred {
@@ -433,20 +432,12 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                                 extra_headers: headers.clone(),
                                 zdr_video_output_s3: None,
                             },
-                            WebSearchConfig::Enabled {
-                                api_key: token,
-                                base_url: url.clone(),
-                                model: default_web_search_model(),
-                                extra_headers: headers,
-                                alpha_test_key: None,
-                            },
                             AppBuilderDeployerConfig::default(),
                         )
                     }
                     _ => (
                         ImageGenConfig::default(),
                         VideoGenConfig::default(),
-                        WebSearchConfig::default(),
                         AppBuilderDeployerConfig::default(),
                     ),
                 }
@@ -454,7 +445,6 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                 (
                     ImageGenConfig::default(),
                     VideoGenConfig::default(),
-                    WebSearchConfig::default(),
                     AppBuilderDeployerConfig::default(),
                 )
             };
@@ -471,7 +461,6 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
             skills: vec![],
             state_path: self.resolve_state_path(session_id),
             memory_backend: None,
-            web_search_config,
             web_fetch_config: build_web_fetch_config(),
             lsp: None,
             image_gen_config,
@@ -536,9 +525,6 @@ fn build_web_fetch_config() -> grow_tools::implementations::grow_build::web_fetc
     }
     WebFetchConfig::Enabled { params }
 }
-fn default_web_search_model() -> String {
-    std::env::var("GROW_WEB_SEARCH_MODEL").unwrap_or_default()
-}
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use crate::config::SessionContextFactory;
@@ -594,7 +580,6 @@ pub mod test_support {
                 skills: vec![],
                 state_path: session_root.join("tool_state.json"),
                 memory_backend: None,
-                web_search_config: Default::default(),
                 web_fetch_config: Default::default(),
                 lsp: None,
                 image_gen_config: Default::default(),

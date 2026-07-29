@@ -582,7 +582,6 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
         | ToolOutput::ListDir(_)
         | ToolOutput::SearchReplace(_)
         | ToolOutput::Todo(_)
-        | ToolOutput::WebSearch(_)
         | ToolOutput::WebFetch(_)
         | ToolOutput::MCP(_)
         | ToolOutput::Skill(_)

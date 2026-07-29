@@ -86,11 +86,6 @@ pub struct AgentBuilder {
     session_env: Option<Arc<HashMap<String, String>>>,
     state_path: Option<PathBuf>,
     memory_backend: Option<Arc<dyn grow_tools::types::memory_backend::MemoryBackend>>,
-    web_search_config: grow_tools::implementations::web_search::WebSearchConfig,
-    /// When true, web search and X search are sent as native server-side
-    /// tools for execution by the agentic sampler, instead of being
-    /// registered as local Function tools.
-    backend_search: bool,
     web_fetch_config: grow_tools::implementations::grow_build::web_fetch::WebFetchConfig,
     lsp: Option<std::sync::Arc<dyn grow_tools::implementations::lsp::LspBackend>>,
     image_gen_config: grow_tools::implementations::grow_build::image_gen::ImageGenConfig,
@@ -230,8 +225,6 @@ impl AgentBuilder {
             session_env: None,
             state_path: None,
             memory_backend: None,
-            web_search_config: Default::default(),
-            backend_search: false,
             web_fetch_config: Default::default(),
             lsp: None,
             image_gen_config: Default::default(),
@@ -427,27 +420,6 @@ impl AgentBuilder {
         self.parent_scheduler_handle = Some(handle);
         self
     }
-    /// Set the web search configuration.
-    ///
-    /// When `Enabled`, a `WebSearchClient` is created and injected into
-    /// the ToolBridge's resources so the `web_search` tool can call the
-    /// Responses API. When `Disabled` (default), the tool returns a
-    /// graceful error if invoked.
-    pub fn with_web_search_config(
-        mut self,
-        config: grow_tools::implementations::web_search::WebSearchConfig,
-    ) -> Self {
-        self.web_search_config = config;
-        self
-    }
-    /// When true, web search and X search are sent as native server-side
-    /// tools for execution by the agentic sampler, instead of being
-    /// registered as local Function tools. Per-model gating is applied
-    /// at request time, not here.
-    pub fn with_backend_search(mut self, enabled: bool) -> Self {
-        self.backend_search = enabled;
-        self
-    }
     /// Set the web fetch configuration.
     ///
     /// When `Enabled`, the `web_fetch` tool is registered and a `WebFetchClient`
@@ -511,11 +483,9 @@ impl AgentBuilder {
         self.api_key_provider = Some(provider);
         self
     }
-    /// Set the 401-attribution callback for tool HTTP clients
-    /// (`image_gen`, `video_gen`, `web_search`). When set, a 401
+    /// Set the 401-attribution callback for media tool HTTP clients. When set, a 401
     /// from any of those tools emits an `auth_401_attribution`
-    /// event with `consumer` of `"ImageGen"` / `"VideoGen.start"` /
-    /// `"VideoGen.poll"` / `"WebSearch"`. Callers should pass the
+    /// event identifies the failing media operation. Callers should pass the
     /// same `ShellAttribution` instance they wire into
     /// `grow_sampler::SamplerConfig::attribution_callback` so
     /// all 401s share the same `AuthManager` reference and land in
@@ -719,10 +689,6 @@ impl AgentBuilder {
                 tool_config
                     .tools
                     .push((&memory::get_tool::MemoryGetImpl).into());
-            }
-            if self.web_search_config.is_enabled() {
-                use grow_tools::implementations::grow_build;
-                tool_config.tools.push((&grow_build::WebSearchTool).into());
             }
             if self.web_fetch_config.is_enabled() {
                 use grow_tools::implementations::grow_build;
@@ -970,8 +936,6 @@ impl AgentBuilder {
                 }
             }
         }
-        let use_backend_search = self.backend_search;
-        let web_search_enabled = self.web_search_config.is_enabled();
         let tool_bridge = ToolBridge::finalize_builder(
             tool_bridge_builder,
             tool_config,
@@ -991,7 +955,6 @@ impl AgentBuilder {
                 skills: skill_info.clone(),
                 state_path,
                 memory_backend: self.memory_backend,
-                web_search_config: self.web_search_config,
                 web_fetch_config: self.web_fetch_config,
                 lsp: self.lsp,
                 image_gen_config: self.image_gen_config,
@@ -1137,19 +1100,6 @@ impl AgentBuilder {
         {
             definition.description = rendered;
         }
-        let mut hosted_tools = Vec::new();
-        if use_backend_search {
-            if web_search_enabled && definition.hosted_tool_allowed("web_search") {
-                hosted_tools.push(grow_sampling_types::HostedTool::WebSearch { options: None });
-            }
-            if definition.hosted_tool_allowed("x_search") {
-                hosted_tools.push(grow_sampling_types::HostedTool::XSearch { options: None });
-            }
-            grow_sampling_types::apply_tool_overrides(
-                &mut hosted_tools,
-                definition.tool_overrides.as_ref(),
-            );
-        }
         #[allow(clippy::arc_with_non_send_sync)]
         let tool_bridge = Arc::new(tool_bridge);
         Ok(Agent::new(
@@ -1159,8 +1109,6 @@ impl AgentBuilder {
             tool_bridge,
             self.reminder_policy,
             self.compaction_policy,
-            hosted_tools,
-            use_backend_search,
         ))
     }
 }
@@ -1200,7 +1148,6 @@ const SUBAGENT_TOOL_NAMING: xai_tool_types::SubagentToolNaming<'static> =
         edit: "${{ tools.by_kind.edit }}",
         list: "${{ tools.by_kind.list }}",
         search: "${{ tools.by_kind.search }}",
-        web_search: "${{ tools.by_kind.web_search }}",
         plan: "${{ tools.by_kind.plan }}",
     };
 /// Return the tool-access fragment for a built-in subagent type, sourced from the
@@ -1818,23 +1765,6 @@ mod tests {
         def.session_tools_denylist = Some(vec!["read_file".into()]);
         assert!(!def.session_tools_allowed("read_file"));
     }
-    #[test]
-    fn hosted_tool_gating() {
-        let base = crate::config::AgentDefinition::general_purpose;
-        assert!(base().hosted_tool_allowed("web_search"));
-        assert!(base().hosted_tool_allowed("x_search"));
-        let mut d = base();
-        d.disallowed_tools = vec!["x_search".into()];
-        assert!(!d.hosted_tool_allowed("x_search"));
-        assert!(d.hosted_tool_allowed("web_search"));
-        let mut d = base();
-        d.tools = vec!["read_file".into()];
-        assert!(!d.hosted_tool_allowed("web_search"));
-        assert!(!d.hosted_tool_allowed("x_search"));
-        let mut d = base();
-        d.session_tools_allowlist = Some(vec!["read_file".into()]);
-        assert!(!d.hosted_tool_allowed("web_search"));
-    }
     const AGENT_TOOLS_BASE: &[&str] = &["read_file", "run_terminal_cmd"];
     #[tokio::test]
     async fn explicit_tool_list_without_agent_disables_task_tools() {
@@ -2048,12 +1978,11 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn registered_but_absent_web_tools_do_not_fall_back() {
+    async fn disabled_web_fetch_does_not_fall_back() {
         let tools = vec![
             "read_file".into(),
             "grep".into(),
             "list_dir".into(),
-            "web_search".into(),
             "web_fetch".into(),
         ];
         let agent = build_with_tools(tools, vec![]).await;
@@ -2063,9 +1992,7 @@ mod tests {
             .iter()
             .map(|d| d.function.name.clone())
             .collect();
-        for absent in ["web_search", "web_fetch"] {
-            assert!(!names.contains(&absent.to_string()), "got: {names:?}");
-        }
+        assert!(!names.contains(&"web_fetch".to_string()), "got: {names:?}");
         for kept in ["read_file", "grep", "list_dir"] {
             assert!(names.contains(&kept.to_string()), "got: {names:?}");
         }
@@ -2074,17 +2001,15 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn requested_enabled_web_tools_survive_allowlist() {
+    async fn requested_enabled_web_fetch_survives_allowlist() {
         use grow_tools::computer::local::LocalTerminalBackend;
         use grow_tools::implementations::grow_build::web_fetch::WebFetchConfig;
-        use grow_tools::implementations::web_search::WebSearchConfig;
         use grow_tools::notification::ToolNotificationHandle;
         let mut definition = crate::config::AgentDefinition::default_grow_build();
         definition.tools = vec![
             "read_file".into(),
             "grep".into(),
             "list_dir".into(),
-            "web_search".into(),
             "web_fetch".into(),
         ];
         let agent = AgentBuilder::new(
@@ -2093,13 +2018,6 @@ mod tests {
             ToolNotificationHandle::noop(),
         )
         .from_definition(definition)
-        .with_web_search_config(WebSearchConfig::Enabled {
-            api_key: "test-key".into(),
-            base_url: "https://api.example.com/v1".into(),
-            model: "test-web-search-model".into(),
-            extra_headers: Default::default(),
-            alpha_test_key: None,
-        })
         .with_web_fetch_config(WebFetchConfig::Enabled {
             params: Default::default(),
         })
@@ -2112,7 +2030,7 @@ mod tests {
             .iter()
             .map(|d| d.function.name.clone())
             .collect();
-        for kept in ["read_file", "grep", "list_dir", "web_search", "web_fetch"] {
+        for kept in ["read_file", "grep", "list_dir", "web_fetch"] {
             assert!(names.contains(&kept.to_string()), "got: {names:?}");
         }
         for excluded in ["run_terminal_command", "search_replace"] {
@@ -2208,140 +2126,6 @@ mod tests {
         assert!(
             !names.contains(&"search_replace".to_string()),
             "no full-toolset fallback — Edit must be excluded; got: {names:?}"
-        );
-    }
-    async fn build_with_web_search(
-        web_search_enabled: bool,
-        backend_search_enabled: bool,
-        disallowed_tools: &[&str],
-        tool_overrides: Option<grow_sampling_types::ToolOverrides>,
-    ) -> crate::agent::Agent {
-        use grow_tools::computer::local::LocalTerminalBackend;
-        use grow_tools::implementations::web_search::WebSearchConfig;
-        use grow_tools::notification::ToolNotificationHandle;
-        let web_search_config = if web_search_enabled {
-            WebSearchConfig::Enabled {
-                api_key: "test-key".into(),
-                base_url: "https://api.example.com/v1".into(),
-                model: "test-web-search-model".into(),
-                extra_headers: Default::default(),
-                alpha_test_key: None,
-            }
-        } else {
-            WebSearchConfig::Disabled
-        };
-        let mut def = crate::config::AgentDefinition::default_grow_build();
-        def.disallowed_tools = disallowed_tools.iter().map(|s| s.to_string()).collect();
-        def.tool_overrides = tool_overrides;
-        AgentBuilder::new(
-            std::env::temp_dir(),
-            Arc::new(LocalTerminalBackend::new()),
-            ToolNotificationHandle::noop(),
-        )
-        .from_definition(def)
-        .with_web_search_config(web_search_config)
-        .with_backend_search(backend_search_enabled)
-        .build()
-        .await
-        .expect("agent should build for backend-search test case")
-    }
-    #[tokio::test]
-    async fn disallowed_web_search_strips_function_and_hosted_tools() {
-        let agent = build_with_web_search(true, true, &["web_search"], None).await;
-        let hosted = agent.hosted_tools();
-        assert!(
-            !hosted
-                .iter()
-                .any(|t| matches!(t, grow_sampling_types::HostedTool::WebSearch { .. })),
-            "hosted WebSearch must be removed when web_search is disallowed, got: {hosted:?}"
-        );
-        assert!(
-            hosted
-                .iter()
-                .any(|t| matches!(t, grow_sampling_types::HostedTool::XSearch { .. })),
-            "XSearch must remain when only web_search is disallowed, got: {hosted:?}"
-        );
-        let has_web_search_fn = agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|td| short_tool_name(&td.function.name) == "web_search");
-        assert!(
-            !has_web_search_fn,
-            "function web_search tool must be removed when disallowed"
-        );
-    }
-    /// Regression: with backend search + web search both enabled, both
-    /// hosted tools appear and `backend_search_enabled()` is true.
-    #[tokio::test]
-    async fn hosted_tools_populated_when_backend_search_and_web_search_enabled() {
-        let agent = build_with_web_search(true, true, &[], None).await;
-        assert!(agent.backend_search_enabled());
-        let hosted = agent.hosted_tools();
-        assert!(
-            hosted
-                .iter()
-                .any(|t| matches!(t, grow_sampling_types::HostedTool::WebSearch { .. })),
-            "expected WebSearch hosted tool, got: {hosted:?}"
-        );
-        assert!(
-            hosted
-                .iter()
-                .any(|t| matches!(t, grow_sampling_types::HostedTool::XSearch { .. })),
-            "expected XSearch hosted tool, got: {hosted:?}"
-        );
-    }
-    /// XSearch is added unconditionally when backend search is on;
-    /// WebSearch requires the web-search config.
-    #[tokio::test]
-    async fn hosted_tools_only_xsearch_when_web_search_disabled() {
-        let agent = build_with_web_search(false, true, &[], None).await;
-        let hosted = agent.hosted_tools();
-        assert!(
-            !hosted
-                .iter()
-                .any(|t| matches!(t, grow_sampling_types::HostedTool::WebSearch { .. })),
-            "WebSearch must NOT appear when web_search is disabled, got: {hosted:?}"
-        );
-        assert!(
-            hosted
-                .iter()
-                .any(|t| matches!(t, grow_sampling_types::HostedTool::XSearch { .. })),
-            "expected XSearch hosted tool, got: {hosted:?}"
-        );
-    }
-    /// Backend search off: gate bool false and no hosted tools, regardless
-    /// of web-search config.
-    #[tokio::test]
-    async fn hosted_tools_empty_when_backend_search_disabled() {
-        let agent = build_with_web_search(true, false, &[], None).await;
-        assert!(!agent.backend_search_enabled());
-        assert!(agent.hosted_tools().is_empty());
-    }
-    #[tokio::test]
-    async fn hosted_tools_bake_definition_tool_overrides_into_options() {
-        let x_search = grow_sampling_types::XSearchOptions {
-            date_bound: Some(
-                grow_sampling_types::SearchDateBound::new(None, Some("2024-03-15".into())).unwrap(),
-            ),
-        };
-        let agent = build_with_web_search(
-            true,
-            true,
-            &[],
-            Some(grow_sampling_types::ToolOverrides {
-                x_search: Some(x_search.clone()),
-                web_search: None,
-            }),
-        )
-        .await;
-        assert!(
-            agent
-                .hosted_tools()
-                .contains(&grow_sampling_types::HostedTool::XSearch {
-                    options: Some(x_search),
-                }),
-            "definition tool_overrides must be applied to HostedTool options"
         );
     }
 }

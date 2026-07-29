@@ -582,13 +582,7 @@ pub(super) async fn run_session(
                                 s.resume_plan_approval(completion_tx).await;
                             });
                         }
-                        SessionCommand::GetToolOverrides { respond_to } => {
-                            let _ = respond_to.send(session.effective_tool_overrides());
-                        }
-                        SessionCommand::SetToolOverrides { overrides } => {
-                            session.set_tool_overrides(overrides);
-                        }
-                        SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, client_identifier, screen_mode, verbatim, json_schema, send_now, admission, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx } => {
+                        SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, client_identifier, screen_mode, verbatim, json_schema, send_now, admission, respond_to, persist_ack, parsed_prompt_tx } => {
                             let origin = super::PromptOrigin::from_prompt_id(&prompt_id);
                             let (actor_admitted, task_wake_fallback) = match admission {
                                 Some(admission) => {
@@ -650,7 +644,7 @@ pub(super) async fn run_session(
                                 );
                             }
                             let cancel_for_send_now = session
-                                .queue_input(prompt_blocks, prompt_id, prompt_mode, client_identifier, screen_mode, verbatim, json_schema, send_now, task_wake_fallback, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx)
+                                .queue_input(prompt_blocks, prompt_id, prompt_mode, client_identifier, screen_mode, verbatim, json_schema, send_now, task_wake_fallback, respond_to, persist_ack, parsed_prompt_tx)
                                 .await;
                             if cancel_for_send_now {
                                 session.cancel_turn_for_send_now(&mut replay_buffer).await;
@@ -1860,7 +1854,6 @@ pub(super) async fn run_session(
                                     json_schema: None,
                                     origin: super::PromptOrigin::GoalSummary,
                                     task_wake_fallback: None,
-                                    tool_overrides_update: None,
                                     respond_to,
                                     persist_ack: None,
                                     parsed_prompt_tx: None,
@@ -1911,7 +1904,6 @@ pub(super) async fn run_session(
                                         completion_id: format!("{run_id}-{revision}"),
                                     },
                                     task_wake_fallback: None,
-                                    tool_overrides_update: None,
                                     respond_to,
                                     persist_ack: None,
                                     parsed_prompt_tx: None,

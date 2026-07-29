@@ -1467,7 +1467,6 @@ fn managed_mcp_gateway_tools_enabled_with_managed_master() {
     );
 }
 fn with_model_overrides_env_full<T>(
-    ws: Option<&str>,
     ss: Option<&str>,
     id: Option<&str>,
     ps: Option<&str>,
@@ -1476,95 +1475,35 @@ fn with_model_overrides_env_full<T>(
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     with_env_var_opt(
-        "GROW_WEB_SEARCH_MODEL",
-        ws,
+        "GROW_SESSION_SUMMARY_MODEL",
+        ss,
         || with_env_var_opt(
-            "GROW_SESSION_SUMMARY_MODEL",
-            ss,
-            || with_env_var_opt(
-                "GROW_IMAGE_DESCRIPTION_MODEL",
-                id,
-                || with_env_var_opt("GROW_PROMPT_SUGGESTIONS_MODEL", ps, f),
-            ),
+            "GROW_IMAGE_DESCRIPTION_MODEL",
+            id,
+            || with_env_var_opt("GROW_PROMPT_SUGGESTIONS_MODEL", ps, f),
         ),
     )
 }
 fn with_model_overrides_env<T>(
-    ws: Option<&str>,
     ss: Option<&str>,
     id: Option<&str>,
     f: impl FnOnce() -> T,
 ) -> T {
-    with_model_overrides_env_full(ws, ss, id, None, f)
-}
-#[test]
-fn model_overrides_remote_settings_blocked_by_local_config() {
-    with_model_overrides_env(
-        None,
-        None,
-        None,
-        || {
-            let config: toml::Value = toml::from_str(
-                    r#"
-                [models]
-                web_search = "local-ws"
-                "#,
-                )
-                .unwrap();
-            let remote = crate::util::config::RemoteSettings {
-                web_search_model: Some("remote-ws".to_owned()),
-                session_summary_model: Some("remote-ss".to_owned()),
-                image_description_model: Some("remote-id".to_owned()),
-                ..Default::default()
-            };
-            let cfg = ModelOverrideConfig::resolve(None, None, &config, Some(&remote));
-            assert_eq!(cfg.web_search, "local-ws");
-            assert_eq!(cfg.session_summary, Some("remote-ss".to_owned()));
-            assert_eq!(cfg.image_description, Some("remote-id".to_owned()));
-        },
-    );
-}
-#[test]
-fn model_overrides_cli_overrides_everything() {
-    with_model_overrides_env(
-        Some("env-ws"),
-        Some("env-ss"),
-        None,
-        || {
-            let config: toml::Value = toml::from_str(
-                    r#"
-                [models]
-                web_search = "local-ws"
-                "#,
-                )
-                .unwrap();
-            let cfg = ModelOverrideConfig::resolve(
-                Some("cli-ws"),
-                Some("cli-ss"),
-                &config,
-                None,
-            );
-            assert_eq!(cfg.web_search, "cli-ws");
-            assert_eq!(cfg.session_summary, Some("cli-ss".to_owned()));
-        },
-    );
+    with_model_overrides_env_full(ss, id, None, f)
 }
 #[test]
 fn model_overrides_remote_settings_applies_without_local_config() {
     with_model_overrides_env(
         None,
         None,
-        None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let remote = crate::util::config::RemoteSettings {
-                web_search_model: Some("remote-ws".to_owned()),
                 session_summary_model: Some("remote-ss".to_owned()),
                 image_description_model: Some("remote-id".to_owned()),
                 ..Default::default()
             };
-            let cfg = ModelOverrideConfig::resolve(None, None, &empty, Some(&remote));
-            assert_eq!(cfg.web_search, "remote-ws");
+            let cfg = ModelOverrideConfig::resolve(None, &empty, Some(&remote));
             assert_eq!(cfg.session_summary, Some("remote-ss".to_owned()));
             assert_eq!(cfg.image_description, Some("remote-id".to_owned()));
         },
@@ -1573,7 +1512,6 @@ fn model_overrides_remote_settings_applies_without_local_config() {
 #[test]
 fn model_overrides_local_image_description_wins_over_remote() {
     with_model_overrides_env(
-        None,
         None,
         None,
         || {
@@ -1588,7 +1526,7 @@ fn model_overrides_local_image_description_wins_over_remote() {
                 image_description_model: Some("remote-id".to_owned()),
                 ..Default::default()
             };
-            let cfg = ModelOverrideConfig::resolve(None, None, &config, Some(&remote));
+            let cfg = ModelOverrideConfig::resolve(None, &config, Some(&remote));
             assert_eq!(cfg.image_description, Some("local-id".to_owned()));
         },
     );
@@ -1598,10 +1536,9 @@ fn model_overrides_default_image_description_is_grow_build() {
     with_model_overrides_env(
         None,
         None,
-        None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
-            let cfg = ModelOverrideConfig::resolve(None, None, &empty, None);
+            let cfg = ModelOverrideConfig::resolve(None, &empty, None);
             assert_eq!(
                 cfg.image_description,
                 Some(crate::models::default_image_description_model().to_owned())
@@ -1614,10 +1551,9 @@ fn model_overrides_default_session_summary_is_grow_build() {
     with_model_overrides_env(
         None,
         None,
-        None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
-            let cfg = ModelOverrideConfig::resolve(None, None, &empty, None);
+            let cfg = ModelOverrideConfig::resolve(None, &empty, None);
             assert_eq!(
                 cfg.session_summary,
                 Some(crate::models::default_session_summary_model().to_owned())
@@ -1630,7 +1566,6 @@ fn model_overrides_local_session_summary_wins_over_remote() {
     with_model_overrides_env(
         None,
         None,
-        None,
         || {
             let config: toml::Value = toml::from_str(
                     r#"
@@ -1643,7 +1578,7 @@ fn model_overrides_local_session_summary_wins_over_remote() {
                 session_summary_model: Some("remote-ss".to_owned()),
                 ..Default::default()
             };
-            let cfg = ModelOverrideConfig::resolve(None, None, &config, Some(&remote));
+            let cfg = ModelOverrideConfig::resolve(None, &config, Some(&remote));
             assert_eq!(cfg.session_summary, Some("local-ss".to_owned()));
         },
     );
@@ -1651,7 +1586,6 @@ fn model_overrides_local_session_summary_wins_over_remote() {
 #[test]
 fn model_overrides_env_session_summary_overrides_remote() {
     with_model_overrides_env(
-        None,
         Some("env-ss"),
         None,
         || {
@@ -1660,7 +1594,7 @@ fn model_overrides_env_session_summary_overrides_remote() {
                 session_summary_model: Some("remote-ss".to_owned()),
                 ..Default::default()
             };
-            let cfg = ModelOverrideConfig::resolve(None, None, &empty, Some(&remote));
+            let cfg = ModelOverrideConfig::resolve(None, &empty, Some(&remote));
             assert_eq!(cfg.session_summary, Some("env-ss".to_owned()));
         },
     );
@@ -1668,7 +1602,6 @@ fn model_overrides_env_session_summary_overrides_remote() {
 #[test]
 fn model_overrides_env_session_summary_overrides_local() {
     with_model_overrides_env(
-        None,
         Some("env-ss"),
         None,
         || {
@@ -1679,7 +1612,7 @@ fn model_overrides_env_session_summary_overrides_local() {
                 "#,
                 )
                 .unwrap();
-            let cfg = ModelOverrideConfig::resolve(None, None, &config, None);
+            let cfg = ModelOverrideConfig::resolve(None, &config, None);
             assert_eq!(cfg.session_summary, Some("env-ss".to_owned()));
         },
     );
@@ -1687,7 +1620,6 @@ fn model_overrides_env_session_summary_overrides_local() {
 #[test]
 fn model_overrides_empty_session_summary_toml_uses_default() {
     with_model_overrides_env(
-        None,
         None,
         None,
         || {
@@ -1698,7 +1630,7 @@ fn model_overrides_empty_session_summary_toml_uses_default() {
                 "#,
                 )
                 .unwrap();
-            let cfg = ModelOverrideConfig::resolve(None, None, &config, None);
+            let cfg = ModelOverrideConfig::resolve(None, &config, None);
             assert_eq!(
                 cfg.session_summary,
                 Some(crate::models::default_session_summary_model().to_owned())
@@ -1711,14 +1643,13 @@ fn model_overrides_empty_session_summary_remote_uses_default() {
     with_model_overrides_env(
         None,
         None,
-        None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let remote = crate::util::config::RemoteSettings {
                 session_summary_model: Some("   ".to_owned()),
                 ..Default::default()
             };
-            let cfg = ModelOverrideConfig::resolve(None, None, &empty, Some(&remote));
+            let cfg = ModelOverrideConfig::resolve(None, &empty, Some(&remote));
             assert_eq!(
                 cfg.session_summary,
                 Some(crate::models::default_session_summary_model().to_owned())
@@ -1729,7 +1660,6 @@ fn model_overrides_empty_session_summary_remote_uses_default() {
 #[test]
 fn model_overrides_cli_session_summary_overrides_everything() {
     with_model_overrides_env(
-        None,
         Some("env-ss"),
         None,
         || {
@@ -1745,7 +1675,6 @@ fn model_overrides_cli_session_summary_overrides_everything() {
                 ..Default::default()
             };
             let cfg = ModelOverrideConfig::resolve(
-                None,
                 Some("cli-ss"),
                 &config,
                 Some(&remote),
@@ -1759,10 +1688,9 @@ fn model_overrides_empty_cli_session_summary_uses_default() {
     with_model_overrides_env(
         None,
         None,
-        None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
-            let cfg = ModelOverrideConfig::resolve(None, Some(""), &empty, None);
+            let cfg = ModelOverrideConfig::resolve(Some(""), &empty, None);
             assert_eq!(
                 cfg.session_summary,
                 Some(crate::models::default_session_summary_model().to_owned())
@@ -1774,7 +1702,6 @@ fn model_overrides_empty_cli_session_summary_uses_default() {
 fn model_overrides_env_image_description_overrides_remote() {
     with_model_overrides_env(
         None,
-        None,
         Some("env-id"),
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
@@ -1782,7 +1709,7 @@ fn model_overrides_env_image_description_overrides_remote() {
                 image_description_model: Some("remote-id".to_owned()),
                 ..Default::default()
             };
-            let cfg = ModelOverrideConfig::resolve(None, None, &empty, Some(&remote));
+            let cfg = ModelOverrideConfig::resolve(None, &empty, Some(&remote));
             assert_eq!(cfg.image_description, Some("env-id".to_owned()));
         },
     );
@@ -1790,7 +1717,6 @@ fn model_overrides_env_image_description_overrides_remote() {
 #[test]
 fn model_overrides_env_image_description_overrides_local() {
     with_model_overrides_env(
-        None,
         None,
         Some("env-id"),
         || {
@@ -1801,7 +1727,7 @@ fn model_overrides_env_image_description_overrides_local() {
                 "#,
                 )
                 .unwrap();
-            let cfg = ModelOverrideConfig::resolve(None, None, &config, None);
+            let cfg = ModelOverrideConfig::resolve(None, &config, None);
             assert_eq!(cfg.image_description, Some("env-id".to_owned()));
         },
     );
@@ -1809,7 +1735,6 @@ fn model_overrides_env_image_description_overrides_local() {
 #[test]
 fn model_overrides_empty_image_description_toml_uses_default() {
     with_model_overrides_env(
-        None,
         None,
         None,
         || {
@@ -1820,7 +1745,7 @@ fn model_overrides_empty_image_description_toml_uses_default() {
                 "#,
                 )
                 .unwrap();
-            let cfg = ModelOverrideConfig::resolve(None, None, &config, None);
+            let cfg = ModelOverrideConfig::resolve(None, &config, None);
             assert_eq!(
                 cfg.image_description,
                 Some(crate::models::default_image_description_model().to_owned())
@@ -1833,14 +1758,13 @@ fn model_overrides_empty_image_description_remote_uses_default() {
     with_model_overrides_env(
         None,
         None,
-        None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let remote = crate::util::config::RemoteSettings {
                 image_description_model: Some("   ".to_owned()),
                 ..Default::default()
             };
-            let cfg = ModelOverrideConfig::resolve(None, None, &empty, Some(&remote));
+            let cfg = ModelOverrideConfig::resolve(None, &empty, Some(&remote));
             assert_eq!(
                 cfg.image_description,
                 Some(crate::models::default_image_description_model().to_owned())
@@ -1853,10 +1777,9 @@ fn model_overrides_prompt_suggestion_unpinned_by_default() {
     with_model_overrides_env(
         None,
         None,
-        None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
-            let cfg = ModelOverrideConfig::resolve(None, None, &empty, None);
+            let cfg = ModelOverrideConfig::resolve(None, &empty, None);
             assert_eq!(cfg.prompt_suggestion, PromptSuggestModelPin::Unpinned);
         },
     );
@@ -1864,7 +1787,6 @@ fn model_overrides_prompt_suggestion_unpinned_by_default() {
 #[test]
 fn model_overrides_prompt_suggestion_local_wins_over_remote() {
     with_model_overrides_env(
-        None,
         None,
         None,
         || {
@@ -1879,7 +1801,7 @@ fn model_overrides_prompt_suggestion_local_wins_over_remote() {
                 prompt_suggestion_model: Some("remote-ps".to_owned()),
                 ..Default::default()
             };
-            let cfg = ModelOverrideConfig::resolve(None, None, &config, Some(&remote));
+            let cfg = ModelOverrideConfig::resolve(None, &config, Some(&remote));
             assert_eq!(
                 cfg.prompt_suggestion,
                 PromptSuggestModelPin::Pinned("local-ps".to_owned())
@@ -1892,14 +1814,13 @@ fn model_overrides_prompt_suggestion_remote_applies_without_local() {
     with_model_overrides_env(
         None,
         None,
-        None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let remote = crate::util::config::RemoteSettings {
                 prompt_suggestion_model: Some("remote-ps".to_owned()),
                 ..Default::default()
             };
-            let cfg = ModelOverrideConfig::resolve(None, None, &empty, Some(&remote));
+            let cfg = ModelOverrideConfig::resolve(None, &empty, Some(&remote));
             assert_eq!(
                 cfg.prompt_suggestion,
                 PromptSuggestModelPin::Pinned("remote-ps".to_owned())
@@ -1910,7 +1831,6 @@ fn model_overrides_prompt_suggestion_remote_applies_without_local() {
 #[test]
 fn model_overrides_prompt_suggestion_env_wins_over_local_and_remote() {
     with_model_overrides_env_full(
-        None,
         None,
         None,
         Some("env-ps"),
@@ -1926,7 +1846,7 @@ fn model_overrides_prompt_suggestion_env_wins_over_local_and_remote() {
                 prompt_suggestion_model: Some("remote-ps".to_owned()),
                 ..Default::default()
             };
-            let cfg = ModelOverrideConfig::resolve(None, None, &config, Some(&remote));
+            let cfg = ModelOverrideConfig::resolve(None, &config, Some(&remote));
             assert_eq!(
                 cfg.prompt_suggestion,
                 PromptSuggestModelPin::Env("env-ps".to_owned())
@@ -1939,7 +1859,6 @@ fn model_overrides_prompt_suggestion_blank_values_are_unset() {
     with_model_overrides_env_full(
         None,
         None,
-        None,
         Some("  "),
         || {
             let config: toml::Value = toml::from_str(
@@ -1949,7 +1868,7 @@ fn model_overrides_prompt_suggestion_blank_values_are_unset() {
                 "#,
                 )
                 .unwrap();
-            let cfg = ModelOverrideConfig::resolve(None, None, &config, None);
+            let cfg = ModelOverrideConfig::resolve(None, &config, None);
             assert_eq!(
                 cfg.prompt_suggestion,
                 PromptSuggestModelPin::Pinned("local-ps".to_owned())
@@ -1957,7 +1876,6 @@ fn model_overrides_prompt_suggestion_blank_values_are_unset() {
         },
     );
     with_model_overrides_env(
-        None,
         None,
         None,
         || {
@@ -1972,7 +1890,7 @@ fn model_overrides_prompt_suggestion_blank_values_are_unset() {
                 prompt_suggestion_model: Some("  ".to_owned()),
                 ..Default::default()
             };
-            let cfg = ModelOverrideConfig::resolve(None, None, &config, Some(&remote));
+            let cfg = ModelOverrideConfig::resolve(None, &config, Some(&remote));
             assert_eq!(cfg.prompt_suggestion, PromptSuggestModelPin::Unpinned);
         },
     );
@@ -3031,13 +2949,13 @@ fn config_layers_system_managed_lowest_priority() {
 #[test]
 fn apply_requirements_value_overrides_user_settings() {
     let raw_config: toml::Value = toml::from_str(
-            "[cli]\nauto_update = true\nchannel = \"beta\"\n\n[features]\nlsp_tools = true\nweb_fetch = true\nwrite_file = true\n\n[ui]\nyolo = true\n\n[models]\ndefault = \"user-model\"\nweb_search = \"user-ws-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://user-proxy.example/v1\"\ninference_base_url = \"https://user-api.example/v1\"\nmodels_base_url = \"https://user-models.example/v1\"\nmodels_list_url = \"https://user-models.example/v1/models\"\n",
+            "[cli]\nauto_update = true\nchannel = \"beta\"\n\n[features]\nlsp_tools = true\nweb_fetch = true\nwrite_file = true\n\n[ui]\nyolo = true\n\n[models]\ndefault = \"user-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://user-proxy.example/v1\"\ninference_base_url = \"https://user-api.example/v1\"\nmodels_base_url = \"https://user-models.example/v1\"\nmodels_list_url = \"https://user-models.example/v1/models\"\n",
         )
         .unwrap();
     let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw_config).unwrap();
     cfg.default_yolo_mode = true;
     let requirements: toml::Value = toml::from_str(
-            "[cli]\nauto_update = false\nchannel = \"stable\"\n\n[features]\nlsp_tools = false\nweb_fetch = false\nwrite_file = false\nremote_fetch = false\n\n[ui]\nyolo = false\n\n[models]\ndefault = \"managed-model\"\nweb_search = \"managed-ws-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://managed-proxy.example/v1\"\ninference_base_url = \"https://managed-api.example/v1\"\nmodels_base_url = \"https://managed-models.example/v1\"\nmodels_list_url = \"https://managed-models.example/v1/models\"\ndeployment_key = \"enterprise-deploy-key-should-not-log\"\n",
+            "[cli]\nauto_update = false\nchannel = \"stable\"\n\n[features]\nlsp_tools = false\nweb_fetch = false\nwrite_file = false\nremote_fetch = false\n\n[ui]\nyolo = false\n\n[models]\ndefault = \"managed-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://managed-proxy.example/v1\"\ninference_base_url = \"https://managed-api.example/v1\"\nmodels_base_url = \"https://managed-models.example/v1\"\nmodels_list_url = \"https://managed-models.example/v1/models\"\ndeployment_key = \"enterprise-deploy-key-should-not-log\"\n",
         )
         .unwrap();
     let source = RequirementSource::Requirements {
@@ -3057,7 +2975,6 @@ fn apply_requirements_value_overrides_user_settings() {
     assert!(!cfg.ui.yolo);
     assert!(!cfg.default_yolo_mode);
     assert_eq!(Some("managed-model"), cfg.models.default.as_deref());
-    assert_eq!(Some("managed-ws-model"), cfg.models.web_search.as_deref());
     assert_eq!(Some("stable"), cfg.cli.channel.as_deref());
     assert_eq!(
             Some("https://managed-proxy.example/v1"),

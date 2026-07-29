@@ -163,7 +163,7 @@ A capability mode is an optional, coarse filter on a subagent's tools:
 
 | Mode         | Read | Write | Execute | Description                                  |
 | ------------ | ---- | ----- | ------- | -------------------------------------------- |
-| `read-only`  | Yes  | No    | No      | Read, search, and inspect (also web search and LSP); no file edits or shell. |
+| `read-only`  | Yes  | No    | No      | Read, search, and inspect (including inherited MCP and LSP tools); no file edits or shell. |
 | `read-write` | Yes  | Yes   | No      | Read, plus create, edit, delete, and move files. No shell. |
 | `execute`    | Yes  | No    | Yes     | Read, plus run shell commands and background tasks. No file edits. |
 | `all`        | Yes  | Yes   | Yes     | Unrestricted tool access.                    |

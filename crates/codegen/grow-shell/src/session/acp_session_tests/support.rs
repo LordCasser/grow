@@ -23,22 +23,6 @@ pub(crate) fn noop_observability_bridge() -> xai_computer_hub_sdk::Observability
 pub(crate) async fn test_agent_default() -> grow_agent::Agent {
     test_agent_with_tools(vec![]).await
 }
-#[cfg(test)]
-pub(crate) async fn test_agent_backend_search(
-    hosted_tools: Vec<grow_sampling_types::HostedTool>,
-) -> grow_agent::Agent {
-    let base = test_agent_default().await;
-    grow_agent::Agent::new(
-        base.definition().clone(),
-        grow_agent::PromptContext::default(),
-        String::new(),
-        base.tool_bridge().clone(),
-        grow_agent::ReminderPolicy::default(),
-        grow_agent::CompactionPolicy::default(),
-        hosted_tools,
-        true,
-    )
-}
 /// Like [`test_agent_default`] but registers the `update_goal` tool so
 /// `command_availability().goal` is satisfied and `/goal …` slash commands
 /// resolve to their builtins when a turn is driven through `handle_prompt`.
@@ -126,7 +110,6 @@ async fn test_agent_from_config(
         skills: vec![],
         state_path: std::path::PathBuf::from("/tmp/tool_state.json"),
         memory_backend: None,
-        web_search_config: Default::default(),
         web_fetch_config: Default::default(),
         lsp: None,
         image_gen_config: Default::default(),
@@ -149,8 +132,6 @@ async fn test_agent_from_config(
         tool_bridge,
         grow_agent::ReminderPolicy::default(),
         grow_agent::CompactionPolicy::default(),
-        vec![],
-        false,
     )
 }
 #[cfg(test)]
@@ -256,9 +237,6 @@ pub(crate) async fn create_test_actor_ex(
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
-        supports_backend_search: std::cell::Cell::new(false),
-        tool_overrides: std::cell::RefCell::new(None),
-        resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
         compactions_remaining: std::cell::Cell::new(None),
         compaction_at_tokens: std::cell::Cell::new(None),
         doom_loop_recovery: None,
@@ -456,7 +434,6 @@ pub(crate) fn user_item_with_rx(
         json_schema: None,
         origin: crate::session::PromptOrigin::User,
         task_wake_fallback: None,
-        tool_overrides_update: None,
         respond_to,
         persist_ack: None,
         parsed_prompt_tx: None,
@@ -496,7 +473,6 @@ pub(crate) fn input_with_origin_rx(
         json_schema: None,
         origin,
         task_wake_fallback: None,
-        tool_overrides_update: None,
         respond_to,
         persist_ack: None,
         parsed_prompt_tx: None,

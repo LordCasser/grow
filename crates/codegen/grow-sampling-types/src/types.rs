@@ -34,8 +34,6 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub search_parameters: Option<SearchParameters>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<crate::rs::ResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -54,7 +52,6 @@ impl ChatCompletionRequest {
             user: None,
             tools: None,
             tool_choice: None,
-            search_parameters: None,
             response_format: None,
             reasoning_effort: None,
         }
@@ -72,7 +69,6 @@ impl ChatCompletionRequest {
             user: None,
             tools: None,
             tool_choice: None,
-            search_parameters: None,
             response_format: None,
             reasoning_effort: None,
         }
@@ -563,69 +559,6 @@ pub struct ChatChunkDelta {
     pub tool_call_id: Option<String>,
 }
 
-/// Parameters to control realtime data.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct SearchParameters {
-    /// Choose the mode to query realtime data:
-    /// * `off`: no search performed and no external will be considered.
-    /// * `on` (default): the model will search in every source for relevant data.
-    /// * `auto`: the model chooses whether to search data or not and where to search the data.
-    pub mode: Option<String>,
-    /// List of sources to search in. If no sources are specified, the model will look over the web and X by default.
-    pub sources: Option<Vec<SearchSource>>,
-    /// Date from which to consider the results in ISO-8601 YYYY-MM-DD.
-    pub from_date: Option<String>,
-    /// Date up to which to consider the results in ISO-8601 YYYY-MM-DD.
-    pub to_date: Option<String>,
-    /// Whether to return citations in the response or not.
-    pub return_citations: Option<bool>,
-    /// Maximum number of search results to use.
-    pub max_search_results: Option<i32>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(tag = "type")]
-pub enum SearchSource {
-    #[serde(rename = "x")]
-    X {
-        /// X Handles of the users from whom to consider the posts.
-        included_x_handles: Option<Vec<String>>,
-        /// DEPRECATED in favor of `included_x_handles`. Use `included_x_handles` instead.
-        x_handles: Option<Vec<String>>,
-        /// List of X handles to exclude from the search results.
-        excluded_x_handles: Option<Vec<String>>,
-        /// The minimum favorite count of the X posts to consider.
-        post_favorite_count: Option<i32>,
-        /// The minimum view count of the X posts to consider.
-        post_view_count: Option<i32>,
-    },
-    #[serde(rename = "web")]
-    Web {
-        /// List of website to exclude from the search results.
-        excluded_websites: Option<Vec<String>>,
-        /// List of website to allow in the search results.
-        allowed_websites: Option<Vec<String>>,
-        /// ISO alpha-2 code of the country.
-        country: Option<String>,
-        /// If set to true, mature content won't be considered during the search.
-        safe_search: Option<bool>,
-    },
-    #[serde(rename = "news")]
-    News {
-        /// List of website to exclude from the search results.
-        excluded_websites: Option<Vec<String>>,
-        /// ISO alpha-2 code of the country.
-        country: Option<String>,
-        /// If set to true, mature content won't be considered during the search.
-        safe_search: Option<bool>,
-    },
-    #[serde(rename = "rss")]
-    Rss {
-        /// Links of the RSS feeds.
-        links: Vec<String>,
-    },
-}
-
 /// Per-model config for the `x-compaction-at` request header (a token count).
 ///
 /// Deserialized from a polymorphic remote-config value: `true` enables the
@@ -977,26 +910,17 @@ pub struct SamplingConfig {
 
 // ============ Responses API wrapper ============
 
-/// Wrapper around `async_openai::types::responses::CreateResponse` for raw
-/// hosted-tool entries not represented by the upstream type.
+/// Wrapper around `async_openai::types::responses::CreateResponse`.
 #[derive(Debug, Clone, Default)]
 pub struct CreateResponseWrapper {
     /// The inner Responses API request.
     pub inner: crate::rs::CreateResponse,
-
-    /// xAI-specific tool definitions that can't be expressed via
-    /// `async_openai`'s `rs::Tool` enum (e.g., `x_search`). Injected
-    /// as raw JSON into the serialized request body's `tools` array.
-    pub extra_tool_entries: Vec<serde_json::Value>,
 }
 
 impl CreateResponseWrapper {
     /// Create a new wrapper from an existing `CreateResponse`.
     pub fn new(inner: crate::rs::CreateResponse) -> Self {
-        Self {
-            inner,
-            extra_tool_entries: vec![],
-        }
+        Self { inner }
     }
 }
 

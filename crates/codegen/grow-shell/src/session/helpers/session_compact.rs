@@ -2,8 +2,8 @@
 //! gets passed to the next turn of the model
 use crate::sampling::{
     ApiBackend, ChatCompletionRequest, ChatRequestMessage, Client as OaiCompatClient,
-    ConversationItem, ConversationRequest, ConversationToolChoice, HostedTool, SamplingError,
-    ToolChoice, ToolDefinition, ToolSpec, conversation_to_chat_messages,
+    ConversationItem, ConversationRequest, ConversationToolChoice, SamplingError, ToolChoice,
+    ToolDefinition, ToolSpec, conversation_to_chat_messages,
 };
 use agent_client_protocol as acp;
 use async_openai::types::responses::ResponseStreamEvent;
@@ -333,7 +333,7 @@ where
 /// user message — use [`build_compaction_chat_history`] to construct it. The
 /// split lets callers persist the exact request payload before issuing it.
 ///
-/// `tools` / `hosted_tools` are the SAME effective definitions the turn loop
+/// `tools` are the same effective definitions the turn loop
 /// attaches to normal requests. Tool definitions are serialized into the
 /// prompt prefix by every backend, so omitting them would shift the entire
 /// prefix and force a full prefill on the summarizer call — attaching them
@@ -348,7 +348,6 @@ where
 pub(crate) async fn generate_session_compact(
     chat_history: Vec<ConversationItem>,
     tools: Vec<ToolSpec>,
-    hosted_tools: Vec<HostedTool>,
     client: OaiCompatClient,
     session_id: acp::SessionId,
     sampling_config: &SamplingConfig,
@@ -472,7 +471,6 @@ pub(crate) async fn generate_session_compact(
                 items: chat_history,
                 tool_choice: (!tools.is_empty()).then_some(conversation_tool_choice),
                 tools,
-                hosted_tools,
                 model: Some(sampling_config.model.to_owned()),
                 temperature: Some(1.0),
                 ..Default::default()
@@ -593,7 +591,6 @@ pub(crate) async fn generate_session_compact(
             let request = ConversationRequest {
                 items: chat_history,
                 tools,
-                hosted_tools,
                 model: Some(sampling_config.model.to_owned()),
                 temperature: Some(1.0),
                 ..Default::default()
@@ -1599,7 +1596,6 @@ mod reasoning_compaction_regression_tests {
         let output = generate_session_compact(
             chat_history,
             vec![],
-            vec![],
             client,
             acp::SessionId::new("test-session"),
             &config,
@@ -1634,7 +1630,6 @@ mod reasoning_compaction_regression_tests {
             origin_client: None,
             attribution_callback: None,
             bearer_resolver: None,
-            supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
@@ -1684,7 +1679,6 @@ mod reasoning_compaction_regression_tests {
         ];
         let result = generate_session_compact(
             chat_history,
-            vec![],
             vec![],
             client,
             acp::SessionId::new("test-session"),
@@ -1747,7 +1741,6 @@ mod reasoning_compaction_regression_tests {
         generate_session_compact(
             chat_history.clone(),
             tools,
-            vec![],
             client,
             acp::SessionId::new("test-session"),
             &config,
@@ -1760,7 +1753,6 @@ mod reasoning_compaction_regression_tests {
         let client = Client::new(config.clone()).unwrap();
         generate_session_compact(
             chat_history,
-            vec![],
             vec![],
             client,
             acp::SessionId::new("test-session"),
@@ -1889,12 +1881,10 @@ mod reasoning_compaction_regression_tests {
             description: Some("Reads a file".to_string()),
             parameters: json!({"type": "object", "properties": {}}),
         }];
-        let hosted = vec![HostedTool::WebSearch { options: None }];
         let client = Client::new(config.clone()).unwrap();
         generate_session_compact(
             chat_history.clone(),
             tools,
-            hosted,
             client,
             acp::SessionId::new("test-session"),
             &config,
@@ -1907,7 +1897,6 @@ mod reasoning_compaction_regression_tests {
         let client = Client::new(config.clone()).unwrap();
         generate_session_compact(
             chat_history,
-            vec![],
             vec![],
             client,
             acp::SessionId::new("test-session"),
@@ -1936,12 +1925,6 @@ mod reasoning_compaction_regression_tests {
         assert!(
             has_read_file,
             "client function tool must be present: {sent_tools:?}"
-        );
-        assert!(
-            sent_tools
-                .iter()
-                .any(|t| t.get("type") == Some(&json!("web_search"))),
-            "hosted web_search must be present for prefix alignment: {sent_tools:?}"
         );
         let without_tools = &bodies[1];
         assert!(
@@ -1986,7 +1969,6 @@ mod reasoning_compaction_regression_tests {
         ];
         let result = generate_session_compact(
             chat_history,
-            vec![],
             vec![],
             client,
             acp::SessionId::new("test-session"),
@@ -2066,7 +2048,6 @@ mod reasoning_compaction_regression_tests {
         let result = generate_session_compact(
             chat_history,
             vec![],
-            vec![],
             client,
             acp::SessionId::new("test-session"),
             &config,
@@ -2144,7 +2125,6 @@ mod reasoning_compaction_regression_tests {
         let result = generate_session_compact(
             chat_history,
             vec![],
-            vec![],
             client,
             acp::SessionId::new("test-session"),
             &config,
@@ -2218,7 +2198,6 @@ mod reasoning_compaction_regression_tests {
         ];
         let result = generate_session_compact(
             chat_history,
-            vec![],
             vec![],
             client,
             acp::SessionId::new("test-session"),

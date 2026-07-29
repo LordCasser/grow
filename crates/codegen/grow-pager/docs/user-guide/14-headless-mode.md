@@ -56,7 +56,7 @@ Tool names are internal tool IDs (e.g. the shell tool is `run_terminal_cmd`, not
 grow -p "Explain this codebase" --tools "read_file,grep,list_dir"
 
 # Remove web access and file editing
-grow -p "Review this code" --disallowed-tools "web_search,web_fetch,search_replace"
+grow -p "Review this code" --disallowed-tools "web_fetch,search_replace"
 
 # Remove shell access
 grow -p "Review this code" --disallowed-tools "run_terminal_cmd"
@@ -574,7 +574,6 @@ These flags supplement the [Command-Line Options](#command-line-options) table a
 | `--no-plan`                   | Disable plan mode                                 |
 | `--no-subagents`              | Disable subagent spawning                         |
 | `--no-memory`                 | Disable cross-session memory                      |
-| `--disable-web-search`        | Disable web search and fetch tools                |
 | `--no-alt-screen`             | Run inline (no alternate screen)                  |
 | `--worktree [NAME]`           | Start session in a new git worktree               |
 | `--ref <REF>` / `--worktree-ref <REF>` | Branch/tag/commit to base the worktree on (with `--worktree`) |

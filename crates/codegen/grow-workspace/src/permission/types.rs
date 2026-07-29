@@ -175,7 +175,6 @@ pub enum AccessKind {
         input: serde_json::Value,
     },
     WebFetch(String),
-    WebSearch(String),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -279,7 +278,6 @@ impl From<&grow_tools::types::ToolInput> for AccessKind {
             | ToolInput::WaitTasks(_)
             | ToolInput::KillTask(_)
             | ToolInput::Skill(_) => AccessKind::Read(None),
-            ToolInput::WebSearch(ws) => AccessKind::WebSearch(ws.query.clone()),
             ToolInput::SearchReplace(search_replace) => {
                 AccessKind::Edit(search_replace.file_path.to_string())
             }
@@ -371,7 +369,6 @@ pub enum ToolFilter {
     Grep,
     Mcp,
     WebFetch,
-    WebSearch,
 }
 /// Where a requirement/permission was loaded from (duplicated for claude_compat).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -622,20 +619,6 @@ mod tests {
         assert!(
             matches!(access, AccessKind::WebFetch(ref u) if u == "https://custom.example.com/api"),
             "WebFetch should produce AccessKind::WebFetch with the URL, got {access:?}"
-        );
-    }
-    #[test]
-    fn web_search_maps_to_web_search_access() {
-        use grow_tools::implementations::grow_build::web_search::WebSearchInput;
-        use grow_tools::types::ToolInput;
-        let input = ToolInput::WebSearch(WebSearchInput {
-            query: "rust lang".into(),
-            allowed_domains: None,
-        });
-        let access = AccessKind::from(&input);
-        assert!(
-            matches!(access, AccessKind::WebSearch(ref q) if q == "rust lang"),
-            "WebSearch should produce AccessKind::WebSearch with the query, got {access:?}"
         );
     }
     #[test]

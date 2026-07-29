@@ -1016,7 +1016,6 @@ impl RenderBlock {
             | RenderBlock::ToolCall(ToolCallBlock::Execute(_))
             | RenderBlock::ToolCall(ToolCallBlock::Edit(_))
             | RenderBlock::ToolCall(ToolCallBlock::WebFetch(_))
-            | RenderBlock::ToolCall(ToolCallBlock::WebSearch(_))
             | RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(_))
             | RenderBlock::ToolCall(ToolCallBlock::UseTool(_))
             | RenderBlock::BgTask(_) => true,
@@ -1047,7 +1046,6 @@ impl RenderBlock {
                 | RenderBlock::ToolCall(ToolCallBlock::Read(_))
                 | RenderBlock::ToolCall(ToolCallBlock::Edit(_))
                 | RenderBlock::ToolCall(ToolCallBlock::WebFetch(_))
-                | RenderBlock::ToolCall(ToolCallBlock::WebSearch(_))
         )
     }
 
@@ -1075,7 +1073,6 @@ impl RenderBlock {
             RenderBlock::ToolCall(ToolCallBlock::Read(b)) => b.content.clone(),
             RenderBlock::ToolCall(ToolCallBlock::Edit(b)) => Some(b.copy_text()),
             RenderBlock::ToolCall(ToolCallBlock::WebFetch(b)) => Some(b.copy_text()),
-            RenderBlock::ToolCall(ToolCallBlock::WebSearch(b)) => Some(b.copy_text()),
             RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(b)) => Some(b.copy_text()),
             RenderBlock::ToolCall(ToolCallBlock::UseTool(b)) => Some(b.copy_text()),
             _ => None,
@@ -1091,7 +1088,6 @@ impl RenderBlock {
             RenderBlock::ToolCall(ToolCallBlock::Read(b)) => Some(b.path.clone()),
             RenderBlock::ToolCall(ToolCallBlock::Edit(b)) => Some(b.path.clone()),
             RenderBlock::ToolCall(ToolCallBlock::WebFetch(b)) => Some(b.url.clone()),
-            RenderBlock::ToolCall(ToolCallBlock::WebSearch(b)) => Some(b.query.clone()),
             RenderBlock::ToolCall(ToolCallBlock::Search(b)) => Some(b.pattern.clone()),
             RenderBlock::BgTask(b) => Some(b.command.clone()),
             _ => None,
@@ -1162,7 +1158,6 @@ impl RenderBlock {
             RenderBlock::ToolCall(ToolCallBlock::Read(_)) => Some("copy path"),
             RenderBlock::ToolCall(ToolCallBlock::Edit(_)) => Some("copy path"),
             RenderBlock::ToolCall(ToolCallBlock::WebFetch(_)) => Some("copy url"),
-            RenderBlock::ToolCall(ToolCallBlock::WebSearch(_)) => Some("copy query"),
             RenderBlock::ToolCall(ToolCallBlock::Search(_)) => Some("copy pattern"),
             _ => None,
         }
@@ -1443,8 +1438,8 @@ mod tests {
 mod searchable_text_tests {
     use super::*;
     use crate::scrollback::blocks::SearchLineMatch;
+    use crate::scrollback::blocks::tool::LifecycleEventBlock;
     use crate::scrollback::blocks::tool::memory_search::{MemoryResult, MemorySearchToolCallBlock};
-    use crate::scrollback::blocks::tool::{LifecycleEventBlock, WebSearchToolCallBlock};
     use grow_shell::session::ContextInfo;
     use std::time::Duration;
 
@@ -1650,15 +1645,5 @@ mod searchable_text_tests {
             !text.contains('`'),
             "backticks should be stripped: {text:?}"
         );
-    }
-
-    #[test]
-    fn web_search_indexes_query_and_citation() {
-        let mut ws = WebSearchToolCallBlock::new("rust async runtime");
-        ws.citations = vec!["https://tokio.rs/docs".into()];
-        let block = RenderBlock::ToolCall(ToolCallBlock::WebSearch(ws));
-        let text = block.searchable_text().expect("web search text");
-        assert!(text.contains("rust async runtime"), "got: {text:?}");
-        assert!(text.contains("https://tokio.rs/docs"), "got: {text:?}");
     }
 }

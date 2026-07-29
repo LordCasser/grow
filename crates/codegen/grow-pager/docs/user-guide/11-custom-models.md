@@ -186,15 +186,13 @@ any configured default is considered.
 ## Auxiliary models
 
 Session summaries and image descriptions inherit the active session model when their setting is
-absent. Web search and prompt suggestions are disabled unless explicitly assigned a configured
-catalog model:
+absent. Prompt suggestions are disabled unless explicitly assigned a configured catalog model:
 
 ```toml
 [models]
 default = "primary/main"
 session_summary = "fast/summary"
 image_description = "vision/describe"
-web_search = "search/search-model"
 prompt_suggestion = "fast/suggest"
 ```
 

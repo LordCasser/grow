@@ -983,7 +983,6 @@ pub fn extract_last_response_type(agent: &AgentView) -> String {
                     ToolCallBlock::ListDir(_) => Some("List"),
                     ToolCallBlock::Search(_) => Some("Search"),
                     ToolCallBlock::WebFetch(_) => Some("Fetch"),
-                    ToolCallBlock::WebSearch(_) => Some("Web search"),
                     ToolCallBlock::IntegrationSearch(_) => Some("Tool search"),
                     ToolCallBlock::UseTool(_) => Some("Tool"),
                     ToolCallBlock::MemorySearch(_) => Some("Memory"),

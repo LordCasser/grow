@@ -10,16 +10,6 @@
     "breaking_change": false
   },
   {
-    "category": "features",
-    "description": "**New tool_overrides option** lets you set date cutoffs and domain allowlists for the agent's built-in search tools.",
-    "breaking_change": false
-  },
-  {
-    "category": "features",
-    "description": "**New toolOverrides option** lets you set date cutoffs and domain allowlists for the agent's built-in search tools.",
-    "breaking_change": false
-  },
-  {
     "category": "fixes",
     "description": "**Terminal output** from remote clients is now recorded so read-file hints and monitors function correctly.",
     "breaking_change": false

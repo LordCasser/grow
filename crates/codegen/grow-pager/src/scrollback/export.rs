@@ -91,7 +91,6 @@ fn tool_summary(tc: &ToolCallBlock) -> String {
         ToolCallBlock::ListDir(l) => format!("ListDir: {}", l.path),
         ToolCallBlock::Search(s) => format!("Search: {}", s.pattern),
         ToolCallBlock::WebFetch(w) => format!("WebFetch: {}", w.url),
-        ToolCallBlock::WebSearch(w) => format!("WebSearch: {}", w.query),
         ToolCallBlock::UseTool(u) => format!("UseTool: {}", u.tool_name),
         ToolCallBlock::IntegrationSearch(_) => "IntegrationSearch (MCP tool discovery)".into(),
         ToolCallBlock::MemorySearch(_) => "MemorySearch".into(),

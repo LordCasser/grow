@@ -131,10 +131,7 @@ impl PermissionHookTransport for ToolServerPermissionTransport {
 fn scope_for_access(access: &AccessKind) -> &'static str {
     match access {
         AccessKind::Bash(_) | AccessKind::Edit(_) | AccessKind::MCPTool { .. } => "write",
-        AccessKind::Read(_)
-        | AccessKind::Grep { .. }
-        | AccessKind::WebFetch(_)
-        | AccessKind::WebSearch(_) => "read",
+        AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebFetch(_) => "read",
     }
 }
 fn describe_access(access: &AccessKind) -> String {
@@ -143,7 +140,6 @@ fn describe_access(access: &AccessKind) -> String {
         AccessKind::Edit(path) => format!("Edit {path}"),
         AccessKind::MCPTool { name, .. } => format!("Run MCP tool {name}"),
         AccessKind::WebFetch(url) => format!("Fetch {url}"),
-        AccessKind::WebSearch(query) => format!("Search the web for {query}"),
         AccessKind::Read(_) => "Read a file".to_owned(),
         AccessKind::Grep { .. } => "Search file contents".to_owned(),
     }

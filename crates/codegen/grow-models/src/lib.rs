@@ -10,10 +10,6 @@ pub fn default_model() -> &'static str {
     ""
 }
 
-pub fn default_web_search_model() -> &'static str {
-    ""
-}
-
 pub fn default_image_description_model() -> &'static str {
     ""
 }

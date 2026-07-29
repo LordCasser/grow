@@ -37,6 +37,10 @@ Grow 没有内置的 xAI/Grok 服务端点、OAuth issuer 或 OAuth client。未
 
 - 模型调用：只访问当前 session 所选 provider 的 `base_url`。
 - 用户显式配置：MCP、插件源和其他可选服务端点只在用户配置或执行对应操作后访问。
+
+Grow 不内置 Web Search 提供商。需要联网搜索时，请配置提供搜索能力的 MCP Server；
+Grow 会像发现其他 MCP 工具一样发现它，不要求固定的服务器名或工具名。内置 `web_fetch`
+仍可用于读取已知 URL。
 - `grow/*` 与 `_grow/*` 是本地 ACP wire protocol，不表示任何外部服务。
 
 Grow 不包含遥测、产品分析、Sentry、OTLP exporter 或 trace upload。诊断事件只写入用户指定

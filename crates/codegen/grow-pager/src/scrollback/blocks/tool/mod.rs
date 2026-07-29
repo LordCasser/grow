@@ -12,7 +12,6 @@ pub mod search;
 mod search_tool;
 mod use_tool;
 mod web_fetch;
-mod web_search;
 
 pub use edit::{
     DiffLineOutput, DiffRenderConfig, EDIT_HL_MAX_BYTES, EDIT_HL_MAX_LINES, EditHighlightPhase,
@@ -34,7 +33,6 @@ pub use search_tool::{
 };
 pub use use_tool::UseToolCallBlock;
 pub use web_fetch::WebFetchToolCallBlock;
-pub use web_search::WebSearchToolCallBlock;
 
 use crate::scrollback::block::{BlockContent, join_searchable};
 use crate::scrollback::types::{
@@ -92,8 +90,6 @@ pub enum VerbGroupKind {
     Dir,
     /// Web fetches.
     WebFetch,
-    /// Web searches, including X search.
-    WebSearch,
     /// Memory searches.
     MemorySearch,
     /// MCP tool discovery (`search_tool`).
@@ -118,7 +114,6 @@ impl VerbGroupKind {
         let (past, present) = match self {
             VerbGroupKind::File | VerbGroupKind::Skill => ("Read", "Reading"),
             VerbGroupKind::Search
-            | VerbGroupKind::WebSearch
             | VerbGroupKind::MemorySearch
             | VerbGroupKind::IntegrationSearch => ("Searched", "Searching"),
             VerbGroupKind::Dir => ("Listed", "Listing"),
@@ -139,7 +134,7 @@ impl VerbGroupKind {
             VerbGroupKind::Skill => ("skill", "skills"),
             VerbGroupKind::Search => ("pattern", "patterns"),
             VerbGroupKind::Dir => ("dir", "dirs"),
-            VerbGroupKind::WebFetch | VerbGroupKind::WebSearch => ("website", "websites"),
+            VerbGroupKind::WebFetch => ("website", "websites"),
             VerbGroupKind::MemorySearch => ("memory", "memories"),
             VerbGroupKind::IntegrationSearch | VerbGroupKind::McpCall => ("MCP tool", "MCP tools"),
             VerbGroupKind::Subagent => ("subagent", "subagents"),
@@ -168,8 +163,6 @@ pub enum ToolCallBlock {
     Search(SearchToolCallBlock),
     /// Web fetch (URL content retrieval).
     WebFetch(WebFetchToolCallBlock),
-    /// Web search (web search with citations).
-    WebSearch(WebSearchToolCallBlock),
     /// MCP integration tool discovery (search_tool).
     IntegrationSearch(IntegrationSearchToolCallBlock),
     /// MCP integration tool dispatch (use_tool).
@@ -195,7 +188,6 @@ macro_rules! delegate_tool {
             ToolCallBlock::ListDir(b) => b.$method($($arg),*),
             ToolCallBlock::Search(b) => b.$method($($arg),*),
             ToolCallBlock::WebFetch(b) => b.$method($($arg),*),
-            ToolCallBlock::WebSearch(b) => b.$method($($arg),*),
             ToolCallBlock::IntegrationSearch(b) => b.$method($($arg),*),
             ToolCallBlock::UseTool(b) => b.$method($($arg),*),
             ToolCallBlock::MemorySearch(b) => b.$method($($arg),*),
@@ -322,9 +314,6 @@ impl ToolCallBlock {
             (ToolCallBlock::WebFetch(new), ToolCallBlock::WebFetch(old)) => {
                 new.started_at = old.started_at;
             }
-            (ToolCallBlock::WebSearch(new), ToolCallBlock::WebSearch(old)) => {
-                new.started_at = old.started_at;
-            }
             (ToolCallBlock::IntegrationSearch(new), ToolCallBlock::IntegrationSearch(old)) => {
                 new.started_at = old.started_at;
             }
@@ -351,7 +340,6 @@ impl ToolCallBlock {
             ToolCallBlock::Search(b) => b.is_success(),
             ToolCallBlock::ListDir(b) => b.is_success(),
             ToolCallBlock::WebFetch(b) => b.is_success(),
-            ToolCallBlock::WebSearch(b) => b.is_success(),
             ToolCallBlock::IntegrationSearch(b) => b.is_success(),
             ToolCallBlock::UseTool(b) => b.is_success(),
             ToolCallBlock::MemorySearch(b) => b.is_success(),
@@ -374,7 +362,6 @@ impl ToolCallBlock {
             ToolCallBlock::Search(b) => b.started_at = Some(instant),
             ToolCallBlock::ListDir(b) => b.started_at = Some(instant),
             ToolCallBlock::WebFetch(b) => b.started_at = Some(instant),
-            ToolCallBlock::WebSearch(b) => b.started_at = Some(instant),
             ToolCallBlock::IntegrationSearch(b) => b.started_at = Some(instant),
             ToolCallBlock::UseTool(b) => b.started_at = Some(instant),
             ToolCallBlock::MemorySearch(b) => b.started_at = Some(instant),
@@ -418,11 +405,6 @@ impl ToolCallBlock {
                 }
             }
             ToolCallBlock::WebFetch(b) => {
-                if b.started_at.is_none() {
-                    b.started_at = Some(std::time::Instant::now());
-                }
-            }
-            ToolCallBlock::WebSearch(b) => {
                 if b.started_at.is_none() {
                     b.started_at = Some(std::time::Instant::now());
                 }
@@ -475,7 +457,6 @@ impl ToolCallBlock {
                 ToolCallBlock::Search(SearchToolCallBlock::new(summary.into()))
             }
             "web_fetch" | "fetch" => ToolCallBlock::WebFetch(WebFetchToolCallBlock::new(summary)),
-            "web_search" => ToolCallBlock::WebSearch(WebSearchToolCallBlock::new(summary)),
             "search_tool" => {
                 ToolCallBlock::IntegrationSearch(IntegrationSearchToolCallBlock::new(summary))
             }
@@ -528,16 +509,6 @@ impl ToolCallBlock {
             ToolCallBlock::WebFetch(b) => {
                 join_searchable([Some(b.url.clone()), b.output.clone(), b.error.clone()])
             }
-            ToolCallBlock::WebSearch(b) => {
-                let citations = join_searchable(b.citations.iter().cloned().map(Some));
-                join_searchable([
-                    Some(b.query.clone()),
-                    b.content.clone(),
-                    citations,
-                    b.label.clone(),
-                    b.error.clone(),
-                ])
-            }
             ToolCallBlock::IntegrationSearch(b) => {
                 join_searchable([Some(b.copy_text()), b.content.clone(), b.error.clone()])
             }
@@ -575,7 +546,6 @@ impl ToolCallBlock {
             ToolCallBlock::ListDir(_) => Some(VerbGroupKind::Dir),
             ToolCallBlock::Search(_) => Some(VerbGroupKind::Search),
             ToolCallBlock::WebFetch(_) => Some(VerbGroupKind::WebFetch),
-            ToolCallBlock::WebSearch(_) => Some(VerbGroupKind::WebSearch),
             ToolCallBlock::IntegrationSearch(_) => Some(VerbGroupKind::IntegrationSearch),
             ToolCallBlock::MemorySearch(_) => Some(VerbGroupKind::MemorySearch),
             ToolCallBlock::Skill(_) => Some(VerbGroupKind::Skill),
@@ -604,7 +574,6 @@ impl ToolCallBlock {
             | ToolCallBlock::ListDir(_)
             | ToolCallBlock::Search(_)
             | ToolCallBlock::WebFetch(_)
-            | ToolCallBlock::WebSearch(_)
             | ToolCallBlock::IntegrationSearch(_)
             | ToolCallBlock::MemorySearch(_)
             | ToolCallBlock::Skill(_) => self.verb_group_kind(),
@@ -627,7 +596,6 @@ mod tests {
         assert_eq!(VerbGroupKind::Dir.verb(true), "Listing");
         assert_eq!(VerbGroupKind::WebFetch.verb(false), "Fetched");
         assert_eq!(VerbGroupKind::WebFetch.verb(true), "Fetching");
-        assert_eq!(VerbGroupKind::WebSearch.verb(false), "Searched");
         assert_eq!(VerbGroupKind::MemorySearch.verb(false), "Searched");
         assert_eq!(VerbGroupKind::IntegrationSearch.verb(true), "Searching");
         assert_eq!(VerbGroupKind::Subagent.verb(false), "Ran");
@@ -649,7 +617,6 @@ mod tests {
         assert_eq!(VerbGroupKind::Search.noun(1), "pattern");
         assert_eq!(VerbGroupKind::Dir.noun(2), "dirs");
         assert_eq!(VerbGroupKind::WebFetch.noun(1), "website");
-        assert_eq!(VerbGroupKind::WebSearch.noun(2), "websites");
         // Irregular plural.
         assert_eq!(VerbGroupKind::MemorySearch.noun(1), "memory");
         assert_eq!(VerbGroupKind::MemorySearch.noun(2), "memories");
@@ -675,7 +642,6 @@ mod tests {
             ToolCallBlock::ListDir(ListDirToolCallBlock::new("src")),
             ToolCallBlock::Search(SearchToolCallBlock::new("todo")),
             ToolCallBlock::WebFetch(WebFetchToolCallBlock::new("https://example.com")),
-            ToolCallBlock::WebSearch(WebSearchToolCallBlock::new("grow")),
             ToolCallBlock::IntegrationSearch(IntegrationSearchToolCallBlock::new("linear")),
             ToolCallBlock::UseTool(UseToolCallBlock::new("linear__save_issue")),
             ToolCallBlock::MemorySearch(MemorySearchToolCallBlock::new("auth")),
@@ -692,7 +658,6 @@ mod tests {
                 ToolCallBlock::ListDir(_) => Some(VerbGroupKind::Dir),
                 ToolCallBlock::Search(_) => Some(VerbGroupKind::Search),
                 ToolCallBlock::WebFetch(_) => Some(VerbGroupKind::WebFetch),
-                ToolCallBlock::WebSearch(_) => Some(VerbGroupKind::WebSearch),
                 ToolCallBlock::IntegrationSearch(_) => Some(VerbGroupKind::IntegrationSearch),
                 ToolCallBlock::MemorySearch(_) => Some(VerbGroupKind::MemorySearch),
                 ToolCallBlock::Skill(_) => Some(VerbGroupKind::Skill),

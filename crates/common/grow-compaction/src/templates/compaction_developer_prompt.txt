@@ -22,7 +22,7 @@ During that analysis, thoroughly identify:
   - full code snippets (especially recent ones or those executed in REPL)
   - function signatures
   - file edits / diffs
-  - tool call details (e.g., code_execution snippets, web_search queries, browse_page instructions, X search operators)
+  - tool call details (e.g., shell snippets, web_fetch requests, MCP search queries, browser instructions)
   - render components used (if any)
 - Errors encountered (tool failures, code exec errors, search limitations, reasoning issues) and how they were diagnosed/fixed
 - Pay special attention to specific user feedback, especially if the user told you to do something differently, corrected facts, or changed direction.
@@ -35,7 +35,7 @@ Your final summary must contain the following sections, in order:
 
 2. Key Technical Concepts: List all important technical concepts, technologies, frameworks, and Grow-specific tool patterns discussed.
 
-3. Tool Usage & Verification: Summarize significant tool calls (code_execution REPL state, web_search, browse_page, X tools, etc.), key information retrieved/verified, cross-referencing steps, and how they influenced decisions or responses.
+3. Tool Usage & Verification: Summarize significant tool calls (shell state, web_fetch, MCP tools, browser tools, etc.), key information retrieved/verified, cross-referencing steps, and how they influenced decisions or responses.
 
 4. Files, Attachments, Images, Render Results & Code Artifacts: Enumerate all specific file-like artifacts (broadly defined as above: files, attachments, images, render_results, etc.), code sections, or REPL executions examined, modified, or created. Pay special attention to the most recent messages and include full code snippets, image descriptions/references, render outputs, or attachment details where applicable, plus a summary of why this artifact is important for continuation.
 

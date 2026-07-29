@@ -1672,8 +1672,7 @@ pub(in crate::app::dispatch) fn clear_default_model(app: &mut AppView) -> Vec<Ef
 }
 
 // ---------------------------------------------------------------------------
-// Model-family settings: fork_secondary_model (and formerly
-// web_search_model, session_summary_model, default_reasoning_effort).
+// Model-family settings: fork_secondary_model and session_summary_model.
 //
 // SHELL-OWNED. Unlike `default_model`, these do NOT mutate live
 // runtime state — they update `current_ui` mirrors and persist.
@@ -1792,9 +1791,8 @@ pub(in crate::app::dispatch) fn clear_fork_secondary_model(app: &mut AppView) ->
     }]
 }
 
-// `web_search_model`, `session_summary_model`, and
-// `default_reasoning_effort` setters were removed alongside their
-// registry entries. Mirror fields and TOML schema stay for compat.
+// `session_summary_model` and `default_reasoning_effort` setters were removed
+// alongside their registry entries.
 
 // ---------------------------------------------------------------------------
 // max_thoughts_width — Int-valued setting. Registry surface is `i64`;

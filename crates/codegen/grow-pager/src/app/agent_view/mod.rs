@@ -2083,7 +2083,7 @@ fn question_visible_h(
         .saturating_sub(sticky_freeform_h)
     }
 }
-/// Collect citation URLs from visible WebSearch and WebFetch tool blocks.
+/// Collect URLs from visible WebFetch tool blocks.
 ///
 /// Returns `VisibleLink` entries with the entry's rendered content area.
 /// Only visible blocks (from the selection model) are scanned.
@@ -2101,15 +2101,6 @@ fn collect_citation_links(
             continue;
         };
         match &entry.block {
-            RenderBlock::ToolCall(ToolCallBlock::WebSearch(ws)) => {
-                for url in &ws.citations {
-                    links.push(VisibleLink {
-                        rects: vec![block_geom.content_area],
-                        target: crate::render::osc8::LinkTarget::Url(Arc::from(url.as_str())),
-                        id: None,
-                    });
-                }
-            }
             RenderBlock::ToolCall(ToolCallBlock::WebFetch(wf)) => {
                 if !wf.url.is_empty() {
                     links.push(VisibleLink {

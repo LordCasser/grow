@@ -563,12 +563,10 @@ impl SessionActor {
             .as_ref()
             .map(xai_chat_state::estimate_system_message_tokens)
             .unwrap_or(0);
-        let backend_search_active = self.backend_search_active();
         let tool_defs: Vec<_> = self
             .prepare_tool_definitions_inner()
             .await
             .into_iter()
-            .filter(|td| !backend_search_active || td.function.name != "web_search")
             .collect();
         let tool_definitions_count = tool_defs.len();
         let tool_definitions_tokens = xai_chat_state::estimate_tool_definitions_tokens(&tool_defs);

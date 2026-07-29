@@ -201,7 +201,6 @@ pub(crate) struct InputItem {
     /// Typed deferred completion retained while an admitted task wake is queued.
     /// Consumed by Ctrl+C if it removes the wake before the turn starts.
     pub(crate) task_wake_fallback: Option<TaskWakeFallback>,
-    pub(crate) tool_overrides_update: Option<grow_sampling_types::ToolOverridesUpdate>,
     pub(crate) respond_to: oneshot::Sender<PromptTurnResult>,
     /// Fired after the user message is in chat history and a persistence flush
     /// barrier has completed (see `SessionCommand::Prompt::persist_ack`).
@@ -636,13 +635,6 @@ pub(crate) struct SessionActor {
     /// read it synchronously to surface `NeedsInput`. Mutated by
     /// `PendingInteractionGuard` at each reverse-request site. Never persisted.
     pub(crate) pending_interactions: crate::session::pending_interaction::PendingInteractions,
-    /// Whether the selected provider exposes a hosted search capability.
-    pub(crate) supports_backend_search: std::cell::Cell<bool>,
-    /// Per-turn override, set at promotion. Not persisted; a reload reverts to the definition seed.
-    pub(crate) tool_overrides: std::cell::RefCell<Option<grow_sampling_types::ToolOverrides>>,
-    /// Configured cutoff a subagent inherits, read off the `SessionHandle` without an actor round-trip.
-    pub(crate) resolved_tool_overrides:
-        std::sync::Arc<arc_swap::ArcSwapOption<grow_sampling_types::ToolOverrides>>,
     pub(crate) compactions_remaining:
         std::cell::Cell<Option<grow_sampling_types::CompactionsRemaining>>,
     pub(crate) compaction_at_tokens:
@@ -1361,8 +1353,8 @@ mod managed_gateway_descriptor_tests {
     use super::*;
     use grow_tools::types::output::{MCPOutput, ToolOutput};
     use grow_tools::types::tool::{ToolKind, ToolNamespace};
-    #[derive(Debug, Default)]
-    struct FixtureMcpTool;
+    #[derive(Debug)]
+    struct FixtureMcpTool(&'static str);
     impl grow_tools::types::tool_metadata::ToolMetadata for FixtureMcpTool {
         fn kind(&self) -> ToolKind {
             ToolKind::Other
@@ -1378,13 +1370,13 @@ mod managed_gateway_descriptor_tests {
         type Args = serde_json::Value;
         type Output = ToolOutput;
         fn id(&self) -> xai_tool_protocol::ToolId {
-            xai_tool_protocol::ToolId::new("server__tool").expect("valid")
+            xai_tool_protocol::ToolId::new(self.0).expect("valid")
         }
         fn description(
             &self,
             _ctx: &::xai_tool_runtime::ListToolsContext,
         ) -> xai_tool_types::ToolDescription {
-            xai_tool_types::ToolDescription::new("server__tool", "fixture")
+            xai_tool_types::ToolDescription::new(self.0, "fixture")
         }
         async fn run(
             &self,
@@ -1392,8 +1384,12 @@ mod managed_gateway_descriptor_tests {
             _args: serde_json::Value,
         ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
             Ok(ToolOutput::MCP(MCPOutput::okay_output(
-                "server__tool".to_string(),
-                "server".to_string(),
+                self.0.to_string(),
+                self.0
+                    .split_once("__")
+                    .expect("qualified MCP name")
+                    .0
+                    .to_string(),
                 "ok".to_string(),
             )))
         }
@@ -1404,7 +1400,7 @@ mod managed_gateway_descriptor_tests {
         bridge
             .register_mcp_tools(
                 "server__tool".to_string(),
-                FixtureMcpTool,
+                FixtureMcpTool("server__tool"),
                 Some(serde_json::json!({"type": "object"})),
             )
             .await
@@ -1461,6 +1457,35 @@ mod managed_gateway_descriptor_tests {
             .expect("local MCP tool remains indexed");
         assert_eq!(server_tool.server_name, "server");
         assert_eq!(server_tool.description, "fixture");
+    }
+    #[tokio::test]
+    async fn arbitrary_mcp_search_tool_is_registered_without_a_reserved_name() {
+        let bridge = Arc::new(crate::tools::bridge::ToolBridge::for_test());
+        bridge
+            .register_mcp_tools(
+                "research__search_docs".to_string(),
+                FixtureMcpTool("research__search_docs"),
+                Some(serde_json::json!({"type": "object"})),
+            )
+            .await
+            .expect("ordinary MCP search tool registration succeeds");
+        let snapshot = Arc::new(std::sync::Mutex::new(
+            crate::session::tool_index::ToolMetadataSnapshot::default(),
+        ));
+        refresh_mcp_snapshot_for_test(
+            bridge,
+            Arc::new(TokioMutex::new(McpState::new(vec![]))),
+            crate::session::managed_mcp::ManagedMcpStateHandle::default(),
+            snapshot.clone(),
+        )
+        .await;
+        let snapshot = snapshot.lock().unwrap();
+        let tool = snapshot
+            .tools
+            .iter()
+            .find(|tool| tool.qualified_name == "research__search_docs")
+            .expect("arbitrarily named MCP search tool remains discoverable");
+        assert_eq!(tool.server_name, "research");
     }
     #[tokio::test]
     async fn refresh_snapshot_excludes_disabled_gateway_tools_and_connectors() {
@@ -1832,8 +1857,6 @@ mod turn_end_guard_tests;
 #[path = "acp_session_tests/wait_for_mcp_prefix_tests.rs"]
 mod wait_for_mcp_prefix_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/web_search_e2e_tests.rs"]
-mod web_search_e2e_tests;
 #[cfg(test)]
 mod managed_gateway_tool_tests {
     use super::*;

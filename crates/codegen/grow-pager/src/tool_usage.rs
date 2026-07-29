@@ -45,8 +45,6 @@ pub enum ToolCategory {
     ListDir,
     /// Web fetch (URL content retrieval).
     WebFetch,
-    /// Web search (web search with citations).
-    WebSearch,
     /// Other/unknown tool types.
     Other,
     /// Agent thinking/reasoning.
@@ -66,7 +64,6 @@ impl ToolCategory {
             Self::Skill => "Skill",
             Self::ListDir => "ListDir",
             Self::WebFetch => "Fetch",
-            Self::WebSearch => "WebSearch",
             Self::Other => "Other",
             Self::Thinking => "Thinking",
             Self::Message => "Message",
@@ -83,7 +80,6 @@ impl ToolCategory {
             Self::Skill => crate::glyphs::diamond_filled_char(),
             Self::ListDir => '▀',
             Self::WebFetch => '▄',
-            Self::WebSearch => '○',
             Self::Other => crate::glyphs::diamond_filled_char(),
             Self::Thinking => crate::glyphs::diamond_hollow_char(),
             Self::Message => '▪',
@@ -100,7 +96,6 @@ impl ToolCategory {
             Self::Skill => theme.accent_skill,
             Self::ListDir => theme.accent_model,
             Self::WebFetch => theme.accent_tool,
-            Self::WebSearch => theme.accent_tool,
             Self::Other => theme.path,
             Self::Thinking => theme.accent_running,
             Self::Message => theme.text_primary,
@@ -118,7 +113,6 @@ impl ToolCategory {
             ToolCallBlock::Skill(_) => Self::Skill,
             ToolCallBlock::ListDir(_) => Self::ListDir,
             ToolCallBlock::WebFetch(_) => Self::WebFetch,
-            ToolCallBlock::WebSearch(_) => Self::WebSearch,
             ToolCallBlock::IntegrationSearch(_) | ToolCallBlock::UseTool(_) => Self::Other,
             ToolCallBlock::MemorySearch(_)
             | ToolCallBlock::Other(_)
@@ -398,7 +392,6 @@ impl ToolUsageStats {
             ToolCallBlock::Search(b) => b.is_success(),
             ToolCallBlock::ListDir(b) => b.is_success(),
             ToolCallBlock::WebFetch(b) => b.is_success(),
-            ToolCallBlock::WebSearch(b) => b.is_success(),
             ToolCallBlock::IntegrationSearch(b) => b.is_success(),
             ToolCallBlock::UseTool(b) => b.is_success(),
             ToolCallBlock::MemorySearch(b) => b.is_success(),
@@ -417,7 +410,6 @@ impl ToolUsageStats {
             ToolCallBlock::Search(b) => b.elapsed_ms(),
             ToolCallBlock::ListDir(b) => b.elapsed_ms(),
             ToolCallBlock::WebFetch(b) => b.elapsed_ms(),
-            ToolCallBlock::WebSearch(b) => b.elapsed_ms(),
             ToolCallBlock::IntegrationSearch(b) => b.elapsed_ms(),
             ToolCallBlock::UseTool(b) => b.elapsed_ms(),
             ToolCallBlock::MemorySearch(b) => b.elapsed_ms(),

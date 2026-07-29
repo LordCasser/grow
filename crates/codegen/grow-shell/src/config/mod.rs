@@ -616,7 +616,6 @@ impl ManagedMcpsConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct ModelOverrideConfig {
-    pub web_search: String,
     /// `None` = current model.
     pub session_summary: Option<String>,
     /// Compiled default (`grow-build`) when unset locally, remotely, and via env.
@@ -629,7 +628,6 @@ pub struct ModelOverrideConfig {
 impl Default for ModelOverrideConfig {
     fn default() -> Self {
         Self {
-            web_search: String::new(),
             session_summary: None,
             image_description: None,
             prompt_suggestion: PromptSuggestModelPin::Unpinned,
@@ -683,7 +681,6 @@ impl ModelOverrideConfig {
     /// a model string (no CLI flag; the default and the catalog guard live at
     /// the consumer, `handle_suggest_prompt`).
     pub fn resolve(
-        cli_web_search_model: Option<&str>,
         cli_session_summary_model: Option<&str>,
         config: &toml::Value,
         remote: Option<&crate::util::config::RemoteSettings>,
@@ -693,14 +690,12 @@ impl ModelOverrideConfig {
             .and_then(|v| v.clone().try_into().ok())
             .unwrap_or_default();
         let mut result = Self {
-            web_search: parsed_models.web_search.unwrap_or_default(),
             session_summary: non_empty_model_override(parsed_models.session_summary.as_deref()),
             image_description: non_empty_model_override(parsed_models.image_description.as_deref()),
             prompt_suggestion: non_empty_model_override(parsed_models.prompt_suggestion.as_deref())
                 .map(PromptSuggestModelPin::Pinned)
                 .unwrap_or_default(),
         };
-        let has_local_ws = models_table.and_then(|m| m.get("web_search")).is_some();
         let has_local_ss = models_table
             .and_then(|m| m.get("session_summary"))
             .is_some();
@@ -708,9 +703,6 @@ impl ModelOverrideConfig {
             .and_then(|m| m.get("image_description"))
             .is_some();
         if let Some(remote) = remote {
-            if !has_local_ws && let Some(ref v) = remote.web_search_model {
-                result.web_search = v.clone();
-            }
             if !has_local_ss {
                 result.session_summary =
                     non_empty_model_override(remote.session_summary_model.as_deref());
@@ -725,12 +717,6 @@ impl ModelOverrideConfig {
                 result.prompt_suggestion = PromptSuggestModelPin::Pinned(v);
             }
         }
-        if let Ok(v) = std::env::var("GROW_WEB_SEARCH_MODEL") {
-            let v = v.trim();
-            if !v.is_empty() {
-                result.web_search = v.to_owned();
-            }
-        }
         if let Ok(v) = std::env::var("GROW_SESSION_SUMMARY_MODEL") {
             result.session_summary = non_empty_model_override(Some(v.as_str()));
         }
@@ -741,9 +727,6 @@ impl ModelOverrideConfig {
             && let Some(v) = non_empty_model_override(Some(v.as_str()))
         {
             result.prompt_suggestion = PromptSuggestModelPin::Env(v);
-        }
-        if let Some(v) = cli_web_search_model {
-            result.web_search = v.to_owned();
         }
         if let Some(v) = cli_session_summary_model {
             result.session_summary = non_empty_model_override(Some(v));
@@ -1161,7 +1144,6 @@ fn apply_requirements_inner(
         };
     }
     enforce_str!("models", "default", config.models.default);
-    enforce_str!("models", "web_search", config.models.web_search);
     enforce_str!("cli", "channel", config.cli.channel);
     enforce_str!("cli", "minimum_version", config.cli.minimum_version);
     enforce_str!("cli", "maximum_version", config.cli.maximum_version);

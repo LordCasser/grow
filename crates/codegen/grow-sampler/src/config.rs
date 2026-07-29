@@ -104,9 +104,6 @@ pub struct SamplerConfig {
     #[serde(skip)]
     pub bearer_resolver: Option<SharedBearerResolver>,
 
-    #[serde(default)]
-    pub supports_backend_search: bool,
-
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     #[serde(default)]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -150,7 +147,6 @@ impl Default for SamplerConfig {
             origin_client: None,
             attribution_callback: None,
             bearer_resolver: None,
-            supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,

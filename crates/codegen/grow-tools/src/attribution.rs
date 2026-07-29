@@ -11,7 +11,6 @@ pub enum ToolConsumer {
     ImageGen,
     VideoGenStart,
     VideoGenPoll,
-    WebSearch,
 }
 
 impl ToolConsumer {
@@ -20,7 +19,6 @@ impl ToolConsumer {
             Self::ImageGen => "ImageGen",
             Self::VideoGenStart => "VideoGen.start",
             Self::VideoGenPoll => "VideoGen.poll",
-            Self::WebSearch => "WebSearch",
         }
     }
 }
@@ -98,6 +96,5 @@ mod tests {
         assert_eq!(ToolConsumer::ImageGen.as_str(), "ImageGen");
         assert_eq!(ToolConsumer::VideoGenStart.as_str(), "VideoGen.start");
         assert_eq!(ToolConsumer::VideoGenPoll.as_str(), "VideoGen.poll");
-        assert_eq!(ToolConsumer::WebSearch.as_str(), "WebSearch");
     }
 }

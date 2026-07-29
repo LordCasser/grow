@@ -18,7 +18,7 @@ the workspace; your only write is `{PLAN_FILE}`.
 When the OBJECTIVE names something with an established canon or spec — a named
 game or "classic X", a named algorithm/protocol/format, a "clone of <a specific
 product>" — and web access is available, FIRST research it with your
-`{WEB_SEARCH_TOOL}` tool (and `{WEB_FETCH_TOOL}` to open a source) to learn its
+configured MCP research tools (and `{WEB_FETCH_TOOL}` to open a source) to learn its
 DEFINING mechanics before writing criteria; do NOT plan it from memory alone.
 Defining mechanics are the PRIMARY behaviors without which the deliverable is
 NOT recognizably that thing — e.g. for a key-value store, durable get-after-set;

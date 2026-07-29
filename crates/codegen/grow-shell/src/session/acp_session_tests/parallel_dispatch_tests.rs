@@ -220,7 +220,7 @@ fn lock_path_for_args_matches_grow_build_target_file() {
 
 #[test]
 fn lock_path_for_args_returns_none_for_pathless_tools() {
-    // Tools like run_terminal_cmd or web_search have no workspace path;
+    // Tools like run_terminal_cmd have no workspace path;
     // they must not be bucketed into a file lock and must run fully
     // concurrently.
     let args = serde_json::json!({

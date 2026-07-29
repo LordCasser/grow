@@ -661,15 +661,15 @@ mod tests {
     fn hub_tool_ids_to_tool_configs_basic() {
         let ids = vec![
             ToolId::new("read_file").unwrap(),
-            ToolId::new("web_search").unwrap(),
+            ToolId::new("search_docs").unwrap(),
         ];
         let configs = hub_tool_ids_to_tool_configs(&ids);
         assert_eq!(configs.len(), 2);
         assert_eq!(configs[0].id, "hub:read_file");
         assert_eq!(configs[0].name_override.as_deref(), Some("read_file"));
         assert_eq!(configs[0].kind, None::<ToolKind>);
-        assert_eq!(configs[1].id, "hub:web_search");
-        assert_eq!(configs[1].name_override.as_deref(), Some("web_search"));
+        assert_eq!(configs[1].id, "hub:search_docs");
+        assert_eq!(configs[1].name_override.as_deref(), Some("search_docs"));
     }
     #[test]
     fn hub_tool_ids_to_tool_configs_empty() {

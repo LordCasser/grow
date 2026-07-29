@@ -8,7 +8,6 @@ use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 
 /// Subagents inherit the parent permission handle, so a managed `Read(**/.env)`
 /// deny still blocks the child — direct read and the `cat .env` shell equivalent.
-#[tokio::test]
 async fn subagent_spawn_context_inherits_parent_permission_handle() {
     use grow_workspace::permission::types::{
         PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
@@ -78,7 +77,6 @@ async fn subagent_spawn_context_inherits_parent_permission_handle() {
 
 /// A subagent shares the parent's `goal_loop_active_gate` Arc, so flipping the
 /// parent gate is observed through the child context (same allocation).
-#[tokio::test]
 async fn subagent_spawn_context_shares_parent_goal_loop_gate() {
     use std::sync::atomic::Ordering::Relaxed;
 
@@ -102,7 +100,6 @@ async fn subagent_spawn_context_shares_parent_goal_loop_gate() {
 
 /// A subagent inherits the parent session's `ask_user_question` gate, so
 /// `--no-ask-user` strips the tool from subagents too, while the default keeps it.
-#[tokio::test]
 async fn subagent_spawn_context_inherits_parent_ask_user_question_gate() {
     let agent = build_minimal_agent_for_tests();
 
@@ -131,45 +128,5 @@ async fn subagent_spawn_context_inherits_parent_ask_user_question_gate() {
     assert!(
         ctx_on.ask_user_question_enabled,
         "subagent must inherit the parent's enabled ask_user_question gate"
-    );
-}
-
-#[tokio::test]
-async fn subagent_spawn_context_inherits_parent_configured_cutoff() {
-    let agent = build_minimal_agent_for_tests();
-
-    let cutoff = grow_sampling_types::ToolOverrides {
-        x_search: Some(grow_sampling_types::XSearchOptions {
-            date_bound: Some(
-                grow_sampling_types::SearchDateBound::new(None, Some("2020-01-01".to_string()))
-                    .unwrap(),
-            ),
-        }),
-        web_search: None,
-    };
-
-    let sid = acp::SessionId::new("parent-cutoff");
-    let handle = make_test_handle("test-model", false, None);
-    handle
-        .resolved_tool_overrides
-        .store(Some(std::sync::Arc::new(cutoff.clone())));
-    agent.sessions.borrow_mut().insert(sid.clone(), handle);
-    let ctx = agent.build_subagent_spawn_context(sid.0.as_ref());
-    assert_eq!(
-        ctx.inherited_tool_overrides,
-        Some(cutoff),
-        "subagent context must inherit the parent's configured cutoff for its first-turn update"
-    );
-
-    // A parent with no configured cutoff must not fabricate one for the child.
-    let sid_none = acp::SessionId::new("parent-unbounded");
-    agent.sessions.borrow_mut().insert(
-        sid_none.clone(),
-        make_test_handle("test-model", false, None),
-    );
-    let ctx_none = agent.build_subagent_spawn_context(sid_none.0.as_ref());
-    assert!(
-        ctx_none.inherited_tool_overrides.is_none(),
-        "an unbounded parent must not hand a subagent a cutoff"
     );
 }

@@ -164,7 +164,6 @@ In a `matcher`, Grow maps Claude-style tool names to its own so hooks migrated f
 - `Edit`, `Write`, and `MultiEdit` → `search_replace`
 - `Grep` → `grep`
 - `Glob` and `ListDir` → `list_dir`
-- `WebSearch` → `web_search`
 - `Task` → `spawn_subagent`
 
 A matcher keeps its original name too, so `Bash` matches both `Bash` and `run_terminal_command`.

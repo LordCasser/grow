@@ -12,7 +12,6 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::rs;
-use crate::tool_overrides::{ToolOverrides, WebSearchOptions, XSearchOptions, drop_empty};
 use crate::types::{
     ChatCompletionRequest, ChatContentBlock, ChatRequestMessage, ChatResponseMessage, FinishReason,
     ImageUrl, MessageContent, Role, ToolCallRequest, ToolChoice, ToolDefinition, Usage,
@@ -35,7 +34,7 @@ pub enum ConversationItem {
     /// Tool/function result
     ToolResult(ToolResultItem),
     /// A tool call executed server-side by the backend agentic sampler
-    /// (e.g. web search, X search, code interpreter). These are NOT
+    /// (currently code interpreter). These are NOT
     /// executed by the client — the server already ran them and fed
     /// results into the model's context. Stored so they can be:
     /// 1. Persisted to chat_history.jsonl for session replay/fork
@@ -52,7 +51,7 @@ pub enum ConversationItem {
     ///    turns, which is what lets the server-side prefix KV-cache hit.
     ///
     /// Wraps `rs::ReasoningItem` directly (symmetric with `BackendToolCall`
-    /// wrapping `rs::WebSearchToolCall` etc.) so no field is dropped on the
+    /// wrapping native backend call items) so no field is dropped on the
     /// way through.
     Reasoning(rs::ReasoningItem),
 }
@@ -294,14 +293,11 @@ pub struct BackendToolCallItem {
 
 impl BackendToolCallItem {
     /// The backend-tool-call id (the `id` field on the underlying
-    /// `rs::WebSearchToolCall` / `rs::CustomToolCall` /
     /// `rs::CodeInterpreterToolCall`). Used by the legacy-session
     /// upgrader to dedupe against the same call when it also appears
     /// inside a sibling assistant's `raw_output` array.
     pub fn id(&self) -> &str {
         match &self.kind {
-            BackendToolKind::WebSearch(ws) => ws.id.as_str(),
-            BackendToolKind::XSearch(ct) => ct.id.as_str(),
             BackendToolKind::CodeInterpreter(ci) => ci.id.as_str(),
         }
     }
@@ -309,22 +305,6 @@ impl BackendToolCallItem {
     /// Human-readable summary for token estimation and text extraction.
     pub fn text_summary(&self) -> String {
         match &self.kind {
-            BackendToolKind::WebSearch(ws) => {
-                let action_desc = match &ws.action {
-                    rs::WebSearchToolCallAction::Search(s) => format!("search: {}", s.query),
-                    rs::WebSearchToolCallAction::OpenPage(o) => {
-                        format!("open: {}", o.url.as_deref().unwrap_or("?"))
-                    }
-                    rs::WebSearchToolCallAction::Find(f)
-                    | rs::WebSearchToolCallAction::FindInPage(f) => {
-                        format!("find \"{}\" in {}", f.pattern, f.url)
-                    }
-                };
-                format!("[backend web_search] {action_desc}")
-            }
-            BackendToolKind::XSearch(ct) => {
-                format!("[backend x_search] {}({})", ct.name, ct.input)
-            }
             BackendToolKind::CodeInterpreter(ci) => {
                 let code_preview = ci
                     .code
@@ -350,10 +330,6 @@ impl BackendToolCallItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "tool_type", rename_all = "snake_case")]
 pub enum BackendToolKind {
-    /// Server-side web search (query + sources).
-    WebSearch(rs::WebSearchToolCall),
-    /// Server-side X/Twitter search (keyword, semantic, user, thread).
-    XSearch(rs::CustomToolCall),
     /// Server-side code interpreter execution.
     CodeInterpreter(rs::CodeInterpreterToolCall),
 }
@@ -483,54 +459,6 @@ pub struct ToolSpec {
     pub parameters: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HostedTool {
-    WebSearch { options: Option<WebSearchOptions> },
-    XSearch { options: Option<XSearchOptions> },
-}
-
-impl HostedTool {
-    pub fn wire_name(&self) -> &'static str {
-        match self {
-            HostedTool::WebSearch { .. } => "web_search",
-            HostedTool::XSearch { .. } => "x_search",
-        }
-    }
-}
-
-/// Resolve `overrides` onto the hosted tools in place so the serialized request matches the returned
-/// echo. Empty options normalize to absent (via `drop_empty`), so a stray `{}` never clears a seeded
-/// bound. Returns the applied overrides.
-pub fn apply_tool_overrides(
-    tools: &mut [HostedTool],
-    overrides: Option<&ToolOverrides>,
-) -> ToolOverrides {
-    let mut applied = ToolOverrides::default();
-    for tool in tools.iter_mut() {
-        match tool {
-            HostedTool::XSearch { options } => {
-                if let Some(x) = drop_empty(
-                    overrides.and_then(|o| o.x_search.clone()),
-                    XSearchOptions::is_empty,
-                ) {
-                    *options = Some(x);
-                }
-                applied.x_search = drop_empty(options.clone(), XSearchOptions::is_empty);
-            }
-            HostedTool::WebSearch { options } => {
-                if let Some(w) = drop_empty(
-                    overrides.and_then(|o| o.web_search.clone()),
-                    WebSearchOptions::is_empty,
-                ) {
-                    *options = Some(w);
-                }
-                applied.web_search = drop_empty(options.clone(), WebSearchOptions::is_empty);
-            }
-        }
-    }
-    applied
-}
-
 impl From<ToolDefinition> for ToolSpec {
     fn from(td: ToolDefinition) -> Self {
         Self {
@@ -552,9 +480,6 @@ pub struct ConversationRequest {
     pub items: Vec<ConversationItem>,
     /// Available tools (client-side, sent as Function definitions)
     pub tools: Vec<ToolSpec>,
-    /// Backend-hosted tools (sent as native Responses API tool types).
-    /// These are executed server-side by the agentic sampler during inference.
-    pub hosted_tools: Vec<HostedTool>,
     /// Tool choice behavior
     pub tool_choice: Option<ConversationToolChoice>,
     /// Model to use (if not using client default)
@@ -1482,20 +1407,6 @@ pub fn upgrade_legacy_reasoning(
                 rs::OutputItem::Reasoning(r) => {
                     siblings.push(ConversationItem::Reasoning(r));
                 }
-                rs::OutputItem::WebSearchCall(ws) => {
-                    if sibling_btc_ids_seen.insert(ws.id.clone()) {
-                        siblings.push(ConversationItem::BackendToolCall(BackendToolCallItem {
-                            kind: BackendToolKind::WebSearch(ws),
-                        }));
-                    }
-                }
-                rs::OutputItem::CustomToolCall(ct) => {
-                    if sibling_btc_ids_seen.insert(ct.id.clone()) {
-                        siblings.push(ConversationItem::BackendToolCall(BackendToolCallItem {
-                            kind: BackendToolKind::XSearch(ct),
-                        }));
-                    }
-                }
                 rs::OutputItem::CodeInterpreterCall(ci) => {
                     if sibling_btc_ids_seen.insert(ci.id.clone()) {
                         siblings.push(ConversationItem::BackendToolCall(BackendToolCallItem {
@@ -2058,18 +1969,6 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
             // fed results into the model's context. We capture them as
             // BackendToolCall siblings so they're persisted and sent back
             // on subsequent turns for context continuity.
-            rs::OutputItem::WebSearchCall(ws) => {
-                backend_tool_count += 1;
-                items.push(ConversationItem::BackendToolCall(BackendToolCallItem {
-                    kind: BackendToolKind::WebSearch(ws),
-                }));
-            }
-            rs::OutputItem::CustomToolCall(ct) => {
-                backend_tool_count += 1;
-                items.push(ConversationItem::BackendToolCall(BackendToolCallItem {
-                    kind: BackendToolKind::XSearch(ct),
-                }));
-            }
             rs::OutputItem::CodeInterpreterCall(ci) => {
                 backend_tool_count += 1;
                 items.push(ConversationItem::BackendToolCall(BackendToolCallItem {
@@ -2160,7 +2059,6 @@ impl From<ConversationRequest> for ChatCompletionRequest {
             user: None,
             tools,
             tool_choice,
-            search_parameters: None,
             response_format,
             reasoning_effort: req.reasoning_effort,
         }
@@ -2381,12 +2279,6 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
             // Round-trip backend tool calls back to the Responses API as
             // their native item types, preserving full context continuity.
             vec![match &b.kind {
-                BackendToolKind::WebSearch(ws) => {
-                    rs::InputItem::Item(rs::Item::WebSearchCall(ws.clone()))
-                }
-                BackendToolKind::XSearch(ct) => {
-                    rs::InputItem::Item(rs::Item::CustomToolCall(ct.clone()))
-                }
                 BackendToolKind::CodeInterpreter(ci) => {
                     rs::InputItem::Item(rs::Item::CodeInterpreterCall(ci.clone()))
                 }
@@ -2422,28 +2314,10 @@ fn content_parts_to_easy_input_content(parts: &[ContentPart]) -> rs::EasyInputCo
 
 /// Build tools for Responses API.
 ///
-/// Combines client-side function tools (`req.tools`) with backend-hosted
-/// tools (`req.hosted_tools`). Function tools are sent as `rs::Tool::Function`;
-/// hosted tools are sent as their native Responses API types (e.g.,
-/// `rs::Tool::WebSearch`), which tells the backend to execute them server-side.
-///
-/// Function tools whose name collides with a hosted tool are dropped (the
-/// backend rejects the request with `Duplicate tool names: <name>` otherwise);
-/// the hosted tool wins.
+/// Converts client-side function tools to Responses API function tools.
 fn build_responses_tools(req: &ConversationRequest) -> Vec<rs::Tool> {
-    let mut tools: Vec<rs::Tool> = req
-        .tools
+    req.tools
         .iter()
-        .filter(|t| {
-            let collides = req.hosted_tools.iter().any(|h| h.wire_name() == t.name);
-            if collides {
-                tracing::warn!(
-                    tool = %t.name,
-                    "dropping function tool that collides with a backend-hosted tool"
-                );
-            }
-            !collides
-        })
         .map(|t| {
             rs::Tool::Function(rs::FunctionTool {
                 name: t.name.clone(),
@@ -2452,53 +2326,7 @@ fn build_responses_tools(req: &ConversationRequest) -> Vec<rs::Tool> {
                 strict: None,
             })
         })
-        .collect();
-
-    for hosted in &req.hosted_tools {
-        match hosted {
-            HostedTool::WebSearch { options } => {
-                // An empty allowlist is unbounded, so it emits no filter.
-                let filters = options
-                    .as_ref()
-                    .and_then(|o| o.allowed_domains.as_deref())
-                    .filter(|domains| !domains.is_empty())
-                    .map(|domains| rs::WebSearchToolFilters {
-                        allowed_domains: Some(domains.to_vec()),
-                    });
-                tools.push(rs::Tool::WebSearch(rs::WebSearchTool {
-                    filters,
-                    ..Default::default()
-                }));
-            }
-            // XSearch is xAI-specific — not in async_openai's rs::Tool enum.
-            // Injected as raw JSON by the sampler client after serialization.
-            HostedTool::XSearch { .. } => {}
-        }
-    }
-
-    tools
-}
-
-/// Return raw JSON tool definitions for xAI-specific hosted tools that
-/// cannot be represented by `async_openai`'s `rs::Tool` enum.
-///
-/// The sampler client injects these into the serialized request body's
-/// `tools` array before sending to the API.
-pub fn extra_tool_entries(hosted_tools: &[HostedTool]) -> Vec<serde_json::Value> {
-    let mut entries = Vec::new();
-    for tool in hosted_tools {
-        match tool {
-            // WebSearch ships natively (rs::Tool::WebSearch), so no JSON entry here.
-            HostedTool::WebSearch { .. } => {}
-            HostedTool::XSearch { options } => {
-                entries.push(match options {
-                    Some(o) => o.to_tool_entry(),
-                    None => XSearchOptions::default().to_tool_entry(),
-                });
-            }
-        }
-    }
-    entries
+        .collect()
 }
 
 // ============================================================================
@@ -3505,7 +3333,6 @@ mod compaction_item_bridge_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool_overrides::*;
     use assert_matches::assert_matches;
 
     #[test]
@@ -3628,241 +3455,6 @@ mod tests {
             panic!("Expected Items input");
         };
         assert_eq!(items.len(), 2);
-    }
-
-    #[test]
-    fn function_tool_colliding_with_hosted_web_search_is_dropped() {
-        let mut req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
-            .with_tools(vec![
-                ToolSpec {
-                    name: "web_search".to_string(),
-                    description: Some("local web search".to_string()),
-                    parameters: serde_json::json!({"type": "object"}),
-                },
-                ToolSpec {
-                    name: "read_file".to_string(),
-                    description: None,
-                    parameters: serde_json::json!({"type": "object"}),
-                },
-            ]);
-        req.hosted_tools = vec![HostedTool::WebSearch { options: None }];
-
-        let responses_req: rs::CreateResponse = (&req).into();
-        let tools = responses_req.tools.expect("tools should be set");
-
-        let web_search_count = tools
-            .iter()
-            .filter(|t| matches!(t, rs::Tool::WebSearch(_)))
-            .count();
-        assert_eq!(
-            web_search_count, 1,
-            "exactly one typed web_search: {tools:?}"
-        );
-        let function_names: Vec<&str> = tools
-            .iter()
-            .filter_map(|t| match t {
-                rs::Tool::Function(f) => Some(f.name.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            function_names,
-            vec!["read_file"],
-            "colliding function tool must be dropped"
-        );
-    }
-
-    #[test]
-    fn function_tool_colliding_with_hosted_x_search_is_dropped() {
-        let mut req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
-            .with_tools(vec![ToolSpec {
-                name: "x_search".to_string(),
-                description: None,
-                parameters: serde_json::json!({"type": "object"}),
-            }]);
-        req.hosted_tools = vec![HostedTool::XSearch { options: None }];
-
-        let responses_req: rs::CreateResponse = (&req).into();
-        let tools = responses_req.tools.unwrap_or_default();
-        assert!(tools.is_empty(), "expected no tools, got: {tools:?}");
-        let entries = extra_tool_entries(&req.hosted_tools);
-        assert_eq!(entries, vec![serde_json::json!({"type": "x_search"})]);
-    }
-
-    #[test]
-    fn x_search_serializes_to_the_tool_entry() {
-        // A full bound reaches the flat snake_case entry; an empty or `None` bound emits the bare entry.
-        let dated = extra_tool_entries(&[HostedTool::XSearch {
-            options: Some(XSearchOptions {
-                date_bound: Some(
-                    SearchDateBound::new(Some("2024-01-01".into()), Some("2024-03-15".into()))
-                        .unwrap(),
-                ),
-            }),
-        }]);
-        assert_eq!(
-            dated,
-            vec![serde_json::json!({
-                "type": "x_search",
-                "from_date": "2024-01-01",
-                "to_date": "2024-03-15",
-            })]
-        );
-        let bare = vec![serde_json::json!({"type": "x_search"})];
-        assert_eq!(
-            extra_tool_entries(&[HostedTool::XSearch {
-                options: Some(XSearchOptions {
-                    date_bound: Some(SearchDateBound::new(None, None).unwrap()),
-                }),
-            }]),
-            bare
-        );
-        assert_eq!(
-            extra_tool_entries(&[HostedTool::XSearch { options: None }]),
-            bare
-        );
-    }
-
-    #[test]
-    fn tool_overrides_update_apply_merges_tristate() {
-        let x = XSearchOptions {
-            date_bound: Some(SearchDateBound::new(None, Some("2024-03-15".into())).unwrap()),
-        };
-        let w = WebSearchOptions {
-            allowed_domains: Some(vec!["x.com".into()]),
-        };
-
-        // set: an object sets that tool's options.
-        let base = ToolOverridesUpdate {
-            x_search: Some(Some(x.clone())),
-            web_search: None,
-        }
-        .apply(None);
-        assert_eq!(
-            base.as_ref().and_then(|o| o.x_search.clone()),
-            Some(x.clone())
-        );
-
-        // leave: an absent field keeps the base's entry; a set field updates only itself.
-        let merged = ToolOverridesUpdate {
-            x_search: None,
-            web_search: Some(Some(w.clone())),
-        }
-        .apply(base.clone());
-        assert_eq!(merged.as_ref().and_then(|o| o.x_search.clone()), Some(x));
-        assert_eq!(merged.and_then(|o| o.web_search), Some(w));
-
-        // clear: `null` clears just that tool; clearing the last remaining tool
-        // empties the override to `None`.
-        let cleared = ToolOverridesUpdate {
-            x_search: Some(None),
-            web_search: None,
-        }
-        .apply(base);
-        assert!(cleared.is_none());
-    }
-
-    #[test]
-    fn empty_per_turn_override_never_clears_a_seeded_cutoff() {
-        use serde_json::json;
-        // A stray empty `{}` carries no instruction, so a definition-seeded cutoff must survive it
-        // (only an explicit bound changes the window; `null` reverts to the seed).
-        let update = ToolOverridesUpdate::parse(&json!({"xSearch": {}}))
-            .unwrap()
-            .apply(None);
-        let mut tools = vec![HostedTool::XSearch {
-            options: Some(XSearchOptions {
-                date_bound: Some(SearchDateBound::new(None, Some("2024-01-01".into())).unwrap()),
-            }),
-        }];
-        let applied = apply_tool_overrides(&mut tools, update.as_ref());
-        assert_eq!(
-            applied
-                .x_search
-                .and_then(|x| x.date_bound)
-                .and_then(|b| b.to_date().map(str::to_owned)),
-            Some("2024-01-01".to_string()),
-            "an empty override must not widen a seeded cutoff"
-        );
-
-        let mut tools = vec![HostedTool::XSearch {
-            options: Some(XSearchOptions {
-                date_bound: Some(SearchDateBound::new(None, Some("2024-01-01".into())).unwrap()),
-            }),
-        }];
-        let direct = ToolOverrides::parse(&json!({"xSearch": {}})).unwrap();
-        let applied = apply_tool_overrides(&mut tools, Some(&direct));
-        assert_eq!(
-            applied
-                .x_search
-                .and_then(|x| x.date_bound)
-                .and_then(|b| b.to_date().map(str::to_owned)),
-            Some("2024-01-01".to_string()),
-            "an empty override leaves the seeded bound, which stays attested"
-        );
-    }
-
-    #[test]
-    fn search_date_bound_validation() {
-        // Non-canonical dates: unpadded is NotZeroPadded; a five-digit year and year 0 (below the
-        // minimum year 1) are InvalidDate; a valid padded window is accepted.
-        assert!(matches!(
-            SearchDateBound::new(Some("2024-3-5".into()), None),
-            Err(SearchDateBoundError::NotZeroPadded { .. })
-        ));
-        assert!(matches!(
-            SearchDateBound::new(Some("10000-01-01".into()), None),
-            Err(SearchDateBoundError::InvalidDate { .. })
-        ));
-        assert!(matches!(
-            SearchDateBound::new(Some("0000-01-01".into()), None),
-            Err(SearchDateBoundError::InvalidDate { .. })
-        ));
-        assert!(SearchDateBound::new(Some("0001-01-01".into()), Some("0099-12-31".into())).is_ok());
-
-        // Inverted window is rejected with the typed error; equal and ordered windows are accepted.
-        assert!(matches!(
-            SearchDateBound::new(Some("2024-03-15".into()), Some("2024-01-01".into())),
-            Err(SearchDateBoundError::InvertedWindow { .. })
-        ));
-        assert!(SearchDateBound::new(Some("2024-01-01".into()), Some("2024-01-01".into())).is_ok());
-        assert!(SearchDateBound::new(Some("2024-01-01".into()), Some("2024-01-02".into())).is_ok());
-
-        // The rejection also holds through parse and the composed aggregate wire type, so a client
-        // cannot smuggle an inverted window past the outer types.
-        let inverted = serde_json::json!({"fromDate": "2024-03-15", "toDate": "2024-01-01"});
-        let err = SearchDateBound::parse(&inverted)
-            .expect_err("inverted window must fail parse")
-            .to_string();
-        assert!(err.contains("on or before"), "unhelpful error: {err}");
-        assert!(
-            ToolOverridesUpdate::parse(&serde_json::json!({"xSearch": {"dateBound": &inverted}}))
-                .is_err(),
-            "inverted window must fail through the aggregate wire type"
-        );
-    }
-
-    #[test]
-    fn function_web_search_kept_when_no_hosted_tools() {
-        let req =
-            ConversationRequest::from_items(vec![ConversationItem::user("hi")]).with_tools(vec![
-                ToolSpec {
-                    name: "web_search".to_string(),
-                    description: None,
-                    parameters: serde_json::json!({"type": "object"}),
-                },
-            ]);
-
-        let responses_req: rs::CreateResponse = (&req).into();
-        let tools = responses_req.tools.expect("tools should be set");
-        let function_names: Vec<&str> = tools
-            .iter()
-            .filter_map(|t| match t {
-                rs::Tool::Function(f) => Some(f.name.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(function_names, vec!["web_search"]);
     }
 
     #[test]
@@ -8461,119 +8053,6 @@ mod tests {
     // ============================================================================
 
     #[test]
-    fn multi_tco_reasoning_items_round_trip_as_siblings() {
-        let make_reasoning = |suffix: &str, summary: &str, encrypted: Option<&str>| {
-            rs::OutputItem::Reasoning(rs::ReasoningItem {
-                id: format!("rs_resp123_{suffix}"),
-                summary: if summary.is_empty() {
-                    vec![]
-                } else {
-                    vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                        text: summary.to_string(),
-                    })]
-                },
-                content: None,
-                encrypted_content: encrypted.map(str::to_owned),
-                status: Some(rs::OutputStatus::Completed),
-            })
-        };
-        let make_tco = |suffix: &str| {
-            rs::OutputItem::Reasoning(rs::ReasoningItem {
-                id: format!("tco_resp123_call-{suffix}"),
-                summary: vec![],
-                content: None,
-                encrypted_content: Some(format!("enc_blob_{suffix}")),
-                status: Some(rs::OutputStatus::Completed),
-            })
-        };
-        let make_ws = |suffix: &str, query: &str| {
-            rs::OutputItem::WebSearchCall(rs::WebSearchToolCall {
-                id: format!("ws_resp123_{suffix}"),
-                status: rs::WebSearchToolCallStatus::Completed,
-                action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
-                    query: query.to_string(),
-                    sources: Some(vec![]),
-                }),
-            })
-        };
-
-        let response = rs::Response {
-            background: None,
-            billing: None,
-            conversation: None,
-            created_at: 0,
-            completed_at: None,
-            error: None,
-            id: "resp123".to_string(),
-            incomplete_details: None,
-            instructions: None,
-            max_output_tokens: None,
-            metadata: None,
-            model: "grow-build".to_string(),
-            object: "response".to_string(),
-            output: vec![
-                make_reasoning("a", "thinking pre-search", None),
-                make_ws("5", "capybara facts"),
-                make_ws("6", "wombat habitat"),
-                make_tco("5"),
-                make_tco("6"),
-                make_reasoning("b", "follow-up thinking", None),
-                make_ws("7", "platypus venom"),
-                make_tco("7"),
-            ],
-            parallel_tool_calls: None,
-            previous_response_id: None,
-            prompt: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
-            reasoning: None,
-            safety_identifier: None,
-            service_tier: None,
-            status: rs::Status::Completed,
-            temperature: None,
-            text: None,
-            tool_choice: None,
-            tools: None,
-            top_logprobs: None,
-            top_p: None,
-            truncation: None,
-            usage: None,
-        };
-
-        let items = response_to_conversation_items(response);
-
-        // Five reasoning siblings: 2 real `rs_*` + 3 encrypted `tco_*`.
-        let reasoning_ids: Vec<&str> = items
-            .iter()
-            .filter_map(|i| match i {
-                ConversationItem::Reasoning(r) => Some(r.id.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            reasoning_ids,
-            vec![
-                "rs_resp123_a",
-                "tco_resp123_call-5",
-                "tco_resp123_call-6",
-                "rs_resp123_b",
-                "tco_resp123_call-7",
-            ],
-            "every reasoning item — including all 3 tco_* — must round-trip in emission order"
-        );
-
-        // Exactly one trailing Assistant.
-        assert!(matches!(items.last(), Some(ConversationItem::Assistant(_))));
-
-        // Backend tool calls preserved in order.
-        let bt_count = items
-            .iter()
-            .filter(|i| matches!(i, ConversationItem::BackendToolCall(_)))
-            .count();
-        assert_eq!(bt_count, 3);
-    }
-
-    #[test]
     fn build_responses_input_preserves_multi_turn_ordering() {
         // 4-turn conversation where each assistant turn carries reasoning.
         // The wire-level item order must be
@@ -8698,86 +8177,6 @@ mod tests {
             "trailing reasoning has no assistant to attach to"
         );
         assert_eq!(msgs[0].role, Role::User);
-    }
-
-    #[test]
-    fn conversation_to_chat_messages_folds_reasoning_across_backend_tool_call() {
-        // The canonical post-tool-call ordering is
-        // `[..., Reasoning, BackendToolCall, Assistant]` (e.g. a web_search
-        // turn). The BackendToolCall is emitted as its own synthetic assistant
-        // message, but it must NOT drop the pending reasoning: the reasoning
-        // belongs to the same turn and folds onto the following assistant's
-        // `reasoning_content`, matching the Responses API path
-        // (`build_responses_input_preserves_multi_turn_ordering`).
-        let items = vec![
-            ConversationItem::user("hi"),
-            reasoning_sibling("r1", "thinking before search", None),
-            ConversationItem::BackendToolCall(BackendToolCallItem {
-                kind: BackendToolKind::WebSearch(rs::WebSearchToolCall {
-                    id: "ws_1".to_string(),
-                    status: rs::WebSearchToolCallStatus::Completed,
-                    action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
-                        query: "capybaras".to_string(),
-                        sources: Some(vec![]),
-                    }),
-                }),
-            }),
-            ConversationItem::assistant("answer"),
-        ];
-
-        let msgs = conversation_to_chat_messages(items);
-
-        assert_eq!(msgs.len(), 3, "user + synthetic BTC assistant + assistant");
-        assert_eq!(msgs[0].role, Role::User);
-        // BackendToolCall becomes a synthetic assistant carrying its summary;
-        // it does not itself carry the reasoning.
-        assert_eq!(msgs[1].role, Role::Assistant);
-        assert_eq!(
-            msgs[1].text_content(),
-            "[backend web_search] search: capybaras"
-        );
-        assert_eq!(
-            msgs[1].reasoning_content.as_deref(),
-            None,
-            "reasoning lands on the real assistant, not the synthetic BTC message"
-        );
-        // The real assistant turn keeps the reasoning that preceded the
-        // backend tool call.
-        assert_eq!(msgs[2].role, Role::Assistant);
-        assert_eq!(msgs[2].text_content(), "answer");
-        assert_eq!(
-            msgs[2].reasoning_content.as_deref(),
-            Some("thinking before search"),
-            "reasoning preceding a BackendToolCall folds onto the following \
-             assistant rather than being dropped"
-        );
-    }
-
-    #[test]
-    fn conversation_item_to_chat_message_backend_tool_call_is_synthetic_assistant() {
-        // The only conversion arm with no direct unit test: a BackendToolCall
-        // has no Chat Completions equivalent, so it is emitted as a synthetic
-        // assistant message carrying its human-readable `text_summary()`.
-        let item = ConversationItem::BackendToolCall(BackendToolCallItem {
-            kind: BackendToolKind::WebSearch(rs::WebSearchToolCall {
-                id: "ws_1".to_string(),
-                status: rs::WebSearchToolCallStatus::Completed,
-                action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
-                    query: "capybaras".to_string(),
-                    sources: Some(vec![]),
-                }),
-            }),
-        });
-
-        let msg = conversation_item_to_chat_message(item);
-
-        assert_eq!(msg.role, Role::Assistant);
-        assert_eq!(msg.text_content(), "[backend web_search] search: capybaras");
-        assert!(
-            msg.tool_calls.is_empty(),
-            "synthetic assistant carries no tool calls"
-        );
-        assert_eq!(msg.reasoning_content.as_deref(), None);
     }
 
     #[test]
@@ -8924,99 +8323,6 @@ mod tests {
         };
         let rs::SummaryPart::SummaryText(s) = &r.summary[0];
         assert_eq!(s.text, "v0-style plain text reasoning");
-    }
-
-    #[test]
-    fn upgrade_legacy_reasoning_raw_output_expands_parallel_tco_blobs() {
-        // backend-search-era shape: raw_output preserves the full ordered
-        // Vec<OutputItem>. The N parallel `tco_*` reasoning items round-
-        // trip as N sibling Reasoning items — the structural fix the
-        // refactor is built around.
-        let raw = serde_json::json!({
-            "type": "assistant",
-            "content": "I searched two things in parallel.",
-            "tool_calls": [],
-            "raw_output": [
-                {"type":"reasoning","id":"tco_1","summary":[],"encrypted_content":"enc1"},
-                {"type":"web_search_call","id":"ws_1","status":"completed",
-                 "action":{"type":"search","query":"q1","sources":[]}},
-                {"type":"reasoning","id":"tco_2","summary":[],"encrypted_content":"enc2"},
-                {"type":"web_search_call","id":"ws_2","status":"completed",
-                 "action":{"type":"search","query":"q2","sources":[]}},
-                {"type":"reasoning","id":"rs_main",
-                 "summary":[{"type":"summary_text","text":"final synthesis"}]},
-                {"type":"message","id":"msg_1","status":"completed","role":"assistant",
-                 "content":[{"type":"output_text","text":"I searched two things in parallel.",
-                             "annotations":[]}]}
-            ]
-        });
-        let mut seen = std::collections::HashSet::new();
-        let siblings = upgrade_legacy_reasoning(&raw, &mut seen);
-
-        // 3 Reasoning + 2 BackendToolCall = 5 siblings.
-        // Message and FunctionCall (none here) are NOT emitted as siblings.
-        assert_eq!(siblings.len(), 5);
-
-        let reasoning_ids: Vec<&str> = siblings
-            .iter()
-            .filter_map(|s| match s {
-                ConversationItem::Reasoning(r) => Some(r.id.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            reasoning_ids,
-            vec!["tco_1", "tco_2", "rs_main"],
-            "all three reasoning items recovered in emission order — duplicate recovery is \
-             structurally impossible here"
-        );
-
-        let btc_ids: Vec<&str> = siblings
-            .iter()
-            .filter_map(|s| match s {
-                ConversationItem::BackendToolCall(b) => Some(b.id()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(btc_ids, vec!["ws_1", "ws_2"]);
-
-        // Both web-search ids registered for downstream dedup.
-        assert!(seen.contains("ws_1"));
-        assert!(seen.contains("ws_2"));
-    }
-
-    #[test]
-    fn upgrade_legacy_reasoning_dedupes_backend_tool_calls_seen_as_siblings() {
-        // BackendToolCall was already a sibling in legacy rows, so the same
-        // call can appear *both* as its own JSONL row *and* inside the
-        // following assistant's raw_output. The upgrader must not emit
-        // a duplicate.
-        let mut seen = std::collections::HashSet::new();
-        seen.insert("ws_already_a_sibling".to_string());
-
-        let raw = serde_json::json!({
-            "type": "assistant",
-            "content": "",
-            "raw_output": [
-                {"type":"web_search_call","id":"ws_already_a_sibling","status":"completed",
-                 "action":{"type":"search","query":"x","sources":[]}},
-                {"type":"web_search_call","id":"ws_new","status":"completed",
-                 "action":{"type":"search","query":"y","sources":[]}}
-            ]
-        });
-        let siblings = upgrade_legacy_reasoning(&raw, &mut seen);
-        let btc_ids: Vec<&str> = siblings
-            .iter()
-            .filter_map(|s| match s {
-                ConversationItem::BackendToolCall(b) => Some(b.id()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            btc_ids,
-            vec!["ws_new"],
-            "the already-sibling call is skipped; only the new one is emitted"
-        );
     }
 
     #[test]
@@ -9463,67 +8769,6 @@ mod tests {
         let req3 = ConversationRequest::from_items(turn3);
 
         assert_prefix_stable(&req2, &req3);
-    }
-
-    /// `BackendToolCall` items round-trip through the wire as their
-    /// typed Item shape; their serialized position must be stable across
-    /// turns. (This is the structural analogue of the old
-    /// `test_backend_tool_call_skip_with_raw_output`: in the new model,
-    /// BackendToolCall items are never "skipped" because there is no
-    /// raw_output decompose-vs-passthrough split -- they are always
-    /// passed through inline. We test that all BackendToolCall items
-    /// survive serialization at their position.)
-    #[test]
-    fn backend_tool_call_position_stable() {
-        let ws_a = ConversationItem::BackendToolCall(BackendToolCallItem {
-            kind: BackendToolKind::WebSearch(rs::WebSearchToolCall {
-                id: "ws_a".to_string(),
-                status: rs::WebSearchToolCallStatus::Completed,
-                action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
-                    query: "alpha".to_string(),
-                    sources: Some(vec![]),
-                }),
-            }),
-        });
-        let ws_b = ConversationItem::BackendToolCall(BackendToolCallItem {
-            kind: BackendToolKind::WebSearch(rs::WebSearchToolCall {
-                id: "ws_b".to_string(),
-                status: rs::WebSearchToolCallStatus::Completed,
-                action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
-                    query: "beta".to_string(),
-                    sources: Some(vec![]),
-                }),
-            }),
-        });
-
-        let req = ConversationRequest::from_items(vec![
-            ConversationItem::user("u1"),
-            reasoning_sibling("r1", "think a", Some("enc_a")),
-            ws_a,
-            ConversationItem::assistant("a1"),
-            ConversationItem::user("u2"),
-            ws_b,
-            ConversationItem::assistant("a2"),
-        ]);
-
-        let input = input_items_json(&req);
-        let ws_items: Vec<&serde_json::Value> = input
-            .iter()
-            .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("web_search_call"))
-            .collect();
-
-        // Both backend tool calls must survive serialization.
-        assert_eq!(
-            ws_items.len(),
-            2,
-            "both web_search_call items must survive; got: {:?}",
-            summarise_input(&input)
-        );
-        let ids: Vec<&str> = ws_items
-            .iter()
-            .filter_map(|v| v.get("id").and_then(|i| i.as_str()))
-            .collect();
-        assert_eq!(ids, vec!["ws_a", "ws_b"], "ordering preserved");
     }
 
     /// Canary for `serde_json`'s `preserve_order` feature.

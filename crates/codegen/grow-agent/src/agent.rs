@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use grow_sampling_types::HostedTool;
 use grow_tools::bridge::ToolBridge;
 use grow_tools::types::definition::ToolDefinition;
 
@@ -39,15 +38,6 @@ pub struct Agent {
     /// Session-level policies.
     reminder_policy: ReminderPolicy,
     compaction_policy: CompactionPolicy,
-
-    /// Backend-hosted tools to include in API requests.
-    /// These are sent as native Responses API types (e.g., `WebSearch`)
-    /// and executed server-side by the agentic sampler.
-    hosted_tools: Vec<HostedTool>,
-
-    /// Build-time toggle for server-side search tools. ANDed at request
-    /// time with the per-model `SessionActor::supports_backend_search`.
-    backend_search_enabled: bool,
 }
 
 impl Agent {
@@ -62,8 +52,6 @@ impl Agent {
         tool_bridge: Arc<ToolBridge>,
         reminder_policy: ReminderPolicy,
         compaction_policy: CompactionPolicy,
-        hosted_tools: Vec<HostedTool>,
-        backend_search_enabled: bool,
     ) -> Self {
         Self {
             definition,
@@ -72,8 +60,6 @@ impl Agent {
             tool_bridge,
             reminder_policy,
             compaction_policy,
-            hosted_tools,
-            backend_search_enabled,
         }
     }
 
@@ -172,22 +158,6 @@ impl Agent {
     /// Tool definitions for the sampling API — delegates to ToolBridge.
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
         self.tool_bridge.tool_definitions().await
-    }
-
-    /// Backend-hosted tools that should be included in API requests.
-    /// These are sent as native types (e.g., `rs::Tool::WebSearch`) and
-    /// executed server-side by the agentic sampler.
-    pub fn hosted_tools(&self) -> &[HostedTool] {
-        &self.hosted_tools
-    }
-
-    /// Build-time toggle for server-side search tools. Callers should
-    /// AND this with the per-model `supports_backend_search` flag to
-    /// decide whether to ship `hosted_tools` on a request. Do not use
-    /// `hosted_tools().is_empty()` as a proxy — the list also depends
-    /// on web-search config.
-    pub fn backend_search_enabled(&self) -> bool {
-        self.backend_search_enabled
     }
 
     /// Built-in tool definitions only (excludes MCP tools).

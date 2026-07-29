@@ -106,7 +106,6 @@ pub struct ConnectFlags {
     pub subagents: bool,
     pub experimental_memory: bool,
     pub no_memory: bool,
-    pub disable_web_search: bool,
     /// Session-scoped `--todo-gate` override. Forces
     /// `ReminderPolicy.todo_gate.enabled = true` for this session.
     pub todo_gate: bool,
@@ -164,11 +163,9 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         remote_settings: flags.remote_settings.as_ref(),
         is_headless: false,
         cli_subagents: Some(flags.subagents),
-        cli_web_search_model: None,
         cli_session_summary_model: None,
         cli_experimental_memory: flags.experimental_memory,
         cli_no_memory: flags.no_memory,
-        disable_web_search: flags.disable_web_search,
         todo_gate: flags.todo_gate,
         laziness_debug_log: flags.laziness_debug_log.as_deref(),
         storage_mode: flags.storage_mode.as_deref(),
@@ -390,9 +387,6 @@ fn unsupported_leader_flags(flags: &ConnectFlags) -> Vec<&'static str> {
     }
     if flags.no_memory {
         out.push("--no-memory");
-    }
-    if flags.disable_web_search {
-        out.push("--disable-web-search");
     }
     if flags.storage_mode.is_some() {
         out.push("--storage-mode");
@@ -1039,16 +1033,14 @@ mod tests {
         let flags = ConnectFlags {
             experimental_memory: true,
             no_memory: true,
-            disable_web_search: true,
             storage_mode: Some("writeback".into()),
             subagents: true,
             ..Default::default()
         };
         let detected = unsupported_leader_flags(&flags);
-        assert_eq!(detected.len(), 5);
+        assert_eq!(detected.len(), 4);
         assert!(detected.contains(&"--experimental-memory"));
         assert!(detected.contains(&"--no-memory"));
-        assert!(detected.contains(&"--disable-web-search"));
         assert!(detected.contains(&"--storage-mode"));
         assert!(detected.contains(&"--subagents"));
     }

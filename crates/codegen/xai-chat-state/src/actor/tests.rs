@@ -4360,49 +4360,6 @@ async fn prefix_stable_after_tool_result_pruning() {
 /// turns. Once emitted, a backend tool call sits at a fixed position
 /// in the conversation list and the wire input.
 #[tokio::test]
-async fn prefix_stable_with_backend_tool_calls() {
-    use grow_sampling_types::{BackendToolCallItem, BackendToolKind, rs};
-
-    let h = TestHarness::with_conversation(vec![
-        ConversationItem::system("sys"),
-        ConversationItem::user("search for capybaras"),
-    ]);
-
-    let req1 = h.handle.build_request(vec![], None, false).await.unwrap();
-
-    h.handle
-        .push_assistant_response(ConversationItem::assistant("Found info about capybaras"));
-    h.handle
-        .push_tool_result(ConversationItem::BackendToolCall(BackendToolCallItem {
-            kind: BackendToolKind::WebSearch(rs::WebSearchToolCall {
-                id: "ws_capybara".to_string(),
-                status: rs::WebSearchToolCallStatus::Completed,
-                action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
-                    query: "capybara facts".to_string(),
-                    sources: Some(vec![]),
-                }),
-            }),
-        }));
-    h.handle
-        .push_user_message(ConversationItem::user("tell me more"));
-
-    let req2 = h.handle.build_request(vec![], None, false).await.unwrap();
-
-    assert_prefix_stable_pair(&req1, &req2, "with backend tool calls");
-
-    h.handle
-        .push_assistant_response(ConversationItem::assistant("More capybara info"));
-    h.handle.push_user_message(ConversationItem::user("thanks"));
-
-    let req3 = h.handle.build_request(vec![], None, false).await.unwrap();
-
-    assert_prefix_stable_pair(&req2, &req3, "backend tool call stable across 3 turns");
-}
-
-/// Snapshot/restore must preserve prefix stability within the same
-/// compaction epoch. After restoring a snapshot, build_request output
-/// should match what it was before the restore.
-#[tokio::test]
 async fn prefix_stable_after_session_resume() {
     let h = TestHarness::with_conversation(vec![
         ConversationItem::system("sys"),

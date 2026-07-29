@@ -1846,45 +1846,6 @@ async fn read_parent_sampling_config_ignores_global_default() {
         );
 }
 #[tokio::test]
-async fn read_parent_sampling_config_resolves_backend_search_from_catalog() {
-    let mut entry = test_model_entry("grow-4.5");
-    entry.info.supports_backend_search = true;
-    let mut models = indexmap::IndexMap::new();
-    models.insert("auto".to_string(), entry);
-    let mut ctx = ctx_with_parent_chat_state("auto", "grow-4.5", "auto", models);
-    ctx.sampling_config.supports_backend_search = false;
-    let (config, _model_id) = read_parent_sampling_config(&ctx).await;
-    assert!(
-            config.supports_backend_search,
-            "subagent should inherit backend-tools capability from the live model catalog"
-        );
-}
-#[tokio::test]
-async fn read_parent_sampling_config_fallback_resolves_backend_search_from_catalog() {
-    let mut entry = test_model_entry("composer-2-fast");
-    entry.info.supports_backend_search = true;
-    let mut models = indexmap::IndexMap::new();
-    models.insert("composer-2-fast".to_string(), entry);
-    let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.model_id = acp::ModelId::new("composer-2-fast");
-    ctx.parent_chat_state = None;
-    ctx.sampling_config.model = "composer-2-fast".to_string();
-    ctx.sampling_config.supports_backend_search = false;
-    ctx.models_manager = crate::agent::models::ModelsManager::new(
-        None,
-        models,
-        acp::ModelId::new("composer-2-fast"),
-        ctx.auth_manager.clone(),
-        crate::agent::config::Config::default(),
-    );
-    let (config, model_id) = read_parent_sampling_config(&ctx).await;
-    assert_eq!(model_id.0.as_ref(), "composer-2-fast");
-    assert!(
-            config.supports_backend_search,
-            "fallback path should also resolve backend-tools capability from the catalog"
-        );
-}
-#[tokio::test]
 async fn read_parent_sampling_config_resolves_compactions_remaining_from_catalog() {
     use grow_sampling_types::CompactionsRemaining;
     let mut entry = test_model_entry("grow-4.5");

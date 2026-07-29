@@ -123,7 +123,6 @@ impl ChatStateActor {
         ConversationRequest {
             items,
             tools: tool_definitions,
-            hosted_tools: vec![],
             tool_choice: None,
             model: Some(self.state.sampling_config.model.clone()),
             temperature: self.state.sampling_config.temperature,

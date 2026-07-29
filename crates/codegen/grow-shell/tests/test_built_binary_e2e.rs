@@ -52,9 +52,7 @@ async fn single_model_server(model: &str, backend: &str) -> MockInferenceServer 
 
 async fn grow_build_server() -> MockInferenceServer {
     MockInferenceServer::start_with_models(vec![
-        MockModelEntry::with_agent_type("grow-4.5", "grow-build")
-            .with_api_backend("responses")
-            .with_supports_backend_search(true),
+        MockModelEntry::with_agent_type("grow-4.5", "grow-build").with_api_backend("responses"),
     ])
     .await
     .expect("start mock server")
@@ -70,11 +68,6 @@ fn request_tool_name(tool: &Value) -> Option<&str> {
     tool.pointer("/function/name")
         .or_else(|| tool.get("name"))
         .and_then(Value::as_str)
-        .or_else(|| {
-            tool.get("type")
-                .and_then(Value::as_str)
-                .and_then(|kind| kind.starts_with("web_search").then_some("web_search"))
-        })
 }
 
 fn inference_request(server: &MockInferenceServer) -> Value {
@@ -197,7 +190,7 @@ async fn test_headless_session_in_non_git_dir() {
 
 #[tokio::test]
 #[ignore] // requires pre-built binary; run with --ignored
-async fn test_headless_tools_allowlist_keeps_enabled_web_tools() {
+async fn test_headless_tools_allowlist_keeps_enabled_web_fetch() {
     let server = grow_build_server().await;
     server.preset_settings_empty();
     let workdir = git_workdir();
@@ -209,17 +202,17 @@ async fn test_headless_tools_allowlist_keeps_enabled_web_tools() {
             "say hello",
             "--yolo",
             "--tools",
-            "read_file,grep,list_dir,web_search,web_fetch",
+            "read_file,grep,list_dir,web_fetch",
         ],
         workdir.workspace(),
         &[("GROW_WEB_FETCH", "1")],
     )
     .await;
 
-    assert_headless_success(&result, "grow -p --tools with web tools", Some(&server));
+    assert_headless_success(&result, "grow -p --tools with web_fetch", Some(&server));
     assert_no_crashes(&result.stderr);
     let names = inference_tool_names(&server);
-    for expected in ["read_file", "grep", "list_dir", "web_search", "web_fetch"] {
+    for expected in ["read_file", "grep", "list_dir", "web_fetch"] {
         assert!(names.iter().any(|name| name == expected), "got: {names:?}");
     }
     for excluded in ["run_terminal_command", "search_replace"] {
@@ -229,21 +222,6 @@ async fn test_headless_tools_allowlist_keeps_enabled_web_tools() {
     let tools = request["tools"]
         .as_array()
         .expect("inference request tools should be an array");
-    assert!(
-        tools.iter().any(|tool| {
-            tool.get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|kind| kind.starts_with("web_search"))
-        }),
-        "backend-capable model should receive hosted web search: {tools:?}"
-    );
-    assert!(
-        !tools.iter().any(|tool| {
-            tool.get("type").and_then(Value::as_str) == Some("function")
-                && tool.get("name").and_then(Value::as_str) == Some("web_search")
-        }),
-        "backend-capable model must not receive function web_search: {tools:?}"
-    );
     assert!(
         tools.iter().any(|tool| {
             tool.get("type").and_then(Value::as_str) == Some("function")

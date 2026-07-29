@@ -46,7 +46,7 @@ pub enum ToolNamespace {
 }
 /// Categorizes what a tool does at a high level.
 ///
-/// Serializes as snake_case strings (e.g. `"read"`, `"list_dir"`, `"web_search"`).
+/// Serializes as snake_case strings (e.g. `"read"`, `"list_dir"`, `"web_fetch"`).
 /// `Other` is the default for tools that don't fit neatly elsewhere, and the
 /// `#[serde(other)]` sink so a consumer pinned to an older schema deserializes
 /// a newer `kind` to `Other` instead of erroring. The `JsonSchema` impl (in
@@ -78,7 +78,6 @@ pub enum ToolKind {
     Lsp,
     Execute,
     Plan,
-    WebSearch,
     WebFetch,
     BackgroundTaskAction,
     WaitTasksAction,

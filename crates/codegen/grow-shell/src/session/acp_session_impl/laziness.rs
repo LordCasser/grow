@@ -544,7 +544,6 @@ impl SessionActor {
         let request = ConversationRequest {
             items,
             tools: vec![],
-            hosted_tools: vec![],
             tool_choice: None,
             model: Some(model_id.clone()),
             temperature: Some(0.0),

@@ -215,8 +215,7 @@ struct Bucket<'e> {
     kind: VerbGroupKind,
     calls: usize,
     /// Distinct-count override: when non-empty its size replaces `calls` as
-    /// the displayed count. Holds WebSearch citation URLs (distinct result
-    /// websites) and subagent child session ids (started + terminal rows of
+    /// the displayed count. Holds subagent child session ids (started + terminal rows of
     /// one subagent count once; a burst of terminal rows counts each
     /// distinct subagent).
     sources: std::collections::HashSet<&'e str>,
@@ -343,13 +342,6 @@ impl<'e> BucketAccumulator<'e> {
         // failure detection.
         match &entry.block {
             RenderBlock::ToolCall(block) => {
-                if let ToolCallBlock::WebSearch(b) = block
-                    && b.is_success()
-                {
-                    bucket
-                        .sources
-                        .extend(b.citations.iter().map(String::as_str));
-                }
                 if block_failed(block) {
                     self.failed_count += 1;
                 }
@@ -417,7 +409,6 @@ fn block_failed(block: &ToolCallBlock) -> bool {
         ToolCallBlock::ListDir(b) => !b.is_success(),
         ToolCallBlock::Search(b) => !b.is_success(),
         ToolCallBlock::WebFetch(b) => !b.is_success(),
-        ToolCallBlock::WebSearch(b) => !b.is_success(),
         ToolCallBlock::MemorySearch(b) => !b.is_success(),
         ToolCallBlock::IntegrationSearch(b) => !b.is_success(),
         ToolCallBlock::Skill(b) => !b.is_success(),
@@ -434,7 +425,7 @@ mod tests {
     use super::*;
     use crate::scrollback::blocks::SubagentBlock;
     use crate::scrollback::blocks::tool::{
-        ListDirToolCallBlock, ReadToolCallBlock, SearchToolCallBlock, WebSearchToolCallBlock,
+        ListDirToolCallBlock, ReadToolCallBlock, SearchToolCallBlock,
     };
 
     fn entry(block: ToolCallBlock) -> ScrollbackEntry {
@@ -530,31 +521,6 @@ mod tests {
         let l = label(&entries);
         assert_eq!(l.text, "Read 1 file, Searched 1 pattern");
         assert!(!l.running);
-    }
-
-    #[test]
-    fn web_search_counts_distinct_sources_with_call_fallback() {
-        let searched = |query: &str, citations: &[&str]| {
-            let mut b = WebSearchToolCallBlock::new(query);
-            b.citations = citations.iter().map(|s| s.to_string()).collect();
-            b.content = Some("results".into());
-            entry(ToolCallBlock::WebSearch(b))
-        };
-        // Three distinct URLs across two searches, one duplicated.
-        let entries = vec![
-            searched("grow", &["https://a.com", "https://b.com"]),
-            searched("pager", &["https://b.com", "https://c.com"]),
-        ];
-        let l = label(&entries);
-        assert_eq!(l.text, "Searched 3 websites");
-
-        // No citations yet (still running / no results): fall back to call count.
-        let entries = vec![
-            entry(ToolCallBlock::WebSearch(WebSearchToolCallBlock::new("a"))),
-            entry(ToolCallBlock::WebSearch(WebSearchToolCallBlock::new("b"))),
-        ];
-        let l = label(&entries);
-        assert_eq!(l.text, "Searched 2 websites");
     }
 
     #[test]

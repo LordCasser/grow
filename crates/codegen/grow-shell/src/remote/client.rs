@@ -925,12 +925,6 @@ pub fn parse_remote_model_value(
             .and_then(|v| v.as_array())
             .map(|arr| grow_sampling_types::parse_reasoning_effort_options(arr))
             .unwrap_or_default(),
-        supports_backend_search: obj
-            .get("supportsBackendSearch")
-            .or_else(|| obj.get("supports_backend_search"))
-            .or_else(|| meta.and_then(|m| m.get("supportsBackendSearch")))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
         compactions_remaining: obj
             .get("compactionsRemaining")
             .or_else(|| obj.get("compactions_remaining"))

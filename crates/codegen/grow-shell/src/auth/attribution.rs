@@ -116,7 +116,7 @@ impl ShellAttribution {
     /// Tool-side counterpart of [`Self::new`]: returns
     /// `Arc<dyn grow_tools::Auth401AttributionCallback>` for the
     /// `with_attribution_callback(...)` builder on each tool HTTP
-    /// client (`ImageGenClient`, `VideoGenClient`, `WebSearchClient`).
+    /// client (`ImageGenClient`, `VideoGenClient`).
     /// The two callbacks share the same underlying impl and emit the
     /// same `auth_401_attribution` event format -- only the trait
     /// signature differs (`SamplingConsumer` vs. `ToolConsumer`).
@@ -154,7 +154,7 @@ impl Auth401AttributionCallback for ShellAttribution {
     }
 }
 
-/// Tool-side hook: each tool client (image_gen, video_gen, web_search)
+/// Tool-side hook: each media tool client
 /// in `grow-tools` emits a 401 attribution event through this
 /// trait when its HTTP request returns UNAUTHORIZED. Same shape as
 /// the sampler-side impl above; routes to the same pair of sinks.
@@ -168,7 +168,6 @@ impl ToolAuth401AttributionCallback for ShellAttribution {
             ToolConsumer::ImageGen => (ConsumerKind::ImageGen, ""),
             ToolConsumer::VideoGenStart => (ConsumerKind::VideoGen, "start"),
             ToolConsumer::VideoGenPoll => (ConsumerKind::VideoGen, "poll"),
-            ToolConsumer::WebSearch => (ConsumerKind::WebSearch, ""),
         };
         record_consumer_401(
             self.auth_manager.as_ref(),
@@ -207,10 +206,6 @@ pub(crate) enum ConsumerKind {
     /// `"start"` (`POST /videos/generations`) or `"poll"`
     /// (`GET /videos/{request_id}`).
     VideoGen,
-    /// `grow_tools::ToolConsumer::WebSearch` -- web search via
-    /// `POST /responses` with a `WebSearch` tool. No per-op
-    /// discriminator; consumer string is just `"WebSearch"`.
-    WebSearch,
 }
 
 impl ConsumerKind {
@@ -222,20 +217,16 @@ impl ConsumerKind {
             Self::IdleResumeModelRefresh => "IdleResumeModelRefresh",
             Self::ImageGen => "ImageGen",
             Self::VideoGen => "VideoGen",
-            Self::WebSearch => "WebSearch",
         }
     }
 
     /// `true` for variants that take a per-operation discriminator
     /// appended as `<prefix>.<op>`. `false` for variants whose
     /// `consumer` string is just the prefix
-    /// (`IdleResumeModelRefresh`, `ImageGen`, `WebSearch` -- each is
+    /// (`IdleResumeModelRefresh`, `ImageGen` -- each is
     /// a single endpoint with no sub-operation).
     fn takes_op(self) -> bool {
-        !matches!(
-            self,
-            Self::IdleResumeModelRefresh | Self::ImageGen | Self::WebSearch
-        )
+        !matches!(self, Self::IdleResumeModelRefresh | Self::ImageGen)
     }
 }
 
@@ -580,8 +571,6 @@ mod tests {
             (ConsumerKind::ImageGen, "ignored", "ImageGen"),
             (ConsumerKind::VideoGen, "start", "VideoGen.start"),
             (ConsumerKind::VideoGen, "poll", "VideoGen.poll"),
-            (ConsumerKind::WebSearch, "", "WebSearch"),
-            (ConsumerKind::WebSearch, "ignored", "WebSearch"),
         ];
         for (kind, op, expected) in cases {
             assert_eq!(
@@ -621,7 +610,6 @@ mod tests {
             (ToolConsumer::ImageGen, "ImageGen"),
             (ToolConsumer::VideoGenStart, "VideoGen.start"),
             (ToolConsumer::VideoGenPoll, "VideoGen.poll"),
-            (ToolConsumer::WebSearch, "WebSearch"),
         ];
 
         for (consumer, expected_consumer_str) in cases {

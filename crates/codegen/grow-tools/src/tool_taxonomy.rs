@@ -47,7 +47,6 @@ impl ToolKind {
             ToolKind::Lsp => "Code Intelligence",
             ToolKind::Execute => "Run Command",
             ToolKind::Plan => "Plan",
-            ToolKind::WebSearch => "Web Search",
             ToolKind::WebFetch => "Web Fetch",
             ToolKind::BackgroundTaskAction => "Background Task",
             ToolKind::WaitTasksAction => "Wait for Tasks",
@@ -85,7 +84,6 @@ impl ToolKind {
             | ToolKind::List
             | ToolKind::MemorySearch
             | ToolKind::MemoryGet
-            | ToolKind::WebSearch
             | ToolKind::WebFetch
             | ToolKind::EnterPlan
             | ToolKind::ExitPlan

@@ -3,58 +3,6 @@
 //! [`acp::Agent`] trait implementation for [`MvpAgent`].
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
-/// Which `x_search` sub-tools enforce the date cutoff, sent in `initialize`. `x_user_search` and
-/// `x_thread_fetch` are `false`: they don't honor it yet.
-#[derive(serde::Serialize)]
-struct ToolOverridesCapability {
-    x_keyword_search: bool,
-    x_semantic_search: bool,
-    x_user_search: bool,
-    x_thread_fetch: bool,
-}
-const TOOL_OVERRIDES_CAPABILITY: ToolOverridesCapability = ToolOverridesCapability {
-    x_keyword_search: true,
-    x_semantic_search: true,
-    x_user_search: false,
-    x_thread_fetch: false,
-};
-fn tool_overrides_capability() -> serde_json::Value {
-    serde_json::to_value(TOOL_OVERRIDES_CAPABILITY)
-        .expect("ToolOverridesCapability is always serializable")
-}
-async fn read_applied_tool_overrides(
-    cmd_tx: &tokio::sync::mpsc::UnboundedSender<SessionCommand>,
-) -> Option<grow_sampling_types::ToolOverrides> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    if cmd_tx
-        .send(SessionCommand::GetToolOverrides {
-            respond_to: tx,
-        })
-        .is_err()
-    {
-        tracing::warn!("tool-overrides echo: session actor command channel closed");
-        return None;
-    }
-    match rx.await {
-        Ok(overrides) => overrides,
-        Err(_) => {
-            tracing::warn!("tool-overrides echo: session actor dropped the response channel");
-            None
-        }
-    }
-}
-fn insert_applied_tool_overrides(
-    meta: &mut serde_json::Map<String, serde_json::Value>,
-    echo: Option<&grow_sampling_types::ToolOverrides>,
-) {
-    if let Some(overrides) = echo {
-        meta.insert(
-            "toolOverrides".to_string(),
-            serde_json::to_value(overrides)
-                .expect("ToolOverrides is always serializable"),
-        );
-    }
-}
 #[async_trait::async_trait(?Send)]
 impl acp::Agent for MvpAgent {
     /// In the meta, we provide
@@ -491,9 +439,6 @@ impl acp::Agent for MvpAgent {
                         "blockingEvents": crate::extensions::hooks::ADVERTISED_BLOCKING_EVENTS,
                         "decisions": crate::extensions::hooks::ADVERTISED_DECISIONS,
                         "stopSignals": crate::extensions::hooks::ADVERTISED_STOP_SIGNALS,
-                    },
-                    "grow/capabilities": {
-                        "toolOverrides": tool_overrides_capability(),
                     },
                 })
                                 .as_object()
@@ -1295,19 +1240,6 @@ impl acp::Agent for MvpAgent {
         } else {
             self.model_state(Some(&session_id))
         };
-        let applied_tool_overrides = match self
-            .session_handle_waiting_for_load(&session_id)
-            .await
-        {
-            Some(handle) => read_applied_tool_overrides(&handle.cmd_tx).await,
-            None => {
-                tracing::warn!(
-                    session_id = %session_id.0,
-                    "session/new toolOverrides echo: session handle not found"
-                );
-                None
-            }
-        };
         let mut meta = serde_json::json!({
             "currentWorkingDirectory": cwd.as_str().to_owned(),
             "codebaseIndexed": indexed_roots,
@@ -1323,7 +1255,6 @@ impl acp::Agent for MvpAgent {
                 None,
                 &models,
             );
-            insert_applied_tool_overrides(obj, applied_tool_overrides.as_ref());
         }
         Ok(
             acp::NewSessionResponse::new(session_id)
@@ -1956,27 +1887,6 @@ impl acp::Agent for MvpAgent {
             summary.display_title_opt(),
             &model_state,
         );
-        let applied_tool_overrides = {
-            let cmd_tx = self
-                .sessions
-                .borrow()
-                .get(&session_id)
-                .map(|handle| handle.cmd_tx.clone());
-            match cmd_tx {
-                Some(cmd_tx) => read_applied_tool_overrides(&cmd_tx).await,
-                None => {
-                    tracing::warn!(
-                        session_id = %session_id.0,
-                        "session/load toolOverrides echo: session handle not found"
-                    );
-                    None
-                }
-            }
-        };
-        insert_applied_tool_overrides(
-            &mut response_meta_map,
-            applied_tool_overrides.as_ref(),
-        );
         let response_meta = serde_json::Value::Object(response_meta_map);
         grow_diagnostics::unified_log::info(
             "session loaded",
@@ -2200,24 +2110,6 @@ impl acp::Agent for MvpAgent {
                     .data("outputSchema must be a JSON object describing a JSON Schema"),
             );
         }
-        let tool_overrides_update = match arguments
-            .meta
-            .as_ref()
-            .and_then(|m| m.get("toolOverrides"))
-        {
-            None => None,
-            Some(value) => {
-                match grow_sampling_types::ToolOverridesUpdate::parse(value) {
-                    Ok(update) => Some(update),
-                    Err(reason) => {
-                        return Err(
-                            acp::Error::invalid_params()
-                                .data(format!("toolOverrides: {reason}")),
-                        );
-                    }
-                }
-            }
-        };
         handle
             .cmd_tx
             .send(SessionCommand::Prompt {
@@ -2230,7 +2122,6 @@ impl acp::Agent for MvpAgent {
                 json_schema,
                 send_now,
                 admission: None,
-                tool_overrides_update,
                 respond_to: tx,
                 persist_ack: None,
                 parsed_prompt_tx: None,
@@ -2253,10 +2144,6 @@ impl acp::Agent for MvpAgent {
             .chat_state_handle
             .get_last_turn_usage()
             .await;
-        let applied_tool_overrides = stop_result
-            .as_ref()
-            .ok()
-            .and_then(|ok| ok.tool_overrides.clone());
         if matches!(
             stop_result,
             Ok(crate::session::commands::PromptTurnOk {
@@ -2277,7 +2164,6 @@ impl acp::Agent for MvpAgent {
                                 cancellation_category: None,
                                 cancel_trigger: None,
                                 structured_output: None,
-                                tool_overrides: applied_tool_overrides.clone(),
                             })
                             .as_object()
                             .cloned(),
@@ -2351,7 +2237,6 @@ impl acp::Agent for MvpAgent {
                     completion_kind,
                     structured_output,
                     usage: prompt_usage,
-                    tool_overrides: _,
                 } = turn_ok;
                 let cwd = handle.info.cwd.clone();
                 let cmd_tx = handle.cmd_tx.clone();
@@ -2396,7 +2281,6 @@ impl acp::Agent for MvpAgent {
                                     cancellation_category,
                                     cancel_trigger,
                                     structured_output,
-                                    tool_overrides: applied_tool_overrides,
                                 })
                                 .as_object()
                                 .cloned(),
@@ -3261,21 +3145,5 @@ impl acp::Agent for MvpAgent {
             );
         }
         Ok(())
-    }
-}
-#[cfg(test)]
-mod tool_overrides_capability_tests {
-    use super::tool_overrides_capability;
-    #[test]
-    fn capability_wire_shape_is_pinned() {
-        assert_eq!(
-            tool_overrides_capability(),
-            serde_json::json!({
-                "x_keyword_search": true,
-                "x_semantic_search": true,
-                "x_user_search": false,
-                "x_thread_fetch": false,
-            }),
-        );
     }
 }

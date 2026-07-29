@@ -33,7 +33,7 @@ use rmcp::{
 use crate::oauth_config::McpOAuthConfig;
 
 use grow_tools::types::{
-    output::{MCPOutput, MCPOutputDetails, ToolOutput},
+    output::{MCPOutput, ToolOutput},
     tool::{ToolKind, ToolNamespace},
     tool_metadata::ToolMetadata,
 };
@@ -1355,7 +1355,6 @@ impl xai_tool_runtime::Tool for McpErasedTool {
 
         let server = &self.tool.server_name;
         let tool = &self.tool.name;
-        let tool_timeout = client.tool_timeout_for(tool);
         let qualified_name = format!("{}{}{}", server, MCP_TOOL_NAME_DELIMITER, tool);
 
         let mut auth_retry_attempted = false;
@@ -1592,7 +1591,7 @@ impl McpErasedTool {
         );
         let mcp_service = match client.recover().await {
             Ok(service) => service,
-            Err(e) => {
+            Err(_) => {
                 return Err(xai_tool_runtime::ToolError::custom(
                     "process_manager",
                     original_err.to_string(),

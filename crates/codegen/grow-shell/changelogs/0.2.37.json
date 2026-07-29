@@ -5,11 +5,6 @@
     "breaking_change": false
   },
   {
-    "category": "fixes",
-    "description": "**Subagents** now correctly receive web_search and x_search tools from the parent session.",
-    "breaking_change": false
-  },
-  {
     "category": "features",
     "description": "**`grok update`** now restarts any older running leader so all clients get the new binary.",
     "breaking_change": false

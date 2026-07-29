@@ -981,7 +981,6 @@ pub(crate) async fn run_shell_child(
         None,
         ctx.inference_idle_timeout_secs,
         None,
-        ctx.web_search_sampling_config.clone(),
         ctx.web_fetch_config.clone(),
         ctx.image_gen_config.clone(),
         ctx.video_gen_config.clone(),
@@ -999,8 +998,6 @@ pub(crate) async fn run_shell_child(
         grow_agent::prompt::context::PromptAudience::Subagent,
         effective_runtime.role_prompt.clone(),
         None,
-        ctx.disable_web_search,
-        ctx.backend_tools_enabled,
         ctx.respect_gitignore,
         ctx.path_not_found_hints,
         ctx.resolve_tool_params_json(),
@@ -1086,11 +1083,6 @@ pub(crate) async fn run_shell_child(
         cancel_token.clone(),
         goal_tick_cmd_tx(ctx.goal_enabled, ctx.parent_cmd_tx.as_ref()),
     );
-    if let Some(overrides) = ctx.inherited_tool_overrides.clone() {
-        let _ = child_handle
-            .cmd_tx
-            .send(SessionCommand::SetToolOverrides { overrides });
-    }
     let (prompt_tx, prompt_rx) = oneshot::channel();
     let prompt_text = task_prompt_text;
     let child_prompt_id = uuid::Uuid::now_v7().to_string();
@@ -1104,7 +1096,6 @@ pub(crate) async fn run_shell_child(
         json_schema: request.runtime_overrides.output_schema.clone(),
         send_now: false,
         admission: None,
-        tool_overrides_update: None,
         respond_to: prompt_tx,
         persist_ack: None,
         parsed_prompt_tx: None,

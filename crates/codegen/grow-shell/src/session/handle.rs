@@ -61,9 +61,6 @@ pub struct SessionHandle {
     /// Resolved turn limit for this session; lets a spawned subagent inherit
     /// the parent's limit. `None` = unlimited.
     pub max_turns: Option<usize>,
-    /// Configured cutoff a subagent inherits, published by the session actor. `None` when unset.
-    pub resolved_tool_overrides:
-        std::sync::Arc<arc_swap::ArcSwapOption<grow_sampling_types::ToolOverrides>>,
     /// Handle to the hunk tracker for this session
     pub hunk_tracker_handle: HunkTrackerHandle,
     /// Actor-based chat state handle — lets callers inspect final conversation state.

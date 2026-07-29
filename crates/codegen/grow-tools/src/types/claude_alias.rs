@@ -55,7 +55,6 @@ const CLAUDE_TOOLS: &[ClaudeTool] = &[
     k("Glob",            List,                 &["list_dir"]),
     k("LS",              List,                 &[]),                                  // legacy name for Glob
     k("LSP",             Lsp,                  &["lsp"]),
-    k("WebSearch",       WebSearch,            &["web_search"]),
     k("WebFetch",        WebFetch,             &["web_fetch"]),
     k("DeployApp",       DeployApp,            &[]),
     k("TodoWrite",       Plan,                 &["todo_write"]),

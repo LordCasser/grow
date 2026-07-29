@@ -110,8 +110,6 @@ pub enum ViewerKind {
     BgTask,
     /// Web fetch tool call (fetched content).
     WebFetch,
-    /// Web search tool call (search results + citations).
-    WebSearch,
     /// Integration tool discovery (search_tool).
     IntegrationSearch,
     /// Integration tool dispatch (use_tool).
@@ -334,7 +332,7 @@ impl BlockViewerPane {
         })
     }
 
-    /// Create a viewer for static content lines (shared by web_fetch and web_search).
+    /// Create a viewer for static tool content lines.
     fn for_static_content(entry_id: EntryId, kind: ViewerKind, lines: Vec<Line<'static>>) -> Self {
         let config = ListPaneConfig {
             follow_enabled: false,
@@ -503,54 +501,6 @@ impl BlockViewerPane {
         Some(Self::for_static_content(
             entry_id,
             ViewerKind::PlainText,
-            lines,
-        ))
-    }
-
-    /// Create a viewer for a web search block (search results + citations).
-    pub fn for_web_search(entry_id: EntryId, entry: &ScrollbackEntry) -> Option<Self> {
-        let RenderBlock::ToolCall(ToolCallBlock::WebSearch(ws)) = &entry.block else {
-            return None;
-        };
-
-        let theme = Theme::current();
-        let content = ws.content.as_deref().unwrap_or("");
-
-        let mut lines: Vec<Line<'static>> = content
-            .lines()
-            .map(|line| {
-                Line::from(Span::styled(
-                    line.to_string(),
-                    Style::default().fg(theme.text_primary),
-                ))
-            })
-            .collect();
-
-        // Citations footer (separated by a horizontal rule).
-        if !ws.citations.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "───────────────────────────────────",
-                Style::default().fg(theme.gray_dim),
-            )));
-            lines.push(Line::from(Span::styled(
-                format!("Sources ({})", ws.citations.len()),
-                Style::default().fg(theme.text_secondary),
-            )));
-            let url_style = Style::default().fg(theme.gray);
-            let prefix_style = Style::default().fg(theme.text_secondary);
-            for (i, url) in ws.citations.iter().enumerate() {
-                let prefix = format!("[{}] ", i + 1);
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, prefix_style),
-                    Span::styled(url.clone(), url_style),
-                ]));
-            }
-        }
-
-        Some(Self::for_static_content(
-            entry_id,
-            ViewerKind::WebSearch,
             lines,
         ))
     }
@@ -986,7 +936,6 @@ impl BlockViewerPane {
             ViewerKind::Read
             | ViewerKind::Grep
             | ViewerKind::WebFetch
-            | ViewerKind::WebSearch
             | ViewerKind::IntegrationSearch
             | ViewerKind::UseTool
             | ViewerKind::PlainText => {}
@@ -1071,9 +1020,6 @@ impl BlockViewerPane {
             ViewerKind::WebFetch => {
                 hints.push(HintItem::new(crate::key!('Y'), "copy url"));
             }
-            ViewerKind::WebSearch => {
-                hints.push(HintItem::new(crate::key!('Y'), "copy query"));
-            }
             ViewerKind::Read => {
                 hints.push(HintItem::new(crate::key!('Y'), "copy path"));
             }
@@ -1127,7 +1073,6 @@ impl BlockViewerPane {
                 | ViewerKind::Read
                 | ViewerKind::Grep
                 | ViewerKind::WebFetch
-                | ViewerKind::WebSearch
         ) && key.code == KeyCode::Char('Y')
             && key.modifiers == KeyModifiers::SHIFT
             && self.list_state.input_mode().is_none()

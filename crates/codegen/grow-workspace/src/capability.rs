@@ -81,7 +81,6 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::Lsp,
     ToolKind::Execute,
     ToolKind::Plan,
-    ToolKind::WebSearch,
     ToolKind::WebFetch,
     ToolKind::BackgroundTaskAction,
     ToolKind::WaitTasksAction,
@@ -136,7 +135,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         }
 
         // Search class.
-        Search | WebSearch | WebFetch => {
+        Search | WebFetch => {
             matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute)
         }
 

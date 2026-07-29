@@ -243,7 +243,6 @@ impl CompiledPolicy {
                         ToolFilter::Grep => "grep",
                         ToolFilter::Mcp => "mcp",
                         ToolFilter::WebFetch => "web_fetch",
-                        ToolFilter::WebSearch => "web_search",
                     };
                     let reason = match &rule.pattern {
                         Some(pattern) => format!(
@@ -507,7 +506,6 @@ fn tool_filter_matches(access: &AccessKind, filter: &ToolFilter) -> bool {
         ToolFilter::Grep => matches!(access, AccessKind::Grep { .. }),
         ToolFilter::Mcp => matches!(access, AccessKind::MCPTool { .. }),
         ToolFilter::WebFetch => matches!(access, AccessKind::WebFetch(_)),
-        ToolFilter::WebSearch => matches!(access, AccessKind::WebSearch(_)),
     }
 }
 
@@ -562,9 +560,6 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>) -> bool {
             PatternMode::Domain => domain_matches(pattern, url),
             PatternMode::Glob => glob_matches(url, MatchContext::Freeform, cr.matcher),
         },
-        AccessKind::WebSearch(query) => {
-            glob_matches(query, MatchContext::Freeform, cr.matcher) || query.starts_with(pattern)
-        }
     }
 }
 
@@ -651,7 +646,7 @@ pub(crate) fn rule_is_catchall(rule: &PermissionRule) -> bool {
         ToolFilter::Any => {
             opens_all(bash_probes()) || opens_all(mcp_probes()) || opens_all(webfetch_probes())
         }
-        ToolFilter::Read | ToolFilter::Edit | ToolFilter::Grep | ToolFilter::WebSearch => false,
+        ToolFilter::Read | ToolFilter::Edit | ToolFilter::Grep => false,
     }
 }
 
@@ -1406,23 +1401,6 @@ mod tests {
     }
 
     #[test]
-    fn deny_web_search_does_not_block_read_bash_or_webfetch() {
-        let policy = PermissionConfig::new(vec![PermissionRule {
-            action: RuleAction::Deny,
-            tool: ToolFilter::WebSearch,
-            pattern: None,
-            pattern_mode: PatternMode::Glob,
-        }]);
-        assert!(matches!(
-            evaluate_policy(&AccessKind::WebSearch("rust lang".into()), &policy),
-            Some(Decision::Reject(_))
-        ));
-        assert!(evaluate_policy(&AccessKind::Read(Some("src/lib.rs".into())), &policy).is_none());
-        assert!(evaluate_policy(&AccessKind::Bash("ls".into()), &policy).is_none());
-        assert!(evaluate_policy(&AccessKind::WebFetch("https://x.com".into()), &policy).is_none());
-    }
-
-    #[test]
     fn deny_web_fetch_still_blocks_only_webfetch() {
         let policy = PermissionConfig::new(vec![PermissionRule {
             action: RuleAction::Deny,
@@ -1434,7 +1412,6 @@ mod tests {
             evaluate_policy(&AccessKind::WebFetch("https://x.com".into()), &policy),
             Some(Decision::Reject(_))
         ));
-        assert!(evaluate_policy(&AccessKind::WebSearch("rust".into()), &policy).is_none());
     }
 
     /// The Grep tool reads file contents, so managed `Read` rules must govern it:

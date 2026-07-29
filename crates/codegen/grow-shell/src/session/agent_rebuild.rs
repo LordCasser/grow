@@ -52,7 +52,6 @@ use grow_tools::implementations::grow_build::task::types::{SubagentEvent, TaskMo
 use grow_tools::implementations::grow_build::video_gen::VideoGenConfig;
 use grow_tools::implementations::grow_build::web_fetch::WebFetchConfig;
 use grow_tools::implementations::lsp::LspBackend;
-use grow_tools::implementations::web_search::WebSearchConfig;
 use grow_tools::notification::ToolNotificationHandle;
 use grow_tools::types::SharedApiKeyProvider;
 use grow_tools::types::compat::CompatConfig;
@@ -91,8 +90,6 @@ pub(crate) struct AgentRebuildSpec {
     pub memory_global_path: Option<String>,
     pub memory_workspace_path: Option<String>,
     pub memory_backend: Option<Arc<dyn MemoryBackend>>,
-    pub web_search_config: WebSearchConfig,
-    pub backend_search: bool,
     pub web_fetch_config: WebFetchConfig,
     pub image_gen_config: ImageGenConfig,
     pub video_gen_config: VideoGenConfig,
@@ -193,8 +190,6 @@ impl AgentRebuildSpec {
             memory_global_path,
             memory_workspace_path,
             memory_backend,
-            web_search_config,
-            backend_search,
             web_fetch_config,
             image_gen_config,
             video_gen_config,
@@ -252,8 +247,6 @@ impl AgentRebuildSpec {
         .with_system_prompt_label(system_prompt_label.clone())
         .with_session_env(session_env.clone())
         .with_state_path(bridge_state_path.clone())
-        .with_web_search_config(web_search_config.clone())
-        .with_backend_search(*backend_search)
         .with_image_gen_config(image_gen_config.clone())
         .with_video_gen_config(video_gen_config.clone())
         .with_app_builder_deployer_config(app_builder_deployer_config.clone())
@@ -419,8 +412,6 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         memory_global_path: None,
         memory_workspace_path: None,
         memory_backend: None,
-        web_search_config: WebSearchConfig::default(),
-        backend_search: false,
         web_fetch_config: WebFetchConfig::Disabled,
         image_gen_config: ImageGenConfig::default(),
         video_gen_config: VideoGenConfig::default(),

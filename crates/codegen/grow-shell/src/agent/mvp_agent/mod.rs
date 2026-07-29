@@ -395,8 +395,6 @@ pub(crate) struct PromptResponseMeta {
     pub structured_output: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output_error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_overrides: Option<grow_sampling_types::ToolOverrides>,
 }
 /// Inputs for [`build_prompt_response_meta`]. A struct (not positional args)
 /// so call sites are self-documenting and adding a field can't silently
@@ -411,7 +409,6 @@ pub(crate) struct PromptResponseMetaArgs<'a> {
     pub cancellation_category: Option<String>,
     pub cancel_trigger: Option<String>,
     pub structured_output: Option<Result<serde_json::Value, String>>,
-    pub tool_overrides: Option<grow_sampling_types::ToolOverrides>,
 }
 /// Build the `_meta` JSON for `PromptResponse`. Includes baseline
 /// session/prompt/model identifiers plus optional per-turn token counts
@@ -429,7 +426,6 @@ pub(crate) fn build_prompt_response_meta(
         cancellation_category,
         cancel_trigger,
         structured_output,
-        tool_overrides,
     } = args;
     let (structured_output, structured_output_error) = match structured_output {
         Some(Ok(value)) => (Some(value), None),
@@ -451,7 +447,6 @@ pub(crate) fn build_prompt_response_meta(
         cancel_trigger,
         structured_output,
         structured_output_error,
-        tool_overrides,
     };
     serde_json::to_value(meta).expect("PromptResponseMeta is always serializable")
 }

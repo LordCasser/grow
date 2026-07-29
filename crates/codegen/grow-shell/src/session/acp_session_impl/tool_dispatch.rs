@@ -71,30 +71,13 @@ pub(super) fn compaction_artifact_read(
     xai_chat_state::compaction_transcript::classify_compaction_path(path)
 }
 
-/// Map a backend-hosted tool name to a user-facing title, ACP ToolKind,
-/// and `raw_input` JSON for display in the pager's tool call UI.
-///
-/// The `raw_input` carries metadata that the pager's `tool_call_to_block()`
-/// uses to select the correct renderer (e.g., `variant: "WebSearch"` picks
-/// the `WebSearchToolCallBlock` instead of the grep `SearchToolCallBlock`).
+/// Map a backend-hosted tool name to generic ACP display metadata.
 pub(super) fn backend_tool_display(name: &str) -> (String, acp::ToolKind, serde_json::Value) {
-    match name {
-        "web_search" => (
-            "Web search:".to_string(),
-            acp::ToolKind::Search,
-            serde_json::json!({"variant": "WebSearch", "backend": true}),
-        ),
-        "x_search" => (
-            "X search:".to_string(),
-            acp::ToolKind::Search,
-            serde_json::json!({"variant": "XSearch", "backend": true}),
-        ),
-        n => (
-            n.to_string(),
-            acp::ToolKind::Other,
-            serde_json::json!({"backend": true}),
-        ),
-    }
+    (
+        name.to_string(),
+        acp::ToolKind::Other,
+        serde_json::json!({"backend": true}),
+    )
 }
 
 /// Temporary gate: only expose resolved model ID to the user for these models.

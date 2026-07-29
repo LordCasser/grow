@@ -21,6 +21,5 @@
 //!   Glob       → `${{ tools.by_kind.list }}`
 //!   Grep       → `${{ tools.by_kind.search }}`
 //!   Bash       → `${{ tools.by_kind.execute }}`
-//!   WebSearch  → `${{ tools.by_kind.web_search }}`
 
 pub use xai_tool_types::{EXPLORE_PROMPT, GENERAL_PURPOSE_PROMPT, PLAN_PROMPT};

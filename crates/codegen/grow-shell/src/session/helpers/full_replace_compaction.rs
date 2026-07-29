@@ -31,7 +31,7 @@ use grow_compaction::{
 };
 use grow_diagnostics::events::{CompactionRetryDegraded, CompactionTrigger};
 use grow_sampler::SamplerConfig as SamplingConfig;
-use grow_sampling_types::{ConversationItem, HostedTool, ToolSpec};
+use grow_sampling_types::{ConversationItem, ToolSpec};
 
 use xai_chat_state::compaction_utils::{
     CompactionAttempt, MAX_CAPTURED_SUMMARY_CHARS, bound_captured_output,
@@ -60,7 +60,6 @@ pub(crate) struct ShellCompactionSampler {
     use_short_prompt: bool,
     user_context: Option<String>,
     tools: Vec<ToolSpec>,
-    hosted_tools: Vec<HostedTool>,
     client: OaiCompatClient,
     session_id: acp::SessionId,
     sampling_config: SamplingConfig,
@@ -82,7 +81,6 @@ impl ShellCompactionSampler {
         use_short_prompt: bool,
         user_context: Option<String>,
         tools: Vec<ToolSpec>,
-        hosted_tools: Vec<HostedTool>,
         client: OaiCompatClient,
         session_id: acp::SessionId,
         sampling_config: SamplingConfig,
@@ -94,7 +92,6 @@ impl ShellCompactionSampler {
             use_short_prompt,
             user_context,
             tools,
-            hosted_tools,
             client,
             session_id,
             sampling_config,
@@ -133,7 +130,6 @@ impl CompactionSampler for ShellCompactionSampler {
         match generate_session_compact(
             chat_history,
             self.tools.clone(),
-            self.hosted_tools.clone(),
             self.client.clone(),
             self.session_id.clone(),
             &self.sampling_config,

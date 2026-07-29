@@ -9,8 +9,6 @@
 ## Features
 
 - **New /tutorial slash command** opens an opt-in nine-topic onboarding tour of Grok.
-- **New tool_overrides option** lets you set date cutoffs and domain allowlists for the agent's built-in search tools.
-- **New toolOverrides option** lets you set date cutoffs and domain allowlists for the agent's built-in search tools.
 - **New config options** let you add query parameters or environment-backed headers to custom model providers and control which variables reach shell tools.
 - **Terminal and environment fixes** are now consolidated under the `/doctor` command with clearer guidance.
 - **Marketplace add** now rejects non-git URLs at add time instead of failing later.
@@ -1039,7 +1037,6 @@
 ## Bug Fixes
 
 - **Focus reports** no longer leak as literal text when split across reads over SSH.
-- **--disable-web-search** now honored in grok -p and grok agent; auxiliary model routing respects catalog overrides.
 - **Focus events** now fire correctly for SSH-split focus reports.
 - **Boolean tool flags** now accept "true"/"false"/"yes"/"no"/1/0 strings and numbers in addition to native booleans.
 - **Session last-active timestamps** and message counts no longer regress under concurrent writers.
@@ -1437,7 +1434,6 @@
 
 ## Bug Fixes
 
-- **Subagents** now correctly receive web_search and x_search tools from the parent session.
 
 
 # 0.2.36
@@ -1805,5 +1801,3 @@
 ## Performance
 
 - **Large chat sessions** now use substantially less memory and run faster during forks, rewinds, and compaction.
-
-

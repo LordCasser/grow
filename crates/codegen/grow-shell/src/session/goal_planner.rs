@@ -550,40 +550,12 @@ mod tests {
     }
 
     #[test]
-    fn planner_template_default_render_names_the_web_tools() {
-        // The research mandate is inert if the planner can't see the tool: the
-        // inherit/default render must NAME a real web tool (the stock
-        // `web_search`/`web_fetch`) and leave no tool placeholder unresolved.
+    fn planner_template_default_render_names_web_fetch() {
         let rendered = RoleToolNames::inherit_defaults().apply(GOAL_PLANNER_PROMPT_TEMPLATE);
-        assert!(
-            rendered.contains("web_search"),
-            "default render must name the web-search tool",
-        );
         assert!(rendered.contains("web_fetch"));
         assert_no_tool_placeholders(&rendered);
     }
 
-    #[test]
-    fn planner_template_cursor_render_names_the_web_search_tool() {
-        // The previously-broken case: on the alternate toolset the web
-        // tool is named "WebSearch", so the planner prompt must render THAT —
-        // otherwise the weak model never reaches for it and plans from memory.
-        let rendered = RoleToolNames::from_summary(&summary_with(&[
-            (ToolKind::WebSearch, "WebSearch"),
-            (ToolKind::WebFetch, "WebFetch"),
-        ]))
-        .apply(GOAL_PLANNER_PROMPT_TEMPLATE);
-        assert!(
-            rendered.contains("WebSearch"),
-            "cursor render must name the cursor web-search tool",
-        );
-        assert!(rendered.contains("WebFetch"));
-        assert_no_tool_placeholders(&rendered);
-    }
-
-    /// Pin each load-bearing clause of the named-artifact research mandate so a
-    /// targeted revert fails (the convergence balance: fix under-scoping, never
-    /// reopen over-scoping).
     #[test]
     fn planner_prompt_pins_named_artifact_research_mandate() {
         let t = GOAL_PLANNER_PROMPT_TEMPLATE;

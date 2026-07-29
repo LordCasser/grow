@@ -188,11 +188,9 @@ impl SessionActor {
             .borrow()
             .compaction_policy()
             .wall_clock_budget_secs;
-        let hosted_tools = self.hosted_tools_for_turn();
         match generate_session_compact(
             history,
             tools,
-            hosted_tools,
             client,
             self.session_info.id.clone(),
             &sampling_config,
@@ -1046,21 +1044,14 @@ impl SessionActor {
         }
         let sampling_config = self.reconstruct_full_config().await;
         let sampling_client = self.prepare_chat_completion(false).await?;
-        let backend_search_active = self.backend_search_active();
-        let effective_tool_defs: Vec<grow_sampling_types::ToolDefinition> = self
-            .prepare_tool_definitions()
-            .await
-            .into_iter()
-            .filter(|td| !backend_search_active || td.function.name != "web_search")
-            .collect();
+        let effective_tool_defs: Vec<grow_sampling_types::ToolDefinition> =
+            self.prepare_tool_definitions().await.into_iter().collect();
         let compaction_tool_tokens =
             xai_chat_state::estimate_tool_definitions_tokens(&effective_tool_defs);
         let compaction_tools: Vec<grow_sampling_types::ToolSpec> = effective_tool_defs
             .into_iter()
             .map(grow_sampling_types::ToolSpec::from)
             .collect();
-        let compaction_hosted_tools: Vec<grow_sampling_types::HostedTool> =
-            self.hosted_tools_for_turn();
         tracing::info!(
             num_tools = compaction_tools.len(),
             tool_tokens = compaction_tool_tokens,
@@ -1104,7 +1095,6 @@ impl SessionActor {
             use_short_prompt,
             user_context.clone(),
             compaction_tools.clone(),
-            compaction_hosted_tools.clone(),
             sampling_client,
             self.session_info.id.clone(),
             sampling_config.clone(),
@@ -2340,9 +2330,6 @@ mod inline_auto_compact_flow_tests {
             pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
-            supports_backend_search: std::cell::Cell::new(false),
-            tool_overrides: std::cell::RefCell::new(None),
-            resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
             compactions_remaining: std::cell::Cell::new(None),
             compaction_at_tokens: std::cell::Cell::new(None),
             doom_loop_recovery: None,

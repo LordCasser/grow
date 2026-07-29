@@ -1,7 +1,7 @@
 //! VisibleLinkMap — per-frame map of clickable link regions on screen.
 //!
 //! Populated during the scrollback render pass from the `LinkOverlay`
-//! (markdown hyperlinks) and citation URLs from web_search / web_fetch
+//! (markdown hyperlinks) and URLs from web_fetch
 //! tool blocks. Used by the mouse handler for click-to-open.
 
 use ratatui::layout::Rect;

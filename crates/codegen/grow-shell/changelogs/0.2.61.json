@@ -16,11 +16,6 @@
   },
   {
     "category": "fixes",
-    "description": "**--disable-web-search** now honored in grok -p and grok agent; auxiliary model routing respects catalog overrides.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
     "description": "**Focus events** now fire correctly for SSH-split focus reports.",
     "breaking_change": false
   },

@@ -103,12 +103,13 @@ Grow has built-in tools for:
 | `grep` | Regex search across your codebase (powered by ripgrep) |
 | `list_dir` | List directory contents |
 | `run_terminal_command` | Execute shell commands |
-| `web_search` / `web_fetch` | Search the web and fetch URLs |
+| `web_fetch` | Fetch a known URL |
 | `todo_write` | Create and manage task lists |
 | `spawn_subagent` | Spawn parallel subagent sessions |
 | `memory_search` | Search cross-session memory |
 
-Tools can be extended with [MCP servers](05-configuration.md#mcp-servers) for integrations like GitHub, databases, and more.
+Tools can be extended with [MCP servers](05-configuration.md#mcp-servers) for integrations like
+GitHub, databases, and Web Search. Grow does not require a fixed name for an MCP search tool.
 
 ### Slash Commands
 

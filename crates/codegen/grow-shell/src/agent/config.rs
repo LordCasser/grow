@@ -320,14 +320,11 @@ pub struct RuntimeResolutionContext<'a> {
     pub is_headless: bool,
     /// `Some(true)` = CLI explicitly enabled, `None` = defer to config/env/remote.
     pub cli_subagents: Option<bool>,
-    pub cli_web_search_model: Option<&'a str>,
     pub cli_session_summary_model: Option<&'a str>,
     /// CLI `--experimental-memory` flag. Enables cross-session memory.
     pub cli_experimental_memory: bool,
     /// CLI `--no-memory` flag. Overrides all other memory settings.
     pub cli_no_memory: bool,
-    /// CLI `--disable-web-search` flag. ORed with config.toml value.
-    pub disable_web_search: bool,
     /// CLI `--todo-gate` flag. Session-scoped — not persisted.
     pub todo_gate: bool,
     /// CLI `--laziness-debug-log <path>`. When `Some`, the Layer-3
@@ -692,8 +689,6 @@ pub struct ModelsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_reasoning_effort: Option<ReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub web_search: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub session_summary: Option<String>,
     /// Vision model used to transcribe user-supplied
     /// images via a separate endpoint.
@@ -705,8 +700,8 @@ pub struct ModelsConfig {
     pub prompt_suggestion: Option<String>,
     /// Restricts which models are user-selectable for normal chat (picker,
     /// `/model`, `-m`). Non-matching models stay in the catalog but are never
-    /// shown, defaulted to, or selectable. Special/internal models (web_search,
-    /// image_description, subagents, fork secondary) are exempt.
+    /// shown, defaulted to, or selectable. Special/internal models
+    /// (image_description, subagents, fork secondary) are exempt.
     ///
     /// Glob patterns (`*`, `?`, `[...]`) match the model id or catalog key,
     /// case-sensitive. Empty = no restriction; an excluded explicit `default`/`-m`
@@ -1111,9 +1106,6 @@ pub struct Config {
     /// CLI override for reasoning effort.
     #[serde(skip)]
     pub reasoning_effort_override: Option<ReasoningEffort>,
-    /// CLI override for the web search model ID.
-    #[serde(skip)]
-    pub web_search_model_override: Option<String>,
     /// CLI override for the session summary model ID.
     #[serde(skip)]
     pub session_summary_model_override: Option<String>,
@@ -1181,11 +1173,6 @@ pub struct Config {
     #[serde(skip)]
     pub subagent_personas:
         std::collections::HashMap<String, grow_subagent_resolution::config::SubagentPersona>,
-    /// Whether web search is force-disabled via `--disable-web-search` CLI flag.
-    /// When true, the web search tool is never added to the agent toolset
-    /// regardless of available credentials.
-    #[serde(default)]
-    pub disable_web_search: bool,
     /// Whether the runtime turn-end TodoGate is force-enabled via the
     /// `--todo-gate` CLI flag. Session-scoped — not persisted. When
     /// true, flips the runtime policy's `enabled` bit on regardless of
@@ -1250,9 +1237,6 @@ pub struct Config {
     /// Enforced requirement pins from `requirements.toml`.
     #[serde(skip)]
     pub requirements: Requirements,
-    /// Model ID for web_search.
-    #[serde(skip)]
-    pub web_search_model: String,
     /// Session title model. Resolved to the compiled default
     /// (`default_session_summary_model`) when unset; see `ModelOverrideConfig::resolve`.
     #[serde(skip)]
@@ -1469,7 +1453,6 @@ impl Default for Config {
             storage_mode: StorageMode::resolve(None, None),
             default_model_override: None,
             reasoning_effort_override: None,
-            web_search_model_override: None,
             session_summary_model_override: None,
             default_yolo_mode: false,
             default_auto_mode: false,
@@ -1485,7 +1468,6 @@ impl Default for Config {
             subagent_toggle: std::collections::HashMap::new(),
             subagent_roles: std::collections::HashMap::new(),
             subagent_personas: std::collections::HashMap::new(),
-            disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
             respect_gitignore: false,
@@ -1501,7 +1483,6 @@ impl Default for Config {
             auto_wake_enabled: true,
             compat_resolved: CompatConfig::default(),
             requirements: Requirements::default(),
-            web_search_model: String::new(),
             session_summary_model: None,
             image_description_model: None,
             prompt_suggest_model_pin: crate::config::PromptSuggestModelPin::Unpinned,
@@ -1775,9 +1756,7 @@ impl Config {
         if config.client_version.is_none() {
             config.client_version = Self::default().client_version;
         }
-        let model_overrides =
-            crate::config::ModelOverrideConfig::resolve(None, None, raw_config, None);
-        config.web_search_model = model_overrides.web_search;
+        let model_overrides = crate::config::ModelOverrideConfig::resolve(None, raw_config, None);
         config.session_summary_model = model_overrides.session_summary;
         config.image_description_model = model_overrides.image_description;
         config.prompt_suggest_model_pin = model_overrides.prompt_suggestion;
@@ -1846,10 +1825,9 @@ impl Config {
     /// - respect_gitignore via `ToolsConfig::resolve`
     /// - disable_zdr_incompatible_tools via `ToolsConfig::resolve`
     /// - managed_mcps_enabled via `ManagedMcpsConfig::resolve`
-    /// - web_search_model / session_summary_model / image_description_model /
+    /// - session_summary_model / image_description_model /
     ///   prompt_suggest_model_pin via `ModelOverrideConfig::resolve`
     /// - memory_config via `MemoryConfig::resolve`
-    /// - disable_web_search (CLI flag ORed with config.toml)
     /// - storage_mode via `StorageMode::resolve`
     /// - path_not_found_hints from remote_settings
     ///
@@ -1857,7 +1835,6 @@ impl Config {
     /// `resolve_worktree_type` since it's an agent-level field, not a Config field.
     pub fn resolve_runtime_fields(&mut self, ctx: &RuntimeResolutionContext<'_>) {
         self.cli_subagents = ctx.cli_subagents;
-        self.web_search_model_override = ctx.cli_web_search_model.map(|s| s.to_owned());
         self.session_summary_model_override = ctx.cli_session_summary_model.map(|s| s.to_owned());
         let cli_flag = ctx.cli_subagents.unwrap_or(false);
         self.resolve_subagents(cli_flag, ctx.raw_config);
@@ -1885,12 +1862,10 @@ impl Config {
         self.managed_mcps_enabled = mcps.enabled;
         self.managed_mcp_gateway_tools_enabled = mcps.gateway_tools_enabled;
         let models = crate::config::ModelOverrideConfig::resolve(
-            ctx.cli_web_search_model,
             ctx.cli_session_summary_model,
             ctx.raw_config,
             ctx.remote_settings,
         );
-        self.web_search_model = models.web_search;
         self.session_summary_model = models.session_summary;
         self.image_description_model = models.image_description;
         self.prompt_suggest_model_pin = models.prompt_suggestion;
@@ -1903,7 +1878,6 @@ impl Config {
             ctx.remote_settings,
         );
         self.memory_config = if mem.enabled { Some(mem) } else { None };
-        self.disable_web_search = self.disable_web_search || ctx.disable_web_search;
         self.todo_gate = ctx.todo_gate;
         self.laziness_debug_log = ctx.laziness_debug_log.map(std::path::Path::to_path_buf);
         self.storage_mode =
@@ -1926,7 +1900,6 @@ impl Config {
     /// Integration test coverage: `tests/test_settings_refresh.rs`.
     pub fn re_resolve_runtime_fields(&mut self, raw_config: &toml::Value) {
         let remote_settings = self.remote_settings.clone();
-        let cli_web_search_model = self.web_search_model_override.clone();
         let cli_session_summary_model = self.session_summary_model_override.clone();
         let laziness_debug_log = self.laziness_debug_log.clone();
         let ctx = RuntimeResolutionContext {
@@ -1934,11 +1907,9 @@ impl Config {
             remote_settings: remote_settings.as_ref(),
             is_headless: self.mode == AgentMode::Headless,
             cli_subagents: self.cli_subagents,
-            cli_web_search_model: cli_web_search_model.as_deref(),
             cli_session_summary_model: cli_session_summary_model.as_deref(),
             cli_experimental_memory: self.cli_experimental_memory,
             cli_no_memory: self.cli_no_memory,
-            disable_web_search: self.disable_web_search,
             todo_gate: self.todo_gate,
             laziness_debug_log: laziness_debug_log.as_deref(),
             storage_mode: None,
@@ -2416,12 +2387,6 @@ impl Config {
             .requirement(self.requirements.write_file.pinned())
             .config(self.features.write_file)
             .feature_flag(ff)
-            .default(true)
-            .resolve()
-    }
-    pub(crate) fn resolve_backend_tools(&self) -> Resolved<bool> {
-        BoolFlag::env("GROW_BACKEND_SEARCH")
-            .config(self.features.backend_tools)
             .default(true)
             .resolve()
     }
@@ -2960,8 +2925,6 @@ struct DefaultModelJson {
     #[serde(default = "default_true")]
     supported_in_api: bool,
     #[serde(default)]
-    supports_backend_search: bool,
-    #[serde(default)]
     compactions_remaining: Option<CompactionsRemaining>,
     #[serde(default)]
     compaction_at_tokens: Option<CompactionAtTokens>,
@@ -3024,7 +2987,6 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 reasoning_effort: m.reasoning_effort,
                 supports_reasoning_effort: m.supports_reasoning_effort,
                 reasoning_efforts: m.reasoning_efforts,
-                supports_backend_search: m.supports_backend_search,
                 compactions_remaining: m.compactions_remaining,
                 compaction_at_tokens: m.compaction_at_tokens,
                 show_model_fingerprint: m.show_model_fingerprint,
@@ -3124,14 +3086,12 @@ pub struct ModelEntryConfig {
     /// Can also be set via the `GROW_MAX_RETRIES` environment variable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
-    /// Exclude from the client model picker; still usable internally (web_search, etc.).
+    /// Exclude from the client model picker; still usable by internal tasks.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
     /// When false, only OAuth users see this in the picker.
     #[serde(default = "default_true")]
     pub supported_in_api: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub supports_backend_search: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -3212,7 +3172,6 @@ pub struct ConfigModelOverride {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub supports_reasoning_effort: Option<bool>,
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
-    pub supports_backend_search: Option<bool>,
     /// Aliases must be registered in `config_model_override_parse::ALIASES`;
     /// serde rejects a table that contains both spellings otherwise.
     #[serde(alias = "send_compactions_remaining")]
@@ -3298,9 +3257,6 @@ impl ConfigModelOverride {
         }
         if !self.reasoning_efforts.is_empty() {
             entry.info.reasoning_efforts = self.reasoning_efforts.clone();
-        }
-        if let Some(v) = self.supports_backend_search {
-            entry.info.supports_backend_search = v;
         }
         if self.compactions_remaining.is_some() {
             entry.info.compactions_remaining = self.compactions_remaining;
@@ -3393,7 +3349,6 @@ pub struct ModelInfo {
     /// Per-model reasoning-effort menu (source of truth); legacy fields derived from it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
-    pub supports_backend_search: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     pub compactions_remaining: Option<CompactionsRemaining>,
     /// Per-model config for the `x-compaction-at` header; `None` disables it.
@@ -3439,7 +3394,6 @@ impl ModelInfo {
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
-            supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -3476,7 +3430,6 @@ impl ModelInfo {
             reasoning_effort: entry.reasoning_effort,
             supports_reasoning_effort: entry.supports_reasoning_effort,
             reasoning_efforts: entry.reasoning_efforts.clone(),
-            supports_backend_search: entry.supports_backend_search,
             compactions_remaining: entry.compactions_remaining,
             compaction_at_tokens: entry.compaction_at_tokens,
             show_model_fingerprint: entry.show_model_fingerprint,
@@ -3820,11 +3773,6 @@ pub struct Features {
     /// `None` = defer to remote settings / env / default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_wake: Option<bool>,
-    /// Backend-executed tools (web_search, x_search run server-side).
-    /// `None` = defer to env / default (true). Set `false` to force
-    /// client-side tool execution.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend_tools: Option<bool>,
     /// `summary` (default) | `transcript` | `segments`. `None` = defer to CLI /
     /// env (`GROW_COMPACTION_MODE`). Parsed via `CompactionMode::parse`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4245,7 +4193,6 @@ pub fn sampling_config_for_model(
         origin_client: None,
         attribution_callback: None,
         bearer_resolver: None,
-        supports_backend_search: info.supports_backend_search,
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
@@ -4299,39 +4246,6 @@ pub fn resolve_model_to_sampling_config(
         credentials,
         alpha_test_key,
     ))
-}
-pub fn resolve_web_search_sampling_config(
-    model_id: &str,
-    models: &IndexMap<String, ModelEntry>,
-    session_key: Option<&str>,
-    disable_api_key_auth: bool,
-    alpha_test_key: Option<String>,
-    _endpoints: &EndpointsConfig,
-) -> Option<SamplerConfig> {
-    let resolved = if let Some(entry) = find_model_by_id(models, model_id).cloned() {
-        let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
-        if credentials.api_key.is_none() && entry.effective_auth_provider().is_some() {
-            tracing::warn!(
-                web_search_model = %model_id,
-                "web search model uses an auth provider with no cached token; disabling web search"
-            );
-            return None;
-        }
-        Some(sampling_config_for_model(
-            &entry,
-            credentials,
-            alpha_test_key,
-        ))
-    } else {
-        None
-    };
-    if resolved.is_none() {
-        tracing::warn!(
-            web_search_model = %model_id,
-            "configured web_search model not found; disabling web search"
-        );
-    }
-    resolved.map(crate::tools::config::web_search_sampling_config)
 }
 pub fn to_acp_model_info(
     models: &IndexMap<String, ModelEntry>,
@@ -4636,11 +4550,9 @@ reasoning_effort = "low"
                 remote_settings: None,
                 is_headless: false,
                 cli_subagents: None,
-                cli_web_search_model: None,
                 cli_session_summary_model: None,
                 cli_experimental_memory: false,
                 cli_no_memory: false,
-                disable_web_search: false,
                 todo_gate: false,
                 laziness_debug_log: None,
                 storage_mode: None,
@@ -4657,44 +4569,9 @@ reasoning_effort = "low"
         assert!(cfg.disable_zdr_incompatible_tools);
     }
     #[test]
-    fn resolve_runtime_fields_propagates_disable_web_search() {
-        fn ctx(raw: &toml::Value, disable_web_search: bool) -> RuntimeResolutionContext<'_> {
-            RuntimeResolutionContext {
-                raw_config: raw,
-                remote_settings: None,
-                is_headless: true,
-                cli_subagents: None,
-                cli_web_search_model: None,
-                cli_session_summary_model: None,
-                cli_experimental_memory: false,
-                cli_no_memory: false,
-                disable_web_search,
-                todo_gate: false,
-                laziness_debug_log: None,
-                storage_mode: None,
-            }
-        }
-        let empty: toml::Value = toml::Value::Table(toml::map::Map::new());
-        let mut cfg = Config::new_from_toml_cfg(&empty).unwrap();
-        cfg.resolve_runtime_fields(&ctx(&empty, false));
-        assert!(!cfg.disable_web_search);
-        let mut cfg = Config::new_from_toml_cfg(&empty).unwrap();
-        cfg.resolve_runtime_fields(&ctx(&empty, true));
-        assert!(cfg.disable_web_search);
-        let toml_on: toml::Value = toml::from_str("disable_web_search = true").unwrap();
-        let mut cfg = Config::new_from_toml_cfg(&toml_on).unwrap();
-        cfg.resolve_runtime_fields(&ctx(&toml_on, false));
-        assert!(cfg.disable_web_search);
-    }
-    #[test]
-    fn new_from_toml_cfg_restores_web_search_and_session_summary_models() {
+    fn new_from_toml_cfg_restores_auxiliary_models() {
         let empty: toml::Value = toml::Value::Table(toml::map::Map::new());
         let cfg = Config::new_from_toml_cfg(&empty).expect("empty config should parse");
-        assert_eq!(
-            cfg.web_search_model,
-            crate::models::default_web_search_model(),
-            "empty config should produce the compiled-in default web_search model"
-        );
         assert_eq!(
             cfg.session_summary_model,
             Some(crate::models::default_session_summary_model().to_owned()),
@@ -4708,14 +4585,12 @@ reasoning_effort = "low"
         let with_overrides: toml::Value = toml::from_str(
             r#"
             [models]
-            web_search = "custom-ws-model"
             session_summary = "custom-ss-model"
             image_description = "custom-id-model"
             "#,
         )
         .unwrap();
         let cfg2 = Config::new_from_toml_cfg(&with_overrides).expect("config should parse");
-        assert_eq!(cfg2.web_search_model, "custom-ws-model");
         assert_eq!(
             cfg2.session_summary_model,
             Some("custom-ss-model".to_owned())
@@ -4723,27 +4598,6 @@ reasoning_effort = "low"
         assert_eq!(
             cfg2.image_description_model,
             Some("custom-id-model".to_owned())
-        );
-    }
-    #[test]
-    fn hidden_default_web_search_resolution_is_explicit_and_responses_only() {
-        let endpoints = EndpointsConfig::default();
-        let resolved = resolve_web_search_sampling_config(
-            crate::models::default_web_search_model(),
-            &IndexMap::new(),
-            Some("session-token"),
-            false,
-            None,
-            &endpoints,
-        )
-        .expect("hidden default web search model should resolve");
-        assert_eq!(resolved.model, crate::models::default_web_search_model());
-        assert_eq!(resolved.base_url, endpoints.proxy_url());
-        assert_eq!(resolved.api_backend, ApiBackend::Responses);
-        assert_eq!(
-            resolved.api_key.as_deref(),
-            Some("session-token"),
-            "hidden default should still use normal credential resolution"
         );
     }
     #[test]
@@ -4879,51 +4733,6 @@ reasoning_effort = "low"
             "first-party aux samplers keep the session refresh behavior"
         );
     }
-    /// A cold cache disables web search rather than sending an
-    /// unauthenticated request.
-    #[tokio::test]
-    async fn web_search_with_auth_provider_requires_warm_cache() {
-        let endpoints = EndpointsConfig::default();
-        let provider = crate::auth::AuthProviderRef::new(
-            "web-search-provider-test".into(),
-            crate::auth::AuthProviderConfig {
-                command: "printf ws-token".into(),
-                args: None,
-                token_ttl_secs: Some(3600),
-                timeout_secs: None,
-                cwd: None,
-                ..Default::default()
-            },
-        );
-        let mut entry = test_model_entry("m", "https://litellm.example/v1", None, None, None);
-        entry.auth_provider = Some(provider.clone());
-        let mut catalog = IndexMap::new();
-        catalog.insert("proxied-search".to_string(), entry);
-        assert!(
-            resolve_web_search_sampling_config(
-                "proxied-search",
-                &catalog,
-                Some("session-jwt"),
-                false,
-                None,
-                &endpoints,
-            )
-            .is_none(),
-            "a cold provider cache must disable web search, not send an unauthenticated request"
-        );
-        let _ = provider.ensure_fresh_token(None).await;
-        let resolved = resolve_web_search_sampling_config(
-            "proxied-search",
-            &catalog,
-            Some("session-jwt"),
-            false,
-            None,
-            &endpoints,
-        )
-        .expect("warm cache resolves");
-        assert_eq!(resolved.api_key.as_deref(), Some("ws-token"));
-    }
-    /// GBT-4128: bad `[mcp_servers.*]` entries are dropped, not fatal.
     #[test]
     fn invalid_mcp_server_stub_does_not_fail_config_load() {
         let raw_config: toml::Value = toml::from_str(
@@ -5117,35 +4926,6 @@ reasoning_effort = "low"
             set: _,
             include_only: _,
         } = ShellEnvironmentPolicyKnownKeys::default();
-    }
-    #[test]
-    fn web_search_disable_api_key_auth_swaps_first_party_key_for_session() {
-        let endpoints = EndpointsConfig::default();
-        let mut models = IndexMap::new();
-        models.insert(
-            "ws-model".to_string(),
-            test_model_entry(
-                "ws-model",
-                "https://api.example.com/v1",
-                Some("first-party-key"),
-                None,
-                None,
-            ),
-        );
-        let resolved = resolve_web_search_sampling_config(
-            "ws-model",
-            &models,
-            Some("session-token"),
-            true,
-            None,
-            &endpoints,
-        )
-        .expect("web search model should resolve");
-        assert_eq!(
-            resolved.api_key.as_deref(),
-            Some("session-token"),
-            "first-party API key must be swapped for the session token when disabled"
-        );
     }
     #[test]
     fn parses_model_api_key() {
@@ -5490,7 +5270,6 @@ reasoning_effort = "low"
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
-                supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,
@@ -6480,7 +6259,6 @@ reasoning_effort = "low"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
-            supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -6639,7 +6417,6 @@ reasoning_effort = "low"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
-            supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -7090,7 +6867,6 @@ reasoning_effort = "low"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
-            supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -7327,14 +7103,12 @@ reasoning_effort = "low"
             r#"
             [models]
             default = "my-enterprise-model"
-            web_search = "enterprise-search"
             session_summary = "title-model"
             "#,
         )
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
         assert_eq!(cfg.models.default.as_deref(), Some("my-enterprise-model"));
-        assert_eq!(cfg.models.web_search.as_deref(), Some("enterprise-search"));
         assert_eq!(cfg.models.session_summary.as_deref(), Some("title-model"));
     }
     #[test]
@@ -9428,7 +9202,6 @@ agent_type = "cursor"
         unsafe {
             std::env::remove_var("GROW_SUBAGENTS");
             std::env::remove_var("GROW_RESPECT_GITIGNORE");
-            std::env::remove_var("GROW_WEB_SEARCH_MODEL");
             std::env::remove_var("GROW_SESSION_SUMMARY_MODEL");
             std::env::remove_var("GROW_CURSOR_SKILLS_ENABLED");
             std::env::remove_var("GROW_CURSOR_RULES_ENABLED");
@@ -9713,11 +9486,9 @@ hooks = true
             remote_settings: Some(&remote),
             is_headless: false,
             cli_subagents: None,
-            cli_web_search_model: None,
             cli_session_summary_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
-            disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
             storage_mode: None,
@@ -9738,11 +9509,9 @@ hooks = true
             remote_settings: None,
             is_headless: false,
             cli_subagents: None,
-            cli_web_search_model: None,
             cli_session_summary_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
-            disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
             storage_mode: None,
@@ -9751,10 +9520,6 @@ hooks = true
         assert!(!cfg.respect_gitignore);
         assert!(cfg.managed_mcps_enabled);
         assert!(!cfg.managed_mcp_gateway_tools_enabled);
-        assert_eq!(
-            cfg.web_search_model,
-            crate::models::default_web_search_model()
-        );
         assert_eq!(
             cfg.session_summary_model,
             Some(crate::models::default_session_summary_model().to_owned())
@@ -9773,11 +9538,9 @@ hooks = true
             remote_settings: None,
             is_headless: true,
             cli_subagents: None,
-            cli_web_search_model: None,
             cli_session_summary_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
-            disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
             storage_mode: None,
@@ -9804,11 +9567,9 @@ hooks = true
             remote_settings: Some(&remote),
             is_headless: false,
             cli_subagents: None,
-            cli_web_search_model: None,
             cli_session_summary_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
-            disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
             storage_mode: None,
@@ -9826,11 +9587,9 @@ hooks = true
             remote_settings: None,
             is_headless: false,
             cli_subagents: None,
-            cli_web_search_model: None,
             cli_session_summary_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
-            disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
             storage_mode: None,
@@ -9848,11 +9607,9 @@ hooks = true
             remote_settings: None,
             is_headless: false,
             cli_subagents: Some(true),
-            cli_web_search_model: None,
             cli_session_summary_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
-            disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
             storage_mode: None,
@@ -9871,11 +9628,9 @@ hooks = true
             remote_settings: None,
             is_headless: false,
             cli_subagents: None,
-            cli_web_search_model: None,
             cli_session_summary_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
-            disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
             storage_mode: None,
@@ -9885,7 +9640,7 @@ hooks = true
     }
     #[test]
     #[serial]
-    fn resolve_runtime_fields_model_overrides_from_cli() {
+    fn resolve_runtime_fields_aux_model_override_from_cli() {
         clear_runtime_env_vars();
         let raw = empty_config();
         let mut cfg = Config::new_from_toml_cfg(&raw).unwrap();
@@ -9894,16 +9649,13 @@ hooks = true
             remote_settings: None,
             is_headless: false,
             cli_subagents: None,
-            cli_web_search_model: Some("custom-ws"),
             cli_session_summary_model: Some("custom-ss"),
             cli_experimental_memory: false,
             cli_no_memory: false,
-            disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
             storage_mode: None,
         });
-        assert_eq!(cfg.web_search_model, "custom-ws");
         assert_eq!(cfg.session_summary_model, Some("custom-ss".to_owned()));
     }
     #[test]
@@ -9921,11 +9673,9 @@ hooks = true
             remote_settings: Some(&remote),
             is_headless: false,
             cli_subagents: None,
-            cli_web_search_model: None,
             cli_session_summary_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
-            disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
             storage_mode: None,
@@ -9943,11 +9693,9 @@ hooks = true
             remote_settings: None,
             is_headless: false,
             cli_subagents: None,
-            cli_web_search_model: None,
             cli_session_summary_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
-            disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
             storage_mode: None,
@@ -9956,12 +9704,10 @@ hooks = true
         let first_subagents = cfg.subagents_enabled;
         let first_gitignore = cfg.respect_gitignore;
         let first_mcps = cfg.managed_mcps_enabled;
-        let first_ws = cfg.web_search_model.clone();
         cfg.resolve_runtime_fields(&ctx);
         assert_eq!(cfg.subagents_enabled, first_subagents);
         assert_eq!(cfg.respect_gitignore, first_gitignore);
         assert_eq!(cfg.managed_mcps_enabled, first_mcps);
-        assert_eq!(cfg.web_search_model, first_ws);
     }
 
     #[test]
@@ -10149,7 +9895,6 @@ default = "grow-4.5"
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
-                supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,

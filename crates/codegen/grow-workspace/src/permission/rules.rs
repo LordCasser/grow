@@ -115,7 +115,6 @@ impl std::error::Error for RuleParseError {}
 ///   - `MCPTool(...)` -> `ToolFilter::Mcp`
 ///   - `Grep(...)` / `Glob(...)` -> `ToolFilter::Grep`
 ///   - `WebFetch(...)` -> `ToolFilter::WebFetch`
-///   - `WebSearch(...)` -> `ToolFilter::WebSearch`
 ///   - No prefix / bare pattern -> `ToolFilter::Any`
 ///
 /// `WebFetch` patterns support a `domain:` prefix (e.g., `WebFetch(domain:example.com)`)
@@ -241,7 +240,6 @@ pub(crate) fn tool_name_to_filter(name: &str) -> Option<ToolFilter> {
         "MCPTool" => Some(ToolFilter::Mcp),
         "Grep" | "Glob" => Some(ToolFilter::Grep),
         "WebFetch" => Some(ToolFilter::WebFetch),
-        "WebSearch" => Some(ToolFilter::WebSearch),
         _ => None,
     }
 }

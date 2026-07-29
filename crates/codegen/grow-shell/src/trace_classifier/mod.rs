@@ -590,7 +590,6 @@ pub fn build_classifier_request(
     ConversationRequest {
         items: convo_items,
         tools: vec![],
-        hosted_tools: vec![],
         tool_choice: None,
         model: Some(model_id.to_owned()),
         temperature: Some(0.0),
@@ -1852,7 +1851,6 @@ mod tests {
         assert_eq!(req.max_output_tokens, Some(LAZINESS_MAX_OUTPUT_TOKENS));
         assert!(req.reasoning_effort.is_none());
         assert!(req.tools.is_empty());
-        assert!(req.hosted_tools.is_empty());
         assert!(req.tool_choice.is_none());
     }
 

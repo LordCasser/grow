@@ -30,21 +30,10 @@ impl SessionActor {
         self.compaction
             .threshold_percent
             .set(auto_compact_threshold_percent);
-        self.supports_backend_search
-            .set(sampling_config.supports_backend_search);
         self.compactions_remaining
             .set(sampling_config.compactions_remaining);
         self.compaction_at_tokens
             .set(sampling_config.compaction_at_tokens);
-        grow_diagnostics::unified_log::info(
-            "backend_search: model switch",
-            Some(self.session_info.id.0.as_ref()),
-            Some(serde_json::json!({
-                "new_model": &sampling_config.model,
-                "api_backend": format!("{:?}", sampling_config.api_backend),
-                "supports_backend_search": sampling_config.supports_backend_search,
-            })),
-        );
         self.chat_state_handle
             .update_sampling_config(grow_sampling_types::SamplingConfig {
                 base_url: sampling_config.base_url.clone(),
@@ -185,7 +174,6 @@ impl SessionActor {
         self.compaction.prefire.clear();
         *self.agent.borrow_mut() = new_agent;
         *self.active_agent_type.lock() = Some(new_agent_name.clone());
-        self.emit_resolved_tool_overrides();
         self.queue_exit_reminder_on_approved_exit.store(
             self.is_cursor_harness(),
             std::sync::atomic::Ordering::Relaxed,

@@ -66,9 +66,6 @@ pub(crate) fn responses_event_has_meaningful_content(event: &rs::ResponseStreamE
         | ResponseStreamEvent::ResponseFileSearchCallInProgress(_)
         | ResponseStreamEvent::ResponseFileSearchCallSearching(_)
         | ResponseStreamEvent::ResponseFileSearchCallCompleted(_)
-        | ResponseStreamEvent::ResponseWebSearchCallInProgress(_)
-        | ResponseStreamEvent::ResponseWebSearchCallSearching(_)
-        | ResponseStreamEvent::ResponseWebSearchCallCompleted(_)
         | ResponseStreamEvent::ResponseReasoningSummaryPartAdded(_)
         | ResponseStreamEvent::ResponseReasoningSummaryPartDone(_)
         | ResponseStreamEvent::ResponseImageGenerationCallCompleted(_)
@@ -86,6 +83,7 @@ pub(crate) fn responses_event_has_meaningful_content(event: &rs::ResponseStreamE
         | ResponseStreamEvent::ResponseCodeInterpreterCallCompleted(_)
         | ResponseStreamEvent::ResponseOutputTextAnnotationAdded(_)
         | ResponseStreamEvent::ResponseError(_) => true,
+        _ => true,
     }
 }
 
@@ -361,66 +359,6 @@ pub(crate) fn stream_responses_tracked<'a>(
                         error: SamplingErrorInfo::from(&err),
                     };
                     return;
-                }
-
-                // ── Backend-hosted tool lifecycle events ────────────
-                // These tools are executed server-side by the agentic
-                // sampler. We emit progress events so the shell/pager
-                // can show status to the user.
-
-                // Web search
-                ResponseStreamEvent::ResponseWebSearchCallInProgress(ev) => {
-                    yield SamplingEvent::BackendToolCallStarted {
-                        request_id: request_id.clone(),
-                        call_id: ev.item_id.clone(),
-                        name: "web_search".to_string(),
-                    };
-                }
-                // Completed/Searching carry no data — the real payload
-                // arrives via ResponseOutputItemDone(WebSearchCall) below.
-                ResponseStreamEvent::ResponseWebSearchCallCompleted(_)
-                | ResponseStreamEvent::ResponseWebSearchCallSearching(_) => {}
-
-                // OutputItemDone carries the full result for backend tools.
-                // For WebSearchCall this includes the query and source URLs.
-                // For CustomToolCall this includes x_search results.
-                ResponseStreamEvent::ResponseOutputItemDone(done_event) => {
-                    match &done_event.item {
-                        rs::OutputItem::WebSearchCall(ws) => {
-                            let result = serde_json::to_value(ws).ok();
-                            yield SamplingEvent::BackendToolCallCompleted {
-                                request_id: request_id.clone(),
-                                call_id: ws.id.clone(),
-                                name: "web_search".to_string(),
-                                result,
-                            };
-                        }
-                        // X search results arrive as CustomToolCall with
-                        // names like x_keyword_search, x_semantic_search, etc.
-                        // Use "x_search" consistently (matching the Started event);
-                        // the specific sub-type is in the serialized result payload
-                        // and extracted by the pager from raw_output.name.
-                        rs::OutputItem::CustomToolCall(ct) => {
-                            let result = serde_json::to_value(ct).ok();
-                            yield SamplingEvent::BackendToolCallCompleted {
-                                request_id: request_id.clone(),
-                                call_id: ct.id.clone(),
-                                name: "x_search".to_string(),
-                                result,
-                            };
-                        }
-                        _ => {}
-                    }
-                }
-
-                // CustomToolCallInputDelta is x_search in-progress streaming.
-                // Emit a started event on first delta per item_id.
-                ResponseStreamEvent::ResponseCustomToolCallInputDone(ev) => {
-                    yield SamplingEvent::BackendToolCallStarted {
-                        request_id: request_id.clone(),
-                        call_id: ev.item_id.clone(),
-                        name: "x_search".to_string(),
-                    };
                 }
 
                 // All other events (intermediate progress, annotations,
@@ -838,15 +776,6 @@ mod tests {
                 delta: "no".into(),
             });
         assert!(responses_event_may_have_output(&refusal));
-
-        let backend_progress = rs::ResponseStreamEvent::ResponseWebSearchCallSearching(
-            rs_types::ResponseWebSearchCallSearchingEvent {
-                sequence_number: 2,
-                output_index: 0,
-                item_id: "search-1".into(),
-            },
-        );
-        assert!(responses_event_may_have_output(&backend_progress));
     }
 
     #[tokio::test]
