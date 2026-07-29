@@ -698,13 +698,13 @@ disable_plugins = false               # hide hooks/plugins UI entirely
 
 ## Environment variables
 
-The key ones. See the README for the complete list.
+Common variables are listed below.
 
 ### Authentication
 
 | Variable | Description |
 |----------|-------------|
-| `GROW_API_KEY` | API key from console.example.com |
+| `GROW_API_KEY` | Fallback API key for configured providers that do not declare their own `api_key` or `env_key` |
 | `GROW_AUTH_PROVIDER_COMMAND` | External auth binary path |
 | `GROW_AUTH_PROVIDER_LABEL` | Display name on TUI login screen |
 | `GROW_AUTH_TOKEN_TTL` | Token lifetime in seconds |
@@ -742,6 +742,8 @@ The key ones. See the README for the complete list.
 | Variable | Description |
 |----------|-------------|
 | `GROW_HOME` | Override config directory (default: `~/.grow`) |
+| `GROW_ROOT` | Optional multi-user workspace root used together with `GROW_USER` |
+| `GROW_USER` | User name or relative user directory under `GROW_ROOT`; bare names resolve below `users/` |
 | `GROW_RESPECT_GITIGNORE` | Force gitignore filtering on (`1`) or off (`0`); overrides `[tools] respect_gitignore` |
 
 ## File locations

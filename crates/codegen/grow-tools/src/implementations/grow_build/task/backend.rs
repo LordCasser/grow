@@ -425,7 +425,7 @@ impl SubagentBackend for ChannelBackend {
 pub const VALIDATE_TYPE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Env-var override for [`VALIDATE_TYPE_TIMEOUT`] (positive milliseconds).
-pub const VALIDATE_TYPE_TIMEOUT_ENV_VAR: &str = "XAI_VALIDATE_TYPE_TIMEOUT_MS";
+pub const VALIDATE_TYPE_TIMEOUT_ENV_VAR: &str = "GROW_VALIDATE_TYPE_TIMEOUT_MS";
 
 /// Validation timeout, honoring the env-var override.
 pub fn validate_type_timeout() -> std::time::Duration {

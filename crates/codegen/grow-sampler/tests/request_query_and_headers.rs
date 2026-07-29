@@ -15,7 +15,7 @@ use tokio::net::TcpListener;
 async fn request_carries_query_params_and_env_http_headers() {
     // A unique name avoids clashing with other tests that read the process
     // environment; the surrounding whitespace exercises value trimming.
-    let env_var = "XAI_SAMPLER_TEST_TENANT_TOKEN";
+    let env_var = "GROW_SAMPLER_TEST_TENANT_TOKEN";
     unsafe { std::env::set_var(env_var, "  tenant-secret\n") };
 
     let captured: Arc<Mutex<Option<(String, HeaderMap)>>> = Arc::new(Mutex::new(None));

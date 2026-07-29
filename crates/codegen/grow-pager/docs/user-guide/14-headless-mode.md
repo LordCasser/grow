@@ -449,15 +449,16 @@ Key environment variables that affect headless mode:
 
 | Variable                        | Description                                                   |
 | ------------------------------- | ------------------------------------------------------------- |
-| `GROW_API_KEY`        | API key for authentication (required when no browser login)   |
+| `GROW_API_KEY`                 | Optional fallback API key when a configured provider does not declare `api_key` or `env_key` |
 | `GROW_HOME`                    | Override config directory (default: `~/.grow`)                |
 | `GROW_LOG_FILE`                | Path to a log file (used verbatim as the path; works in headless and TUI, honors `RUST_LOG`) |
 | `RUST_LOG`                     | Log level filter (e.g. `debug`). Headless logs to stderr.     |
 
-For CI environments without browser access, set `GROW_API_KEY` with an API key from [console.example.com](https://console.example.com):
+For CI environments, set the environment variable named by the selected provider's
+`env_key`. For example, a provider configured with `env_key = "DEEPSEEK_API_KEY"` uses:
 
 ```bash
-export GROW_API_KEY="xai-..."
+export DEEPSEEK_API_KEY="sk-..."
 grow -p "Run the test suite" --yolo
 ```
 
@@ -531,12 +532,12 @@ Grow stores data in `~/.grow` (override with `GROW_HOME`; see [Environment Varia
 
 For containers or CI, mount `~/.grow` read-only:
 
-- Pre-populate `auth.json` or use `GROW_API_KEY`
+- Pre-populate provider OAuth credentials or set the environment variable named by the provider's `env_key`
 - Session persistence fails silently (ephemeral)
 - Update checks log a warning and skip
 
 ```bash
-export GROW_API_KEY="xai-..."
+export DEEPSEEK_API_KEY="sk-..."
 export GROW_DISABLE_AUTOUPDATER=1
 grow -p "..." --no-auto-update
 ```

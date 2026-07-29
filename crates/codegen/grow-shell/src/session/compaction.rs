@@ -638,7 +638,7 @@ impl SessionActor {
     }
     /// Suppress AUTO compaction after a deterministic failure. Scope depends on
     /// the reason (see [`SuppressReason::suppress_state`]): size/schema sticky,
-    /// credit until 200, auth until credentials recover, other clears next turn.
+    /// provider limits until 200, auth until credentials recover, other clears next turn.
     /// Diagnostic + one notification per transition; manual `/compact` exempt.
     async fn suppress_auto_compaction(
         &self,
@@ -1961,7 +1961,7 @@ impl SessionActor {
         })
     }
     /// On model change: clear sticky/other suppress and compact if the window shrank.
-    /// Leaves credit/auth suppress (a switch can't fix those) and short-circuits.
+    /// Leaves provider-limit/auth suppression (a switch can't fix those) and short-circuits.
     /// Auth compact failures abort the turn (same as pre-sampling/preflight).
     pub(crate) async fn maybe_compact_on_model_switch(self: &Arc<Self>) -> Result<(), acp::Error> {
         self.refresh_token_if_expired().await;
@@ -2598,7 +2598,7 @@ mod inline_auto_compact_flow_tests {
                 );
                 assert!(
                     actor.check_auto_compact_needed().await.is_none(),
-                    "credit-block suppression must survive the per-turn reset"
+                    "provider-limit suppression must survive the per-turn reset"
                 );
                 let _ = actor.compaction.auto_compact_suppressed.compare_exchange(
                     SUPPRESS_UNTIL_SUCCESS,
@@ -2631,7 +2631,7 @@ mod inline_auto_compact_flow_tests {
     }
     /// A model switch clears suppression the switch (or the fresh budget-driven
     /// trigger) can resolve — sticky size/schema and a stale per-turn `other` — so
-    /// the gates re-evaluate against the new window. Account-state credit/auth is
+    /// the gates re-evaluate against the new window. Provider-limit/auth state is
     /// covered by `model_switch_keeps_account_state_suppression`.
     #[tokio::test(flavor = "current_thread")]
     async fn model_switch_clears_sticky_suppression() {
@@ -2669,7 +2669,7 @@ mod inline_auto_compact_flow_tests {
             })
             .await;
     }
-    /// Model switch must not clear credit/auth suppress or compact under it.
+    /// Model switch must not clear provider-limit/auth suppression or compact under it.
     #[tokio::test(flavor = "current_thread")]
     async fn model_switch_keeps_account_state_suppression() {
         use crate::session::compaction_config::{
@@ -2746,7 +2746,7 @@ mod inline_auto_compact_flow_tests {
     }
     /// Auth recovery must not clear provider-limit suppress.
     #[tokio::test(flavor = "current_thread")]
-    async fn clear_auth_suppress_leaves_credit_suppress() {
+    async fn clear_auth_suppress_leaves_provider_limit_suppress() {
         use crate::session::compaction_config::SUPPRESS_UNTIL_SUCCESS;
         use std::sync::atomic::Ordering::Relaxed;
         let local = tokio::task::LocalSet::new();
@@ -2763,7 +2763,7 @@ mod inline_auto_compact_flow_tests {
                 assert_eq!(
                     actor.compaction.auto_compact_suppressed.load(Relaxed),
                     SUPPRESS_UNTIL_SUCCESS,
-                    "credential recovery must not clear a credit-block suppress"
+                    "credential recovery must not clear provider-limit suppression"
                 );
             })
             .await;

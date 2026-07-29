@@ -452,8 +452,8 @@ impl SessionActor {
 
             // Conversation shrank — clear budget-based (size/schema) and stale
             // per-turn suppression so compaction can run against the smaller context.
-            // Account-state suppression (credit/auth → SUPPRESS_UNTIL_SUCCESS) isn't
-            // budget-related, so it persists until a successful model call.
+            // Provider-limit/auth suppression isn't budget-related, so it persists
+            // until a successful model call.
             if self
                 .compaction
                 .auto_compact_suppressed

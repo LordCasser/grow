@@ -497,7 +497,7 @@ impl CompactionScope {
 
 /// Auto-compaction suppressed after a deterministic failure so the turn loop stops
 /// re-firing a doomed compaction. Fires once per transition into the suppressed
-/// state; `reason` is a fixed classification: `credit_block | size | auth | schema | other`.
+/// state; `reason` is a fixed classification: `provider_limit | size | auth | schema | other`.
 #[derive(Serialize)]
 pub struct AutoCompactSuppressed {
     pub reason: &'static str,
