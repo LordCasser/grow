@@ -1067,9 +1067,13 @@ pub struct Config {
     /// `[desktop]` section — owned by grow-desktop (Electron app), opaque to the CLI agent.
     #[serde(default, skip_serializing)]
     pub desktop: Option<toml::Value>,
-    /// Top-level `announcements` array — consumed by `resolve_announcements`.
-    #[serde(default, skip_serializing)]
-    pub announcements: Vec<grow_announcements::RemoteAnnouncement>,
+    /// Final top-level local `announcements` array. The default is Grow's
+    /// built-in notice; an explicitly configured empty array disables it.
+    #[serde(
+        default = "grow_announcements::default_announcements",
+        skip_serializing
+    )]
+    pub announcements: Vec<grow_announcements::Announcement>,
     /// `[tips]` section — consumed by `merge_tips`.
     #[serde(default, skip_serializing)]
     pub tips: Option<crate::util::config::TipsOverride>,
@@ -1433,7 +1437,7 @@ impl Default for Config {
             compaction: CompactionConfig::default(),
             managed_mcps: crate::config::ManagedMcpsConfig::default(),
             desktop: None,
-            announcements: Vec::new(),
+            announcements: grow_announcements::default_announcements(),
             tips: None,
             permission: PermissionKnownKeys::default(),
             tools: crate::config::ToolsConfig::default(),

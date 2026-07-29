@@ -665,7 +665,7 @@ pub struct DashboardState {
     /// location picker. `None` when the header is too narrow to paint it.
     pub location_hit: crate::app::agent_view::HitArea,
     /// Hit area for the header's promo upgrade CTA `[label]` button (click →
-    /// `AnnouncementsOpenCta(Dashboard)`). `None` when no CTA is shown.
+    /// `AnnouncementsOpenCta`). `None` when no CTA is shown.
     pub upgrade_cta_hit: crate::app::agent_view::HitArea,
     /// A pinned (non-dismissible) promo CTA is live this frame (cached by
     /// `render_dashboard`); `Ctrl+O` opens it instead of falling through.
@@ -3031,9 +3031,7 @@ impl DashboardState {
         // stays a safe no-op. Stamped `Keyboard` (like the agent/welcome Ctrl+O)
         // so "which surface" stays orthogonal to "was it keyboard".
         if self.pinned_upgrade_cta_live && key!('o', CONTROL).matches(key) {
-            return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                grow_diagnostics::events::AnnouncementCtaSurface::Keyboard,
-            ));
+            return InputOutcome::Action(Action::AnnouncementsOpenCta);
         }
 
         // Shift+Tab while the peek is open cycles the PEEKED agent's live
@@ -3809,9 +3807,7 @@ impl DashboardState {
             // Click on the header upgrade CTA `[label]` → open the promo url
             // (resolved through the slot gate at dispatch time).
             if self.upgrade_cta_hit.contains(mouse.column, mouse.row) {
-                return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                    grow_diagnostics::events::AnnouncementCtaSurface::Dashboard,
-                ));
+                return InputOutcome::Action(Action::AnnouncementsOpenCta);
             }
 
             // Click on the header location label → open the location

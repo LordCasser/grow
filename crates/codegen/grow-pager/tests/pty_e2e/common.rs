@@ -142,53 +142,6 @@ pub(crate) fn tall_response(sentinel: &str, rows: usize) -> String {
 // `seed_fake_oauth` / `oauth_credential_ops` live in
 // `grow_pager_pty_harness::flows` (re-exported above).
 
-/// Spawn a pager with fake session (OAuth) auth and a 1s announcements poll,
-/// then drive it into a live session (welcome → prompt → mock response).
-/// Session auth matters: the settings poll requires `auth_manager.auth()`, and
-/// the harness's default `GROW_API_KEY` (ApiKey/BYOK mode, no auth.json entry)
-/// would never fetch `/v1/settings`. Spawns WITHOUT `GROW_ANNOUNCEMENTS_OVERRIDE`
-/// (the env override beats pushed lists in the pager and would mask updates).
-/// Call `content.set_response(..)` BEFORE this so the entry prompt streams.
-pub(crate) fn spawn_polling_session(content: &ContentController, oauth_user: &str) -> PtyHarness {
-    spawn_polling_session_with_env(content, oauth_user, &[])
-}
-
-/// [`spawn_polling_session`] with extra env pairs appended after the shared
-/// oauth/poll env (e.g. a test-seam path or a `TERM_PROGRAM` pin).
-pub(crate) fn spawn_polling_session_with_env(
-    content: &ContentController,
-    oauth_user: &str,
-    extra_env: &[(&str, &str)],
-) -> PtyHarness {
-    seed_fake_oauth(content, oauth_user);
-    let mut overrides = Vec::from(oauth_credential_ops());
-    overrides.push(EnvOp::set("GROW_ANNOUNCEMENTS_REFRESH_INTERVAL_SECS", "1"));
-    overrides.extend(extra_env.iter().map(|(key, value)| EnvOp::set(key, value)));
-
-    let binary = pager_binary().expect("resolve pager binary");
-    let mut harness = PtyHarness::spawn_with_content_env_ops_in_dir(
-        &binary,
-        DEFAULT_ROWS,
-        DEFAULT_COLS,
-        content,
-        &[],
-        &overrides,
-        Some(content.home()),
-    )
-    .expect("spawn pager with polling session auth");
-
-    harness
-        .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
-        .expect("welcome text");
-    harness
-        .inject_keys(format!("{PROMPT}\r").as_bytes())
-        .expect("submit prompt to enter session");
-    harness
-        .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
-        .expect("session response");
-    harness
-}
-
 // ── Agent type mismatch e2e tests ──────────────────────────────────────
 
 /// Start the mock server with two models that have different agent types,

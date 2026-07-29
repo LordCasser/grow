@@ -897,7 +897,7 @@ impl AgentView {
         &mut self,
         sharing_enabled: bool,
         screen_mode: crate::app::ScreenMode,
-        announcements: &[grow_announcements::RemoteAnnouncement],
+        announcements: &[grow_announcements::Announcement],
     ) {
         self.set_sharing_enabled(sharing_enabled);
         self.prompt.set_screen_mode(screen_mode);

@@ -1290,9 +1290,7 @@ impl AgentView {
             }
             ActionId::ToggleYolo => {
                 if self.pinned_upgrade_cta_live {
-                    InputOutcome::Action(Action::AnnouncementsOpenCta(
-                        grow_diagnostics::events::AnnouncementCtaSurface::Keyboard,
-                    ))
+                    InputOutcome::Action(Action::AnnouncementsOpenCta)
                 } else {
                     InputOutcome::Action(Action::SetYoloMode(!self.session.is_yolo()))
                 }

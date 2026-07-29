@@ -117,18 +117,18 @@ pub(crate) fn render_cta_button(
     Some(Rect::new(x, y, disp_w as u16, 1))
 }
 
-fn is_critical(a: &grow_announcements::RemoteAnnouncement) -> bool {
+fn is_critical(a: &grow_announcements::Announcement) -> bool {
     a.severity.as_deref() == Some("critical")
 }
 
-fn is_promo(a: &grow_announcements::RemoteAnnouncement) -> bool {
+fn is_promo(a: &grow_announcements::Announcement) -> bool {
     a.severity.as_deref() == Some("promo")
 }
 
 /// One definition of "live critical" (visible message + critical + not expired)
 /// shared by every predicate below so the meanings cannot drift.
 fn is_live_critical(
-    a: &grow_announcements::RemoteAnnouncement,
+    a: &grow_announcements::Announcement,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     is_critical(a) && !grow_announcements::is_expired_at(a, now)
@@ -137,10 +137,7 @@ fn is_live_critical(
 /// Promo twin of [`is_live_critical`]. A CTA is NOT required: a promo without
 /// one is still a valid 1-line message row (the selection's visible-message
 /// guarantee already skips items with nothing to render).
-fn is_live_promo(
-    a: &grow_announcements::RemoteAnnouncement,
-    now: chrono::DateTime<chrono::Utc>,
-) -> bool {
+fn is_live_promo(a: &grow_announcements::Announcement, now: chrono::DateTime<chrono::Utc>) -> bool {
     is_promo(a) && !grow_announcements::is_expired_at(a, now)
 }
 
@@ -148,38 +145,37 @@ fn is_live_promo(
 /// hide-key set and the slash-gate predicate share so the set of severities
 /// that open the in-session slot cannot drift between them.
 fn is_live_session_announcement(
-    a: &grow_announcements::RemoteAnnouncement,
+    a: &grow_announcements::Announcement,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     is_live_critical(a, now) || is_live_promo(a, now)
 }
 
-/// Hideable unless the server says otherwise: absent/`true` = dismissible
-/// (back-compat with every pre-flag announcement), only an explicit `false`
-/// pins the banner. Shared by the selection seam, both painters, and the
-/// hide dispatch so the meanings cannot drift.
-pub fn is_dismissible(a: &grow_announcements::RemoteAnnouncement) -> bool {
+/// Hideable unless local configuration says otherwise: absent/`true` is
+/// dismissible, while an explicit `false` pins the banner. Shared by the
+/// selection seam, both painters, and hide dispatch.
+pub fn is_dismissible(a: &grow_announcements::Announcement) -> bool {
     a.dismissible != Some(false)
 }
 
 /// The hidden-ids filter the selection gates share. It applies only to
 /// dismissible items: an explicit `dismissible: false` stays selectable even
-/// with its hide key stored, so flipping the flag server-side resurrects a
-/// previously-hidden banner (the remote config stays source of truth).
-fn is_hidden(a: &grow_announcements::RemoteAnnouncement, hidden_ids: &BTreeSet<String>) -> bool {
+/// with its hide key stored, so changing the local flag resurrects a
+/// previously-hidden banner.
+fn is_hidden(a: &grow_announcements::Announcement, hidden_ids: &BTreeSet<String>) -> bool {
     is_dismissible(a) && hidden_ids.contains(&grow_announcements::announcement_hide_key(a))
 }
 
 /// The promo's CTA when it is renderable: both label and url trimmed
-/// non-empty (the server validates this pair; the tolerant client re-checks
-/// so a partial object never paints a dead button), and the url scheme
+/// non-empty. The client validates this pair so a partial object never paints
+/// a dead button, and the url scheme is
 /// allowed by the same filter the click's open path enforces. This is the
 /// ONE gate — paint, hit-rect, OSC 8 emission, and dispatch all inherit it.
 /// The scheme re-check fails closed here because OSC 8 activation is
-/// terminal-native and would otherwise hand a raw remote URL (`file://`,
+/// terminal-native and would otherwise hand a raw configured URL (`file://`,
 /// custom schemes) past `open_url_if_safe` entirely; a non-https CTA renders
 /// as a plain message row instead of a dead or unsafe button.
-fn usable_cta(a: &grow_announcements::RemoteAnnouncement) -> Option<(&str, &str)> {
+fn usable_cta(a: &grow_announcements::Announcement) -> Option<(&str, &str)> {
     let cta = a.cta.as_ref()?;
     let label = cta
         .label
@@ -204,7 +200,7 @@ fn usable_cta(a: &grow_announcements::RemoteAnnouncement) -> Option<(&str, &str)
 /// Decorative only: deliberately independent of [`usable_cta`] so a caption can
 /// never gate, resurrect, or invalidate the button — surfaces AND this with
 /// their own pinned/chord gates, and no button painted means no caption shown.
-pub(crate) fn usable_cta_caption(a: &grow_announcements::RemoteAnnouncement) -> Option<&str> {
+pub(crate) fn usable_cta_caption(a: &grow_announcements::Announcement) -> Option<&str> {
     let caption = a.cta.as_ref()?.caption.as_deref()?.trim();
     (!caption.is_empty()).then_some(caption)
 }
@@ -212,9 +208,9 @@ pub(crate) fn usable_cta_caption(a: &grow_announcements::RemoteAnnouncement) -> 
 /// Wall-clock [`first_critical_session_announcement_at`] — test convenience.
 #[cfg(test)]
 fn first_critical_session_announcement<'a>(
-    announcements: &'a [grow_announcements::RemoteAnnouncement],
+    announcements: &'a [grow_announcements::Announcement],
     hidden_ids: &BTreeSet<String>,
-) -> Option<&'a grow_announcements::RemoteAnnouncement> {
+) -> Option<&'a grow_announcements::Announcement> {
     first_critical_session_announcement_at(announcements, hidden_ids, chrono::Utc::now())
 }
 
@@ -224,15 +220,15 @@ fn first_critical_session_announcement<'a>(
 /// in-session slot. Private: prod consumers go through
 /// [`first_session_announcement`]'s `.or_else` leg so slot precedence is
 /// structurally enforced. Skips expired items at selection (draw) time so an
-/// `expires_at` crossed mid-session stops rendering before the next server
-/// push; the per-call timestamp parse and hide-key build are
+/// `expires_at` crossed mid-session stops rendering before the next config
+/// update; the per-call timestamp parse and hide-key build are
 /// allocation-light and the gate runs at most a few times per frame over a
 /// tiny list, so no caching is needed.
 fn first_critical_session_announcement_at<'a>(
-    announcements: &'a [grow_announcements::RemoteAnnouncement],
+    announcements: &'a [grow_announcements::Announcement],
     hidden_ids: &BTreeSet<String>,
     now: chrono::DateTime<chrono::Utc>,
-) -> Option<&'a grow_announcements::RemoteAnnouncement> {
+) -> Option<&'a grow_announcements::Announcement> {
     visible_announcements(announcements)
         .into_iter()
         .find(|a| is_live_critical(a, now) && !is_hidden(a, hidden_ids))
@@ -241,9 +237,9 @@ fn first_critical_session_announcement_at<'a>(
 /// Wall-clock [`first_promo_session_announcement_at`] — test convenience.
 #[cfg(test)]
 fn first_promo_session_announcement<'a>(
-    announcements: &'a [grow_announcements::RemoteAnnouncement],
+    announcements: &'a [grow_announcements::Announcement],
     hidden_ids: &BTreeSet<String>,
-) -> Option<&'a grow_announcements::RemoteAnnouncement> {
+) -> Option<&'a grow_announcements::Announcement> {
     first_promo_session_announcement_at(announcements, hidden_ids, chrono::Utc::now())
 }
 
@@ -252,10 +248,10 @@ fn first_promo_session_announcement<'a>(
 /// slot gate's `.or_else` leg consumes it, so nothing can bypass "critical
 /// wins" again.
 fn first_promo_session_announcement_at<'a>(
-    announcements: &'a [grow_announcements::RemoteAnnouncement],
+    announcements: &'a [grow_announcements::Announcement],
     hidden_ids: &BTreeSet<String>,
     now: chrono::DateTime<chrono::Utc>,
-) -> Option<&'a grow_announcements::RemoteAnnouncement> {
+) -> Option<&'a grow_announcements::Announcement> {
     visible_announcements(announcements)
         .into_iter()
         .find(|a| is_live_promo(a, now) && !is_hidden(a, hidden_ids))
@@ -265,9 +261,9 @@ fn first_promo_session_announcement_at<'a>(
 /// (critical always wins the slot), else the promo selection. Per-frame
 /// derivation makes the swap automatic when a critical arrives mid-promo.
 pub fn first_session_announcement<'a>(
-    announcements: &'a [grow_announcements::RemoteAnnouncement],
+    announcements: &'a [grow_announcements::Announcement],
     hidden_ids: &BTreeSet<String>,
-) -> Option<&'a grow_announcements::RemoteAnnouncement> {
+) -> Option<&'a grow_announcements::Announcement> {
     first_session_announcement_at(announcements, hidden_ids, chrono::Utc::now())
 }
 
@@ -275,7 +271,7 @@ pub fn first_session_announcement<'a>(
 /// slot ranking: critical outranks the privacy upsell banner (an outage
 /// notice must not be hidden by a persistent nag), promo does not.
 pub fn has_critical_session_announcement(
-    announcements: &[grow_announcements::RemoteAnnouncement],
+    announcements: &[grow_announcements::Announcement],
     hidden_ids: &BTreeSet<String>,
 ) -> bool {
     first_critical_session_announcement_at(announcements, hidden_ids, chrono::Utc::now()).is_some()
@@ -283,10 +279,10 @@ pub fn has_critical_session_announcement(
 
 /// [`first_session_announcement`] with an injectable clock.
 pub fn first_session_announcement_at<'a>(
-    announcements: &'a [grow_announcements::RemoteAnnouncement],
+    announcements: &'a [grow_announcements::Announcement],
     hidden_ids: &BTreeSet<String>,
     now: chrono::DateTime<chrono::Utc>,
-) -> Option<&'a grow_announcements::RemoteAnnouncement> {
+) -> Option<&'a grow_announcements::Announcement> {
     first_critical_session_announcement_at(announcements, hidden_ids, now)
         .or_else(|| first_promo_session_announcement_at(announcements, hidden_ids, now))
 }
@@ -302,9 +298,9 @@ pub fn first_session_announcement_at<'a>(
 /// through a stale prior-frame rect (critical preempted the promo between
 /// draws) no-ops.
 pub(crate) fn promo_cta<'a>(
-    announcements: &'a [grow_announcements::RemoteAnnouncement],
+    announcements: &'a [grow_announcements::Announcement],
     hidden_ids: &BTreeSet<String>,
-) -> Option<(&'a grow_announcements::RemoteAnnouncement, &'a str, &'a str)> {
+) -> Option<(&'a grow_announcements::Announcement, &'a str, &'a str)> {
     let owner = first_session_announcement(announcements, hidden_ids).filter(|a| is_promo(a))?;
     let (label, url) = usable_cta(owner)?;
     Some((owner, label, url))
@@ -314,9 +310,9 @@ pub(crate) fn promo_cta<'a>(
 /// url-only projection of [`promo_cta`] the click dispatch (url + announcement
 /// id for diagnostics) and the OSC 8 emission share.
 pub fn promo_cta_target<'a>(
-    announcements: &'a [grow_announcements::RemoteAnnouncement],
+    announcements: &'a [grow_announcements::Announcement],
     hidden_ids: &BTreeSet<String>,
-) -> Option<(&'a grow_announcements::RemoteAnnouncement, &'a str)> {
+) -> Option<(&'a grow_announcements::Announcement, &'a str)> {
     promo_cta(announcements, hidden_ids).map(|(owner, _label, url)| (owner, url))
 }
 
@@ -325,14 +321,14 @@ pub fn promo_cta_target<'a>(
 /// selection's meaning of visible; prune owns cleanup of keys for
 /// expired-but-still-listed items.
 pub fn session_announcement_hide_keys(
-    announcements: &[grow_announcements::RemoteAnnouncement],
+    announcements: &[grow_announcements::Announcement],
 ) -> Vec<String> {
     session_announcement_hide_keys_at(announcements, chrono::Utc::now())
 }
 
 /// [`session_announcement_hide_keys`] with an injectable clock.
 pub fn session_announcement_hide_keys_at(
-    announcements: &[grow_announcements::RemoteAnnouncement],
+    announcements: &[grow_announcements::Announcement],
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<String> {
     visible_announcements(announcements)
@@ -346,7 +342,7 @@ pub fn session_announcement_hide_keys_at(
 /// promo) exists, deliberately IGNORING the hidden set (unlike the banner
 /// selection above) so `/announcements show` stays reachable while
 /// everything is hidden.
-pub fn has_session_announcements(announcements: &[grow_announcements::RemoteAnnouncement]) -> bool {
+pub fn has_session_announcements(announcements: &[grow_announcements::Announcement]) -> bool {
     let now = chrono::Utc::now();
     visible_announcements(announcements)
         .into_iter()
@@ -358,7 +354,7 @@ pub fn has_session_announcements(announcements: &[grow_announcements::RemoteAnno
 /// Derived from [`first_session_announcement`] so slot precedence lives in
 /// exactly one function.
 pub fn session_banner_height(
-    announcements: &[grow_announcements::RemoteAnnouncement],
+    announcements: &[grow_announcements::Announcement],
     hidden_ids: &BTreeSet<String>,
 ) -> u16 {
     match first_session_announcement(announcements, hidden_ids) {
@@ -432,7 +428,7 @@ fn paint_hide_button(
 pub fn render_banner(
     area: Rect,
     buf: &mut Buffer,
-    announcements: &[grow_announcements::RemoteAnnouncement],
+    announcements: &[grow_announcements::Announcement],
     hidden_ids: &BTreeSet<String>,
     hide_hovered: bool,
     cta_hovered: bool,
@@ -459,7 +455,7 @@ pub fn render_banner(
 fn render_critical_rows(
     area: Rect,
     buf: &mut Buffer,
-    ann: &grow_announcements::RemoteAnnouncement,
+    ann: &grow_announcements::Announcement,
     hide_hovered: bool,
 ) -> BannerHits {
     use unicode_width::UnicodeWidthStr;
@@ -593,7 +589,7 @@ fn render_critical_rows(
 fn render_promo_row(
     area: Rect,
     buf: &mut Buffer,
-    ann: &grow_announcements::RemoteAnnouncement,
+    ann: &grow_announcements::Announcement,
     hide_hovered: bool,
     cta_hovered: bool,
     caption_allowed: bool,
@@ -678,10 +674,10 @@ fn render_promo_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grow_announcements::RemoteAnnouncement;
+    use grow_announcements::Announcement;
 
-    fn ann(severity: Option<&str>, message: Option<&str>) -> RemoteAnnouncement {
-        RemoteAnnouncement {
+    fn ann(severity: Option<&str>, message: Option<&str>) -> Announcement {
+        Announcement {
             severity: severity.map(str::to_string),
             message: message.map(str::to_string),
             ..Default::default()
@@ -692,8 +688,8 @@ mod tests {
         BTreeSet::new()
     }
 
-    fn promo(id: &str, message: &str, cta: Option<(&str, &str)>) -> RemoteAnnouncement {
-        RemoteAnnouncement {
+    fn promo(id: &str, message: &str, cta: Option<(&str, &str)>) -> Announcement {
+        Announcement {
             id: Some(id.into()),
             severity: Some("promo".into()),
             message: Some(message.into()),
@@ -735,13 +731,13 @@ mod tests {
     #[test]
     fn first_critical_selection_skips_hidden_and_reveals_next() {
         let list = vec![
-            RemoteAnnouncement {
+            Announcement {
                 id: Some("a".into()),
                 severity: Some("critical".into()),
                 message: Some("A msg".into()),
                 ..Default::default()
             },
-            RemoteAnnouncement {
+            Announcement {
                 id: Some("b".into()),
                 severity: Some("critical".into()),
                 message: Some("B msg".into()),
@@ -770,13 +766,13 @@ mod tests {
     /// `expires_at` has passed even though it is still in the ingested list.
     #[test]
     fn first_critical_session_announcement_at_skips_expired() {
-        let expiring = RemoteAnnouncement {
+        let expiring = Announcement {
             severity: Some("critical".into()),
             message: Some("expiring".into()),
             expires_at: Some("2030-01-01T00:00:00Z".into()),
             ..Default::default()
         };
-        let evergreen = RemoteAnnouncement {
+        let evergreen = Announcement {
             severity: Some("critical".into()),
             message: Some("evergreen".into()),
             ..Default::default()
@@ -814,20 +810,20 @@ mod tests {
         expired_promo.expires_at = Some("2000-01-01T00:00:00Z".into());
         let list = vec![
             ann(Some("info"), Some("skip me")),
-            RemoteAnnouncement {
+            Announcement {
                 id: Some("crit-1".into()),
                 severity: Some("critical".into()),
                 message: Some("one".into()),
                 ..Default::default()
             },
-            RemoteAnnouncement {
+            Announcement {
                 id: None,
                 title: Some("T".into()),
                 severity: Some("critical".into()),
                 message: Some("two".into()),
                 ..Default::default()
             },
-            RemoteAnnouncement {
+            Announcement {
                 id: Some("crit-expired".into()),
                 severity: Some("critical".into()),
                 message: Some("gone".into()),
@@ -872,7 +868,7 @@ mod tests {
             .collect();
         assert_eq!(session_banner_height(&msg_only, &hide_it), 0);
 
-        let with_title = vec![RemoteAnnouncement {
+        let with_title = vec![Announcement {
             severity: Some("critical".into()),
             title: Some("Outage".into()),
             message: Some("Do not deploy".into()),
@@ -891,7 +887,7 @@ mod tests {
 
     #[test]
     fn render_banner_title_row_with_hide_button_message_row_with_cta() {
-        let anns = [RemoteAnnouncement {
+        let anns = [Announcement {
             severity: Some("critical".into()),
             title: Some("Outage".into()),
             message: Some("Do not deploy".into()),
@@ -953,7 +949,7 @@ mod tests {
     /// part that truncates (with an ellipsis), never the other way around.
     #[test]
     fn render_banner_truncates_message_never_cta() {
-        let anns = [RemoteAnnouncement {
+        let anns = [Announcement {
             severity: Some("critical".into()),
             title: Some("Outage".into()),
             message: Some("0123456789ABCDEFGHIJ".into()),
@@ -972,20 +968,20 @@ mod tests {
     #[test]
     fn render_banner_shows_first_critical_only() {
         let anns = [
-            RemoteAnnouncement {
+            Announcement {
                 severity: Some("info".into()),
                 title: Some("Info".into()),
                 message: Some("ignored".into()),
                 ..Default::default()
             },
-            RemoteAnnouncement {
+            Announcement {
                 id: Some("first".into()),
                 severity: Some("critical".into()),
                 title: Some("First".into()),
                 message: Some("one".into()),
                 ..Default::default()
             },
-            RemoteAnnouncement {
+            Announcement {
                 severity: Some("critical".into()),
                 title: Some("Second".into()),
                 message: Some("two".into()),
@@ -1029,7 +1025,7 @@ mod tests {
     /// title truncates with an ellipsis instead of overpainting the button.
     #[test]
     fn render_banner_long_title_truncates_before_hide_button() {
-        let anns = [RemoteAnnouncement {
+        let anns = [Announcement {
             severity: Some("critical".into()),
             title: Some("A".repeat(80)),
             message: Some("MSGBODY".into()),
@@ -1120,7 +1116,7 @@ mod tests {
     fn first_session_announcement_prefers_critical_over_promo() {
         let list = vec![
             promo("p", "upsell", Some(("Go", "https://example.com"))),
-            RemoteAnnouncement {
+            Announcement {
                 id: Some("c".into()),
                 severity: Some("critical".into()),
                 message: Some("outage".into()),
@@ -1144,11 +1140,11 @@ mod tests {
 
     /// The hidden-ids filter applies only to dismissible items: an explicit
     /// `dismissible: false` stays selectable with its hide key stored (a
-    /// server-side flag flip resurrects a previously-hidden banner), while
+    /// local flag change resurrects a previously-hidden banner), while
     /// absent/`true` keep today's hidden behavior.
     #[test]
     fn non_dismissible_selected_despite_stored_hide_key() {
-        let mut crit = RemoteAnnouncement {
+        let mut crit = Announcement {
             id: Some("c".into()),
             severity: Some("critical".into()),
             message: Some("pinned outage".into()),
@@ -1187,7 +1183,7 @@ mod tests {
     /// vs the dismissible `W−2−6−2` / `W−2−27`).
     #[test]
     fn render_critical_rows_non_dismissible_reclaims_hide_columns() {
-        let anns = [RemoteAnnouncement {
+        let anns = [Announcement {
             severity: Some("critical".into()),
             title: Some("T".repeat(50)),
             message: Some("0123456789ABCDEFGHIJ".into()),
@@ -1439,7 +1435,7 @@ mod tests {
     #[test]
     fn promo_cta_target_yields_to_critical_slot_owner() {
         let promo_ann = promo("p", "upsell", Some(("Go", "https://example.com/promo")));
-        let crit = RemoteAnnouncement {
+        let crit = Announcement {
             id: Some("c".into()),
             severity: Some("critical".into()),
             message: Some("outage".into()),

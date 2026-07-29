@@ -69,7 +69,7 @@ pub struct AcpConnection {
     pub available_commands: Vec<acp::AvailableCommand>,
     // NOTE: Startup announcements from InitializeResponse.meta are not yet supported.
     // Requires shell to include announcements in initialize metadata.
-    // When available, add field: startup_announcements: Option<Vec<grow_announcements::RemoteAnnouncement>>
+    // When available, add field: startup_announcements: Option<Vec<grow_announcements::Announcement>>
     /// Whether interactive login is required (deferred auth for `provider.oauth`).
     pub needs_login: bool,
     /// Login button label from `AuthMethod.name` (e.g., "provider.oauth", "Acme Corp").

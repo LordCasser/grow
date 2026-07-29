@@ -187,9 +187,7 @@ impl AgentView {
                 if self.hit_announcement_cta.contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
-                    return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                        grow_diagnostics::events::AnnouncementCtaSurface::Banner,
-                    ));
+                    return InputOutcome::Action(Action::AnnouncementsOpenCta);
                 }
                 if self
                     .plugin_cta
@@ -237,9 +235,7 @@ impl AgentView {
                 if self.hit_upgrade_cta.contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
-                    return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                        grow_diagnostics::events::AnnouncementCtaSurface::Header,
-                    ));
+                    return InputOutcome::Action(Action::AnnouncementsOpenCta);
                 }
                 if self.hit_cwd.contains(mouse.column, mouse.row) {
                     let path = self.session.cwd.display().to_string();

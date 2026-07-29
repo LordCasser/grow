@@ -3489,286 +3489,40 @@ fn interactive_trust_prompt_reprompts_after_untrust() {
         );
     });
 }
-fn ann(id: &str) -> grow_announcements::RemoteAnnouncement {
-    grow_announcements::RemoteAnnouncement {
-        id: Some(id.to_string()),
-        message: Some(format!("{id}-msg")),
-        severity: Some("critical".to_string()),
-        ..Default::default()
-    }
-}
-/// `RemoteSettings` with only `announcements` set (callers add sentinel
-/// fields as needed).
-fn settings_with(
-    announcements: Option<Vec<grow_announcements::RemoteAnnouncement>>,
-) -> crate::util::config::RemoteSettings {
-    crate::util::config::RemoteSettings {
-        announcements,
-        ..Default::default()
-    }
-}
-fn test_now() -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc)
-}
-/// Pushes must carry strictly increasing generations, seeded from unix-epoch
-/// seconds so a restarted leader still beats pager watermarks that survived
-/// re-election (`AppView.announcements_last_gen` is never reset).
+
 #[tokio::test]
-async fn announcements_gen_seeds_from_epoch_and_strictly_increases() {
-    let agent = build_minimal_agent_for_tests();
-    let epoch_before = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let first = agent.next_announcements_gen();
-    let second = agent.next_announcements_gen();
-    assert!(
-        first >= epoch_before,
-        "first gen must be epoch-seeded: {first} < {epoch_before}"
-    );
-    assert!(
-        second > first,
-        "gens must strictly increase: {first} -> {second}"
-    );
-    let far_ahead = first + 1_000_000;
-    agent.announcements_gen.set(far_ahead);
-    assert_eq!(agent.next_announcements_gen(), far_ahead + 1);
-}
-/// An unchanged visible list must not produce a push (idle steady-state is
-/// silent); a changed one — including clearing to empty — must.
-#[test]
-fn announcements_push_gate_emits_only_on_change() {
-    let now = test_now();
-    assert_eq!(
-        announcements_push_payload(None, &[], now, AnnouncementsPushMode::IfChanged),
-        None
-    );
-    let list_a = vec![ann("a")];
-    assert_eq!(
-        announcements_push_payload(
-            Some(list_a.as_slice()),
-            &[],
-            now,
-            AnnouncementsPushMode::IfChanged
-        ),
-        Some(list_a.clone())
-    );
-    assert_eq!(
-        announcements_push_payload(
-            Some(list_a.as_slice()),
-            &list_a,
-            now,
-            AnnouncementsPushMode::IfChanged
-        ),
-        None
-    );
-    let list_ab = vec![ann("a"), ann("b")];
-    assert_eq!(
-        announcements_push_payload(
-            Some(list_ab.as_slice()),
-            &list_a,
-            now,
-            AnnouncementsPushMode::IfChanged
-        ),
-        Some(list_ab.clone())
-    );
-    assert_eq!(
-        announcements_push_payload(None, &list_ab, now, AnnouncementsPushMode::IfChanged),
-        Some(vec![])
-    );
-}
-/// `seed` (per-client initialize) re-emits an unchanged non-empty list for
-/// the freshly attached client, but stays silent when there is nothing to
-/// show.
-#[test]
-fn announcements_push_gate_seed_reemits_nonempty_only() {
-    let now = test_now();
-    let list_a = vec![ann("a")];
-    assert_eq!(
-        announcements_push_payload(
-            Some(list_a.as_slice()),
-            &list_a,
-            now,
-            AnnouncementsPushMode::SeedNewClient
-        ),
-        Some(list_a.clone()),
-        "seed must re-push an unchanged non-empty list"
-    );
-    assert_eq!(
-        announcements_push_payload(None, &[], now, AnnouncementsPushMode::SeedNewClient),
-        None,
-        "seed with nothing visible must stay silent"
-    );
-}
-/// `/new` forces a push even when the visible list is unchanged — including
-/// unchanged-empty — so the pager re-merges its config-layer (requirements/
-/// user/managed TOML) announcements from local mid-session edits.
-#[test]
-fn announcements_push_gate_force_mode_pushes_unchanged_and_empty() {
-    let now = test_now();
-    let list_a = vec![ann("a")];
-    assert_eq!(
-        announcements_push_payload(
-            Some(list_a.as_slice()),
-            &list_a,
-            now,
-            AnnouncementsPushMode::Force
-        ),
-        Some(list_a.clone()),
-        "force must push an unchanged list"
-    );
-    assert_eq!(
-        announcements_push_payload(None, &[], now, AnnouncementsPushMode::Force),
-        Some(vec![]),
-        "force must push even an unchanged empty list"
-    );
-}
-/// An addition that is already expired on arrival never becomes visible, so
-/// it must not re-emit.
-#[test]
-fn announcements_push_gate_ignores_expired_only_addition() {
-    let now = test_now();
-    let expired = grow_announcements::RemoteAnnouncement {
-        expires_at: Some("2000-01-01T00:00:00Z".to_string()),
-        ..ann("expired")
-    };
-    let list_a = vec![ann("a")];
-    let stored = vec![ann("a"), expired];
-    assert_eq!(
-        announcements_push_payload(
-            Some(stored.as_slice()),
-            &list_a,
-            now,
-            AnnouncementsPushMode::IfChanged
-        ),
-        None,
-        "an already-expired addition must not re-emit"
-    );
-}
-/// A previously emitted item that passes its `expires_at` between gate runs
-/// must emit the shrunken (here: empty) list exactly once, so live banners
-/// clear on time instead of outliving their own expiry.
-#[test]
-fn announcements_push_gate_emits_on_expiry_crossing() {
-    let expiring = grow_announcements::RemoteAnnouncement {
-        expires_at: Some("2026-06-01T00:00:00Z".to_string()),
-        ..ann("soon")
-    };
-    let stored = vec![expiring.clone()];
-    let before = chrono::DateTime::parse_from_rfc3339("2026-05-31T23:59:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-    let emitted = announcements_push_payload(
-        Some(stored.as_slice()),
-        &[],
-        before,
-        AnnouncementsPushMode::IfChanged,
-    )
-    .expect("live item must emit");
-    assert_eq!(emitted, stored);
-    let after = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:01:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-    assert_eq!(
-        announcements_push_payload(
-            Some(stored.as_slice()),
-            &emitted,
-            after,
-            AnnouncementsPushMode::IfChanged
-        ),
-        Some(vec![]),
-        "expiry crossing must emit the shrunken list"
-    );
-    assert_eq!(
-        announcements_push_payload(
-            Some(stored.as_slice()),
-            &[],
-            after,
-            AnnouncementsPushMode::IfChanged
-        ),
-        None
-    );
-}
-/// End-to-end through the shared gate: every emission advances the baseline
-/// and carries a strictly larger gen; unchanged state is silent unless
-/// seeding a new client.
-#[tokio::test]
-async fn emit_announcements_gate_emits_updates_baseline_and_bumps_gen() {
+async fn local_announcement_reload_updates_config_and_clients() {
     let (agent, mut rx) = build_agent_with_gateway_rx();
-    agent.cfg.borrow_mut().remote_settings = Some(settings_with(Some(vec![ann("a")])));
-    let recv_gen =
-        |rx: &mut tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>| {
-            let msg = rx.try_recv().expect("expected an announcements push");
-            let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg else {
-                panic!("expected ExtNotification, got another message kind");
-            };
-            assert_eq!(args.request.method.as_ref(), "grow/announcements/update");
-            let parsed: serde_json::Value =
-                serde_json::from_str(args.request.params.get()).expect("valid JSON payload");
-            parsed
-                .get("gen")
-                .and_then(|g| g.as_u64())
-                .expect("gen field")
-        };
-    agent.emit_announcements(AnnouncementsPushMode::IfChanged);
-    let first_gen = recv_gen(&mut rx);
-    agent.emit_announcements(AnnouncementsPushMode::IfChanged);
-    assert!(rx.try_recv().is_err(), "unchanged list must not re-push");
-    agent.emit_announcements(AnnouncementsPushMode::SeedNewClient);
-    let seed_gen = recv_gen(&mut rx);
-    assert!(
-        seed_gen > first_gen,
-        "gen must strictly increase: {first_gen} -> {seed_gen}"
+    let announcements = vec![grow_announcements::Announcement {
+        id: Some("local".into()),
+        message: Some("Configured locally".into()),
+        severity: Some("info".into()),
+        ..Default::default()
+    }];
+    let params = serde_json::value::to_raw_value(&serde_json::json!({
+        "announcements": announcements,
+    }))
+    .unwrap();
+    let request = acp::ExtRequest::new(
+        "grow/internal/reload_announcements",
+        std::sync::Arc::from(params),
     );
-    agent.cfg.borrow_mut().remote_settings = Some(settings_with(None));
-    agent.emit_announcements(AnnouncementsPushMode::IfChanged);
-    let clear_gen = recv_gen(&mut rx);
-    assert!(clear_gen > seed_gen);
-    agent.emit_announcements(AnnouncementsPushMode::IfChanged);
-    assert!(
-        rx.try_recv().is_err(),
-        "cleared state must push exactly once"
-    );
-    agent.emit_announcements(AnnouncementsPushMode::Force);
-    let force_gen = recv_gen(&mut rx);
-    assert!(
-        force_gen > clear_gen,
-        "forced push must keep gens increasing"
-    );
-}
-/// A send the gateway channel rejects must not advance the last-emitted
-/// baseline; the next gate call then re-diffs and re-pushes the same list
-/// (the poll's natural retry, no dedicated retry machinery).
-#[tokio::test]
-async fn emit_announcements_gate_keeps_baseline_on_failed_send_and_retries() {
-    let (mut agent, rx) = build_agent_with_gateway_rx();
-    agent.cfg.borrow_mut().remote_settings = Some(settings_with(Some(vec![ann("a")])));
-    drop(rx);
-    agent.emit_announcements(AnnouncementsPushMode::IfChanged);
-    assert!(
-        agent.last_emitted_announcements.borrow().is_empty(),
-        "a failed send must leave the baseline untouched"
-    );
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    agent.gateway = GatewaySender::new(tx);
-    agent.emit_announcements(AnnouncementsPushMode::IfChanged);
-    let msg = rx
-        .try_recv()
-        .expect("next gate call must re-push after a failed send");
-    let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg else {
-        panic!("expected ExtNotification, got another message kind");
+
+    crate::extensions::session_admin::handle(&agent, &request)
+        .await
+        .expect("reload succeeds");
+
+    let xai_acp_lib::AcpClientMessage::ExtNotification(args) =
+        rx.try_recv().expect("announcement notification")
+    else {
+        panic!("expected announcement notification");
     };
     assert_eq!(args.request.method.as_ref(), "grow/announcements/update");
-    assert_eq!(
-        *agent.last_emitted_announcements.borrow(),
-        vec![ann("a")],
-        "a successful send advances the baseline"
-    );
-    agent.emit_announcements(AnnouncementsPushMode::IfChanged);
-    assert!(rx.try_recv().is_err(), "unchanged list must not re-push");
+    let payload: grow_announcements::AnnouncementsUpdated =
+        serde_json::from_str(args.request.params.get()).unwrap();
+    assert_eq!(payload.announcements, agent.cfg.borrow().announcements);
 }
+
 mod direct_hub_cloud_removed {
     use super::super::{DIRECT_HUB_CLOUD_REMOVED_MSG, reject_direct_hub_cloud_meta};
     use crate::agent::config::HubConfig;

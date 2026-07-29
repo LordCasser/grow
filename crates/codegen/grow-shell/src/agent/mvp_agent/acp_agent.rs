@@ -417,7 +417,7 @@ impl acp::Agent for MvpAgent {
             let agent_ref = LocalRef::new(self);
             tokio::task::spawn_local(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                agent_ref.get().emit_announcements(AnnouncementsPushMode::SeedNewClient);
+                agent_ref.get().emit_announcements();
             });
         }
         let init_model_state = self.model_state(None);
@@ -2364,7 +2364,8 @@ impl acp::Agent for MvpAgent {
             | "grow/internal/reload_all_mcp_servers"
             | "grow/internal/reload_project_mcp_servers" | "grow/internal/reload_skills"
             | "grow/internal/reload_workflows" | "grow/internal/reload_models"
-            | "grow/internal/reload_models_cache" | "grow/internal/auth_cleared"
+            | "grow/internal/reload_models_cache" | "grow/internal/reload_announcements"
+            | "grow/internal/auth_cleared"
             | "grow/plugins/reload" | "grow/commands/list" => {
                 crate::extensions::session_admin::handle(self, &args).await
             }

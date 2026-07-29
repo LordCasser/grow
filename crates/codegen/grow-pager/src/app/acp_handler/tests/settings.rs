@@ -420,14 +420,12 @@
         );
     }
 
-    /// The settings path must not touch announcements: the shell already emits
-    /// gen-ordered `grow/announcements/update` for every settings writer, and a
-    /// gen-less apply here could clobber a newer push.
+    /// Announcements have their own local-config notification and are not part
+    /// of the remote settings payload.
     #[test]
     fn settings_update_ignores_announcements_payload() {
         let mut app = make_app_with_agent("sess-ann");
         app.active_announcements = vec![critical_announcement("from-push")];
-        app.announcements_last_gen = 7;
 
         let notif = acp::ExtNotification::new(
             "grow/settings/update",
@@ -445,7 +443,6 @@
             vec![critical_announcement("from-push")],
             "settings/update must not replace the pushed announcements"
         );
-        assert_eq!(app.announcements_last_gen, 7, "watermark untouched");
         assert!(app.sharing_enabled, "other settings fields still apply");
     }
 

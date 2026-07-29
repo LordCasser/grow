@@ -389,7 +389,7 @@ pub enum Action {
     /// Open the promo CTA link (url resolved from current state at dispatch
     /// time, mirroring how `AnnouncementsHide` resolves its target). The
     /// payload records which surface activated it, for diagnostics.
-    AnnouncementsOpenCta(grow_diagnostics::events::AnnouncementCtaSurface),
+    AnnouncementsOpenCta,
     /// Cycle session mode (Ctrl+R): Normal → Plan → Always-Approve → Normal.
     /// Plan mode sends a signal to the shell; always-approve is local.
     CycleMode,

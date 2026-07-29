@@ -165,7 +165,7 @@ struct WelcomeLayoutInput<'a> {
     compact: bool,
     /// Horizontal-inset compaction (appearance setting) for the stacked slot.
     prompt_compact: bool,
-    announcement: Option<&'a grow_announcements::RemoteAnnouncement>,
+    announcement: Option<&'a grow_announcements::Announcement>,
     /// Whether a long announcement is expanded inline (vs. collapsed to 2 lines).
     expanded: bool,
     /// Whether the info slot reserves a promo upgrade CTA (spacer + button).
@@ -580,7 +580,7 @@ pub struct WelcomeRenderParams<'a> {
     pub auth_code_cursor_byte: usize,
     pub clipboard_delivery: Option<crate::clipboard::ClipboardDelivery>,
     pub show_raw_url: bool,
-    pub announcement: Option<&'a grow_announcements::RemoteAnnouncement>,
+    pub announcement: Option<&'a grow_announcements::Announcement>,
     pub tip: Option<&'a str>,
     pub model_name: &'a str,
     pub flags: &'a [PromptFlag<'a>],
@@ -1595,7 +1595,7 @@ fn render_announcement_section(
     area: Rect,
     buf: &mut Buffer,
     theme: &Theme,
-    announcement: &grow_announcements::RemoteAnnouncement,
+    announcement: &grow_announcements::Announcement,
     min_width_hint: u16,
     content_height: u16,
     expanded: bool,
@@ -3678,8 +3678,8 @@ mod tests {
         );
     }
 
-    fn long_ann() -> grow_announcements::RemoteAnnouncement {
-        grow_announcements::RemoteAnnouncement {
+    fn long_ann() -> grow_announcements::Announcement {
+        grow_announcements::Announcement {
             title: Some("Security policy".into()),
             message: Some(
                 "Report security incidents to the security team promptly through \
@@ -3722,7 +3722,7 @@ the usual channels. "
     #[test]
     fn announcement_equal_for_short_message() {
         let area = Rect::new(0, 0, 120, 60);
-        let a = grow_announcements::RemoteAnnouncement {
+        let a = grow_announcements::Announcement {
             title: Some("FYI".into()),
             message: Some("All good.".into()),
             ..Default::default()

@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Announcement from remote settings or local override.
+/// A locally configured announcement shown by Grow clients.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export, optional_fields = nullable))]
-pub struct RemoteAnnouncement {
+pub struct Announcement {
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
@@ -29,8 +29,6 @@ pub struct RemoteAnnouncement {
     #[serde(default)]
     pub cta: Option<AnnouncementCta>,
     #[serde(default)]
-    pub updated_at: Option<String>,
-    #[serde(default)]
     pub expires_at: Option<String>,
     #[serde(default)]
     pub dismissible: Option<bool>,
@@ -38,10 +36,7 @@ pub struct RemoteAnnouncement {
     pub persistent: Option<bool>,
 }
 
-/// Optional call-to-action on an announcement (clients render it as a
-/// clickable link/button). The server only emits it with both fields
-/// non-empty and the url https; kept tolerant here like the parent struct.
-/// `caption` is optional dim helper text after the button; absent = none.
+/// Optional call-to-action rendered as a clickable link or button.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export, optional_fields = nullable))]
@@ -54,18 +49,30 @@ pub struct AnnouncementCta {
     pub caption: Option<String>,
 }
 
-/// Payload for `grow/announcements/update` ACP notification.
-// Name predates the method rename to `.../update`; renaming would churn the pager consumer.
-#[derive(Debug, Clone, Deserialize)]
+/// Payload for the local `grow/announcements/update` ACP notification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
-pub struct AnnouncementsRefreshed {
-    // The wire value is a plain JSON number; ts-rs would map u64 to `bigint`.
-    #[serde(rename = "gen")]
-    #[cfg_attr(feature = "ts", ts(type = "number"))]
-    pub r#gen: u64,
+pub struct AnnouncementsUpdated {
     #[serde(default)]
-    pub announcements: Vec<RemoteAnnouncement>,
+    pub announcements: Vec<Announcement>,
+}
+
+/// Built-in content used when local configuration does not declare
+/// `announcements`. An explicitly configured empty array disables announcements.
+pub fn default_announcements() -> Vec<Announcement> {
+    vec![Announcement {
+        id: Some("grow-default".to_owned()),
+        title: Some("Grow".to_owned()),
+        message: Some(
+            "Grow is a provider-neutral coding agent. Configure models and tools locally in ~/.grow/config.toml."
+                .to_owned(),
+        ),
+        severity: Some("info".to_owned()),
+        dismissible: Some(true),
+        persistent: Some(false),
+        ..Default::default()
+    }]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -76,7 +83,7 @@ pub struct AnnouncementsRefreshed {
 /// content-derived fallback so id-less items are still hideable. The fallback
 /// joins title/message with the unprintable unit separator (\x1f) so distinct
 /// title/message splits cannot collide and real ids cannot plausibly match.
-pub fn announcement_hide_key(a: &RemoteAnnouncement) -> String {
+pub fn announcement_hide_key(a: &Announcement) -> String {
     match a.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(id) => id.to_string(),
         None => format!(
@@ -116,10 +123,7 @@ pub fn serialize_hidden_announcement_ids(ids: &BTreeSet<String>) -> Option<Strin
 /// Drop hidden ids whose announcement is no longer active; returns whether the
 /// set changed (so callers can persist). Meant for real update paths only — a
 /// per-frame prune would churn on transient list states.
-pub fn prune_hidden_announcement_ids(
-    ids: &mut BTreeSet<String>,
-    active: &[RemoteAnnouncement],
-) -> bool {
+pub fn prune_hidden_announcement_ids(ids: &mut BTreeSet<String>, active: &[Announcement]) -> bool {
     let live: BTreeSet<String> = active.iter().map(announcement_hide_key).collect();
     let before = ids.len();
     ids.retain(|id| live.contains(id));
@@ -153,7 +157,7 @@ fn announcements_state_path() -> PathBuf {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Return only announcements with non-empty (trimmed) messages.
-pub fn visible_announcements(announcements: &[RemoteAnnouncement]) -> Vec<&RemoteAnnouncement> {
+pub fn visible_announcements(announcements: &[Announcement]) -> Vec<&Announcement> {
     announcements
         .iter()
         .filter(|a| {
@@ -166,9 +170,7 @@ pub fn visible_announcements(announcements: &[RemoteAnnouncement]) -> Vec<&Remot
 }
 
 /// Filter out announcements whose `expires_at` is in the past.
-pub fn filter_expired(
-    announcements: impl IntoIterator<Item = RemoteAnnouncement>,
-) -> Vec<RemoteAnnouncement> {
+pub fn filter_expired(announcements: impl IntoIterator<Item = Announcement>) -> Vec<Announcement> {
     filter_expired_at(announcements, Utc::now())
 }
 
@@ -176,9 +178,9 @@ pub fn filter_expired(
 /// (an item that was live at the last check and has since passed `expires_at`)
 /// is unit-testable.
 pub fn filter_expired_at(
-    announcements: impl IntoIterator<Item = RemoteAnnouncement>,
+    announcements: impl IntoIterator<Item = Announcement>,
     now: DateTime<Utc>,
-) -> Vec<RemoteAnnouncement> {
+) -> Vec<Announcement> {
     announcements
         .into_iter()
         .filter(|a| !is_expired_at(a, now))
@@ -188,7 +190,7 @@ pub fn filter_expired_at(
 /// Whether `expires_at` parses and is at/behind `now` (strict `dt > now` keeps
 /// an item live only before its expiry; missing/unparseable never expires).
 /// Allocation-free per call, so draw-time consumers can check every frame.
-pub fn is_expired_at(a: &RemoteAnnouncement, now: DateTime<Utc>) -> bool {
+pub fn is_expired_at(a: &Announcement, now: DateTime<Utc>) -> bool {
     if let Some(exp) = &a.expires_at
         && let Ok(dt) = DateTime::parse_from_rfc3339(exp)
     {
@@ -215,7 +217,7 @@ mod bindings_export {
                     "exporting {}: {e}", stringify!($t)));
             )+};
         }
-        export!(RemoteAnnouncement, AnnouncementCta, AnnouncementsRefreshed);
+        export!(Announcement, AnnouncementCta, AnnouncementsUpdated);
     }
 }
 
@@ -225,15 +227,15 @@ mod tests {
 
     #[test]
     fn filter_expired_removes_past() {
-        let past = RemoteAnnouncement {
+        let past = Announcement {
             expires_at: Some("2000-01-01T00:00:00Z".to_string()),
             ..Default::default()
         };
-        let future = RemoteAnnouncement {
+        let future = Announcement {
             expires_at: Some("2100-01-01T00:00:00Z".to_string()),
             ..Default::default()
         };
-        let none = RemoteAnnouncement {
+        let none = Announcement {
             expires_at: None,
             ..Default::default()
         };
@@ -246,7 +248,7 @@ mod tests {
     /// `expires_at` and dropped at/after it (`dt > now` is a strict compare).
     #[test]
     fn filter_expired_at_honors_injected_clock() {
-        let item = RemoteAnnouncement {
+        let item = Announcement {
             expires_at: Some("2030-01-01T00:00:00Z".to_string()),
             ..Default::default()
         };
@@ -265,7 +267,7 @@ mod tests {
     /// the parent struct's style (a partial cta parses instead of poisoning).
     #[test]
     fn cta_parses_nested_partial_and_absent() {
-        let full: RemoteAnnouncement = serde_json::from_str(
+        let full: Announcement = serde_json::from_str(
             r#"{"id":"p","severity":"promo","cta":{"label":"Open docs","url":"https://grow.example/docs","caption":"or use Ctrl+O"}}"#,
         )
         .unwrap();
@@ -274,7 +276,7 @@ mod tests {
         assert_eq!(cta.url.as_deref(), Some("https://grow.example/docs"));
         assert_eq!(cta.caption.as_deref(), Some("or use Ctrl+O"));
 
-        let partial: RemoteAnnouncement =
+        let partial: Announcement =
             serde_json::from_str(r#"{"cta":{"label":"only label"}}"#).unwrap();
         assert_eq!(
             partial.cta,
@@ -285,7 +287,7 @@ mod tests {
             })
         );
 
-        let absent: RemoteAnnouncement = serde_json::from_str(r#"{"id":"a"}"#).unwrap();
+        let absent: Announcement = serde_json::from_str(r#"{"id":"a"}"#).unwrap();
         assert_eq!(absent.cta, None);
     }
 
@@ -324,11 +326,11 @@ mod tests {
     #[test]
     fn prune_hidden_ids_drops_ids_absent_from_active_list() {
         let active = vec![
-            RemoteAnnouncement {
+            Announcement {
                 id: Some("live".into()),
                 ..Default::default()
             },
-            RemoteAnnouncement {
+            Announcement {
                 id: None,
                 title: Some("T".into()),
                 message: Some("M".into()),
@@ -354,7 +356,7 @@ mod tests {
 
     #[test]
     fn announcement_hide_key_prefers_id_with_content_fallback() {
-        let with_id = RemoteAnnouncement {
+        let with_id = Announcement {
             id: Some("  spaced-id  ".into()),
             title: Some("T".into()),
             message: Some("M".into()),
@@ -362,7 +364,7 @@ mod tests {
         };
         assert_eq!(announcement_hide_key(&with_id), "spaced-id");
 
-        let blank_id = RemoteAnnouncement {
+        let blank_id = Announcement {
             id: Some("   ".into()),
             title: Some("T".into()),
             message: Some("M".into()),
@@ -370,16 +372,16 @@ mod tests {
         };
         assert_eq!(announcement_hide_key(&blank_id), "content:T\u{1f}M");
 
-        let no_id = RemoteAnnouncement::default();
+        let no_id = Announcement::default();
         assert_eq!(announcement_hide_key(&no_id), "content:\u{1f}");
 
         // The unprintable separator disambiguates title/message splits.
-        let ab_c = RemoteAnnouncement {
+        let ab_c = Announcement {
             title: Some("a|b".into()),
             message: Some("c".into()),
             ..Default::default()
         };
-        let a_bc = RemoteAnnouncement {
+        let a_bc = Announcement {
             title: Some("a".into()),
             message: Some("b|c".into()),
             ..Default::default()
@@ -389,15 +391,15 @@ mod tests {
 
     #[test]
     fn visible_announcements_filters_empty_message() {
-        let a1 = RemoteAnnouncement {
+        let a1 = Announcement {
             message: Some("valid".into()),
             ..Default::default()
         };
-        let a2 = RemoteAnnouncement {
+        let a2 = Announcement {
             message: None,
             ..Default::default()
         };
-        let a3 = RemoteAnnouncement {
+        let a3 = Announcement {
             message: Some("   ".into()),
             ..Default::default()
         };

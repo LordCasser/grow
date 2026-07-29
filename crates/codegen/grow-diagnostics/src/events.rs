@@ -1119,44 +1119,6 @@ pub struct ProjectPickerSelected {
     pub project_dir_options: usize,
 }
 
-/// Which surface a promo announcement's upgrade CTA was activated from.
-/// Distinguishes the welcome hero from the in-session header, banner,
-/// dashboard, and keyboard activation surfaces.
-/// Ord/Eq exist for the pager's per-(announcement, surface) impression latch.
-#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum AnnouncementCtaSurface {
-    Banner,
-    Welcome,
-    Header,
-    Dashboard,
-    Keyboard,
-}
-
-/// A promo announcement's CTA button was painted on a surface — the
-/// impression half of the per-surface CTR funnel with
-/// [`AnnouncementCtaClicked`]. Emitted once per (announcement, surface) per
-/// pager process (cleared on logout); never emitted for `Keyboard` (a
-/// click-only surface).
-#[derive(Serialize)]
-pub struct AnnouncementCtaShown {
-    /// Announcement `id` from the server push (`None` for id-less items).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    /// Which surface painted the button.
-    pub source: AnnouncementCtaSurface,
-}
-
-/// User activated a promo announcement's CTA button (the `[label]` open).
-#[derive(Serialize)]
-pub struct AnnouncementCtaClicked {
-    /// Announcement `id` from the server push (`None` for id-less items).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    /// Which surface the activation came from (per-surface conversion signal).
-    pub source: AnnouncementCtaSurface,
-}
-
 /// Flat snapshot of the terminal environment for diagnostics.
 ///
 /// Shared across pager events so terminal fields are typed once.
@@ -1505,8 +1467,6 @@ diagnostics_event!(SessionEnded, "session_ended");
 diagnostics_event!(PagerSlashCommand, "pager_slash_command");
 diagnostics_event!(PlanSubmit, "plan_submit");
 diagnostics_event!(ProjectPickerSelected, "project_picker_selected");
-diagnostics_event!(AnnouncementCtaShown, "announcement_cta_shown");
-diagnostics_event!(AnnouncementCtaClicked, "announcement_cta_clicked");
 diagnostics_event!(TerminalDiagnostic, "terminal_context");
 diagnostics_event!(DisplayRefreshProbe, "display_refresh_probe");
 diagnostics_event!(BackspaceNoEffect, "backspace_no_effect");
@@ -1730,12 +1690,6 @@ mod tests {
         assert_eq!(PluginCtaConnectClicked::NAME, "plugin_cta_connect_clicked");
         assert_eq!(PluginCtaDismissed::NAME, "plugin_cta_dismissed");
         assert_eq!(PluginCtaInstalled::NAME, "plugin_cta_installed");
-    }
-
-    #[test]
-    fn announcement_cta_event_names() {
-        assert_eq!(AnnouncementCtaShown::NAME, "announcement_cta_shown");
-        assert_eq!(AnnouncementCtaClicked::NAME, "announcement_cta_clicked");
     }
 
     #[test]

@@ -13,6 +13,7 @@
 //! - `grow/internal/reload_skills`          skills file watcher fan-out
 //! - `grow/internal/reload_models`          model list hot-reload from config.toml
 //! - `grow/internal/reload_models_cache`    model catalog hot-reload from disk cache
+//! - `grow/internal/reload_announcements`   local announcement hot-reload
 //! - `grow/internal/auth_cleared`           auth hot-clear cleanup
 //! - `grow/plugins/reload`                  rebuild shared plugin registry
 //! - `grow/commands/list`                   list slash commands
@@ -46,11 +47,27 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "grow/internal/reload_workflows" => handle_reload_workflows(agent),
         "grow/internal/reload_models" => handle_reload_models(agent),
         "grow/internal/reload_models_cache" => handle_reload_models_cache(agent),
+        "grow/internal/reload_announcements" => handle_reload_announcements(agent, args),
         "grow/internal/auth_cleared" => handle_auth_cleared(agent),
         "grow/plugins/reload" => handle_plugins_reload(agent).await,
         "grow/commands/list" => handle_commands_list(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
+}
+
+fn handle_reload_announcements(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    #[derive(Deserialize)]
+    struct ReloadAnnouncements {
+        announcements: Vec<grow_announcements::Announcement>,
+    }
+
+    let request: ReloadAnnouncements = parse_params(args)?;
+    let count = request.announcements.len();
+    agent.cfg.borrow_mut().announcements = request.announcements;
+    agent.emit_announcements();
+    ExtMethodResult::success(serde_json::json!({ "announcements": count }))
+        .to_ext_response()
+        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 
 // session/rename

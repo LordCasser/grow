@@ -357,19 +357,23 @@ pub(super) fn handle_sessions_changed(notif: &acp::ExtNotification, app: &mut Ap
 
 pub(super) fn handle_announcements_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(parsed) =
-        serde_json::from_str::<grow_announcements::AnnouncementsRefreshed>(notif.params.get())
+        serde_json::from_str::<grow_announcements::AnnouncementsUpdated>(notif.params.get())
     else {
         return false;
     };
 
-    if parsed.r#gen <= app.announcements_last_gen {
-        return false;
+    app.active_announcements = grow_announcements::filter_expired(parsed.announcements);
+    app.announcement = app.active_announcements.first().cloned();
+    if grow_announcements::prune_hidden_announcement_ids(
+        &mut app.hidden_announcement_ids,
+        &app.active_announcements,
+    ) {
+        app.pending_effects
+            .push(Effect::PersistAnnouncementsHidden {
+                hidden_ids: app.hidden_announcement_ids.clone(),
+            });
     }
-
-    // Grow owns its announcements through local configuration. Consume the
-    // upstream notification so the wire protocol remains well-formed, but do
-    // not surface vendor model promotions such as the Grok 4.5 launch banner.
-    app.announcements_last_gen = parsed.r#gen;
+    app.sync_session_announcement_slash_gate();
     true
 }
 

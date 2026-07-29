@@ -591,8 +591,8 @@ pub(super) fn make_app_two_agents() -> AppView {
 }
 pub(super) fn critical_announcement(
     id: &str,
-) -> grow_announcements::RemoteAnnouncement {
-    grow_announcements::RemoteAnnouncement {
+) -> grow_announcements::Announcement {
+    grow_announcements::Announcement {
         id: Some(id.into()),
         title: Some(format!("{id} title")),
         message: Some(format!("{id} message")),
@@ -601,14 +601,13 @@ pub(super) fn critical_announcement(
     }
 }
 pub(super) fn announcements_update_notif(
-    r#gen: u64,
-    announcements: &[grow_announcements::RemoteAnnouncement],
+    announcements: &[grow_announcements::Announcement],
 ) -> acp::ExtNotification {
     acp::ExtNotification::new(
         "grow/announcements/update",
         std::sync::Arc::from(
             serde_json::value::to_raw_value(
-                    &serde_json::json!({ "gen": r#gen, "announcements": announcements }),
+                    &serde_json::json!({ "announcements": announcements }),
                 )
                 .unwrap(),
         ),

@@ -114,7 +114,6 @@ use crate::app::agent_view::ActivePane;
 use crate::app::app_view::{ActiveView, AppView, AuthState};
 use crate::scrollback::types::DisplayMode;
 use crate::views::session_picker::CONTENT_EXPAND_OFFSET;
-use grow_diagnostics::session_ctx::log_event;
 pub(super) fn dispatch_copy_auth_url(
     app: &mut AppView,
     copy: impl FnOnce(&str) -> crate::clipboard::ClipboardDelivery,
@@ -907,17 +906,12 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 vec![]
             }
         }
-        Action::AnnouncementsOpenCta(surface) => {
-            if let Some((promo, url)) = crate::views::announcements::promo_cta_target(
+        Action::AnnouncementsOpenCta => {
+            if let Some((_announcement, url)) = crate::views::announcements::promo_cta_target(
                 &app.active_announcements,
                 &app.hidden_announcement_ids,
             ) {
                 let url = url.to_owned();
-                let promo_id = promo.id.clone();
-                log_event(grow_diagnostics::events::AnnouncementCtaClicked {
-                    id: promo_id,
-                    source: surface,
-                });
                 open_url_or_show(app, &url);
             }
             vec![]

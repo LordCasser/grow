@@ -70,6 +70,9 @@ pub enum ConfigUpdate {
     /// drop redundant `ProjectMcpServersChanged` dispatches on
     /// the reloader doesn't have.
     ModelsCacheChanged,
+    /// Final local announcement snapshot changed. The receiver forwards it to
+    /// connected clients through `grow/announcements/update`.
+    Announcements(Vec<grow_announcements::Announcement>),
     /// Updated UI settings — agent broadcasts `grow/config_changed` to IPC clients.
     Ui {
         theme: Option<String>,
@@ -84,6 +87,7 @@ pub enum ConfigUpdate {
 pub struct ConfigReloader {
     last_auth_key_hash: u64,
     last_global_config: toml::Value,
+    last_announcements: Vec<grow_announcements::Announcement>,
     /// Per-cwd content hash of the project MCP config files, used to
     /// to diff (the dedup lives in `ModelsManager::reload_from_disk_cache`),
     /// mtime-only touches (see `hash_project_mcp_config`).
@@ -109,9 +113,11 @@ impl ConfigReloader {
         experimental_memory: bool,
         no_memory: bool,
     ) -> Self {
+        let last_announcements = crate::util::config::resolve_announcements(&initial_config);
         Self {
             last_auth_key_hash: initial_auth_key_hash,
             last_global_config: initial_config,
+            last_announcements,
             last_project_mcp_hashes: HashMap::new(),
             grow_home,
             auth_scope,
@@ -315,6 +321,19 @@ impl ConfigReloader {
     }
 
     fn reload_config(&mut self) -> anyhow::Result<()> {
+        let effective = crate::config::load_effective_config()?;
+        let announcements = crate::util::config::resolve_announcements(&effective);
+        if announcements != self.last_announcements {
+            info!(
+                count = announcements.len(),
+                "local announcements config change detected"
+            );
+            self.last_announcements = announcements.clone();
+            let _ = self
+                .config_update_tx
+                .send(ConfigUpdate::Announcements(announcements));
+        }
+
         // `has_project_config` parameter dropped —
         // project-scoped reloads are dispatched via
         // `ProjectMcpServersChanged { cwd }` in the caller's

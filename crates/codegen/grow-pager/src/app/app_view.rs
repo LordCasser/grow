@@ -553,13 +553,12 @@ pub struct AppView {
     /// Release-safe FPS HUD (`/debug fps`; `GROW_FPS` env on release
     /// builds, where the dev overlay is compiled out) — see the module doc.
     pub fps_hud: crate::views::fps_hud::FpsHud,
-    pub active_announcements: Vec<grow_announcements::RemoteAnnouncement>,
+    pub active_announcements: Vec<grow_announcements::Announcement>,
     /// Persisted hide keys, filtered at the banner selection gate — hiding one
     /// critical reveals the next unhidden one, and a NEW id re-arms the banner.
     pub hidden_announcement_ids: std::collections::BTreeSet<String>,
-    pub announcements_last_gen: u64,
     /// Selected welcome announcement for this pager launch.
-    pub announcement: Option<grow_announcements::RemoteAnnouncement>,
+    pub announcement: Option<grow_announcements::Announcement>,
     /// Cached changelog markdown (for `/release-notes`). Populated by
     /// `FetchChangelog` at startup; `None` until the fetch completes.
     pub changelog_markdown: Option<String>,
@@ -721,7 +720,7 @@ pub struct AppView {
     /// Hit-test rect for the "show full URL" fallback link.
     pub welcome_auth_fallback_rect: Option<ratatui::layout::Rect>,
     /// Hit-test rect for the welcome hero upgrade CTA `[label]` button
-    /// (click → `AnnouncementsOpenCta(Welcome)`).
+    /// (click → `AnnouncementsOpenCta`).
     pub welcome_upgrade_cta_rect: Option<ratatui::layout::Rect>,
     pub welcome_privacy_banner_accept_rect: Option<ratatui::layout::Rect>,
     pub welcome_privacy_banner_customize_rect: Option<ratatui::layout::Rect>,
@@ -936,12 +935,6 @@ pub struct AppView {
     /// Whether ZDR users are allowed to use the product.
     /// Server-controlled via RemoteSettings (remote settings). Default `false` (blocked) during beta.
     pub zdr_access_enabled: bool,
-    /// (hide-key, surface) pairs whose `AnnouncementCtaShown` impression was
-    /// already logged — once per pager process, cleared on logout. Keyed by
-    /// `announcement_hide_key` (stable even for id-less items, unlike the
-    /// event's `id`).
-    pub announcement_cta_impressions_logged:
-        std::collections::BTreeSet<(String, grow_diagnostics::events::AnnouncementCtaSurface)>,
     /// Whether a leader reconnect is in progress (blocks prompt submission).
     pub reconnect_pending: bool,
     /// Structured startup warnings collected from the terminal diagnostics
@@ -1151,7 +1144,6 @@ impl AppView {
             fps_hud: crate::views::fps_hud::FpsHud::new(),
             active_announcements: Vec::new(),
             hidden_announcement_ids: Default::default(),
-            announcements_last_gen: 0,
             announcement: None,
             changelog_markdown: None,
             changelog_bullets: Vec::new(),
@@ -1262,7 +1254,6 @@ impl AppView {
             auto_update: None,
             ask_user_question_timeout_enabled: None,
             zdr_access_enabled: false,
-            announcement_cta_impressions_logged: Default::default(),
             reconnect_pending: false,
             startup_warnings: Vec::new(),
             is_api_key_auth: false,
@@ -2890,9 +2881,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         }
         if matches!(ctx.auth_state, AuthState::Done) {
             if ctx.upgrade_cta_keyboard && key!('o', CONTROL).matches(key) {
-                return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                    grow_diagnostics::events::AnnouncementCtaSurface::Keyboard,
-                ));
+                return InputOutcome::Action(Action::AnnouncementsOpenCta);
             }
             if key!('w', CONTROL).matches(key) && ctx.cwd_has_git_ancestor {
                 return InputOutcome::Action(Action::OpenNewWorktreeDialog);
@@ -3091,9 +3080,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 if let Some(rect) = ctx.upgrade_cta_rect
                     && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
                 {
-                    return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                        grow_diagnostics::events::AnnouncementCtaSurface::Welcome,
-                    ));
+                    return InputOutcome::Action(Action::AnnouncementsOpenCta);
                 }
                 if let Some(rect) = ctx.privacy_banner_accept_rect
                     && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
@@ -4099,72 +4086,7 @@ impl AppView {
         if let Some(started) = fps_frame_started {
             self.fps_hud.record(started.elapsed());
         }
-        self.log_announcement_cta_impressions();
         self.maybe_evict_offscreen_caches();
-    }
-    /// Log [`grow_diagnostics::events::AnnouncementCtaShown`] for each
-    /// surface whose CTA button is painted this frame (armed hit rect, not
-    /// covered by a frame occluder — the click/OSC 8 truth the impression
-    /// pairs with), once per (announcement, surface) per pager process
-    /// (cleared on logout). The owner resolves through the same slot gate as
-    /// the click dispatch, so a critical preempting the slot or a hidden
-    /// promo emits nothing.
-    pub(crate) fn log_announcement_cta_impressions(&mut self) {
-        use grow_diagnostics::events::AnnouncementCtaSurface;
-        let (banner, welcome, header, dashboard) = match self.active_view {
-            ActiveView::Welcome => (false, self.welcome_upgrade_cta_rect.is_some(), false, false),
-            ActiveView::Agent(agent_id) => match self.agents.get(&agent_id) {
-                Some(a) => {
-                    let cta_rect = a.hit_announcement_cta.rect;
-                    let header_rect = a.hit_upgrade_cta.rect;
-                    (
-                        cta_rect.is_some_and(|r| !a.rect_occluded(r)),
-                        false,
-                        header_rect.is_some_and(|r| !a.rect_occluded(r)),
-                        false,
-                    )
-                }
-                None => return,
-            },
-            ActiveView::AgentDashboard => (
-                false,
-                false,
-                false,
-                self.dashboard
-                    .as_ref()
-                    .is_some_and(|d| d.upgrade_cta_hit.rect.is_some()),
-            ),
-        };
-        if !(banner || welcome || header || dashboard) {
-            return;
-        }
-        let Some((owner, _label, _url)) = crate::views::announcements::promo_cta(
-            &self.active_announcements,
-            &self.hidden_announcement_ids,
-        ) else {
-            return;
-        };
-        let key = grow_announcements::announcement_hide_key(owner);
-        let id = owner.id.clone();
-        let surfaces = [
-            (AnnouncementCtaSurface::Banner, banner),
-            (AnnouncementCtaSurface::Welcome, welcome),
-            (AnnouncementCtaSurface::Header, header),
-            (AnnouncementCtaSurface::Dashboard, dashboard),
-        ];
-        for (surface, _) in surfaces.into_iter().filter(|(_, painted)| *painted) {
-            if self
-                .announcement_cta_impressions_logged
-                .insert((key.clone(), surface))
-            {
-                grow_diagnostics::session_ctx::log_event(
-                    grow_diagnostics::events::AnnouncementCtaShown {
-                        id: id.clone(),
-                        source: surface,
-                    },
-                );
-            }
-        }
     }
     /// Interval between off-screen render-cache eviction sweeps.
     const CACHE_EVICT_INTERVAL: Duration = Duration::from_secs(5);
@@ -5026,7 +4948,6 @@ pub(crate) mod tests {
             tracing_rx: None,
             active_announcements: vec![],
             hidden_announcement_ids: Default::default(),
-            announcements_last_gen: 0,
             announcement: None,
             changelog_markdown: None,
             changelog_bullets: Vec::new(),
@@ -5085,7 +5006,6 @@ pub(crate) mod tests {
             auto_update: None,
             ask_user_question_timeout_enabled: None,
             zdr_access_enabled: false,
-            announcement_cta_impressions_logged: Default::default(),
             bundle_state: BundleState::default(),
             scroll_debug_hud: crate::views::scroll_debug_hud::ScrollDebugHud::new(),
             fps_hud: crate::views::fps_hud::FpsHud::new(),
@@ -5713,7 +5633,7 @@ pub(crate) mod tests {
             .get_mut(&id)
             .unwrap()
             .set_has_session_announcements(true);
-        app.active_announcements = vec![grow_announcements::RemoteAnnouncement {
+        app.active_announcements = vec![grow_announcements::Announcement {
             id: Some("expired".into()),
             message: Some("gone".into()),
             severity: Some("critical".into()),
@@ -5728,7 +5648,7 @@ pub(crate) mod tests {
                 .has_session_announcements(),
             "expired-only list must close the gate on the next frame"
         );
-        app.active_announcements = vec![grow_announcements::RemoteAnnouncement {
+        app.active_announcements = vec![grow_announcements::Announcement {
             id: Some("live".into()),
             message: Some("new outage".into()),
             severity: Some("critical".into()),

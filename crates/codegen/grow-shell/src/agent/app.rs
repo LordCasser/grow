@@ -1685,6 +1685,18 @@ pub async fn run_leader(
                                 );
                             }
                         }
+                        ConfigUpdate::Announcements(announcements) => {
+                            info!(count = announcements.len(), "Local announcements changed — updating clients");
+                            let line = internal_reload_request_line(
+                                "config-reload-announcements",
+                                "grow/internal/reload_announcements",
+                                serde_json::json!({ "announcements": announcements }),
+                            );
+                            let mut tx = acp_tx_for_config.lock().await;
+                            if let Err(e) = tx.write_all(line.as_bytes()).await {
+                                warn!(error = %e, "failed to inject announcements reload into ACP stream");
+                            }
+                        }
                         ConfigUpdate::Memory(mem) => {
                             info!(
                                 enabled = mem.enabled,

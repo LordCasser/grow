@@ -93,7 +93,7 @@ impl AgentView {
     pub(super) fn push_promo_cta_link_span(
         &self,
         link_spans_out: &mut Vec<xai_ratatui_inline::LinkSpan>,
-        banner_announcements: &[grow_announcements::RemoteAnnouncement],
+        banner_announcements: &[grow_announcements::Announcement],
         hidden_announcement_ids: &std::collections::BTreeSet<String>,
     ) {
         if let Some((_, url)) = crate::views::announcements::promo_cta_target(
@@ -109,7 +109,7 @@ impl AgentView {
     pub(super) fn push_upgrade_cta_link_span(
         &self,
         link_spans_out: &mut Vec<xai_ratatui_inline::LinkSpan>,
-        banner_announcements: &[grow_announcements::RemoteAnnouncement],
+        banner_announcements: &[grow_announcements::Announcement],
         hidden_announcement_ids: &std::collections::BTreeSet<String>,
     ) {
         if let Some((_, url)) = crate::views::announcements::promo_cta_target(
@@ -456,22 +456,19 @@ mod link_click_tests {
         agent.hit_announcement_cta.set(Some(Rect::new(0, 1, 15, 1)));
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(3, 1)), &reg);
         assert!(
-            matches!(
-                outcome,
-                InputOutcome::Action(Action::AnnouncementsOpenCta(_))
-            ),
+            matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "[label] click must dispatch AnnouncementsOpenCta"
         );
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(3, 2)), &reg);
         assert!(!matches!(
             outcome,
-            InputOutcome::Action(Action::AnnouncementsOpenCta(_))
+            InputOutcome::Action(Action::AnnouncementsOpenCta)
         ));
         agent.hit_announcement_cta.set(None);
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(3, 1)), &reg);
         assert!(!matches!(
             outcome,
-            InputOutcome::Action(Action::AnnouncementsOpenCta(_))
+            InputOutcome::Action(Action::AnnouncementsOpenCta)
         ));
     }
     /// Draw one 80x30 frame with `announcements` in the banner slot — shared
@@ -480,7 +477,7 @@ mod link_click_tests {
     fn draw_banner_frame(
         agent: &mut AgentView,
         reg: &ActionRegistry,
-        announcements: &[grow_announcements::RemoteAnnouncement],
+        announcements: &[grow_announcements::Announcement],
         banner_height: u16,
     ) {
         draw_frame_sized(agent, reg, announcements, banner_height, 80);
@@ -488,7 +485,7 @@ mod link_click_tests {
     fn draw_frame_sized(
         agent: &mut AgentView,
         reg: &ActionRegistry,
-        announcements: &[grow_announcements::RemoteAnnouncement],
+        announcements: &[grow_announcements::Announcement],
         banner_height: u16,
         cols: u16,
     ) -> Buffer {
@@ -497,7 +494,7 @@ mod link_click_tests {
     fn draw_frame_privacy(
         agent: &mut AgentView,
         reg: &ActionRegistry,
-        announcements: &[grow_announcements::RemoteAnnouncement],
+        announcements: &[grow_announcements::Announcement],
         banner_height: u16,
         cols: u16,
         privacy_banner: bool,
@@ -537,7 +534,7 @@ mod link_click_tests {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.last_terminal_size = (80, 30);
-        let critical = [grow_announcements::RemoteAnnouncement {
+        let critical = [grow_announcements::Announcement {
             severity: Some("critical".into()),
             title: Some("ZZCRIT".into()),
             message: Some("outage".into()),
@@ -581,7 +578,7 @@ mod link_click_tests {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.last_terminal_size = (80, 30);
-        let critical = [grow_announcements::RemoteAnnouncement {
+        let critical = [grow_announcements::Announcement {
             severity: Some("critical".into()),
             title: Some("ZZCRIT".into()),
             message: Some("outage".into()),
@@ -649,7 +646,7 @@ mod link_click_tests {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.last_terminal_size = (80, 30);
-        let promo = [grow_announcements::RemoteAnnouncement {
+        let promo = [grow_announcements::Announcement {
             id: Some("promo-1".into()),
             severity: Some("promo".into()),
             message: Some("ZZPROMO".into()),
@@ -671,10 +668,7 @@ mod link_click_tests {
         );
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
         assert!(
-            matches!(
-                outcome,
-                InputOutcome::Action(Action::AnnouncementsOpenCta(_))
-            ),
+            matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "sanity: visible [label] must dispatch"
         );
         let _ = agent.prompt.handle_paste("/");
@@ -690,10 +684,7 @@ mod link_click_tests {
         );
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
         assert!(
-            !matches!(
-                outcome,
-                InputOutcome::Action(Action::AnnouncementsOpenCta(_))
-            ),
+            !matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "click where [label] used to be must not open a URL under a dropdown"
         );
     }
@@ -840,7 +831,7 @@ mod link_click_tests {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.last_terminal_size = (120, 30);
-        let promo = [grow_announcements::RemoteAnnouncement {
+        let promo = [grow_announcements::Announcement {
             id: Some("promo-pin".into()),
             severity: Some("promo".into()),
             message: Some("ZZPROMO".into()),
@@ -859,10 +850,7 @@ mod link_click_tests {
             .expect("promo must arm the header CTA rect");
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
         assert!(
-            matches!(
-                outcome,
-                InputOutcome::Action(Action::AnnouncementsOpenCta(_))
-            ),
+            matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "sanity: visible header CTA must dispatch"
         );
         let _ = agent.prompt.handle_paste("/");
@@ -878,10 +866,7 @@ mod link_click_tests {
         );
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
         assert!(
-            !matches!(
-                outcome,
-                InputOutcome::Action(Action::AnnouncementsOpenCta(_))
-            ),
+            !matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "click where the header CTA used to be must not open under a dropdown"
         );
     }
@@ -956,7 +941,7 @@ mod link_click_tests {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.last_terminal_size = (120, 30);
-        let promo = [grow_announcements::RemoteAnnouncement {
+        let promo = [grow_announcements::Announcement {
             id: Some("promo-1".into()),
             severity: Some("promo".into()),
             message: Some("ZZPROMO".into()),
@@ -981,13 +966,12 @@ mod link_click_tests {
         assert!(agent.hit_upgrade_cta.rect.is_none());
     }
     /// In-session header upgrade CTA: a promo owning the slot arms
-    /// `hit_upgrade_cta` (clickable → `AnnouncementsOpenCta(Header)`), and the
+    /// `hit_upgrade_cta` (clickable → `AnnouncementsOpenCta`), and the
     /// draw caches `pinned_upgrade_cta_live` so the `Ctrl+O` arm can override
     /// YOLO — but ONLY for a pinned (non-dismissible) promo.
     #[test]
     fn header_upgrade_cta_rect_and_ctrl_o_override() {
         use crate::actions::ActionId;
-        use grow_diagnostics::events::AnnouncementCtaSurface;
         let reg = ActionRegistry::defaults();
         let cta = || {
             Some(grow_announcements::AnnouncementCta {
@@ -998,7 +982,7 @@ mod link_click_tests {
         };
         let mut agent = make_agent();
         agent.last_terminal_size = (120, 30);
-        let pinned = [grow_announcements::RemoteAnnouncement {
+        let pinned = [grow_announcements::Announcement {
             id: Some("promo-pin".into()),
             severity: Some("promo".into()),
             message: Some("ZZPROMO".into()),
@@ -1028,24 +1012,19 @@ mod link_click_tests {
         );
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
         assert!(
-            matches!(
-                outcome,
-                InputOutcome::Action(Action::AnnouncementsOpenCta(AnnouncementCtaSurface::Header))
-            ),
+            matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "header CTA click opens with the Header surface"
         );
         assert!(
             matches!(
                 agent.handle_agent_action(ActionId::ToggleYolo),
-                InputOutcome::Action(Action::AnnouncementsOpenCta(
-                    AnnouncementCtaSurface::Keyboard
-                ))
+                InputOutcome::Action(Action::AnnouncementsOpenCta)
             ),
             "Ctrl+O opens the pinned CTA (Keyboard surface) instead of YOLO"
         );
         let mut agent = make_agent();
         agent.last_terminal_size = (120, 30);
-        let dismissible = [grow_announcements::RemoteAnnouncement {
+        let dismissible = [grow_announcements::Announcement {
             id: Some("promo-dis".into()),
             severity: Some("promo".into()),
             message: Some("ZZPROMO".into()),
@@ -1088,7 +1067,7 @@ mod link_click_tests {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.last_terminal_size = (80, 30);
-        let promo = [grow_announcements::RemoteAnnouncement {
+        let promo = [grow_announcements::Announcement {
             id: Some("promo-pin".into()),
             severity: Some("promo".into()),
             message: Some("ZZPROMO".into()),
@@ -1123,7 +1102,7 @@ mod link_click_tests {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.last_terminal_size = (80, 30);
-        let promo = [grow_announcements::RemoteAnnouncement {
+        let promo = [grow_announcements::Announcement {
             id: Some("promo-1".into()),
             severity: Some("promo".into()),
             message: Some("ZZPROMO".into()),
@@ -1148,10 +1127,7 @@ mod link_click_tests {
         assert!(spans.is_empty(), "occluded [label] must emit no OSC 8 span");
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(cta.x + 1, cta.y)), &reg);
         assert!(
-            !matches!(
-                outcome,
-                InputOutcome::Action(Action::AnnouncementsOpenCta(_))
-            ),
+            !matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "occluded [label] click must not open a URL"
         );
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(hide.x + 1, hide.y)), &reg);
@@ -1170,10 +1146,7 @@ mod link_click_tests {
         assert_eq!(&*spans[0].url, "https://example.com/promo");
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(cta.x + 1, cta.y)), &reg);
         assert!(
-            matches!(
-                outcome,
-                InputOutcome::Action(Action::AnnouncementsOpenCta(_))
-            ),
+            matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "overlay-free [label] click must dispatch"
         );
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(hide.x + 1, hide.y)), &reg);
@@ -2380,7 +2353,7 @@ mod link_click_tests {
             &mut HashMap::new(),
         );
         assert!(agent.ephemeral_tip.is_active());
-        let critical = [grow_announcements::RemoteAnnouncement {
+        let critical = [grow_announcements::Announcement {
             severity: Some("critical".into()),
             message: Some("ZZCRITZZ outage".into()),
             ..Default::default()

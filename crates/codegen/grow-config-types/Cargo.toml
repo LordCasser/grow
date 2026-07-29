@@ -12,7 +12,6 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 strum = { workspace = true }
 tracing = { workspace = true }
-grow-announcements = { workspace = true }
 grow-config = { workspace = true }
 grow-mcp = { workspace = true }
 

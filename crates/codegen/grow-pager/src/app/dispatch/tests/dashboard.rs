@@ -3373,7 +3373,7 @@ fn dashboard_rename_esc_keystroke_routes_to_cancel() {
 }
 /// The dashboard header upgrade CTA: a pinned promo paints `[label]` (+ its
 /// configured `cta.caption`, bare when none), arms the click rect (→
-/// `AnnouncementsOpenCta(Dashboard)`), and lights the `Ctrl+O` override; a
+/// `AnnouncementsOpenCta`), and lights the `Ctrl+O` override; a
 /// dismissible promo shows the button but keeps Ctrl+O falling through and
 /// suppresses any caption; no promo shows nothing.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
@@ -3387,7 +3387,6 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use grow_diagnostics::events::AnnouncementCtaSurface;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let registry = ActionRegistry::defaults();
@@ -3434,9 +3433,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
     );
     assert!(matches!(
         state.handle_input(&ctrl_o(), &registry),
-        InputOutcome::Action(Action::AnnouncementsOpenCta(
-            AnnouncementCtaSurface::Keyboard
-        ))
+        InputOutcome::Action(Action::AnnouncementsOpenCta)
     ));
     let click = Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
@@ -3446,9 +3443,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
     });
     assert!(matches!(
         state.handle_input(&click, &registry),
-        InputOutcome::Action(Action::AnnouncementsOpenCta(
-            AnnouncementCtaSurface::Dashboard
-        ))
+        InputOutcome::Action(Action::AnnouncementsOpenCta)
     ));
     let mut buf = Buffer::empty(area);
     let mut state = DashboardState::new();
@@ -3509,7 +3504,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
     assert!(
         !matches!(
             state.handle_input(&ctrl_o(), &registry),
-            InputOutcome::Action(Action::AnnouncementsOpenCta(_))
+            InputOutcome::Action(Action::AnnouncementsOpenCta)
         ),
         "dismissible promo must not steal Ctrl+O in the dashboard"
     );

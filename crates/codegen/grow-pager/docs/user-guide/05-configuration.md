@@ -77,6 +77,31 @@ load_envrc = true                      # load .envrc environment variables
 respect_gitignore = false              # default: false; set true to make every tool skip gitignored files
 ```
 
+### Local announcements
+
+Grow does not download announcements. The welcome page, Dashboard, and session banner read the
+final local `announcements` array and update when the configuration file changes:
+
+```toml
+[[announcements]]
+id = "team-notice"
+title = "Notice"
+message = "Local announcement text"
+severity = "info"                    # info | warning | critical | promo
+dismissible = true
+persistent = false
+expires_at = "2026-12-31T23:59:59Z" # optional RFC 3339 timestamp
+
+[announcements.cta]
+label = "Open docs"
+url = "https://example.com/docs"
+caption = "Optional"
+```
+
+When `announcements` is absent, Grow shows its built-in provider-neutral notice. A configured
+non-empty array replaces that notice completely. Set `announcements = []` to disable announcements.
+Hidden announcement IDs remain local in `~/.grow/announcements.json`.
+
 #### Input mode
 
 `[ui] simple_mode` controls how you edit text in the **prompt** — the input editor. It has nothing to do with how you move around the scrollback; that's [`vim_mode`](#vim-mode).

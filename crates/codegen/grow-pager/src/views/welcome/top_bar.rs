@@ -16,7 +16,7 @@ pub fn render_top_bar(
     area: Rect,
     buf: &mut Buffer,
     theme: &Theme,
-    announcement: Option<&grow_announcements::RemoteAnnouncement>,
+    announcement: Option<&grow_announcements::Announcement>,
 ) {
     let line = truncate_line(location_line(theme), area.width as usize);
     let line_width = line.width() as u16;

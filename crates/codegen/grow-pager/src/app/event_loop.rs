@@ -1089,11 +1089,9 @@ pub(crate) async fn run(
             resolve_announcements, resolve_slash_command_tags, resolve_tips,
         };
 
-        let announcements = resolve_announcements(
-            requirements.as_ref(),
-            user_config.as_ref(),
-            managed_config.as_ref(),
-        );
+        let empty_config = toml::Value::Table(toml::map::Map::new());
+        let announcements =
+            resolve_announcements(effective_config.as_ref().unwrap_or(&empty_config));
         app.active_announcements = grow_announcements::filter_expired(announcements);
         if !app.active_announcements.is_empty() {
             use rand::Rng;
@@ -2194,10 +2192,6 @@ pub(crate) async fn run(
                         );
                         last_leader_generation = generation;
                         app.reconnect_pending = true;
-                        // Connection-scoped: a re-elected shell reseeds its push gen from wall clock,
-                        // so a surviving higher watermark would silently drop its fresh pushes.
-                        app.announcements_last_gen = 0;
-
                         // Cancel any in-flight re-init from a previous reconnect
                         // cycle and restore those agents' stashed transcripts —
                         // their load requests rode the now-dead connection.

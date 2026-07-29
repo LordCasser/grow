@@ -14,7 +14,6 @@ pub use mcp::*;
 mod permission;
 pub use permission::*;
 mod pool;
-use grow_announcements::RemoteAnnouncement;
 pub use pool::*;
 use serde::{Deserialize, Serialize};
 /// A remote `campaigns[]` entry: an `id` gate plus a full-power
@@ -721,10 +720,6 @@ pub struct RemoteSettings {
     /// is a kill-switch, `None` falls back to env/default (off).
     #[serde(default)]
     pub plugin_cta: Option<bool>,
-    /// Remote announcements list from proxy. Malformed items are skipped entirely.
-    /// `None` or `[]` = no announcements to display.
-    #[serde(default, deserialize_with = "deserialize_tolerant_announcements")]
-    pub announcements: Option<Vec<RemoteAnnouncement>>,
     #[serde(default)]
     pub session_summary_model: Option<String>,
     #[serde(default)]
@@ -994,38 +989,6 @@ pub struct ContextualHintsRemote {
     #[serde(default)]
     pub ssh_wrap: Option<bool>,
 }
-/// Tolerant deserializer for `Option<Vec<RemoteAnnouncement>>`.
-/// Parses as Vec<Value>, tries each as RemoteAnnouncement, drops failures.
-/// This ensures one bad item does not poison the whole RemoteSettings.
-/// Logs a warning when malformed items are dropped.
-fn deserialize_tolerant_announcements<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<RemoteAnnouncement>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let opt: Option<serde_json::Value> = serde::Deserialize::deserialize(deserializer)?;
-    match opt {
-        None => Ok(None),
-        Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::Array(arr)) => {
-            let mut out = Vec::with_capacity(arr.len());
-            for item in arr {
-                match serde_json::from_value::<RemoteAnnouncement>(item) {
-                    Ok(a) => out.push(a),
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "remote settings announcements: dropped malformed item"
-                        );
-                    }
-                }
-            }
-            Ok(Some(out))
-        }
-        Some(_) => Ok(None),
-    }
-}
 /// Parse one JSON value as a [`GoalRoleModel`], returning `None` (with a
 /// `tracing::warn!`) instead of erroring when the value is malformed.
 /// Shared by the tolerant deserializers for the single-pair role fields
@@ -1242,55 +1205,6 @@ mod tests {
         assert_eq!(s2.prompt_suggestion_model, s.prompt_suggestion_model);
         let s3: RemoteSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s3.prompt_suggestion_model, None);
-    }
-    #[test]
-    fn remote_settings_announcements_absent() {
-        let json = r#"{}"#;
-        let settings: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(settings.announcements, None);
-    }
-    #[test]
-    fn remote_settings_announcements_populated() {
-        let json = r#"{"announcements": [{"id": "a", "message": "m"}]}"#;
-        let settings: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            settings.announcements,
-            Some(vec![RemoteAnnouncement {
-                id: Some("a".to_string()),
-                message: Some("m".to_string()),
-                severity: None,
-                title: None,
-                cta: None,
-                updated_at: None,
-                expires_at: None,
-                dismissible: None,
-                persistent: None,
-            }])
-        );
-    }
-    #[test]
-    fn remote_settings_announcements_one_bad_item_does_not_poison() {
-        let json = r#"{
-            "announcements": [
-                {"id": "good", "message": "ok"},
-                {"id": 999, "message": "bad-id-type"}
-            ]
-        }"#;
-        let settings: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            settings.announcements,
-            Some(vec![RemoteAnnouncement {
-                id: Some("good".to_string()),
-                message: Some("ok".to_string()),
-                severity: None,
-                title: None,
-                cta: None,
-                updated_at: None,
-                expires_at: None,
-                dismissible: None,
-                persistent: None,
-            }])
-        );
     }
     #[test]
     fn remote_settings_goal_role_models_absent_default_clean() {

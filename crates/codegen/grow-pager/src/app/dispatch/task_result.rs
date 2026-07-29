@@ -1050,7 +1050,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::LogoutComplete => {
             app.auth_state = AuthState::Pending { error: None };
-            app.announcement_cta_impressions_logged.clear();
             app.login_method_id = None;
             ensure_login_method(app);
             app.auth_clipboard_delivery = None;

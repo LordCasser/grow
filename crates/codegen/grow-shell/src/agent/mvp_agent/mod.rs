@@ -363,7 +363,6 @@ struct SettingsUpdateNotification {
     session_picker_grouped: Option<bool>,
     tips: Option<Vec<String>>,
     slash_command_tags: Option<std::collections::BTreeMap<String, String>>,
-    announcements: Option<Vec<grow_announcements::RemoteAnnouncement>>,
     /// Remote campaigns snapshot for the client's process-global campaign
     /// cache. `Some` whenever settings exist (empty means campaigns were
     /// withdrawn); `None` when the agent has no settings yet, which clients
@@ -376,53 +375,6 @@ struct SettingsUpdateNotification {
     permission_mode: Option<String>,
     group_tool_verbs: Option<bool>,
     collapsed_edit_blocks: Option<bool>,
-}
-/// When the announcements push gate emits despite an unchanged visible list.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum AnnouncementsPushMode {
-    /// Push only when the visible list differs from the last emitted one
-    /// (pollers and background settings refreshers).
-    IfChanged,
-    /// Also re-push an unchanged non-empty list: a freshly attached client
-    /// (watermark 0) has no other way to learn it (per-client initialize).
-    SeedNewClient,
-    /// Always push, even unchanged or empty: the pager re-merges its local
-    /// config-layer (requirements/user/managed TOML) announcements only on an
-    /// accepted push, so `/new` uses this to surface mid-session local edits.
-    Force,
-}
-/// Pure decision half of the announcements push gate: the visible (expiry-
-/// filtered at `now`) stored list vs the last list actually emitted to
-/// clients. `Some(list)` = push `list` and make it the new baseline (the
-/// baseline advances only once the push is accepted).
-///
-/// Diffing against the last-EMITTED list (not against storage at the same
-/// instant) is what lets every baseline writer share one gate, and it makes a
-/// pure expiry crossing observable: an item that was live at the last emit
-/// and has since passed `expires_at` shrinks `current` vs the baseline, so
-/// clients get exactly one clearing push. An addition that is already expired
-/// on arrival never enters `current` and stays silent.
-///
-/// `mode` decides when an unchanged list still pushes — see
-/// [`AnnouncementsPushMode`].
-fn announcements_push_payload(
-    stored: Option<&[grow_announcements::RemoteAnnouncement]>,
-    last_emitted: &[grow_announcements::RemoteAnnouncement],
-    now: chrono::DateTime<chrono::Utc>,
-    mode: AnnouncementsPushMode,
-) -> Option<Vec<grow_announcements::RemoteAnnouncement>> {
-    let current = grow_announcements::filter_expired_at(
-        stored.map(|s| s.to_vec()).unwrap_or_default(),
-        now,
-    );
-    let push = match mode {
-        AnnouncementsPushMode::IfChanged => current.as_slice() != last_emitted,
-        AnnouncementsPushMode::SeedNewClient => {
-            current.as_slice() != last_emitted || !current.is_empty()
-        }
-        AnnouncementsPushMode::Force => true,
-    };
-    push.then_some(current)
 }
 /// Reason why a client is not eligible to use codebase indexing.
 ///
@@ -697,16 +649,6 @@ pub struct MvpAgent {
     /// reapply can't coalesce away a freshly authenticated identity's gate and
     /// settings resolution.
     post_auth_settings_in_flight: std::rc::Rc<std::cell::Cell<bool>>,
-    /// Last value handed out by `next_announcements_gen` (single-threaded
-    /// LocalSet, so a plain `Cell` suffices). LEADER-SAFE(shared): one
-    /// agent-wide push stream.
-    announcements_gen: std::cell::Cell<u64>,
-    /// Announcements list last actually emitted via `grow/announcements/update`
-    /// (expiry-filtered), the diff baseline for `emit_announcements`.
-    /// Owned by the emit gate — full-settings refreshes move `remote_settings`
-    /// without touching this, so their changes still get pushed on the next
-    /// gate call. LEADER-SAFE(shared): one agent-wide push stream.
-    last_emitted_announcements: RefCell<Vec<grow_announcements::RemoteAnnouncement>>,
     /// Test-only spy recording every terminal roster delta `(session_id,
     /// final_state)` emitted by `record_roster_delta` (reap → `DeadFailed`,
     /// explicit close → `Completed`). Lets tests observe a terminal demotion
@@ -1575,7 +1517,6 @@ impl MvpAgent {
                 session_picker_grouped: rs.and_then(|s| s.session_picker_grouped),
                 tips: rs.and_then(|s| s.tips.clone()),
                 slash_command_tags: rs.and_then(|s| s.slash_command_tags.clone()),
-                announcements: rs.and_then(|s| s.announcements.clone()),
                 campaigns: rs.map(|s| s.campaigns.clone()),
                 auto_permission_mode_enabled: crate::util::config::remote_auto_mode_enabled(
                     rs,

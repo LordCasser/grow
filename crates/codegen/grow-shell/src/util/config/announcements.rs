@@ -1,82 +1,71 @@
 use toml::Value as TomlValue;
 
 /// Announcement entry shared with the TUI.
-pub use grow_announcements::RemoteAnnouncement;
+pub use grow_announcements::Announcement;
 
-// ---------------------------------------------------------------------------
-// Announcements & tips from TOML
-// ---------------------------------------------------------------------------
-
-/// Parse `announcements` from a TOML value (inline tables or array-of-tables).
-pub fn announcements_from_toml(root: &TomlValue) -> Vec<RemoteAnnouncement> {
-    root.get("announcements")
-        .and_then(|v| v.clone().try_into::<Vec<RemoteAnnouncement>>().ok())
-        .unwrap_or_default()
-}
-
-/// Merge announcement slices in priority order. Dedup by `id`; first wins.
-pub fn merge_announcements(sources: &[&[RemoteAnnouncement]]) -> Vec<RemoteAnnouncement> {
-    let mut seen = std::collections::HashSet::<String>::new();
-    let mut out = Vec::new();
-    for source in sources {
-        for a in *source {
-            if let Some(ref id) = a.id
-                && !seen.insert(id.clone())
-            {
-                continue;
-            }
-            out.push(a.clone());
-        }
-    }
-    out
-}
-
-/// Dev/test override for announcements via `GROW_ANNOUNCEMENTS_OVERRIDE` (a JSON
-/// array of announcements). Returns `Some` only when the env var holds valid
-/// JSON; an empty array (`[]`) suppresses all announcements. Every announcement
-/// resolution path honors this so it works for testing regardless of source.
-pub fn announcements_override() -> Option<Vec<RemoteAnnouncement>> {
-    let raw = std::env::var("GROW_ANNOUNCEMENTS_OVERRIDE").ok()?;
-    match serde_json::from_str::<Vec<RemoteAnnouncement>>(&raw) {
-        Ok(list) => Some(list),
-        Err(_) => {
-            tracing::warn!("invalid GROW_ANNOUNCEMENTS_OVERRIDE JSON; ignoring");
-            None
-        }
-    }
-}
-
-/// Resolve announcements from pre-loaded config layers.
+/// Resolve announcements from the final effective local configuration.
 ///
-/// Priority: requirements > user config > managed config.
-/// `GROW_ANNOUNCEMENTS_OVERRIDE` env var overrides everything (dev-only escape hatch).
-pub fn resolve_announcements(
-    requirements: Option<&TomlValue>,
-    user: Option<&TomlValue>,
-    managed: Option<&TomlValue>,
-) -> Vec<RemoteAnnouncement> {
-    if let Some(list) = announcements_override() {
-        return list;
+/// The effective configuration has already applied Grow's normal configuration
+/// precedence. A declared array replaces the built-in content wholesale;
+/// `announcements = []` disables the feature. When the key is absent, Grow's
+/// single built-in announcement is used.
+pub fn resolve_announcements(root: &TomlValue) -> Vec<Announcement> {
+    let Some(value) = root.get("announcements") else {
+        return grow_announcements::default_announcements();
+    };
+    match value.clone().try_into::<Vec<Announcement>>() {
+        Ok(announcements) => announcements,
+        Err(error) => {
+            tracing::warn!(%error, "invalid local announcements configuration; using built-in default");
+            grow_announcements::default_announcements()
+        }
     }
-
-    let req = requirements
-        .map(announcements_from_toml)
-        .unwrap_or_default();
-    let usr = user.map(announcements_from_toml).unwrap_or_default();
-    let mgd = managed.map(announcements_from_toml).unwrap_or_default();
-    merge_announcements(&[&req, &usr, &mgd])
 }
 
-/// Convenience wrapper that loads config layers from disk.
-/// Prefer [`resolve_announcements`] when layers are already loaded.
-pub fn resolve_announcements_from_disk() -> Option<Vec<RemoteAnnouncement>> {
-    let requirements = crate::config::load_merged_requirements();
-    let user = crate::config::load_from_disk().ok();
-    let managed = crate::config::load_managed_config().ok();
-    let merged = resolve_announcements(requirements.as_ref(), user.as_ref(), managed.as_ref());
-    if merged.is_empty() {
-        None
-    } else {
-        Some(merged)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_config_uses_grow_default() {
+        let root: TomlValue = toml::from_str("").unwrap();
+        let resolved = resolve_announcements(&root);
+        assert_eq!(resolved, grow_announcements::default_announcements());
+        assert_eq!(resolved[0].id.as_deref(), Some("grow-default"));
+    }
+
+    #[test]
+    fn configured_list_replaces_default() {
+        let root: TomlValue = toml::from_str(
+            r#"
+                [[announcements]]
+                id = "team-notice"
+                title = "Notice"
+                message = "Local announcement text"
+                severity = "info"
+                dismissible = true
+
+                [announcements.cta]
+                label = "Open docs"
+                url = "https://example.com/docs"
+            "#,
+        )
+        .unwrap();
+        let resolved = resolve_announcements(&root);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].id.as_deref(), Some("team-notice"));
+        assert_eq!(
+            resolved[0]
+                .cta
+                .as_ref()
+                .and_then(|cta| cta.label.as_deref()),
+            Some("Open docs")
+        );
+    }
+
+    #[test]
+    fn explicit_empty_list_disables_announcements() {
+        let root: TomlValue = toml::from_str("announcements = []").unwrap();
+        assert!(resolve_announcements(&root).is_empty());
     }
 }

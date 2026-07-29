@@ -283,7 +283,7 @@ impl PrivacyBannerState {
 pub struct BannerSlotParams<'a> {
     /// Reserved slot height (0 = no slot this frame).
     pub(crate) height: u16,
-    pub(crate) announcements: &'a [grow_announcements::RemoteAnnouncement],
+    pub(crate) announcements: &'a [grow_announcements::Announcement],
     pub(crate) hidden_ids: &'a std::collections::BTreeSet<String>,
     /// Privacy upsell banner owns the slot (highest banner precedence
     /// below critical announcements; gated by the caller).

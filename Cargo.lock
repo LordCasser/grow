@@ -4144,7 +4144,6 @@ name = "grow-config-types"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
- "grow-announcements",
  "grow-config",
  "grow-mcp",
  "indexmap",

@@ -746,7 +746,6 @@ impl MvpAgent {
             }
         }
         self.emit_settings_update_notification();
-        self.emit_announcements(AnnouncementsPushMode::IfChanged);
     }
     /// Run the blocking `/settings` fetch for `auth` off the runtime thread.
     async fn fetch_settings(
@@ -887,10 +886,11 @@ impl MvpAgent {
                     tracing::warn!(error = %e, "config reload failed during settings refresh");
                     toml::Value::Table(toml::map::Map::new())
                 });
+            cfg.announcements = crate::util::config::resolve_announcements(&raw_config);
             cfg.re_resolve_runtime_fields(&raw_config);
         }
         self.emit_settings_update_notification();
-        self.emit_announcements(AnnouncementsPushMode::Force);
+        self.emit_announcements();
     }
     /// Spawns a background task coalesced on `in_flight`: a request while one
     /// is in flight is dropped. The task is bounded by
@@ -967,63 +967,27 @@ impl MvpAgent {
                 .set(self.post_auth_settings_spawn_count.get() + 1);
         }
     }
-    /// The single announcements push gate — every `remote_settings` writer
-    /// funnels through here. Emits `grow/announcements/update` and advances
-    /// the last-emitted baseline per [`announcements_push_payload`] (`mode`
-    /// decides when an unchanged list still pushes), but only once the
-    /// gateway accepts the send — a failed enqueue leaves the baseline
-    /// untouched so the next gate call re-diffs and re-pushes.
-    ///
-    /// Synchronous by design: the decide→send→advance sequence cannot
-    /// interleave with another gate call on the LocalSet.
-    pub(super) fn emit_announcements(&self, mode: AnnouncementsPushMode) {
-        let payload_list = {
-            let cfg = self.cfg.borrow();
-            let last = self.last_emitted_announcements.borrow();
-            announcements_push_payload(
-                cfg.remote_settings.as_ref().and_then(|s| s.announcements.as_deref()),
-                &last,
-                chrono::Utc::now(),
-                mode,
-            )
+    /// Push the current, expiry-filtered local announcement configuration to
+    /// connected clients. The notification is deliberately stateless: local
+    /// config reload and client initialization both publish an authoritative
+    /// replacement snapshot.
+    pub(crate) fn emit_announcements(&self) {
+        let announcements = grow_announcements::filter_expired(
+            self.cfg.borrow().announcements.clone(),
+        );
+        let payload = grow_announcements::AnnouncementsUpdated {
+            announcements: announcements.clone(),
         };
-        let Some(announcements) = payload_list else {
-            return;
-        };
-        let payload = serde_json::json!({
-            "gen": self.next_announcements_gen(),
-            "announcements": announcements,
-        });
         let Ok(params) = serde_json::value::to_raw_value(&payload) else {
             return;
         };
-        let accepted = self
-            .gateway
-            .forward_fire_and_forget(
-                acp::ExtNotification::new("grow/announcements/update", params.into()),
-            );
-        if !accepted {
-            return;
-        }
-        *self.last_emitted_announcements.borrow_mut() = announcements.clone();
+        self.gateway.forward_fire_and_forget(
+            acp::ExtNotification::new("grow/announcements/update", params.into()),
+        );
         tracing::info!(
             count = announcements.len(),
-            mode = ?mode,
-            "pushing announcements update to clients"
+            "pushing local announcements update to clients"
         );
-    }
-    /// Next generation for an `grow/announcements/update` push. Strictly
-    /// increasing within the process, and seeded from unix-epoch seconds so a
-    /// restarted leader's pushes still clear pager watermarks that survived
-    /// re-election (`AppView.announcements_last_gen` outlives the agent).
-    pub(super) fn next_announcements_gen(&self) -> u64 {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let next = now_secs.max(self.announcements_gen.get() + 1);
-        self.announcements_gen.set(next);
-        next
     }
     /// Shared fetch half of every settings refresh: endpoint fields from a
     /// scoped `cfg` borrow, `fetch_settings_blocking` off-executor (it already
@@ -1461,8 +1425,6 @@ impl MvpAgent {
             supervisor_started: std::cell::Cell::new(false),
             settings_reapply_in_flight: std::rc::Rc::new(std::cell::Cell::new(false)),
             post_auth_settings_in_flight: std::rc::Rc::new(std::cell::Cell::new(false)),
-            announcements_gen: std::cell::Cell::new(0),
-            last_emitted_announcements: RefCell::new(Vec::new()),
             #[cfg(test)]
             #[cfg(test)]
             roster_delta_spy: RefCell::new(Vec::new()),
