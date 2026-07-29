@@ -33,6 +33,7 @@ fn install_real_permissions(actor: &mut SessionActor) {
         vec![],
         false,
         None,
+        false,
     );
     actor.permissions = handle;
 }

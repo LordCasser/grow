@@ -260,6 +260,7 @@ async fn mixed_permission_cancel_skips_exit_reverse_request() {
                 vec![],
                 false,
                 None,
+                false,
             );
             actor.permissions = perms;
 

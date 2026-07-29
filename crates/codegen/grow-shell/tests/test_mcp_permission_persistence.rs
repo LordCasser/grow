@@ -222,6 +222,7 @@ async fn run_actor_test_full<F, Fut>(
                 vec![],
                 initial_yolo,
                 None,
+                false,
             );
             body(handle, gw, cwd).await;
         })
@@ -464,6 +465,7 @@ async fn policy_deny_takes_precedence_over_mcp_allowlist() {
                 vec![],
                 false,
                 None,
+                false,
             );
 
             // Do NOT script a response: a policy Deny must short-circuit
