@@ -1,8 +1,8 @@
 //! Off-draw-thread Mermaid render worker, per-session disk cache, and the
 //! [`AgentView`] lazy render-on-click glue (both `[Open]` and `[Copy path]`).
 //!
-//! Mirrors the existing inline-video worker model (`std::thread::spawn` +
-//! `std::sync::mpsc`, polled each tick via `try_recv`) rather than tokio. A
+//! Uses a dedicated `std::thread` plus `std::sync::mpsc`, polled each tick via
+//! `try_recv`, rather than tokio. A
 //! single worker thread renders a requested diagram (in a short-lived child
 //! process — see below), writes the PNG to the session's `mermaid/` dir, and
 //! reports back only the on-disk path. Diagrams are never displayed inline; the
@@ -13,7 +13,7 @@
 //! always matches the current theme, including auto day/night) and then runs the
 //! requested action. A small lock-free [`PendingMermaidAction`] list records what
 //! the user asked for so the tick can complete it when the matching render result
-//! arrives — mirroring how inline video loads via `mpsc` + poll.
+//! arrives.
 //!
 //! # Crash isolation under `panic = "abort"` — out of process
 //!

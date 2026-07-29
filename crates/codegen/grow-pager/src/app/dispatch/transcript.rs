@@ -301,12 +301,6 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
         }
 
         if !entry.block.has_normal_fullscreen_viewer() {
-            // Video: Enter starts inline playback (no modal).
-            if let Some(first_ref) = entry.block.video_references().first() {
-                let path = first_ref.path.clone();
-                agent.start_inline_video_playback(&path);
-                return;
-            }
             // Image: Enter opens the file in the OS-native viewer.
             if let Some(first_ref) = entry.block.image_references().first() {
                 let path = first_ref.path.clone();
@@ -371,12 +365,6 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
             return;
         }
 
-        // Video: Enter starts inline playback.
-        if let Some(first_ref) = entry.block.video_references().first() {
-            let path = first_ref.path.clone();
-            agent.start_inline_video_playback(&path);
-            return;
-        }
         // Image: Enter opens the file in the OS-native viewer.
         if let Some(first_ref) = entry.block.image_references().first() {
             let path = first_ref.path.clone();

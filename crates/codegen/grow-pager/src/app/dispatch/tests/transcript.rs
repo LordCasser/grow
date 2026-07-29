@@ -230,8 +230,8 @@ fn open_block_viewer_opens_image_only_blocks_natively() {
     let _guard = set_protocol_for_test(GraphicsProtocol::Kitty);
     let effects = dispatch(Action::OpenBlockViewer, &mut app);
 
-    // Generated media now opens in the OS-native viewer (fire-and-forget),
-    // so neither the in-app block viewer nor image viewer is shown.
+    // A tool-produced local image opens in the OS-native viewer
+    // (fire-and-forget), so no in-app viewer is shown.
     assert!(effects.is_empty());
     let agent = app.agents.get(&id).unwrap();
     assert!(agent.block_viewer.is_none());

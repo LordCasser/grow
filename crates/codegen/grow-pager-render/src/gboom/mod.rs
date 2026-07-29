@@ -5,7 +5,7 @@
 //! standards in `crates/codegen/AGENTS.md`.
 //!
 //! Typing `/gboom` (and nothing else) opens a modal overlay — the same
-//! surface the imagine-video player uses — and streams PNG frames via
+//! surface used by image overlays — and streams PNG frames via
 //! per-frame kitty `a=T` retransmission at the ~30 fps animation tick. The
 //! simulation steps with wall-clock `dt`, so gameplay speed is independent
 //! of the achieved frame rate.
@@ -32,7 +32,7 @@ use game::{Control, Game};
 
 /// Maximum rendered frame width in pixels. Each frame is PNG-encoded and
 /// pushed through the PTY every tick (~100 KB / ~3 MB/s at 30 fps at this
-/// cap), comfortably within what the video player already streams.
+/// cap), keeping terminal bandwidth bounded.
 const MAX_FRAME_W: usize = 480;
 /// Maximum rendered frame height in pixels.
 const MAX_FRAME_H: usize = 320;
@@ -78,9 +78,8 @@ pub struct GboomHud {
     pub(crate) playing: bool,
 }
 
-/// Modal state for the `/gboom` easter egg. Owned by the agent view like
-/// the video viewer; ticked from the animation tick; rendered in the draw
-/// path via post-flush kitty escapes.
+/// Modal state for the `/gboom` easter egg. Owned by the agent view, ticked
+/// from the animation tick, and rendered via post-flush kitty escapes.
 pub struct GboomState {
     game: Game,
     renderer: Renderer,

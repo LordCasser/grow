@@ -8,7 +8,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
 
 use xai_ratatui_textarea::ElementId;
 
@@ -226,327 +225,7 @@ pub fn load_image_data(path: &std::path::Path) -> ImageLoadResult {
 }
 
 // -------------------------------------------------------------------------
-// Video viewer state
-// -------------------------------------------------------------------------
-
-/// Target frames per second for terminal video playback.
-const VIDEO_FPS: f64 = 10.0;
-
-/// Maximum pixel width for extracted frames.
-const VIDEO_MAX_WIDTH: u32 = 640;
-
-/// Modal video viewer state.
-///
-/// Holds pre-extracted frames and playback position. The rendering path
-/// reuses the same `post_flush_escapes` pipeline as the image viewer.
-pub struct VideoViewerState {
-    /// Pre-extracted frames (PNG for Kitty, JPEG for iTerm2).
-    pub frames: Vec<Vec<u8>>,
-    /// Current frame index.
-    current_frame: usize,
-    /// Whether playback is active.
-    pub playing: bool,
-    /// Playback frame rate.
-    pub fps: f64,
-    /// Last frame advance timestamp (for pacing).
-    last_frame_time: Instant,
-    /// Original video pixel dimensions.
-    pub video_width: u32,
-    pub video_height: u32,
-    /// Total duration in seconds.
-    pub duration_secs: f64,
-    /// Display title (file name).
-    pub title: Option<String>,
-}
-
-impl VideoViewerState {
-    /// Minimal viewer for tests (pager and render unit tests); the real
-    /// `open_from_path` needs ffmpeg and a graphics-capable terminal, neither
-    /// available under `cargo test`. Public so dependent crates can construct
-    /// a viewer without pulling in decode/graphics.
-    pub fn test_stub() -> Self {
-        Self {
-            frames: vec![Vec::new()],
-            current_frame: 0,
-            playing: false,
-            fps: 1.0,
-            last_frame_time: Instant::now(),
-            video_width: 1,
-            video_height: 1,
-            duration_secs: 0.0,
-            title: None,
-        }
-    }
-
-    /// Open a video file for playback. Returns `None` if ffmpeg is
-    /// unavailable or the video cannot be decoded.
-    ///
-    /// Extracts all frames upfront — for short videos (5–15s at 10fps)
-    /// this is 50–150 frames and takes ~1–3 seconds.
-    pub fn open_from_path(path: &std::path::Path) -> Option<Self> {
-        use crate::terminal::image::{GraphicsProtocol, detect_graphics_protocol};
-
-        let protocol = detect_graphics_protocol();
-        if protocol == GraphicsProtocol::None {
-            return None;
-        }
-
-        let (width, height, duration, fps) = ffprobe_metadata(path)?;
-        let target_fps = VIDEO_FPS.min(fps);
-
-        // PNG for Kitty (required), JPEG for iTerm2 (smaller).
-        let ext = match protocol {
-            GraphicsProtocol::Kitty => "png",
-            GraphicsProtocol::ITerm2 => "jpg",
-            GraphicsProtocol::None => return None,
-        };
-
-        let vf = if width > VIDEO_MAX_WIDTH {
-            format!("fps={target_fps},scale={}:-2", VIDEO_MAX_WIDTH)
-        } else {
-            format!("fps={target_fps}")
-        };
-
-        let tmp_dir = make_temp_dir();
-        std::fs::create_dir_all(&tmp_dir).ok()?;
-
-        let mut ffmpeg_cmd = std::process::Command::new("ffmpeg");
-        ffmpeg_cmd
-            .args(["-hide_banner", "-loglevel", "error", "-i"])
-            .arg(path)
-            .args(["-vf", &vf, "-q:v", "5"])
-            .arg(tmp_dir.join(format!("%06d.{ext}")))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        xai_tty_utils::detach_std_command(&mut ffmpeg_cmd);
-        let status = ffmpeg_cmd.status();
-
-        match &status {
-            Err(e) => tracing::debug!("ffmpeg not available: {e}"),
-            Ok(s) if !s.success() => tracing::debug!("ffmpeg exited with {s}"),
-            _ => {}
-        }
-        if !status.as_ref().is_ok_and(|s| s.success()) {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-            return None;
-        }
-
-        let frames = load_frames(&tmp_dir, ext);
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-
-        if frames.is_empty() {
-            return None;
-        }
-
-        Some(Self {
-            current_frame: 0,
-            playing: true,
-            fps: target_fps,
-            last_frame_time: Instant::now(),
-            video_width: width,
-            video_height: height,
-            duration_secs: duration,
-            title: path.file_name().map(|n| n.to_string_lossy().into_owned()),
-            frames,
-        })
-    }
-
-    /// Advance playback based on elapsed time. Returns `true` if the
-    /// frame changed (caller should redraw).
-    pub fn tick(&mut self) -> bool {
-        if !self.playing || self.frames.is_empty() {
-            return false;
-        }
-
-        let frame_duration = std::time::Duration::from_secs_f64(1.0 / self.fps);
-        if self.last_frame_time.elapsed() < frame_duration {
-            return false;
-        }
-
-        self.current_frame = (self.current_frame + 1) % self.frames.len();
-        self.last_frame_time = Instant::now();
-        true
-    }
-
-    /// Toggle play/pause.
-    pub fn toggle_play_pause(&mut self) {
-        self.playing = !self.playing;
-        if self.playing {
-            self.last_frame_time = Instant::now();
-        }
-    }
-
-    /// Seek forward by ~1 second.
-    pub fn seek_forward(&mut self) {
-        let skip = self.fps.round() as usize;
-        self.current_frame = (self.current_frame + skip).min(self.frames.len().saturating_sub(1));
-        self.last_frame_time = Instant::now();
-    }
-
-    /// Seek backward by ~1 second.
-    pub fn seek_backward(&mut self) {
-        let skip = self.fps.round() as usize;
-        self.current_frame = self.current_frame.saturating_sub(skip);
-        self.last_frame_time = Instant::now();
-    }
-
-    /// Current frame image data.
-    pub fn current_frame_data(&self) -> &[u8] {
-        &self.frames[self.current_frame]
-    }
-
-    /// Current playback position in seconds.
-    pub fn position_secs(&self) -> f64 {
-        if self.fps <= 0.0 {
-            return 0.0;
-        }
-        self.current_frame as f64 / self.fps
-    }
-
-    /// Playback progress fraction (0.0–1.0).
-    pub fn progress(&self) -> f64 {
-        if self.frames.len() <= 1 {
-            return 0.0;
-        }
-        self.current_frame as f64 / (self.frames.len() - 1) as f64
-    }
-}
-
-/// Extract a single poster frame from a video file via ffmpeg.
-/// Returns `(image_bytes, width, height)`. The image format depends on
-/// the active terminal protocol (PNG for Kitty, JPEG for iTerm2).
-pub fn extract_poster_frame(path: &std::path::Path) -> Option<(Vec<u8>, u32, u32)> {
-    use crate::terminal::image::{GraphicsProtocol, detect_graphics_protocol};
-
-    let protocol = detect_graphics_protocol();
-    let ext = match protocol {
-        GraphicsProtocol::Kitty => "png",
-        GraphicsProtocol::ITerm2 => "jpg",
-        GraphicsProtocol::None => return None,
-    };
-
-    // Try seeking to 1s for a representative frame; fall back to first frame.
-    let try_extract = |seek: Option<&str>| {
-        let mut cmd = std::process::Command::new("ffmpeg");
-        cmd.args(["-hide_banner", "-loglevel", "error"]);
-        if let Some(ss) = seek {
-            cmd.args(["-ss", ss]);
-        }
-        cmd.args(["-i"])
-            .arg(path)
-            .args(["-frames:v", "1", "-f", "image2pipe", "-vcodec", ext])
-            .arg("-")
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        xai_tty_utils::detach_std_command(&mut cmd);
-        cmd.output()
-            .ok()
-            .filter(|o| o.status.success() && !o.stdout.is_empty())
-    };
-
-    let output = try_extract(Some("1")).or_else(|| try_extract(None))?;
-
-    let (w, h) = decode_image_dimensions(&output.stdout)?;
-
-    Some((output.stdout, w, h))
-}
-
-/// Create a unique temp directory path for frame extraction.
-fn make_temp_dir() -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "grow-video-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ))
-}
-
-/// Read all frame files from `dir` with the given extension, sorted by name.
-fn load_frames(dir: &std::path::Path, ext: &str) -> Vec<Vec<u8>> {
-    let mut paths: Vec<_> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == ext))
-        .collect();
-    paths.sort();
-    paths.iter().filter_map(|p| std::fs::read(p).ok()).collect()
-}
-
-/// Probe video metadata via ffprobe. Returns `(width, height, duration, fps)`.
-fn ffprobe_metadata(path: &std::path::Path) -> Option<(u32, u32, f64, f64)> {
-    let mut cmd = std::process::Command::new("ffprobe");
-    cmd.args([
-        "-v",
-        "quiet",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=width,height,r_frame_rate,duration",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "csv=p=0:s=,",
-    ])
-    .arg(path)
-    .stdin(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null());
-    xai_tty_utils::detach_std_command(&mut cmd);
-    let output = match cmd.output() {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::debug!("ffprobe not available: {e}");
-            return None;
-        }
-    };
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    // Stream line: width,height,r_frame_rate[,duration]
-    // Format line: duration
-    let lines: Vec<&str> = text.trim().lines().collect();
-    let parts: Vec<&str> = lines.first()?.split(',').collect();
-    if parts.len() < 3 {
-        return None;
-    }
-
-    let width: u32 = parts[0].trim().parse().ok()?;
-    let height: u32 = parts[1].trim().parse().ok()?;
-    let fps = parse_fraction(parts[2].trim()).unwrap_or(30.0);
-
-    // Try stream duration, fall back to format duration.
-    let duration = parts
-        .get(3)
-        .and_then(|d| d.trim().parse::<f64>().ok())
-        .or_else(|| lines.get(1).and_then(|l| l.trim().parse::<f64>().ok()))
-        .unwrap_or(0.0);
-
-    Some((width, height, duration, fps))
-}
-
-/// Parse a fraction like "30/1" or "30000/1001".
-fn parse_fraction(s: &str) -> Option<f64> {
-    if let Some((num, den)) = s.split_once('/') {
-        let n: f64 = num.parse().ok()?;
-        let d: f64 = den.parse().ok()?;
-        if d == 0.0 {
-            return None;
-        }
-        Some(n / d)
-    } else {
-        s.parse::<f64>().ok()
-    }
-}
-
-// -------------------------------------------------------------------------
-// Inline media info (for scrollback inline rendering)
+// Inline image info (for scrollback inline rendering)
 // -------------------------------------------------------------------------
 
 /// Metadata for inline media rendering in the scrollback.
@@ -558,8 +237,6 @@ pub struct InlineMediaInfo {
     /// Pixel dimensions of the media.
     pub width: u32,
     pub height: u32,
-    /// Whether this is a video (poster frame) vs. a static image.
-    pub is_video: bool,
     /// Alt text / description from the markdown `![alt](path)` syntax.
     pub alt_text: String,
 }
@@ -1762,9 +1439,9 @@ const MARKDOWN_IMAGE_REF_PATTERN: &str = r"!\[([^\]]*)\]\(([^)\s]+)\)";
 
 /// Whether text consists only of markdown media references (`![alt](path)`).
 ///
-/// `resolved_ref_count` is the total number of resolved media refs
-/// (images + videos) extracted from the same text. Unresolved or
-/// undecodable paths are not counted, preventing false positives.
+/// `resolved_ref_count` is the total number of resolved image refs extracted
+/// from the same text. Unresolved or undecodable paths are not counted,
+/// preventing false positives.
 pub fn is_media_only_markdown(text: &str, resolved_ref_count: usize) -> bool {
     use std::sync::LazyLock;
 
@@ -1834,92 +1511,6 @@ pub fn extract_image_refs(text: &str) -> Vec<ScrollbackImageRef> {
             let path_str = m.as_str();
             if seen.insert(path_str.to_owned())
                 && let Some(r) = ScrollbackImageRef::from_path(path_str)
-            {
-                refs.push(r);
-            }
-        }
-    }
-
-    refs
-}
-
-// -------------------------------------------------------------------------
-// Scrollback video references
-// -------------------------------------------------------------------------
-
-const VIDEO_EXTENSIONS: &[&str] = &["mp4", "webm", "mov", "avi", "mkv"];
-
-/// A video file referenced in scrollback content via `![alt](path.mp4)` markdown
-/// or a bare absolute path. Validated on construction: path must exist and have a
-/// recognized video extension.
-#[derive(Debug, Clone)]
-pub struct ScrollbackVideoRef {
-    /// Absolute path to the video file on disk.
-    pub path: PathBuf,
-    /// Alt text from the `![alt](path)` markdown syntax (empty for bare paths).
-    pub alt_text: String,
-}
-
-impl ScrollbackVideoRef {
-    /// Validate that `path` exists and has a recognized video extension.
-    pub fn from_path(path: impl Into<PathBuf>) -> Option<Self> {
-        Self::from_path_with_alt(path, String::new())
-    }
-
-    /// Construct with alt text from the markdown `![alt](path)` syntax.
-    pub fn from_path_with_alt(path: impl Into<PathBuf>, alt_text: String) -> Option<Self> {
-        let path = strip_verbatim_prefix(&path.into());
-        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-        if !VIDEO_EXTENSIONS.contains(&ext.as_str()) || !path.is_file() {
-            return None;
-        }
-        Some(Self { path, alt_text })
-    }
-}
-
-/// Extract video references from text (markdown `![](path)` and bare paths).
-pub fn extract_video_refs(text: &str) -> Vec<ScrollbackVideoRef> {
-    use std::sync::LazyLock;
-
-    // Reuse the markdown image ref pattern — video_gen uses ![prompt](path.mp4).
-    static MD_RE: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(MARKDOWN_IMAGE_REF_PATTERN).unwrap());
-
-    static VIDEO_PATH_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-        let exts = VIDEO_EXTENSIONS.join("|");
-        // Unix absolute paths (/...) and Windows absolute paths (C:\..., C:/...,
-        // or \\... UNC). Drive letters accept either separator.
-        regex::Regex::new(&format!(
-            r"(?:^|[\s,])((?:/|[A-Za-z]:[\\/]|\\\\)[^\s,]+\.(?:{exts}))(?:[\s,.(]|$)"
-        ))
-        .unwrap()
-    });
-
-    let mut refs = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    // MD_RE: group 1 = alt text, group 2 = path
-    for cap in MD_RE.captures_iter(text) {
-        if let Some(m) = cap.get(2) {
-            let path_str = m.as_str();
-            let alt_text = cap
-                .get(1)
-                .map(|a| a.as_str().to_owned())
-                .unwrap_or_default();
-            if seen.insert(path_str.to_owned())
-                && let Some(r) = ScrollbackVideoRef::from_path_with_alt(path_str, alt_text)
-            {
-                refs.push(r);
-            }
-        }
-    }
-
-    // VIDEO_PATH_RE: group 1 = path (no alt text)
-    for cap in VIDEO_PATH_RE.captures_iter(text) {
-        if let Some(m) = cap.get(1) {
-            let path_str = m.as_str();
-            if seen.insert(path_str.to_owned())
-                && let Some(r) = ScrollbackVideoRef::from_path(path_str)
             {
                 refs.push(r);
             }
@@ -4023,10 +3614,9 @@ mod tests {
         if let agent_client_protocol::ContentBlock::Image(ic) = &blocks[1] {
             assert!(!ic.data.is_empty());
             // The durable session copy is surfaced through `uri` even for
-            // clipboard pastes (no `source_path`). This is the reference
-            // `image_edit` resolves `[Image #N]` against; vision is
-            // unaffected because `pick_user_image_url` never forwards a
-            // `file://` URI to the model.
+            // clipboard pastes (no `source_path`) so the attachment can be
+            // persisted without forwarding a `file://` URI to the model;
+            // `pick_user_image_url` continues to select the inline pixels.
             assert_eq!(
                 ic.uri.as_deref(),
                 Some(format!("file://{}", path.display()).as_str()),

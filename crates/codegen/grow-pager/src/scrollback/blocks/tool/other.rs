@@ -26,8 +26,6 @@ pub struct OtherToolCallBlock {
     pub elapsed_ms: Option<i64>,
     /// Image references detected in the tool output.
     image_refs: Vec<crate::prompt_images::ScrollbackImageRef>,
-    /// Video references detected in the tool output.
-    video_refs: Vec<crate::prompt_images::ScrollbackVideoRef>,
 }
 
 impl OtherToolCallBlock {
@@ -45,7 +43,6 @@ impl OtherToolCallBlock {
             started_at: None,
             elapsed_ms: None,
             image_refs: Vec::new(),
-            video_refs: Vec::new(),
         }
     }
 
@@ -64,23 +61,7 @@ impl OtherToolCallBlock {
     /// Set or replace the output text.
     pub fn set_output_text(&mut self, text: String) {
         self.image_refs = crate::prompt_images::extract_image_refs(&text);
-        self.video_refs = crate::prompt_images::extract_video_refs(&text);
         self.output = Some(text);
-    }
-
-    /// Set the media reference from a typed path (no prose scraping).
-    /// `from_path` validates the file and normalizes `\\?\`; an unresolvable
-    /// path is a no-op.
-    pub fn with_media_ref(mut self, path: impl Into<std::path::PathBuf>, is_video: bool) -> Self {
-        let path = path.into();
-        if is_video {
-            if let Some(r) = crate::prompt_images::ScrollbackVideoRef::from_path(path) {
-                self.video_refs = vec![r];
-            }
-        } else if let Some(r) = crate::prompt_images::ScrollbackImageRef::from_path(path) {
-            self.image_refs = vec![r];
-        }
-        self
     }
 
     /// Check if successful (no error).
@@ -88,16 +69,10 @@ impl OtherToolCallBlock {
         self.error.is_none()
     }
 
-    /// Path of the first media reference (image or video) for the filepath
+    /// Path of the first image reference for the filepath
     /// line of an inline-media block, independent of inline-graphics support.
     pub(crate) fn media_ref_path(&self) -> Option<std::path::PathBuf> {
-        if let Some(img) = self.image_refs.first() {
-            return Some(img.path.clone());
-        }
-        if let Some(vid) = self.video_refs.first() {
-            return Some(vid.path.clone());
-        }
-        None
+        self.image_refs.first().map(|image| image.path.clone())
     }
 
     /// Set error (mutable) — compute elapsed time if not already set (Phase 2).
@@ -190,8 +165,7 @@ impl BlockContent for OtherToolCallBlock {
         let muted_collapsed =
             ctx.mute_when_collapsed(ctx.appearance.scrollback.blocks.tool.muted_collapsed);
 
-        // Inline media blocks (image_gen / video_gen): render the header and a
-        // filepath line on every terminal.
+        // Inline image blocks render the header and a filepath line on every terminal.
         if let Some(media_path) = self.media_ref_path() {
             let header = self.collapsed_line(&theme, muted_collapsed, Some(ctx.content_width()));
             let max_w = ctx.content_width();
@@ -220,12 +194,10 @@ impl BlockContent for OtherToolCallBlock {
 
             // No inline graphics: centered "[Open]" button between blank
             // spacers (its click target is registered in render.rs).
-            if let Some((_, is_video)) = self.inline_open_button() {
-                let label = crate::scrollback::render::media_open_button_label(is_video);
-                let col = crate::scrollback::render::media_open_button_col(
-                    ctx.content_width() as u16,
-                    is_video,
-                );
+            if self.inline_open_button().is_some() {
+                let label = crate::scrollback::render::media_open_button_label();
+                let col =
+                    crate::scrollback::render::media_open_button_col(ctx.content_width() as u16);
                 let open_line = Line::from(vec![
                     Span::raw(" ".repeat(col as usize)),
                     Span::styled(
@@ -383,10 +355,6 @@ impl BlockContent for OtherToolCallBlock {
         &self.image_refs
     }
 
-    fn video_references(&self) -> &[crate::prompt_images::ScrollbackVideoRef] {
-        &self.video_refs
-    }
-
     fn inline_media(&self) -> Option<crate::prompt_images::InlineMediaInfo> {
         if let Some(img) = self.image_refs.first() {
             let (w, h) = img.dimensions?;
@@ -394,33 +362,20 @@ impl BlockContent for OtherToolCallBlock {
                 path: img.path.clone(),
                 width: w,
                 height: h,
-                is_video: false,
                 alt_text: img.alt_text.clone(),
-            });
-        }
-        if let Some(vid) = self.video_refs.first() {
-            return Some(crate::prompt_images::InlineMediaInfo {
-                path: vid.path.clone(),
-                width: 1280,
-                height: 720,
-                is_video: true,
-                alt_text: vid.alt_text.clone(),
             });
         }
         None
     }
 
-    fn inline_open_button(&self) -> Option<(std::path::PathBuf, bool)> {
+    fn inline_open_button(&self) -> Option<std::path::PathBuf> {
         // Only used when there is no inline-graphics overlay to host the button
         // row. When the overlay is active it draws its own button row instead.
         if crate::terminal::image::scrollback_inline_overlay_active() {
             return None;
         }
         if let Some(img) = self.image_refs.first() {
-            return Some((img.path.clone(), false));
-        }
-        if let Some(vid) = self.video_refs.first() {
-            return Some((vid.path.clone(), true));
+            return Some(img.path.clone());
         }
         None
     }

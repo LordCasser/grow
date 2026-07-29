@@ -257,8 +257,6 @@ pub(crate) async fn spawn_session_actor(
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
     web_fetch_config: grow_tools::implementations::grow_build::web_fetch::WebFetchConfig,
-    image_gen_config: grow_tools::implementations::grow_build::image_gen::ImageGenConfig,
-    video_gen_config: grow_tools::implementations::grow_build::video_gen::VideoGenConfig,
     app_builder_deployer_config: grow_tools::implementations::grow_build::deploy_app::AppBuilderDeployerConfig,
     write_file_enabled: bool,
     goal_enabled: bool,
@@ -741,12 +739,6 @@ pub(crate) async fn spawn_session_actor(
     let (user_question_tx, user_question_rx) = tokio::sync::mpsc::unbounded_channel::<
         grow_tools::implementations::grow_build::ask_user_question::types::UserQuestionRequest,
     >();
-    let attribution_callback_for_spec = auth_manager.as_ref().map(|am| {
-        crate::auth::attribution::ShellAttribution::new_tool_callback(
-            am.clone(),
-            Some(session_info.id.0.to_string()),
-        )
-    });
     let memory_storage_for_session = memory_config.as_ref().filter(|mc| mc.enabled).map(|mc| {
         if mc.flat_memory_root
             && let Some(ref root) = mc.root_dir_override
@@ -937,8 +929,6 @@ pub(crate) async fn spawn_session_actor(
             .map(|s| s.workspace_memory_file().to_string_lossy().into_owned()),
         memory_backend: memory_backend_for_spec,
         web_fetch_config: web_fetch_config.clone(),
-        image_gen_config: image_gen_config.clone(),
-        video_gen_config: video_gen_config.clone(),
         app_builder_deployer_config: app_builder_deployer_config.clone(),
         write_file_enabled,
         subagents_enabled,
@@ -955,8 +945,6 @@ pub(crate) async fn spawn_session_actor(
         prompt_working_directory: prompt_display_cwd.clone(),
         lsp: tool_context.lsp.clone(),
         plugin_registry: plugin_registry.clone(),
-        api_key_provider: api_key_provider.clone(),
-        attribution_callback: attribution_callback_for_spec,
         tool_params_json: tool_params_json.clone(),
         subagent_event_tx: tool_context.subagent_event_tx.clone(),
         monitor_event_buffer: tool_context.monitor_event_buffer.clone(),
@@ -2068,8 +2056,6 @@ pub(crate) async fn spawn_session_on_thread(
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
     web_fetch_config: grow_tools::implementations::grow_build::web_fetch::WebFetchConfig,
-    image_gen_config: grow_tools::implementations::grow_build::image_gen::ImageGenConfig,
-    video_gen_config: grow_tools::implementations::grow_build::video_gen::VideoGenConfig,
     app_builder_deployer_config: grow_tools::implementations::grow_build::deploy_app::AppBuilderDeployerConfig,
     write_file_enabled: bool,
     goal_enabled: bool,
@@ -2220,8 +2206,6 @@ pub(crate) async fn spawn_session_on_thread(
                         inference_idle_timeout_secs,
                         max_retries,
                         web_fetch_config,
-                        image_gen_config,
-                        video_gen_config,
                         app_builder_deployer_config,
                         write_file_enabled,
                         goal_enabled,

@@ -51,7 +51,6 @@ mod tests {
             "help",
             "create-skill",
             "code-review",
-            "imagine",
             "check-work",
             "check",
             "best-of-n",

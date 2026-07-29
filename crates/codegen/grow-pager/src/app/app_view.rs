@@ -3476,10 +3476,6 @@ impl AppView {
     /// synchronized output, cursor blink preservation). See that module's
     /// docs for the full rationale.
     pub fn draw(&mut self, terminal: &mut PagerTerminal) {
-        self.draw_inner(terminal);
-        crate::memory_release::run_deferred_release();
-    }
-    fn draw_inner(&mut self, terminal: &mut PagerTerminal) {
         self.resync_announcement_slash_gate_on_divergence();
         if self.screen_mode.is_minimal() {
             if let Some(hooks) = crate::minimal_hook::hooks() {
@@ -4442,45 +4438,11 @@ impl AppView {
             needs_redraw |= agent.poll_link_modifier();
             needs_redraw |= Self::tick_agent_image_load(agent);
             needs_redraw |= Self::tick_agent_block_viewer(agent);
-            if let Some(ref mut viewer) = agent.video_viewer {
-                needs_redraw |= viewer.tick();
-            }
             if let Some(ref mut gboom) = agent.gboom {
                 gboom.tick();
                 needs_redraw = true;
             }
-            if let Some(ref rx) = agent.video_load_rx
-                && let Ok(result) = rx.try_recv()
-            {
-                agent.video_load_rx = None;
-                match result {
-                    Some(video) => {
-                        agent.replace_inline_video(video);
-                        agent.toast = None;
-                    }
-                    None => {
-                        agent.show_toast("Video playback requires ffmpeg");
-                    }
-                }
-                needs_redraw = true;
-            }
             needs_redraw |= agent.mermaid_tick();
-            if let Some(ref mut video) = agent.inline_video
-                && !video.finished
-                && !video.frames.is_empty()
-            {
-                let elapsed = video.last_frame_time.elapsed();
-                let frame_dur = std::time::Duration::from_secs_f64(1.0 / video.fps);
-                if elapsed >= frame_dur {
-                    if video.current_frame + 1 >= video.frames.len() {
-                        video.finished = true;
-                    } else {
-                        video.current_frame += 1;
-                        video.last_frame_time = std::time::Instant::now();
-                    }
-                    needs_redraw = true;
-                }
-            }
         }
         if let Some(commands) = bootstrap_commands_update {
             self.welcome_prompt
@@ -4712,10 +4674,7 @@ impl AppView {
                     || agent.block_viewer.is_some()
                     || agent.image_viewer.as_ref().is_some_and(|v| v.loading)
                     || agent.image_load_rx.is_some()
-                    || agent.video_viewer.as_ref().is_some_and(|v| v.playing)
                     || agent.gboom.is_some()
-                    || agent.inline_video.as_ref().is_some_and(|v| !v.finished)
-                    || agent.video_load_rx.is_some()
                     || agent.mermaid_needs_tick()
                     || !agent.permission_queue.is_empty()
                     || matches!(
@@ -4869,49 +4828,6 @@ pub(crate) mod tests {
         assert_eq!(
             parse_esc_ttl(Some(u64::MAX.to_string())),
             Duration::from_millis(ESC_DOUBLE_PRESS_TEST_MS)
-        );
-    }
-    /// `AppView::draw` is the ONLY drain point for the process-wide deferred
-    /// release flag; if the wrapper loses its `run_deferred_release()` call,
-    /// every draw/tick-path cliff (video scroll-off, takeover drain,
-    /// frame-set replacement) silently stops purging. Drives the real
-    /// `draw()` against a channel-backed terminal (no tty; same recipe as
-    /// pager-render's `draw_frame` tests). Serialized: process-wide flag.
-    #[test]
-    #[serial_test::serial(MEMORY_RELEASE_DEFER)]
-    fn app_draw_drains_deferred_release_after_flush() {
-        use crate::memory_release::test_support;
-        use ratatui::{TerminalOptions, Viewport};
-        test_support::install_counting_hook();
-        crate::memory_release::run_deferred_release();
-        let (frame_tx, _frame_rx) =
-            std::sync::mpsc::channel::<crate::render::draw::WriterPayload>();
-        let writer =
-            crate::render::draw::TermWriter::new(frame_tx, crate::render::draw::WriterSync::new())
-                .expect("single test writer");
-        let backend = ratatui::backend::CrosstermBackend::new(writer);
-        let mut terminal = xai_ratatui_inline::Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 80, 24)),
-            },
-        )
-        .expect("channel-backed terminal requires no tty");
-        let mut app = test_app();
-        crate::memory_release::request_release_after_draw_with("unit-test-defer");
-        let before = test_support::calls();
-        app.draw(&mut terminal);
-        assert_eq!(
-            test_support::calls(),
-            before + 1,
-            "AppView::draw must drain the deferred release post-flush"
-        );
-        let before = test_support::calls();
-        app.draw(&mut terminal);
-        assert_eq!(
-            test_support::calls(),
-            before,
-            "a draw without a pending request must not purge"
         );
     }
     pub(crate) fn test_app() -> AppView {

@@ -12,8 +12,8 @@
 //!
 //! [`grow_agent::Agent`] owns an [`grow_tools::bridge::ToolBridge`]
 //! that carries session-scoped channels (notification handle, terminal/fs
-//! backends, subagent senders, scheduler set, plugin registry, attribution
-//! callback). The Agent is therefore session-bound — it cannot be shared
+//! backends, subagent senders, scheduler set, and plugin registry). The Agent
+//! is therefore session-bound — it cannot be shared
 //! across sessions and cannot be re-rendered from outside its session
 //! context. To rebuild it (e.g. when the user picks a model with a
 //! different `agent_type` before sending any user message), we need to
@@ -46,14 +46,11 @@ use grow_agent::{Agent, AgentBuilder, CompactionPolicy, ReminderPolicy};
 use grow_tools::computer::types::{AsyncFileSystem, TerminalBackend};
 use grow_tools::implementations::grow_build::ask_user_question::types::UserQuestionRequest;
 use grow_tools::implementations::grow_build::deploy_app::AppBuilderDeployerConfig;
-use grow_tools::implementations::grow_build::image_gen::ImageGenConfig;
 use grow_tools::implementations::grow_build::monitor::types::MonitorEventBuffer;
 use grow_tools::implementations::grow_build::task::types::{SubagentEvent, TaskModelValidator};
-use grow_tools::implementations::grow_build::video_gen::VideoGenConfig;
 use grow_tools::implementations::grow_build::web_fetch::WebFetchConfig;
 use grow_tools::implementations::lsp::LspBackend;
 use grow_tools::notification::ToolNotificationHandle;
-use grow_tools::types::SharedApiKeyProvider;
 use grow_tools::types::compat::CompatConfig;
 use grow_tools::types::memory_backend::MemoryBackend;
 use std::collections::HashMap;
@@ -91,8 +88,6 @@ pub(crate) struct AgentRebuildSpec {
     pub memory_workspace_path: Option<String>,
     pub memory_backend: Option<Arc<dyn MemoryBackend>>,
     pub web_fetch_config: WebFetchConfig,
-    pub image_gen_config: ImageGenConfig,
-    pub video_gen_config: VideoGenConfig,
     pub app_builder_deployer_config: AppBuilderDeployerConfig,
     pub write_file_enabled: bool,
     pub subagents_enabled: bool,
@@ -111,8 +106,6 @@ pub(crate) struct AgentRebuildSpec {
     pub prompt_working_directory: Option<String>,
     pub lsp: Option<Arc<dyn LspBackend>>,
     pub plugin_registry: Option<Arc<grow_agent::plugins::PluginRegistry>>,
-    pub api_key_provider: Option<SharedApiKeyProvider>,
-    pub attribution_callback: Option<grow_tools::SharedAttributionCallback>,
     pub tool_params_json: ResolvedToolParamsJson,
     pub subagent_event_tx: Option<UnboundedSender<SubagentEvent>>,
     pub monitor_event_buffer: Option<MonitorEventBuffer>,
@@ -191,8 +184,6 @@ impl AgentRebuildSpec {
             memory_workspace_path,
             memory_backend,
             web_fetch_config,
-            image_gen_config,
-            video_gen_config,
             app_builder_deployer_config,
             write_file_enabled,
             subagents_enabled,
@@ -209,8 +200,6 @@ impl AgentRebuildSpec {
             prompt_working_directory,
             lsp,
             plugin_registry,
-            api_key_provider,
-            attribution_callback,
             tool_params_json,
             subagent_event_tx,
             monitor_event_buffer,
@@ -247,8 +236,6 @@ impl AgentRebuildSpec {
         .with_system_prompt_label(system_prompt_label.clone())
         .with_session_env(session_env.clone())
         .with_state_path(bridge_state_path.clone())
-        .with_image_gen_config(image_gen_config.clone())
-        .with_video_gen_config(video_gen_config.clone())
         .with_app_builder_deployer_config(app_builder_deployer_config.clone())
         .with_web_fetch_config(web_fetch_config.clone())
         .with_write_file_enabled(*write_file_enabled)
@@ -288,12 +275,6 @@ impl AgentRebuildSpec {
         }
         if let Some(plugin_registry) = plugin_registry.clone() {
             builder = builder.with_plugin_registry(plugin_registry);
-        }
-        if let Some(api_key_provider) = api_key_provider.clone() {
-            builder = builder.with_api_key_provider(api_key_provider);
-        }
-        if let Some(attribution_callback) = attribution_callback.clone() {
-            builder = builder.with_attribution_callback(attribution_callback);
         }
         if let Some(bash_params_json) = tool_params_json.bash.clone() {
             builder = builder.with_bash_params(bash_params_json);
@@ -413,8 +394,6 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         memory_workspace_path: None,
         memory_backend: None,
         web_fetch_config: WebFetchConfig::Disabled,
-        image_gen_config: ImageGenConfig::default(),
-        video_gen_config: VideoGenConfig::default(),
         app_builder_deployer_config: AppBuilderDeployerConfig::default(),
         write_file_enabled: true,
         subagents_enabled: false,
@@ -431,8 +410,6 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         prompt_working_directory: None,
         lsp: None,
         plugin_registry: None,
-        api_key_provider: None,
-        attribution_callback: None,
         tool_params_json: ResolvedToolParamsJson::default(),
         subagent_event_tx: None,
         monitor_event_buffer: None,

@@ -34,10 +34,6 @@
 //!   and resume-deferred first open), gated on a non-empty replay
 //! - closing an agent tab (`dispatch/session/modal.rs`) — the whole
 //!   `AgentView` incl. scrollback, render caches, and child views
-//! - video teardown — the pre-extracted frame set (~50–300 MB per video):
-//!   viewer close (`media.rs`, synchronous — input path), inline stop /
-//!   scroll-off / replacement (`media.rs`, `render.rs`, `app_view.rs` —
-//!   [`request_release_after_draw`], the purge runs post-frame-flush)
 //! - image viewer close (`media.rs`) — the decoded overlay image
 //! - rewind truncation (`dispatch/rewind.rs`) — the removed transcript tail
 //!
@@ -45,8 +41,7 @@
 //! an actual drop, never per frame; draw/tick-path cliffs defer the purge to
 //! the post-flush gap so it cannot stall the frame being painted.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 static RELEASE_HOOK: OnceLock<fn()> = OnceLock::new();
 
@@ -60,12 +55,6 @@ pub fn install_release_hook(hook: fn()) {
 ///
 /// Cheap enough to call after any known memory cliff (see the module docs for
 /// the covered sites). No-op when no hook is installed.
-///
-/// Call this directly from dispatch/input paths (the stall lands between
-/// interactions). From draw/tick paths use [`request_release_after_draw`]
-/// instead: when a purge has real work to do (a ~50–300 MB frame set just
-/// dropped) the synchronous madvise would land inside the very frame the
-/// user is waiting for.
 pub fn release_retained_memory() {
     release_retained_memory_with("unattributed");
 }
@@ -94,45 +83,6 @@ pub fn release_retained_memory_with(reason: &'static str) {
     }
     if trace {
         crate::memory_trace::record_purge(reason, hook.is_some(), before, started.elapsed());
-    }
-}
-
-/// Deferred-release request flag, drained post-frame-flush.
-///
-/// `AtomicBool` rather than a thread-local: requesters (draw/tick code) and
-/// the drainer (`AppView::draw` tail) are both main-thread today, but the
-/// flag must not silently drop a request if that ever changes.
-static RELEASE_AFTER_DRAW: AtomicBool = AtomicBool::new(false);
-
-/// Memory-cliff tag for the pending deferred request. Coalescing requests
-/// keep the LAST writer's reason — precise enough for trace attribution
-/// (coalesced requests within one frame are the same user gesture).
-static DEFER_REASON: Mutex<&'static str> = Mutex::new("post-draw");
-
-/// Request [`release_retained_memory`] to run right after the current frame
-/// flushes (drained by [`run_deferred_release`] at the end of
-/// `AppView::draw`). For memory cliffs hit *inside* the draw/tick path —
-/// e.g. inline video stopped because it scrolled off screen.
-pub fn request_release_after_draw() {
-    request_release_after_draw_with("post-draw");
-}
-
-/// [`request_release_after_draw`] with memory-cliff attribution for the
-/// trace (see [`release_retained_memory_with`]).
-pub fn request_release_after_draw_with(reason: &'static str) {
-    if let Ok(mut r) = DEFER_REASON.lock() {
-        *r = reason;
-    }
-    RELEASE_AFTER_DRAW.store(true, Ordering::Relaxed);
-}
-
-/// Drain a pending [`request_release_after_draw`], if any. Called once at
-/// the end of `AppView::draw`, after the terminal buffer flush, so the purge
-/// cost lands in the idle gap between frames instead of inside one.
-pub fn run_deferred_release() {
-    if RELEASE_AFTER_DRAW.swap(false, Ordering::Relaxed) {
-        let reason = DEFER_REASON.lock().map(|r| *r).unwrap_or("post-draw");
-        release_retained_memory_with(reason);
     }
 }
 
@@ -183,40 +133,6 @@ mod tests {
             test_support::calls(),
             before + 2,
             "each release must invoke the installed hook exactly once"
-        );
-    }
-
-    /// The deferred request coalesces into exactly one release at the next
-    /// drain, and a drain without a request is inert. Serialized: the request
-    /// flag is process-wide.
-    #[test]
-    #[serial_test::serial(MEMORY_RELEASE_DEFER)]
-    fn deferred_request_coalesces_and_drains_once() {
-        test_support::install_counting_hook();
-        run_deferred_release(); // drain any stale request
-
-        let before = test_support::calls();
-        run_deferred_release();
-        assert_eq!(
-            test_support::calls(),
-            before,
-            "drain without request is inert"
-        );
-
-        request_release_after_draw();
-        request_release_after_draw(); // coalesces
-        assert_eq!(
-            test_support::calls(),
-            before,
-            "requesting must not purge synchronously"
-        );
-        run_deferred_release();
-        assert_eq!(test_support::calls(), before + 1, "one drain, one purge");
-        run_deferred_release();
-        assert_eq!(
-            test_support::calls(),
-            before + 1,
-            "flag cleared by the drain"
         );
     }
 }

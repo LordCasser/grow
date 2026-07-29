@@ -3213,8 +3213,7 @@ pub async fn connect_local_workspace(
             workspace_home.display()
         ))
     })?;
-    let api_base_url = std::env::var("GROW_CLI_CHAT_PROXY_BASE_URL").unwrap_or_default();
-    let mut factory = WorkspaceSessionContextFactory::with_auth(auth.clone(), api_base_url.clone());
+    let mut factory = WorkspaceSessionContextFactory::with_auth(auth.clone());
     if crate::session::tool_config::tool_state_enabled() {
         factory = factory.with_tool_state_home(workspace_home.clone());
     }

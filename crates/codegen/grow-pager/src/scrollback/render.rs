@@ -38,19 +38,28 @@ pub(crate) const GROUP_HEADER_RANGE_ID: u16 = u16::MAX;
 
 /// Label for the inline-media native-open text button (terminals without
 /// inline graphics). Graphics terminals use a shorter overlay `[Open]` instead.
-pub fn media_open_button_label(is_video: bool) -> &'static str {
-    if is_video {
-        "[Open Video]"
-    } else {
-        "[Open Image]"
-    }
+pub fn media_open_button_label() -> &'static str {
+    "[Open Image]"
 }
 
 /// Centered left column for the `[Open]` text button. Shared by the renderer
 /// and the hit-area computation so the label and click target stay aligned.
-pub fn media_open_button_col(content_width: u16, is_video: bool) -> u16 {
-    let label_w = media_open_button_label(is_video).len() as u16;
+pub fn media_open_button_col(content_width: u16) -> u16 {
+    let label_w = media_open_button_label().len() as u16;
     content_width.saturating_sub(label_w) / 2
+}
+
+/// `(image_area, total)` rows for an inline image preview. Shared by entry-height
+/// reservation and block placement so they cannot drift.
+pub fn inline_image_reserved_rows(
+    info: &crate::prompt_images::InlineMediaInfo,
+    content_width: u16,
+) -> (u16, u16) {
+    let max_cols = content_width.saturating_sub(2);
+    let max_rows = (content_width / 2).clamp(4, 20);
+    let (_cols, rows) =
+        crate::terminal::image::fit_image_to_cells(info.width, info.height, max_cols, max_rows);
+    (rows, rows + 3)
 }
 
 /// Width reserved for the timestamp on message blocks.
@@ -810,7 +819,7 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
         // Click targets for the text `[Open]` button + filepath of media blocks
         // without an inline overlay (terminals without inline-graphics support).
         if (!is_group_header || verb_expanded_slot)
-            && let Some((open_path, is_video)) = entry.block.inline_open_button()
+            && let Some(open_path) = entry.block.inline_open_button()
         {
             let content_lines = cached_output.lines.len();
             let viewport_bottom = viewport_start + viewport.height as usize;
@@ -838,8 +847,8 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
             // Centered `[Open]` button → click-to-open. It is the second-to-last
             // content line (the last line is a blank spacer).
             let open_button_screen_rect = if content_lines >= 2 {
-                let label_w = media_open_button_label(is_video).len() as u16;
-                let col = media_open_button_col(content_width, is_video);
+                let label_w = media_open_button_label().len() as u16;
+                let col = media_open_button_col(content_width);
                 let button_virtual_y = content_y_start + (content_lines - 2);
                 line_screen_rect(button_virtual_y, label_w).map(|mut rect| {
                     rect.x = rect.x.saturating_add(col);
@@ -855,7 +864,6 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                         path: open_path,
                         width: 0,
                         height: 0,
-                        is_video,
                         alt_text: String::new(),
                     },
                     screen_rect: ratatui::layout::Rect {
@@ -949,7 +957,7 @@ pub(crate) fn map_hyperlinks_to_overlay(
     // Map each hyperlink to screen-space OverlayLinks. Unsafe schemes
     // (javascript:, data:, …) are dropped since OSC 8 URLs reach the terminal
     // without the link_opener scheme filter. Local-file destinations such as
-    // `[videos/1.mp4](videos/1.mp4)` resolve against generated media.
+    // relative session-output links resolve against known local paths.
     let scheme_filter = crate::terminal::hyperlinks::SchemeFilter::Standard;
     for h in hyperlinks {
         let target = if crate::app::link_opener::is_safe_to_open(&h.url, scheme_filter) {
@@ -2376,7 +2384,7 @@ mod tests {
     #[test]
     fn overlay_markdown_relative_link_opens_as_file_url() {
         // End-to-end through the real render path: a markdown link to a short
-        // media path that matches this transcript's generated media becomes a
+        // media path that matches this transcript's known local output becomes a
         // `file://` overlay.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("images")).unwrap();
@@ -2601,7 +2609,7 @@ mod tests {
 
     #[test]
     fn markdown_wrapped_session_media_path_fully_linkified() {
-        // Regression: imagine-tool prose whose long session path soft-wraps
+        // Regression: tool prose whose long session path soft-wraps
         // across rows. The whole path must be clickable (one overlay region
         // per row, all pointing at the full file:// URL) — not just the
         // leading path fragment on the first row.
@@ -3391,8 +3399,8 @@ mod tests {
 
         let mut entries = vec![
             ScrollbackEntry::new(RenderBlock::ToolCall(ToolCallBlock::Other(
-                OtherToolCallBlock::new("image_gen", "saved image")
-                    .with_media_ref(&image_path, false),
+                OtherToolCallBlock::new("tool", "saved image")
+                    .with_output(format!("![image]({})", image_path.display())),
             ))),
             ScrollbackEntry::new(RenderBlock::execute_with_output(
                 "echo hidden",
@@ -4478,7 +4486,8 @@ mod tests {
         std::fs::write(&image_path, make_test_png(120, 120)).unwrap();
 
         let entry = ScrollbackEntry::new(RenderBlock::ToolCall(ToolCallBlock::Other(
-            OtherToolCallBlock::new("image_gen", "saved image").with_media_ref(&image_path, false),
+            OtherToolCallBlock::new("tool", "saved image")
+                .with_output(format!("![image]({})", image_path.display())),
         )));
         let viewport = Rect::new(0, 0, 80, 30);
         let result = render_with_scratch(std::slice::from_ref(&entry), viewport, 0, None);

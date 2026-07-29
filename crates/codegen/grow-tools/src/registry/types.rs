@@ -267,38 +267,12 @@ pub struct SessionContext {
     /// passed to every session. Same pattern as `fs` and `backend`.
     /// When `Some`, inserted into `Resources` so `LspTool` can use it.
     pub lsp: Option<std::sync::Arc<dyn crate::implementations::lsp::LspBackend>>,
-    /// Optional image generation configuration. When `Enabled`, an `ImageGenClient`
-    /// is created and injected into `Resources` so the `image_gen` tool can
-    /// call the xAI Imagine API. When `Disabled` (default), the tool is not
-    /// registered and image generation is unavailable.
-    pub image_gen_config: crate::implementations::grow_build::image_gen::ImageGenConfig,
-    /// Optional video generation configuration. When `Enabled`, a `VideoGenClient`
-    /// is created and injected into `Resources` so the `video_gen` tool can
-    /// call the xAI Video Generation API. When `Disabled` (default), the tool is not
-    /// registered and video generation is unavailable.
-    pub video_gen_config: crate::implementations::grow_build::video_gen::VideoGenConfig,
-    /// Optional deploy service configuration. When enabled, the
-    /// `deploy_app` tool connects to the service at call time using the shared
-    /// API key provider.
+    /// Optional deploy service configuration.
     pub app_builder_deployer_config:
         crate::implementations::grow_build::deploy_app::AppBuilderDeployerConfig,
-    /// Dynamic API key provider for tool HTTP clients.
-    /// When set, clients resolve the API key per-request from this provider
-    /// instead of using the key baked into their config at construction time.
-    /// Prevents 401 failures when a session outlives the initial token lifetime.
-    pub api_key_provider: Option<crate::types::SharedApiKeyProvider>,
     /// Auth provider which returns a xai_computer_hub_sdk::AuthCredential. Can be used by
     /// tools that need to authenticate with services.
-    ///
-    /// Not to be confused with the api_key_provider, which is a legacy
-    /// provider used by the shell's auth manager.
     pub auth_provider: Option<xai_computer_hub_sdk::SharedAuthProvider>,
-    /// Optional 401-attribution callback for tool HTTP clients. When
-    /// set, a 401 from `image_gen` / `video_gen`
-    /// emits an `auth_401_attribution` event via this hook. Hosts can
-    /// wire this to the same attribution sink used for inference-side
-    /// 401s so tool and chat auth failures share one diagnostics path.
-    pub attribution_callback: Option<crate::SharedAttributionCallback>,
     /// Tag name for `<system-reminder>` wrappers in tool result text.
     /// Defaults to [`crate::reminders::DEFAULT_REMINDER_TAG`] (hyphen).
     /// Hosts that expect a different tag name may override this.
@@ -683,10 +657,6 @@ impl ToolRegistryBuilder {
         b.register::<grow_build::TaskTool>();
         b.register_with_params::<grow_build::WebFetchTool, grow_build::web_fetch::WebFetchParams>();
         b.register::<grow_build::LspTool>();
-        b.register::<grow_build::ImageGenTool>();
-        b.register::<grow_build::ImageEditTool>();
-        b.register::<grow_build::ImageToVideoTool>();
-        b.register::<grow_build::ReferenceToVideoTool>();
         b.register::<grow_build::EnterPlanModeTool>();
         b.register::<grow_build::ExitPlanModeTool>();
         b.register_with_params::<
@@ -1005,40 +975,6 @@ impl ToolRegistryBuilder {
         }
         if let Some(lsp) = ctx.lsp {
             resources.insert(lsp);
-        }
-        let mut image_gen_config = ctx.image_gen_config;
-        let mut video_gen_config = ctx.video_gen_config;
-        if let Some(session_id) = &ctx.owner_session_id {
-            image_gen_config.stamp_session_id_header(session_id);
-            video_gen_config.stamp_session_id_header(session_id);
-        }
-        if image_gen_config.has_credentials() {
-            match crate::implementations::grow_build::image_gen::ImageGenClient::new(
-                &image_gen_config,
-                ctx.api_key_provider.clone(),
-            ) {
-                Ok(client) => {
-                    let client = client.with_attribution_callback(ctx.attribution_callback.clone());
-                    resources.insert(client);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create ImageGenClient: {e}");
-                }
-            }
-        }
-        if video_gen_config.is_enabled() {
-            match crate::implementations::grow_build::video_gen::VideoGenClient::new(
-                &video_gen_config,
-                ctx.api_key_provider.clone(),
-            ) {
-                Ok(client) => {
-                    let client = client.with_attribution_callback(ctx.attribution_callback.clone());
-                    resources.insert(client);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create VideoGenClient: {e}");
-                }
-            }
         }
         if let crate::implementations::grow_build::web_fetch::WebFetchConfig::Enabled { params } =
             &ctx.web_fetch_config
@@ -2116,15 +2052,9 @@ mod tests {
             web_fetch_config:
                 crate::implementations::grow_build::web_fetch::WebFetchConfig::default(),
             lsp: None,
-            image_gen_config:
-                crate::implementations::grow_build::image_gen::ImageGenConfig::default(),
-            video_gen_config:
-                crate::implementations::grow_build::video_gen::VideoGenConfig::default(),
             app_builder_deployer_config:
                 crate::implementations::grow_build::deploy_app::AppBuilderDeployerConfig::default(),
-            api_key_provider: None,
             auth_provider: None,
-            attribution_callback: None,
             system_reminder_tag: crate::reminders::DEFAULT_REMINDER_TAG,
         }
     }
@@ -2267,7 +2197,6 @@ mod tests {
     #[tokio::test]
     async fn full_toolset_descriptions_render_cleanly() {
         use crate::implementations::grow_build::{
-            IMAGE_GEN_TOOL_NAME, IMAGE_TO_VIDEO_TOOL_NAME, REFERENCE_TO_VIDEO_TOOL_NAME,
             SCHEDULER_CREATE_TOOL_NAME, SCHEDULER_DELETE_TOOL_NAME,
         };
         let builder = ToolRegistryBuilder::new();
@@ -2287,9 +2216,6 @@ mod tests {
                 "task",
                 "web_fetch",
                 "lsp",
-                IMAGE_GEN_TOOL_NAME,
-                IMAGE_TO_VIDEO_TOOL_NAME,
-                REFERENCE_TO_VIDEO_TOOL_NAME,
                 "monitor",
                 SCHEDULER_CREATE_TOOL_NAME,
                 SCHEDULER_DELETE_TOOL_NAME,

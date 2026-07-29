@@ -216,13 +216,6 @@ pub enum MemoryFlushTrigger {
 
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
-pub enum MediaType {
-    Image,
-    Video,
-}
-
-#[derive(Serialize, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
 pub enum PagerCommandSource {
     Builtin,
     NonBuiltin,
@@ -1054,17 +1047,6 @@ pub struct MemoryFlushed {
 }
 
 // ---------------------------------------------------------------------------
-// Media Generation
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize)]
-pub struct MediaGenerated {
-    pub media_type: MediaType,
-    pub success: bool,
-    pub prompt_length: usize,
-}
-
-// ---------------------------------------------------------------------------
 // Session End
 // ---------------------------------------------------------------------------
 
@@ -1462,7 +1444,6 @@ diagnostics_event!(ActionStationarityStop, "action_stationarity_stop");
 diagnostics_event!(ToolCallCompleted, "tool_call_completed");
 diagnostics_event!(ModelResponseReceived, "model_response_received");
 diagnostics_event!(MemoryFlushed, "memory_flushed");
-diagnostics_event!(MediaGenerated, "media_generated");
 diagnostics_event!(SessionEnded, "session_ended");
 diagnostics_event!(PagerSlashCommand, "pager_slash_command");
 diagnostics_event!(PlanSubmit, "plan_submit");

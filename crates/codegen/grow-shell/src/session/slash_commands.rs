@@ -477,8 +477,6 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "home",
             "hooks",
             "howto",
-            "imagine",
-            "imagine-video",
             "import-claude",
             "jump",
             "login",
@@ -1923,11 +1921,11 @@ mod tests {
 
     #[test]
     fn build_tools_meta_serialises_tool_names() {
-        let names = vec!["scheduler_create".to_string(), "image_gen".to_string()];
+        let names = vec!["scheduler_create".to_string(), "web_fetch".to_string()];
         let v = build_tools_meta(&names);
         assert_eq!(
             serde_json::Value::Object(v),
-            serde_json::json!({"tools": ["scheduler_create", "image_gen"]})
+            serde_json::json!({"tools": ["scheduler_create", "web_fetch"]})
         );
     }
 

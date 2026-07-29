@@ -168,12 +168,6 @@ pub struct ScrollbackState {
     /// of an O(n) full rebuild.
     gaps_may_be_dirty: bool,
 
-    /// Last observed [`ffmpeg_available`](crate::inline_media_ffmpeg::ffmpeg_available).
-    /// A false→true flip (user installs ffmpeg mid-session) must rebuild the
-    /// layout so reserved heights match the now-full-size posters — otherwise a
-    /// poster paints over the text below its (still banner-sized) reservation.
-    ffmpeg_available_snapshot: bool,
-
     /// Set of group-start EntryIds whose group has been manually expanded
     /// by the user (pressing l/Enter on the group header). When a group's
     /// first entry ID is in this set, the fold pass (`groups::apply`) marks
@@ -240,7 +234,6 @@ impl ScrollbackState {
             appearance: AppearanceConfig::default(),
             batch_depth: 0,
             gaps_may_be_dirty: false,
-            ffmpeg_available_snapshot: false,
             expanded_groups: HashSet::new(),
             generation: 0,
             content_generation: 0,
@@ -1498,13 +1491,6 @@ impl ScrollbackState {
     /// pane.render_with_scratch(area, buf, &state, &mut scratch);
     /// ```
     pub fn prepare_layout(&mut self, width: u16, height: u16) -> bool {
-        // Mid-session ffmpeg install: invalidate cached banner-sized reservations.
-        if !self.ffmpeg_available_snapshot && crate::inline_media_ffmpeg::ffmpeg_available() {
-            self.ffmpeg_available_snapshot = true;
-            self.gaps_may_be_dirty = true;
-            self.invalidate_layout_cache();
-        }
-
         // Bump generation when viewport dimensions change — screen coordinates
         // of visible links shift, so the VisibleLinkMap must be rebuilt.
         if height != self.viewport_height || width != self.last_width {

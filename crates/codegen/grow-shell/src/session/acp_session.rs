@@ -1830,8 +1830,6 @@ mod laziness_integration_tests;
 #[path = "acp_session_tests/load_user_prompts_tests.rs"]
 mod load_user_prompts_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/media_gen_auth_retry_tests.rs"]
-mod media_gen_auth_retry_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/memory_config_tests.rs"]
 mod memory_config_tests;

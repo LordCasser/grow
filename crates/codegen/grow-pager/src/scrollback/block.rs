@@ -4,8 +4,7 @@ use ratatui::style::Style;
 use ratatui::text::{Span, Text};
 
 use crate::diff::DiffHunk;
-use crate::inline_media_ffmpeg::inline_media_reserved_rows;
-use crate::prompt_images::{InlineMediaInfo, ScrollbackImageRef, ScrollbackVideoRef};
+use crate::prompt_images::{InlineMediaInfo, ScrollbackImageRef};
 // Imported (rather than referenced as `crate::…`) so the default trait method
 // below stays free of `crate::` tokens: `#[enum_delegate::register]` captures
 // default method bodies into a generated macro, where `crate::` trips
@@ -183,11 +182,6 @@ pub trait BlockContent {
         &[]
     }
 
-    /// Video file references in this block (default: none).
-    fn video_references(&self) -> &[ScrollbackVideoRef] {
-        &[]
-    }
-
     /// Inline media metadata for blocks that should display media inline in
     /// the scrollback. The renderer uses this to reserve height and the draw
     /// loop uses it to emit terminal image escape sequences. Default: none.
@@ -217,7 +211,8 @@ pub trait BlockContent {
         // `EntryRenderer::inline_media_rows` reserves. The line count needs the
         // laid-out output; the generic wrapper can't know it otherwise.
         let content_lines = self.output(ctx).lines.len() as u16;
-        let (rows, _total_rows) = inline_media_reserved_rows(&info, ctx.width);
+        let (rows, _total_rows) =
+            crate::scrollback::render::inline_image_reserved_rows(&info, ctx.width);
         vec![AnchoredMedia {
             info,
             row_offset: content_lines + 1,
@@ -243,9 +238,9 @@ pub trait BlockContent {
     }
 
     /// For media blocks on terminals without inline-graphics support, returns
-    /// `(path, is_video)` so the block can render a clickable text `[Open]`
+    /// the path so the block can render a clickable text `[Open Image]`
     /// line. `None` on graphics terminals (the overlay hosts its own buttons).
-    fn inline_open_button(&self) -> Option<(std::path::PathBuf, bool)> {
+    fn inline_open_button(&self) -> Option<std::path::PathBuf> {
         None
     }
 }
@@ -535,10 +530,6 @@ impl BlockContent for RenderBlock {
         delegate_block!(self, image_references())
     }
 
-    fn video_references(&self) -> &[crate::prompt_images::ScrollbackVideoRef] {
-        delegate_block!(self, video_references())
-    }
-
     fn inline_media(&self) -> Option<InlineMediaInfo> {
         delegate_block!(self, inline_media())
     }
@@ -555,7 +546,7 @@ impl BlockContent for RenderBlock {
         delegate_block!(self, estimate_extra_rows())
     }
 
-    fn inline_open_button(&self) -> Option<(std::path::PathBuf, bool)> {
+    fn inline_open_button(&self) -> Option<std::path::PathBuf> {
         delegate_block!(self, inline_open_button())
     }
 }
@@ -926,9 +917,9 @@ impl RenderBlock {
         )
     }
 
-    /// Absolute path of the media (image/video) this block references, if it is
-    /// a media-generation tool result. Used to resolve the short relative paths
-    /// the model prints in prose (`images/1.jpg`) to a clickable link.
+    /// Absolute path of the image this block references, if any. Used to
+    /// resolve short relative paths printed in prose (`images/1.jpg`) to a
+    /// clickable link.
     pub(crate) fn media_ref_path(&self) -> Option<std::path::PathBuf> {
         match self {
             RenderBlock::ToolCall(ToolCallBlock::Other(b)) => b.media_ref_path(),
@@ -1030,9 +1021,7 @@ impl RenderBlock {
 
     /// Whether this block supports the fullscreen viewer.
     pub fn supports_fullscreen(&self) -> bool {
-        self.has_normal_fullscreen_viewer()
-            || !self.image_references().is_empty()
-            || !self.video_references().is_empty()
+        self.has_normal_fullscreen_viewer() || !self.image_references().is_empty()
     }
 
     /// Whether this block supports copy-to-clipboard.
@@ -1235,7 +1224,6 @@ mod tests {
                 path: std::path::PathBuf::from("/tmp/img.png"),
                 width: 400,
                 height: 200,
-                is_video: false,
                 alt_text: String::new(),
             })
         }

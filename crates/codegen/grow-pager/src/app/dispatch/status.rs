@@ -332,7 +332,7 @@ pub(super) fn dispatch_show_tasks(app: &mut AppView) -> Vec<Effect> {
 ///
 /// Targets the top-level agent view (where the prompt lives), not a
 /// focused subagent view: the modal's tick/draw plumbing runs on the
-/// top-level view, mirroring the video viewer.
+/// top-level view, like the other full-screen overlays.
 pub(super) fn dispatch_open_gboom(app: &mut AppView) -> Vec<Effect> {
     use crate::terminal::image::{GraphicsProtocol, detect_graphics_protocol};
     let ActiveView::Agent(id) = app.active_view else {
@@ -353,7 +353,6 @@ pub(super) fn dispatch_open_gboom(app: &mut AppView) -> Vec<Effect> {
     // a leaked rx would mis-feed the next image viewer's poll loop).
     agent.image_viewer = None;
     agent.image_load_rx = None;
-    agent.video_viewer = None;
     agent.gboom = Some(crate::gboom::GboomState::new());
     vec![]
 }

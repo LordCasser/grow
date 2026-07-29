@@ -228,7 +228,7 @@ const RENDER_REVISION: u8 = 3;
 /// A detection skeleton: it records detection results and exposes each diagram's
 /// source, but never renders and tracks no per-diagram render state. Constructed
 /// once at message construction/finish (never per streaming chunk), mirroring
-/// the image/video reference precedent. Rendering is lazy — driven by the
+/// image-reference detection. Rendering is lazy — driven by the
 /// affordance row's `[Open]`/`[Copy path]` click, not by this type.
 #[derive(Debug, Clone, Default)]
 pub struct MermaidContent {

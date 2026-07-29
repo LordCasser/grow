@@ -58,12 +58,8 @@ async fn tool_bridge_routes_writes_through_injected_fs() {
         memory_backend: None,
         web_fetch_config: Default::default(),
         lsp: None,
-        image_gen_config: Default::default(),
-        video_gen_config: Default::default(),
         app_builder_deployer_config: Default::default(),
-        api_key_provider: None,
         auth_provider: None,
-        attribution_callback: None,
         system_reminder_tag: grow_tools::reminders::DEFAULT_REMINDER_TAG,
     };
     let bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)

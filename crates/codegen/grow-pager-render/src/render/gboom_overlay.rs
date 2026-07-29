@@ -1,7 +1,7 @@
 //! `/gboom` easter-egg overlay chrome (border, title, HUD bar).
 //!
 //! The game frame itself is rendered via post-flush kitty escape sequences
-//! by the caller, matching the image/video viewer pattern.
+//! by the caller, matching the image-viewer pattern.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -28,7 +28,7 @@ pub fn render_gboom_overlay(
 
     crate::render::color::dim_area(buf, area, bg, 0.5);
 
-    // 90% centered popup, like the video viewer.
+    // 90% centered popup, like the other full-screen overlays.
     let popup_width = ((area.width as u32 * 90) / 100)
         .max(30)
         .min(area.width as u32) as u16;

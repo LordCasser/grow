@@ -88,8 +88,6 @@ pub struct AgentBuilder {
     memory_backend: Option<Arc<dyn grow_tools::types::memory_backend::MemoryBackend>>,
     web_fetch_config: grow_tools::implementations::grow_build::web_fetch::WebFetchConfig,
     lsp: Option<std::sync::Arc<dyn grow_tools::implementations::lsp::LspBackend>>,
-    image_gen_config: grow_tools::implementations::grow_build::image_gen::ImageGenConfig,
-    video_gen_config: grow_tools::implementations::grow_build::video_gen::VideoGenConfig,
     app_builder_deployer_config:
         grow_tools::implementations::grow_build::deploy_app::AppBuilderDeployerConfig,
     write_file_enabled: bool,
@@ -107,8 +105,6 @@ pub struct AgentBuilder {
     ask_user_question_params_json: Option<serde_json::Map<String, serde_json::Value>>,
     plugin_registry: Option<std::sync::Arc<crate::plugins::PluginRegistry>>,
     context_window_tokens: Option<u64>,
-    api_key_provider: Option<grow_tools::types::SharedApiKeyProvider>,
-    attribution_callback: Option<grow_tools::SharedAttributionCallback>,
     /// Session-scoped MCP tool-result inline cap (bytes). When `Some`, seeded
     /// into the toolset's `TruncationCfg` resource after finalize, where the
     /// MCP truncation path consults it before the process-global cap. The
@@ -227,8 +223,6 @@ impl AgentBuilder {
             memory_backend: None,
             web_fetch_config: Default::default(),
             lsp: None,
-            image_gen_config: Default::default(),
-            video_gen_config: Default::default(),
             app_builder_deployer_config: Default::default(),
             write_file_enabled: true,
             subagents_enabled: false,
@@ -242,8 +236,6 @@ impl AgentBuilder {
             ask_user_question_params_json: None,
             plugin_registry: None,
             context_window_tokens: None,
-            api_key_provider: None,
-            attribution_callback: None,
             mcp_max_output_bytes: None,
             system_reminder_tag: grow_tools::reminders::DEFAULT_REMINDER_TAG,
             persisted_announced_skill_names: None,
@@ -440,33 +432,6 @@ impl AgentBuilder {
         self.lsp = Some(handle);
         self
     }
-    /// Set the image generation configuration.
-    ///
-    /// When `Enabled`, an `ImageGenClient` is created and injected into
-    /// the ToolBridge's resources and the `image_gen` tool is registered,
-    /// allowing image generation via the xAI Imagine API with session
-    /// credentials. When `Disabled` (default), the tool is not registered.
-    pub fn with_image_gen_config(
-        mut self,
-        config: grow_tools::implementations::grow_build::image_gen::ImageGenConfig,
-    ) -> Self {
-        self.image_gen_config = config;
-        self
-    }
-    /// Set the video generation configuration.
-    ///
-    /// When `Enabled`, a `VideoGenClient` is created and injected into
-    /// the ToolBridge's resources and the `video_gen` tool is registered,
-    /// allowing video generation via the xAI Video Generation API with
-    /// session credentials. When `Disabled` (default), the tool is not
-    /// registered.
-    pub fn with_video_gen_config(
-        mut self,
-        config: grow_tools::implementations::grow_build::video_gen::VideoGenConfig,
-    ) -> Self {
-        self.video_gen_config = config;
-        self
-    }
     /// Set the deploy service configuration.
     pub fn with_app_builder_deployer_config(
         mut self,
@@ -476,27 +441,6 @@ impl AgentBuilder {
         self
     }
     /// Set the dynamic API key provider for tool HTTP clients.
-    pub fn with_api_key_provider(
-        mut self,
-        provider: grow_tools::types::SharedApiKeyProvider,
-    ) -> Self {
-        self.api_key_provider = Some(provider);
-        self
-    }
-    /// Set the 401-attribution callback for media tool HTTP clients. When set, a 401
-    /// from any of those tools emits an `auth_401_attribution`
-    /// event identifies the failing media operation. Callers should pass the
-    /// same `ShellAttribution` instance they wire into
-    /// `grow_sampler::SamplerConfig::attribution_callback` so
-    /// all 401s share the same `AuthManager` reference and land in
-    /// the same Axiom dataset.
-    pub fn with_attribution_callback(
-        mut self,
-        callback: grow_tools::SharedAttributionCallback,
-    ) -> Self {
-        self.attribution_callback = Some(callback);
-        self
-    }
     /// Override the system-reminder tag name used in tool result text.
     ///
     /// Defaults to `"system-reminder"` (hyphen). Harnesses trained on a
@@ -698,24 +642,6 @@ impl AgentBuilder {
                 tool_config
                     .tools
                     .push((&grow_tools::implementations::grow_build::LspTool).into());
-            }
-            if self.image_gen_config.image_gen_enabled() {
-                tool_config
-                    .tools
-                    .push((&grow_tools::implementations::grow_build::ImageGenTool).into());
-            }
-            if self.image_gen_config.image_edit_enabled() {
-                tool_config
-                    .tools
-                    .push((&grow_tools::implementations::grow_build::ImageEditTool).into());
-            }
-            if self.video_gen_config.is_enabled() {
-                tool_config
-                    .tools
-                    .push((&grow_tools::implementations::grow_build::ImageToVideoTool).into());
-                tool_config
-                    .tools
-                    .push((&grow_tools::implementations::grow_build::ReferenceToVideoTool).into());
             }
             let has_write_tool = tool_config
                 .tools
@@ -957,12 +883,8 @@ impl AgentBuilder {
                 memory_backend: self.memory_backend,
                 web_fetch_config: self.web_fetch_config,
                 lsp: self.lsp,
-                image_gen_config: self.image_gen_config,
-                video_gen_config: self.video_gen_config,
                 app_builder_deployer_config: self.app_builder_deployer_config,
-                api_key_provider: self.api_key_provider,
                 auth_provider: None,
-                attribution_callback: self.attribution_callback,
                 system_reminder_tag: self.system_reminder_tag,
             },
         )

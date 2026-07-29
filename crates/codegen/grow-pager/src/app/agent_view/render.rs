@@ -720,7 +720,6 @@ impl AgentView {
         > = Vec::new();
         if self.inline_media_active
             && (self.image_viewer.is_some()
-                || self.video_viewer.is_some()
                 || self.gboom.is_some()
                 || self.block_viewer.is_some()
                 || self.extensions_modal.is_some()
@@ -3526,49 +3525,6 @@ impl AgentView {
             self.pane_areas = layout.pane_areas();
             return (None, prompt_post_flush);
         }
-        if let Some(ref viewer) = self.video_viewer {
-            use crate::terminal::image::{GraphicsProtocol, detect_graphics_protocol};
-            use crate::views::shortcuts_bar::HintItem;
-            let overlay_area = Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width,
-                height: layout.shortcuts.y.saturating_sub(area.y),
-            };
-            let mut video_escape_emitted = false;
-            if let Some(popup_rect) = crate::render::video_overlay::render_video_overlay(
-                buf,
-                overlay_area,
-                viewer,
-                theme.bg_base,
-                theme.text_primary,
-                theme.gray_dim,
-            ) {
-                if let Some(esc) = crate::terminal::overlay::volatile_centered(
-                    viewer.current_frame_data(),
-                    viewer.video_width,
-                    viewer.video_height,
-                    popup_rect,
-                ) {
-                    prompt_post_flush = Some(esc.into());
-                    video_escape_emitted = true;
-                }
-                if !video_escape_emitted && detect_graphics_protocol() == GraphicsProtocol::Kitty {
-                    let clear = crate::terminal::overlay::clear_kitty();
-                    prompt_post_flush = Some(clear.into());
-                }
-            }
-            let play_label = if viewer.playing { "pause" } else { "play" };
-            let hints = vec![
-                HintItem::new(key!(Esc), "close"),
-                HintItem::new(key!(' '), play_label),
-                HintItem::new(key!(Left), "back"),
-                HintItem::new(key!(Right), "fwd"),
-            ];
-            ShortcutsBar::new(&hints).render(layout.shortcuts, buf);
-            self.pane_areas = layout.pane_areas();
-            return (None, prompt_post_flush);
-        }
         if let Some(gboom) = self.gboom.as_mut() {
             use crate::terminal::image::{GraphicsProtocol, detect_graphics_protocol};
             use crate::views::shortcuts_bar::HintItem;
@@ -3898,32 +3854,17 @@ impl AgentView {
                 {
                     let rect = placement.screen_rect;
                     let center_x = |len: usize| rect.x + rect.width.saturating_sub(len as u16) / 2;
-                    if placement.info.is_video && !crate::inline_media_ffmpeg::ffmpeg_available() {
-                        use crate::inline_media_ffmpeg::{FFMPEG_HINT_TEXT, ffmpeg_install_cmd};
-                        let warn = Style::default().fg(theme.warning);
-                        buf.set_string_safe(
-                            center_x(FFMPEG_HINT_TEXT.len()),
-                            rect.y,
-                            FFMPEG_HINT_TEXT,
-                            warn,
-                        );
-                        if let Some(cmd) = ffmpeg_install_cmd() {
-                            let dim = Style::default().fg(theme.gray_dim);
-                            buf.set_string_safe(center_x(cmd.len()), rect.y + 1, cmd, dim);
-                        }
-                    } else {
-                        let spinner_frames = crate::glyphs::braille_spinner_frames();
-                        let tick = self.scrollback.current_tick() as usize;
-                        let spinner = spinner_frames[tick % spinner_frames.len()];
-                        let label = format!("{spinner} Loading...");
-                        let cy = rect.y + rect.height / 2;
-                        buf.set_string_safe(
-                            center_x(label.len()),
-                            cy,
-                            &label,
-                            Style::default().fg(theme.gray_dim),
-                        );
-                    }
+                    let spinner_frames = crate::glyphs::braille_spinner_frames();
+                    let tick = self.scrollback.current_tick() as usize;
+                    let spinner = spinner_frames[tick % spinner_frames.len()];
+                    let label = format!("{spinner} Loading...");
+                    let cy = rect.y + rect.height / 2;
+                    buf.set_string_safe(
+                        center_x(label.len()),
+                        cy,
+                        &label,
+                        Style::default().fg(theme.gray_dim),
+                    );
                 }
                 if let Some(esc) = self.build_inline_media_escapes(placement) {
                     all_escapes.push_str(&esc);
@@ -3938,109 +3879,46 @@ impl AgentView {
                     let sb_area = self.pane_areas.scrollback;
                     let button_visible =
                         button_y >= sb_area.y && button_y < sb_area.y + sb_area.height;
-                    if placement.info.is_video {
-                        self.inline_media_hits
-                            .video_play_areas
-                            .push((rect, path.clone()));
-                        if button_visible {
-                            let is_playing = matches!(
-                                self.inline_video,
-                                Some(ref vid) if vid.path == *path && !vid.finished
-                            );
-                            let play_label: String = if is_playing {
-                                let vid = self.inline_video.as_ref().unwrap();
-                                let dur_s = vid.frames.len() as f64 / vid.fps;
-                                let pos_s = vid.current_frame as f64 / vid.fps;
-                                format!(
-                                    "{}:{:02} / {}:{:02}",
-                                    pos_s as u32 / 60,
-                                    pos_s as u32 % 60,
-                                    dur_s as u32 / 60,
-                                    dur_s as u32 % 60,
-                                )
-                            } else {
-                                "[Play]".to_string()
-                            };
-                            let open_label = "[Open]";
-                            let gap = 3u16;
-                            let total = play_label.len() as u16 + gap + open_label.len() as u16;
-                            let start_x = rect.x + rect.width.saturating_sub(total) / 2;
-                            buf.set_string_safe(
-                                start_x,
-                                button_y,
-                                &play_label,
-                                Style::default().fg(theme.gray),
-                            );
-                            if !is_playing {
-                                self.inline_media_hits.play_buttons.push((
-                                    Rect {
-                                        x: start_x,
-                                        y: button_y,
-                                        width: play_label.len() as u16,
-                                        height: 1,
-                                    },
-                                    path.clone(),
-                                ));
-                            }
-                            let open_x = start_x + play_label.len() as u16 + gap;
-                            buf.set_string_safe(
-                                open_x,
-                                button_y,
-                                open_label,
-                                Style::default().fg(theme.gray),
-                            );
-                            self.inline_media_hits.open_buttons.push((
-                                Rect {
-                                    x: open_x,
-                                    y: button_y,
-                                    width: open_label.len() as u16,
-                                    height: 1,
-                                },
-                                path.clone(),
-                            ));
-                        }
-                    } else {
-                        self.inline_media_hits
-                            .media_areas
-                            .push((rect, path.clone()));
-                        if button_visible {
-                            let open_label = "[Open]";
-                            let copy_label = "[Copy]";
-                            let gap = 3u16;
-                            let total = open_label.len() as u16 + gap + copy_label.len() as u16;
-                            let start_x = rect.x + rect.width.saturating_sub(total) / 2;
-                            buf.set_string_safe(
-                                start_x,
-                                button_y,
-                                open_label,
-                                Style::default().fg(theme.gray),
-                            );
-                            self.inline_media_hits.open_buttons.push((
-                                Rect {
-                                    x: start_x,
-                                    y: button_y,
-                                    width: open_label.len() as u16,
-                                    height: 1,
-                                },
-                                path.clone(),
-                            ));
-                            let copy_x = start_x + open_label.len() as u16 + gap;
-                            buf.set_string_safe(
-                                copy_x,
-                                button_y,
-                                copy_label,
-                                Style::default().fg(theme.gray),
-                            );
-                            self.inline_media_hits.copy_image_buttons.push((
-                                Rect {
-                                    x: copy_x,
-                                    y: button_y,
-                                    width: copy_label.len() as u16,
-                                    height: 1,
-                                },
-                                path.clone(),
-                            ));
-                        }
+                    self.inline_media_hits
+                        .media_areas
+                        .push((rect, path.clone()));
+                    if button_visible {
+                        let open_label = "[Open]";
+                        let copy_label = "[Copy]";
+                        let gap = 3u16;
+                        let total = open_label.len() as u16 + gap + copy_label.len() as u16;
+                        let start_x = rect.x + rect.width.saturating_sub(total) / 2;
+                        buf.set_string_safe(
+                            start_x,
+                            button_y,
+                            open_label,
+                            Style::default().fg(theme.gray),
+                        );
+                        self.inline_media_hits.open_buttons.push((
+                            Rect {
+                                x: start_x,
+                                y: button_y,
+                                width: open_label.len() as u16,
+                                height: 1,
+                            },
+                            path.clone(),
+                        ));
+                        let copy_x = start_x + open_label.len() as u16 + gap;
+                        buf.set_string_safe(
+                            copy_x,
+                            button_y,
+                            copy_label,
+                            Style::default().fg(theme.gray),
+                        );
+                        self.inline_media_hits.copy_image_buttons.push((
+                            Rect {
+                                x: copy_x,
+                                y: button_y,
+                                width: copy_label.len() as u16,
+                                height: 1,
+                            },
+                            path.clone(),
+                        ));
                     }
                 }
             }
@@ -4083,7 +3961,6 @@ impl AgentView {
             }
         } else if self.inline_media_active {
             self.inline_media_active = false;
-            self.stop_inline_playback();
             let mut clear_esc = String::new();
             for &id in self.inline_media_ids.values() {
                 clear_esc.push_str(&crate::terminal::image::clear_kitty_image(id));

@@ -270,15 +270,11 @@ impl BlockContent for ToolCallBlock {
         delegate_tool!(self, image_references())
     }
 
-    fn video_references(&self) -> &[crate::prompt_images::ScrollbackVideoRef] {
-        delegate_tool!(self, video_references())
-    }
-
     fn inline_media(&self) -> Option<crate::prompt_images::InlineMediaInfo> {
         delegate_tool!(self, inline_media())
     }
 
-    fn inline_open_button(&self) -> Option<(std::path::PathBuf, bool)> {
+    fn inline_open_button(&self) -> Option<std::path::PathBuf> {
         delegate_tool!(self, inline_open_button())
     }
 

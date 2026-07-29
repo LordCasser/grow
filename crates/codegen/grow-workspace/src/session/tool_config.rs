@@ -304,9 +304,8 @@ fn ensure_session_dir(root: &std::path::Path, session_id: &str) -> (PathBuf, std
 pub(crate) use crate::ENV_TEST_LOCK as TOOL_STATE_ENV_LOCK;
 /// [`SessionContextFactory`] for workspace server sessions.
 ///
-/// When constructed with an [`AuthProvider`] and API base URL, gen tools
-/// (image_gen, video_gen) are enabled using the provider's current
-/// OAuth token. Without auth, gen tools default to `Disabled`.
+/// When constructed with an [`AuthProvider`], hub-backed tools can use the
+/// provider's current OAuth token.
 ///
 /// When [`with_tool_state_home`](Self::with_tool_state_home) is set, each
 /// session's [`SessionContext::state_path`] is rooted at
@@ -325,7 +324,6 @@ pub(crate) use crate::ENV_TEST_LOCK as TOOL_STATE_ENV_LOCK;
 /// [`LocalTerminalBackend`]: grow_tools::computer::local::LocalTerminalBackend
 pub struct WorkspaceSessionContextFactory {
     auth: Option<xai_computer_hub_sdk::SharedAuthProvider>,
-    api_base_url: Option<String>,
     /// Resolved `$GROW_WORKSPACE_HOME` when tool-state persistence is enabled;
     /// `None` disables it. Resolved once by the caller so the factory performs
     /// no per-build env reads.
@@ -340,15 +338,13 @@ impl WorkspaceSessionContextFactory {
     pub fn new() -> Self {
         Self {
             auth: None,
-            api_base_url: None,
             tool_state_home: None,
         }
     }
-    /// Factory with auth — gen tools use the provider's live token.
-    pub fn with_auth(auth: xai_computer_hub_sdk::SharedAuthProvider, api_base_url: String) -> Self {
+    /// Factory with auth for tools that access the connected computer hub.
+    pub fn with_auth(auth: xai_computer_hub_sdk::SharedAuthProvider) -> Self {
         Self {
             auth: Some(auth),
-            api_base_url: Some(api_base_url),
             tool_state_home: None,
         }
     }
@@ -405,49 +401,9 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
         backend: Arc<dyn grow_tools::computer::types::TerminalBackend>,
     ) -> grow_tools::registry::types::SessionContext {
         use grow_tools::implementations::grow_build::deploy_app::AppBuilderDeployerConfig;
-        use grow_tools::implementations::grow_build::image_gen::ImageGenConfig;
-        use grow_tools::implementations::grow_build::video_gen::VideoGenConfig;
         let fs = Arc::new(grow_tools::computer::local::LocalFs)
             as Arc<dyn grow_tools::computer::types::AsyncFileSystem>;
         let notification_handle = grow_tools::notification::ToolNotificationHandle::noop();
-        let (image_gen_config, video_gen_config, app_builder_deployer_config) =
-            if let (Some(auth), Some(url)) = (&self.auth, &self.api_base_url) {
-                let cred = auth.current();
-                match cred {
-                    xai_computer_hub_sdk::AuthCredential::Bearer { token, .. } => {
-                        let headers = build_proxy_headers(url);
-                        (
-                            ImageGenConfig::Enabled {
-                                api_key: token.clone(),
-                                base_url: url.clone(),
-                                extra_headers: headers.clone(),
-                                image_gen_enabled: true,
-                                image_edit_enabled: true,
-                                model_override: None,
-                                edit_model_override: None,
-                            },
-                            VideoGenConfig::Enabled {
-                                api_key: token.clone(),
-                                base_url: url.clone(),
-                                extra_headers: headers.clone(),
-                                zdr_video_output_s3: None,
-                            },
-                            AppBuilderDeployerConfig::default(),
-                        )
-                    }
-                    _ => (
-                        ImageGenConfig::default(),
-                        VideoGenConfig::default(),
-                        AppBuilderDeployerConfig::default(),
-                    ),
-                }
-            } else {
-                (
-                    ImageGenConfig::default(),
-                    VideoGenConfig::default(),
-                    AppBuilderDeployerConfig::default(),
-                )
-            };
         grow_tools::registry::types::SessionContext {
             backend,
             fs,
@@ -463,12 +419,8 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
             memory_backend: None,
             web_fetch_config: build_web_fetch_config(),
             lsp: None,
-            image_gen_config,
-            video_gen_config,
-            app_builder_deployer_config,
-            api_key_provider: None,
+            app_builder_deployer_config: AppBuilderDeployerConfig::default(),
             auth_provider: self.auth.clone(),
-            attribution_callback: None,
             system_reminder_tag: grow_tools::reminders::DEFAULT_REMINDER_TAG,
         }
     }
@@ -485,29 +437,6 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
             std::sync::LazyLock::new(|| Arc::new(ToolRegistryBuilder::new().known_tool_ids()));
         IDS.clone()
     }
-}
-/// Build extra headers for API calls routed through the chat proxy.
-/// Mirrors the shell's `inject_proxy_headers` logic.
-fn build_proxy_headers(base_url: &str) -> indexmap::IndexMap<String, String> {
-    let mut headers = indexmap::IndexMap::new();
-    let version = grow_version::VERSION;
-    headers.insert(
-        "user-agent".to_string(),
-        format!("grow-workspace/{version}"),
-    );
-    headers.insert("x-grow-client-version".to_string(), version.to_string());
-    headers.insert(
-        "x-grow-client-identifier".to_string(),
-        std::env::var("GROW_CLIENT_NAME").unwrap_or_else(|_| "grow-shell".to_string()),
-    );
-    if base_url.contains("cli-chat-proxy") || base_url.contains("chat-proxy") {
-        headers.insert("X-Grow-Token-Auth".to_string(), "grow-cli".to_string());
-        headers.insert(
-            "x-authenticateresponse".to_string(),
-            "authenticate-response".to_string(),
-        );
-    }
-    headers
 }
 /// Build web fetch config. Enabled with default params unless
 /// `GROW_DISABLE_WEB_FETCH=1` is set.
@@ -582,12 +511,8 @@ pub mod test_support {
                 memory_backend: None,
                 web_fetch_config: Default::default(),
                 lsp: None,
-                image_gen_config: Default::default(),
-                video_gen_config: Default::default(),
                 app_builder_deployer_config: Default::default(),
-                api_key_provider: None,
                 auth_provider: None,
-                attribution_callback: None,
                 system_reminder_tag: grow_tools::reminders::DEFAULT_REMINDER_TAG,
             }
         }

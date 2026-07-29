@@ -179,9 +179,6 @@ pub fn workspace_grow_build_toolset() -> ToolServerConfig {
     tools.push((&grow_build::EnterPlanModeTool).into());
     tools.push((&grow_build::ExitPlanModeTool).into());
     tools.push((&grow_build::AskUserQuestionTool).into());
-    tools.push((&grow_build::ImageGenTool).into());
-    tools.push((&grow_build::ImageToVideoTool).into());
-    tools.push((&grow_build::ReferenceToVideoTool).into());
     tools.push((&grow_build::WebFetchTool).into());
     tools.push((&memory::search_tool::MemorySearchImpl).into());
     tools.push((&memory::get_tool::MemoryGetImpl).into());
@@ -459,10 +456,6 @@ fn orchestrator_toolset() -> ToolServerConfig {
             (&grow_build::MonitorTool).into(),
             // Web fetch
             (&grow_build::WebFetchTool).into(),
-            // Imagine
-            (&grow_build::ImageGenTool).into(),
-            (&grow_build::ImageToVideoTool).into(),
-            (&grow_build::ReferenceToVideoTool).into(),
             // Memory
             (&memory::MemorySearchImpl).into(),
             (&memory::MemoryGetImpl).into(),
@@ -723,7 +716,7 @@ pub struct AgentDefinition {
     pub agents_md: bool,
     /// When true (the default), the AgentBuilder layers session-level optional
     /// tools on top of the agent's declared `tool_config`: memory_search/get,
-    /// web_fetch, lsp, image_gen, video_gen, OpenCode write
+    /// web_fetch, lsp, and OpenCode write
     /// fallback, and the plan-mode tools.
     ///
     /// Set this to `false` for harnesses that need an exact, minimal toolset

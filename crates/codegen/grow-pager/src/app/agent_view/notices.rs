@@ -151,17 +151,16 @@ impl AgentView {
             // Subagent fullscreen takeover: draw early-returns into
             // draw_subagent_fullscreen and never paints the parent banner.
             || self.active_subagent.is_some()
-            // Fullscreen viewers render after the banner paints: image/video/
-            // block dim the whole region down to the shortcuts row (banner
+            // Fullscreen viewers render after the banner paints: image/block
+            // viewers dim the whole region down to the shortcuts row (banner
             // included). line_viewer's overlay stops at turn_status.y when a
             // turn status shows, so it does NOT always cover the banner — kept
             // anyway as a safe over-refusal (the gate cannot know layout
             // heights, and a tip during viewer reading is unwanted regardless).
             || self.line_viewer.is_some()
             || self.image_viewer.is_some()
-            || self.video_viewer.is_some()
             || self.block_viewer.is_some()
-            // /gboom dims the same down-to-shortcuts region as the video viewer.
+            // /gboom dims the same down-to-shortcuts region as other viewers.
             || self.gboom.is_some()
             // Extensions/agents modals are centered popups (render_modal_window)
             // that capture all input and early-return out of draw; distinct

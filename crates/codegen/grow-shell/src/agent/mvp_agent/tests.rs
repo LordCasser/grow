@@ -523,12 +523,8 @@ async fn file_toolset_override_e2e_to_finalized_toolset() {
         memory_backend: None,
         web_fetch_config: Default::default(),
         lsp: None,
-        image_gen_config: grow_tools::implementations::grow_build::image_gen::ImageGenConfig::default(),
-        video_gen_config: grow_tools::implementations::grow_build::video_gen::VideoGenConfig::default(),
         app_builder_deployer_config: grow_tools::implementations::grow_build::deploy_app::AppBuilderDeployerConfig::default(),
-        api_key_provider: None,
         auth_provider: None,
-        attribution_callback: None,
         system_reminder_tag: grow_tools::reminders::DEFAULT_REMINDER_TAG,
     };
     let toolset = builder
@@ -1805,8 +1801,8 @@ async fn auth_type_session_based_no_current_returns_session_token() {
 }
 /// BYOK guard. Users with `provider.api_key` must continue to report `ApiKey`
 /// regardless of live-token state -- BYOK sessions have nothing to refresh,
-/// and reporting `SessionToken` would route through cli-chat-proxy paths
-/// (image_gen / video_gen base_url) that don't apply to BYOK keys.
+/// and reporting `SessionToken` would route through OAuth proxy paths that do
+/// not apply to BYOK keys.
 #[tokio::test(flavor = "current_thread")]
 async fn auth_type_provider_api_key_no_current_returns_api_key() {
     let agent = build_minimal_agent_for_tests();
@@ -1880,121 +1876,6 @@ async fn cached_token_fallthrough_prefers_api_key_for_deployment_key() {
         Some(PROVIDER_API_KEY_METHOD_ID),
         "deployment-key user (GROW_API_KEY set, no kill switch) must fall \
          through to provider.api_key on a dead cached_token -- not interactive login",
-    );
-}
-/// Verifies the 4-state matrix of `(disable_zdr_incompatible_tools, zdr_video_output_s3)`:
-///
-/// | ZDR flag | S3 config | Result                                      |
-/// |----------|-----------|---------------------------------------------|
-/// | false    | None      | Enabled, no S3 (normal non-ZDR mode)        |
-/// | true     | None      | Disabled (ZDR with no escape hatch)         |
-/// | false    | Some      | Enabled, S3 **not** threaded (non-ZDR)      |
-/// | true     | Some      | Enabled, S3 threaded (ZDR with upload path) |
-#[tokio::test(flavor = "current_thread")]
-async fn prepare_video_gen_config_disabled_when_zdr_flag_set() {
-    use grow_tools::implementations::grow_build::video_gen::{
-        S3AccessCredentials, VideoGenConfig, ZdrVideoOutputS3Config,
-    };
-    fn zdr_s3() -> ZdrVideoOutputS3Config {
-        ZdrVideoOutputS3Config {
-            bucket: "team-videos".into(),
-            endpoint: "https://s3.example.com".into(),
-            region: "us-east-1".into(),
-            key_prefix: "grow-videos/".into(),
-            expires_secs: 900,
-            read_write: S3AccessCredentials {
-                access_key_id: "AKIA...".into(),
-                secret_access_key: "secret".into(),
-            },
-            read_only: None,
-        }
-    }
-    let agent = build_minimal_agent_for_tests();
-    agent.sampling_config.borrow_mut().api_key = Some("test-key".to_string());
-    assert!(matches!(
-        agent.prepare_video_gen_config(),
-        VideoGenConfig::Enabled { .. }
-    ));
-    agent.cfg.borrow_mut().disable_zdr_incompatible_tools = true;
-    assert!(matches!(
-        agent.prepare_video_gen_config(),
-        VideoGenConfig::Disabled
-    ));
-    agent.cfg.borrow_mut().zdr_video_output_s3 = Some(zdr_s3());
-    agent.cfg.borrow_mut().disable_zdr_incompatible_tools = false;
-    let VideoGenConfig::Enabled {
-        zdr_video_output_s3: s3_when_non_zdr,
-        ..
-    } = agent.prepare_video_gen_config()
-    else {
-        panic!("expected Enabled");
-    };
-    assert!(
-        s3_when_non_zdr.is_none(),
-        "S3 config must not be threaded when ZDR flag is off"
-    );
-    agent.cfg.borrow_mut().disable_zdr_incompatible_tools = true;
-    let VideoGenConfig::Enabled {
-        zdr_video_output_s3,
-        ..
-    } = agent.prepare_video_gen_config()
-    else {
-        panic!("expected Enabled");
-    };
-    assert!(zdr_video_output_s3.as_ref().is_some_and(|c| c.is_valid()));
-}
-#[tokio::test(flavor = "current_thread")]
-async fn prepare_video_gen_config_respects_feature_flag() {
-    use grow_tools::implementations::grow_build::video_gen::VideoGenConfig;
-    let agent = build_minimal_agent_for_tests();
-    agent.sampling_config.borrow_mut().api_key = Some("test-key".to_string());
-    assert!(matches!(
-        agent.prepare_video_gen_config(),
-        VideoGenConfig::Enabled { .. }
-    ));
-    agent.cfg.borrow_mut().features.video_gen = Some(false);
-    assert!(matches!(
-        agent.prepare_video_gen_config(),
-        VideoGenConfig::Disabled
-    ));
-}
-/// The imagine tools bypass cli-chat-proxy (direct API calls), so the server
-/// can only scope the coding data-retention opt-out (`/privacy opt-out`) to
-/// Build traffic via the `x-grow-client-identifier` header. If this header is
-/// dropped, opted-out users' imagine prompts are logged/retained server-side.
-#[tokio::test(flavor = "current_thread")]
-async fn prepare_image_gen_config_sends_client_identifier_header() {
-    use grow_tools::implementations::grow_build::image_gen::ImageGenConfig;
-    let agent = build_minimal_agent_for_tests();
-    agent.sampling_config.borrow_mut().api_key = Some("test-key".to_string());
-    let ImageGenConfig::Enabled { extra_headers, .. } = agent.prepare_image_gen_config() else {
-        panic!("expected Enabled");
-    };
-    assert_eq!(
-        extra_headers
-            .get("x-grow-client-identifier")
-            .map(String::as_str),
-        Some(crate::http::process_client_identifier().as_str()),
-        "imagine API calls must carry the client identifier so the server \
-         applies the coding ZDR opt-out to Build traffic"
-    );
-}
-/// Same contract for video generation (also a direct API call).
-#[tokio::test(flavor = "current_thread")]
-async fn prepare_video_gen_config_sends_client_identifier_header() {
-    use grow_tools::implementations::grow_build::video_gen::VideoGenConfig;
-    let agent = build_minimal_agent_for_tests();
-    agent.sampling_config.borrow_mut().api_key = Some("test-key".to_string());
-    let VideoGenConfig::Enabled { extra_headers, .. } = agent.prepare_video_gen_config() else {
-        panic!("expected Enabled");
-    };
-    assert_eq!(
-        extra_headers
-            .get("x-grow-client-identifier")
-            .map(String::as_str),
-        Some(crate::http::process_client_identifier().as_str()),
-        "video gen API calls must carry the client identifier so the server \
-         applies the coding ZDR opt-out to Build traffic"
     );
 }
 /// Regression: `grow/auth/info` must return profile fields even when the

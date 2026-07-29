@@ -1,7 +1,7 @@
-//! Inline media: image/video viewer keys, playback state, media click
+//! Inline media: image viewer keys, media click
 //! handling, and mermaid diagram affordances.
 
-use super::{AgentView, InlineVideoState};
+use super::AgentView;
 use crate::app::app_view::InputOutcome;
 use crate::render::SafeBuf;
 use crate::terminal::overlay::{self, PostFlush};
@@ -54,29 +54,7 @@ impl AgentView {
 
         let path = &placement.info.path;
 
-        // During inline video playback, transmit the current frame.
-        let is_video_playing = self.inline_video.as_ref().is_some_and(|v| v.path == *path);
-        if is_video_playing {
-            let vid_id = self.get_or_alloc_media_id(path);
-            let video = self.inline_video.as_ref()?;
-            let frame_data = &video.frames[video.current_frame];
-            let (w, h) = decode_image_dimensions(frame_data)
-                .unwrap_or((placement.info.width, placement.info.height));
-            let transmit = crate::terminal::image::transmit_inline_image(frame_data, vid_id)?;
-            let place = crate::terminal::image::place_inline_image(
-                frame_data,
-                w,
-                h,
-                placement.screen_rect,
-                placement.full_rows,
-                placement.top_crop_rows,
-                vid_id,
-                true,
-            )?;
-            return Some(format!("{transmit}{place}"));
-        }
-
-        // Static image or video poster frame.
+        // Static image.
         // Allocate the Kitty id only *after* bytes are in hand: a not-yet-written
         // path (or a failed read) must return `None` without recording an id, or
         // the next time the path is seen `needs_transmit` would be false and only
@@ -87,13 +65,8 @@ impl AgentView {
         if needs_transmit {
             // Load bytes from disk (or use cached bytes if available).
             if !self.inline_media_cache.contains_key(path) {
-                let bytes = if placement.info.is_video {
-                    let (frame_bytes, _, _) = crate::prompt_images::extract_poster_frame(path)?;
-                    crate::terminal::image::prepare_overlay_image_bytes(&frame_bytes)?
-                } else {
-                    let raw = std::fs::read(path).ok()?;
-                    crate::terminal::image::prepare_overlay_image_bytes(&raw)?
-                };
+                let raw = std::fs::read(path).ok()?;
+                let bytes = crate::terminal::image::prepare_overlay_image_bytes(&raw)?;
                 // Bound the cache: a long image-heavy session must not pin
                 // every encoded image for its lifetime. Evicting drops only
                 // CPU-side bytes — Kitty placements already transmitted stay
@@ -306,19 +279,10 @@ impl AgentView {
     /// manages its own placements — draining it too would just force a
     /// re-transmit.
     pub(super) fn take_own_inline_media_clear_escapes(&mut self) -> Option<String> {
-        // Also proceed when only playback state remains (`inline_video` Some
-        // with no active placements — e.g. frames finished loading after the
-        // media scrolled off): the drain must still stop the ticking video,
-        // or it keeps holding the animation gate open invisibly and its
-        // eventual drop is never purged.
-        if !self.inline_media_active
-            && self.inline_media_ids.is_empty()
-            && self.inline_video.is_none()
-        {
+        if !self.inline_media_active && self.inline_media_ids.is_empty() {
             return None;
         }
         self.inline_media_active = false;
-        self.stop_inline_playback();
         let mut clear_esc = String::new();
         for &id in self.inline_media_ids.values() {
             clear_esc.push_str(&crate::terminal::image::clear_kitty_image(id));
@@ -327,29 +291,6 @@ impl AgentView {
         self.inline_media_iterm_emitted.clear();
         self.last_placed_ids.clear();
         (!clear_esc.is_empty()).then_some(clear_esc)
-    }
-
-    /// Stop inline video playback, dropping the pre-extracted frame set
-    /// (~50–300 MB), and request a post-draw purge for it. Returns whether a
-    /// video was actually playing — callers on the draw path rely on the
-    /// deferred request (never a synchronous purge mid-frame), and image-only
-    /// paths (`None` here) must not purge at all.
-    pub(super) fn stop_inline_playback(&mut self) -> bool {
-        let had_video = self.inline_video.take().is_some();
-        if had_video {
-            crate::memory_release::request_release_after_draw_with("inline-video-stop");
-        }
-        had_video
-    }
-
-    /// Install freshly-extracted inline video frames, dropping (and
-    /// requesting a post-draw purge for) any previous playback's frame set.
-    /// Called from the tick path when the background extraction completes.
-    pub(crate) fn replace_inline_video(&mut self, video: crate::app::agent_view::InlineVideoState) {
-        if self.inline_video.replace(video).is_some() {
-            // Switching videos: the previous frame set just dropped.
-            crate::memory_release::request_release_after_draw_with("inline-video-replace");
-        }
     }
 
     /// Subagent fullscreen views render inline media with their own ids —
@@ -384,8 +325,7 @@ impl AgentView {
         );
     }
 
-    /// Open a media file in the OS-native default application (Preview,
-    /// default video player, etc.). Shared by the `[Open]` button, the
+    /// Open an image file in the OS-native default application. Shared by the `[Open]` button, the
     /// inline-image click target, and the Enter-key handler.
     pub(crate) fn open_media_natively(&mut self, path: &std::path::Path) -> bool {
         if crate::app::link_opener::open_path(path) {
@@ -395,40 +335,6 @@ impl AgentView {
             self.show_toast("Could not open file");
             false
         }
-    }
-
-    /// Start or restart inline video playback. If already playing for this
-    /// path, restarts from the beginning. Frames are extracted via ffmpeg in
-    /// a background thread so the UI never blocks.
-    pub(crate) fn start_inline_video_playback(&mut self, path: &std::path::Path) {
-        // If already loaded for this path, just restart.
-        if let Some(ref mut video) = self.inline_video
-            && video.path == path
-        {
-            video.current_frame = 0;
-            video.finished = false;
-            video.last_frame_time = std::time::Instant::now();
-            return;
-        }
-        // Extract frames in a background thread to avoid blocking the UI.
-        let path_owned = path.to_path_buf();
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.video_load_rx = Some(rx);
-        self.show_toast("Loading video\u{2026}");
-        std::thread::spawn(move || {
-            let result =
-                crate::prompt_images::VideoViewerState::open_from_path(&path_owned).map(|viewer| {
-                    InlineVideoState {
-                        path: path_owned,
-                        frames: viewer.frames,
-                        current_frame: 0,
-                        last_frame_time: std::time::Instant::now(),
-                        fps: viewer.fps,
-                        finished: false,
-                    }
-                });
-            let _ = tx.send(result);
-        });
     }
 
     // -- Inline media click handling -----------------------------------------
@@ -442,8 +348,7 @@ impl AgentView {
     ) -> Option<InputOutcome> {
         let pos = ratatui::layout::Position::new(col, row);
 
-        // [Open] button or inline image → open natively. Checked before the
-        // play targets so a video's [Open] button opens rather than plays.
+        // [Open] button or inline image → open natively.
         let open_target = self
             .inline_media_hits
             .open_buttons
@@ -453,19 +358,6 @@ impl AgentView {
             .map(|(_, path)| path.clone());
         if let Some(path) = open_target {
             self.open_media_natively(&path);
-            return Some(InputOutcome::Changed);
-        }
-
-        // [Play] button or video poster → start/restart inline playback.
-        let play_target = self
-            .inline_media_hits
-            .play_buttons
-            .iter()
-            .chain(self.inline_media_hits.video_play_areas.iter())
-            .find(|(rect, _)| rect.contains(pos))
-            .map(|(_, path)| path.clone());
-        if let Some(path) = play_target {
-            self.start_inline_video_playback(&path);
             return Some(InputOutcome::Changed);
         }
 
@@ -552,42 +444,6 @@ impl AgentView {
         }
     }
 
-    // -- Video viewer input --------------------------------------------------
-
-    /// Handle a key event in the video viewer modal.
-    pub(super) fn handle_video_viewer_key(&mut self, key: &KeyEvent) -> InputOutcome {
-        use crossterm::event::KeyCode;
-
-        let Some(ref mut viewer) = self.video_viewer else {
-            return InputOutcome::Unchanged;
-        };
-
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                // Clear the Kitty image before closing.
-                grow_shell::util::with_locked_stderr(|stderr| {
-                    let clear = PostFlush::from(overlay::clear_kitty());
-                    let _ = clear.write_to(stderr);
-                });
-                self.video_viewer = None;
-                // The viewer's pre-extracted frame set (~50–300 MB for a
-                // typical clip) just dropped; return the pages to the OS.
-                crate::memory_release::release_retained_memory_with("video-viewer-close");
-            }
-            KeyCode::Char(' ') => {
-                viewer.toggle_play_pause();
-            }
-            KeyCode::Right | KeyCode::Char('l') => {
-                viewer.seek_forward();
-            }
-            KeyCode::Left | KeyCode::Char('h') => {
-                viewer.seek_backward();
-            }
-            _ => {}
-        }
-        InputOutcome::Changed
-    }
-
     // -- /gboom easter egg input ------------------------------------------------
 
     /// Handle a key event in the `/gboom` game modal.
@@ -597,8 +453,8 @@ impl AgentView {
         };
         match gboom.handle_key(key) {
             crate::gboom::GboomKeyOutcome::Close => {
-                // Clear the kitty image before closing (same as the video
-                // viewer) so no stale frame lingers in the cell grid.
+                // Clear the kitty image before closing so no stale frame
+                // lingers in the cell grid.
                 grow_shell::util::with_locked_stderr(|stderr| {
                     let clear = PostFlush::from(overlay::clear_kitty());
                     let _ = clear.write_to(stderr);
@@ -632,147 +488,6 @@ mod tests {
 
     fn make_agent() -> crate::app::agent_view::AgentView {
         crate::test_util::make_agent_view(None, "/tmp")
-    }
-
-    fn stub_inline_video() -> crate::app::agent_view::InlineVideoState {
-        crate::app::agent_view::InlineVideoState {
-            path: std::path::PathBuf::from("/tmp/clip.mp4"),
-            frames: vec![Vec::new()],
-            current_frame: 0,
-            last_frame_time: std::time::Instant::now(),
-            fps: 1.0,
-            finished: false,
-        }
-    }
-
-    /// Closing the video viewer modal drops the pre-extracted frame set —
-    /// the purge must fire on close and never on other viewer keys.
-    #[test]
-    fn video_viewer_close_releases_retained_memory() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        test_support::install_counting_hook();
-
-        let mut agent = make_agent();
-        agent.video_viewer = Some(crate::prompt_images::VideoViewerState::test_stub());
-
-        // A non-close key keeps the viewer (and its frames) → no purge.
-        let before = test_support::calls();
-        agent.handle_video_viewer_key(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        assert!(agent.video_viewer.is_some());
-        assert_eq!(
-            test_support::calls(),
-            before,
-            "play/pause drops nothing and must not purge"
-        );
-
-        // Esc closes → frames drop → one purge.
-        let before = test_support::calls();
-        agent.handle_video_viewer_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(agent.video_viewer.is_none());
-        assert_eq!(
-            test_support::calls(),
-            before + 1,
-            "closing the viewer must purge after the frame set drops"
-        );
-    }
-
-    /// Draining inline-media placements requests a POST-DRAW purge only when
-    /// live playback (a frame set) was actually dropped — image-only clears
-    /// must not, and the purge must never run synchronously (these paths sit
-    /// inside `draw`). Serialized: the deferred-request flag is process-wide.
-    #[test]
-    #[serial_test::serial(MEMORY_RELEASE_DEFER)]
-    fn inline_media_clear_defers_release_only_for_video() {
-        test_support::install_counting_hook();
-        // Drain any stale request left by an earlier test in this group.
-        crate::memory_release::run_deferred_release();
-
-        let mut agent = make_agent();
-
-        // Image-only placements active: clear drops no frames → no request.
-        agent.inline_media_active = true;
-        let before = test_support::calls();
-        let _ = agent.take_inline_media_clear_escapes();
-        crate::memory_release::run_deferred_release();
-        assert_eq!(
-            test_support::calls(),
-            before,
-            "an image-only media clear must not purge"
-        );
-
-        // Active inline playback: sync no purge; the drain runs it → one.
-        agent.inline_media_active = true;
-        agent.inline_video = Some(stub_inline_video());
-        let before = test_support::calls();
-        let _ = agent.take_inline_media_clear_escapes();
-        assert!(agent.inline_video.is_none());
-        assert_eq!(
-            test_support::calls(),
-            before,
-            "draw-path video stop must never purge synchronously"
-        );
-        crate::memory_release::run_deferred_release();
-        assert_eq!(
-            test_support::calls(),
-            before + 1,
-            "the post-draw drain must purge the dropped frame set"
-        );
-
-        // Orphaned playback (frames finished loading after the media
-        // scrolled off: no active flag, no placements): the drain must still
-        // stop the video and request its purge.
-        agent.inline_media_active = false;
-        agent.inline_video = Some(stub_inline_video());
-        let before = test_support::calls();
-        assert!(agent.take_inline_media_clear_escapes().is_none());
-        assert!(
-            agent.inline_video.is_none(),
-            "orphaned playback must be stopped by the drain"
-        );
-        crate::memory_release::run_deferred_release();
-        assert_eq!(test_support::calls(), before + 1);
-
-        // Nothing at all: the early no-placement return → no request.
-        let before = test_support::calls();
-        let _ = agent.take_inline_media_clear_escapes();
-        crate::memory_release::run_deferred_release();
-        assert_eq!(
-            test_support::calls(),
-            before,
-            "a no-op clear must not purge"
-        );
-    }
-
-    /// Installing freshly-extracted frames purges the PREVIOUS playback's
-    /// frame set (deferred), and never purges on first install.
-    #[test]
-    #[serial_test::serial(MEMORY_RELEASE_DEFER)]
-    fn replace_inline_video_defers_release_only_when_replacing() {
-        test_support::install_counting_hook();
-        crate::memory_release::run_deferred_release();
-
-        let mut agent = make_agent();
-
-        // First install: nothing drops → no request.
-        let before = test_support::calls();
-        agent.replace_inline_video(stub_inline_video());
-        crate::memory_release::run_deferred_release();
-        assert_eq!(
-            test_support::calls(),
-            before,
-            "first frame-set install drops nothing and must not purge"
-        );
-
-        // Replacement: the old frame set drops → deferred purge.
-        let before = test_support::calls();
-        agent.replace_inline_video(stub_inline_video());
-        assert_eq!(
-            test_support::calls(),
-            before,
-            "tick-path replacement must never purge synchronously"
-        );
-        crate::memory_release::run_deferred_release();
-        assert_eq!(test_support::calls(), before + 1);
     }
 
     /// Closing the image viewer drops the decoded overlay image — purge

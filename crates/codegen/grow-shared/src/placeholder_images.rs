@@ -102,34 +102,6 @@ pub fn display_number_from_meta(meta: Option<&agent_client_protocol::Meta>) -> O
         .and_then(|n| usize::try_from(n).ok())
 }
 
-/// Build the per-turn `[Image #N]` → reference registry (see
-/// [`AttachedImages`](grow_tools::types::resources::AttachedImages))
-/// from the user's inline attached images.
-///
-/// The display number comes from each block's `_meta` (set by the TUI),
-/// falling back to 1-based position for callers that don't record it. The
-/// reference is one `image_edit`'s resolver can read directly: the bare
-/// durable path (from the `file://` URI) when present, else a
-/// `data:<mime>;base64,<data>` URL.
-pub fn attached_image_references(
-    images: &[agent_client_protocol::ImageContent],
-) -> Vec<(usize, String)> {
-    images
-        .iter()
-        .enumerate()
-        .map(|(idx, image)| {
-            let display_number = display_number_from_meta(image.meta.as_ref()).unwrap_or(idx + 1);
-            let reference =
-                if let Some(path) = image.uri.as_deref().and_then(|u| u.strip_prefix("file://")) {
-                    path.to_owned()
-                } else {
-                    format!("data:{};base64,{}", image.mime_type, image.data)
-                };
-            (display_number, reference)
-        })
-        .collect()
-}
-
 /// File extensions accepted by the placeholder loader.
 ///
 /// SVG is intentionally **not** in this list: SVG is XML text with no
@@ -1193,8 +1165,8 @@ mod tests {
         assert_eq!(raw[0].mime_type, "image/png");
         assert!(!raw[0].data.is_empty());
         assert!(raw[0].uri.as_deref().unwrap().starts_with("file://"));
-        // The recovered image carries its real `[Image #N]` number so
-        // `image_edit` can resolve the token to it by number.
+        // The recovered image carries its real `[Image #N]` number so the
+        // visual attachment keeps the same stable display label.
         assert_eq!(display_number_from_meta(raw[0].meta.as_ref()), Some(1));
     }
 
@@ -1459,68 +1431,5 @@ mod tests {
         // the bytes against the on-disk PNG.
         assert_eq!(loaded.mime_type, "image/png");
         assert_eq!(loaded.data, PNG_BYTES);
-    }
-
-    #[test]
-    fn attached_image_references_prefers_file_path_over_data() {
-        // `[Image #N]` resolution should hand `image_edit` a bare on-disk
-        // path (from the durable `file://` URI) so it reads the session
-        // copy rather than re-decoding a large base64 blob.
-        let img = agent_client_protocol::ImageContent::new("AAAA", "image/png")
-            .uri(Some(
-                "file:///Users/me/.grow/sessions/s/images/image-1.png".into(),
-            ))
-            .meta(display_number_meta(1));
-        let refs = attached_image_references(std::slice::from_ref(&img));
-        assert_eq!(
-            refs,
-            vec![(
-                1,
-                "/Users/me/.grow/sessions/s/images/image-1.png".to_string()
-            )]
-        );
-    }
-
-    #[test]
-    fn attached_image_references_falls_back_to_data_url() {
-        // No durable URI (e.g. persistence failed): keep the inline bytes
-        // as a data URL so the token still resolves to the right image.
-        let img = agent_client_protocol::ImageContent::new("BBBB", "image/jpeg")
-            .meta(display_number_meta(2));
-        let refs = attached_image_references(std::slice::from_ref(&img));
-        assert_eq!(refs, vec![(2, "data:image/jpeg;base64,BBBB".to_string())]);
-    }
-
-    #[test]
-    fn attached_image_references_keys_by_meta_number_not_position() {
-        // Non-contiguous numbers (`#1`, `#3`) survive a mid-compose chip
-        // removal; the registry must key on the recorded number, not the
-        // list position.
-        let mk = |data: &str, n: usize| {
-            agent_client_protocol::ImageContent::new(data, "image/png").meta(display_number_meta(n))
-        };
-        let refs = attached_image_references(&[mk("first", 1), mk("third", 3)]);
-        assert_eq!(
-            refs,
-            vec![
-                (1, "data:image/png;base64,first".to_string()),
-                (3, "data:image/png;base64,third".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn attached_image_references_falls_back_to_position_without_meta() {
-        // Older client / non-TUI caller with no recorded number: fall back
-        // to 1-based position so the common contiguous case still resolves.
-        let mk = |data: &str| agent_client_protocol::ImageContent::new(data, "image/png");
-        let refs = attached_image_references(&[mk("first"), mk("second")]);
-        assert_eq!(
-            refs,
-            vec![
-                (1, "data:image/png;base64,first".to_string()),
-                (2, "data:image/png;base64,second".to_string()),
-            ]
-        );
     }
 }

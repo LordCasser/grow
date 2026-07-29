@@ -377,7 +377,7 @@ struct RowSegment {
 /// joiner to the *previous* row (see `BlockLine::joiner`): `None` = hard
 /// break, `Some("")` = mid-word wrap, `Some(" ")` = word wrap. Consecutive
 /// rows connected by `Some(..)` joiners are re-joined into one logical line
-/// before matching, so a long path or URL soft-wrapped across rows (imagine
+/// before matching, so a long path or URL soft-wrapped across rows (for example,
 /// media lives at `~/.grow/sessions/%2F…/images/1.jpg`, which wraps in
 /// narrow panes) is detected whole and each row's fragment gets its own
 /// clickable overlay region. Spans within a row are likewise concatenated so
@@ -606,7 +606,7 @@ fn scan_logical_line(
         }
     }
 
-    // Pass 3: relative paths that uniquely match a generated media file
+    // Pass 3: relative paths that uniquely match a known local output file
     // (so bare `word/word.ext` prose is not over-linkified).
     if !media_paths.is_empty() {
         for m in rel_path_re.find_iter(text) {
@@ -679,7 +679,7 @@ mod tests {
         std::fs::write(dir.path().join("images/1.jpg"), b"x").unwrap();
         let media = vec![dir.path().join("images/1.jpg")];
 
-        // Short session-relative path matches the generated media by suffix.
+        // Short session-relative path matches a known local output by suffix.
         let target = local_link_to_file_target("images/1.jpg", &media).unwrap();
         assert_eq!(target, LinkTarget::File(Arc::from(media[0].as_path())));
         let resolved = resolve_link_target(&target).expect("resolved target");
@@ -700,7 +700,7 @@ mod tests {
         assert!(local_link_to_file_target("https://example.com", &media).is_none());
         assert!(local_link_to_file_target("mailto:a@b.c", &media).is_none());
         assert!(local_link_to_file_target("#section", &media).is_none());
-        // Relative path that isn't a known generated media file.
+        // Relative path that isn't a known local output file.
         assert!(local_link_to_file_target("images/2.jpg", &media).is_none());
         // No known media at all.
         assert!(local_link_to_file_target("images/1.jpg", &[]).is_none());
@@ -1239,7 +1239,7 @@ mod tests {
         std::fs::write(dir.path().join("images/1.png"), b"x").unwrap();
         let media = vec![dir.path().join("images/1.png")];
 
-        // A path that isn't a known generated media file → not linkified.
+        // A path that isn't a known local output file → not linkified.
         let line = make_line("edit images/2.png please");
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &media, &mut overlay);
@@ -1254,7 +1254,7 @@ mod tests {
     #[test]
     fn scan_detects_grow_session_media_path() {
         // Dot-directory (`.grow`), percent-encoded session segment, and a
-        // trailing sentence period — the shape of `image_gen` output prose.
+        // trailing sentence period — a common tool-output prose shape.
         let line = make_line("Saved to /Users/alice/.grow/sessions/%2Fabc/00000000/images/1.jpg.");
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
@@ -1271,7 +1271,7 @@ mod tests {
 
     #[test]
     fn scan_detects_media_path_soft_wrapped_across_rows() {
-        // Regression: `image_gen` output prose wraps the long session path
+        // Regression: tool output prose wraps the long session path
         // across visual rows (`joiner: Some("")` mid-word break). Previously
         // each row was scanned in isolation, so only the `/Users/alice`
         // fragment on the first row matched and became clickable.

@@ -74,7 +74,7 @@ fn unauthorized_maps_to_custom_with_unauthorized_subcode() {
 
 #[test]
 fn timeout_with_details() {
-    let err = ToolError::timeout(tid("slow"), "image generation timed out")
+    let err = ToolError::timeout(tid("slow"), "tool execution timed out")
         .with_details(json!({"tool_id": "slow", "elapsed_ms": 2500}));
     let wire: ToolErrorWire = err.into();
     match wire {
@@ -98,14 +98,14 @@ fn cancelled_round_trips_tool_id() {
 
 #[test]
 fn rate_limited_carries_detail_message() {
-    let err = ToolError::rate_limited("You've reached your image generation limit.");
+    let err = ToolError::rate_limited("You've reached the service limit.");
     let wire: ToolErrorWire = err.into();
     match wire {
         ToolErrorWire::Custom {
             subcode, message, ..
         } => {
             assert_eq!(subcode, "rate_limited");
-            assert_eq!(message, "You've reached your image generation limit.");
+            assert_eq!(message, "You've reached the service limit.");
         }
         other => panic!("expected Custom, got {other:?}"),
     }
@@ -145,7 +145,7 @@ fn network_error_maps_to_custom_with_message() {
 fn execution_uses_detail_as_message() {
     let err = ToolError::execution(
         tid("worker"),
-        "image generation failed: model returned empty response",
+        "tool execution failed: model returned empty response",
     )
     .with_source(anyhow::anyhow!("root cause"));
     let wire: ToolErrorWire = err.into();
@@ -154,7 +154,7 @@ fn execution_uses_detail_as_message() {
             assert_eq!(tool_id, tid("worker"));
             assert_eq!(
                 message,
-                "image generation failed: model returned empty response"
+                "tool execution failed: model returned empty response"
             );
         }
         other => panic!("expected Execution, got {other:?}"),

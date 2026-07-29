@@ -764,21 +764,6 @@ pub struct RemoteSettings {
     /// is set in config.toml. Absent → default (**disabled** — ships dark).
     #[serde(default)]
     pub subagent_worktree_snapshot_enabled: Option<bool>,
-    /// `image_gen` / `/imagine`. `None` → env / `[features]` / default on.
-    #[serde(default)]
-    pub image_gen_enabled: Option<bool>,
-    /// remote settings flag: optional Imagine model override for `image_gen`.
-    /// When present and non-empty, `image_gen` uses this model slug
-    /// (e.g. `grow-imagine-image`) instead of the default quality model
-    /// (`grow-imagine-image-quality`). Absent/empty → default model.
-    #[serde(default)]
-    pub image_gen_model_override: Option<String>,
-    /// Optional Imagine model override for `image_edit`. Absent/empty → default.
-    #[serde(default)]
-    pub image_edit_model_override: Option<String>,
-    /// Video tools / `/imagine-video`. `None` → env / `[features]` / default on.
-    #[serde(default)]
-    pub video_gen_enabled: Option<bool>,
     /// When `Some(true)`, enable the process-wide image normalize cache that
     /// amortises decode + integrity-check + re-encode work across SessionActors.
     /// Default: disabled. See `session::normalize_cache`.
@@ -934,28 +919,11 @@ pub struct RemoteSettings {
     pub compaction_verbatim_input: Option<bool>,
     #[serde(default)]
     pub compaction_tool_choice: Option<String>,
-    /// remote settings denylist of optional imagine tools to disable
-    /// (e.g. `["image_edit"]`). When a tool is listed it is authoritatively
-    /// removed from the toolset and local env/config can't re-enable it.
-    /// Absent or not listed → each tool keeps its own default.
-    /// See `Config::resolve_image_edit`.
-    #[serde(default)]
-    pub imagine_tools_disabled: Option<Vec<String>>,
     /// remote settings gate for the `grow workspace` CLI command (Computer Hub
     /// workspace exposure), from `grow_build_settings.workspace_command_enabled`.
     /// `Some(true)` enables it; `None`/`Some(false)` (the default) keep it off.
     #[serde(default)]
     pub workspace_command_enabled: Option<bool>,
-}
-impl RemoteSettings {
-    /// Denylist check for an optional imagine tool. Returns `true` when the
-    /// server sent `imagine_tools_disabled` and it contains `tool` (force-off);
-    /// otherwise `false` (defer to the tool's own default).
-    pub fn imagine_tool_disabled(&self, tool: &str) -> bool {
-        self.imagine_tools_disabled
-            .as_ref()
-            .is_some_and(|list| list.iter().any(|t| t == tool))
-    }
 }
 /// Remote enable tier for the per-tip contextual hints (mirrors the client's
 /// `[ui.contextual_hints]` shape). Each field is a soft default for one tip;

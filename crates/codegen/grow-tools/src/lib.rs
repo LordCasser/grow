@@ -16,8 +16,6 @@ pub use util::mcp_truncate::{
     mcp_max_output_bytes, mcp_max_output_bytes_from_env, set_mcp_max_output_bytes,
 };
 
-pub mod attribution;
-
 pub mod bridge;
 pub mod computer;
 pub mod gitignore;
@@ -32,7 +30,3 @@ pub mod tool_taxonomy;
 pub mod types;
 pub mod util;
 pub mod versions;
-
-pub use attribution::{
-    Auth401AttributionCallback, SENT_BEARER_PREFIX_LEN, SharedAttributionCallback, ToolConsumer,
-};

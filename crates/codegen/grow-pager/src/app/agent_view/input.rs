@@ -48,7 +48,6 @@ impl AgentView {
             || self.scrollback_search.is_some()
             || self.line_viewer.is_some()
             || self.image_viewer.is_some()
-            || self.video_viewer.is_some()
             || self.block_viewer.is_some()
             || self.gboom.is_some()
             || self.show_goal_detail
@@ -84,7 +83,6 @@ impl AgentView {
             && self.line_viewer.is_none()
             && self.active_modal.is_none()
             && self.image_viewer.is_none()
-            && self.video_viewer.is_none()
             && self.gboom.is_none()
             && self.extensions_modal.is_none()
             && self.btw_state.is_none()
@@ -118,12 +116,11 @@ impl AgentView {
     /// Surfaces that own input ahead of the dashboard overlay cascade.
     /// That cascade runs before `handle_input`, so without this guard Left/Esc
     /// on an empty prompt would exit the overlay instead of reaching `/gboom`
-    /// (turn/close), video (seek/close), or image (close).
+    /// (turn/close) or image (close).
     fn modal_owns_input(&self) -> bool {
         self.extensions_modal.is_some()
             || self.active_modal.is_some()
             || self.gboom.is_some()
-            || self.video_viewer.is_some()
             || self.image_viewer.is_some()
     }
     /// Prompt pane focused with an empty draft and no overlay or prompt-local
@@ -544,17 +541,6 @@ impl AgentView {
                         }
                         _ => InputOutcome::Changed,
                     }
-                }
-                _ => InputOutcome::Changed,
-            };
-        }
-        if self.video_viewer.is_some() {
-            return match ev {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    if key!('q', CONTROL).matches(key) {
-                        return InputOutcome::Unchanged;
-                    }
-                    self.handle_video_viewer_key(key)
                 }
                 _ => InputOutcome::Changed,
             };
@@ -2029,11 +2015,6 @@ mod btw_focus_tests {
         block.handle_minimal_input(&key(KeyCode::Esc), &reg);
         assert!(block.block_viewer.is_none(), "block viewer handled Esc");
         assert_minimal_btw_active(&block, "block viewer");
-        let mut video = minimal_btw_agent();
-        video.video_viewer = Some(crate::prompt_images::VideoViewerState::test_stub());
-        video.handle_minimal_input(&key(KeyCode::Esc), &reg);
-        assert!(video.video_viewer.is_none(), "video viewer handled Esc");
-        assert_minimal_btw_active(&video, "video viewer");
         let mut goal = minimal_btw_agent();
         goal.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
         goal.show_goal_detail = true;

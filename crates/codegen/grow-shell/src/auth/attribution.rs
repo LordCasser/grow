@@ -36,7 +36,6 @@
 use std::sync::Arc;
 
 use grow_sampler::{Auth401AttributionCallback, SamplingConsumer};
-use grow_tools::{Auth401AttributionCallback as ToolAuth401AttributionCallback, ToolConsumer};
 use serde_json::Value as JsonValue;
 
 use crate::auth::{AuthManager, TOKEN_TTL, token_suffix};
@@ -110,23 +109,6 @@ impl ShellAttribution {
             session_id,
         })
     }
-
-    /// Tool-side counterpart of [`Self::new`]: returns
-    /// `Arc<dyn grow_tools::Auth401AttributionCallback>` for the
-    /// `with_attribution_callback(...)` builder on each tool HTTP
-    /// client (`ImageGenClient`, `VideoGenClient`).
-    /// The two callbacks share the same underlying impl and emit the
-    /// same `auth_401_attribution` event format -- only the trait
-    /// signature differs (`SamplingConsumer` vs. `ToolConsumer`).
-    pub fn new_tool_callback(
-        auth_manager: Arc<AuthManager>,
-        session_id: Option<String>,
-    ) -> Arc<dyn ToolAuth401AttributionCallback> {
-        Arc::new(Self {
-            auth_manager,
-            session_id,
-        })
-    }
 }
 
 impl Auth401AttributionCallback for ShellAttribution {
@@ -152,31 +134,6 @@ impl Auth401AttributionCallback for ShellAttribution {
     }
 }
 
-/// Tool-side hook: each media tool client
-/// in `grow-tools` emits a 401 attribution event through this
-/// trait when its HTTP request returns UNAUTHORIZED. Same shape as
-/// the sampler-side impl above; routes to the same pair of sinks.
-///
-/// `ToolConsumer::VideoGenStart` and `VideoGenPoll` collapse to the
-/// same [`ConsumerKind::VideoGen`] with different op strings so the
-/// gate query can break down video-gen 401s by phase.
-impl ToolAuth401AttributionCallback for ShellAttribution {
-    fn record_401(&self, consumer: ToolConsumer, sent_bearer_prefix: Option<&str>) {
-        let (kind, op) = match consumer {
-            ToolConsumer::ImageGen => (ConsumerKind::ImageGen, ""),
-            ToolConsumer::VideoGenStart => (ConsumerKind::VideoGen, "start"),
-            ToolConsumer::VideoGenPoll => (ConsumerKind::VideoGen, "poll"),
-        };
-        record_consumer_401(
-            self.auth_manager.as_ref(),
-            self.session_id.as_deref(),
-            kind,
-            op,
-            sent_bearer_prefix,
-        );
-    }
-}
-
 /// Categories of 401-attribution emit sites. Each variant maps to a
 /// fixed prefix in the rendered `consumer` field; the per-site `op`
 /// string is appended after a `.` separator (omitted for variants that
@@ -192,15 +149,6 @@ pub(crate) enum ConsumerKind {
     /// No per-op discriminator -- the consumer string is just
     /// `"IdleResumeModelRefresh"`.
     IdleResumeModelRefresh,
-    /// `grow_tools::ToolConsumer::ImageGen` -- Imagine API
-    /// (`POST /images/generations`). No per-op discriminator;
-    /// consumer string is just `"ImageGen"`.
-    ImageGen,
-    /// `grow_tools::ToolConsumer::VideoGenStart` and
-    /// `VideoGenPoll` -- Video Generation API. The op string is
-    /// `"start"` (`POST /videos/generations`) or `"poll"`
-    /// (`GET /videos/{request_id}`).
-    VideoGen,
 }
 
 impl ConsumerKind {
@@ -209,18 +157,15 @@ impl ConsumerKind {
         match self {
             Self::OaiCompatClient => "OaiCompatClient",
             Self::IdleResumeModelRefresh => "IdleResumeModelRefresh",
-            Self::ImageGen => "ImageGen",
-            Self::VideoGen => "VideoGen",
         }
     }
 
     /// `true` for variants that take a per-operation discriminator
     /// appended as `<prefix>.<op>`. `false` for variants whose
     /// `consumer` string is just the prefix
-    /// (`IdleResumeModelRefresh`, `ImageGen` -- each is
-    /// a single endpoint with no sub-operation).
+    /// (`IdleResumeModelRefresh`).
     fn takes_op(self) -> bool {
-        !matches!(self, Self::IdleResumeModelRefresh | Self::ImageGen)
+        !matches!(self, Self::IdleResumeModelRefresh)
     }
 }
 
@@ -537,8 +482,7 @@ mod tests {
 
     /// `format_consumer` matrix:
     ///   - generic ops append "." + op (`OaiCompatClient.foo`)
-    ///   - IdleResumeModelRefresh and tool variants drop the op
-    ///     (their consumer string has no sub-op axis).
+    ///   - IdleResumeModelRefresh drops the op.
     #[test]
     fn format_consumer_matrix() {
         let cases: &[(ConsumerKind, &str, &str)] = &[
@@ -557,10 +501,6 @@ mod tests {
                 "ignored",
                 "IdleResumeModelRefresh",
             ),
-            (ConsumerKind::ImageGen, "", "ImageGen"),
-            (ConsumerKind::ImageGen, "ignored", "ImageGen"),
-            (ConsumerKind::VideoGen, "start", "VideoGen.start"),
-            (ConsumerKind::VideoGen, "poll", "VideoGen.poll"),
         ];
         for (kind, op, expected) in cases {
             assert_eq!(
@@ -580,44 +520,6 @@ mod tests {
             format_consumer(ConsumerKind::OaiCompatClient, "chat_completions_stream"),
             "OaiCompatClient.chat_completions_stream"
         );
-    }
-
-    /// `ShellAttribution` implements `grow_tools::Auth401AttributionCallback`
-    /// by routing each `ToolConsumer` variant to the right
-    /// `(ConsumerKind, op)` pair, which formats to the expected
-    /// `consumer` string in the emitted payload.
-    #[test]
-    #[serial_test::serial(attribution_emit_count)]
-    fn shell_attribution_tool_impl_routes_to_correct_consumer_strings() {
-        reset_test_emit_count();
-        let (_dir, am) = empty_auth_manager();
-        am.hot_swap(fresh_auth("bearer-1234567890"));
-        let am_arc = Arc::new(am);
-        let cb: Arc<dyn ToolAuth401AttributionCallback> =
-            ShellAttribution::new_tool_callback(am_arc.clone(), Some("sid-tool".into()));
-
-        let cases = [
-            (ToolConsumer::ImageGen, "ImageGen"),
-            (ToolConsumer::VideoGenStart, "VideoGen.start"),
-            (ToolConsumer::VideoGenPoll, "VideoGen.poll"),
-        ];
-
-        for (consumer, expected_consumer_str) in cases {
-            cb.record_401(consumer, Some("bearer-1234567890"));
-            let payload = compute_attribution_payload(
-                am_arc.as_ref(),
-                expected_consumer_str,
-                Some("bearer-1234567890"),
-            );
-            assert_eq!(
-                payload_field(&payload, "consumer"),
-                expected_consumer_str,
-                "ToolConsumer::{consumer:?} should render as {expected_consumer_str:?}",
-            );
-        }
-
-        // Each variant bumped the global counter exactly once.
-        assert_eq!(test_emit_count() as usize, cases.len());
     }
 
     /// Capture `tracing::Span` `on_new_span` callbacks into a

@@ -77,10 +77,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub(crate) struct InlineMediaHitAreas {
     /// Inline image areas (image overlay): clicking opens the file natively.
     pub media_areas: Vec<(ratatui::layout::Rect, std::path::PathBuf)>,
-    /// Video poster areas: clicking starts/restarts inline playback.
-    pub video_play_areas: Vec<(ratatui::layout::Rect, std::path::PathBuf)>,
-    /// `[Play]` button rects: clicking starts/replays inline video.
-    pub play_buttons: Vec<(ratatui::layout::Rect, std::path::PathBuf)>,
     /// `[Open]` button rects (overlay and text fallback): open the file natively.
     pub open_buttons: Vec<(ratatui::layout::Rect, std::path::PathBuf)>,
     /// `[Copy]` button rects (images only): clicking copies the image.
@@ -102,26 +98,6 @@ pub(crate) struct InlineMediaHitAreas {
     ///
     /// [`mermaid_buttons`]: Self::mermaid_buttons
     pub mermaid_sources: Vec<String>,
-}
-/// Inline video playback state for scrollback media entries.
-///
-/// Created when the user clicks or presses Enter on a video poster frame.
-/// Frames are extracted via ffmpeg in a background thread. Playback
-/// advances one frame per tick, stops on the last frame (no loop).
-#[derive(Debug)]
-pub(crate) struct InlineVideoState {
-    /// Video file path (used to match against visible placements).
-    pub path: std::path::PathBuf,
-    /// Pre-extracted frames, protocol-prepared (PNG for Kitty, JPEG for iTerm2).
-    pub frames: Vec<Vec<u8>>,
-    /// Current frame index (0-based).
-    pub current_frame: usize,
-    /// Timestamp of last frame advance (for fps pacing).
-    pub last_frame_time: std::time::Instant,
-    /// Target playback frame rate.
-    pub fps: f64,
-    /// True after the last frame has been displayed.
-    pub finished: bool,
 }
 use super::actions::Action;
 use super::agent::AgentSession;
@@ -1086,8 +1062,6 @@ pub struct AgentView {
     /// viewer spawns a load thread; polled each tick via `try_recv()`.
     pub(crate) image_load_rx:
         Option<std::sync::mpsc::Receiver<crate::prompt_images::ImageLoadResult>>,
-    /// Active video viewer popup (Esc to close, Space to pause).
-    pub(crate) video_viewer: Option<crate::prompt_images::VideoViewerState>,
     /// Active `/gboom` easter-egg game modal.
     pub(crate) gboom: Option<crate::gboom::GboomState>,
     /// Protocol-prepared image bytes keyed by file path. Used for dimension
@@ -1104,10 +1078,6 @@ pub struct AgentView {
         std::collections::HashMap<std::path::PathBuf, ratatui::layout::Rect>,
     /// Counter for allocating the next Kitty image ID.
     pub(crate) next_inline_media_id: u32,
-    /// Active inline video playback (user-initiated via click/Enter).
-    pub(crate) inline_video: Option<InlineVideoState>,
-    /// Receiver for background video frame extraction.
-    pub(crate) video_load_rx: Option<std::sync::mpsc::Receiver<Option<InlineVideoState>>>,
     /// Off-thread Mermaid render runtime (worker channels + the on-click renders
     /// awaiting their result). Lazily created on the first *cache-missing*
     /// `[Open]`/`[Copy path]` click; `None` until then.

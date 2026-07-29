@@ -1964,49 +1964,6 @@ mod tests {
     }
 
     #[test]
-    fn ffmpeg_install_midsession_expands_video_reservation() {
-        use crate::inline_media_ffmpeg::set_ffmpeg_available_for_test;
-        use crate::scrollback::block::RenderBlock;
-        use crate::scrollback::blocks::{OtherToolCallBlock, ToolCallBlock};
-        use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
-
-        // Inline video posters only reserve rows on a Kitty-capable terminal.
-        let _proto = set_protocol_for_test(GraphicsProtocol::Kitty);
-
-        // Building a video ref requires a real file with a video extension.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("clip.mp4");
-        std::fs::write(&path, b"x").unwrap();
-
-        let mut state = ScrollbackState::new();
-        state.push_block(RenderBlock::ToolCall(ToolCallBlock::Other(
-            OtherToolCallBlock::new("image_to_video", "clip").with_media_ref(path.clone(), true),
-        )));
-
-        // Without ffmpeg the entry reserves only the compact banner.
-        let banner_total = {
-            let _no_ffmpeg = set_ffmpeg_available_for_test(false);
-            state.prepare_layout(80, 40);
-            state.scroll_info().2
-        };
-
-        // Installing ffmpeg mid-session must rebuild the layout so the poster
-        // claims full height — otherwise it paints over the text below the
-        // (stale) banner-sized reservation.
-        let poster_total = {
-            let _ffmpeg = set_ffmpeg_available_for_test(true);
-            state.prepare_layout(80, 40);
-            state.scroll_info().2
-        };
-
-        assert!(
-            poster_total > banner_total,
-            "video reservation must grow when ffmpeg appears \
-             (banner={banner_total}, poster={poster_total})"
-        );
-    }
-
-    #[test]
     fn test_hit_test_no_scroll_no_header() {
         // No scroll → no sticky header → all entries hittable
         let state = make_scrollback_for_hittest(2, 80, 20);

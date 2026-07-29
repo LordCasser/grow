@@ -385,8 +385,8 @@ impl<'a> EntryRenderer<'a> {
             .ensure_truncated_height_cached(content_width, &self.appearance, self.cwd)
     }
 
-    /// Extra rows to reserve for inline media preview (images/video poster).
-    /// Returns 0 on non-graphics terminals or when the block has no media.
+    /// Extra rows to reserve for an inline image preview. Returns 0 on
+    /// non-graphics terminals or when the block has no image.
     fn inline_media_rows(&self, content_width: u16) -> u16 {
         use crate::terminal::image::scrollback_inline_overlay_active;
 
@@ -399,7 +399,7 @@ impl<'a> EntryRenderer<'a> {
         // Shared with `inline_media_placements` so the reserved rows match the
         // painted placement exactly.
         let (_image_rows, total_rows) =
-            crate::inline_media_ffmpeg::inline_media_reserved_rows(&media, content_width);
+            crate::scrollback::render::inline_image_reserved_rows(&media, content_width);
         total_rows
     }
 

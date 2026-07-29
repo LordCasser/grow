@@ -795,33 +795,6 @@ impl AvailableSkills {
 /// Session folder for logs and output files.
 #[derive(Debug, Clone)]
 pub struct SessionFolder(pub PathBuf);
-/// Per-turn registry mapping each attached image's `[Image #N]` display
-/// number to a reference `image_edit` can resolve.
-///
-/// The model sees attachments inline (as pixels) and only the `[Image #N]`
-/// token in text — never a path — so this lets `image_edit` resolve that
-/// token instead of fabricating a filesystem path it can't know.
-///
-/// Keyed by display **number**, not list position: numbers are not
-/// renumbered when a chip is removed mid-compose (`#1` and `#3` survive
-/// after `#2`) and images may be dropped during normalization, so the two
-/// diverge. Each reference is a bare filesystem path (the durable
-/// `session_image_path`) or a `data:<mime>;base64,<data>` URL fallback.
-///
-/// Replaced wholesale each turn (empty when there are no attachments) so a
-/// stale registry never resolves to a prior turn's image. Ephemeral — not
-/// persisted, not serde-registered.
-#[derive(Debug, Clone, Default)]
-pub struct AttachedImages(pub Vec<(usize, String)>);
-impl AttachedImages {
-    /// Resolve an `[Image #N]` display number to its reference string.
-    pub fn reference_for(&self, display_number: usize) -> Option<&str> {
-        self.0
-            .iter()
-            .find(|(n, _)| *n == display_number)
-            .map(|(_, reference)| reference.as_str())
-    }
-}
 /// Notification handle for streaming tool output.
 #[derive(Clone)]
 pub struct NotificationHandle(pub ToolNotificationHandle);

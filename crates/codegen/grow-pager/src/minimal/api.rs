@@ -397,7 +397,6 @@ pub fn plan_approval_view(v: &AgentView) -> Option<&PlanApprovalViewState> {
 pub fn minimal_btw_surface_available(v: &AgentView) -> bool {
     v.active_subagent.is_none()
         && v.image_viewer.is_none()
-        && v.video_viewer.is_none()
         && v.gboom.is_none()
         && !(v.show_goal_detail && v.goal_state.is_some())
         && v.line_viewer.is_none()

@@ -28,11 +28,9 @@ use std::sync::Arc;
 ///
 /// This enum enumerates the six HTTP endpoints owned by
 /// `SamplingClient` (chat completions, responses, messages -- each in
-/// streaming and non-streaming form). It does *not* cover image
-/// generation, video generation, web search, or embedding -- those
-/// tools live in `grow-tools`
-/// (`crates/codegen/grow-tools/src/implementations/`), have their
-/// own HTTP clients that do not flow through `SamplingClient`, and
+/// streaming and non-streaming form). It does *not* cover embedding or
+/// other non-inference services, whose HTTP clients do not flow through
+/// `SamplingClient`, and
 /// hook into the `grow_tools::ApiKeyProvider` trait rather than
 /// this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -19,8 +19,6 @@ pub struct AgentMessageBlock {
     content: MarkdownContent,
     /// Cached image references extracted from the markdown source.
     image_refs: Vec<crate::prompt_images::ScrollbackImageRef>,
-    /// Cached video references extracted from the markdown source.
-    video_refs: Vec<crate::prompt_images::ScrollbackVideoRef>,
     /// Detected ` ```mermaid ` diagrams + render skeleton, populated at
     /// construction/finish (never per streaming chunk) like the media refs.
     mermaid: MermaidContent,
@@ -31,13 +29,11 @@ impl AgentMessageBlock {
     pub fn new(text: impl Into<String>) -> Self {
         let text = text.into();
         let image_refs = crate::prompt_images::extract_image_refs(&text);
-        let video_refs = crate::prompt_images::extract_video_refs(&text);
         let content = MarkdownContent::new(text);
         let mermaid = content.mermaid_content();
         Self {
             content,
             image_refs,
-            video_refs,
             mermaid,
         }
     }
@@ -47,7 +43,6 @@ impl AgentMessageBlock {
         Self {
             content: MarkdownContent::streaming(),
             image_refs: Vec::new(),
-            video_refs: Vec::new(),
             mermaid: MermaidContent::default(),
         }
     }
@@ -77,7 +72,6 @@ impl AgentMessageBlock {
         self.content.finish();
         let text = self.content.text();
         self.image_refs = crate::prompt_images::extract_image_refs(&text);
-        self.video_refs = crate::prompt_images::extract_video_refs(&text);
         // Detection runs once the render is final, after the renderer freezes —
         // never per streaming chunk.
         self.mermaid = self.content.mermaid_content();
@@ -222,10 +216,6 @@ impl BlockContent for AgentMessageBlock {
 
     fn image_references(&self) -> &[crate::prompt_images::ScrollbackImageRef] {
         &self.image_refs
-    }
-
-    fn video_references(&self) -> &[crate::prompt_images::ScrollbackVideoRef] {
-        &self.video_refs
     }
 }
 

@@ -153,7 +153,7 @@ fn build_open_path_command(path: &std::path::Path) -> std::process::Command {
 /// - **Windows**: `explorer.exe /select,<path>` reveals + highlights the file
 ///   in Explorer. We deliberately avoid `cmd /c start`, whose `%VAR%`
 ///   expansion corrupts the percent-encoded session-directory segment in
-///   imagine media paths (e.g. `…\C%3A%5CUsers…`).
+///   local image paths (e.g. `…\C%3A%5CUsers…`).
 /// - **macOS / Linux**: `open` / `xdg-open` open the file in its default app.
 pub fn open_path(path: &std::path::Path) -> bool {
     // Never launch a real GUI app in tests.

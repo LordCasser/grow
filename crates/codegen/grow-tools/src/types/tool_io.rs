@@ -19,14 +19,11 @@ use crate::implementations::grow_build::ask_user_question::AskUserQuestionInput;
 use crate::implementations::grow_build::enter_plan_mode::EnterPlanModeInput;
 use crate::implementations::grow_build::exit_plan_mode::ExitPlanModeInput;
 use crate::implementations::grow_build::grep::GrepSearchInput;
-use crate::implementations::grow_build::image_edit::ImageEditInput;
-use crate::implementations::grow_build::image_gen::ImageGenInput;
 use crate::implementations::grow_build::list_dir::ListDirInput;
 use crate::implementations::grow_build::read_file::ReadFileInput;
 use crate::implementations::grow_build::search_replace::SearchReplaceInput;
 use crate::implementations::grow_build::todo::TodoWriteInput;
 use crate::implementations::grow_build::update_goal::UpdateGoalInput;
-use crate::implementations::grow_build::video_gen::{ImageToVideoInput, ReferenceToVideoInput};
 use crate::implementations::grow_build::web_fetch::WebFetchInput;
 use crate::implementations::lsp::LspToolInput;
 use crate::implementations::memory::types::{MemoryGetInput, MemorySearchInput};
@@ -69,10 +66,6 @@ pub enum ToolInput {
     WaitTasks(WaitTasksToolInput),
     KillTask(KillTaskToolInput),
     Task(TaskToolInput),
-    ImageGen(ImageGenInput),
-    ImageEdit(ImageEditInput),
-    ImageToVideo(ImageToVideoInput),
-    ReferenceToVideo(ReferenceToVideoInput),
     WebFetch(WebFetchInput),
     Write(WriteInput),
     ApplyPatch(ApplyPatchInput),

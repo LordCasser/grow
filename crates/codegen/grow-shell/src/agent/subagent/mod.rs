@@ -164,10 +164,6 @@ pub(crate) struct SubagentSpawnContext {
     pub memory_config: Option<crate::config::MemoryConfig>,
     /// Resolved config for web fetch.
     pub web_fetch_config: grow_tools::implementations::grow_build::web_fetch::WebFetchConfig,
-    /// Image generation config (parent-inherited).
-    pub image_gen_config: grow_tools::implementations::grow_build::image_gen::ImageGenConfig,
-    /// Resolved config for video generation.
-    pub video_gen_config: grow_tools::implementations::grow_build::video_gen::VideoGenConfig,
     /// Resolved config for the deploy service.
     pub app_builder_deployer_config:
         grow_tools::implementations::grow_build::deploy_app::AppBuilderDeployerConfig,

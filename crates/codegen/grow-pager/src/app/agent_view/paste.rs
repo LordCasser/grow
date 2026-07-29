@@ -68,7 +68,7 @@ impl AgentView {
             PromptEvent::Ignored => (InputOutcome::Changed, ClipboardTextInsertion::Failed),
         }
     }
-    fn reject_shared_queue_image_edit(
+    fn reject_shared_queue_image_attachment(
         &mut self,
         pasted: &crate::prompt_images::PastedImage,
     ) -> bool {
@@ -160,7 +160,7 @@ impl AgentView {
         );
         let attachment = match image {
             ProbedAttachment::Image(pasted) => {
-                if self.reject_shared_queue_image_edit(&pasted) {
+                if self.reject_shared_queue_image_attachment(&pasted) {
                     return ClipboardPasteCompletion::Failed(
                         ClipboardPasteFailure::AlreadyReported,
                     );
@@ -411,7 +411,7 @@ impl AgentView {
         &mut self,
         mut pasted: crate::prompt_images::PastedImage,
     ) -> bool {
-        if self.reject_shared_queue_image_edit(&pasted) {
+        if self.reject_shared_queue_image_attachment(&pasted) {
             return false;
         }
         let preparation = pasted.preview_preparation();
@@ -1505,9 +1505,6 @@ pub(super) mod paste_key_tests {
         );
         assert_refused(&mut agent, &mut counts, "image viewer");
         agent.image_viewer = None;
-        agent.video_viewer = Some(crate::prompt_images::VideoViewerState::test_stub());
-        assert_refused(&mut agent, &mut counts, "video viewer");
-        agent.video_viewer = None;
         agent.block_viewer = Some(crate::views::block_viewer::BlockViewerPane::for_plain_text(
             "t", "content",
         ));
@@ -1931,7 +1928,6 @@ pub(super) mod paste_key_tests {
                 path: path.clone(),
                 width: 40,
                 height: 20,
-                is_video: false,
                 alt_text: String::new(),
             },
             screen_rect: ratatui::layout::Rect::new(0, 0, 20, 6),
@@ -2007,7 +2003,6 @@ pub(super) mod paste_key_tests {
         assert!(!agent.inline_media_active);
         assert!(agent.inline_media_ids.is_empty());
         assert!(agent.last_placed_ids.is_empty());
-        assert!(agent.inline_video.is_none());
         assert!(agent.take_inline_media_clear_escapes().is_none());
     }
     /// An agent with no placements has nothing to clear.
@@ -2073,46 +2068,6 @@ pub(super) mod paste_key_tests {
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
-        );
-    }
-    /// The scrolled-off/overlay branch of `AgentView::draw` (render.rs) must
-    /// stop live inline playback through `stop_inline_playback` — dropping
-    /// the frame set and REQUESTING a post-draw purge, never purging
-    /// synchronously mid-frame. Pins the render.rs wiring itself (the
-    /// helper alone is covered in media.rs). Serialized: the deferred flag
-    /// is process-wide.
-    #[test]
-    #[serial_test::serial(MEMORY_RELEASE_DEFER)]
-    fn scrolled_off_video_stop_requests_post_draw_release() {
-        use crate::memory_release::test_support;
-        test_support::install_counting_hook();
-        crate::memory_release::run_deferred_release();
-        let mut agent = make_agent();
-        agent.inline_media_active = true;
-        agent.inline_video = Some(crate::app::agent_view::InlineVideoState {
-            path: std::path::PathBuf::from("/tmp/clip.mp4"),
-            frames: vec![Vec::new()],
-            current_frame: 0,
-            last_frame_time: std::time::Instant::now(),
-            fps: 1.0,
-            finished: false,
-        });
-        let before = test_support::calls();
-        draw_media_frame(&mut agent);
-        assert!(
-            agent.inline_video.is_none(),
-            "scroll-off branch must stop playback"
-        );
-        assert_eq!(
-            test_support::calls(),
-            before,
-            "no synchronous purge inside AgentView::draw"
-        );
-        crate::memory_release::run_deferred_release();
-        assert_eq!(
-            test_support::calls(),
-            before + 1,
-            "the post-draw drain must purge the dropped frame set"
         );
     }
     /// Entering the fullscreen subagent view must delete the parent's Kitty

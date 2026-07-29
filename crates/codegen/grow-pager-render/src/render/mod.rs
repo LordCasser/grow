@@ -13,7 +13,6 @@ pub mod renderable;
 pub mod scrollbar;
 pub mod terminal_output;
 pub mod tool_paths;
-pub mod video_overlay;
 pub mod wrapping;
 pub use image_overlay::render_image_overlay;
 pub use preview_overlay::{PreviewConfig, PreviewStyle, render_preview_overlay};
