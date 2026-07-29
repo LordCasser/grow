@@ -20,7 +20,7 @@ fn test_config_with_window(context_window: u64) -> SamplingConfig {
     SamplingConfig {
         base_url: "https://api.example.com".to_string(),
         model: "test-model".to_string(),
-        max_completion_tokens: None,
+        output_limit: None,
         temperature: None,
         top_p: None,
         api_backend: Default::default(),
@@ -1167,7 +1167,7 @@ async fn update_sampling_config_is_queryable() {
     let new_config = SamplingConfig {
         base_url: "https://new.example.com".to_string(),
         model: "grow-3".to_string(),
-        max_completion_tokens: Some(4096),
+        output_limit: Some(4096),
         temperature: Some(0.5),
         top_p: None,
         api_backend: Default::default(),
@@ -1554,7 +1554,7 @@ async fn build_request_uses_sampling_config() {
     let config = SamplingConfig {
         base_url: "https://api.example.com".to_string(),
         model: "grow-3".to_string(),
-        max_completion_tokens: Some(8192),
+        output_limit: Some(8192),
         temperature: Some(0.7),
         top_p: Some(0.9),
         api_backend: Default::default(),
@@ -3696,7 +3696,7 @@ async fn sampling_config_survives_compaction_replacement() {
     let config = SamplingConfig {
         base_url: "https://api.example.com".to_string(),
         model: "grow-build".to_string(),
-        max_completion_tokens: None,
+        output_limit: None,
         temperature: Some(0.7),
         top_p: Some(0.95),
         api_backend: ApiBackend::Responses,
@@ -3781,7 +3781,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
     let config = SamplingConfig {
         base_url: "https://api.example.com".to_string(),
         model: "grow-build".to_string(),
-        max_completion_tokens: None,
+        output_limit: None,
         temperature: Some(0.7),
         top_p: Some(0.95),
         api_backend: Default::default(),
@@ -3871,7 +3871,7 @@ async fn context_window_downgrade_triggers_auto_compact() {
     let config = SamplingConfig {
         base_url: "https://api.example.com/v1".to_string(),
         model: "grow-4.5".to_string(),
-        max_completion_tokens: None,
+        output_limit: None,
         temperature: Some(0.7),
         top_p: Some(0.95),
         api_backend: ApiBackend::Responses,

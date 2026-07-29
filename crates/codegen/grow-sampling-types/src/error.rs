@@ -71,7 +71,7 @@ impl EmptyResponseContext {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResponseModelMetadata {
     pub context_window: Option<u64>,
-    pub max_completion_tokens: Option<u32>,
+    pub output_limit: Option<u32>,
     /// `x-models-etag` — triggers model catalog refresh when changed.
     pub models_etag: Option<String>,
 }

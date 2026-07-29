@@ -213,7 +213,7 @@ pub(crate) async fn create_test_actor_ex(
         grow_sampling_types::SamplingConfig {
             base_url: "http://localhost".to_string(),
             model: "test".to_string(),
-            max_completion_tokens: None,
+            output_limit: None,
             temperature: None,
             top_p: None,
             api_backend: Default::default(),

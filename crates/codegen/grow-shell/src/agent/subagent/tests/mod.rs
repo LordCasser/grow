@@ -1741,7 +1741,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             base_url: String::new(),
             name: None,
             description: None,
-            max_completion_tokens: None,
+            output_limit: None,
             temperature: None,
             top_p: None,
             api_backend: Default::default(),
@@ -2040,7 +2040,7 @@ fn test_sampling_config(model_slug: &str) -> grow_sampling_types::SamplingConfig
     grow_sampling_types::SamplingConfig {
         base_url: "https://api.test/v1".to_string(),
         model: model_slug.to_string(),
-        max_completion_tokens: None,
+        output_limit: None,
         temperature: None,
         top_p: None,
         api_backend: Default::default(),

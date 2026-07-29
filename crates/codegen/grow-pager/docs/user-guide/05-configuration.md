@@ -35,7 +35,7 @@ web_search = "grow-4.5"                # model used by the web_search tool
 extra_headers = { "X-Request-Tags" = "team=example,env=prod" }
 temperature = 0.7
 top_p = 0.95
-max_completion_tokens = 8192
+output_limit = 8192
 max_retries = 8
 inference_idle_timeout_secs = 600
 stream_tool_calls = true
@@ -219,7 +219,7 @@ api_key = "sk-..."                    # API key for this provider
 env_key = "GROW_API_KEY"               # env var(s) holding the API key; string or array (first set, non-empty wins)
 temperature = 0.7                     # sampling temperature (0.0-2.0)
 top_p = 0.95                          # nucleus sampling parameter
-max_completion_tokens = 8192          # max tokens per response
+output_limit = 8192          # max tokens per response
 context_window = 128000               # context window size (for auto-compact)
 query_params = { api-version = "2026-07-22" } # query params appended to every request URL
 env_http_headers = { "X-Tenant" = "TENANT_TOKEN" }    # request headers from env vars, resolved at client build

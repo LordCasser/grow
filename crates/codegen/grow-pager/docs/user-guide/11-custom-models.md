@@ -128,11 +128,11 @@ base_url = "http://localhost:11434/v1"
 name = "Qwen 3 Coder"
 context_window = 131072
 temperature = 0.2
-max_completion_tokens = 8192
+output_limit = 8192
 ```
 
 A model may override shared provider options when required. Common model fields include `model`,
-`name`, `description`, `context_window`, `temperature`, `top_p`, `max_completion_tokens`,
+`name`, `description`, `context_window`, `temperature`, `top_p`, `output_limit`,
 `reasoning_effort`, `reasoning_efforts`, `extra_headers`, `query_params`, and
 `env_http_headers`.
 

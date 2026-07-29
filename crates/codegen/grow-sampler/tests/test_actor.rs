@@ -73,7 +73,7 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         api_key: Some("test-key".into()),
         base_url,
         model: model.into(),
-        max_completion_tokens: Some(1024),
+        output_limit: Some(1024),
         temperature: None,
         top_p: None,
         api_backend: ApiBackend::ChatCompletions,

@@ -1108,7 +1108,7 @@ async fn build_sampler_client(
         api_key: Some(resolved),
         base_url,
         model,
-        max_completion_tokens: Some(LAZINESS_MAX_OUTPUT_TOKENS),
+        output_limit: Some(LAZINESS_MAX_OUTPUT_TOKENS),
         ..grow_sampler::SamplerConfig::default()
     };
     grow_sampler::SamplingClient::new(config).map_err(|e| anyhow!("build SamplingClient: {e}"))

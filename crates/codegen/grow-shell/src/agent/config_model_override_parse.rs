@@ -566,6 +566,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn max_completion_tokens_is_not_an_output_limit_alias() {
+        let (models, warnings) = parse_raw(
+            r#"
+            [model.legacy]
+            model = "legacy"
+            max_completion_tokens = 4096
+            "#,
+        );
+        assert_eq!(models.get("legacy").unwrap().output_limit, None);
+        assert!(warnings.iter().any(|warning| {
+            warning.kind == ConfigWarningKind::UnknownField
+                && warning.field() == Some("max_completion_tokens")
+        }));
+    }
+
     /// An unknown field warns the same whether or not another field fails to
     /// parse.
     #[test]
@@ -693,7 +709,7 @@ mod tests {
             auth_provider: Some("corp-gateway".into()),
             model_provider: Some("gateway".into()),
             api_base_url: Some("https://api.example.com".into()),
-            max_completion_tokens: Some(1024),
+            output_limit: Some(1024),
             temperature: Some(0.5),
             top_p: Some(0.9),
             api_backend: Some(ApiBackend::Messages),

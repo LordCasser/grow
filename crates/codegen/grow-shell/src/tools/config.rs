@@ -198,7 +198,7 @@ pub(crate) fn web_search_sampling_config(base: SamplerConfig) -> SamplerConfig {
     };
     SamplerConfig {
         model,
-        max_completion_tokens: Some(8192),
+        output_limit: Some(8192),
         temperature: Some(0.1),
         top_p: Some(0.95),
         force_http1: false,
@@ -214,7 +214,7 @@ impl ShellToolsetConfig {
             api_key: None,
             base_url: "https://api.example.com/v1".to_string(),
             model: String::new(),
-            max_completion_tokens: None,
+            output_limit: None,
             temperature: None,
             top_p: None,
             api_backend: Default::default(),

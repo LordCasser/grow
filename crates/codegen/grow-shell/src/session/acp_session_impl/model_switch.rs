@@ -49,7 +49,7 @@ impl SessionActor {
             .update_sampling_config(grow_sampling_types::SamplingConfig {
                 base_url: sampling_config.base_url.clone(),
                 model: sampling_config.model.clone(),
-                max_completion_tokens: sampling_config.max_completion_tokens,
+                output_limit: sampling_config.output_limit,
                 temperature: sampling_config.temperature,
                 top_p: sampling_config.top_p,
                 api_backend: sampling_config.api_backend.clone(),

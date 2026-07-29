@@ -44,7 +44,7 @@ async fn test_last_api_request_at_idle_detection() {
 ///
 /// Simulates a session idle for >10 minutes, then verifies the function
 /// fetches `/models-v2`, parses the response, and updates `context_window`
-/// and `max_completion_tokens` in the sampling config.
+/// and `output_limit` in the sampling config.
 #[tokio::test(flavor = "current_thread")]
 async fn test_e2e_idle_resume_refreshes_model_metadata() {
     use axum::routing::get;
@@ -59,7 +59,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                             "model": "test-model",
                             "name": "Test Model",
                             "context_window": 300_000,
-                            "max_completion_tokens": 16384,
+                            "output_limit": 16384,
                             "base_url": "http://localhost/v1"
                         }]
                     }))
@@ -103,7 +103,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 grow_sampling_types::SamplingConfig {
                     base_url: mock_url,
                     model: "test-model".to_string(),
-                    max_completion_tokens: Some(8192),
+                    output_limit: Some(8192),
                     temperature: None,
                     top_p: None,
                     api_backend: Default::default(),
@@ -330,7 +330,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 cfg_before.context_window,
                 std::num::NonZeroU64::new(200_000).unwrap()
             );
-            assert_eq!(cfg_before.max_completion_tokens, Some(8192));
+            assert_eq!(cfg_before.output_limit, Some(8192));
             actor.maybe_refresh_model_metadata_on_resume().await;
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let cfg_after = actor.chat_state_handle.get_sampling_config().await.unwrap();
@@ -340,9 +340,9 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 "context_window should be updated to 300K from /models-v2"
             );
             assert_eq!(
-                cfg_after.max_completion_tokens,
+                cfg_after.output_limit,
                 Some(16384),
-                "max_completion_tokens should be updated to 16384 from /models-v2"
+                "output_limit should be updated to 16384 from /models-v2"
             );
         })
         .await;

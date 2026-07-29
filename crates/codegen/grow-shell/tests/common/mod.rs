@@ -326,7 +326,7 @@ pub fn test_sampler_config(
         api_key: Some("test-api-key".to_string()),
         base_url: base_url.to_string(),
         model: "test-model".to_string(),
-        max_completion_tokens: Some(1000),
+        output_limit: Some(1000),
         temperature: Some(0.7),
         top_p: None,
         api_backend,

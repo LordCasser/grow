@@ -176,7 +176,7 @@ mod tests {
             sampling_config: SamplingConfig {
                 base_url: "https://api.example.com".to_string(),
                 model: "test-model".to_string(),
-                max_completion_tokens: None,
+                output_limit: None,
                 temperature: None,
                 top_p: None,
                 api_backend: Default::default(),
@@ -221,7 +221,7 @@ mod tests {
             sampling_config: SamplingConfig {
                 base_url: "https://api.example.com".to_string(),
                 model: "grow-3".to_string(),
-                max_completion_tokens: Some(4096),
+                output_limit: Some(4096),
                 temperature: Some(0.7),
                 top_p: None,
                 api_backend: Default::default(),

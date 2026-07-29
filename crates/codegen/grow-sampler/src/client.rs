@@ -233,8 +233,8 @@ fn extract_model_metadata(headers: &reqwest::header::HeaderMap) -> Option<Respon
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
-    let max_completion_tokens = headers
-        .get("x-grow-max-completion-tokens")
+    let output_limit = headers
+        .get("x-grow-output-limit")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
 
@@ -243,10 +243,10 @@ fn extract_model_metadata(headers: &reqwest::header::HeaderMap) -> Option<Respon
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    if context_window.is_some() || max_completion_tokens.is_some() || models_etag.is_some() {
+    if context_window.is_some() || output_limit.is_some() || models_etag.is_some() {
         Some(ResponseModelMetadata {
             context_window,
-            max_completion_tokens,
+            output_limit,
             models_etag,
         })
     } else {
@@ -341,7 +341,7 @@ impl std::fmt::Debug for SamplingClient {
 #[derive(Clone, Debug, Default)]
 struct ClientDefaults {
     model: String,
-    max_completion_tokens: Option<u32>,
+    output_limit: Option<u32>,
     temperature: Option<f32>,
     top_p: Option<f32>,
     api_backend: ApiBackend,
@@ -629,7 +629,7 @@ impl SamplingClient {
 
         let defaults = ClientDefaults {
             model: config.model,
-            max_completion_tokens: config.max_completion_tokens,
+            output_limit: config.output_limit,
             temperature: config.temperature,
             top_p: config.top_p,
             api_backend: config.api_backend,
@@ -828,7 +828,7 @@ impl SamplingClient {
         }
 
         if request.max_tokens.is_none() {
-            request.max_tokens = self.defaults.max_completion_tokens;
+            request.max_tokens = self.defaults.output_limit;
         }
 
         if request.temperature.is_none() {
@@ -1121,7 +1121,7 @@ impl SamplingClient {
 
         // Apply max_output_tokens default if not specified
         if request.inner.max_output_tokens.is_none() {
-            request.inner.max_output_tokens = self.defaults.max_completion_tokens;
+            request.inner.max_output_tokens = self.defaults.output_limit;
         }
 
         // Set store to false if not specified (default is true, but that breaks ZDR compliance)
@@ -1474,7 +1474,7 @@ impl SamplingClient {
         if request.inner.max_tokens == 0 {
             request.inner.max_tokens = self
                 .defaults
-                .max_completion_tokens
+                .output_limit
                 .unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);
         }
 
@@ -1775,7 +1775,7 @@ impl SamplingClient {
         }
 
         if request.max_output_tokens.is_none() {
-            request.max_output_tokens = self.defaults.max_completion_tokens;
+            request.max_output_tokens = self.defaults.output_limit;
         }
 
         Ok(())
@@ -2017,7 +2017,7 @@ mod tests {
             api_key: Some("test-key".to_string()),
             base_url: "https://example.test".to_string(),
             model: "test-model".to_string(),
-            max_completion_tokens: None,
+            output_limit: None,
             temperature: None,
             top_p: None,
             api_backend: ApiBackend::ChatCompletions,
@@ -2108,6 +2108,34 @@ mod tests {
 
         assert!(obj.get("max_tokens").is_none());
         assert!(obj.get("tools").is_none());
+    }
+
+    #[test]
+    fn output_limit_maps_to_each_backend_wire_field() {
+        let mut config = minimal_config();
+        config.output_limit = Some(131_072);
+        let client = SamplingClient::new(config).expect("sampling client");
+        let mut request = ConversationRequest::default();
+
+        client
+            .apply_conversation_defaults(&mut request)
+            .expect("apply output limit");
+        assert_eq!(request.max_output_tokens, Some(131_072));
+
+        let chat: ChatCompletionRequest = request.clone().into();
+        let chat = serde_json::to_value(chat).expect("serialize chat request");
+        assert_eq!(chat["max_tokens"], 131_072);
+        assert!(chat.get("max_output_tokens").is_none());
+
+        let responses: rs::CreateResponse = (&request).into();
+        let responses = serde_json::to_value(responses).expect("serialize responses request");
+        assert_eq!(responses["max_output_tokens"], 131_072);
+        assert!(responses.get("max_tokens").is_none());
+
+        let messages = build_messages_request(&request);
+        let messages = serde_json::to_value(messages).expect("serialize messages request");
+        assert_eq!(messages["max_tokens"], 131_072);
+        assert!(messages.get("max_output_tokens").is_none());
     }
 
     #[test]

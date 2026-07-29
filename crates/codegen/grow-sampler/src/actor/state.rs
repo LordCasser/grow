@@ -84,7 +84,7 @@ mod tests {
             api_key: None,
             base_url: "https://example.test".into(),
             model: "test-model".into(),
-            max_completion_tokens: None,
+            output_limit: None,
             temperature: None,
             top_p: None,
             api_backend: ApiBackend::ChatCompletions,

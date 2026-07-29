@@ -335,7 +335,7 @@ impl SessionActor {
     ///
     /// Called at the start of each turn. If idle > `IDLE_REFRESH_THRESHOLD_SECS`,
     /// fetches `/models-v2` from cli-chat-proxy and updates the cached
-    /// context_window / max_completion_tokens if remote settings changed them.
+    /// context_window / output_limit if remote settings changed them.
     ///
     /// Skipped for BYOK users (no remote settings, no `/models-v2`).
     pub(super) async fn maybe_refresh_model_metadata_on_resume(&self) {
@@ -388,7 +388,7 @@ impl SessionActor {
                 for entry in data {
                     let parsed = crate::remote::client::parse_remote_model_value(entry, base_url)?;
                     if parsed.model == *current_model {
-                        return Some((parsed.context_window, parsed.max_completion_tokens));
+                        return Some((parsed.context_window, parsed.output_limit));
                     }
                 }
                 None
@@ -432,7 +432,7 @@ impl SessionActor {
                 .ok()
                 .and_then(parse_models_response)
         };
-        let Some((new_context_window, new_max_completion_tokens)) = result else {
+        let Some((new_context_window, new_output_limit)) = result else {
             tracing::debug!("Model metadata refresh: no update or fetch failed");
             return;
         };
@@ -449,15 +449,15 @@ impl SessionActor {
             updated_config.context_window = new_context_window;
             config_changed = true;
         }
-        if let Some(new_mct) = new_max_completion_tokens
-            && current_config.max_completion_tokens != Some(new_mct)
+        if let Some(new_limit) = new_output_limit
+            && current_config.output_limit != Some(new_limit)
         {
             tracing::info!(
-                old_max_completion_tokens = current_config.max_completion_tokens,
-                new_max_completion_tokens = new_mct,
-                "Max completion tokens updated on session resume"
+                old_output_limit = current_config.output_limit,
+                new_output_limit = new_limit,
+                "Output limit updated on session resume"
             );
-            updated_config.max_completion_tokens = Some(new_mct);
+            updated_config.output_limit = Some(new_limit);
             config_changed = true;
         }
         if config_changed {
@@ -479,7 +479,7 @@ impl SessionActor {
         };
         let mut config_changed = false;
         let mut new_context_window = current_config.context_window;
-        let mut new_max_completion_tokens = current_config.max_completion_tokens;
+        let mut new_output_limit = current_config.output_limit;
         if let Some(new_cw) = metadata.context_window.and_then(std::num::NonZeroU64::new)
             && current_config.context_window != new_cw
             && self.compaction.context_window_override.is_none()
@@ -500,15 +500,15 @@ impl SessionActor {
                 config_changed = true;
             }
         }
-        if let Some(new_mct) = metadata.max_completion_tokens
-            && current_config.max_completion_tokens != Some(new_mct)
+        if let Some(new_limit) = metadata.output_limit
+            && current_config.output_limit != Some(new_limit)
         {
             tracing::info!(
-                old_max_completion_tokens = current_config.max_completion_tokens,
-                new_max_completion_tokens = new_mct,
-                "Model max_completion_tokens changed via response header"
+                old_output_limit = current_config.output_limit,
+                new_output_limit = new_limit,
+                "Model output_limit changed via response header"
             );
-            new_max_completion_tokens = Some(new_mct);
+            new_output_limit = Some(new_limit);
             config_changed = true;
         }
         if !config_changed {
@@ -516,7 +516,7 @@ impl SessionActor {
         }
         let updated_config = grow_sampling_types::SamplingConfig {
             context_window: new_context_window,
-            max_completion_tokens: new_max_completion_tokens,
+            output_limit: new_output_limit,
             ..current_config
         };
         self.chat_state_handle

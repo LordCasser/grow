@@ -2019,7 +2019,7 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             base_url: String::new(),
             name: None,
             description: None,
-            max_completion_tokens: None,
+            output_limit: None,
             temperature: None,
             top_p: None,
             api_backend: crate::sampling::ApiBackend::default(),

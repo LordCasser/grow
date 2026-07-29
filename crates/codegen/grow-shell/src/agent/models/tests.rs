@@ -1720,7 +1720,7 @@ fn make_entry_config_with_id(
         base_url: "https://test.api/v1".to_owned(),
         name: name.map(|n| n.to_owned()),
         description: None,
-        max_completion_tokens: None,
+        output_limit: None,
         temperature: None,
         top_p: None,
         api_key: None,

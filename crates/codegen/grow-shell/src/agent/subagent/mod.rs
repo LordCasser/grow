@@ -704,7 +704,7 @@ async fn read_parent_sampling_config(
                 api_key: creds.api_key,
                 base_url: cfg.base_url,
                 model: cfg.model.clone(),
-                max_completion_tokens: cfg.max_completion_tokens,
+                output_limit: cfg.output_limit,
                 temperature: cfg.temperature,
                 top_p: cfg.top_p,
                 api_backend: cfg.api_backend,

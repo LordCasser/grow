@@ -51,6 +51,7 @@ Grow 没有内置的 xAI/Grok 服务端点、OAuth issuer 或 OAuth client。未
 ```toml
 [models]
 default = "zuozuo/claude-opus-5"
+output_limit = 65536
 
 [provider.zuozuo]
 api_backend = "messages"
@@ -62,6 +63,7 @@ env_key = "ZUOZUO_API_KEY"
 [provider.zuozuo.models.claude-opus-5]
 name = "Claude Opus 5"
 context_window = 200000
+output_limit = 131072
 ```
 
 `api_backend` 描述端点协议，而不是厂商名称：
@@ -71,6 +73,9 @@ context_window = 200000
 - `messages` → `/v1/messages`
 
 也可以在 `[provider.<id>.options]` 中使用 `api_key`，但推荐通过 `env_key` 从环境变量读取。
+`output_limit` 控制单次模型输出上限：模型级配置覆盖 `[models].output_limit`；两处都未配置时
+Grow 不设置可选的输出限制。`context_window` 只用于本地上下文管理和自动压缩。请求时
+`chat_completions`/`messages` 使用 `max_tokens`，`responses` 使用 `max_output_tokens`。
 完整字段和 session 继承规则见
 [LLM Providers and BYOK](crates/codegen/grow-pager/docs/user-guide/11-custom-models.md)。
 

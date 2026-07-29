@@ -886,8 +886,8 @@ pub fn parse_remote_model_value(
         base_url,
         name,
         description: get_string(obj, "description"),
-        max_completion_tokens: get_u64(obj, "maxCompletionTokens")
-            .or_else(|| get_u64(obj, "max_completion_tokens"))
+        output_limit: get_u64(obj, "outputLimit")
+            .or_else(|| get_u64(obj, "output_limit"))
             .and_then(|v| u32::try_from(v).ok()),
         temperature: get_f64(obj, "temperature").map(|v| v as f32),
         top_p: get_f64(obj, "topP").or_else(|| get_f64(obj, "top_p")).map(|v| v as f32),

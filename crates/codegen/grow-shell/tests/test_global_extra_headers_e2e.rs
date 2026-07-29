@@ -6,7 +6,7 @@
 //! wire-observable one — `extra_headers` — reaches the `/v1/chat/completions`
 //! request header, for a model with no per-model `[model.<id>]` override.
 //!
-//! The scalar defaults (temperature, top_p, max_completion_tokens, max_retries,
+//! The scalar defaults (temperature, top_p, output_limit, max_retries,
 //! inference_idle_timeout_secs, stream_tool_calls) are exercised here to prove
 //! they parse and the turn still completes; their resolution onto the model is
 //! covered directly by `config.rs` unit tests. The headless turn does not
@@ -38,7 +38,7 @@ async fn global_models_config_reaches_inference_request() {
 extra_headers = { "X-Request-Tags" = "team=example,env=prod" }
 temperature = 0.5
 top_p = 0.25
-max_completion_tokens = 4096
+output_limit = 4096
 max_retries = 7
 inference_idle_timeout_secs = 600
 stream_tool_calls = true

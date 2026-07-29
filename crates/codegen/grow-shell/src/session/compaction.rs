@@ -2291,7 +2291,7 @@ mod inline_auto_compact_flow_tests {
             grow_sampling_types::SamplingConfig {
                 base_url: "http://localhost".to_string(),
                 model: "test".to_string(),
-                max_completion_tokens: None,
+                output_limit: None,
                 temperature: None,
                 top_p: None,
                 api_backend: Default::default(),
@@ -3708,7 +3708,7 @@ mod inline_auto_compact_flow_tests {
             retry_after_secs: None,
             model_metadata: Some(crate::sampling::ResponseModelMetadata {
                 context_window: Some(context_window),
-                max_completion_tokens: None,
+                output_limit: None,
                 models_etag: None,
             }),
             empty_response_context: None,

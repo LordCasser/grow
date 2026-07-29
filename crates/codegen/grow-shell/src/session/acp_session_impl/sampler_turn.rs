@@ -425,7 +425,7 @@ impl SessionActor {
             .unwrap_or_else(|| grow_sampling_types::SamplingConfig {
                 base_url: String::new(),
                 model: String::new(),
-                max_completion_tokens: None,
+                output_limit: None,
                 temperature: None,
                 top_p: None,
                 api_backend: Default::default(),
@@ -488,7 +488,7 @@ impl SessionActor {
             api_key,
             base_url: cfg.base_url,
             model: cfg.model,
-            max_completion_tokens: cfg.max_completion_tokens,
+            output_limit: cfg.output_limit,
             temperature: cfg.temperature,
             top_p: cfg.top_p,
             api_backend: cfg.api_backend,

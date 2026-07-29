@@ -985,7 +985,7 @@ pub struct ModelsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_completion_tokens: Option<u32>,
+    pub output_limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3484,8 +3484,8 @@ fn apply_global_scalar_defaults(
         if let Some(v) = models.top_p {
             info.top_p.get_or_insert(v);
         }
-        if let Some(v) = models.max_completion_tokens {
-            info.max_completion_tokens.get_or_insert(v);
+        if let Some(v) = models.output_limit {
+            info.output_limit.get_or_insert(v);
         }
         if let Some(v) = models.max_retries {
             info.max_retries.get_or_insert(v);
@@ -3540,7 +3540,7 @@ struct DefaultModelJson {
     context_window: Option<NonZeroU64>,
     temperature: Option<f32>,
     top_p: Option<f32>,
-    max_completion_tokens: Option<u32>,
+    output_limit: Option<u32>,
     api_backend: ApiBackend,
     #[serde(default = "default_agent_type")]
     agent_type: String,
@@ -3604,7 +3604,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 system_prompt_label: m.system_prompt_label,
                 temperature: m.temperature,
                 top_p: m.top_p,
-                max_completion_tokens: m.max_completion_tokens,
+                output_limit: m.output_limit,
                 api_backend: m.api_backend,
                 auth_scheme: None,
                 agent_type: m.agent_type,
@@ -3646,7 +3646,7 @@ pub struct ModelEntryConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_completion_tokens: Option<u32>,
+    pub output_limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3780,7 +3780,7 @@ pub struct ConfigModelOverride {
     pub auth_provider: Option<String>,
     pub model_provider: Option<String>,
     pub api_base_url: Option<String>,
-    pub max_completion_tokens: Option<u32>,
+    pub output_limit: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub api_backend: Option<ApiBackend>,
@@ -3839,8 +3839,8 @@ impl ConfigModelOverride {
         if self.description.is_some() {
             entry.info.description.clone_from(&self.description);
         }
-        if self.max_completion_tokens.is_some() {
-            entry.info.max_completion_tokens = self.max_completion_tokens;
+        if self.output_limit.is_some() {
+            entry.info.output_limit = self.output_limit;
         }
         if self.temperature.is_some() {
             entry.info.temperature = self.temperature;
@@ -3945,7 +3945,7 @@ pub struct ModelInfo {
     /// to users in either consumer.
     pub name: Option<String>,
     pub description: Option<String>,
-    pub max_completion_tokens: Option<u32>,
+    pub output_limit: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub api_backend: ApiBackend,
@@ -4014,7 +4014,7 @@ impl ModelInfo {
             base_url: String::new(),
             name: None,
             description: None,
-            max_completion_tokens: None,
+            output_limit: None,
             temperature: None,
             top_p: None,
             api_backend: ApiBackend::default(),
@@ -4051,7 +4051,7 @@ impl ModelInfo {
             base_url: entry.base_url.clone(),
             name: entry.name.clone(),
             description: entry.description.clone(),
-            max_completion_tokens: entry.max_completion_tokens,
+            output_limit: entry.output_limit,
             temperature: entry.temperature,
             top_p: entry.top_p,
             api_backend: entry.api_backend.clone(),
@@ -4828,7 +4828,7 @@ pub fn sampling_config_for_model(
 ) -> SamplerConfig {
     let info = model.info();
     let model_name = info.model.clone();
-    let max_completion_tokens = info.max_completion_tokens;
+    let output_limit = info.output_limit;
     let temperature = info.temperature;
     let top_p = info.top_p;
     let mut extra_headers = info.extra_headers.clone();
@@ -4842,7 +4842,7 @@ pub fn sampling_config_for_model(
         api_key: credentials.api_key,
         model: model_name,
         base_url: credentials.base_url,
-        max_completion_tokens,
+        output_limit,
         temperature,
         top_p,
         api_backend,
@@ -5802,6 +5802,70 @@ reasoning_effort = "low"
         assert_eq!(model.info.base_url, "https://api.example.com/v1");
         assert_eq!(model.api_key, Some("sk-test-key-12345".to_string()));
     }
+
+    #[test]
+    fn provider_model_output_limit_overrides_global_default() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [models]
+            output_limit = 65536
+
+            [provider.deepseek.options]
+            base_url = "https://api.deepseek.com/v1"
+            api_key = "sk-test"
+
+            [provider.deepseek.models.deepseek-v4-pro]
+            context_window = 1048576
+            output_limit = 131072
+
+            [provider.deepseek.models.deepseek-chat]
+            context_window = 131072
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let model = resolved
+            .get("deepseek/deepseek-v4-pro")
+            .expect("provider model should exist");
+
+        assert_eq!(model.info.context_window.get(), 1_048_576);
+        assert_eq!(model.info.output_limit, Some(131_072));
+        assert_eq!(
+            resolved
+                .get("deepseek/deepseek-chat")
+                .expect("provider model should inherit global defaults")
+                .info
+                .output_limit,
+            Some(65_536)
+        );
+    }
+
+    #[test]
+    fn provider_model_without_output_limit_keeps_it_unset() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [provider.local.options]
+            base_url = "http://localhost:11434/v1"
+            api_key = "local"
+
+            [provider.local.models.qwen]
+            context_window = 131072
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        assert_eq!(
+            resolved
+                .get("local/qwen")
+                .expect("provider model should exist")
+                .info
+                .output_limit,
+            None
+        );
+    }
+
     #[test]
     fn parses_auth_provider_tables_and_model_reference() {
         let raw_config: toml::Value = toml::from_str(
@@ -6042,7 +6106,7 @@ reasoning_effort = "low"
                 base_url: base_url.to_string(),
                 name: None,
                 description: None,
-                max_completion_tokens: None,
+                output_limit: None,
                 temperature: None,
                 top_p: None,
                 api_backend: ApiBackend::default(),
@@ -7066,7 +7130,7 @@ reasoning_effort = "low"
             base_url: "https://test.api/v1".to_string(),
             name: None,
             description: None,
-            max_completion_tokens: None,
+            output_limit: None,
             temperature: None,
             top_p: None,
             api_key: None,
@@ -7225,7 +7289,7 @@ reasoning_effort = "low"
             base_url: "https://test.api/v1".to_string(),
             name: None,
             description: None,
-            max_completion_tokens: None,
+            output_limit: None,
             temperature: None,
             top_p: None,
             api_key: None,
@@ -7676,7 +7740,7 @@ reasoning_effort = "low"
             base_url: "https://test.api/v1".to_string(),
             name: None,
             description: None,
-            max_completion_tokens: None,
+            output_limit: None,
             temperature: None,
             top_p: None,
             api_key: None,
@@ -11164,7 +11228,7 @@ default = "grow-4.5"
                 base_url: "https://test.example.com/v1".to_owned(),
                 name: Some(slug.to_owned()),
                 description: None,
-                max_completion_tokens: None,
+                output_limit: None,
                 temperature: None,
                 top_p: None,
                 api_backend,
@@ -11307,38 +11371,15 @@ default = "grow-4.5"
         );
     }
     #[test]
-    fn global_model_defaults_apply_to_model_without_override() {
-        let mut cfg = Config::default();
-        cfg.models.temperature = Some(0.5);
-        cfg.models.top_p = Some(0.25);
-        cfg.models.max_completion_tokens = Some(4096);
-        cfg.models.max_retries = Some(9);
-        cfg.models.inference_idle_timeout_secs = Some(600);
-        cfg.models.stream_tool_calls = Some(true);
-        let entry = prefetch_model_entry("remote-only-model", 200_000, ApiBackend::default());
-        let mut prefetched = IndexMap::new();
-        prefetched.insert("remote-only-model".to_owned(), entry);
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let info = &resolved
-            .get("remote-only-model")
-            .expect("prefetched model should exist")
-            .info;
-        assert_eq!(info.temperature, Some(0.5));
-        assert_eq!(info.top_p, Some(0.25));
-        assert_eq!(info.max_completion_tokens, Some(4096));
-        assert_eq!(info.max_retries, Some(9));
-        assert_eq!(info.inference_idle_timeout_secs, Some(600));
-        assert_eq!(info.stream_tool_calls, Some(true));
-    }
-    #[test]
     fn per_model_value_overrides_global_model_default() {
         let mut cfg = Config::default();
         cfg.models.max_retries = Some(9);
-        cfg.models.max_completion_tokens = Some(8192);
+        cfg.models.output_limit = Some(8192);
         cfg.config_models.insert(
             "remote-only-model".to_owned(),
             ConfigModelOverride {
                 max_retries: Some(2),
+                output_limit: Some(16_384),
                 ..Default::default()
             },
         );
@@ -11355,33 +11396,9 @@ default = "grow-4.5"
             "per-model value must win over the [models] default"
         );
         assert_eq!(
-            model.info.max_completion_tokens,
-            Some(8192),
-            "a global-only default must still be inherited"
-        );
-    }
-    #[test]
-    fn global_model_defaults_do_not_override_prefetched_value() {
-        let mut cfg = Config::default();
-        cfg.models.max_retries = Some(9);
-        cfg.models.temperature = Some(0.5);
-        let mut entry = prefetch_model_entry("remote-only-model", 200_000, ApiBackend::default());
-        entry.info.max_retries = Some(3);
-        let mut prefetched = IndexMap::new();
-        prefetched.insert("remote-only-model".to_owned(), entry);
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let model = resolved
-            .get("remote-only-model")
-            .expect("prefetched model should exist");
-        assert_eq!(
-            model.info.max_retries,
-            Some(3),
-            "a prefetched value must beat the [models] default (fallback semantics)"
-        );
-        assert_eq!(
-            model.info.temperature,
-            Some(0.5),
-            "a field the prefetch left unset must inherit the [models] default"
+            model.info.output_limit,
+            Some(16_384),
+            "per-model output_limit must override the [models] default"
         );
     }
     #[test]

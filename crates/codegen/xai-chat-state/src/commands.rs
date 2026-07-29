@@ -404,7 +404,7 @@ mod tests {
             config: SamplingConfig {
                 base_url: String::new(),
                 model: String::new(),
-                max_completion_tokens: None,
+                output_limit: None,
                 temperature: None,
                 top_p: None,
                 api_backend: Default::default(),

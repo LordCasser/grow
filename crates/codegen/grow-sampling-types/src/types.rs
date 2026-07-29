@@ -1034,7 +1034,7 @@ impl ApiBackend {
 pub struct SamplingConfig {
     pub base_url: String,
     pub model: String,
-    pub max_completion_tokens: Option<u32>,
+    pub output_limit: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     /// Which API backend to use for this model

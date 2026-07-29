@@ -1807,6 +1807,24 @@ async fn read_parent_sampling_config_keeps_auto_catalog_id_with_routing_slug() {
     assert_eq!(config.model, "grow-4.5");
     assert_eq!(model_id.0.as_ref(), "auto");
 }
+
+#[tokio::test]
+async fn read_parent_sampling_config_inherits_output_limit() {
+    let mut models = indexmap::IndexMap::new();
+    models.insert("auto".to_string(), test_model_entry("grow-4.5"));
+    let ctx = ctx_with_parent_chat_state("auto", "grow-4.5", "auto", models);
+    let mut parent_config = test_sampling_config("grow-4.5");
+    parent_config.output_limit = Some(131_072);
+    ctx.parent_chat_state
+        .as_ref()
+        .expect("parent chat state")
+        .update_sampling_config(parent_config);
+
+    let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    assert_eq!(config.output_limit, Some(131_072));
+    assert_eq!(model_id.0.as_ref(), "auto");
+}
+
 #[tokio::test]
 async fn read_parent_sampling_config_keeps_auto_when_catalog_has_slug_key_only() {
     let mut models = indexmap::IndexMap::new();
