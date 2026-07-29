@@ -392,15 +392,6 @@ impl SessionActor {
             self.emit_event(crate::session::events::Event::ToolStarted {
                 tool_name: call.function.name.clone(),
             });
-            self.observability_bridge
-                .emit(
-                    xai_tool_protocol::session_event::SessionEvent::ToolCallStarted {
-                        tool_call_id: call.id.clone(),
-                        tool_name: call.function.name.clone(),
-                        turn_number: self.current_turn_number.get(),
-                    },
-                )
-                .await;
             let call_name = call.function.name.clone();
             match self.prepare_tool_call(call, deferred_followups).await? {
                 Ok(prepared) => approved.push(prepared),
@@ -712,16 +703,6 @@ impl SessionActor {
                 duration_ms,
                 outcome: tool_outcome,
             });
-            self.observability_bridge
-                .emit(
-                    xai_tool_protocol::session_event::SessionEvent::ToolCallCompleted {
-                        tool_call_id: prepared.call_id.clone(),
-                        tool_name: prepared.tool_name.clone(),
-                        duration_ms,
-                        outcome: map_tool_outcome(tool_outcome),
-                    },
-                )
-                .await;
             grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::ToolCallCompleted {
                 tool_name: prepared.tool_name.clone(),
                 outcome: tool_outcome.into(),

@@ -420,7 +420,6 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
             web_fetch_config: build_web_fetch_config(),
             lsp: None,
             app_builder_deployer_config: AppBuilderDeployerConfig::default(),
-            auth_provider: self.auth.clone(),
             system_reminder_tag: grow_tools::reminders::DEFAULT_REMINDER_TAG,
         }
     }
@@ -512,7 +511,6 @@ pub mod test_support {
                 web_fetch_config: Default::default(),
                 lsp: None,
                 app_builder_deployer_config: Default::default(),
-                auth_provider: None,
                 system_reminder_tag: grow_tools::reminders::DEFAULT_REMINDER_TAG,
             }
         }

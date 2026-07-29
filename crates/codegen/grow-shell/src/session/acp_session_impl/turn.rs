@@ -492,15 +492,6 @@ impl SessionActor {
             schema_version: crate::session::events::EVENT_SCHEMA_VERSION.into(),
             redirect_kind,
         });
-        self.observability_bridge
-            .emit(
-                xai_tool_protocol::session_event::SessionEvent::TurnStarted {
-                    turn_number,
-                    model_id: model_id.clone(),
-                    yolo_mode,
-                },
-            )
-            .await;
         self.send_before_turn_event(xai_tool_protocol::turn_hook::BeforeTurnPayload {
             turn_number: self.chat_state_handle.get_prompt_index().await as u64,
             model_id: model_id.clone(),
@@ -895,16 +886,6 @@ impl SessionActor {
             })),
         );
         let turn_tool_count = self.events.tool_count_this_turn();
-        let bridge_outcome = turn_result_to_hook_outcome(&result);
-        self.observability_bridge
-            .emit(xai_tool_protocol::session_event::SessionEvent::TurnEnded {
-                turn_number: current_prompt_index as u64,
-                outcome: bridge_outcome,
-                duration_ms: turn_duration_ms,
-                tool_call_count: turn_tool_count,
-                model_id: turn_model_id.clone(),
-            })
-            .await;
         match &result {
             Ok(TurnOutcome::Completed { refusal, .. }) => {
                 self.emit_turn_ended(
@@ -2020,13 +2001,6 @@ impl SessionActor {
             self.emit_event(crate::session::events::Event::PhaseChanged {
                 phase: crate::session::events::Phase::WaitingForModel,
             });
-            self.observability_bridge
-                .emit(
-                    xai_tool_protocol::session_event::SessionEvent::PhaseChanged {
-                        phase: xai_tool_protocol::session_event::SessionPhase::Sampling,
-                    },
-                )
-                .await;
             grow_diagnostics::unified_log::info(
                 "shell.turn.inference_start",
                 Some(self.session_info.id.0.as_ref()),
@@ -2431,13 +2405,6 @@ impl SessionActor {
             self.emit_event(crate::session::events::Event::PhaseChanged {
                 phase: crate::session::events::Phase::ToolExecution,
             });
-            self.observability_bridge
-                .emit(
-                    xai_tool_protocol::session_event::SessionEvent::PhaseChanged {
-                        phase: xai_tool_protocol::session_event::SessionPhase::ToolExecution,
-                    },
-                )
-                .await;
             let execute_tool_calls_result = self.execute_tool_calls(tool_call_responses).await;
             match execute_tool_calls_result {
                 Ok(ToolLoop::PermissionReject { tool_name, reason }) => {

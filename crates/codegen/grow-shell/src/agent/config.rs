@@ -739,30 +739,6 @@ pub struct RemoteConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
 }
-/// `[hub]` section from config.toml.
-///
-/// Optional default Computer Hub URL for **workspace provider** exposure
-/// (`grow workspace` / leader `with_default_hub_url`). Does **not** enable
-/// agent-side harness/client connections or alter local session behavior.
-///
-/// ```toml
-/// [hub]
-/// url = "wss://hub.example.com/ws"
-/// ```
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HubConfig {
-    /// Hub WebSocket URL (`ws://` or `wss://`) used as the leader default for
-    /// `grow workspace start` when the CLI does not pass `--hub-url`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-}
-impl HubConfig {
-    /// Whether a non-empty hub URL is configured (workspace default only).
-    pub fn is_enabled(&self) -> bool {
-        self.url.as_ref().is_some_and(|u| !u.trim().is_empty())
-    }
-}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorktreePoolConfig {
@@ -1032,9 +1008,6 @@ pub struct Config {
     pub models: ModelsConfig,
     #[serde(default, skip_serializing)]
     pub remote: RemoteConfig,
-    /// Computer Hub configuration (`[hub]` in config.toml).
-    #[serde(default, skip_serializing)]
-    pub hub: HubConfig,
     #[serde(default, skip_serializing)]
     pub worktree_pool: WorktreePoolConfig,
     #[serde(default, skip_serializing)]
@@ -1402,7 +1375,6 @@ impl Default for Config {
             cli: CliConfig::default(),
             models: ModelsConfig::default(),
             remote: RemoteConfig::default(),
-            hub: HubConfig::default(),
             worktree_pool: WorktreePoolConfig::default(),
             sandbox: SandboxSettingsConfig::default(),
             mcp_servers: std::collections::HashMap::new(),
@@ -9831,26 +9803,6 @@ default = "grow-4.5"
                 );
             }
         }
-    }
-    #[test]
-    fn hub_config_default_has_no_url() {
-        assert!(HubConfig::default().url.is_none());
-        assert!(!HubConfig::default().is_enabled());
-    }
-    #[test]
-    fn hub_config_is_enabled_only_for_nonempty_url() {
-        assert!(
-            HubConfig {
-                url: Some("wss://hub.example/ws".into()),
-            }
-            .is_enabled()
-        );
-        assert!(
-            !HubConfig {
-                url: Some("   ".into()),
-            }
-            .is_enabled()
-        );
     }
     #[test]
     fn resolve_model_list_prunes_bundled_entries_not_in_prefetch() {

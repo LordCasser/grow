@@ -169,9 +169,7 @@ portable-pty = "0.9"
 parking_lot.workspace = true
 dashmap.workspace = true
 
-# Used by acp_session.rs and mcp_servers.rs for the unified
-# xai_tool_runtime::Tool dispatch model and the computer-hub MCP adapter.
-xai-computer-hub-sdk = { workspace = true }
+# Unified local tool dispatch shared by ACP sessions and MCP servers.
 xai-tool-runtime = { workspace = true }
 xai-tool-protocol = { workspace = true }
 xai-tool-types = { workspace = true }

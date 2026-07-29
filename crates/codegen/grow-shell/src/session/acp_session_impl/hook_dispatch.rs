@@ -3,22 +3,6 @@
 
 use super::*;
 
-/// Map a turn result to the hub protocol's `TurnHookOutcome`.
-pub(super) fn turn_result_to_hook_outcome(
-    result: &Result<TurnOutcome, acp::Error>,
-) -> xai_tool_protocol::turn_hook::TurnHookOutcome {
-    use xai_tool_protocol::turn_hook::TurnHookOutcome;
-    match result {
-        Ok(TurnOutcome::Completed { .. }) | Ok(TurnOutcome::StationarityEnded { .. }) => {
-            TurnHookOutcome::Completed
-        }
-        Ok(TurnOutcome::Cancelled { .. }) | Ok(TurnOutcome::MaxTurnsReached { .. }) => {
-            TurnHookOutcome::Cancelled
-        }
-        Err(_) => TurnHookOutcome::Error,
-    }
-}
-
 /// Encode a [`CancellationCategory`](crate::session::events::CancellationCategory)
 /// as its bare snake_case wire string for the `after_turn` hook payload.
 /// Deliberately `serde_json::to_value` + `as_str`, NOT `to_string` — the
@@ -30,28 +14,6 @@ pub(super) fn cancellation_category_to_wire_string(
     serde_json::to_value(category)
         .ok()
         .and_then(|v| v.as_str().map(String::from))
-}
-
-/// Map shell-internal `ToolOutcome` to the hub protocol's `ToolCallOutcome`.
-///
-/// The shell tracks 9 granular outcome variants; the hub protocol has 3:
-/// - `Success` → tool executed and returned a result
-/// - `Error` → tool failed to execute or was invalid
-/// - `Cancelled` → tool never ran (permission, doom-loop, hook, followup)
-pub(super) fn map_tool_outcome(
-    outcome: crate::session::events::ToolOutcome,
-) -> xai_tool_protocol::session_event::ToolCallOutcome {
-    use crate::session::events::ToolOutcome;
-    use xai_tool_protocol::session_event::ToolCallOutcome;
-    match outcome {
-        ToolOutcome::Success => ToolCallOutcome::Success,
-        ToolOutcome::Error | ToolOutcome::InvalidTool => ToolCallOutcome::Error,
-        ToolOutcome::PermissionRejected
-        | ToolOutcome::PermissionCancelled
-        | ToolOutcome::Followup
-        | ToolOutcome::HookDenied
-        | ToolOutcome::Cancelled => ToolCallOutcome::Cancelled,
-    }
 }
 
 /// Returns `(notification_type, message, title, level)` when this update should

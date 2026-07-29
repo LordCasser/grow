@@ -884,7 +884,6 @@ impl AgentBuilder {
                 web_fetch_config: self.web_fetch_config,
                 lsp: self.lsp,
                 app_builder_deployer_config: self.app_builder_deployer_config,
-                auth_provider: None,
                 system_reminder_tag: self.system_reminder_tag,
             },
         )

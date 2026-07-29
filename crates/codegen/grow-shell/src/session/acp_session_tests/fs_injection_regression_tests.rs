@@ -59,7 +59,6 @@ async fn tool_bridge_routes_writes_through_injected_fs() {
         web_fetch_config: Default::default(),
         lsp: None,
         app_builder_deployer_config: Default::default(),
-        auth_provider: None,
         system_reminder_tag: grow_tools::reminders::DEFAULT_REMINDER_TAG,
     };
     let bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)

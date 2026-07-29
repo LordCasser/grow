@@ -13,13 +13,6 @@ pub(crate) const HARNESS_VERIFIES_SENTENCE: &str =
 pub(crate) const PLAN_SEED_TODOS_PHRASE: &str =
     "Seed todos from the plan's acceptance criteria via";
 #[cfg(test)]
-pub(crate) fn noop_observability_bridge() -> xai_computer_hub_sdk::ObservabilityBridge {
-    xai_computer_hub_sdk::ObservabilityBridge::new(
-        None,
-        xai_tool_protocol::SessionId::new("test").expect("valid"),
-    )
-}
-#[cfg(test)]
 pub(crate) async fn test_agent_default() -> grow_agent::Agent {
     test_agent_with_tools(vec![]).await
 }
@@ -113,7 +106,6 @@ async fn test_agent_from_config(
         web_fetch_config: Default::default(),
         lsp: None,
         app_builder_deployer_config: Default::default(),
-        auth_provider: None,
         system_reminder_tag: grow_tools::reminders::DEFAULT_REMINDER_TAG,
     };
     let tool_bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)
@@ -359,7 +351,6 @@ pub(crate) async fn create_test_actor_ex(
         plugin_registry: std::cell::RefCell::new(None),
         plugin_registry_handle: None,
         events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
-        observability_bridge: noop_observability_bridge(),
         current_turn_number: std::cell::Cell::new(0),
         last_recap_main_turn: std::cell::Cell::new(0),
         recap_in_flight: std::cell::Cell::new(false),

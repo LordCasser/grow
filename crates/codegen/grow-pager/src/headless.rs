@@ -878,9 +878,6 @@ pub async fn run_single_turn(
         None,
     );
 
-    // No agent-level hub client URL (gateway-only cloud; workspace provider
-    // hub_url lives on `grow workspace` / WorkspaceStartArgs only).
-
     apply_agent_flag(&options.agent, &mut agent_config);
 
     if let Some(ref json) = options.agents_json {

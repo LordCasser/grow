@@ -1381,11 +1381,6 @@ pub(crate) async fn spawn_session_actor(
             }
         });
     }
-    let obs_bridge = {
-        let sid = xai_tool_protocol::SessionId::new(&*session_info.id.0)
-            .unwrap_or_else(|_| xai_tool_protocol::SessionId::new("unknown").expect("valid"));
-        xai_computer_hub_sdk::ObservabilityBridge::new(None, sid)
-    };
     let mut effective_config = crate::config::load_effective_config()
         .ok()
         .and_then(|raw| crate::agent::config::Config::new_from_toml_cfg(&raw).ok())
@@ -1614,7 +1609,6 @@ pub(crate) async fn spawn_session_actor(
         events: crate::session::events::EventTracker::new(
             &crate::session::persistence::session_dir(&session_info),
         ),
-        observability_bridge: obs_bridge,
         current_turn_number: std::cell::Cell::new(0),
         last_recap_main_turn: std::cell::Cell::new(0),
         recap_in_flight: std::cell::Cell::new(false),

@@ -1085,11 +1085,7 @@ pub async fn run_leader(
         lock_path: lock.lock_path().clone(),
         ws_url_suffix: compute_ws_url_suffix(ws_url),
         leader_binary_version: grow_version::VERSION.to_string(),
-    })
-    .with_default_hub_url(agent_config.hub.url.clone());
-
-    // Cloned before control_state moves into the IPC server; auth wired below.
-    let workspace_control = control_state.workspace.clone();
+    });
 
     // ── Phase 4: Bind socket and start IPC server (BEFORE auth/prefetch) ──────
     //
@@ -1208,8 +1204,6 @@ pub async fn run_leader(
     // permanent — the background cold-mint's auth.json write drives the
     // config-update loop to arm the relay via `DeferredRelayArm`.
     let relay_config = relay_config_for_session(auth.as_ref(), &agent_config, &shared_auth_manager);
-    // Same manager as the leader, so the exposure never writes auth.json itself.
-    workspace_control.set_auth_manager(shared_auth_manager.clone());
     let auth_manager_for_agent = shared_auth_manager.clone();
     let auth_manager_for_config = shared_auth_manager.clone();
 

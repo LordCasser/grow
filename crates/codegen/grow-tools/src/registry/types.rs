@@ -270,9 +270,6 @@ pub struct SessionContext {
     /// Optional deploy service configuration.
     pub app_builder_deployer_config:
         crate::implementations::grow_build::deploy_app::AppBuilderDeployerConfig,
-    /// Auth provider which returns a xai_computer_hub_sdk::AuthCredential. Can be used by
-    /// tools that need to authenticate with services.
-    pub auth_provider: Option<xai_computer_hub_sdk::SharedAuthProvider>,
     /// Tag name for `<system-reminder>` wrappers in tool result text.
     /// Defaults to [`crate::reminders::DEFAULT_REMINDER_TAG`] (hyphen).
     /// Hosts that expect a different tag name may override this.
@@ -969,9 +966,6 @@ impl ToolRegistryBuilder {
         }
         if let Some(memory_backend) = ctx.memory_backend {
             resources.insert(memory_backend);
-        }
-        if let Some(auth_provider) = ctx.auth_provider.clone() {
-            resources.insert(auth_provider);
         }
         if let Some(lsp) = ctx.lsp {
             resources.insert(lsp);
@@ -2054,7 +2048,6 @@ mod tests {
             lsp: None,
             app_builder_deployer_config:
                 crate::implementations::grow_build::deploy_app::AppBuilderDeployerConfig::default(),
-            auth_provider: None,
             system_reminder_tag: crate::reminders::DEFAULT_REMINDER_TAG,
         }
     }
