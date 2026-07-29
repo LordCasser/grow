@@ -1382,7 +1382,7 @@ pub(super) fn handle_prompt_response(
 
         // Predicted-next-prompt (tab autocomplete): wipe any stale suggestion
         // at every turn boundary. This must run before the reconnect /
-        // credit-limit early returns below, which skip the fetch gate
+        // reconnect and other early-return paths below, which skip the fetch gate
         // entirely — a prior ghost would otherwise survive those paths.
         agent.prompt.prompt_suggestion.clear();
 

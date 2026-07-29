@@ -446,10 +446,6 @@ pub struct RemoteSettings {
     /// Used as a fallback when the user hasn't set `[cli] use_leader` locally.
     #[serde(default)]
     pub leader_mode: Option<bool>,
-    #[serde(default)]
-    pub max_upload_file_bytes: Option<u64>,
-    #[serde(default)]
-    pub max_upload_untracked_bytes: Option<u64>,
     /// When `Some(true)`, capture workspace files for non-git project dirs (client default: off).
     #[serde(default)]
     pub non_git_workspace_capture: Option<bool>,
