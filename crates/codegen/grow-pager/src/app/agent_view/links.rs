@@ -103,10 +103,10 @@ impl AgentView {
             self.push_cta_link_span(link_spans_out, self.hit_announcement_cta.rect, url);
         }
     }
-    /// OSC 8 twin for the in-session header upgrade CTA (`hit_upgrade_cta`),
+    /// OSC 8 twin for the in-session header promo CTA (`hit_promo_cta`),
     /// sharing the same slot-gated url + occluder drop-whole rule as the banner
     /// CTA so hyperlink-capable terminals can open the promo from the header.
-    pub(super) fn push_upgrade_cta_link_span(
+    pub(super) fn push_header_promo_cta_link_span(
         &self,
         link_spans_out: &mut Vec<xai_ratatui_inline::LinkSpan>,
         banner_announcements: &[grow_announcements::Announcement],
@@ -116,7 +116,7 @@ impl AgentView {
             banner_announcements,
             hidden_announcement_ids,
         ) {
-            self.push_cta_link_span(link_spans_out, self.hit_upgrade_cta.rect, url);
+            self.push_cta_link_span(link_spans_out, self.hit_promo_cta.rect, url);
         }
     }
     /// Emit an OSC 8 hyperlink span over a CTA button `rect` when armed (draw
@@ -740,11 +740,11 @@ mod link_click_tests {
             "read-only child view must not advertise a background button"
         );
     }
-    /// Header twin: the top-header upgrade CTA rect must drop under an open
+    /// Header twin: the top-header announcement CTA rect must drop under an open
     /// dropdown too — the only suppression consumer previously without a
     /// dropdown pin (its occluder-class twin lives below).
     #[test]
-    fn open_prompt_dropdown_suppresses_header_upgrade_cta_click_target() {
+    fn open_prompt_dropdown_suppresses_header_promo_cta_click_target() {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.last_terminal_size = (120, 30);
@@ -754,7 +754,7 @@ mod link_click_tests {
             message: Some("ZZPROMO".into()),
             dismissible: Some(false),
             cta: Some(grow_announcements::AnnouncementCta {
-                label: Some("Upgrade Account".into()),
+                label: Some("Open Docs".into()),
                 url: Some("https://example.com/promo".into()),
                 caption: None,
             }),
@@ -762,7 +762,7 @@ mod link_click_tests {
         }];
         let _ = draw_frame_sized(&mut agent, &reg, &promo, 1, 120);
         let rect = agent
-            .hit_upgrade_cta
+            .hit_promo_cta
             .rect
             .expect("promo must arm the header CTA rect");
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
@@ -778,7 +778,7 @@ mod link_click_tests {
         );
         let _ = draw_frame_sized(&mut agent, &reg, &promo, 1, 120);
         assert!(
-            agent.hit_upgrade_cta.rect.is_none(),
+            agent.hit_promo_cta.rect.is_none(),
             "open dropdown must suppress the header CTA rect"
         );
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(rect.x + 1, rect.y)), &reg);
@@ -875,24 +875,24 @@ mod link_click_tests {
             "banner CTA armed"
         );
         assert!(agent.hit_announcement_hide.rect.is_some(), "[hide] armed");
-        assert!(agent.hit_upgrade_cta.rect.is_some(), "header CTA armed");
+        assert!(agent.hit_promo_cta.rect.is_some(), "header CTA armed");
         agent.active_subagent = Some("child-sid".into());
         let _ = draw_frame_sized(&mut agent, &reg, &promo, 1, 120);
         assert!(agent.hit_announcement_cta.rect.is_none());
         assert!(agent.hit_announcement_hide.rect.is_none());
-        assert!(agent.hit_upgrade_cta.rect.is_none());
+        assert!(agent.hit_promo_cta.rect.is_none());
     }
-    /// In-session header upgrade CTA: a promo owning the slot arms
-    /// `hit_upgrade_cta` (clickable → `AnnouncementsOpenCta`), and the
-    /// draw caches `pinned_upgrade_cta_live` so the `Ctrl+O` arm can override
+    /// In-session header promo CTA: a promo owning the slot arms
+    /// `hit_promo_cta` (clickable → `AnnouncementsOpenCta`), and the draw caches
+    /// `pinned_promo_cta_live` so the `Ctrl+O` arm can override
     /// YOLO — but ONLY for a pinned (non-dismissible) promo.
     #[test]
-    fn header_upgrade_cta_rect_and_ctrl_o_override() {
+    fn header_promo_cta_rect_and_ctrl_o_override() {
         use crate::actions::ActionId;
         let reg = ActionRegistry::defaults();
         let cta = || {
             Some(grow_announcements::AnnouncementCta {
-                label: Some("Upgrade Account".into()),
+                label: Some("Open Docs".into()),
                 url: Some("https://example.com/promo".into()),
                 caption: None,
             })
@@ -909,20 +909,17 @@ mod link_click_tests {
         }];
         let buf = draw_frame_sized(&mut agent, &reg, &pinned, 1, 120);
         assert!(
-            agent.pinned_upgrade_cta_live,
+            agent.pinned_promo_cta_live,
             "pinned promo lights the Ctrl+O override"
         );
         let rect = agent
-            .hit_upgrade_cta
+            .hit_promo_cta
             .rect
             .expect("pinned promo must arm the header CTA rect");
         let header_row: String = (0..120)
             .filter_map(|x| buf.cell((x, rect.y)).map(|c| c.symbol().to_string()))
             .collect();
-        assert!(
-            header_row.contains("[Upgrade Account]"),
-            "row={header_row:?}"
-        );
+        assert!(header_row.contains("[Open Docs]"), "row={header_row:?}");
         assert!(
             !header_row.contains("Ctrl+O"),
             "top-header button must stay bare; row={header_row:?}"
@@ -950,11 +947,11 @@ mod link_click_tests {
         }];
         draw_frame_sized(&mut agent, &reg, &dismissible, 1, 120);
         assert!(
-            !agent.pinned_upgrade_cta_live,
+            !agent.pinned_promo_cta_live,
             "dismissible promo must not steal Ctrl+O"
         );
         assert!(
-            agent.hit_upgrade_cta.rect.is_some(),
+            agent.hit_promo_cta.rect.is_some(),
             "dismissible promo still shows the clickable header CTA"
         );
         assert!(
@@ -968,10 +965,10 @@ mod link_click_tests {
         agent.last_terminal_size = (120, 30);
         draw_frame_sized(&mut agent, &reg, &[], 0, 120);
         assert!(
-            agent.hit_upgrade_cta.rect.is_none(),
+            agent.hit_promo_cta.rect.is_none(),
             "no promo → no header CTA"
         );
-        assert!(!agent.pinned_upgrade_cta_live);
+        assert!(!agent.pinned_promo_cta_live);
         assert!(matches!(
             agent.handle_agent_action(ActionId::ToggleYolo),
             InputOutcome::Action(Action::SetYoloMode(_))

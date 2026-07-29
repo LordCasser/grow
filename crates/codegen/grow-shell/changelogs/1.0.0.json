@@ -25,6 +25,11 @@
     "breaking_change": false
   },
   {
+    "category": "features",
+    "description": "**Default Agent prompts are readable build inputs.** Markdown under `grow-agent/prompts` is embedded directly without prompt encryption or a generated Rust wrapper.",
+    "breaking_change": false
+  },
+  {
     "category": "breaking",
     "description": "**GitHub Release is the only distribution channel.** Grow 1.0.0 supports macOS arm64, Linux arm64, and Linux amd64.",
     "breaking_change": true

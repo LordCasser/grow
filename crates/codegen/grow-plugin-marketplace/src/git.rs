@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn cache_hash_is_deterministic() {
-        let url = "https://github.com/xai-org/xai-plugin-marketplace.git";
+        let url = "https://github.com/example-org/plugin-marketplace.git";
         let h1 = cache_hash(url);
         let h2 = cache_hash(url);
         assert_eq!(h1, h2);

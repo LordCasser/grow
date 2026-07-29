@@ -151,7 +151,7 @@ fn spawn_terminal_and_display_refresh_diagnostics(tel: StartupTel) {
             }
         };
         let c = tel.cadence;
-        // OTLP path: numerics as i64 (u32/u64 fall back to strings and get dropped).
+        // Keep numeric fields consistently typed in structured local diagnostics.
         let duration_ms_i = duration_ms as i64;
         let min_draw_i = c.min_draw_ms as i64;
         let scroll_i = c.scroll_ms as i64;

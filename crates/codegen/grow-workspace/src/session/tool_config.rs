@@ -197,7 +197,7 @@ pub(crate) fn merge_and_filter(
         behavior_preset: baseline.behavior_preset.clone(),
     }
 }
-/// Whether per-session `tool_state.json` persistence + per-turn upload is
+/// Whether per-session `tool_state.json` persistence and per-turn restoration are
 /// enabled (`GROW_WORKSPACE_TOOL_STATE_ENABLED=true`; any other value keeps
 /// legacy behavior).
 pub fn tool_state_enabled() -> bool {

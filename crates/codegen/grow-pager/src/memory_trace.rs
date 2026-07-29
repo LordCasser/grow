@@ -30,15 +30,11 @@
 //! The lib cannot depend on jemalloc; `grow-pager-bin` installs:
 //! - [`install_allocator_stats_provider`] — cheap mallctl gauge reads
 //! - [`install_allocator_dump_provider`] — full `malloc_stats_print` text
-//! - [`install_threshold_hook`] — `(trace_path, crossed_bytes)`; the
-//!   GCS upload pipeline (WIP) attaches here to ship the trace + dump when a
-//!   process gets big enough to care about. Absent a hook, crossing is still
-//!   recorded locally and surfaced via `tracing::warn!`.
 //!
 //! Everything is inert until [`start`] runs (tests use scoped sinks).
 
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -111,7 +107,6 @@ struct TraceEvent<'a> {
 
 static STATS_PROVIDER: OnceLock<fn() -> Option<AllocatorStats>> = OnceLock::new();
 static DUMP_PROVIDER: OnceLock<fn() -> String> = OnceLock::new();
-static THRESHOLD_HOOK: OnceLock<fn(&Path, u64)> = OnceLock::new();
 
 /// Install the allocator gauge provider (jemalloc `stats.*` reads).
 /// Idempotent; first caller wins.
@@ -123,13 +118,6 @@ pub fn install_allocator_stats_provider(provider: fn() -> Option<AllocatorStats>
 /// invoked only on threshold crossings. Idempotent; first caller wins.
 pub fn install_allocator_dump_provider(provider: fn() -> String) {
     let _ = DUMP_PROVIDER.set(provider);
-}
-
-/// Install the threshold hook: `(jsonl_trace_path, crossed_threshold_bytes)`.
-/// It fires at most once per bucket per growth cycle (buckets re-arm after the
-/// footprint halves). Idempotent; first caller wins.
-pub fn install_threshold_hook(hook: fn(&Path, u64)) {
-    let _ = THRESHOLD_HOOK.set(hook);
 }
 
 // ─── Process memory sampling ──────────────────────────────────────────────
@@ -452,9 +440,6 @@ impl Sink {
             trace = %self.path.display(),
             "process footprint crossed memory threshold"
         );
-        if let Some(hook) = THRESHOLD_HOOK.get() {
-            hook(&self.path, bucket);
-        }
     }
 }
 

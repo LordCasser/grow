@@ -23,6 +23,7 @@
 ## Build and Release
 
 - All `grow-*` workspace crates now inherit version `1.0.0` from the workspace package metadata.
+- Default Agent prompts are compiled directly from readable Markdown under `grow-agent/prompts`; the legacy prompt encryption and generated Rust wrapper are gone.
 - Release builds embed a verified ripgrep binary and are published with checksums by the GitHub release workflow.
 
 # 0.2.112 — 2026-07-24

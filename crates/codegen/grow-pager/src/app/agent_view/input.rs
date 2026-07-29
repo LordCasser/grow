@@ -1274,7 +1274,7 @@ impl AgentView {
                 InputOutcome::Unchanged
             }
             ActionId::ToggleYolo => {
-                if self.pinned_upgrade_cta_live {
+                if self.pinned_promo_cta_live {
                     InputOutcome::Action(Action::AnnouncementsOpenCta)
                 } else {
                     InputOutcome::Action(Action::SetYoloMode(!self.session.is_yolo()))

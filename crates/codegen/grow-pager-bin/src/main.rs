@@ -1823,12 +1823,7 @@ async fn finish_update_on_exit(
 fn build_update_config() -> UpdateConfig {
     let environment = grow_shell::env::GrowEnvironment::from_flags(false, false);
     let mut config = UpdateConfig::from_environment(&environment);
-    cryptify::flow_stmt!({
-        {
-            config.deployment_key =
-                grow_shell::agent::config::EndpointsConfig::default().deployment_key;
-        }
-    });
+    config.deployment_key = grow_shell::agent::config::EndpointsConfig::default().deployment_key;
     if let Ok(root) = grow_shell::config::load_effective_config_disk_only()
         && let Some(ch) = grow_shell::util::config::channel_from_toml_opt(&root)
     {

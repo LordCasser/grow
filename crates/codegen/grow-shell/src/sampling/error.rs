@@ -283,7 +283,7 @@ mod tests {
             num_turns: 1,
             usage_is_incomplete: false,
         };
-        let free = "subscription:free-usage-exhausted quota hit";
+        let free = "provider:request-quota-exhausted";
         let err = attach_prompt_usage(
             acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited").data(free),
             Some(usage),
@@ -296,7 +296,7 @@ mod tests {
                     .or_else(|| d.get("message").and_then(|m| m.as_str()))
             })
             .unwrap_or("");
-        assert!(msg.contains("subscription:free-usage-exhausted"));
+        assert!(msg.contains("provider:request-quota-exhausted"));
         assert!(prompt_usage_from_error(&err).is_some());
         assert!(!err.data.as_ref().unwrap().is_string());
     }

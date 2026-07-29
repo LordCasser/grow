@@ -206,7 +206,7 @@ impl AgentView {
                 {
                     return InputOutcome::Action(Action::SubmitFollowUp(text));
                 }
-                if self.hit_upgrade_cta.contains(mouse.column, mouse.row)
+                if self.hit_promo_cta.contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
                     return InputOutcome::Action(Action::AnnouncementsOpenCta);
@@ -1035,7 +1035,7 @@ impl AgentView {
                 changed |= self.hit_bg_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_catalog_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cwd.update_hover(mouse.column, mouse.row);
-                changed |= self.hit_upgrade_cta.update_hover(mouse.column, mouse.row);
+                changed |= self.hit_promo_cta.update_hover(mouse.column, mouse.row);
                 {
                     let new_kill = self
                         .tasks

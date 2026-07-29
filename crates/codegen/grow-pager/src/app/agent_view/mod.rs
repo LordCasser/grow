@@ -998,10 +998,10 @@ pub struct AgentView {
     pub hit_announcement_hide: HitArea,
     /// `[label]` CTA button on the promo banner row (click opens its link).
     pub hit_announcement_cta: HitArea,
-    /// `[label]` upgrade CTA appended after the cwd path in the status bar
+    /// `[label]` promo CTA appended after the cwd path in the status bar
     /// (click opens its link; nulled under dropdowns / occluders like the
     /// banner CTA).
-    pub hit_upgrade_cta: HitArea,
+    pub hit_promo_cta: HitArea,
     /// Scrollbar track for the scrollback pane (for click-to-jump / drag).
     pub hit_scrollbar: HitArea,
     /// Whether a scrollbar drag is in progress on the scrollback scrollbar.
@@ -1125,11 +1125,11 @@ pub struct AgentView {
     /// mode-switch, an announcement can last the session, so tips must not
     /// burn TTL/seen counts while hidden.
     pub(crate) session_banner_active: bool,
-    /// A pinned (non-dismissible) promo upgrade CTA is live this frame (set at
+    /// A pinned (non-dismissible) promo announcement CTA is live this frame (set at
     /// the start of `draw` from the same slot gate as the header CTA). When
     /// true, `Ctrl+O` opens that CTA instead of toggling YOLO; the dispatch
     /// re-resolves through the gate so a stale-by-one-frame value stays safe.
-    pub(crate) pinned_upgrade_cta_live: bool,
+    pub(crate) pinned_promo_cta_live: bool,
     /// Fullscreen block viewer. When `Some`, replaces the scrollback area.
     pub(crate) block_viewer: Option<BlockViewerPane>,
     /// Active scrollback search session. When `Some`, vim `/` (or `/find`) is

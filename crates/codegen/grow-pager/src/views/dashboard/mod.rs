@@ -33,7 +33,7 @@ pub mod state;
 
 pub use render::render_dashboard;
 pub use render::{
-    DashboardOverlayChrome, HeaderUpgradeCta, popup_rect, render_dashboard_session_header,
+    DashboardOverlayChrome, HeaderPromoCta, popup_rect, render_dashboard_session_header,
     render_dashboard_session_overlay, render_popup_overlay,
 };
 pub use row::{

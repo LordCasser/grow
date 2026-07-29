@@ -53,13 +53,13 @@ const GAP: usize = 2;
 /// reservation every surface subtracts from its own budget so the adjacent text
 /// (message/path/location) truncates first. Excludes any surface-specific lead
 /// space (callers add their own).
-pub(crate) fn upgrade_cta_reserve(label: &str, caption: Option<&str>) -> u16 {
+pub(crate) fn promo_cta_reserve(label: &str, caption: Option<&str>) -> u16 {
     use unicode_width::UnicodeWidthStr;
     let cap_w = caption.map_or(0, |c| UnicodeWidthStr::width(c) + 1);
     (UnicodeWidthStr::width(format!("[{label}]").as_str()) + cap_w) as u16
 }
 
-/// Paint the promo upgrade `[label]` button (semantic warning yellow; hovered →
+/// Paint the promotional announcement `[label]` button (semantic warning yellow; hovered →
 /// warning fg on `bg_hover`) at (`x`, `y`), then the dim `caption` one space
 /// after it when it fits. The label truncates to `max_width` and the caption is
 /// dropped whole when it no longer fits, so the button never overpaints past
@@ -268,8 +268,8 @@ pub fn first_session_announcement<'a>(
 }
 
 /// Whether a live critical session announcement exists. Used by the banner
-/// slot ranking: critical outranks the privacy upsell banner (an outage
-/// notice must not be hidden by a persistent nag), promo does not.
+/// slot ranking: a critical notice must not be hidden by a lower-priority
+/// promotional announcement.
 pub fn has_critical_session_announcement(
     announcements: &[grow_announcements::Announcement],
     hidden_ids: &BTreeSet<String>,
@@ -287,7 +287,7 @@ pub fn first_session_announcement_at<'a>(
         .or_else(|| first_promo_session_announcement_at(announcements, hidden_ids, now))
 }
 
-/// The upgrade CTA to surface: `(owner, label, url)` resolved through the
+/// The announcement CTA to surface: `(owner, label, url)` resolved through the
 /// banner-slot gate. The single resolution shared by every surface that paints
 /// the `[label]` button (welcome hero, in-session header, dashboard, banner)
 /// and by the click/keyboard/OSC 8 open paths — so show-logic, https-safety,
@@ -831,7 +831,7 @@ mod tests {
                 ..Default::default()
             },
             ann(Some("critical"), None), // no message → not visible
-            promo("promo-1", "upsell", Some(("Go", "https://example.com"))),
+            promo("promo-1", "notice", Some(("Go", "https://example.com"))),
             expired_promo,
         ];
         let now = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
@@ -1115,7 +1115,7 @@ mod tests {
     #[test]
     fn first_session_announcement_prefers_critical_over_promo() {
         let list = vec![
-            promo("p", "upsell", Some(("Go", "https://example.com"))),
+            promo("p", "notice", Some(("Go", "https://example.com"))),
             Announcement {
                 id: Some("c".into()),
                 severity: Some("critical".into()),
@@ -1341,15 +1341,11 @@ mod tests {
     /// promo from a dismissible one.
     #[test]
     fn promo_cta_returns_label_and_pinned_flag() {
-        let mut pinned = promo(
-            "p",
-            "msg",
-            Some(("Upgrade Account", "https://example.com/promo")),
-        );
+        let mut pinned = promo("p", "msg", Some(("Open Docs", "https://example.com/promo")));
         pinned.dismissible = Some(false);
         let pinned = [pinned];
         let (owner, label, url) = promo_cta(&pinned, &no_hidden()).expect("usable cta");
-        assert_eq!(label, "Upgrade Account");
+        assert_eq!(label, "Open Docs");
         assert_eq!(url, "https://example.com/promo");
         assert!(
             !is_dismissible(owner),
@@ -1378,10 +1374,14 @@ mod tests {
         // Fits: the full button; the rect covers it (no caption requested).
         let area = Rect::new(0, 0, 30, 1);
         let mut buf = Buffer::empty(area);
-        let rect = render_cta_button(&mut buf, &theme, 0, 0, 30, "Upgrade", None, false)
+        let rect = render_cta_button(&mut buf, &theme, 0, 0, 30, "Open Docs", None, false)
             .expect("button fits");
-        assert_eq!(rect, Rect::new(0, 0, 9, 1), "rect covers `[Upgrade]` only");
-        assert_eq!(buf_row(&buf, area, 0), "[Upgrade]");
+        assert_eq!(
+            rect,
+            Rect::new(0, 0, 11, 1),
+            "rect covers `[Open Docs]` only"
+        );
+        assert_eq!(buf_row(&buf, area, 0), "[Open Docs]");
 
         // Caption fits: painted after the button; the rect stays button-only.
         let area = Rect::new(0, 0, 40, 1);
@@ -1403,7 +1403,7 @@ mod tests {
         // header/dashboard CTA can't overpaint the status group.
         let area = Rect::new(0, 0, 6, 1);
         let mut buf = Buffer::empty(area);
-        let rect = render_cta_button(&mut buf, &theme, 0, 0, 6, "Upgrade Account", None, false)
+        let rect = render_cta_button(&mut buf, &theme, 0, 0, 6, "Open Documentation", None, false)
             .expect("clipped button still paints");
         assert!(
             rect.width <= 6,
@@ -1422,10 +1422,10 @@ mod tests {
 
     /// The reserve helper counts the `[label]` button plus the optional caption.
     #[test]
-    fn upgrade_cta_reserve_counts_button_and_caption() {
-        assert_eq!(upgrade_cta_reserve("Go", None), 4); // `[Go]`
+    fn promo_cta_reserve_counts_button_and_caption() {
+        assert_eq!(promo_cta_reserve("Go", None), 4); // `[Go]`
         // `[Go]` (4) + leading space (1) + caption width (5).
-        assert_eq!(upgrade_cta_reserve("Go", Some("hello")), 4 + 1 + 5);
+        assert_eq!(promo_cta_reserve("Go", Some("hello")), 4 + 1 + 5);
     }
 
     /// Slot consistency: `promo_cta_target` resolves through the banner-slot
@@ -1434,7 +1434,7 @@ mod tests {
     /// the promo resolves again once the critical is hidden or expired.
     #[test]
     fn promo_cta_target_yields_to_critical_slot_owner() {
-        let promo_ann = promo("p", "upsell", Some(("Go", "https://example.com/promo")));
+        let promo_ann = promo("p", "notice", Some(("Go", "https://example.com/promo")));
         let crit = Announcement {
             id: Some("c".into()),
             severity: Some("critical".into()),
@@ -1536,7 +1536,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let hits = render_banner(area, &mut buf, &anns, &no_hidden(), false, false, true);
         let row0 = buf_row(&buf, area, 0);
-        assert!(row0.starts_with("[Upgrade"), "row0={row0:?}");
+        assert!(row0.starts_with("[Read"), "row0={row0:?}");
         assert!(
             row0.contains('…'),
             "button label must truncate; row0={row0:?}"

@@ -698,7 +698,7 @@ impl AgentView {
             hidden_announcement_ids,
         )
         .is_some();
-        self.pinned_upgrade_cta_live =
+        self.pinned_promo_cta_live =
             crate::views::announcements::promo_cta(banner_announcements, hidden_announcement_ids)
                 .is_some_and(|(owner, _, _)| !crate::views::announcements::is_dismissible(owner));
         self.frame_occluder_rects.clear();
@@ -743,7 +743,7 @@ impl AgentView {
             }
             self.hit_announcement_hide.clear();
             self.hit_announcement_cta.clear();
-            self.hit_upgrade_cta.clear();
+            self.hit_promo_cta.clear();
             return self.draw_subagent_fullscreen(
                 &child_sid.clone(),
                 area,
@@ -1425,14 +1425,14 @@ impl AgentView {
             .min()
             .map(|min_x| min_x.saturating_sub(layout.status_bar.x).saturating_sub(1))
             .unwrap_or(layout.status_bar.width);
-        let upgrade_cta =
+        let promo_cta =
             crate::views::announcements::promo_cta(banner_announcements, hidden_announcement_ids);
-        let upgrade_reserve = upgrade_cta.map_or(0u16, |(_, label, _)| {
-            1 + crate::views::announcements::upgrade_cta_reserve(label, None)
+        let promo_reserve = promo_cta.map_or(0u16, |(_, label, _)| {
+            1 + crate::views::announcements::promo_cta_reserve(label, None)
         });
         let cwd_line = truncate_line(
             cwd_line,
-            max_cwd_width.saturating_sub(upgrade_reserve) as usize,
+            max_cwd_width.saturating_sub(promo_reserve) as usize,
         );
         let cwd_width = cwd_line.width() as u16;
         buf.set_line_safe(
@@ -1449,8 +1449,8 @@ impl AgentView {
             width: visible_path_width,
             height: 1,
         });
-        let mut upgrade_cta_rect = None;
-        if let Some((_owner, label, _url)) = upgrade_cta {
+        let mut promo_cta_rect = None;
+        if let Some((_owner, label, _url)) = promo_cta {
             let avail = max_cwd_width.saturating_sub(cwd_width);
             if avail > 1 {
                 let cta_x = layout.status_bar.x + cwd_width;
@@ -1460,7 +1460,7 @@ impl AgentView {
                     &Span::styled(" ", Style::default().bg(theme.bg_base)),
                     1,
                 );
-                upgrade_cta_rect = crate::views::announcements::render_cta_button(
+                promo_cta_rect = crate::views::announcements::render_cta_button(
                     buf,
                     &theme,
                     cta_x + 1,
@@ -1468,13 +1468,13 @@ impl AgentView {
                     avail - 1,
                     label,
                     None,
-                    self.hit_upgrade_cta.hovered,
+                    self.hit_promo_cta.hovered,
                 );
             }
         }
         let dropdown_open = self.prompt.any_dropdown_open();
-        self.hit_upgrade_cta
-            .set_unless_dropdown(upgrade_cta_rect, dropdown_open);
+        self.hit_promo_cta
+            .set_unless_dropdown(promo_cta_rect, dropdown_open);
         let mut inline_edit_cursor: Option<(u16, u16)> = None;
         {
             self.sync_pending_user_input_marks();
@@ -4057,7 +4057,7 @@ impl AgentView {
                     banner_announcements,
                     hidden_announcement_ids,
                 );
-                self.push_upgrade_cta_link_span(
+                self.push_header_promo_cta_link_span(
                     link_spans_out,
                     banner_announcements,
                     hidden_announcement_ids,

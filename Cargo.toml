@@ -118,7 +118,6 @@ crc32fast = "1.4"
 criterion = "0.6"
 crossbeam = "0.8"
 crossterm = "0.28"
-cryptify = "3.2"
 dashmap = "6"
 derive_more = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "into", "into_iterator", "try_into"] }
 dhat = "0.3"

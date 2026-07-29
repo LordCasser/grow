@@ -32,9 +32,9 @@ pub(super) fn is_auth_tool_error(err: &xai_tool_runtime::ToolError) -> bool {
 struct SessionTokenAuthGate {
     is_session_based: bool,
     model_byok: crate::agent::auth_method::ModelByok,
-    /// Whether the request targets a first-party host. Lets an `Unknown`
-    /// BYOK status still refresh against cli-chat-proxy / `*.x.ai` without
-    /// risking a session-token leak to a third-party BYOK endpoint.
+    /// Whether the request targets an explicitly configured Grow proxy. Lets
+    /// an `Unknown` BYOK status still refresh without risking a session-token
+    /// leak to an unrelated provider endpoint.
     endpoint_is_first_party: bool,
 }
 impl SessionTokenAuthGate {

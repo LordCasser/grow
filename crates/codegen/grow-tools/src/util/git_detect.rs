@@ -140,14 +140,14 @@ mod tests {
 
     #[test]
     fn commit_and_pr_create_with_url() {
-        let out = "exit: 0\nhttps://github.com/xai-org/example/pull/12345\n";
+        let out = "exit: 0\nhttps://github.com/example-org/example/pull/12345\n";
         let ops = detect_git_ops("git commit -m 'x' && gh pr create --fill", out).unwrap();
         assert!(ops.committed);
         assert!(!ops.pr_merged);
         let pr = ops.pr_created.unwrap();
         assert_eq!(
             pr.url.as_deref(),
-            Some("https://github.com/xai-org/example/pull/12345")
+            Some("https://github.com/example-org/example/pull/12345")
         );
         assert_eq!(pr.number, Some(12345));
     }

@@ -111,8 +111,8 @@ pub struct WelcomeRenderResult {
     pub announcement_truncated: bool,
     /// Hit-test rect for the full announcement block (click anywhere to toggle).
     pub announcement_rect: Option<Rect>,
-    /// Hit-test rect for the promo upgrade CTA `[label]` button (click → open).
-    pub upgrade_cta_rect: Option<Rect>,
+    /// Hit-test rect for the promo announcement CTA `[label]` button (click → open).
+    pub promo_cta_rect: Option<Rect>,
 }
 
 use hero_box::HERO_BOX_MIN_WIDTH;
@@ -165,8 +165,8 @@ struct WelcomeLayoutInput<'a> {
     announcement: Option<&'a grow_announcements::Announcement>,
     /// Whether a long announcement is expanded inline (vs. collapsed to 2 lines).
     expanded: bool,
-    /// Whether the info slot reserves a promo upgrade CTA (spacer + button).
-    has_upgrade_cta: bool,
+    /// Whether the info slot reserves a promo announcement CTA (spacer + button).
+    has_promo_cta: bool,
 }
 
 impl WelcomeLayout {
@@ -228,7 +228,7 @@ impl WelcomeLayout {
             prompt_compact,
             announcement,
             expanded,
-            has_upgrade_cta,
+            has_promo_cta,
         } = input;
         let zero = Rect::default();
         // Pick hero vs stacked first, independent of the announcement's height:
@@ -256,7 +256,7 @@ impl WelcomeLayout {
                 changelog_height,
                 announcement,
                 expanded,
-                has_upgrade_cta,
+                has_promo_cta,
             );
         }
 
@@ -268,7 +268,7 @@ impl WelcomeLayout {
                     .width
                     .saturating_sub(prompt::prompt_inset(prompt_compact) * 2);
                 let width = stacked_info_width(avail, content_area.height, MENU_MIN_WIDTH);
-                hero_box::announcement_desired_rows(ann, width, expanded, has_upgrade_cta).min(
+                hero_box::announcement_desired_rows(ann, width, expanded, has_promo_cta).min(
                     stacked_info_budget(
                         content_area,
                         error_height,
@@ -615,10 +615,10 @@ pub struct WelcomeRenderParams<'a> {
     /// Whether a long managed-config announcement is expanded inline (vs the
     /// default 2-line collapsed view with a trailing `…`).
     pub welcome_announcement_expanded: bool,
-    /// Promo upgrade CTA `[label]` to paint below the hero announcement: `Some`
+    /// Promo announcement CTA `[label]` to paint below the hero announcement: `Some`
     /// drives both the reserved row height and the `[label]` button. `None` = no
     /// CTA on the welcome screen.
-    pub upgrade_cta: Option<&'a str>,
+    pub promo_cta: Option<&'a str>,
 }
 
 /// Render the welcome screen.
@@ -692,7 +692,7 @@ pub fn render_welcome(
                 changelog_cta_rect: None,
                 announcement_truncated: false,
                 announcement_rect: None,
-                upgrade_cta_rect: None,
+                promo_cta_rect: None,
             }
         }
         AuthState::Authenticating { auth_url, mode, .. } => {
@@ -722,7 +722,7 @@ pub fn render_welcome(
                 changelog_cta_rect: None,
                 announcement_truncated: false,
                 announcement_rect: None,
-                upgrade_cta_rect: None,
+                promo_cta_rect: None,
             }
         }
         AuthState::Done if params.is_zdr_blocked => {
@@ -753,7 +753,7 @@ pub fn render_welcome(
                 changelog_cta_rect: None,
                 announcement_truncated: false,
                 announcement_rect: None,
-                upgrade_cta_rect: None,
+                promo_cta_rect: None,
             }
         }
         // Folder-trust question: shown after auth, before any session is
@@ -1586,7 +1586,7 @@ fn render_announcement_section(
     content_height: u16,
     expanded: bool,
     mouse_pos: Option<(u16, u16)>,
-    upgrade_cta: Option<&str>,
+    promo_cta: Option<&str>,
 ) -> (Option<Rect>, bool, Option<Rect>) {
     // Same width the height pre-pass reserved for (see `stacked_info_width`).
     let menu_width = stacked_info_width(area.width, content_height, min_width_hint);
@@ -1604,14 +1604,14 @@ fn render_announcement_section(
 
     // Mirror the hero: reserve the CTA rows at the bottom, draw the text into
     // what's left, then place the `[label]` button right after the drawn text.
-    let (text_area, truncated, cta_rect) = hero_box::render_announcement_with_upgrade_cta(
+    let (text_area, truncated, cta_rect) = hero_box::render_announcement_with_cta(
         buf,
         theme,
         centered,
         announcement,
         expanded,
         mouse_pos,
-        upgrade_cta,
+        promo_cta,
     );
     (Some(text_area), truncated, cta_rect)
 }
@@ -1723,7 +1723,7 @@ fn render_welcome_done(
         prompt_compact: p.compact,
         announcement: p.announcement,
         expanded: p.welcome_announcement_expanded,
-        has_upgrade_cta: p.upgrade_cta.is_some(),
+        has_promo_cta: p.promo_cta.is_some(),
     });
 
     // Render startup warning in the error area (same slot as auth errors).
@@ -1733,7 +1733,7 @@ fn render_welcome_done(
     let mut changelog_cta_rect: Option<Rect> = None;
     let mut announcement_truncated = false;
     let mut announcement_rect: Option<Rect> = None;
-    let mut upgrade_cta_rect: Option<Rect> = None;
+    let mut promo_cta_rect: Option<Rect> = None;
 
     let (menu_rects, picker_close_button) = if show_picker {
         // Use the full area since logo/menu are hidden and shortcuts
@@ -1777,12 +1777,12 @@ fn render_welcome_done(
             p.welcome_announcement_expanded,
             p.changelog_bullets,
             p.changelog_has_full_notes,
-            p.upgrade_cta,
+            p.promo_cta,
         );
         changelog_cta_rect = rects.changelog_cta_rect;
         announcement_truncated = rects.announcement_truncated;
         announcement_rect = rects.announcement_rect;
-        upgrade_cta_rect = rects.upgrade_cta_rect;
+        promo_cta_rect = rects.promo_cta_rect;
         (rects.menu_rects, None)
     } else {
         // Narrow layout: stacked logo above, menu below. Inset the menu the
@@ -1819,11 +1819,11 @@ fn render_welcome_done(
                 content_area.height,
                 p.welcome_announcement_expanded,
                 p.mouse_pos,
-                p.upgrade_cta,
+                p.promo_cta,
             );
             announcement_rect = block;
             announcement_truncated = truncated;
-            upgrade_cta_rect = cta_rect;
+            promo_cta_rect = cta_rect;
         } else {
             changelog_cta_rect = render_changelog_section(
                 info_area,
@@ -1966,7 +1966,7 @@ fn render_welcome_done(
         changelog_cta_rect,
         announcement_truncated,
         announcement_rect,
-        upgrade_cta_rect,
+        promo_cta_rect,
     }
 }
 
@@ -2518,7 +2518,7 @@ mod tests {
             changelog_bullets: &[],
             changelog_has_full_notes: false,
             welcome_announcement_expanded: false,
-            upgrade_cta: None,
+            promo_cta: None,
         }
     }
 

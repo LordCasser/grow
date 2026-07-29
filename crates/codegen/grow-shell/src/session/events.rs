@@ -1,4 +1,4 @@
-//! Re-exports of event types (stub — cloud upload removed).
+//! Local session event vocabulary and writers.
 //! The orphan-rule items (`From<&permission::Decision>`
 //! and the doom-loop categorizer) stay here since they need shell-local
 //! types.

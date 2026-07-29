@@ -434,8 +434,8 @@ pub(crate) struct AutoCompactTriggerInfo {
     pub percentage: u8,
 }
 /// Why auto-compaction was suppressed after a deterministic failure.
-/// [`SuppressReason::as_str`] is a stable diagnostics value (BQ/OTLP/dashboards key
-/// off it) — don't rename the strings.
+/// [`SuppressReason::as_str`] is a stable local diagnostics value; do not rename
+/// the strings without updating readers and tests.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SuppressReason {
     ProviderLimit,
@@ -3434,8 +3434,8 @@ mod inline_auto_compact_flow_tests {
             SuppressReason::Other
         );
     }
-    /// `SuppressReason::as_str` is the stable diagnostics wire value — BQ/OTLP and
-    /// dashboards key off these exact strings. Lock them so a rename can't break monitoring.
+    /// `SuppressReason::as_str` is the stable local diagnostics value. Lock the
+    /// exact strings so local log analysis remains consistent across releases.
     #[test]
     fn suppress_reason_as_str_is_stable() {
         assert_eq!(SuppressReason::ProviderLimit.as_str(), "provider_limit");

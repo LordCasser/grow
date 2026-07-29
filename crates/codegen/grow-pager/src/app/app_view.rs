@@ -571,8 +571,8 @@ pub struct AppView {
     pub tip: Option<String>,
     /// Whether to show the resolved model ID in /session-info output.
     pub show_resolved_model: bool,
-    /// Whether the plugin marketplace CTA is enabled. Env `GROW_PLUGIN_CTA`
-    /// overrides `RemoteSettings.plugin_cta` (remote settings); defaults to `false`.
+    /// Whether the plugin marketplace CTA is enabled by the local
+    /// `GROW_PLUGIN_CTA` environment variable; defaults to `false`.
     pub plugin_cta_enabled: bool,
     /// Whether the pager is connected via a leader (leader mode). The Agent
     /// Dashboard entry points (`/dashboard`, `Ctrl+\`, `grow dashboard`, the
@@ -715,13 +715,13 @@ pub struct AppView {
     pub welcome_announcement: WelcomeAnnouncementState,
     /// Hit-test rect for the "show full URL" fallback link.
     pub welcome_auth_fallback_rect: Option<ratatui::layout::Rect>,
-    /// Hit-test rect for the welcome hero upgrade CTA `[label]` button
+    /// Hit-test rect for the welcome hero promo CTA `[label]` button
     /// (click → `AnnouncementsOpenCta`).
-    pub welcome_upgrade_cta_rect: Option<ratatui::layout::Rect>,
+    pub welcome_promo_cta_rect: Option<ratatui::layout::Rect>,
     /// Transient welcome toast: (message, wall-clock expiry).
     pub welcome_toast: Option<(String, std::time::Instant)>,
-    /// Sticky hover flag for the welcome upgrade CTA (redraw on enter/leave).
-    pub welcome_on_upgrade_cta: bool,
+    /// Sticky hover flag for the welcome promo CTA (redraw on enter/leave).
+    pub welcome_on_promo_cta: bool,
     /// Hit-test rect for the clickable changelog info block (opens release notes).
     pub welcome_changelog_cta_rect: Option<ratatui::layout::Rect>,
     /// Show the raw auth URL with mouse capture disabled for manual copy.
@@ -1092,9 +1092,9 @@ impl AppView {
             welcome_on_changelog_cta: false,
             welcome_announcement: WelcomeAnnouncementState::default(),
             welcome_auth_fallback_rect: None,
-            welcome_upgrade_cta_rect: None,
+            welcome_promo_cta_rect: None,
             welcome_toast: None,
-            welcome_on_upgrade_cta: false,
+            welcome_on_promo_cta: false,
             welcome_changelog_cta_rect: None,
             auth_show_raw_url: false,
             auth_mouse_disabled: false,
@@ -1772,7 +1772,7 @@ impl AppView {
             return InputOutcome::Changed;
         }
         let zdr_blocked = self.is_zdr_blocked();
-        let welcome_pinned_upgrade_cta = crate::views::announcements::promo_cta(
+        let welcome_pinned_promo_cta = crate::views::announcements::promo_cta(
             &self.active_announcements,
             &self.hidden_announcement_ids,
         )
@@ -1812,14 +1812,14 @@ impl AppView {
                     import_banner_rect: self.welcome_import_banner_rect.as_ref(),
                     auth_url_rect: self.welcome_auth_url_rect.as_ref(),
                     auth_fallback_rect: self.welcome_auth_fallback_rect.as_ref(),
-                    upgrade_cta_rect: self.welcome_upgrade_cta_rect.as_ref(),
-                    on_upgrade_cta: &mut self.welcome_on_upgrade_cta,
-                    upgrade_cta_keyboard: welcome_pinned_upgrade_cta,
+                    promo_cta_rect: self.welcome_promo_cta_rect.as_ref(),
+                    on_promo_cta: &mut self.welcome_on_promo_cta,
+                    promo_cta_keyboard: welcome_pinned_promo_cta,
                     changelog_cta_rect: self.welcome_changelog_cta_rect.as_ref(),
                     on_changelog_cta: &mut self.welcome_on_changelog_cta,
                     announcement_truncated: self.welcome_announcement.truncated,
                     announcement_rect: self.welcome_announcement.rect.as_ref(),
-                    on_announcement_cta: &mut self.welcome_announcement.on_cta,
+                    on_announcement: &mut self.welcome_announcement.on_cta,
                     announcement_expanded: &mut self.welcome_announcement.expanded,
                     show_raw_url: &mut self.auth_show_raw_url,
                     is_zdr_blocked: zdr_blocked,
@@ -2376,15 +2376,15 @@ struct WelcomeInputCtx<'a> {
     import_banner_rect: Option<&'a ratatui::layout::Rect>,
     auth_url_rect: Option<&'a ratatui::layout::Rect>,
     auth_fallback_rect: Option<&'a ratatui::layout::Rect>,
-    /// Hit-test rect for the welcome hero upgrade CTA `[label]` button
+    /// Hit-test rect for the welcome hero promo CTA `[label]` button
     /// (click → open the promo url).
-    upgrade_cta_rect: Option<&'a ratatui::layout::Rect>,
-    /// Sticky hover flag for the upgrade CTA (redraw on enter/leave so the
+    promo_cta_rect: Option<&'a ratatui::layout::Rect>,
+    /// Sticky hover flag for the promo CTA (redraw on enter/leave so the
     /// button brightens/dims).
-    on_upgrade_cta: &'a mut bool,
+    on_promo_cta: &'a mut bool,
     /// A pinned (non-dismissible) promo CTA is live, so `Ctrl+O` opens it
     /// (the welcome screen has no YOLO toggle to preserve).
-    upgrade_cta_keyboard: bool,
+    promo_cta_keyboard: bool,
     /// Hit-test rect for the clickable changelog info block (opens release notes).
     changelog_cta_rect: Option<&'a ratatui::layout::Rect>,
     /// Sticky hover flag for the changelog block (redraw on enter/leave).
@@ -2394,7 +2394,7 @@ struct WelcomeInputCtx<'a> {
     /// Hit-test rect for the full announcement block (click anywhere to toggle).
     announcement_rect: Option<&'a ratatui::layout::Rect>,
     /// Sticky hover flag for the announcement block (redraw on enter/leave).
-    on_announcement_cta: &'a mut bool,
+    on_announcement: &'a mut bool,
     /// Whether the long announcement is currently expanded inline.
     announcement_expanded: &'a mut bool,
     show_raw_url: &'a mut bool,
@@ -2778,7 +2778,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             return InputOutcome::Action(Action::NewSession);
         }
         if matches!(ctx.auth_state, AuthState::Done) {
-            if ctx.upgrade_cta_keyboard && key!('o', CONTROL).matches(key) {
+            if ctx.promo_cta_keyboard && key!('o', CONTROL).matches(key) {
                 return InputOutcome::Action(Action::AnnouncementsOpenCta);
             }
             if key!('w', CONTROL).matches(key) && ctx.cwd_has_git_ancestor {
@@ -2975,7 +2975,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                         );
                     }
                 }
-                if let Some(rect) = ctx.upgrade_cta_rect
+                if let Some(rect) = ctx.promo_cta_rect
                     && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
                 {
                     return InputOutcome::Action(Action::AnnouncementsOpenCta);
@@ -3053,15 +3053,15 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     *ctx.on_changelog_cta = over_cta;
                     return InputOutcome::Changed;
                 }
-                let over_upgrade = ctx.upgrade_cta_rect.is_some_and(|r| r.contains(pos));
-                if over_upgrade != *ctx.on_upgrade_cta {
-                    *ctx.on_upgrade_cta = over_upgrade;
+                let over_promo_cta = ctx.promo_cta_rect.is_some_and(|r| r.contains(pos));
+                if over_promo_cta != *ctx.on_promo_cta {
+                    *ctx.on_promo_cta = over_promo_cta;
                     return InputOutcome::Changed;
                 }
                 let over_ann = (ctx.announcement_truncated || *ctx.announcement_expanded)
                     && ctx.announcement_rect.is_some_and(|r| r.contains(pos));
-                if over_ann != *ctx.on_announcement_cta {
-                    *ctx.on_announcement_cta = over_ann;
+                if over_ann != *ctx.on_announcement {
+                    *ctx.on_announcement = over_ann;
                     return InputOutcome::Changed;
                 }
                 if matches!(ctx.auth_state, AuthState::Authenticating { .. })
@@ -3546,7 +3546,7 @@ impl AppView {
                             changelog_bullets: &self.changelog_bullets,
                             changelog_has_full_notes: self.changelog_markdown.is_some(),
                             welcome_announcement_expanded: self.welcome_announcement.expanded,
-                            upgrade_cta: hero_cta.map(|(_owner, label, _)| label),
+                            promo_cta: hero_cta.map(|(_owner, label, _)| label),
                         };
                         let result = crate::views::welcome::render_welcome(
                             view_area,
@@ -3561,7 +3561,7 @@ impl AppView {
                         self.welcome_import_banner_rect = result.import_banner_rect;
                         self.welcome_auth_url_rect = result.auth_url_rect;
                         self.welcome_auth_fallback_rect = result.auth_fallback_rect;
-                        self.welcome_upgrade_cta_rect = result.upgrade_cta_rect;
+                        self.welcome_promo_cta_rect = result.promo_cta_rect;
                         self.welcome_changelog_cta_rect = result.changelog_cta_rect;
                         if let Some((ref msg, _)) = self.welcome_toast {
                             paint_welcome_toast(f.buffer_mut(), view_area, msg);
@@ -3824,12 +3824,12 @@ impl AppView {
                                 } else {
                                     &self.dashboard_local_sessions
                                 };
-                            let dash_upgrade_cta = crate::views::announcements::promo_cta(
+                            let dash_promo_cta = crate::views::announcements::promo_cta(
                                 &self.active_announcements,
                                 &self.hidden_announcement_ids,
                             )
                             .map(
-                                |(owner, label, _)| crate::views::dashboard::HeaderUpgradeCta {
+                                |(owner, label, _)| crate::views::dashboard::HeaderPromoCta {
                                     label,
                                     pinned: !crate::views::announcements::is_dismissible(owner),
                                     caption: crate::views::announcements::usable_cta_caption(owner),
@@ -3844,7 +3844,7 @@ impl AppView {
                                 pending_hint,
                                 dashboard_roster,
                                 self.dashboard_sessions_loading,
-                                dash_upgrade_cta,
+                                dash_promo_cta,
                             );
                             let (popup_cursor, popup_post_flush, drawn_popup_agent) =
                                 if let Some(agent_id) = dashboard.attached_agent {
@@ -4792,9 +4792,9 @@ pub(crate) mod tests {
             welcome_on_changelog_cta: false,
             welcome_announcement: WelcomeAnnouncementState::default(),
             welcome_auth_fallback_rect: None,
-            welcome_upgrade_cta_rect: None,
+            welcome_promo_cta_rect: None,
             welcome_toast: None,
-            welcome_on_upgrade_cta: false,
+            welcome_on_promo_cta: false,
             welcome_changelog_cta_rect: None,
             auth_show_raw_url: false,
             auth_mouse_disabled: false,

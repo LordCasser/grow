@@ -861,9 +861,7 @@ pub(crate) async fn run(
         .as_ref()
         .and_then(|s| s.show_resolved_model)
         .unwrap_or(true);
-    app.plugin_cta_enabled = grow_config::env_bool("GROW_PLUGIN_CTA")
-        .or_else(|| remote_settings.as_ref().and_then(|s| s.plugin_cta))
-        .unwrap_or(false);
+    app.plugin_cta_enabled = grow_config::env_bool("GROW_PLUGIN_CTA").unwrap_or(false);
     app.session_picker_grouped = std::env::var("GROW_SESSION_PICKER_GROUPED")
         .ok()
         .and_then(|v| match v.as_str() {

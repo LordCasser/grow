@@ -336,7 +336,9 @@ mod tests {
         assert!(!is_service_api_url(
             "https://api.example.com.evil.example/v1"
         ));
-        assert!(!is_service_api_url("https://evil-x.ai.attacker.com/v1"));
+        assert!(!is_service_api_url(
+            "https://service.example.com.attacker.example/v1"
+        ));
         assert!(!is_service_api_url("https://prefix.example/v1"));
         assert!(!is_service_api_url("not-a-url"));
         assert!(!is_service_api_url(""));

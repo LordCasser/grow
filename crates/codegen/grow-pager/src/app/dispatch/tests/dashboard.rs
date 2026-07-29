@@ -3371,17 +3371,17 @@ fn dashboard_rename_esc_keystroke_routes_to_cancel() {
         "Esc in rename mode must produce DashboardCancelRename, got {outcome:?}",
     );
 }
-/// The dashboard header upgrade CTA: a pinned promo paints `[label]` (+ its
+/// The dashboard header announcement CTA: a pinned promo paints `[label]` (+ its
 /// configured `cta.caption`, bare when none), arms the click rect (→
 /// `AnnouncementsOpenCta`), and lights the `Ctrl+O` override; a
 /// dismissible promo shows the button but keeps Ctrl+O falling through and
 /// suppresses any caption; no promo shows nothing.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
+fn dashboard_promo_cta_paints_arms_rect_and_ctrl_o_override() {
     use crate::actions::ActionRegistry;
     use crate::app::app_view::InputOutcome;
-    use crate::views::dashboard::HeaderUpgradeCta;
+    use crate::views::dashboard::HeaderPromoCta;
     use crate::views::dashboard::render_dashboard;
     use crate::views::dashboard::state::DashboardState;
     use crossterm::event::{
@@ -3411,22 +3411,22 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         None,
         &[],
         false,
-        Some(HeaderUpgradeCta {
-            label: "Upgrade Account",
+        Some(HeaderPromoCta {
+            label: "Open Docs",
             pinned: true,
             caption: Some(CAPTION),
         }),
     );
     assert!(
-        state.pinned_upgrade_cta_live,
+        state.pinned_promo_cta_live,
         "pinned promo lights the Ctrl+O override"
     );
     let rect = state
-        .upgrade_cta_hit
+        .promo_cta_hit
         .rect
         .expect("pinned promo arms the header CTA rect");
     let header = header_row(&buf, rect.y);
-    assert!(header.contains("[Upgrade Account]"), "header={header:?}");
+    assert!(header.contains("[Open Docs]"), "header={header:?}");
     assert!(
         header.contains(CAPTION),
         "pinned dashboard promo shows its configured caption; header={header:?}"
@@ -3456,19 +3456,19 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         None,
         &[],
         false,
-        Some(HeaderUpgradeCta {
-            label: "Upgrade Account",
+        Some(HeaderPromoCta {
+            label: "Open Docs",
             pinned: true,
             caption: None,
         }),
     );
-    assert!(state.pinned_upgrade_cta_live);
+    assert!(state.pinned_promo_cta_live);
     let rect = state
-        .upgrade_cta_hit
+        .promo_cta_hit
         .rect
         .expect("caption-less pinned promo still arms the button");
     let header = header_row(&buf, rect.y);
-    assert!(header.contains("[Upgrade Account]"), "header={header:?}");
+    assert!(header.contains("[Open Docs]"), "header={header:?}");
     assert!(
         !header.contains(CAPTION),
         "absent caption paints nothing after the button; header={header:?}"
@@ -3484,19 +3484,19 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         None,
         &[],
         false,
-        Some(HeaderUpgradeCta {
-            label: "Upgrade Account",
+        Some(HeaderPromoCta {
+            label: "Open Docs",
             pinned: false,
             caption: Some(CAPTION),
         }),
     );
-    assert!(!state.pinned_upgrade_cta_live);
+    assert!(!state.pinned_promo_cta_live);
     let rect = state
-        .upgrade_cta_hit
+        .promo_cta_hit
         .rect
         .expect("dismissible promo still shows the clickable button");
     let header = header_row(&buf, rect.y);
-    assert!(header.contains("[Upgrade Account]"), "header={header:?}");
+    assert!(header.contains("[Open Docs]"), "header={header:?}");
     assert!(
         !header.contains(CAPTION),
         "dismissible dashboard promo suppresses its configured caption; header={header:?}"
@@ -3521,8 +3521,8 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         false,
         None,
     );
-    assert!(state.upgrade_cta_hit.rect.is_none());
-    assert!(!state.pinned_upgrade_cta_live);
+    assert!(state.promo_cta_hit.rect.is_none());
+    assert!(!state.pinned_promo_cta_live);
 }
 /// Empty rename draft cancels without emitting an Effect.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]

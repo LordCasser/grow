@@ -2,13 +2,11 @@
 //!
 //! Building a `reqwest::Client` is expensive (~95ms) because it loads
 //! TLS root certificates from the OS trust store. This module
-//! provides four clients for non-sampling traffic (the first three
+//! provides three clients for non-sampling traffic (the first two
 //! public and cached, the last crate-internal and built on demand):
 //!
 //! - `shared_client`: a `OnceLock`-cached async client for general
-//!   use (diagnostics, feedback, settings, etc.).
-//! - `shared_upload_client`: a `OnceLock`-cached client for GCS
-//!   uploads with aggressive connection pool eviction.
+//!   use (feedback, settings, etc.).
 //! - `shared_startup_blocking_client`: a blocking client for the early
 //!   model prefetch (runs before the async runtime is available).
 //! - `fresh_http1_client` -- a crate-internal, on-demand, pool-less
@@ -342,41 +340,6 @@ pub fn with_auth_retry(
     reqwest_middleware::ClientBuilder::new(client)
         .with(grow_auth::AuthRetryMiddleware::new(credentials, 1))
         .build()
-}
-
-/// Returns a shared [`reqwest::Client`] for GCS uploads, creating it on first call.
-///
-/// Unlike `shared_client()`, this client has aggressive connection pool eviction
-/// to avoid reusing stale/poisoned connections during retry loops. When uploads
-/// fail and trigger exponential backoff (1s, 2s, 4s...), idle connections may be
-/// closed by the server, Cloudflare, or load balancers. Without pool eviction,
-/// all retries would reuse the same dead connection and fail.
-///
-/// Settings:
-/// - HTTP/1.1 only — avoids HTTP/2 connection-poisoning where a degraded
-///   multiplexed connection silently drops multipart request bodies, causing
-///   cascading 400 errors across all concurrent uploads
-/// - Small connection pool (2 per host) for parallel chunk uploads
-/// - Short idle timeout (10s) to evict stale connections before backoff completes
-pub fn shared_upload_client() -> reqwest::Client {
-    static UPLOAD_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    UPLOAD_CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                // Force HTTP/1.1: batch_upload multipart bodies are silently
-                // dropped when an HTTP/2 connection degrades (GOAWAY, flow-control
-                // exhaustion). Because all streams share one connection, a single
-                // bad connection causes every subsequent request to arrive with
-                // Content-Length: 0, producing thousands of 400s until the process
-                // restarts. HTTP/1.1 isolates failures to individual connections.
-                .http1_only()
-                .pool_max_idle_per_host(2)
-                .pool_idle_timeout(std::time::Duration::from_secs(10))
-                .user_agent(process_user_agent_string())
-                .build()
-                .expect("failed to build shared upload HTTP client")
-        })
-        .clone()
 }
 
 /// A fresh, pool-less HTTP/1.1 [`reqwest::Client`], deliberately NOT cached:

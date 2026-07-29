@@ -616,7 +616,7 @@ pub struct PluginUsed {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Plugin CTA (inline marketplace "Connect" upsell)
+// Plugin CTA (inline marketplace connection prompt)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -1139,13 +1139,13 @@ pub struct DisplayRefreshProbe {
     pub terminal: TerminalDiagnostic,
     /// `ok` | `skipped` | `error`
     pub outcome: String,
-    /// Refresh rate as `i64` so OTLP/analytics keep a numeric field.
+    /// Refresh rate as `i64` so structured local logs keep a numeric field.
     pub hz: Option<i64>,
     /// Backend token, e.g. `macos_core_graphics`.
     pub source: String,
     /// Empty when ok; else stable skip/error reason (`ssh`, `wsl`, …).
     pub skip_reason: String,
-    /// Wall ms as `i64` so OTLP/analytics keep a numeric field (u64 serializes as string).
+    /// Wall ms as `i64` so structured local logs keep a numeric field.
     pub duration_ms: i64,
     pub auto_cadence_enabled: bool,
     /// True when derived auto ms is used on at least one motion clock.

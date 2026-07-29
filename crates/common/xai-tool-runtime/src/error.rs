@@ -31,30 +31,6 @@ pub enum ToolErrorKind {
     Cancelled,
     /// Rate limit exceeded.
     RateLimited,
-    /// The caller's usage pool / billing balance is exhausted (out
-    /// of credits). Payment-required-shaped; distinct from
-    /// `RateLimited` so the surface can show "out of credits"
-    /// rather than "try again later".
-    UsagePoolExhausted,
-    /// The caller hit a usage limit with no balance verdict behind it
-    /// (the balance gate was skipped/dormant and the non-billable
-    /// allowance ran out). Payment-required-shaped, but distinct from
-    /// `UsagePoolExhausted` (an explicit out-of-balance verdict) so the
-    /// surface can show a "usage limit reached" message.
-    UsageLimitReached,
-    /// The billing global rate limiter shed this request (transient
-    /// load shed). Distinct from `RateLimited` (per-user / per-message
-    /// quota) so the surface can render a billing-specific
-    /// "try again later" with a retry hint; the `retry_after_secs`
-    /// hint, when known, rides in `ToolError::details`. Named to match
-    /// the chat surface's `global_rate_limit` typed error.
-    GlobalRateLimit,
-    /// The caller hit their per-user concurrency cap (too many media
-    /// generations already in flight). Transient — retry once one
-    /// finishes. Distinct from `GlobalRateLimit` (a shared-backend load
-    /// shed) so the surface can tailor a "too many in progress" message.
-    /// Named to match the chat surface's `concurrency_limit` typed error.
-    ConcurrencyLimit,
     /// Upstream service unavailable.
     ServiceUnavailable,
     /// Network-level failure.
@@ -83,10 +59,6 @@ impl ToolErrorKind {
             Self::Timeout => "timeout",
             Self::Cancelled => "cancelled",
             Self::RateLimited => "rate_limited",
-            Self::UsagePoolExhausted => "usage_pool_exhausted",
-            Self::UsageLimitReached => "usage_limit_reached",
-            Self::GlobalRateLimit => "global_rate_limit",
-            Self::ConcurrencyLimit => "concurrency_limit",
             Self::ServiceUnavailable => "service_unavailable",
             Self::NetworkError => "network_error",
             Self::Execution => "execution",
@@ -209,22 +181,6 @@ impl ToolError {
 
     pub fn rate_limited(detail: impl Into<String>) -> Self {
         Self::new(ToolErrorKind::RateLimited, detail)
-    }
-
-    pub fn usage_pool_exhausted(detail: impl Into<String>) -> Self {
-        Self::new(ToolErrorKind::UsagePoolExhausted, detail)
-    }
-
-    pub fn usage_limit_reached(detail: impl Into<String>) -> Self {
-        Self::new(ToolErrorKind::UsageLimitReached, detail)
-    }
-
-    pub fn global_rate_limit(detail: impl Into<String>) -> Self {
-        Self::new(ToolErrorKind::GlobalRateLimit, detail)
-    }
-
-    pub fn concurrency_limit(detail: impl Into<String>) -> Self {
-        Self::new(ToolErrorKind::ConcurrencyLimit, detail)
     }
 
     pub fn service_unavailable(detail: impl Into<String>) -> Self {

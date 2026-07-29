@@ -1037,7 +1037,7 @@ impl SessionActor {
     ) {
         self.events.emit_turn_ended(outcome, category, context);
     }
-    /// Current model ID for OTLP span attributes. Reads from chat_state_handle
+    /// Current model ID for structured tracing span attributes. Reads from chat_state_handle
     /// so it always reflects the latest model override — no stale cached field.
     /// Returns "unknown" if no sampling config is set.
     async fn current_model_id(&self) -> String {
