@@ -427,7 +427,6 @@ async fn critical_announcement_reaches_live_session_via_periodic_refresh() {
     // Server-side change mid-session (the remote settings flip): the next
     // `GET /v1/settings` returns a critical announcement.
     content.server().set_settings(json!({
-        "allow_access": true,
         "announcements": [{
             "id": "pty-crit-live",
             "title": CRIT_TITLE,
@@ -475,7 +474,6 @@ async fn hidden_critical_does_not_suppress_new_critical_id() {
 
     // Critical A arrives via the poll push.
     content.server().set_settings(json!({
-        "allow_access": true,
         "announcements": [{
             "id": "pty-crit-a",
             "title": CRIT_TITLE,
@@ -517,7 +515,6 @@ async fn hidden_critical_does_not_suppress_new_critical_id() {
 
     // Server-side flip to critical B (new id): the banner must re-arm.
     content.server().set_settings(json!({
-        "allow_access": true,
         "announcements": [{
             "id": "pty-crit-b",
             "title": CRIT_B_TITLE,
@@ -565,7 +562,6 @@ async fn promo_announcement_banner_slash_gate_and_critical_preemption() {
 
     // Server-side flip: the next `GET /v1/settings` returns a promo with CTA.
     content.server().set_settings(json!({
-        "allow_access": true,
         "announcements": [promo_settings_announcement()],
     }));
 
@@ -626,7 +622,6 @@ async fn promo_announcement_banner_slash_gate_and_critical_preemption() {
     // Critical published mid-promo, with the promo STILL in the list: the
     // single slot flips to the critical banner (precedence, not replacement).
     content.server().set_settings(json!({
-        "allow_access": true,
         "announcements": [
             promo_settings_announcement(),
             {
@@ -674,7 +669,6 @@ async fn promo_cta_click_opens_link_and_hide_roundtrip() {
     let mut harness = spawn_polling_session_with_env(&content, "pty-announce-cta", &extra_env);
 
     content.server().set_settings(json!({
-        "allow_access": true,
         "announcements": [promo_settings_announcement()],
     }));
     harness
@@ -792,7 +786,6 @@ async fn non_dismissible_promo_ignores_hide_then_dismissible_hides() {
 
     // Pinned promo arrives via the poll flip.
     content.server().set_settings(json!({
-        "allow_access": true,
         "announcements": [{
             "id": "pty-promo-pinned",
             "message": PROMO_MSG,
@@ -840,7 +833,6 @@ async fn non_dismissible_promo_ignores_hide_then_dismissible_hides() {
     // Back-compat: a dismissible promo re-arms [hide] and hides normally. Its
     // message is hero-only too, so [hide] appearing signals the flip.
     content.server().set_settings(json!({
-        "allow_access": true,
         "announcements": [{
             "id": "pty-promo-hideable",
             "message": PROMO_B_MSG,

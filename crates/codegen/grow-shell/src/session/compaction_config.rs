@@ -17,7 +17,8 @@ pub(crate) const SUPPRESS_TURN: u8 = 1;
 /// cleared only when the context budget changes — a successful compaction, a
 /// rewind (context shrank), or a model switch (a larger window may now fit).
 pub(crate) const SUPPRESS_STICKY: u8 = 2;
-/// Credit block: suppress until a model `200` (credits aren't client-observable).
+/// Provider account/quota limit: suppress until a model `200` because the
+/// provider's account state is not client-observable.
 /// Survives turns; context changes can't fix it. Token refresh must not clear this.
 pub(crate) const SUPPRESS_UNTIL_SUCCESS: u8 = 3;
 /// Auth-expired auto-compact: suppress until login/token refresh, not until 200

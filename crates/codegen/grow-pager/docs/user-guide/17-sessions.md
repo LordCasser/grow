@@ -171,7 +171,7 @@ This shows:
 
 - Session title (when set)
 - Shell version
-- Auth method (OAuth vs API key) and where to manage account and credits (https://service.example.com/?_s=billing for OAuth, console.example.com for API key; API-key sessions also suggest `grow login` for Provider Plan)
+- Auth method (OAuth vs API key)
 - Session ID
 - Working directory
 - Model (with a model hash for coding models)

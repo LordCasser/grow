@@ -794,20 +794,6 @@ impl MvpAgent {
         crate::agent::config::apply_remote_settings_side_effects(
             self.cfg.borrow().remote_settings.as_ref(),
         );
-        if let Some(identity) = self
-            .auth_manager
-            .current_or_expired()
-            .filter(|a| a.is_service_auth())
-            .map(|a| a.user_id)
-        {
-            self.tier_allowed
-                .set(
-                    super::settings_allow_access(
-                        self.cfg.borrow().remote_settings.as_ref(),
-                    ),
-                );
-            *self.allow_access_resolved_for.borrow_mut() = Some(identity);
-        }
         self.reapply_storage_mode();
         {
             let cfg_snapshot = self.cfg.borrow().clone();
@@ -879,7 +865,7 @@ impl MvpAgent {
     /// Fetch remote settings for `auth`, returning them only when the same
     /// identity is still active after the request completes.
     ///
-    pub(super) async fn fetch_settings_resolving_gate(
+    pub(super) async fn fetch_settings_for_current_identity(
         &self,
         auth: &crate::auth::ProviderAuth,
     ) -> Option<crate::util::config::RemoteSettings> {
@@ -954,7 +940,7 @@ impl MvpAgent {
             return;
         }
         let remote_was_absent = self.cfg.borrow().remote_settings.is_none();
-        let Some(settings) = self.fetch_settings_resolving_gate(auth).await else {
+        let Some(settings) = self.fetch_settings_for_current_identity(auth).await else {
             return;
         };
         tracing::info!("post-auth settings refreshed");
@@ -1308,39 +1294,6 @@ impl MvpAgent {
             c
         }
     }
-    /// Whether the current session is a personal provider account on its free tier.
-    /// The Imagine tools stay advertised to the model but
-    /// are flagged tier-restricted so they short-circuit at call time with the
-    /// Provider Plan upsell prose (see `ImageGenConfig`/`VideoGenConfig`'s
-    /// `tier_restricted`).
-    ///
-    /// Fails **open** (returns `false`) whenever we can't positively confirm a
-    /// restricted personal tier — no auth yet, BYOK / API-key sessions, team
-    /// accounts, and an unknown/absent tier all pass. The server
-    /// authoritatively zero-limits Imagine for free accounts (429), so this
-    /// client gate is a UX optimization (a clean in-chat upsell instead of a
-    /// doomed request), never the security boundary — under-restricting is safe,
-    /// over-restricting would wrongly disable a paid feature.
-    ///
-    /// Mirrors the pager's cosmetic slash-command gate
-    /// ([`crate::tier::is_restricted_tier_name`]); the only difference is the
-    /// absent-tier policy (the pager hides on `None`, we fail open on `None`).
-    fn is_tier_restricted_capability(&self) -> bool {
-        let Some(auth) = self.auth_manager.current() else {
-            return false;
-        };
-        if !auth.is_service_auth() || auth.team_id.is_some() {
-            return false;
-        }
-        let tier = self
-            .cfg
-            .borrow()
-            .remote_settings
-            .as_ref()
-            .and_then(|rs| rs.subscription_tier_display.clone())
-            .or_else(|| jwt_tier_claim(&auth.key));
-        tier.as_deref().is_some_and(crate::tier::is_restricted_tier_name)
-    }
     /// Build image generation config.
     ///
     /// Both BYOK and session (OAuth) users go direct to `inference_base_url`.
@@ -1355,7 +1308,6 @@ impl MvpAgent {
         let Some(ref api_key) = sampling_config.api_key else {
             return ImageGenConfig::Disabled;
         };
-        let tier_restricted = self.is_tier_restricted_capability();
         let cfg = self.cfg.borrow();
         let base_url = cfg.endpoints.inference_base_url.clone();
         let version = cfg
@@ -1379,7 +1331,6 @@ impl MvpAgent {
             image_edit_enabled: cfg.resolve_image_edit().value,
             model_override: cfg.resolve_image_gen_model_override(),
             edit_model_override: cfg.resolve_image_edit_model_override(),
-            tier_restricted,
         }
     }
     /// Build deploy-service config. The tool talks directly to the deployer service.
@@ -1401,7 +1352,6 @@ impl MvpAgent {
         let Some(api_key) = self.sampling_config.borrow().api_key.clone() else {
             return VideoGenConfig::Disabled;
         };
-        let tier_restricted = self.is_tier_restricted_capability();
         let zdr_video_output_s3 = cfg
             .disable_zdr_incompatible_tools
             .then(|| cfg.zdr_video_output_s3.clone())
@@ -1430,7 +1380,6 @@ impl MvpAgent {
             base_url,
             extra_headers: headers,
             zdr_video_output_s3: zdr_video_output_s3.map(Box::new),
-            tier_restricted,
         }
     }
     pub(super) fn prepare_web_search_sampling_config(&self) -> Option<SamplingConfig> {
@@ -1602,8 +1551,6 @@ impl MvpAgent {
             interactive_trust_prompted: Rc::new(
                 RefCell::new(std::collections::HashSet::new()),
             ),
-            tier_allowed: std::cell::Cell::new(true),
-            allow_access_resolved_for: std::cell::RefCell::new(None),
             storage_mode: std::cell::Cell::new(storage_mode),
             default_yolo_mode,
             default_auto_mode,
@@ -1635,9 +1582,6 @@ impl MvpAgent {
             ),
             monitor_event_buffer: grow_tools::implementations::grow_build::monitor::types::MonitorEventBuffer::default(),
             bundle_sync_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            post_unblock_jwt_retry_in_flight: Arc::new(
-                std::sync::atomic::AtomicBool::new(false),
-            ),
             workspace_ops: RefCell::new(None),
             require_gateway_sessions: Rc::new(
                 RefCell::new(std::collections::HashSet::new()),

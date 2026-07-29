@@ -109,7 +109,6 @@ impl AgentView {
             bash_turn: false,
             cron_task_id: None,
             stashed_prompt: None,
-            credit_limit_stashed_prompt: None,
             reauth_stashed_prompt: None,
             active_modal: None,
             modal_buttons: Vec::new(),
@@ -117,8 +116,6 @@ impl AgentView {
             context_state: None,
             chat_kind: false,
             app_chat_mode: false,
-            credit_balance: None,
-            auto_topup: None,
             goal_state: None,
             workflow_blocks: std::collections::HashMap::new(),
             workflow_runs: Vec::new(),
@@ -180,7 +177,6 @@ impl AgentView {
             hovered_prompt: false,
             hit_badge: Default::default(),
             hit_context: Default::default(),
-            hit_credits: Default::default(),
             hit_todo_close: Default::default(),
             hit_bg_close: Default::default(),
             hit_subagent_close: Default::default(),
@@ -297,7 +293,6 @@ impl AgentView {
             hit_subagent_frame_close: Default::default(),
             sharing_enabled: false,
             scheduler_background_loops: None,
-            billing_surface_visible: false,
             input_log: crate::input_log::InputRingBuffer::new(),
             esc_pressed_at: None,
             leader_key_started_at: None,
@@ -837,21 +832,6 @@ impl AgentView {
             }
         }
     }
-    /// Apply Build coding-credit balance only for non-chat agents.
-    /// Gateway/chat-kind sessions keep credits unset so bars/warnings stay off.
-    pub fn apply_credit_balance(
-        &mut self,
-        balance: Option<crate::views::credit_bar::CreditBalance>,
-        auto_topup: Option<crate::views::credit_bar::AutoTopupInfo>,
-    ) {
-        if self.chat_kind {
-            self.credit_balance = None;
-            self.auto_topup = None;
-            return;
-        }
-        self.credit_balance = balance;
-        self.auto_topup = auto_topup;
-    }
     /// Record a key event to the input flight recorder.
     ///
     /// Zero heap allocations — stores raw `Copy` types in the ring buffer.
@@ -910,20 +890,6 @@ impl AgentView {
             .registry_mut()
             .set_share_visible(enabled);
     }
-    /// Set [`Self::billing_surface_visible`] (see the field doc) and mirror it
-    /// into this agent's slash controller, so the two can't drift.
-    pub fn set_billing_surface_visible(&mut self, visible: bool) {
-        self.billing_surface_visible = visible;
-        self.prompt
-            .slash_controller
-            .set_billing_surface_visible(visible);
-    }
-    /// Replace the restricted slash-command deny list in this agent's
-    /// registry (e.g. `/usage` denied on a provider's free tier). Deny
-    /// wins over every `set_*_visible` gate.
-    pub fn set_restricted_commands(&mut self, names: &[String]) {
-        self.prompt.set_restricted_commands(names);
-    }
     /// Show or hide the `/dashboard` slash command in this agent's registry.
     /// Driven by the dashboard feature flag
     /// (`crate::views::dashboard::dashboard_enabled()`) at agent-creation
@@ -944,21 +910,17 @@ impl AgentView {
     pub(crate) fn apply_app_scoped_gates(
         &mut self,
         sharing_enabled: bool,
-        billing_surface_visible: bool,
         chat_mode: bool,
         screen_mode: crate::app::ScreenMode,
         announcements: &[grow_announcements::RemoteAnnouncement],
-        restricted_commands: &[String],
     ) {
         self.set_sharing_enabled(sharing_enabled);
-        self.set_billing_surface_visible(billing_surface_visible);
         self.app_chat_mode = chat_mode;
         self.prompt.set_screen_mode(screen_mode);
         self.set_dashboard_visible(crate::views::dashboard::dashboard_enabled());
         self.set_has_session_announcements(crate::views::announcements::has_session_announcements(
             announcements,
         ));
-        self.set_restricted_commands(restricted_commands);
     }
     /// Show or hide the `/recap` slash command in this agent's registry.
     pub fn set_session_recap_available(&mut self, available: bool) {

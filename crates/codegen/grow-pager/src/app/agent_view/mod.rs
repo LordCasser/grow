@@ -829,10 +829,6 @@ pub struct AgentView {
     /// Stashed normal prompt state while editing a queued prompt.
     /// Restored when editing ends.
     pub stashed_prompt: Option<StashedPrompt>,
-    /// Complete prompt stashed from a credit-limit-blocked turn. Used by
-    /// `CreditLimitRecheckComplete` to retry the prompt after a tier
-    /// upgrade instead of showing a stale upsell.
-    pub credit_limit_stashed_prompt: Option<crate::app::agent::InFlightPrompt>,
     /// Complete prompt stashed from a turn that failed because the login
     /// expired (401 / re-auth). Used by the `AuthComplete` handler to
     /// auto-resubmit the prompt after a successful mid-session re-auth so
@@ -847,7 +843,7 @@ pub struct AgentView {
     /// Cached server-reported context state.
     pub context_state: Option<grow_shell::session::ContextInfo>,
     /// Gateway light-frontend session (`kind: "chat"` / `--chat` / conversation
-    /// resume). Suppresses Build credits / local sampler context diagnostics so the
+    /// resume). Suppresses local sampler usage/context diagnostics so the
     /// status bar and prompt never imply remote usage from wrong metrics.
     pub chat_kind: bool,
     /// Process-wide `--chat` (mirrors `AppView::chat_mode`; set via
@@ -856,10 +852,6 @@ pub struct AgentView {
     /// Unlike `chat_kind`, stays `false` for a `/chat` one-shot session in
     /// a Build process, whose picker still lists local sessions.
     pub app_chat_mode: bool,
-    /// Mocked credit balance for the status bar indicator.
-    pub credit_balance: Option<crate::views::credit_bar::CreditBalance>,
-    /// Auto top-up rule paired with `credit_balance` for the prompt warning.
-    pub auto_topup: Option<crate::views::credit_bar::AutoTopupInfo>,
     /// Current goal orchestration state. Set by `GoalUpdated` session
     /// notifications, cleared when a new session starts.
     pub goal_state: Option<super::agent::GoalDisplayState>,
@@ -1041,7 +1033,6 @@ pub struct AgentView {
     pub hovered_prompt: bool,
     pub hit_badge: HitArea,
     pub hit_context: HitArea,
-    pub hit_credits: HitArea,
     pub hit_todo_close: HitArea,
     pub hit_bg_close: HitArea,
     pub hit_subagent_close: HitArea,
@@ -1370,8 +1361,6 @@ pub struct AgentView {
     /// refreshed by `grow/settings/update`: the fire side is pinned for the
     /// session's lifetime, so a live mirror would drift out of agreement.
     pub scheduler_background_loops: Option<bool>,
-    /// Mirrors `AppView::usage_visible` (credit warning + `/usage manage`).
-    pub billing_surface_visible: bool,
     /// Input flight recorder — rolling buffer of recent key events.
     /// Dumped to file via Esc→d combo for debugging.
     pub(crate) input_log: crate::input_log::InputRingBuffer,
@@ -1660,39 +1649,6 @@ fn translate_local_submit(
                 worktree,
                 persist_mode,
             })
-        }
-        LocalQuestionKind::CreditLimitUpsell { choices } => {
-            let q = qv.questions.first();
-            let url = q
-                .and_then(|q| q.options.get(*idx))
-                .and_then(|o| o.id.as_deref())
-                .unwrap_or(super::dispatch::UPSELL_URL_PAYG);
-            let choice = choices
-                .get(*idx)
-                .copied()
-                .unwrap_or(grow_diagnostics::events::CreditLimitChoice::PayAsYouGo);
-            grow_diagnostics::session_ctx::log_event(
-                grow_diagnostics::events::CreditLimitUpsellClicked {
-                    surface: grow_diagnostics::events::CreditLimitUpsellSurface::QuestionModal,
-                    choice,
-                },
-            );
-            InputOutcome::Action(Action::OpenUrl(url.to_string()))
-        }
-        LocalQuestionKind::FreeUsageUpsell { source } => {
-            let url = qv
-                .questions
-                .first()
-                .and_then(|q| q.options.get(*idx))
-                .and_then(|o| o.id.as_deref())
-                .unwrap_or(super::dispatch::UPSELL_URL_UPGRADE);
-            grow_diagnostics::session_ctx::log_event(
-                grow_diagnostics::events::SubscriptionUpsellClicked {
-                    source,
-                    auth_method: None,
-                },
-            );
-            InputOutcome::Action(Action::OpenUrl(url.to_string()))
         }
         LocalQuestionKind::DoctorFix { target, plan } => {
             if *idx == 0 {
@@ -2460,8 +2416,6 @@ pub(crate) mod test_fixtures {
             restore_degree: None,
             rate_limited: false,
             model_incompatible: false,
-            credit_limit_blocked: false,
-            free_usage_blocked: false,
             available_commands: Vec::new(),
             available_commands_generation: 0,
             available_tools: None,
@@ -2523,8 +2477,6 @@ pub(crate) mod test_fixtures {
                 restore_degree: None,
                 rate_limited: false,
                 model_incompatible: false,
-                credit_limit_blocked: false,
-                free_usage_blocked: false,
                 available_commands: Vec::new(),
                 available_commands_generation: 0,
                 available_tools: None,
@@ -3344,8 +3296,6 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             restore_degree: None,
             rate_limited: false,
             model_incompatible: false,
-            credit_limit_blocked: false,
-            free_usage_blocked: false,
             available_commands: Vec::new(),
             available_commands_generation: 0,
             available_tools: None,

@@ -378,8 +378,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 restore_degree: None,
                 rate_limited: false,
                 model_incompatible: false,
-                credit_limit_blocked: false,
-                free_usage_blocked: false,
                 bg_tasks: std::collections::BTreeMap::new(),
                 bg_tool_call_to_task: std::collections::HashMap::new(),
                 scheduled_tasks: std::collections::HashMap::new(),
@@ -400,7 +398,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             child_view.set_input_mode(InputMode::Vim);
             child_view.active_pane = crate::views::agent::ActivePane::Scrollback;
             child_view.set_sharing_enabled(agent.sharing_enabled);
-            child_view.set_billing_surface_visible(agent.billing_surface_visible);
             let dashboard_visible = agent
                 .prompt
                 .slash_controller
@@ -422,12 +419,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 .get("recap")
                 .is_some();
             child_view.set_session_recap_available(recap_visible);
-            let restricted = agent
-                .prompt
-                .slash_controller
-                .registry()
-                .restricted_commands();
-            child_view.set_restricted_commands(&restricted);
             agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view));
             if !agent.session.loading_replay {
                 if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
@@ -1255,9 +1246,8 @@ pub(super) fn apply_retry_state(
     retry: &grow_shell::extensions::notification::RetryState,
     session: &mut AgentSession,
     scrollback: &mut crate::scrollback::state::ScrollbackState,
-    is_api_key_auth: bool,
+    _is_api_key_auth: bool,
 ) {
-    let mut is_credit_limit = false;
     let mut is_reauth = false;
     use grow_shell::extensions::notification::RetryState;
     match retry {
@@ -1290,27 +1280,17 @@ pub(super) fn apply_retry_state(
                     attempts: *attempts,
                 });
             }
-            is_credit_limit = super::super::dispatch::is_credit_limit_error(None, reason);
-            let is_free_usage =
-                *rate_limited && grow_shell::sampling::error::is_free_usage_exhausted_error(reason);
-            if is_credit_limit {
-                session.credit_limit_blocked = true;
-            } else if is_free_usage {
-                session.free_usage_blocked = true;
+            let error = if *rate_limited {
+                crate::app::effects::sanitize_user_error(&format_rate_limited_user_message(Some(
+                    reason.as_str(),
+                )))
             } else {
-                let error = if *rate_limited {
-                    crate::app::effects::sanitize_user_error(&format_rate_limited_user_message(
-                        Some(reason.as_str()),
-                        is_api_key_auth,
-                    ))
-                } else {
-                    format!("failed after {attempts} retries: {reason}")
-                };
-                scrollback.push_block(RenderBlock::session_event(SessionEvent::RetryFailed {
-                    error,
-                    error_type: None,
-                }));
-            }
+                format!("failed after {attempts} retries: {reason}")
+            };
+            scrollback.push_block(RenderBlock::session_event(SessionEvent::RetryFailed {
+                error,
+                error_type: None,
+            }));
         }
         RetryState::Failed {
             error_type,
@@ -1320,10 +1300,7 @@ pub(super) fn apply_retry_state(
             if error_type == "encrypted_content_mismatch" {
                 session.model_incompatible = true;
             }
-            is_credit_limit = super::super::dispatch::is_credit_limit_error(None, message);
-            if is_credit_limit {
-                session.credit_limit_blocked = true;
-            } else if is_reauthable_failure(Some(error_type.as_str())) {
+            if is_reauthable_failure(Some(error_type.as_str())) {
                 is_reauth = true;
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
             } else if error_type == "context_length" {
@@ -1339,16 +1316,7 @@ pub(super) fn apply_retry_state(
             }
         }
     }
-    if is_credit_limit {
-        grow_diagnostics::session_ctx::log_event(grow_diagnostics::events::CreditLimitHit {
-            model_id: session
-                .models
-                .current
-                .as_ref()
-                .map(|m| m.0.to_string())
-                .unwrap_or_default(),
-        });
-    } else if !is_reauth {
+    if !is_reauth {
         session.in_flight_prompt = None;
     }
 }

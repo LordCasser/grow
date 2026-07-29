@@ -467,10 +467,10 @@ pub(crate) fn stream_responses_tracked<'a>(
             }
         };
 
-        // Billing fields (`prompt_tokens`, `completion_tokens`,
+        // Usage accounting fields (`prompt_tokens`, `completion_tokens`,
         // `cached_prompt_tokens`, `reasoning_tokens`) are the cumulative
         // wire values — they sum across every server-side turn of the
-        // agent loop and are what we bill on / log to diagnostics.
+        // agent loop and are what we report in local usage diagnostics.
         //
         // `total_tokens` is the live context length used to drive the
         // CLI `/context` bar, the auto-compact threshold, and

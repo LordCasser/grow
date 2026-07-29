@@ -52,7 +52,6 @@ mod tests {
             models,
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
-            billing_surface_visible: true,
             screen_mode: mode,
             workflows_available: true,
         }
@@ -69,7 +68,6 @@ mod tests {
             session_id,
             bundle_state: bundle,
             screen_mode: mode,
-            billing_surface_visible: true,
             pager_state: PagerLocalSnapshot::default(),
         }
     }

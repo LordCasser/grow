@@ -263,8 +263,6 @@ pub struct SlashController {
     hide_session_scoped: bool,
     /// Offer `/announcements` when session announcements (critical or promo) exist.
     has_session_announcements: bool,
-    /// Consumer billing surface — gates `/usage` subcommands. Default `true`.
-    billing_surface_visible: bool,
     workflows_available: bool,
     /// Effective render mode of this process (immutable after startup — it only
     /// changes via a full `/minimal`-`/fullscreen` re-exec). Injected via
@@ -306,7 +304,6 @@ impl SlashController {
             cwd,
             hide_session_scoped: false,
             has_session_announcements: false,
-            billing_surface_visible: true,
             workflows_available: false,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             mru,
@@ -341,14 +338,6 @@ impl SlashController {
         self.has_session_announcements
     }
 
-    pub fn set_billing_surface_visible(&mut self, visible: bool) {
-        self.billing_surface_visible = visible;
-    }
-
-    pub fn billing_surface_visible(&self) -> bool {
-        self.billing_surface_visible
-    }
-
     pub fn set_workflows_available(&mut self, available: bool) {
         self.workflows_available = available;
     }
@@ -371,7 +360,6 @@ impl SlashController {
             models,
             cwd: &self.cwd,
             has_session_announcements: self.has_session_announcements,
-            billing_surface_visible: self.billing_surface_visible,
             workflows_available: self.workflows_available,
             screen_mode: self.screen_mode,
         }
@@ -2280,30 +2268,6 @@ mod tests {
             .as_ref()
             .expect("ghost tracks selected row");
         assert_eq!(ghost.full_name, "privacy");
-    }
-
-    /// Tier-restricted commands stay in the dropdown (discoverability) even
-    /// though `get()` blocks execution — invoking one shows the Provider Plan
-    /// upsell (covered by the dispatch-level tests).
-    #[test]
-    fn restricted_commands_stay_visible_in_dropdown() {
-        let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
-        ctrl.registry_mut()
-            .set_restricted_commands(&["usage".to_string()]);
-        assert!(
-            ctrl.registry().get("usage").is_none(),
-            "execution stays blocked"
-        );
-
-        let state = SlashState::default();
-        let models = ModelState::default();
-        ctrl.refresh(&state, "/usa", 4, &models);
-        let snapshot = state.snapshot();
-        let top = snapshot.selection().expect("dropdown open").display.clone();
-        assert_eq!(
-            top, "/usage",
-            "restricted command stays discoverable in the dropdown"
-        );
     }
 
     /// Gate open → both `/always-approve` and `/auto` offered + dispatchable.

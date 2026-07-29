@@ -171,8 +171,7 @@ pub(super) fn scrollback_has_recent_context_too_large(
 /// Strip the trailing run of auth-error blocks — the `ReAuthRequired`
 /// prompt plus any stale `RetryFailed` / `TurnFailed` — from an agent's
 /// scrollback. Called after a successful mid-session re-auth so the prompt
-/// disappears once the user returns to the session. Mirrors the
-/// credit-limit upsell's stale-block strip.
+/// disappears once the user returns to the session.
 pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
     use crate::scrollback::block::RenderBlock;
     let mut to_remove = Vec::new();
@@ -340,8 +339,7 @@ pub(super) fn handle_auth_complete(
             clear_startup_actions(app);
             // Re-auth succeeded — hide the now-stale re-auth prompt
             // (and any trailing error blocks) so the user returns to
-            // a clean session. Mirrors the credit-limit upsell's
-            // stale-block strip.
+            // a clean session.
             // Auth is global, so handle every agent (the login may
             // have been started from the dashboard, not the agent
             // that 401'd).
@@ -367,9 +365,6 @@ pub(super) fn handle_auth_complete(
                 note_peek_page_flip(app, id, page_flip_entry);
             }
             let mut effects = dispatch(Action::RequestBundleStatus, app);
-            if app.usage_visible {
-                effects.push(Effect::FetchAppBilling);
-            }
             effects.extend(retry_effects);
             return effects;
         }
@@ -377,17 +372,6 @@ pub(super) fn handle_auth_complete(
         // status only; shell auto-syncs post-auth
         let mut effects = dispatch(Action::RequestBundleStatus, app);
 
-        // Start auto-checking subscription if gated.
-        // Check immediately (don't wait 5s) then schedule the timer.
-        if !app.has_access() {
-            app.paywall_check_started = Some(std::time::Instant::now());
-            effects.push(Effect::CheckSubscription { verify: None });
-            effects.push(Effect::SchedulePaywallCheck);
-        }
-        // Fetch billing so the welcome screen can show a credit warning.
-        if app.usage_visible {
-            effects.push(Effect::FetchAppBilling);
-        }
         // Fetch changelog (mirrors startup path for interactive login).
         effects.push(Effect::FetchChangelog);
 

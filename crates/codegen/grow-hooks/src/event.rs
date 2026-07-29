@@ -287,8 +287,7 @@ pub enum BackgroundTaskType {
     Subagent,
 }
 
-/// `StopFailure` error type. Grow emits a subset: capacity errors fold into
-/// `RateLimit`, and there is no `billing_error`.
+/// `StopFailure` error type. Capacity errors fold into `RateLimit`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopFailureKind {

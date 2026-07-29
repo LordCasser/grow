@@ -426,14 +426,12 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                                 image_edit_enabled: true,
                                 model_override: None,
                                 edit_model_override: None,
-                                tier_restricted: false,
                             },
                             VideoGenConfig::Enabled {
                                 api_key: token.clone(),
                                 base_url: url.clone(),
                                 extra_headers: headers.clone(),
                                 zdr_video_output_s3: None,
-                                tier_restricted: false,
                             },
                             WebSearchConfig::Enabled {
                                 api_key: token,

@@ -242,8 +242,6 @@ pub struct MockInferenceServer {
     /// When set, `/v1/models` and `/v1/settings` hang forever (never
     /// respond); see [`Self::set_hang`].
     hang: Arc<std::sync::atomic::AtomicBool>,
-    /// See [`Self::set_user_subscription_tier`].
-    user_tier: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl MockInferenceServer {
@@ -281,7 +279,6 @@ impl MockInferenceServer {
         let messages_stop_reason = Arc::new(std::sync::RwLock::new("end_turn".to_string()));
         let chunk_delay = Arc::new(std::sync::RwLock::new(None::<Duration>));
         let hang = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let user_tier = Arc::new(std::sync::RwLock::new(None::<String>));
         let app = Self::build_router(
             log.clone(),
             shared_models.clone(),
@@ -292,7 +289,6 @@ impl MockInferenceServer {
             messages_stop_reason.clone(),
             chunk_delay.clone(),
             hang.clone(),
-            user_tier.clone(),
         );
 
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -331,7 +327,6 @@ impl MockInferenceServer {
             messages_stop_reason,
             chunk_delay,
             hang,
-            user_tier,
         })
     }
 
@@ -394,24 +389,15 @@ impl MockInferenceServer {
         *guard = Some(value);
     }
 
-    /// Preset `/v1/settings` to the minimal `{"allow_access": true}` payload
-    /// that opens the subscription gate (clients treat a missing field as
-    /// `false` and would sit on the upsell screen).
-    pub fn preset_allow_access(&self) {
-        self.set_settings(json!({ "allow_access": true }));
+    /// Preset `/v1/settings` to an empty but successful response.
+    pub fn preset_settings_empty(&self) {
+        self.set_settings(json!({}));
     }
 
     /// Make `/v1/models` and `/v1/settings` hang forever, standing in for a
     /// black-holed backend in non-blocking-startup tests.
     pub fn set_hang(&self, hang: bool) {
         self.hang.store(hang, std::sync::atomic::Ordering::Release);
-    }
-
-    /// Set the `subscriptionTier` served by `GET /v1/user`. `None`
-    /// (default) omits the field, which the shell treats as "no qualifying
-    /// subscription" (free tier).
-    pub fn set_user_subscription_tier(&self, tier: Option<&str>) {
-        *self.user_tier.write().unwrap() = tier.map(str::to_owned);
     }
 
     /// Set the `stop_reason` emitted by the `/v1/messages` terminal
@@ -576,7 +562,6 @@ impl MockInferenceServer {
         messages_stop_reason: Arc<std::sync::RwLock<String>>,
         chunk_delay: Arc<std::sync::RwLock<Option<Duration>>>,
         hang: Arc<std::sync::atomic::AtomicBool>,
-        user_tier: Arc<std::sync::RwLock<Option<String>>>,
     ) -> Router {
         let hang_models = hang.clone();
         let hang_settings = hang;
@@ -913,24 +898,17 @@ impl MockInferenceServer {
                 get(
                     move |axum::extract::RawQuery(query): axum::extract::RawQuery| {
                         let log = log.clone();
-                        let user_tier = user_tier.clone();
                         async move {
-                            // Keep the query string in the log so tests can
-                            // count `?include=subscription` checks separately
-                            // from plain enrichment fetches.
+                            // Keep the query string in the request log.
                             let path = match query {
                                 Some(q) if !q.is_empty() => format!("/v1/user?{q}"),
                                 _ => "/v1/user".to_owned(),
                             };
                             log.record("GET", &path, None, None, Vec::new());
-                            let tier = user_tier.read().unwrap().clone();
-                            let mut body = json!({
+                            let body = json!({
                                 "userId": "mock-user",
                                 "email": "mock-user@test.invalid",
                             });
-                            if let Some(t) = tier {
-                                body["subscriptionTier"] = json!(t);
-                            }
                             Json(body).into_response()
                         }
                     },
@@ -1586,11 +1564,11 @@ mod tests {
         let body: Value = resp.json().await.unwrap();
         assert_eq!(body, json!({ "tips": ["t1"] }));
 
-        server.preset_allow_access();
+        server.preset_settings_empty();
         let resp = reqwest::get(&url).await.unwrap();
         assert_eq!(resp.status(), 200);
         let body: Value = resp.json().await.unwrap();
-        assert_eq!(body, json!({ "allow_access": true }));
+        assert_eq!(body, json!({}));
     }
 
     #[tokio::test]

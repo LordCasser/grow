@@ -1,4 +1,4 @@
-//! Per-prompt and per-session billing ledgers (not serialized).
+//! Per-prompt and per-session usage ledgers (not serialized).
 //!
 //! `total_tokens()` is input + output: Responses wire `total` is live context
 //! length. Compaction and other side calls never call `record_main_loop_call`.
@@ -7,7 +7,7 @@
 //!
 //! Wire incomplete is the OR of these stores (each has a distinct role):
 //!
-//! - **`UsageLedger.incomplete`** — durable on the bill snapshot. Set by nested
+//! - **`UsageLedger.incomplete`** — durable on the usage snapshot. Set by nested
 //!   subagent incomplete fold, drain timeout, true apply-miss, and
 //!   `mark_usage_incomplete`. Monotonic for a ledger instance.
 //! - **Sticky (`subagent_usage_not_applied` on the coordinator)** — pin-scoped
@@ -103,7 +103,7 @@ pub struct UsageLedger {
     pub by_model: IndexMap<String, UsageTotals>,
     /// Main-agent loop rounds for `num_turns` (subagents excluded).
     pub main_loop_model_calls: u64,
-    /// Bill may under-count (drain timeout, nested subagent incomplete, apply failure).
+    /// Usage may under-count (drain timeout, nested subagent incomplete, apply failure).
     pub incomplete: bool,
 }
 

@@ -108,8 +108,6 @@ pub struct AppCtx<'a> {
     pub cwd: &'a std::path::Path,
     /// Session announcements (critical or promo) exist (gates `/announcements` visibility).
     pub has_session_announcements: bool,
-    /// Consumer billing surface (`AppView::usage_visible`). Gates `/usage` subcommands.
-    pub billing_surface_visible: bool,
     pub workflows_available: bool,
     /// Effective render mode of this process (gates `/minimal` and
     /// `/fullscreen` visibility). Same source of truth as
@@ -127,8 +125,6 @@ pub struct CommandExecCtx<'a> {
     pub session_id: Option<&'a acp::SessionId>,
     pub bundle_state: &'a BundleState,
     pub(crate) screen_mode: crate::app::ScreenMode,
-    /// Consumer billing surface (`AppView::usage_visible`). Gates `/usage` subcommands.
-    pub billing_surface_visible: bool,
     /// Snapshot of the active agent's PAGER-owned settings, built at
     /// command-build time by the dispatcher. Slash commands like
     /// `/multiline` read this to compute `!current` and dispatch a

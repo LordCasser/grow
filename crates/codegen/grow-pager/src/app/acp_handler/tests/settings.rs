@@ -1,38 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
-    #[test]
-    fn settings_non_api_key_tier_clears_stale_api_key_flag() {
-        let mut app = make_app_with_agent("sess-stale-key");
-        assert!(handle_ext_notification(
-            &tier_settings_update("API Key"),
-            &mut app
-        ));
-        assert!(app.is_api_key_auth);
-        assert!(!app.usage_visible);
-        assert!(app.tier_restricted_commands.is_empty());
-        // Later personal Free stamp must not keep the API-key bypass.
-        assert!(handle_ext_notification(
-            &tier_settings_update("Free"),
-            &mut app
-        ));
-        assert!(!app.is_api_key_auth);
-        assert!(app.usage_visible);
-        assert!(!app.tier_restricted_commands.is_empty());
-        // A paid tier after API Key restores normal auth state without
-        // applying free-tier command restrictions.
-        let mut app = make_app_with_agent("sess-paid");
-        assert!(handle_ext_notification(
-            &tier_settings_update("API Key"),
-            &mut app
-        ));
-        assert!(handle_ext_notification(
-            &tier_settings_update("Provider Plan"),
-            &mut app
-        ));
-        assert!(!app.is_api_key_auth);
-        assert!(app.tier_restricted_commands.is_empty());
-    }
     /// Build an `grow/settings/update` carrying only the scheduler flag.
     fn scheduler_background_loops_update(value: bool) -> acp::ExtNotification {
         acp::ExtNotification::new(

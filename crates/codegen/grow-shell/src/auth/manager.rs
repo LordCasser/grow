@@ -1558,8 +1558,7 @@ impl AuthManager {
         //    For ServerRejected we still check, but only return early if the
         //    token has *changed* (i.e. another task already refreshed it).
         //    If it is the same token that was rejected, we must proceed to
-        //    the IdP to obtain one with fresh claims (e.g. after subscription
-        //    purchase).
+        //    the IdP to obtain a credential the server accepts.
         if let Some(auth) = self.current()
             && (reason != RefreshReason::ServerRejected
                 || pre_lock_key.as_deref() != Some(&auth.key))

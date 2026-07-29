@@ -412,8 +412,8 @@ impl UnauthorizedRecovery {
     /// between the IdP grant and persisting the response orphans the
     /// replacement RT (forced re-login). Consumers retry with the returned
     /// token; a genuinely-bad one refreshes once the window passes. Lives
-    /// here, not in `refresh_chain`, so paywall claims re-mints that call
-    /// `refresh_chain(ServerRejected)` directly are unaffected.
+    /// here, not in `refresh_chain`, so direct server-rejection refreshes are
+    /// unaffected.
     fn fresh_mint_guard(&self) -> Option<ProviderAuth> {
         let auth = self.auth_manager.current()?;
         let mint_age_seconds = auth.mint_age_seconds();

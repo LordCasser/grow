@@ -1532,7 +1532,7 @@ mod tests {
             "p",
             "msg",
             Some((
-                "Upgrade to Provider Plan High for the exclusive preview",
+                "Read the release notes for the exclusive preview",
                 "https://example.com",
             )),
         )];

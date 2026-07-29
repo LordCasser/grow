@@ -1119,41 +1119,9 @@ pub struct ProjectPickerSelected {
     pub project_dir_options: usize,
 }
 
-// ---------------------------------------------------------------------------
-// Provider Plan upsell
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SubscriptionUpsell {
-    WelcomeScreen,
-    RateLimitError,
-    /// Free-usage-exhausted paywall modal (free-tier 429 with the
-    /// `subscription:free-usage-exhausted` well-known error code).
-    FreeUsagePaywall,
-    /// Upsell modal shown when a tier-restricted slash command
-    /// (`/usage`, `/imagine`, …) is invoked on the free / Basic plan tiers.
-    RestrictedCommand,
-}
-
-#[derive(Serialize)]
-pub struct SubscriptionUpsellShown {
-    pub source: SubscriptionUpsell,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_method: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct SubscriptionUpsellClicked {
-    pub source: SubscriptionUpsell,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_method: Option<String>,
-}
-
 /// Which surface a promo announcement's upgrade CTA was activated from.
-/// Modeled on [`SubscriptionUpsell`]; lets the funnel attribute the click to the
-/// welcome hero vs the in-session header vs the banner vs the dashboard, and
-/// distinguish keyboard (`Ctrl+O`) activations from pointer/OSC 8 ones.
+/// Distinguishes the welcome hero from the in-session header, banner,
+/// dashboard, and keyboard activation surfaces.
 /// Ord/Eq exist for the pager's per-(announcement, surface) impression latch.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -1370,8 +1338,7 @@ pub struct DashboardAgentLaunched {
 // Rate limiting
 // ---------------------------------------------------------------------------
 
-/// Emitted when a user's turn fails due to rate limiting (all retries
-/// exhausted). Key conversion-funnel signal: rate limit → upsell → subscribe.
+/// Emitted when a user's turn fails after exhausting rate-limit retries.
 #[derive(Serialize)]
 pub struct RateLimitHit {
     pub model_id: String,
@@ -1397,73 +1364,6 @@ pub struct ApiError {
 #[derive(Serialize)]
 pub struct InternalError {
     pub error_type: String,
-}
-
-// ---------------------------------------------------------------------------
-// Credit limit
-// ---------------------------------------------------------------------------
-
-/// 403 "run out of credits" — billing exhaustion (not request throttling).
-#[derive(Serialize)]
-pub struct CreditLimitHit {
-    pub model_id: String,
-}
-
-#[derive(Serialize, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-pub enum CreditLimitUpsellSurface {
-    /// Q&A modal with "Upgrade tier" + "Pay as you go" options (non-max-tier).
-    QuestionModal,
-    /// Inline scrollback card with PAYG link (max-tier / Heavy users).
-    InlineCard,
-}
-
-/// Credit-limit upsell displayed to the user.
-#[derive(Serialize)]
-pub struct CreditLimitUpsellShown {
-    pub surface: CreditLimitUpsellSurface,
-    pub max_tier: bool,
-    pub pay_as_you_go: bool,
-    /// User is on unified usage billing (buy-credits wording). When false,
-    /// legacy on-demand / PAYG wording was used.
-    #[serde(default)]
-    pub unified_billing: bool,
-}
-
-#[derive(Debug, Serialize, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-pub enum CreditLimitChoice {
-    UpgradeTier,
-    /// Covers both "Pay as you go" (enable) and "Increase limit" (raise cap).
-    PayAsYouGo,
-    /// Unified-billing / credits-pool users: purchase prepaid credits.
-    PurchaseCredits,
-}
-
-/// User clicked an option in the credit-limit upsell.
-#[derive(Serialize)]
-pub struct CreditLimitUpsellClicked {
-    pub surface: CreditLimitUpsellSurface,
-    pub choice: CreditLimitChoice,
-}
-
-// ---------------------------------------------------------------------------
-// Subscription conversion
-// ---------------------------------------------------------------------------
-
-/// Emitted when a previously access-gated user re-authenticates and the gate
-/// is lifted — i.e. they subscribed (externally on service.example.com) and came back.
-/// This is the actual conversion signal for Provider Plan High subscriptions
-/// attributed to Grow: the user saw the gate in Grow, went and
-/// paid, then returned with access.
-#[derive(Serialize)]
-pub struct SubscriptionActivated {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_method: Option<String>,
-    /// Whether the subscribe CTA was shown in this session before the gate
-    /// was lifted (`access_gate_shown_logged`). When `true`, the conversion
-    /// is strongly attributable to Grow's upsell surface.
-    pub upsell_shown_this_session: bool,
 }
 
 /// Why auth recovery could not refresh the credential, forcing the user to
@@ -1605,8 +1505,6 @@ diagnostics_event!(SessionEnded, "session_ended");
 diagnostics_event!(PagerSlashCommand, "pager_slash_command");
 diagnostics_event!(PlanSubmit, "plan_submit");
 diagnostics_event!(ProjectPickerSelected, "project_picker_selected");
-diagnostics_event!(SubscriptionUpsellShown, "provider_plan_upsell_shown");
-diagnostics_event!(SubscriptionUpsellClicked, "provider_plan_upsell_clicked");
 diagnostics_event!(AnnouncementCtaShown, "announcement_cta_shown");
 diagnostics_event!(AnnouncementCtaClicked, "announcement_cta_clicked");
 diagnostics_event!(TerminalDiagnostic, "terminal_context");
@@ -1621,10 +1519,6 @@ diagnostics_event!(DashboardClosed, "dashboard_closed");
 diagnostics_event!(DashboardAgentAttached, "dashboard_agent_attached");
 diagnostics_event!(DashboardAgentLaunched, "dashboard_agent_launched");
 diagnostics_event!(RateLimitHit, "rate_limit_hit");
-diagnostics_event!(CreditLimitHit, "credit_limit_hit");
-diagnostics_event!(CreditLimitUpsellShown, "credit_limit_upsell_shown");
-diagnostics_event!(CreditLimitUpsellClicked, "credit_limit_upsell_clicked");
-diagnostics_event!(SubscriptionActivated, "subscription_activated");
 diagnostics_event!(ApiError, "api_error");
 diagnostics_event!(InternalError, "internal_error");
 // Session lifecycle (structs in session_metrics)

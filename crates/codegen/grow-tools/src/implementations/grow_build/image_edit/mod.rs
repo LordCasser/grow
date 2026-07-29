@@ -327,12 +327,6 @@ impl xai_tool_runtime::Tool for ImageEditTool {
         // Free / Basic plan users are zero-limited on Imagine server-side; return
         // the upsell prose instead of a doomed request (shares `image_gen`'s
         // message and short-circuits before resolving any attachments).
-        if client.is_tier_restricted() {
-            return Ok(ToolOutput::Text(
-                super::image_gen::TIER_RESTRICTED_UPSELL.into(),
-            ));
-        }
-
         // Snapshot the per-turn attachment registry so `[Image #N]` tokens
         // resolve to the real attachment (see `resolve_attachment_reference`).
         let attached_images = {

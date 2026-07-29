@@ -1,6 +1,6 @@
 //! Shared URL-opening and scheme validation utilities.
 //!
-//! Extracted from the `OpenSupergrokUrl` dispatch handler so that any
+//! Shared by user-initiated external-link dispatch handlers so that any
 //! code path (keyboard navigation, mouse click, action dispatch) can
 //! open a link safely without duplicating platform-specific logic.
 
@@ -82,9 +82,8 @@ pub fn open_url(url: &str) -> bool {
         return true;
     }
 
-    // Skip the doomed spawn on headless Linux VMs (no DISPLAY / Wayland)
-    // so billing Upgrade / Buy-credits clicks can fall back to showing the
-    // URL instead of silently no-op'ing.
+    // Skip the doomed spawn on headless Linux VMs (no DISPLAY / Wayland) so
+    // callers can fall back to showing the URL instead of silently no-op'ing.
     if !browser_open_likely_available() {
         tracing::info!("skipping browser open: no display server / BROWSER");
         return false;
@@ -284,28 +283,6 @@ pub fn try_open_url(url: &str, filter: SchemeFilter) -> OpenUrlResult {
     }
 }
 
-/// Ensure `url` carries the given query parameter, returning the rewritten URL.
-///
-/// If the URL already contains a parameter with that name, its value is left
-/// untouched (the caller upstream may have intentionally set one). On parse
-/// failure, the original string is returned unchanged so this is safe to apply
-/// to opener input from untrusted sources.
-///
-/// Used by the Provider Plan upsell flow to attribute clicks to `referrer=grow-build`,
-/// matching the OAuth consent screen regardless of
-/// what the remote settings `gate_url` value happens to be.
-pub fn ensure_query_param(url: &str, key: &str, value: &str) -> String {
-    let Ok(mut parsed) = url::Url::parse(url) else {
-        return url.to_string();
-    };
-    let already_present = parsed.query_pairs().any(|(k, _)| k == key);
-    if already_present {
-        return parsed.to_string();
-    }
-    parsed.query_pairs_mut().append_pair(key, value);
-    parsed.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,79 +432,6 @@ mod tests {
             "\thttps://example.com\n",
             SchemeFilter::Standard
         ));
-    }
-
-    #[test]
-    fn ensure_query_param_appends_when_missing() {
-        let out = ensure_query_param(
-            "https://service.example.com/provider_plan",
-            "referrer",
-            "grow-build",
-        );
-        assert_eq!(
-            out,
-            "https://service.example.com/provider_plan?referrer=grow-build"
-        );
-    }
-
-    #[test]
-    fn ensure_query_param_preserves_existing_value() {
-        let out = ensure_query_param(
-            "https://service.example.com/provider_plan?referrer=other",
-            "referrer",
-            "grow-build",
-        );
-        assert_eq!(
-            out,
-            "https://service.example.com/provider_plan?referrer=other"
-        );
-    }
-
-    #[test]
-    fn ensure_query_param_keeps_other_query_pairs() {
-        let out = ensure_query_param(
-            "https://service.example.com/provider_plan?heavy=1",
-            "referrer",
-            "grow-build",
-        );
-        assert_eq!(
-            out,
-            "https://service.example.com/provider_plan?heavy=1&referrer=grow-build"
-        );
-    }
-
-    #[test]
-    fn ensure_query_param_preserves_fragment() {
-        // The current remote settings value uses a hash fragment for client-side
-        // routing (`service.example.com/#provider_plan`); we still want the referrer attached.
-        let out = ensure_query_param(
-            "https://service.example.com/#provider_plan",
-            "referrer",
-            "grow-build",
-        );
-        assert_eq!(
-            out,
-            "https://service.example.com/?referrer=grow-build#provider_plan"
-        );
-    }
-
-    #[test]
-    fn ensure_query_param_returns_unchanged_on_parse_failure() {
-        let out = ensure_query_param("not a url", "referrer", "grow-build");
-        assert_eq!(out, "not a url");
-    }
-
-    #[test]
-    fn ensure_query_param_url_encodes_value() {
-        let out = ensure_query_param(
-            "https://service.example.com/provider_plan",
-            "referrer",
-            "grow build",
-        );
-        assert_eq!(
-            out,
-            "https://service.example.com/provider_plan?referrer=grow+build"
-        );
     }
 
     #[test]

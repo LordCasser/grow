@@ -375,7 +375,7 @@ Create, edit, and delete personas. A subagent can apply a persona to shape how i
 
 ---
 
-## Account and Billing
+## Account and Usage
 
 ### `/login`
 
@@ -387,11 +387,10 @@ Log out and return to the login screen.
 
 ### `/usage`
 
-View credit usage or manage billing. Alias: `/cost`.
+View local token and context usage for the current session. Alias: `/cost`.
 
 ```
 /usage
-/usage manage
 ```
 
 ### `/privacy`

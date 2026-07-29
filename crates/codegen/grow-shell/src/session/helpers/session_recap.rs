@@ -46,7 +46,7 @@ pub(crate) fn recap_instruction(tag: &str) -> String {
          - If almost nothing happened: \"You had just begun this session.\"\n\n\
          Shape: <lead>: <concrete specifics — crate/file/flag/behavior/endpoint>. ~25–40 words.\n\n\
          Synthetic examples (style only — adapt to THIS session, do not copy):\n\n\
-         You asked how retries work in the payment client: exponential backoff in `billing/retry.rs`, max 5 attempts, 429s only.\n\n\
+         You asked how retries work in the payment client: exponential backoff in `payments/retry.rs`, max 5 attempts, 429s only.\n\n\
          You asked for a walkthrough of the auth middleware change: warn-only mode in the API layer, no hard fail on missing claims.\n\n\
          We fixed the flaky integration test: race in `queue_worker` shutdown by awaiting the drain channel before exit.\n\n\
          We merged the feature branch: kept the new diagnostics hooks, dropped the obsolete feature flag in `config/flags.toml`.\n\n\
@@ -504,7 +504,7 @@ mod tests {
         assert!(text.contains("You asked"));
         assert!(text.contains("We fixed"));
         assert!(text.contains("We merged"));
-        assert!(text.contains("billing/retry.rs"));
+        assert!(text.contains("payments/retry.rs"));
         assert!(text.contains("queue_worker"));
         assert!(text.contains("We fixed the flaky"));
         assert!(text.contains("We merged the feature"));

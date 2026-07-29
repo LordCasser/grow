@@ -6669,43 +6669,4 @@ mod tests {
             "uploaded_url-only media must not claim a local open path"
         );
     }
-    /// A tier-restricted free-tier imagine call short-circuits with the
-    /// Provider Plan upsell as `ToolOutput::Text` on a `Completed` status. The media
-    /// renderer has no file to open, so it must surface the upsell text in the
-    /// card body (not a bare title) and must NOT mark the card as an error.
-    #[test]
-    fn tier_restricted_media_shows_upsell_text_not_error() {
-        let upsell = "Image generation is a Provider Plan feature. Upgrade at \
-             https://service.example.com/provider_plan?referrer=grow-build";
-        let output = ToolOutput::Text(grow_tools::types::output::TextOutput::from(upsell));
-        let tc = acp::ToolCall::new(
-            acp::ToolCallId::new(Arc::from("tier-restricted-img")),
-            "image_gen",
-        )
-        .kind(acp::ToolKind::Other)
-        .status(acp::ToolCallStatus::Completed)
-        .content(vec![acp::ToolCallContent::Content(acp::Content::new(
-            acp::ContentBlock::Text(acp::TextContent::new(upsell)),
-        ))])
-        .raw_input(Some(serde_json::json!({ "variant": "ImageGen" })))
-        .raw_output(serde_json::to_value(output).ok())
-        .locations(vec![]);
-        let RenderBlock::ToolCall(ToolCallBlock::Other(block)) = tool_call_to_block(&tc, None)
-        else {
-            panic!("expected an Other tool-call block");
-        };
-        assert!(
-            block.is_success(),
-            "the upsell is a successful result, not an error"
-        );
-        assert!(
-            block
-                .output
-                .as_deref()
-                .unwrap_or_default()
-                .contains("Provider Plan"),
-            "upsell text must be shown in the card body, got: {:?}",
-            block.output
-        );
-    }
 }

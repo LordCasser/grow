@@ -56,7 +56,7 @@ const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
 /// Async-openai's typed `ResponseUsage` doesn't model `context_details`,
 /// so we peek the raw JSON for it. The cumulative `input_tokens` /
 /// `output_tokens` / `cached_tokens` continue to flow from the typed
-/// `ResponseUsage` unchanged so billing diagnostics stays correct. When
+/// `ResponseUsage` unchanged so local usage diagnostics stay correct. When
 /// the API doesn't emit `context_details` (older deployments) `total_tokens`
 /// passes through unchanged.
 fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
@@ -102,7 +102,7 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
 /// server-side multi-turn loops (e.g. `web_search`, `x_search`) the
 /// wire's cumulative total inflates as the loop runs; `context_details`
 /// reports the final turn's prompt + output tokens — the real live
-/// context the model is sitting in. Billing fields
+/// context the model is sitting in. Usage accounting fields
 /// (`input_tokens`, `output_tokens`, `input_tokens_details.cached_tokens`,
 /// `output_tokens_details.reasoning_tokens`) stay on the cumulative
 /// wire values so diagnostics is unaffected.
@@ -2409,7 +2409,7 @@ mod tests {
     /// `response.completed` carrying
     /// `usage.context_details.{input_tokens, output_tokens}` rewrites
     /// `usage.total_tokens` in place to the live context length
-    /// (`ctx.input + ctx.output`). Billing fields stay on the wire's
+    /// (`ctx.input + ctx.output`). Usage accounting fields stay on the wire's
     /// cumulative values.
     #[test]
     fn deserialize_response_event_overrides_total_tokens_from_context_details() {
@@ -2441,7 +2441,7 @@ mod tests {
             panic!("expected ResponseCompleted");
         };
         let usage = e.response.usage.expect("usage present");
-        // Billing fields stay cumulative — unchanged by context_details.
+        // Usage accounting fields stay cumulative — unchanged by context_details.
         assert_eq!(usage.input_tokens, 6003);
         assert_eq!(usage.output_tokens, 711);
         assert_eq!(usage.input_tokens_details.cached_tokens, 1984);

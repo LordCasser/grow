@@ -1091,12 +1091,6 @@ impl PromptWidget {
     }
 
     /// Replace the restricted slash-command deny list (see
-    /// [`crate::slash::registry::CommandRegistry::set_restricted_commands`]).
-    pub(crate) fn set_restricted_commands(&mut self, names: &[String]) {
-        self.slash_controller
-            .registry_mut()
-            .set_restricted_commands(names);
-    }
 
     /// Access the current slash snapshot (for dropdown rendering).
     pub fn slash_snapshot(&self) -> crate::slash::SlashSnapshot {

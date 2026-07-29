@@ -34,35 +34,6 @@ fn jwt_with_tier(tier: u64) -> String {
     let payload = enc.encode(format!(r#"{{"tier":{tier}}}"#).as_bytes());
     format!("{header}.{payload}.sig")
 }
-#[test]
-fn jwt_tier_claim_maps_free_and_paid() {
-    assert_eq!(jwt_tier_claim(&jwt_with_tier(0)).as_deref(), Some("free"));
-    assert_eq!(
-        jwt_tier_claim(&jwt_with_tier(1)).as_deref(),
-        Some("provider_plan")
-    );
-    assert_eq!(
-        jwt_tier_claim(&jwt_with_tier(2)).as_deref(),
-        Some("x_basic")
-    );
-    assert_eq!(
-        jwt_tier_claim(&jwt_with_tier(3)).as_deref(),
-        Some("x_premium")
-    );
-    assert_eq!(
-        jwt_tier_claim(&jwt_with_tier(4)).as_deref(),
-        Some("x_premium_plus")
-    );
-    assert_eq!(
-        jwt_tier_claim(&jwt_with_tier(5)).as_deref(),
-        Some("provider_plan_high")
-    );
-    assert_eq!(
-        jwt_tier_claim(&jwt_with_tier(6)).as_deref(),
-        Some("provider_plan_lite")
-    );
-    assert_eq!(jwt_tier_claim(&jwt_with_tier(99)).as_deref(), Some("99"));
-}
 fn auth_with_mode(mode: crate::auth::AuthMode, key: &str) -> crate::auth::ProviderAuth {
     crate::auth::ProviderAuth {
         key: key.into(),
@@ -91,96 +62,10 @@ fn auth_with_mode(mode: crate::auth::AuthMode, key: &str) -> crate::auth::Provid
         oidc_client_id: None,
     }
 }
-#[test]
-fn resolve_subscription_tier_prefers_display_then_api_key_then_jwt() {
-    assert_eq!(
-        resolve_subscription_tier_for_diagnostics(Some("Free".into()), None).as_deref(),
-        Some("Free")
-    );
-    let api = auth_with_mode(crate::auth::AuthMode::ApiKey, "xai-not-a-jwt");
-    assert_eq!(
-        resolve_subscription_tier_for_diagnostics(Some("  ".into()), Some(&api)).as_deref(),
-        Some("api_key")
-    );
-    assert_eq!(
-        resolve_subscription_tier_for_diagnostics(None, Some(&api)).as_deref(),
-        Some("api_key")
-    );
-    let oauth = auth_with_mode(crate::auth::AuthMode::Oidc, &jwt_with_tier(0));
-    assert_eq!(
-        resolve_subscription_tier_for_diagnostics(None, Some(&oauth)).as_deref(),
-        Some("free")
-    );
-    assert_ne!(
-        resolve_subscription_tier_for_diagnostics(None, Some(&api)).as_deref(),
-        Some("free")
-    );
-}
 /// JWT claim ↔ `/user` tier mapping used to gate post-unblock catalog refresh
 /// (a stale older paid claim must not skip retry).
-#[test]
-fn jwt_claim_matches_user_subscription_tier_known_pairs() {
-    let cases = [
-        ("provider_plan", "GrowPro"),
-        ("x_basic", "XBasic"),
-        ("x_premium", "XPremium"),
-        ("x_premium_plus", "XPremiumPlus"),
-        ("provider_plan_high", "Provider PlanPro"),
-        ("provider_plan_lite", "Provider PlanLite"),
-    ];
-    for (claim, user_tier) in cases {
-        assert!(
-            jwt_claim_matches_user_subscription_tier(claim, user_tier),
-            "{claim} should match {user_tier}"
-        );
-    }
-}
-#[test]
-fn jwt_claim_matches_user_subscription_tier_rejects_stale_and_unknown() {
-    assert!(!jwt_claim_matches_user_subscription_tier(
-        "x_basic",
-        "Provider PlanPro"
-    ));
-    assert!(!jwt_claim_matches_user_subscription_tier(
-        "provider_plan",
-        "Provider PlanPro"
-    ));
-    assert!(!jwt_claim_matches_user_subscription_tier("free", "GrowPro"));
-    assert!(!jwt_claim_matches_user_subscription_tier("", "XPremium"));
-    assert!(!jwt_claim_matches_user_subscription_tier(
-        "provider_plan_high",
-        "EnterpriseMystery"
-    ));
-}
 /// Single-flight flag must clear on Drop even if the retry task panics /
 /// aborts mid-backoff (guards against the flag stuck true forever).
-#[test]
-fn post_unblock_jwt_retry_in_flight_guard_clears_on_drop() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let flag = Arc::new(AtomicBool::new(true));
-    {
-        let _guard = PostUnblockJwtRetryInFlightGuard { flag: flag.clone() };
-        assert!(flag.load(Ordering::Acquire));
-    }
-    assert!(
-        !flag.load(Ordering::Acquire),
-        "Drop must release post_unblock_jwt_retry_in_flight"
-    );
-    let flag = Arc::new(AtomicBool::new(true));
-    let flag_for_catch = flag.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = PostUnblockJwtRetryInFlightGuard {
-            flag: flag_for_catch,
-        };
-        panic!("simulate retry task panic");
-    }));
-    assert!(result.is_err());
-    assert!(
-        !flag.load(Ordering::Acquire),
-        "Drop must release flag on panic unwind"
-    );
-}
 mod hunk_tracking_mode {
     use super::super::{plan_hunk_tracking, resolve_hunk_tracking_mode};
     use xai_hunk_tracker::TrackingMode;
@@ -365,42 +250,6 @@ async fn broadcast_refresh_skill_baseline_tolerates_dropped_receiver() {
         rx_alive.try_recv(),
         Ok(crate::session::SessionCommand::RefreshSkillBaseline)
     ));
-}
-/// When remote settings are absent (`None`), default to blocked.
-#[test]
-fn settings_allow_access_none_settings_is_blocked() {
-    assert!(!settings_allow_access(None));
-}
-/// When `allow_access` is `Some(true)`, user is allowed.
-#[test]
-fn settings_allow_access_true_is_allowed() {
-    let rs = crate::util::config::RemoteSettings {
-        allow_access: Some(true),
-        ..Default::default()
-    };
-    assert!(settings_allow_access(Some(&rs)));
-}
-/// When `allow_access` is `Some(false)` (remote settings default / rule
-/// disabled), user stays blocked — even if they hold a qualifying
-/// subscription. This is the regression guard for the bug where
-/// `retry_subscription_check` unconditionally lifted the gate.
-#[test]
-fn settings_allow_access_false_is_blocked() {
-    let rs = crate::util::config::RemoteSettings {
-        allow_access: Some(false),
-        ..Default::default()
-    };
-    assert!(!settings_allow_access(Some(&rs)));
-}
-/// When `/settings` returned successfully but the field is absent
-/// (`None`), default to blocked (conservative).
-#[test]
-fn settings_allow_access_field_absent_is_blocked() {
-    let rs = crate::util::config::RemoteSettings {
-        allow_access: None,
-        ..Default::default()
-    };
-    assert!(!settings_allow_access(Some(&rs)));
 }
 /// After allocating a turn number, `session_turn_numbers` holds the next
 /// value (current + 1) for process-local structured diagnostic ordering.
@@ -1928,27 +1777,6 @@ fn orphaned_tasks_filters_rewind_dead_branches() {
         "task in dead branch should be filtered"
     );
 }
-#[test]
-fn allow_access_from_remote_settings() {
-    let json = serde_json::json!({ "allow_access": true });
-    let rs: crate::util::config::RemoteSettings = serde_json::from_value(json).unwrap();
-    assert_eq!(rs.allow_access, Some(true));
-    let json = serde_json::json!({ "allow_access": false });
-    let rs: crate::util::config::RemoteSettings = serde_json::from_value(json).unwrap();
-    assert_eq!(rs.allow_access, Some(false));
-    let json = serde_json::json!({});
-    let rs: crate::util::config::RemoteSettings = serde_json::from_value(json).unwrap();
-    assert_eq!(rs.allow_access, None);
-}
-#[test]
-fn on_demand_enabled_from_remote_settings() {
-    let json = serde_json::json!({ "on_demand_enabled": false });
-    let rs: crate::util::config::RemoteSettings = serde_json::from_value(json).unwrap();
-    assert_eq!(rs.on_demand_enabled, Some(false));
-    let json = serde_json::json!({});
-    let rs: crate::util::config::RemoteSettings = serde_json::from_value(json).unwrap();
-    assert_eq!(rs.on_demand_enabled, None);
-}
 /// Regression for a 401 sequence seen in production. After a long idle
 /// window, the auth manager may have no
 /// live token by the time `session/new` runs. For session-based auth methods
@@ -2132,26 +1960,6 @@ async fn prepare_video_gen_config_respects_feature_flag() {
         agent.prepare_video_gen_config(),
         VideoGenConfig::Disabled
     ));
-}
-/// The imagine tier gate fails **open**: with no resolved auth we can't confirm
-/// a restricted personal tier, so the tools stay advertised and un-flagged (the
-/// server 429 remains the authoritative backstop). Guards against accidentally
-/// disabling a paid feature when tier info hasn't loaded.
-#[tokio::test(flavor = "current_thread")]
-async fn prepare_image_gen_config_fails_open_without_auth() {
-    use grow_tools::implementations::grow_build::image_gen::ImageGenConfig;
-    let agent = build_minimal_agent_for_tests();
-    agent.sampling_config.borrow_mut().api_key = Some("test-key".to_string());
-    let ImageGenConfig::Enabled {
-        tier_restricted, ..
-    } = agent.prepare_image_gen_config()
-    else {
-        panic!("expected Enabled");
-    };
-    assert!(
-        !tier_restricted,
-        "no resolved auth ⇒ fail open (tools not tier-restricted)"
-    );
 }
 /// The imagine tools bypass cli-chat-proxy (direct API calls), so the server
 /// can only scope the coding data-retention opt-out (`/privacy opt-out`) to
@@ -3148,43 +2956,6 @@ fn drained_settings_update(
     }
     found
 }
-/// Regression: `cfg.remote_settings` is not reset on an account switch, so the
-/// access gate must not read a previous identity's cached `allow_access`. A
-/// mismatched identity stays provisionally open (unknown).
-#[tokio::test]
-async fn access_gate_does_not_leak_verdict_across_identities() {
-    use crate::agent::config::AgentMode;
-    use crate::auth::{ProviderAuth, TEST_OAUTH2_ISSUER};
-    let auth_a = ProviderAuth {
-        oidc_issuer: Some(TEST_OAUTH2_ISSUER.to_string()),
-        user_id: "user-a".into(),
-        ..ProviderAuth::test_default()
-    };
-    let (agent, _rx) = build_agent_with_auth_and_proxy(
-        auth_a,
-        "http://127.0.0.1:1/".to_string(),
-        AgentMode::Leader,
-    );
-    {
-        let mut cfg = agent.cfg.borrow_mut();
-        cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-            allow_access: Some(false),
-            ..Default::default()
-        });
-    }
-    *agent.allow_access_resolved_for.borrow_mut() = Some("user-a".to_string());
-    let auth_b = ProviderAuth {
-        oidc_issuer: Some(TEST_OAUTH2_ISSUER.to_string()),
-        user_id: "user-b".into(),
-        ..ProviderAuth::test_default()
-    };
-    assert!(auth_b.is_service_auth(), "precondition: first-party xAI auth");
-    agent.enforce_grok_code_access(&auth_b).await;
-    assert!(
-        agent.tier_allowed.get(),
-        "identity B must not inherit identity A's denied allow_access verdict",
-    );
-}
 /// First-party xAI auth + `writeback_enabled` settings → storage upgrades to
 /// Writeback; the settings arrival also emits `grow/settings/update`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3198,7 +2969,6 @@ async fn post_auth_settings_xai_upgrades_writeback_and_emits() {
         .unwrap();
     server.set_settings(serde_json::json!({
         "writeback_enabled": true,
-        "allow_access": true,
     }));
     let xai_auth = ProviderAuth {
         oidc_issuer: Some(TEST_OAUTH2_ISSUER.to_string()),
@@ -3235,7 +3005,6 @@ async fn post_auth_settings_third_party_keeps_local_but_still_emits() {
         .unwrap();
     server.set_settings(serde_json::json!({
         "writeback_enabled": true,
-        "allow_access": true,
     }));
     let api_auth = ProviderAuth {
         auth_mode: AuthMode::ApiKey,
@@ -3273,7 +3042,7 @@ async fn settings_self_heal_refetches_after_token_rotation() {
     )
     .await
     .unwrap();
-    server.set_settings(serde_json::json!({ "allow_access": true }));
+    server.set_settings(serde_json::json!({}));
     struct RotatingRefresher;
     #[async_trait::async_trait]
     impl TokenRefresher for RotatingRefresher {
@@ -3315,7 +3084,7 @@ async fn settings_not_cached_when_identity_logs_out_during_fetch() {
     let server = grow_test_support::MockInferenceServer::start()
         .await
         .unwrap();
-    server.set_settings(serde_json::json!({ "allow_access": true }));
+    server.set_settings(serde_json::json!({}));
     let xai_auth = ProviderAuth {
         oidc_issuer: Some(TEST_OAUTH2_ISSUER.to_string()),
         ..ProviderAuth::test_default()

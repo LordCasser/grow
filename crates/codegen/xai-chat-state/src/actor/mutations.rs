@@ -514,7 +514,7 @@ impl ChatStateActor {
         self.state.turn_start_ms = snap.turn_start_ms;
         self.state.last_compaction_prompt_index = snap.last_compaction_prompt_index;
         self.state.credentials = snap.credentials;
-        // Drop abandoned prompt billing; session ledger is lifetime.
+        // Drop abandoned prompt usage; the session ledger is lifetime.
         self.state.prompt_usage = None;
     }
 

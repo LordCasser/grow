@@ -440,7 +440,7 @@ pub(crate) struct AutoCompactTriggerInfo {
 /// off it) — don't rename the strings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SuppressReason {
-    CreditBlock,
+    ProviderLimit,
     Size,
     Auth,
     Schema,
@@ -449,7 +449,7 @@ pub(crate) enum SuppressReason {
 impl SuppressReason {
     fn as_str(self) -> &'static str {
         match self {
-            SuppressReason::CreditBlock => "credit_block",
+            SuppressReason::ProviderLimit => "provider_limit",
             SuppressReason::Size => "size",
             SuppressReason::Auth => "auth",
             SuppressReason::Schema => "schema",
@@ -458,13 +458,13 @@ impl SuppressReason {
     }
     /// Suppression scope for this reason:
     /// - `size | schema` → [`SUPPRESS_STICKY`]: cleared only on a context-budget change.
-    /// - `credit_block` → [`SUPPRESS_UNTIL_SUCCESS`]: wait for a model `200`.
+    /// - `provider_limit` → [`SUPPRESS_UNTIL_SUCCESS`]: wait for a model `200`.
     /// - `auth` → [`SUPPRESS_AUTH`]: clear on login/token refresh (not 200 — over-window deadlock).
     /// - `other` → [`SUPPRESS_TURN`]: optimistic per-turn retry.
     fn suppress_state(self) -> u8 {
         match self {
             SuppressReason::Size | SuppressReason::Schema => SUPPRESS_STICKY,
-            SuppressReason::CreditBlock => SUPPRESS_UNTIL_SUCCESS,
+            SuppressReason::ProviderLimit => SUPPRESS_UNTIL_SUCCESS,
             SuppressReason::Auth => SUPPRESS_AUTH,
             SuppressReason::Other => SUPPRESS_TURN,
         }
@@ -674,8 +674,8 @@ impl SessionActor {
                 },
             );
             let message = match reason {
-                SuppressReason::CreditBlock => {
-                    "out of credits or over your spending limit. Add credits and retry."
+                SuppressReason::ProviderLimit => {
+                    "the model provider rejected compaction because of an account or quota limit. Review the provider response and retry."
                 }
                 SuppressReason::Auth => {
                     "the model provider rejected its credentials. Check the provider authentication and retry."
@@ -704,7 +704,7 @@ impl SessionActor {
             || m.contains("usage balance exhausted")
             || m.contains("usage limit reached")
         {
-            SuppressReason::CreditBlock
+            SuppressReason::ProviderLimit
         } else if is_context_length_error(&m) {
             SuppressReason::Size
         } else if m.contains("status 401") || m.contains("unauthorized") {
@@ -808,7 +808,7 @@ impl SessionActor {
             acp::Error::internal_error().data(data)
         }
     }
-    /// Clear [`SUPPRESS_AUTH`] on login/token refresh (credit suppress waits for a 200).
+    /// Clear [`SUPPRESS_AUTH`] on login/token refresh (provider-limit suppress waits for a 200).
     pub(crate) fn clear_auth_compact_suppression(&self) {
         let _ = self.compaction.auto_compact_suppressed.compare_exchange(
             SUPPRESS_AUTH,
@@ -817,7 +817,7 @@ impl SessionActor {
             std::sync::atomic::Ordering::Relaxed,
         );
     }
-    /// Credit or auth suppress — a model switch cannot clear these.
+    /// Provider-limit or auth suppress — a model switch cannot clear these.
     fn is_account_state_suppressed(&self) -> bool {
         matches!(
             self.compaction
@@ -2569,7 +2569,7 @@ mod inline_auto_compact_flow_tests {
             .await;
     }
     /// Suppression gates both AUTO paths; the reset scope depends on the reason:
-    /// `other` clears next turn, `credit_block` holds until a successful model call,
+    /// `other` clears next turn, `provider_limit` holds until a successful model call,
     /// `size` is sticky until a full reset (success / rewind / model switch).
     #[tokio::test(flavor = "current_thread")]
     async fn suppression_gates_and_reset_is_reason_scoped() {
@@ -2600,7 +2600,7 @@ mod inline_auto_compact_flow_tests {
                 );
                 assert!(actor.check_auto_compact_needed().await.is_some());
                 actor
-                    .suppress_auto_compaction(SuppressReason::CreditBlock, 1_000, 200_000)
+                    .suppress_auto_compaction(SuppressReason::ProviderLimit, 1_000, 200_000)
                     .await;
                 assert_eq!(
                     actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -2703,7 +2703,7 @@ mod inline_auto_compact_flow_tests {
                     create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 for (reason, expected) in [
-                    (SuppressReason::CreditBlock, SUPPRESS_UNTIL_SUCCESS),
+                    (SuppressReason::ProviderLimit, SUPPRESS_UNTIL_SUCCESS),
                     (SuppressReason::Auth, SUPPRESS_AUTH),
                 ] {
                     actor.suppress_auto_compaction(reason, 1_000, 200_000).await;
@@ -2762,7 +2762,7 @@ mod inline_auto_compact_flow_tests {
             })
             .await;
     }
-    /// Auth recovery must not clear credit suppress.
+    /// Auth recovery must not clear provider-limit suppress.
     #[tokio::test(flavor = "current_thread")]
     async fn clear_auth_suppress_leaves_credit_suppress() {
         use crate::session::compaction_config::SUPPRESS_UNTIL_SUCCESS;
@@ -2775,7 +2775,7 @@ mod inline_auto_compact_flow_tests {
                 let actor =
                     create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await;
                 actor
-                    .suppress_auto_compaction(SuppressReason::CreditBlock, 1_000, 200_000)
+                    .suppress_auto_compaction(SuppressReason::ProviderLimit, 1_000, 200_000)
                     .await;
                 actor.clear_auth_compact_suppression();
                 assert_eq!(
@@ -2902,8 +2902,11 @@ mod inline_auto_compact_flow_tests {
                     }
                     text.expect("expected an AutoCompactFailed notification")
                 }
-                let credit = notification_for(SuppressReason::CreditBlock).await;
-                assert!(credit.contains("spending limit"), "credit_block: {credit}");
+                let provider_limit = notification_for(SuppressReason::ProviderLimit).await;
+                assert!(
+                    provider_limit.contains("account or quota limit"),
+                    "provider_limit: {provider_limit}"
+                );
                 let auth = notification_for(SuppressReason::Auth).await;
                 assert!(auth.contains("/login"), "auth: {auth}");
                 let size = notification_for(SuppressReason::Size).await;
@@ -3410,19 +3413,19 @@ mod inline_auto_compact_flow_tests {
         let classify = SessionActor::classify_suppress_reason;
         assert_eq!(
             classify("caller does not have permission … spending-limit reached"),
-            SuppressReason::CreditBlock
+            SuppressReason::ProviderLimit
         );
         assert_eq!(
             classify("you have run out of credits"),
-            SuppressReason::CreditBlock
+            SuppressReason::ProviderLimit
         );
         assert_eq!(
             classify("API error (status 402 Payment Required): Grow usage balance exhausted"),
-            SuppressReason::CreditBlock
+            SuppressReason::ProviderLimit
         );
         assert_eq!(
             classify("Grow usage limit reached"),
-            SuppressReason::CreditBlock
+            SuppressReason::ProviderLimit
         );
         assert_eq!(
             classify("This model's maximum prompt length is 500000"),
@@ -3453,7 +3456,7 @@ mod inline_auto_compact_flow_tests {
     /// dashboards key off these exact strings. Lock them so a rename can't break monitoring.
     #[test]
     fn suppress_reason_as_str_is_stable() {
-        assert_eq!(SuppressReason::CreditBlock.as_str(), "credit_block");
+        assert_eq!(SuppressReason::ProviderLimit.as_str(), "provider_limit");
         assert_eq!(SuppressReason::Size.as_str(), "size");
         assert_eq!(SuppressReason::Auth.as_str(), "auth");
         assert_eq!(SuppressReason::Schema.as_str(), "schema");

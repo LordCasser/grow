@@ -242,8 +242,7 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
     }]
 }
 
-/// `/usage` — session token/cost, then consumer credits when visible.
-/// Credits are chained after the session block so layout stays ordered.
+/// `/usage` — local session token and context usage.
 pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -265,12 +264,12 @@ pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
                     "Session usage is unavailable until the session starts.".to_string(),
                 ));
             }
-            append_consumer_billing_surface(app, id)
+            vec![]
         }
     }
 }
 
-/// Commit a session-usage block if still on `session_id`, then consumer credits.
+/// Commit a session-usage block if still on `session_id`.
 pub(super) fn commit_session_usage_block(
     app: &mut AppView,
     agent_id: AgentId,
@@ -284,47 +283,6 @@ pub(super) fn commit_session_usage_block(
         return vec![];
     }
     agent.scrollback.push_block(RenderBlock::system(text));
-    append_consumer_billing_surface(app, agent_id)
-}
-
-/// Consumer credit follow-up for `/usage` (redirect or non-silent billing fetch).
-pub(super) fn append_consumer_billing_surface(app: &mut AppView, agent_id: AgentId) -> Vec<Effect> {
-    if !app.usage_visible {
-        return vec![];
-    }
-    // Remote-settings kill switch (`grow_build_usage_redirect_url`): link out
-    // instead of fetching billing from the backend.
-    if let Some(url) = app.usage_billing_redirect_url.clone() {
-        if let Some(agent) = app.agents.get_mut(&agent_id) {
-            agent.scrollback.push_block(RenderBlock::System(
-                crate::scrollback::blocks::SystemMessageBlock::new(format!(
-                    "Please check your usage on {url}"
-                )),
-            ));
-        }
-        return vec![];
-    }
-    if !app.agents.contains_key(&agent_id) {
-        return vec![];
-    }
-    // Non-silent: the effect also pulls the auto top-up rule so the summary
-    // renders usage, prepaid credits, and auto top-up together.
-    vec![Effect::FetchBilling {
-        agent_id,
-        silent: false,
-    }]
-}
-
-/// `/usage manage` — open consumer billing. No-op when the surface is hidden.
-pub(super) fn dispatch_manage_billing(app: &mut AppView) -> Vec<Effect> {
-    if !app.usage_visible {
-        return vec![];
-    }
-    let Some(url) = app.usage_billing_redirect_url.clone() else {
-        app.show_toast("No provider billing URL is configured");
-        return vec![];
-    };
-    super::ctx::open_url_or_show(app, &url);
     vec![]
 }
 

@@ -36,7 +36,7 @@ pub(super) fn with_active_agent(app: &mut AppView, f: impl FnOnce(&mut AgentView
 
 /// Open `url` via the system browser, falling back to a visible URL when the
 /// browser cannot open (headless VM / missing opener). Prefer this over raw
-/// `open_url_if_safe` for user-initiated billing/upgrade CTAs.
+/// `open_url_if_safe` for user-initiated external links.
 ///
 /// When no agent is active (welcome/gate screen), still attempts the open and
 /// falls back to clipboard + toast.

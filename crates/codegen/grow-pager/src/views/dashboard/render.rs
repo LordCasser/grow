@@ -934,7 +934,7 @@ fn render_header(
         }));
     }
 
-    // Upgrade CTA painted right after the location label (free-tier upsell),
+    // Announcement CTA painted right after the location label,
     // clamped to the space left before the chips — a lead space then the shared
     // clamping button painter. Pointer click → Dashboard, Ctrl+O → Keyboard.
     if let Some(HeaderUpgradeCta { label, .. }) = upgrade_cta {

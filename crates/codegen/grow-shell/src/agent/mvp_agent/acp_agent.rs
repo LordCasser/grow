@@ -146,9 +146,6 @@ impl acp::Agent for MvpAgent {
                 );
             }
         }
-        if !self.tier_allowed.get() && let Some(auth) = self.auth_manager.current() {
-            self.enforce_grok_code_access(&auth).await;
-        }
         self.maybe_sync_bundle_in_background(false);
         let mut client_type = arguments
             .meta
@@ -745,7 +742,6 @@ impl acp::Agent for MvpAgent {
                         .authenticate_after_cached_token_unavailable(arguments)
                         .await;
                 }
-                self.enforce_grok_code_access(&auth).await;
                 self.maybe_sync_bundle_in_background(false);
                 let auth_for_settings = auth.clone();
                 {
@@ -892,7 +888,6 @@ impl acp::Agent for MvpAgent {
                     );
                 }
                 self.auth_manager.hot_swap(auth.clone());
-                self.enforce_grok_code_access(&auth).await;
                 self.maybe_sync_bundle_in_background(false);
                 tokio::task::spawn_local(
                     crate::managed_config::post_login_sync(Some(auth.clone())),
@@ -2804,10 +2799,6 @@ impl acp::Agent for MvpAgent {
                             .data(format!("Failed to delete environment: {e}"))
                     })?;
                 crate::extensions::to_raw_response(&serde_json::json!({ "ok": true }))
-            }
-            "grow/billing" => crate::extensions::billing::handle(self, &args).await,
-            "grow/auto-topup-rule" => {
-                crate::extensions::billing::handle(self, &args).await
             }
             "grow/share_session" => crate::extensions::share::handle(self, &args).await,
             "grow/privacy/setCodingDataRetention" => {

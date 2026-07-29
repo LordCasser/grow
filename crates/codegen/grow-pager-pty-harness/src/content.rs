@@ -16,7 +16,6 @@ use grow_test_support::{MockInferenceServer, TestSandbox};
 
 pub use grow_test_support::mock_server::LogEntry;
 pub use grow_test_support::mock_server::MockModelEntry as MockModel;
-pub use grow_test_support::mock_server::StorageUpload;
 pub use grow_test_support::sse;
 pub use grow_test_support::{
     InferenceEndpoint, InferenceExpectation, InferenceRequestMatcher, ScriptedResponse, SseEvent,
@@ -126,10 +125,9 @@ impl ContentController {
             .await
             .context("start mock inference server")?;
         // Pre-delegation parity, both load-bearing for PTY tests: settings
-        // must be 200 `{"allow_access": true}` (the shared 404-until-set
-        // default strands the pager on the upsell screen), and the response
-        // mode must be a fixed text (the shared default is echo).
-        server.preset_allow_access();
+        // must return 200 (the shared default is 404), and the response mode
+        // must be fixed text (the shared default is echo).
+        server.preset_settings_empty();
         server.set_response(default_response_text());
 
         let mut sandbox = TestSandbox::builder().mock_url(server.url()).build();
@@ -295,23 +293,6 @@ impl ContentController {
     pub fn request_bodies(&self) -> Vec<serde_json::Value> {
         self.server.request_bodies()
     }
-
-    // ── Mock storage controls (park-on-401 e2e) ────────────────────────────
-
-    /// Flip the mock `/v1/storage` 401 gate (the auth-outage window).
-    pub fn set_storage_unauthorized(&self, unauthorized: bool) {
-        self.server.set_storage_unauthorized(unauthorized);
-    }
-
-    /// Total `/v1/storage` upload attempts, including 401-rejected ones.
-    pub fn storage_request_count(&self) -> u32 {
-        self.server.storage_request_count()
-    }
-
-    /// Snapshot of accepted (HTTP 200) `/v1/storage` uploads.
-    pub fn storage_uploads(&self) -> Vec<StorageUpload> {
-        self.server.storage_uploads()
-    }
 }
 
 fn default_response_text() -> String {
@@ -359,9 +340,8 @@ mod tests {
             .expect("read direct foreground response")
     }
 
-    /// The pre-delegation mock always served 200 `{"allow_access": true}`;
-    /// the shared server defaults to 404-until-set. A 404 strands the pager
-    /// on the Provider Plan upsell screen and breaks every PTY test.
+    /// The pre-delegation mock always served a successful settings response;
+    /// the shared server defaults to 404-until-set.
     #[tokio::test]
     async fn settings_endpoint_allows_access_by_default() {
         let content = ContentController::start().await.unwrap();
@@ -371,7 +351,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body, serde_json::json!({ "allow_access": true }));
+        assert_eq!(body, serde_json::json!({}));
     }
 
     /// The pre-delegation mock streamed a fixed default text to every

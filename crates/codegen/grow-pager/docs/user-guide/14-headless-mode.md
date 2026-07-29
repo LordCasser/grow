@@ -187,7 +187,7 @@ Usage notes:
   complete bill.
 - `total_cost_usd_ticks` is the same value in exact integer ticks
   (1 USD = 10^10 ticks) and appears under the same conditions. Use it for
-  billing reconciliation: summing per-invocation ticks matches the server's
+  cost reconciliation: summing per-invocation ticks matches the server's
   usage export exactly, which float dollars cannot guarantee.
 - When subagent usage could not be applied, nested subagent usage was incomplete,
   or the success-path drain timed out (up to 120s on the turn task),

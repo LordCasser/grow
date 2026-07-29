@@ -1,15 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-/// Access gate from `grow_build_access_gate`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GateInfo {
-    pub message: String,
-    #[serde(default)]
-    pub url: Option<String>,
-    #[serde(default)]
-    pub label: Option<String>,
-}
-
 /// Typed auth metadata passed from the shell to the pager via ACP.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthMeta {
@@ -31,13 +21,6 @@ pub struct AuthMeta {
     pub coding_data_retention_opt_out: bool,
     #[serde(default)]
     pub show_resolved_model: Option<bool>,
-    /// `Some` = user is blocked; `None` = user has access.
-    #[serde(default)]
-    pub gate: Option<GateInfo>,
-    /// User-friendly display name for the current subscription tier
-    /// (e.g. "Provider Plan High", "X Premium", "Free"). From CCP `/settings`.
-    #[serde(default)]
-    pub subscription_tier: Option<String>,
 }
 
 impl Default for AuthMeta {
@@ -51,8 +34,6 @@ impl Default for AuthMeta {
             team_role: None,
             coding_data_retention_opt_out: crate::auth::default_coding_data_retention_opt_out(),
             show_resolved_model: None,
-            gate: None,
-            subscription_tier: None,
         }
     }
 }

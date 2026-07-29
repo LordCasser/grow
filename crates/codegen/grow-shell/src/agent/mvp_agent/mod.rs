@@ -147,70 +147,6 @@ pub(crate) fn reject_direct_hub_cloud_meta(
 /// Extract the numeric `tier` claim from a JWT access token (no signature
 /// verification). Maps the `prod_auth.SubscriptionTier` proto enum values
 /// to display-style strings that `normalize_tier` in the diagnostics crate
-/// will canonicalize for Mixpanel.
-pub(crate) fn jwt_tier_claim(jwt: &str) -> Option<String> {
-    use base64::Engine;
-    let payload_b64 = jwt.split('.').nth(1)?;
-    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    let tier = claims.get("tier")?.as_u64()?;
-    Some(
-        match tier {
-            1 => "provider_plan",
-            2 => "x_basic",
-            3 => "x_premium",
-            4 => "x_premium_plus",
-            5 => "provider_plan_high",
-            6 => "provider_plan_lite",
-            0 => "free",
-            _ => return Some(tier.to_string()),
-        }
-            .to_string(),
-    )
-}
-/// Resolve Mixpanel / AuthMeta `subscription_tier`.
-///
-/// Precedence:
-/// 1. CCP `/settings` `subscription_tier_display` (when present and non-empty)
-/// 2. [`AuthMode::ApiKey`] → `"api_key"` (never free)
-/// 3. JWT `tier` claim via [`jwt_tier_claim`] (OAuth free → `"free"`)
-pub(crate) fn resolve_subscription_tier_for_diagnostics(
-    display: Option<String>,
-    auth: Option<&crate::auth::ProviderAuth>,
-) -> Option<String> {
-    if let Some(t) = display.filter(|s| !s.trim().is_empty()) {
-        return Some(t);
-    }
-    let auth = auth?;
-    if auth.auth_mode == crate::auth::AuthMode::ApiKey {
-        return Some("api_key".into());
-    }
-    jwt_tier_claim(&auth.key)
-}
-/// Whether a JWT `tier` claim (from [`jwt_tier_claim`]) reflects the live
-/// `/user?include=subscription` tier string (from the subscription API / QUALIFYING_TIERS).
-///
-/// Post-unblock catalog refresh must not treat *any* present claim as enough:
-/// an older paid claim (e.g. `x_basic`) can remain on the access token while
-/// `/user` already reports a newly qualifying tier (e.g. `Provider PlanPro`). In
-/// that case `/v1/models` would still be targeted at the stale level (the
-/// "stale JWT tier skips retry" bug).
-pub(crate) fn jwt_claim_matches_user_subscription_tier(
-    jwt_claim: &str,
-    user_subscription_tier: &str,
-) -> bool {
-    match user_subscription_tier {
-        "GrowPro" => jwt_claim == "provider_plan",
-        "XBasic" => jwt_claim == "x_basic",
-        "XPremium" => jwt_claim == "x_premium",
-        "XPremiumPlus" => jwt_claim == "x_premium_plus",
-        "Provider PlanPro" => jwt_claim == "provider_plan_high",
-        "Provider PlanLite" => jwt_claim == "provider_plan_lite",
-        _ => false,
-    }
-}
 fn parse_session_computer_sessions(_meta: Option<&acp::Meta>) -> Option<Vec<()>> {
     None
 }
@@ -440,7 +376,7 @@ pub(crate) struct PromptResponseMeta {
     pub cached_read_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u32>,
-    /// Whole-prompt billing (sibling token fields are last call only).
+    /// Whole-prompt token usage (sibling token fields are last call only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::extensions::notification::PromptUsage>,
     /// Cancellation category when the turn was terminated by the system
@@ -541,17 +477,11 @@ struct SettingsUpdateNotification {
     /// seam that seeds the TUI process, so a `/model` pick can record a remote
     /// campaign's dismissal even when the TUI's own startup prefetch missed.
     campaigns: Option<Vec<crate::util::config::CampaignOverride>>,
-    gate_message: Option<String>,
-    gate_url: Option<String>,
-    gate_label: Option<String>,
-    allow_access: Option<bool>,
-    subscription_tier_display: Option<String>,
     auto_permission_mode_enabled: Option<bool>,
     /// Soft-default permission mode for the pager (post-auth / `/new` refresh).
     permission_mode: Option<String>,
     group_tool_verbs: Option<bool>,
     collapsed_edit_blocks: Option<bool>,
-    subscription_watch_interval_secs: Option<u64>,
 }
 /// When the announcements push gate emits despite an unchanged visible list.
 #[derive(Clone, Copy, Debug)]
@@ -726,15 +656,6 @@ pub struct MvpAgent {
     /// into the detached prompt task; cleared for a workspace on GUI untrust
     /// (`execute_hooks_action`) so a later re-open can re-prompt.
     interactive_trust_prompted: Rc<RefCell<std::collections::HashSet<PathBuf>>>,
-    /// Whether the user's subscription tier is in the remote settings `allowed_tiers`
-    /// list. Set by `enforce_grok_code_access`; defaults to `true` (API-key and
-    /// external-auth users bypass the check). When `false`, the pager shows a
-    /// gate CTA instead of the prompt.
-    tier_allowed: std::cell::Cell<bool>,
-    /// The `user_id` the current `tier_allowed` verdict was resolved for.
-    /// `cfg.remote_settings` isn't reset on account switch, so a mismatch here
-    /// means "unknown" (provisional open).
-    allow_access_resolved_for: std::cell::RefCell<Option<String>>,
     /// Writeback vs local. `Cell` so [`Self::reapply_storage_mode`] can
     /// upgrade it when remote settings land; persistence reads the live value.
     /// Authoritative post-construction — `Config.storage_mode` is only the
@@ -868,17 +789,6 @@ pub struct MvpAgent {
     /// on completion without re-borrowing `&self`. `Send` is required
     /// because the inner `sync_bundle_to_root` now uses `spawn_blocking`.
     bundle_sync_in_flight: Arc<std::sync::atomic::AtomicBool>,
-    /// Single-flight guard for [`spawn_post_unblock_jwt_and_catalog_retry`].
-    ///
-    /// After free→paid unblock the JWT may still lack a `tier` claim for
-    /// several seconds. Overlapping `CheckSubscription` RPCs (watch debounce,
-    /// paywall ticks, concurrent in-flight checks) would each otherwise spawn
-    /// another five-attempt `refresh_chain` backoff loop — multiplying IdP
-    /// traffic and redundant catalog work.
-    ///
-    /// Cleared by [`PostUnblockJwtRetryInFlightGuard`] on task exit (including
-    /// panic/abort), not only on the normal post-backoff path.
-    post_unblock_jwt_retry_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// Local workspace ops, built lazily via [`Self::ensure_local_workspace_ops`].
     /// The agent never opens Computer Hub as a harness/client; remote cloud
     /// sandboxes are gateway-owned (`gateway_bridge` / `computer_sessions`).
@@ -1719,264 +1629,29 @@ impl MvpAgent {
         }
         result
     }
-    /// Check whether the user has access via remote settings `allow_access`.
-    ///
-    /// Non-xAI auth (API keys, enterprise) always passes. For xAI OAuth2
-    /// users, reads `allow_access` from remote settings. When settings exist
-    /// but the field is absent/false, defaults to `false` (blocked); when
-    /// settings have not arrived yet (background fetch pending) the gate is
-    /// provisionally open and re-resolved on arrival.
-    pub(super) async fn enforce_grok_code_access(&self, auth: &crate::auth::ProviderAuth) {
-        if !auth.is_service_auth() {
-            self.tier_allowed.set(true);
-            return;
-        }
-        let settings_for_this_identity = self.cfg.borrow().remote_settings.is_some()
-            && self.allow_access_resolved_for.borrow().as_deref()
-                == Some(auth.user_id.as_str());
-        if !settings_for_this_identity
-            && crate::util::config::resolve_remote_fetch_enabled()
-        {
-            self.tier_allowed.set(true);
-            return;
-        }
-        let allow = settings_allow_access(self.cfg.borrow().remote_settings.as_ref());
-        self.tier_allowed.set(allow);
-        *self.allow_access_resolved_for.borrow_mut() = Some(auth.user_id.clone());
-        if !allow {
-            tracing::info!(
-                "auth: user blocked by allow_access (remote settings grow_build_access_gate)"
-            );
-            self.retry_subscription_check().await;
-        }
-    }
-    /// Single-shot subscription check called by the pager's "Check
-    /// subscription" button (`grow/auth/check_subscription`). The pager
-    /// calls this every 5s while the paywall is shown, acting as the poller.
-    ///
-    /// Queries `/user?include=subscription` for the live tier from the
-    /// subscription API. If a qualifying tier is found, does a best-effort
-    /// JWT refresh and settings re-fetch, lifts the gate, then — when the
-    /// access token's `tier` claim **matches** that live tier
-    /// ([`jwt_claim_matches_user_subscription_tier`]; bare `refresh_chain`
-    /// Ok or any older paid claim is not enough) — fire-and-forgets an
-    /// explicit model catalog refresh (`ModelsManager::on_auth_changed`) so
-    /// tier-targeted models appear without restart.
-    /// Catalog refresh is not awaited so gate lift / auth meta are not
-    /// blocked on `/v1/models`. Without a matching claim, defers to
-    /// `spawn_post_unblock_jwt_and_catalog_retry`.
-    pub(crate) async fn retry_subscription_check(&self) {
-        let (proxy_base_url, alpha_test_key) = {
-            let cfg = self.cfg.borrow();
-            (cfg.endpoints.proxy_url(), cfg.endpoints.alpha_test_key.clone())
-        };
-        let user_id = self
-            .auth_manager
-            .current()
-            .map(|a| a.user_id.clone())
-            .unwrap_or_default();
-        let result = super::subscription_check::single_check(
-                self.auth_manager.clone(),
-                &proxy_base_url,
-                alpha_test_key.as_deref(),
-                &user_id,
-            )
-            .await;
-        if let Some(unblocked) = result {
-            tracing::info!(
-                new_tier = %unblocked.new_tier,
-                "subscription detected, lifting gate"
-            );
-            grow_diagnostics::unified_log::info(
-                "paywall_check_gate_lifting",
-                None,
-                Some(
-                    serde_json::json!({
-                    "user_id": user_id,
-                    "new_tier": unblocked.new_tier,
-                }),
-                ),
-            );
-            let remote_was_absent = self.cfg.borrow().remote_settings.is_none();
-            if let Some(auth) = self.auth_manager.current()
-                && let Some(settings) = self.fetch_settings_resolving_gate(&auth).await
-            {
-                self.install_remote_settings(settings);
-                if remote_was_absent {
-                    self.spawn_auto_worktree_gc();
-                }
-            }
-            if crate::util::config::resolve_remote_fetch_enabled()
-                && !settings_allow_access(self.cfg.borrow().remote_settings.as_ref())
-            {
-                tracing::info!(
-                    new_tier = %unblocked.new_tier,
-                    "subscription detected but allow_access still false, keeping gate"
-                );
-                grow_diagnostics::unified_log::warn(
-                    "paywall_check_gate_kept_allow_access_false",
-                    None,
-                    Some(
-                        serde_json::json!({
-                        "user_id": user_id,
-                        "new_tier": unblocked.new_tier,
-                    }),
-                    ),
-                );
-                return;
-            }
-            self.tier_allowed.set(true);
-            let refresh_ok = match self
-                .auth_manager
-                .refresh_chain(
-                    crate::auth::token_type::TokenType::OidcSession,
-                    crate::auth::manager::RefreshReason::ServerRejected,
-                )
-                .await
-            {
-                Ok(_) => {
-                    tracing::info!("post-unblock: JWT refresh_chain succeeded");
-                    grow_diagnostics::unified_log::info(
-                        "paywall_check_jwt_refreshed",
-                        None,
-                        Some(serde_json::json!({ "user_id": user_id })),
-                    );
-                    true
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "post-unblock: JWT refresh failed, user may need to re-login on next restart");
-                    grow_diagnostics::unified_log::warn(
-                        "paywall_check_error",
-                        None,
-                        Some(
-                            serde_json::json!({
-                            "user_id": user_id,
-                            "kind": "post_unblock_refresh_failed",
-                            "detail": e.to_string(),
-                        }),
-                        ),
-                    );
-                    false
-                }
-            };
-            let jwt_claim = self
-                .auth_manager
-                .current_or_expired()
-                .and_then(|auth| jwt_tier_claim(&auth.key));
-            let jwt_matches_new_tier = jwt_claim
-                .as_ref()
-                .is_some_and(|claim| jwt_claim_matches_user_subscription_tier(
-                    claim,
-                    &unblocked.new_tier,
-                ));
-            if jwt_matches_new_tier {
-                let models_manager = self.models_manager.clone();
-                let user_id_log = user_id.clone();
-                let new_tier = unblocked.new_tier.clone();
-                let jwt_claim_log = jwt_claim.clone();
-                tokio::task::spawn(async move {
-                    grow_diagnostics::unified_log::info(
-                        "model catalog: post_subscription_unblock refresh",
-                        None,
-                        Some(
-                            serde_json::json!({
-                            "user_id": user_id_log,
-                            "new_tier": new_tier,
-                            "refresh_ok": refresh_ok,
-                            "jwt_claim": jwt_claim_log,
-                            "jwt_matches_new_tier": true,
-                        }),
-                        ),
-                    );
-                    models_manager.on_auth_changed().await;
-                });
-            } else {
-                tracing::warn!(
-                    refresh_ok,
-                    jwt_claim = ?jwt_claim,
-                    new_tier = %unblocked.new_tier,
-                    "post-unblock: JWT tier claim missing or stale vs live tier; deferring model catalog refresh with retry"
-                );
-                grow_diagnostics::unified_log::warn(
-                    "model catalog: post_subscription_unblock deferred (jwt tier missing or stale)",
-                    None,
-                    Some(
-                        serde_json::json!({
-                        "user_id": user_id,
-                        "new_tier": unblocked.new_tier,
-                        "refresh_ok": refresh_ok,
-                        "jwt_claim": jwt_claim,
-                    }),
-                    ),
-                );
-                spawn_post_unblock_jwt_and_catalog_retry(
-                    self.auth_manager.clone(),
-                    self.models_manager.clone(),
-                    self.post_unblock_jwt_retry_in_flight.clone(),
-                    user_id.clone(),
-                    unblocked.new_tier.clone(),
-                );
-            }
-        } else {
-            grow_diagnostics::unified_log::info(
-                "paywall_check_no_subscription",
-                None,
-                Some(serde_json::json!({
-                    "user_id": user_id,
-                })),
-            );
-        }
-    }
     pub(crate) fn auth_response_with_meta(&self) -> AuthenticateResponse {
-        let (show_resolved_model, gate, subscription_tier) = {
-            let cfg = self.cfg.borrow();
-            let rs = cfg.remote_settings.as_ref();
-            let gate = rs
-                .and_then(|s| s.gate_message.as_ref())
-                .filter(|m| !m.is_empty())
-                .map(|message| crate::auth::GateInfo {
-                    message: message.clone(),
-                    url: rs.and_then(|s| s.gate_url.clone()),
-                    label: rs.and_then(|s| s.gate_label.clone()),
-                });
-            let subscription_tier = rs.and_then(|s| s.subscription_tier_display.clone());
-            (rs.and_then(|s| s.show_resolved_model), gate, subscription_tier)
-        };
-        let subscription_tier = resolve_subscription_tier_for_diagnostics(
-            subscription_tier,
-            self.auth_manager.current_or_expired().as_ref(),
-        );
-        let meta = self
-            .auth_manager
-            .current()
-            .map(|auth| {
-                let gate = if !self.tier_allowed.get() && gate.is_none() {
-                    let message = "A subscription is required.".to_string();
-                    Some(crate::auth::GateInfo {
-                        message,
-                        url: None,
-                        label: None,
-                    })
-                } else {
-                    gate
-                };
-                let auth_meta = crate::auth::AuthMeta {
-                    email: auth.email.clone(),
-                    auth_mode: Some(format!("{:?}", auth.auth_mode)),
-                    team_id: auth.team_id.clone(),
-                    team_name: auth.team_name.clone(),
-                    is_zdr: auth.is_zdr_team(),
-                    team_role: auth.team_role.clone(),
-                    coding_data_retention_opt_out: auth.coding_data_retention_opt_out,
-                    show_resolved_model,
-                    gate,
-                    subscription_tier,
-                };
-                serde_json::to_value(auth_meta)
-                    .ok()
-                    .and_then(|v| v.as_object().cloned())
-                    .unwrap_or_default()
-            });
+        let show_resolved_model = self
+            .cfg
+            .borrow()
+            .remote_settings
+            .as_ref()
+            .and_then(|settings| settings.show_resolved_model);
+        let meta = self.auth_manager.current().map(|auth| {
+            let auth_meta = crate::auth::AuthMeta {
+                email: auth.email.clone(),
+                auth_mode: Some(format!("{:?}", auth.auth_mode)),
+                team_id: auth.team_id.clone(),
+                team_name: auth.team_name.clone(),
+                is_zdr: auth.is_zdr_team(),
+                team_role: auth.team_role.clone(),
+                coding_data_retention_opt_out: auth.coding_data_retention_opt_out,
+                show_resolved_model,
+            };
+            serde_json::to_value(auth_meta)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default()
+        });
         AuthenticateResponse::new().meta(meta)
     }
     /// Fetch remote settings after authentication when early prefetch had none.
@@ -1991,7 +1666,7 @@ impl MvpAgent {
         let Some(auth) = self.auth_manager.current() else {
             return;
         };
-        let Some(settings) = self.fetch_settings_resolving_gate(&auth).await else {
+        let Some(settings) = self.fetch_settings_for_current_identity(&auth).await else {
             return;
         };
         tracing::info!("post-auth remote_settings fetch succeeded");
@@ -2026,20 +1701,12 @@ impl MvpAgent {
                 slash_command_tags: rs.and_then(|s| s.slash_command_tags.clone()),
                 announcements: rs.and_then(|s| s.announcements.clone()),
                 campaigns: rs.map(|s| s.campaigns.clone()),
-                gate_message: rs.and_then(|s| s.gate_message.clone()),
-                gate_url: rs.and_then(|s| s.gate_url.clone()),
-                gate_label: rs.and_then(|s| s.gate_label.clone()),
-                allow_access: rs.and_then(|s| s.allow_access),
-                subscription_tier_display: rs
-                    .and_then(|s| s.subscription_tier_display.clone()),
                 auto_permission_mode_enabled: crate::util::config::remote_auto_mode_enabled(
                     rs,
                 ),
                 permission_mode: rs.and_then(|s| s.permission_mode.clone()),
                 group_tool_verbs: rs.and_then(|s| s.group_tool_verbs),
                 collapsed_edit_blocks: rs.and_then(|s| s.collapsed_edit_blocks),
-                subscription_watch_interval_secs: rs
-                    .and_then(|s| s.subscription_watch_interval_secs),
             }
         };
         if let Ok(params) = serde_json::value::to_raw_value(&payload) {
@@ -2187,163 +1854,6 @@ impl MvpAgent {
             }
         });
     }
-}
-/// Clears [`MvpAgent::post_unblock_jwt_retry_in_flight`] on scope exit —
-/// success, exhaustion, cancel/abort, or panic — so the single-flight flag
-/// cannot wedge `true` for the rest of the process.
-struct PostUnblockJwtRetryInFlightGuard {
-    flag: Arc<std::sync::atomic::AtomicBool>,
-}
-impl Drop for PostUnblockJwtRetryInFlightGuard {
-    fn drop(&mut self) {
-        self.flag.store(false, std::sync::atomic::Ordering::Release);
-    }
-}
-/// Background retry when post-unblock JWT lacks a tier claim that matches
-/// the live `/user` tier. Re-attempts `refresh_chain` and only treats an
-/// attempt as success when [`jwt_claim_matches_user_subscription_tier`]
-/// holds (bare refresh Ok, free token, or a *stale older* paid claim are
-/// all misses). Then refreshes the model catalog.
-///
-/// Gate lift already happened; this only recovers the tier-targeted catalog.
-///
-/// Single-flight: concurrent unblocks (overlapping `CheckSubscription`
-/// RPCs while the JWT is still free/stale-targeted) share one backoff loop
-/// via `in_flight`. A second spawn while a loop is running is a no-op.
-/// The flag is released by [`PostUnblockJwtRetryInFlightGuard`] (Drop), not
-/// only on the happy path after `execute_with_backoff`.
-fn spawn_post_unblock_jwt_and_catalog_retry(
-    auth_manager: std::sync::Arc<crate::auth::AuthManager>,
-    models_manager: crate::agent::models::ModelsManager,
-    in_flight: Arc<std::sync::atomic::AtomicBool>,
-    user_id: String,
-    new_tier: String,
-) {
-    use std::sync::atomic::Ordering;
-    if in_flight
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        tracing::debug!(
-            "post-unblock JWT/catalog retry already in flight, skipping duplicate spawn"
-        );
-        grow_diagnostics::unified_log::info(
-            "model catalog: post_subscription_unblock jwt retry skipped (already in flight)",
-            None,
-            Some(serde_json::json!({
-                "user_id": user_id,
-                "new_tier": new_tier,
-            })),
-        );
-        return;
-    }
-    tokio::task::spawn(async move {
-        let _in_flight_guard = PostUnblockJwtRetryInFlightGuard {
-            flag: in_flight,
-        };
-        let backoff = crate::tools::retry::BackoffConfig::new(5, 2_000, 30_000);
-        let result = crate::tools::retry::execute_with_backoff(
-                &backoff,
-                || {
-                    let auth_manager = auth_manager.clone();
-                    let new_tier = new_tier.clone();
-                    async move {
-                        let refresh_result = auth_manager
-                            .refresh_chain(
-                                crate::auth::token_type::TokenType::OidcSession,
-                                crate::auth::manager::RefreshReason::ServerRejected,
-                            )
-                            .await;
-                        let jwt_claim = auth_manager
-                            .current_or_expired()
-                            .and_then(|auth| jwt_tier_claim(&auth.key));
-                        let matches = jwt_claim
-                            .as_ref()
-                            .is_some_and(|claim| jwt_claim_matches_user_subscription_tier(
-                                claim,
-                                &new_tier,
-                            ));
-                        if matches {
-                            Ok(())
-                        } else {
-                            let detail = match (&refresh_result, &jwt_claim) {
-                                (Ok(_), None) => "refresh_ok but no tier claim".to_string(),
-                                (Ok(_), Some(c)) => {
-                                    format!("refresh_ok but stale tier claim={c} (want {new_tier})")
-                                }
-                                (Err(e), Some(c)) => {
-                                    format!("refresh_err={e}; stale tier claim={c} (want {new_tier})")
-                                }
-                                (Err(e), None) => e.to_string(),
-                            };
-                            Err(format!("jwt tier not current: {detail}"))
-                        }
-                    }
-                },
-                |attempt, max_retries, delay| {
-                    let user_id = user_id.clone();
-                    let new_tier = new_tier.clone();
-                    async move {
-                        grow_diagnostics::unified_log::warn(
-                            "model catalog: post_subscription_unblock jwt retry scheduled",
-                            None,
-                            Some(
-                                serde_json::json!({
-                            "user_id": user_id,
-                            "new_tier": new_tier,
-                            "attempt": attempt,
-                            "max_retries": max_retries,
-                            "delay_ms": delay.as_millis() as u64,
-                        }),
-                            ),
-                        );
-                    }
-                },
-            )
-            .await;
-        match result {
-            Ok(()) => {
-                grow_diagnostics::unified_log::info(
-                    "model catalog: post_subscription_unblock refresh (after jwt retry)",
-                    None,
-                    Some(
-                        serde_json::json!({
-                        "user_id": user_id,
-                        "new_tier": new_tier,
-                    }),
-                    ),
-                );
-                models_manager.on_auth_changed().await;
-            }
-            Err(e) => {
-                grow_diagnostics::unified_log::warn(
-                    "model catalog: post_subscription_unblock jwt retry exhausted",
-                    None,
-                    Some(
-                        serde_json::json!({
-                        "user_id": user_id,
-                        "new_tier": new_tier,
-                        "error": e.to_string(),
-                    }),
-                    ),
-                );
-            }
-        }
-    });
-}
-/// Resolve `allow_access` from remote settings.
-///
-/// Returns `true` only when remote settings explicitly set `allow_access: true`.
-/// Defaults to `false` (blocked) when settings are `None` or the field is
-/// absent — matching the `grow_build_access_gate` flag's server-side default.
-///
-/// Used by both `enforce_grok_code_access` (initial login gate) and
-/// `retry_subscription_check` (poller gate lift) to keep the decision in
-/// one place.
-pub(crate) fn settings_allow_access(
-    rs: Option<&crate::util::config::RemoteSettings>,
-) -> bool {
-    rs.and_then(|s| s.allow_access).unwrap_or(false)
 }
 #[cfg(test)]
 mod tests;

@@ -22,7 +22,6 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "grow/auth/cancel" => handle_cancel(agent, args),
         "grow/auth/logout" => handle_logout(agent, args).await,
         "grow/auth/info" => handle_info(agent),
-        "grow/auth/check_subscription" => handle_check_subscription(agent).await,
         _ => Err(acp::Error::method_not_found()),
     }
 }
@@ -165,19 +164,6 @@ async fn handle_logout(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "was_logged_in": result.was_logged_in,
         "email": result.email,
         "api_key_still_set": result.api_key_still_set,
-    }))
-}
-
-/// Single-shot subscription re-check (retry button on paywall screen).
-///
-/// Calls `retry_subscription_check()`, then returns the updated auth
-/// response with gate info so the pager can refresh the gate state.
-async fn handle_check_subscription(agent: &MvpAgent) -> ExtResult {
-    agent.retry_subscription_check().await;
-    let response = agent.auth_response_with_meta();
-    to_raw_response(&serde_json::json!({
-        "authenticated": response.meta.is_some(),
-        "meta": response.meta,
     }))
 }
 

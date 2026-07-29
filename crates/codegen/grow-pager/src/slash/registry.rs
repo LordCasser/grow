@@ -110,18 +110,6 @@ pub struct CommandRegistry {
     /// see. Menu-only: hidden from completion but still executable via
     /// [`Self::get_for_dispatch`].
     menu_hidden: HashSet<String>,
-    /// Commands denied for this user (e.g. tier-restricted: `/usage` on the
-    /// free tier — see
-    /// [`crate::app::app_view::TIER_RESTRICTED_COMMANDS`]).
-    ///
-    /// Names are stored normalized (lowercase, no leading `/`) and match a
-    /// command's canonical name OR any of its aliases, for both builtin and
-    /// ACP-sourced commands.
-    ///
-    /// Kept separate from `hidden` so the per-command `set_*_visible`
-    /// setters can never un-hide a restricted command: the deny list always
-    /// wins over every other visibility gate.
-    restricted: HashSet<String>,
     /// Names of tools the connected agent has advertised.
     ///
     /// Semantics (fail-closed):
@@ -158,7 +146,6 @@ impl CommandRegistry {
             triggers: Vec::new(),
             hidden,
             menu_hidden: HashSet::new(),
-            restricted: HashSet::new(),
             available_tools: None,
         };
         reg.rebuild_triggers();
@@ -177,8 +164,7 @@ impl CommandRegistry {
     /// Look up a command by canonical name or alias, applying EVERY
     /// visibility gate (completion-menu semantics).
     /// Returns `None` for hidden commands, menu-hidden commands,
-    /// restricted commands, or commands whose `required_tools()` are not
-    /// all in the advertised toolset.
+    /// commands whose `required_tools()` are not all in the advertised toolset.
     ///
     /// Dispatch call sites that execute a fully-typed submission must use
     /// [`Self::get_for_dispatch`] instead, which ignores the menu-only
@@ -193,9 +179,8 @@ impl CommandRegistry {
     ///
     /// Still returns `None` for hard-hidden commands (feature gates like
     /// `/dashboard`, or `/auto` when the auto permission-mode
-    /// feature is unavailable — those must stay fail-closed), restricted
-    /// commands, and commands whose `required_tools()` are not all in the
-    /// advertised toolset.
+    /// feature is unavailable — those must stay fail-closed), and commands
+    /// whose `required_tools()` are not all in the advertised toolset.
     ///
     /// Rationale: `menu_hidden` means "don't OFFER this in completion",
     /// not "this command doesn't exist". A fully-typed submission must still
@@ -207,76 +192,7 @@ impl CommandRegistry {
             .get(key)
             .and_then(|idx| self.commands.get(*idx))
             .filter(|cmd| !self.hidden.contains(cmd.name()))
-            .filter(|cmd| !self.restricted_match(cmd))
             .filter(|cmd| self.tools_satisfied(cmd))
-    }
-
-    /// Normalize a deny-list entry: trim, strip one leading `/`, lowercase.
-    /// Lets callers write `usage`, `/usage`, or `Usage` interchangeably.
-    fn normalize_deny_name(name: &str) -> String {
-        name.trim().trim_start_matches('/').to_lowercase()
-    }
-
-    /// True when the command's canonical name or any alias is on the
-    /// deny list.
-    fn restricted_match(&self, cmd: &Arc<dyn SlashCommand>) -> bool {
-        if self.restricted.is_empty() {
-            return false;
-        }
-        self.restricted.contains(&cmd.name().to_lowercase())
-            || cmd
-                .aliases()
-                .iter()
-                .any(|a| self.restricted.contains(&a.to_lowercase()))
-    }
-
-    /// Replace the restricted-command deny list (e.g. tier restrictions).
-    ///
-    /// Entries are normalized via [`Self::normalize_deny_name`]. Restricted
-    /// commands stay visible in the dropdown/completion (discoverability)
-    /// but disappear from `get()` — invoking one shows the Provider Plan upsell
-    /// instead of executing (see the `dispatch_send_prompt_inner` hook).
-    /// Pass an empty slice to clear the deny list (e.g. after a tier
-    /// upgrade mid-session).
-    pub fn set_restricted_commands(&mut self, names: &[String]) {
-        self.restricted = names
-            .iter()
-            .map(|n| Self::normalize_deny_name(n))
-            .filter(|n| !n.is_empty())
-            .collect();
-        self.rebuild_triggers();
-    }
-
-    /// True when `key` (canonical name or alias, `/` and case ignored)
-    /// names a command the tier deny list blocks from [`Self::get`]. Lets
-    /// the dispatcher distinguish a restricted invocation (upsell) from a
-    /// genuinely unknown one (pass through to the shell/model).
-    ///
-    /// Deliberately scans `commands` instead of `key_to_index`: a
-    /// restricted command can still be missing from the key map for
-    /// *other* reasons (`tools_satisfied` drops tool-gated commands until
-    /// the toolset handshake lands), and a typed invocation must upsell
-    /// even then.
-    pub fn is_restricted(&self, key: &str) -> bool {
-        if self.restricted.is_empty() {
-            return false;
-        }
-        let key = Self::normalize_deny_name(key);
-        self.commands
-            .iter()
-            .filter(|cmd| self.restricted_match(cmd))
-            .any(|cmd| {
-                cmd.name().to_lowercase() == key
-                    || cmd.aliases().iter().any(|a| a.to_lowercase() == key)
-            })
-    }
-
-    /// Current deny list (normalized). Used to mirror the gate onto child
-    /// registries (subagent views), same as the `set_*_visible` gates.
-    pub fn restricted_commands(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.restricted.iter().cloned().collect();
-        names.sort();
-        names
     }
 
     /// True when `cmd.required_tools()` is empty, or the toolset is
@@ -534,15 +450,8 @@ impl CommandRegistry {
 
             // Menu-hidden commands keep their key entries (so
             // `get_for_dispatch()` resolves a typed invocation) but emit no
-            // triggers — the inverse of the restricted trade-off below.
+            // triggers.
             let menu_only = self.menu_hidden.contains(canonical);
-
-            // Restricted commands (per-user deny list, e.g. tier
-            // restrictions) deliberately stay listed: they keep their
-            // triggers/key entries so the dropdown, ghost completion, and
-            // palette show them like any other command (discoverability).
-            // Execution is blocked by `get()`'s `restricted_match` filter —
-            // invoking one shows the Provider Plan upsell instead.
 
             // Insert canonical key.
             self.key_to_index.insert(canonical.to_string(), idx);
@@ -738,128 +647,6 @@ mod tests {
         registry.set_share_visible(true);
         assert!(registry.get("share").is_some());
         assert!(registry.triggers().iter().any(|t| t.canonical == "share"));
-    }
-
-    #[test]
-    fn restricted_commands_hide_and_restore() {
-        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "usage",
-            aliases: &[],
-        });
-        let other: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &[],
-        });
-        let mut registry = CommandRegistry::new(vec![usage, other]);
-        assert!(registry.get("usage").is_some());
-
-        registry.set_restricted_commands(&["usage".to_string()]);
-        // Execution is blocked …
-        assert!(registry.get("usage").is_none());
-        // … but the command stays listed (dropdown/completion
-        // discoverability — invoking shows the upsell instead).
-        assert!(registry.triggers().iter().any(|t| t.canonical == "usage"));
-        // Other commands unaffected.
-        assert!(registry.get("exit").is_some());
-        assert_eq!(registry.restricted_commands(), vec!["usage"]);
-
-        // Clearing the deny list restores execution.
-        registry.set_restricted_commands(&[]);
-        assert!(registry.get("usage").is_some());
-        assert!(registry.restricted_commands().is_empty());
-    }
-
-    #[test]
-    fn restricted_entries_are_normalized() {
-        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "usage",
-            aliases: &[],
-        });
-        let mut registry = CommandRegistry::new(vec![usage]);
-
-        // Leading slash, whitespace, and case are all tolerated; empty
-        // entries are dropped rather than denying the "" name.
-        registry.set_restricted_commands(&[" /Usage ".to_string(), String::new(), "/".to_string()]);
-        assert!(registry.get("usage").is_none());
-        assert_eq!(registry.restricted_commands(), vec!["usage"]);
-    }
-
-    /// `is_restricted` scans the command list (not `key_to_index`, which
-    /// can be missing tool-gated commands pre-handshake), resolves
-    /// aliases, and never matches unknown names.
-    #[test]
-    fn is_restricted_resolves_names_and_aliases() {
-        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "usage",
-            aliases: &["cost"],
-        });
-        let mut registry = CommandRegistry::new(vec![usage]);
-        assert!(!registry.is_restricted("usage"), "empty deny list");
-
-        registry.set_restricted_commands(&["usage".to_string()]);
-        assert!(registry.get("usage").is_none(), "hidden from get()");
-        assert!(registry.is_restricted("usage"));
-        assert!(registry.is_restricted("cost"), "alias resolves");
-        assert!(registry.is_restricted("/Usage"), "normalized lookup");
-        assert!(!registry.is_restricted("frobnicate"), "unknown name");
-    }
-
-    #[test]
-    fn restricted_matches_aliases_both_ways() {
-        let cmd: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &["quit"],
-        });
-        let mut registry = CommandRegistry::new(vec![cmd]);
-
-        // Denying an alias hides the command entirely (canonical too).
-        registry.set_restricted_commands(&["quit".to_string()]);
-        assert!(registry.get("exit").is_none());
-        assert!(registry.get("quit").is_none());
-
-        // Denying the canonical name also hides alias lookups.
-        registry.set_restricted_commands(&["exit".to_string()]);
-        assert!(registry.get("exit").is_none());
-        assert!(registry.get("quit").is_none());
-    }
-
-    #[test]
-    fn restricted_wins_over_visible_setters() {
-        let share: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "share",
-            aliases: &[],
-        });
-        let mut registry = CommandRegistry::new(vec![share]);
-
-        registry.set_restricted_commands(&["share".to_string()]);
-        // A later `set_share_visible(true)` must NOT resurrect a
-        // restricted command — deny wins over every visibility gate.
-        registry.set_share_visible(true);
-        assert!(registry.get("share").is_none());
-    }
-
-    #[test]
-    fn restricted_applies_to_acp_commands() {
-        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &[],
-        });
-        let mut registry = CommandRegistry::new(vec![builtin]);
-        registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
-            "flush".to_string(),
-            "Flush memory".to_string(),
-        )]);
-        assert!(registry.get("flush").is_some());
-
-        registry.set_restricted_commands(&["flush".to_string()]);
-        assert!(registry.get("flush").is_none());
-
-        // Deny list survives an ACP catalog resync.
-        registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
-            "flush".to_string(),
-            "Flush memory".to_string(),
-        )]);
-        assert!(registry.get("flush").is_none());
     }
 
     #[test]
@@ -1190,9 +977,8 @@ mod tests {
         assert!(reg.get_for_dispatch("always-approve").is_some());
     }
 
-    /// `get_for_dispatch` only bypasses the menu-only hide: hard-hidden
-    /// (feature-gated), tier-restricted, and tool-gated commands stay
-    /// unresolvable for dispatch, exactly like `get()`.
+    /// `get_for_dispatch` only bypasses the menu-only hide: hard-hidden and
+    /// tool-gated commands stay unresolvable for dispatch, exactly like `get()`.
     #[test]
     fn get_for_dispatch_respects_hard_gates() {
         // Hard-hidden by name (e.g. /dashboard default, /share toggle).
@@ -1200,25 +986,15 @@ mod tests {
             name: "share",
             aliases: &[],
         });
-        // Tier-restricted.
-        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "usage",
-            aliases: &[],
-        });
         // Tool-gated (toolset unknown → fail-closed).
         let gated: Arc<dyn SlashCommand> = Arc::new(ToolGatedCommand {
             name: "loop",
             required: &["scheduler_create"],
         });
-        let mut reg = CommandRegistry::new(vec![share, usage, gated]);
+        let mut reg = CommandRegistry::new(vec![share, gated]);
         reg.set_share_visible(false);
-        reg.set_restricted_commands(&["usage".to_string()]);
 
         assert!(reg.get_for_dispatch("share").is_none(), "hidden stays hard");
-        assert!(
-            reg.get_for_dispatch("usage").is_none(),
-            "restricted stays blocked (upsell path owns it)"
-        );
         assert!(
             reg.get_for_dispatch("loop").is_none(),
             "tool-gated stays fail-closed pre-handshake"

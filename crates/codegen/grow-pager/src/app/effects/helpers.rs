@@ -85,16 +85,13 @@ pub(super) async fn fetch_plugin_cta_mcps(
     }
 }
 /// Convert an ACP error to a user-friendly string for display.
-/// Rate-limit errors: free-usage paywall, else server detail (with API-key
-/// rewrite when the body pushes personal Provider Plan), else auth-aware fallback
-/// (see [`format_rate_limited_user_message`]).
+/// Rate-limit errors preserve provider detail and use a provider-neutral
+/// fallback when the response has no detail.
 /// All other errors are sanitized to remove internal service names and jargon.
-pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> String {
+pub(super) fn format_acp_error(err: &acp::Error, _is_api_key_auth: bool) -> String {
     if i32::from(err.code) == RATE_LIMITED_ERROR_CODE {
         let detail = err.data.as_ref().and_then(error_detail_from_data);
-        return sanitize_user_error(
-            &format_rate_limited_user_message(detail.as_deref(), is_api_key_auth),
-        );
+        return sanitize_user_error(&format_rate_limited_user_message(detail.as_deref()));
     }
     if err.code == acp::ErrorCode::InvalidParams && let Some(data) = &err.data
         && let Some(msg) = error_detail_from_data(data) && !msg.is_empty()
@@ -704,76 +701,6 @@ pub(super) async fn send_auth_cancel(tx: &AcpAgentTx, request_seq: u64) -> TaskR
     }
     TaskResult::AuthCancelComplete
 }
-pub(super) async fn send_check_subscription(
-    tx: &AcpAgentTx,
-    verify: Option<u64>,
-) -> TaskResult {
-    let req = acp::ExtRequest::new(
-        "grow/auth/check_subscription",
-        serde_json::value::to_raw_value(&serde_json::json!({}))
-            .expect("serialize check_subscription params")
-            .into(),
-    );
-    match acp_send(req, tx).await {
-        Ok(resp) => {
-            let meta = serde_json::from_str::<serde_json::Value>(resp.0.get())
-                .ok()
-                .and_then(|v| v.get("meta").cloned());
-            TaskResult::CheckSubscriptionComplete {
-                verify,
-                meta,
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "check_subscription failed");
-            crate::unified_log::warn(
-                "subscription.check.rpc_failed",
-                None,
-                Some(serde_json::json!({
-                    "verify": verify,
-                    "error": e.to_string(),
-                })),
-            );
-            TaskResult::CheckSubscriptionComplete {
-                verify,
-                meta: None,
-            }
-        }
-    }
-}
-/// One-shot subscription re-check for the credit-limit retry flow.
-/// Same ACP call as `send_check_subscription` but returns a
-/// `CreditLimitRecheckComplete` so the dispatch layer can decide
-/// whether to retry the stashed prompt or show the upsell.
-pub(super) async fn send_credit_limit_recheck(
-    tx: &AcpAgentTx,
-    agent_id: AgentId,
-) -> TaskResult {
-    let req = acp::ExtRequest::new(
-        "grow/auth/check_subscription",
-        serde_json::value::to_raw_value(&serde_json::json!({}))
-            .expect("serialize check_subscription params")
-            .into(),
-    );
-    match acp_send(req, tx).await {
-        Ok(resp) => {
-            let meta = serde_json::from_str::<serde_json::Value>(resp.0.get())
-                .ok()
-                .and_then(|v| v.get("meta").cloned());
-            TaskResult::CreditLimitRecheckComplete {
-                agent_id,
-                meta,
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "credit_limit_recheck failed");
-            TaskResult::CreditLimitRecheckComplete {
-                agent_id,
-                meta: None,
-            }
-        }
-    }
-}
 pub(super) async fn send_authenticate(
     tx: &AcpAgentTx,
     request_seq: u64,
@@ -1337,126 +1264,6 @@ pub(super) fn persist_hint(
             }
             TaskResult::CancelComplete
         });
-}
-/// Map a billing config into a [`CreditBalance`].
-///
-/// Prefers the newer credits-config fields (`credit_usage_percent`,
-/// `current_period`) and falls back to the deprecated
-/// `monthly_limit`/`used`/`billing_period_end`. Shared by `Effect::FetchBilling`
-/// and `Effect::FetchAppBilling` so every pager UI path derives identical usage
-/// values from the same config.
-pub(super) fn credit_balance_from_config(
-    c: grow_shell::extensions::billing::BillingConfig,
-) -> crate::views::credit_bar::CreditBalance {
-    let limit = c.monthly_limit.map(|v| v.val).unwrap_or(0);
-    let used = c.used.map(|v| v.val).unwrap_or(0);
-    let has_credit_pct = c.credit_usage_percent.is_some();
-    let usage_pct = match c.credit_usage_percent {
-        Some(pct) => pct.clamp(0.0, 100.0),
-        None if limit > 0 => (used as f64 / limit as f64 * 100.0).min(100.0),
-        None => 0.0,
-    };
-    let period_end_display = c
-        .current_period
-        .as_ref()
-        .and_then(|p| p.end.clone())
-        .or(c.billing_period_end)
-        .and_then(|s| {
-            chrono::DateTime::parse_from_rfc3339(&s)
-                .ok()
-                .map(|dt| {
-                    dt.with_timezone(&chrono::Local).format("%B %-d, %H:%M").to_string()
-                })
-        });
-    let on_demand_val = c.on_demand_cap.map(|v| v.val).unwrap_or(0);
-    let pay_as_you_go = on_demand_val > 0;
-    let on_demand_cap_cents = if on_demand_val > 0 { Some(on_demand_val) } else { None };
-    let on_demand_used_cents = c
-        .on_demand_used
-        .map(|v| v.val)
-        .unwrap_or_else(|| (used - limit).max(0));
-    let effective_usage_pct = if on_demand_val > 0 {
-        if usage_pct >= 100.0 {
-            (on_demand_used_cents as f64 / on_demand_val as f64 * 100.0).min(100.0)
-        } else if has_credit_pct {
-            usage_pct
-        } else {
-            let total_budget = limit + on_demand_val;
-            if total_budget > 0 {
-                (used as f64 / total_budget as f64 * 100.0).min(100.0)
-            } else {
-                0.0
-            }
-        }
-    } else {
-        usage_pct
-    };
-    let period_type = c.current_period.as_ref().and_then(|p| p.period_type.clone());
-    crate::views::credit_bar::CreditBalance {
-        usage_pct,
-        effective_usage_pct,
-        period_end_display,
-        pay_as_you_go,
-        on_demand_cap_cents,
-        on_demand_used_cents: Some(on_demand_used_cents),
-        prepaid_balance_cents: c.prepaid_balance.map(|v| v.val),
-        period_type,
-        is_unified_billing_user: c.is_unified_billing_user,
-    }
-}
-/// Whether the balance carries a non-zero prepaid credit balance (signed cents).
-pub(super) fn has_prepaid_credits(
-    balance: Option<&crate::views::credit_bar::CreditBalance>,
-) -> bool {
-    balance.and_then(|b| b.prepaid_balance_cents).map(i64::abs).is_some_and(|c| c > 0)
-}
-/// Fetch the user's auto top-up rule via the `grow/auto-topup-rule` extension.
-/// A transport failure yields [`AutoTopupFetch::Unchanged`] so the caller keeps
-/// any cached rule rather than treating the blip as "no auto top-up".
-pub(super) async fn fetch_auto_topup_info(
-    tx: &xai_acp_lib::AcpAgentTx,
-) -> crate::views::credit_bar::AutoTopupFetch {
-    use crate::views::credit_bar::AutoTopupFetch;
-    let req = acp::ExtRequest::new(
-        "grow/auto-topup-rule",
-        serde_json::value::to_raw_value(&serde_json::json!({}))
-            .expect("serialize auto-topup params")
-            .into(),
-    );
-    let Ok(resp) = acp_send(req, tx).await else {
-        return AutoTopupFetch::Unchanged;
-    };
-    let wrapper: serde_json::Value = serde_json::from_str(resp.0.get())
-        .unwrap_or_default();
-    let result = wrapper.get("result").unwrap_or(&wrapper);
-    parse_auto_topup_response(result)
-}
-/// Map an `grow/auto-topup-rule` payload to an [`AutoTopupFetch`]. A body that
-/// fails to deserialize is a fetch error (→ `Unchanged`, keep the cached rule),
-/// not a definitive "no rule", so a malformed response can't silently flip the
-/// credits warning.
-pub(super) fn parse_auto_topup_response(
-    result: &serde_json::Value,
-) -> crate::views::credit_bar::AutoTopupFetch {
-    use crate::views::credit_bar::{AutoTopupFetch, AutoTopupInfo};
-    use grow_shell::extensions::billing::GetAutoTopupRuleResponse;
-    match serde_json::from_value::<GetAutoTopupRuleResponse>(result.clone()) {
-        Ok(parsed) => {
-            AutoTopupFetch::Resolved(
-                parsed
-                    .rule
-                    .map_or_else(
-                        AutoTopupInfo::disabled,
-                        |rule| AutoTopupInfo {
-                            enabled: rule.enabled,
-                            topup_amount_cents: rule.topup_amount.map(|c| c.val),
-                            max_amount_cents: rule.max_amount_per_month.map(|c| c.val),
-                        },
-                    ),
-            )
-        }
-        Err(_) => AutoTopupFetch::Unchanged,
-    }
 }
 /// A blocking flock on the shared, possibly-network `~/.grow` lock must never
 /// stall the event-loop thread (and would hang exit on `/quit`); the registry

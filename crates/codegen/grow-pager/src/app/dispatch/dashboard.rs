@@ -52,16 +52,6 @@ pub(super) fn ensure_dashboard_state(app: &mut AppView) {
     state.adopt_command_tags(app.command_tags.clone());
     state.set_screen_mode(app.screen_mode);
     state.set_recap_visible(app.session_recap_available);
-    state.set_restricted_commands(&app.tier_restricted_commands);
-    let billing = app.usage_visible;
-    state
-        .dispatch
-        .slash_controller
-        .set_billing_surface_visible(billing);
-    state
-        .peek_reply
-        .slash_controller
-        .set_billing_surface_visible(billing);
     app.dashboard = Some(state);
 }
 
@@ -162,7 +152,6 @@ pub(super) fn dispatch_open_dashboard(app: &mut AppView) -> Vec<Effect> {
         // Subsequent reopen — just gc dead ids; in-memory state stays.
         d.gc_stale_refs(&dashboard_alive_fn(&app.agents));
         d.set_recap_visible(app.session_recap_available);
-        d.set_restricted_commands(&app.tier_restricted_commands);
     }
     // Refresh each local agent's git context (branch / worktree / label)
     // from disk so the row subtitles show the LATEST branch and worktree
@@ -1321,23 +1310,6 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             });
         }
 
-        // Tier-restricted commands stay visible for discoverability but must
-        // not execute — and must not fall through to the unknown-command
-        // path below (which would spawn a session with the raw slash text as
-        // its first prompt). The dashboard has no question-modal surface, so
-        // upsell via the feedback toast.
-        if reg.is_restricted(invocation.token) {
-            let token = invocation.token.to_string();
-            if let Some(d) = app.dashboard.as_mut() {
-                d.dispatch.set_text("");
-                d.set_error_toast(&format!(
-                    "/{token} requires Provider Plan — upgrade at {}",
-                    super::billing::UPSELL_URL_UPGRADE
-                ));
-            }
-            return vec![];
-        }
-
         let Some(command) = reg.get(invocation.token).cloned() else {
             // Unknown command. Fall back to the regular dispatch
             // path so the text becomes a new session's prompt.
@@ -1373,7 +1345,6 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             session_id: None,
             bundle_state: &app.bundle_state,
             screen_mode: app.screen_mode,
-            billing_surface_visible: app.usage_visible,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: dashboard_multiline,
                 yolo_mode: app.default_yolo,

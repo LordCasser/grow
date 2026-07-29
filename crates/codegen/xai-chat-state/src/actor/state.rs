@@ -153,9 +153,9 @@ pub(crate) struct ChatState {
     /// persist last_turn_usage). Always overwritten by the most recent turn —
     /// historical turns are not retained here.
     pub last_turn_usage: Option<TokenUsage>,
-    /// Billing for the open prompt (cleared on next prompt; not persisted).
+    /// Usage for the open prompt (cleared on next prompt; not persisted).
     pub prompt_usage: Option<UsageLedger>,
-    /// Lifetime session billing (not persisted).
+    /// Lifetime session usage (not persisted).
     pub session_usage: UsageLedger,
     /// Offset-based turn capture state. `Some` = capture active, `None` = inactive.
     /// Cleared on `TakeTurnMessages` (consumed), `BeginTurnCapture` (new turn),

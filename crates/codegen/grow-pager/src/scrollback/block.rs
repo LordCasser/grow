@@ -13,11 +13,11 @@ use crate::prompt_images::{InlineMediaInfo, ScrollbackImageRef, ScrollbackVideoR
 
 use super::blocks::mermaid_content::DiagramAffordance;
 use super::blocks::{
-    AgentMessageBlock, BgTaskBlock, BtwBlock, ContextInfoBlock, CreditLimitBlock,
-    EditToolCallBlock, ExecuteToolCallBlock, LineRange, ListDirToolCallBlock, OtherToolCallBlock,
-    ReadToolCallBlock, SearchFileMatch, SearchToolCallBlock, SessionEvent, SessionEventBlock,
-    SubagentBlock, SubagentBlockKind, SystemMessageBlock, ThinkingBlock, ToolCallBlock,
-    UserPromptBlock, WorkflowBlock,
+    AgentMessageBlock, BgTaskBlock, BtwBlock, ContextInfoBlock, EditToolCallBlock,
+    ExecuteToolCallBlock, LineRange, ListDirToolCallBlock, OtherToolCallBlock, ReadToolCallBlock,
+    SearchFileMatch, SearchToolCallBlock, SessionEvent, SessionEventBlock, SubagentBlock,
+    SubagentBlockKind, SystemMessageBlock, ThinkingBlock, ToolCallBlock, UserPromptBlock,
+    WorkflowBlock,
 };
 use super::types::{
     AccentStyle, BlockBackground, BlockContext, BlockOutput, DisplayMode, RenderedBlockOutput,
@@ -384,8 +384,6 @@ pub enum RenderBlock {
     Btw(BtwBlock),
     /// `/context` snapshot with categorical bar + breakdown.
     ContextInfo(ContextInfoBlock),
-    /// Credit-limit card for max-tier users (red accent, single action).
-    CreditLimit(CreditLimitBlock),
 }
 
 /// Delegate a method call to the inner block variant.
@@ -404,7 +402,6 @@ macro_rules! delegate_block {
             RenderBlock::Workflow(b) => b.$method($($arg),*),
             RenderBlock::Btw(b) => b.$method($($arg),*),
             RenderBlock::ContextInfo(b) => b.$method($($arg),*),
-            RenderBlock::CreditLimit(b) => b.$method($($arg),*),
         }
     };
 }
@@ -780,15 +777,6 @@ impl RenderBlock {
         RenderBlock::SessionEvent(SessionEventBlock::new(event))
     }
 
-    /// Create a credit-limit card (inline scrollback block for max-tier users).
-    pub fn credit_limit_card(
-        heading: impl Into<String>,
-        action: crate::scrollback::blocks::CreditLimitCardAction,
-        url: impl Into<String>,
-    ) -> Self {
-        RenderBlock::CreditLimit(CreditLimitBlock::new(heading, action, url))
-    }
-
     /// Create a "Task started" background task block.
     pub fn bg_task(command: impl Into<String>, task_id: impl Into<String>) -> Self {
         RenderBlock::BgTask(BgTaskBlock::started(command, task_id))
@@ -914,11 +902,6 @@ impl RenderBlock {
         matches!(self, RenderBlock::AgentMessage(_))
     }
 
-    /// Check if this block is a CreditLimit card.
-    pub fn is_credit_limit(&self) -> bool {
-        matches!(self, RenderBlock::CreditLimit(_))
-    }
-
     /// Check if this block is a plan mode tool call (enter or exit).
     ///
     /// Exact-matches the canonical tool-name set rather than substring-matching
@@ -1017,10 +1000,9 @@ impl RenderBlock {
                     None
                 }
             }
-            RenderBlock::System(_)
-            | RenderBlock::SessionEvent(_)
-            | RenderBlock::ContextInfo(_)
-            | RenderBlock::CreditLimit(_) => None,
+            RenderBlock::System(_) | RenderBlock::SessionEvent(_) | RenderBlock::ContextInfo(_) => {
+                None
+            }
             RenderBlock::Btw(_) => Some(theme.accent_plan),
             RenderBlock::Stub(block) => Some(block.accent_color),
         }
@@ -1167,9 +1149,6 @@ impl RenderBlock {
                 Some(b.content().rendered_plain_text()),
             ]),
             RenderBlock::ContextInfo(b) => join_searchable([Some(b.model.clone())]),
-            RenderBlock::CreditLimit(b) => {
-                join_searchable([Some(b.heading.clone()), Some(b.url.clone())])
-            }
             RenderBlock::ToolCall(tc) => tc.searchable_text(),
         }
     }
@@ -1570,21 +1549,6 @@ mod searchable_text_tests {
         let block = RenderBlock::context_info(snapshot, "grow-4.5");
         // Only the model name is source text; the rest is a numeric breakdown.
         assert_eq!(block.searchable_text().as_deref(), Some("grow-4.5"));
-    }
-
-    #[test]
-    fn credit_limit_indexes_heading_and_url() {
-        let block = RenderBlock::credit_limit_card(
-            "credit limit reached",
-            crate::scrollback::blocks::CreditLimitCardAction::EnablePayg,
-            "https://service.example.com?_s=usage",
-        );
-        let text = block.searchable_text().expect("credit limit text");
-        assert!(text.contains("credit limit reached"), "got: {text:?}");
-        assert!(
-            text.contains("https://service.example.com?_s=usage"),
-            "got: {text:?}"
-        );
     }
 
     #[test]

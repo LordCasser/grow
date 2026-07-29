@@ -199,7 +199,7 @@ async fn test_headless_session_in_non_git_dir() {
 #[ignore] // requires pre-built binary; run with --ignored
 async fn test_headless_tools_allowlist_keeps_enabled_web_tools() {
     let server = grow_build_server().await;
-    server.preset_allow_access();
+    server.preset_settings_empty();
     let workdir = git_workdir();
 
     let result = run_headless_with_env(
@@ -258,7 +258,6 @@ async fn test_headless_tools_allowlist_keeps_enabled_web_tools() {
 async fn test_headless_tools_allowlist_does_not_fail_open_for_disabled_web_fetch() {
     let server = grow_build_server().await;
     server.set_settings(serde_json::json!({
-        "allow_access": true,
         "web_fetch_enabled": false,
     }));
     let workdir = git_workdir();
@@ -323,58 +322,6 @@ async fn test_headless_terminal_only_allowlist_is_foreground_only() {
     assert!(
         !properties.contains_key("is_background"),
         "foreground-only terminal schema must omit is_background: {terminal}"
-    );
-}
-
-/// Free-usage paywall in headless mode: 429s whose flat body carries the
-/// `subscription:free-usage-exhausted` well-known code must surface the
-/// pager's free-usage message instead of the generic rate-limit one. The
-/// code reaches the pager embedded in the flattened error text (no
-/// structured plumbing), so this exercises the whole detection path.
-#[tokio::test]
-#[ignore] // requires pre-built binary; run with --ignored
-async fn test_headless_free_usage_exhausted_prints_paywall_message() {
-    let server = MockInferenceServer::start()
-        .await
-        .expect("start mock server");
-    let free_usage = || {
-        ScriptedResponse::json(
-            429,
-            serde_json::json!({
-                "code": "subscription:free-usage-exhausted",
-                "error": "You have used all your free usage."
-            }),
-        )
-    };
-    // The binary may target either backend, generic-429 handling retries
-    // once before going fatal, and the background session-title generation
-    // may consume a script on the same path — queue three per path (any
-    // leftovers are simply unused).
-    for path in ["/v1/chat/completions", "/v1/responses"] {
-        for _ in 0..3 {
-            server.enqueue_response(path, free_usage());
-        }
-    }
-    let workdir = git_workdir();
-
-    let result = run_headless(&server, &["-p", "say hello", "--yolo"], workdir.workspace()).await;
-
-    assert!(
-        !result.timed_out && !result.status.success(),
-        "a free-usage-exhausted turn must finish and exit non-zero\nstderr tail:\n{}",
-        stderr_tail(&result.stderr, 500)
-    );
-    assert_no_crashes(&result.stderr);
-    let combined = format!("{}\n{}", result.stdout, result.stderr);
-    assert!(
-        combined.contains("reached your free Grow usage limit"),
-        "expected the free-usage paywall message\nstdout:\n{}\nstderr tail:\n{}",
-        result.stdout,
-        stderr_tail(&result.stderr, 1000)
-    );
-    assert!(
-        !combined.contains("hit the rate limit for your plan"),
-        "generic rate-limit message must be replaced by the paywall text"
     );
 }
 

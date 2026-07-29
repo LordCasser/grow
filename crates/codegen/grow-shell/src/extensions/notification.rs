@@ -1473,7 +1473,8 @@ mod tests {
     fn subagent_finished_without_tokens_used_backward_compat() {
         // Old JSONL entries written before the tokens_used field was added
         // must deserialize successfully with tokens_used defaulting to 0.
-        // modelUsage on older wire is ignored (billing is RecordSubagentUsage only).
+        // modelUsage on older wire is ignored (subagent accounting uses
+        // RecordSubagentUsage only).
         let json = r#"{
             "sessionUpdate": "subagent_finished",
             "subagent_id": "sa-old",

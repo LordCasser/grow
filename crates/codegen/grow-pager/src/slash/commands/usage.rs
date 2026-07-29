@@ -1,7 +1,7 @@
-//! `/usage` — session token/cost; consumer accounts can also manage billing.
+//! `/usage` — local session token and context usage.
 
 use crate::app::actions::Action;
-use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 
 pub struct UsageCommand;
 
@@ -19,52 +19,14 @@ impl SlashCommand for UsageCommand {
     }
 
     fn usage(&self) -> &str {
-        "/usage [show|manage]"
+        "/usage"
     }
 
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn takes_args_now(&self, ctx: &AppCtx) -> bool {
-        // Non-consumer: bare `/usage` only — Enter should send, not chain for args.
-        ctx.billing_surface_visible
-    }
-
-    fn suggest_args(&self, ctx: &AppCtx, _args_query: &str) -> Option<Vec<ArgItem>> {
-        if !ctx.billing_surface_visible {
-            return None;
-        }
-        Some(vec![
-            ArgItem {
-                display: "show".into(),
-                match_text: "show".into(),
-                insert_text: "show".into(),
-                description: "View usage".into(),
-            },
-            ArgItem {
-                display: "manage".into(),
-                match_text: "manage".into(),
-                insert_text: "manage".into(),
-                description: "Manage billing".into(),
-            },
-        ])
-    }
-
-    fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let arg = args.trim();
-        if !ctx.billing_surface_visible {
-            return match arg {
-                "" => CommandResult::Action(Action::ShowUsage),
-                _ => CommandResult::Error(format!("Unknown argument: {arg}. Use /usage")),
-            };
-        }
         match arg {
-            "" | "show" => CommandResult::Action(Action::ShowUsage),
-            "manage" => CommandResult::Action(Action::ManageBilling),
-            _ => CommandResult::Error(format!(
-                "Unknown argument: {arg}. Use /usage show or /usage manage"
-            )),
+            "" => CommandResult::Action(Action::ShowUsage),
+            _ => CommandResult::Error(format!("Unknown argument: {arg}. Use /usage")),
         }
     }
 }

@@ -454,33 +454,6 @@ fn parse_esc_ttl(raw: Option<String>) -> Duration {
         .map(|ms| Duration::from_millis(ms.min(ESC_DOUBLE_PRESS_TEST_MS)))
         .unwrap_or(PendingAction::ESC_DOUBLE_PRESS_TTL)
 }
-/// Slash commands unavailable on the provider's free subscription tier.
-///
-/// To restrict another command for these tiers, add its canonical name
-/// (no leading `/`) here — matching covers aliases automatically via
-/// [`crate::slash::registry::CommandRegistry::set_restricted_commands`].
-///
-/// Current set:
-/// - `usage` — coding credit / billing UI (alias: `/cost`)
-/// - `imagine` — image generation entry point
-/// - `imagine-video` — video generation entry point
-pub(crate) const TIER_RESTRICTED_COMMANDS: &[&str] = &["usage", "imagine", "imagine-video"];
-/// Whether a subscription-tier display name is a tier with restricted
-/// commands: the free tier (no subscription ⇒ `None`, or an explicit
-/// "Free"). Everything else — paid tiers and unknown future names — is
-/// unrestricted (fail-open).
-///
-/// The string classification is shared with the shell's capability
-/// (toolset) gate via [`grow_shell::tier::is_restricted_tier_name`] so
-/// the two can't drift. The pager's *cosmetic* slash-command gate treats an
-/// absent tier (`None`) as restricted (it recovers live on the next settings
-/// update); the shell's capability gate treats absence as unrestricted.
-fn is_restricted_tier(tier: Option<&str>) -> bool {
-    match tier {
-        None => true,
-        Some(t) => grow_shell::tier::is_restricted_tier_name(t),
-    }
-}
 /// True for API-key labels from shell/CCP: `"ApiKey"`, `"API Key"`, `"api_key"`.
 pub(crate) fn is_api_key_label(s: &str) -> bool {
     s.trim().to_ascii_lowercase().replace([' ', '_', '-'], "") == "apikey"
@@ -606,15 +579,6 @@ pub struct AppView {
     /// Whether the plugin marketplace CTA is enabled. Env `GROW_PLUGIN_CTA`
     /// overrides `RemoteSettings.plugin_cta` (remote settings); defaults to `false`.
     pub plugin_cta_enabled: bool,
-    /// Consumer billing surface (credit fetches / warnings). False for team
-    /// and API-key auth. `/usage` itself stays available for session token/cost.
-    pub usage_visible: bool,
-    /// Slash commands denied for the current subscription tier
-    /// ([`TIER_RESTRICTED_COMMANDS`] when the user is on the free tier
-    /// tier, empty otherwise). Recomputed by [`Self::apply_tier_restrictions`]
-    /// and fanned out to every slash registry (welcome prompt, agents,
-    /// dashboard); deny wins over all other visibility gates.
-    pub tier_restricted_commands: Vec<String>,
     /// Whether the pager is connected via a leader (leader mode). The Agent
     /// Dashboard entry points (`/dashboard`, `Ctrl+\`, `grow dashboard`, the
     /// startup hook) are only meaningful when a leader is coordinating a
@@ -622,13 +586,6 @@ pub struct AppView {
     /// `event_loop::run` from `connection.leader_status_rx.is_some()`;
     /// defaults to `false` (non-leader, dashboard hidden).
     pub leader_mode: bool,
-    /// App-level credit balance used to show the usage warning on the
-    /// welcome screen before any agent session exists.
-    pub credit_balance: Option<crate::views::credit_bar::CreditBalance>,
-    /// App-level auto top-up rule paired with `credit_balance` for the warning.
-    pub auto_topup: Option<crate::views::credit_bar::AutoTopupInfo>,
-    /// Periodic billing poll requested (credits >= 99%).
-    pub billing_poll_wanted: bool,
     /// Leader-mode session roster (FleetView dashboard). Populated from
     /// `grow/sessions/list` polls and `grow/sessions/changed` broadcasts.
     /// Empty in non-leader mode, which naturally gates roster rendering.
@@ -763,10 +720,6 @@ pub struct AppView {
     pub welcome_announcement: WelcomeAnnouncementState,
     /// Hit-test rect for the "show full URL" fallback link.
     pub welcome_auth_fallback_rect: Option<ratatui::layout::Rect>,
-    /// Hit-test rect for the "[Refresh]" button on the paywall tier line.
-    pub welcome_refresh_rect: Option<ratatui::layout::Rect>,
-    /// Hit-test rect for the gate URL link on the paywall CTA.
-    pub welcome_gate_url_rect: Option<ratatui::layout::Rect>,
     /// Hit-test rect for the welcome hero upgrade CTA `[label]` button
     /// (click → `AnnouncementsOpenCta(Welcome)`).
     pub welcome_upgrade_cta_rect: Option<ratatui::layout::Rect>,
@@ -988,34 +941,12 @@ pub struct AppView {
     /// Whether ZDR users are allowed to use the product.
     /// Server-controlled via RemoteSettings (remote settings). Default `false` (blocked) during beta.
     pub zdr_access_enabled: bool,
-    /// When set, `/usage` shows a link to this URL instead of fetching billing
-    /// data from the backend. Server-controlled via RemoteSettings (remote settings
-    /// `grow_build_usage_redirect_url`, targeted at personal-team users).
-    /// `None` (default) fetches usage from the backend.
-    pub usage_billing_redirect_url: Option<String>,
-    pub access_gate_shown_logged: bool,
     /// (hide-key, surface) pairs whose `AnnouncementCtaShown` impression was
     /// already logged — once per pager process, cleared on logout. Keyed by
     /// `announcement_hide_key` (stable even for id-less items, unlike the
     /// event's `id`).
     pub announcement_cta_impressions_logged:
         std::collections::BTreeSet<(String, grow_diagnostics::events::AnnouncementCtaSurface)>,
-    /// Access gate from `grow_build_access_gate`. `Some` = blocked.
-    pub gate: Option<grow_shell::auth::GateInfo>,
-    /// User-friendly subscription tier name (e.g. "Provider Plan", "Free").
-    pub subscription_tier: Option<String>,
-    /// When the pager started auto-checking subscriptions (for 10-min timeout).
-    pub paywall_check_started: Option<std::time::Instant>,
-    /// Debounce stamp for watch/focus subscription checks (see
-    /// [`super::subscription`]).
-    pub last_subscription_check_at: Option<std::time::Instant>,
-    /// Server override (seconds) for the subscription-watch cadence.
-    pub subscription_watch_interval_secs: Option<u64>,
-    /// A stale-source gate held out of `gate` while a live check verifies
-    /// it (see [`super::subscription`]).
-    pub pending_gate_verification: Option<grow_shell::auth::GateInfo>,
-    /// Generation stamp of the current gate verification.
-    pub gate_verify_gen: u64,
     /// Whether a leader reconnect is in progress (blocks prompt submission).
     pub reconnect_pending: bool,
     /// Structured startup warnings collected from the terminal diagnostics
@@ -1111,13 +1042,9 @@ impl AppView {
     pub fn is_zdr_blocked(&self) -> bool {
         self.is_zdr && !self.zdr_access_enabled
     }
-    /// User is not gated (no gate from remote settings or subscription fallback).
-    pub fn has_access(&self) -> bool {
-        self.gate.is_none()
-    }
-    /// True when the user should not see the prompt (gate, subscription, or ZDR).
+    /// True when the user should not see the prompt.
     pub fn is_access_blocked(&self) -> bool {
-        !self.has_access() || self.is_zdr_blocked()
+        self.is_zdr_blocked()
     }
     /// Coding-data preference is team-admin-owned for non-admin members.
     pub fn is_team_non_admin(&self) -> bool {
@@ -1153,7 +1080,6 @@ impl AppView {
             return false;
         }
         if !matches!(self.auth_state, AuthState::Done)
-            || !self.has_access()
             || self.is_zdr_blocked()
             || !matches!(self.trust_state, TrustState::Done)
         {
@@ -1173,69 +1099,16 @@ impl AppView {
     pub fn session_startup_allowed(&self) -> bool {
         matches!(self.auth_state, AuthState::Done) && matches!(self.trust_state, TrustState::Done)
     }
-    /// Extract `GateInfo` from `RemoteSettings`.
-    pub fn gate_from_settings(
-        rs: &grow_shell::util::config::RemoteSettings,
-    ) -> Option<grow_shell::auth::GateInfo> {
-        let msg = rs.gate_message.as_ref()?;
-        if msg.is_empty() {
-            return None;
-        }
-        Some(grow_shell::auth::GateInfo {
-            message: msg.clone(),
-            url: rs.gate_url.clone(),
-            label: rs.gate_label.clone(),
-        })
-    }
-    /// Apply typed auth metadata from the shell.
+    /// Apply typed authentication metadata from the shell.
     pub fn apply_auth_meta(&mut self, meta: &grow_shell::auth::AuthMeta) {
-        self.pending_gate_verification = None;
-        let was_gated = self.gate.is_some();
         self.team_id = meta.team_id.clone();
         self.team_name = meta.team_name.clone();
         self.is_zdr = meta.is_zdr;
         self.team_role = meta.team_role.clone();
         self.coding_data_retention_opt_out = meta.coding_data_retention_opt_out;
-        self.gate = meta.gate.clone();
-        if was_gated && self.gate.is_none() {
-            self.paywall_check_started = None;
-            grow_diagnostics::session_ctx::log_event(
-                grow_diagnostics::events::SubscriptionActivated {
-                    auth_method: self.login_method_id.as_ref().map(|id| id.0.to_string()),
-                    upsell_shown_this_session: self.access_gate_shown_logged,
-                },
-            );
-        }
-        self.subscription_tier = meta.subscription_tier.clone();
-        self.is_api_key_auth = meta.auth_mode.as_deref().is_some_and(is_api_key_label)
-            || meta
-                .subscription_tier
-                .as_deref()
-                .is_some_and(is_api_key_label);
-        self.usage_visible = meta.team_name.is_none() && !self.is_api_key_auth;
-        self.sync_billing_surface_to_agents();
-        self.apply_tier_restrictions();
+        self.is_api_key_auth = meta.auth_mode.as_deref().is_some_and(is_api_key_label);
         if let Some(show) = meta.show_resolved_model {
             self.show_resolved_model = show;
-        }
-    }
-    /// Mirror [`Self::usage_visible`] onto every slash surface that can run
-    /// `/usage` (agents, welcome, dashboard dispatch / peek-reply).
-    pub(crate) fn sync_billing_surface_to_agents(&mut self) {
-        let visible = self.usage_visible;
-        for agent in self.agents.values_mut() {
-            agent.set_billing_surface_visible(visible);
-        }
-        self.welcome_prompt
-            .slash_controller
-            .set_billing_surface_visible(visible);
-        if let Some(dash) = self.dashboard.as_mut() {
-            dash.dispatch
-                .slash_controller
-                .set_billing_surface_visible(visible);
-            dash.peek_reply
-                .slash_controller
-                .set_billing_surface_visible(visible);
         }
     }
     /// Create a new AppView with the given ACP connection details.
@@ -1312,8 +1185,6 @@ impl AppView {
             welcome_on_changelog_cta: false,
             welcome_announcement: WelcomeAnnouncementState::default(),
             welcome_auth_fallback_rect: None,
-            welcome_refresh_rect: None,
-            welcome_gate_url_rect: None,
             welcome_upgrade_cta_rect: None,
             welcome_privacy_banner_accept_rect: None,
             welcome_privacy_banner_customize_rect: None,
@@ -1397,16 +1268,7 @@ impl AppView {
             auto_update: None,
             ask_user_question_timeout_enabled: None,
             zdr_access_enabled: false,
-            usage_billing_redirect_url: None,
-            access_gate_shown_logged: false,
             announcement_cta_impressions_logged: Default::default(),
-            gate: None,
-            subscription_tier: None,
-            paywall_check_started: None,
-            last_subscription_check_at: None,
-            subscription_watch_interval_secs: None,
-            pending_gate_verification: None,
-            gate_verify_gen: 0,
             reconnect_pending: false,
             startup_warnings: Vec::new(),
             is_api_key_auth: false,
@@ -1422,12 +1284,7 @@ impl AppView {
             show_resolved_model: true,
             sharing_enabled: false,
             plugin_cta_enabled: false,
-            usage_visible: true,
-            tier_restricted_commands: Vec::new(),
             leader_mode: false,
-            credit_balance: None,
-            auto_topup: None,
-            billing_poll_wanted: false,
             leader_roster: Vec::new(),
             dashboard_local_sessions: Vec::new(),
             dashboard_sessions_loading: false,
@@ -1472,35 +1329,6 @@ impl AppView {
         if let Some(dashboard) = self.dashboard.as_mut() {
             dashboard.set_auto_mode_available(available);
         }
-    }
-    /// Recompute the tier-restricted slash commands from the current auth
-    /// state and sync the deny list into every slash surface (welcome
-    /// prompt, all agents, dashboard) so restricted commands hide/show in
-    /// lockstep.
-    ///
-    /// Called from [`Self::apply_auth_meta`] (startup / login) and from the
-    /// `grow/settings/update` handler when the subscription tier changes, so
-    /// a mid-session upgrade lifts the restrictions without a restart.
-    pub fn apply_tier_restrictions(&mut self) {
-        let restricted = self.team_name.is_none()
-            && !self.is_api_key_auth
-            && is_restricted_tier(self.subscription_tier.as_deref());
-        let names: Vec<String> = if restricted {
-            TIER_RESTRICTED_COMMANDS
-                .iter()
-                .map(|n| (*n).to_string())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        for agent in self.agents.values_mut() {
-            agent.set_restricted_commands(&names);
-        }
-        self.welcome_prompt.set_restricted_commands(&names);
-        if let Some(dashboard) = self.dashboard.as_mut() {
-            dashboard.set_restricted_commands(&names);
-        }
-        self.tier_restricted_commands = names;
     }
     /// Draw-time expiry can flip the live-announcement predicate between
     /// pushes; resync the slash gate only when it diverges from the stored
@@ -2049,7 +1877,6 @@ impl AppView {
             return InputOutcome::Changed;
         }
         let zdr_blocked = self.is_zdr_blocked();
-        let has_access = self.has_access();
         let welcome_pinned_upgrade_cta = crate::views::announcements::promo_cta(
             &self.active_announcements,
             &self.hidden_announcement_ids,
@@ -2090,8 +1917,6 @@ impl AppView {
                     import_banner_rect: self.welcome_import_banner_rect.as_ref(),
                     auth_url_rect: self.welcome_auth_url_rect.as_ref(),
                     auth_fallback_rect: self.welcome_auth_fallback_rect.as_ref(),
-                    refresh_rect: self.welcome_refresh_rect.as_ref(),
-                    gate_url_rect: self.welcome_gate_url_rect.as_ref(),
                     upgrade_cta_rect: self.welcome_upgrade_cta_rect.as_ref(),
                     privacy_banner_accept_rect: self.welcome_privacy_banner_accept_rect.as_ref(),
                     privacy_banner_customize_rect: self
@@ -2108,7 +1933,6 @@ impl AppView {
                     on_announcement_cta: &mut self.welcome_announcement.on_cta,
                     announcement_expanded: &mut self.welcome_announcement.expanded,
                     show_raw_url: &mut self.auth_show_raw_url,
-                    has_access,
                     is_zdr_blocked: zdr_blocked,
                     sp_entries: &mut self.session_picker_entries,
                     sp_loading,
@@ -2664,8 +2488,6 @@ struct WelcomeInputCtx<'a> {
     import_banner_rect: Option<&'a ratatui::layout::Rect>,
     auth_url_rect: Option<&'a ratatui::layout::Rect>,
     auth_fallback_rect: Option<&'a ratatui::layout::Rect>,
-    refresh_rect: Option<&'a ratatui::layout::Rect>,
-    gate_url_rect: Option<&'a ratatui::layout::Rect>,
     /// Hit-test rect for the welcome hero upgrade CTA `[label]` button
     /// (click → open the promo url).
     upgrade_cta_rect: Option<&'a ratatui::layout::Rect>,
@@ -2694,7 +2516,6 @@ struct WelcomeInputCtx<'a> {
     /// Whether the long announcement is currently expanded inline.
     announcement_expanded: &'a mut bool,
     show_raw_url: &'a mut bool,
-    has_access: bool,
     is_zdr_blocked: bool,
     sp_entries: &'a mut Option<Vec<SessionPickerEntry>>,
     /// Mirrors the render's `session_picker_loading` param: the spinner-only
@@ -2821,7 +2642,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         }
     }
     if matches!(ctx.auth_state, AuthState::Done)
-        && ctx.has_access
         && !ctx.is_zdr_blocked
         && matches!(ctx.trust_state, TrustState::Pending { .. })
     {
@@ -3072,14 +2892,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 dispatch_zdr_menu_action,
             );
         }
-        if !ctx.has_access && matches!(ctx.auth_state, AuthState::Done) {
-            return handle_menu_shortcuts(
-                key,
-                ctx.menu_index,
-                &['g', 'l', 'q'],
-                dispatch_access_gate_menu_action,
-            );
-        }
         if matches!(ctx.auth_state, AuthState::Done)
             && key!(Enter).matches(key)
             && key.modifiers.is_empty()
@@ -3237,7 +3049,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
     if let Event::Paste(text) = ev {
         match ctx.auth_state {
             AuthState::Done => {
-                if !ctx.has_access || ctx.is_zdr_blocked {
+                if ctx.is_zdr_blocked {
                     return InputOutcome::Unchanged;
                 }
                 return InputOutcome::ActionThenForward(Action::NewSession);
@@ -3271,9 +3083,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                         if ctx.is_zdr_blocked {
                             return dispatch_zdr_menu_action(i);
                         }
-                        if !ctx.has_access {
-                            return dispatch_access_gate_menu_action(i);
-                        }
                         if ctx.has_claude_import
                             && i == 0
                             && mouse.column >= rect.x + rect.width.saturating_sub(4)
@@ -3288,16 +3097,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                             ctx.changelog_markdown.as_deref(),
                         );
                     }
-                }
-                if let Some(rect) = ctx.refresh_rect
-                    && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
-                {
-                    return InputOutcome::Action(Action::CheckSubscription);
-                }
-                if let Some(rect) = ctx.gate_url_rect
-                    && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
-                {
-                    return InputOutcome::Action(Action::OpenSupergrokUrl);
                 }
                 if let Some(rect) = ctx.upgrade_cta_rect
                     && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
@@ -3496,16 +3295,6 @@ fn dispatch_zdr_menu_action(index: usize) -> InputOutcome {
     match index {
         0 => InputOutcome::Action(Action::SwitchAccount),
         1 => InputOutcome::Action(Action::Quit),
-        _ => InputOutcome::Unchanged,
-    }
-}
-/// Menu actions when user is access-gated: 0 = Subscribe CTA, 1 = Logout, 2 = Quit.
-/// "Refresh" (ctrl-r) is handled as a direct key shortcut, not a menu item.
-fn dispatch_access_gate_menu_action(index: usize) -> InputOutcome {
-    match index {
-        0 => InputOutcome::Action(Action::OpenSupergrokUrl),
-        1 => InputOutcome::Action(Action::Logout),
-        2 => InputOutcome::Action(Action::Quit),
         _ => InputOutcome::Unchanged,
     }
 }
@@ -3776,7 +3565,6 @@ impl AppView {
             )
         };
         let zdr_blocked_for_draw = self.is_zdr_blocked();
-        let has_access = self.has_access();
         let privacy_banner = self.privacy_banner_should_show();
         let esc_owned_before_agent = self.esc_owned_before_agent();
         let scroll_debug_panel = self.scroll_debug_panel();
@@ -3894,7 +3682,6 @@ impl AppView {
                             flags: &flags_vec,
                             selected: self.welcome_menu_index,
                             team_name: self.team_name.as_deref(),
-                            has_access,
                             has_claude_import: self.has_claude_import,
                             mouse_pos: self.last_mouse_pos,
                             is_zdr_blocked: zdr_blocked_for_draw,
@@ -3919,14 +3706,9 @@ impl AppView {
                                 .session_picker_entries_query
                                 .as_deref(),
                             welcome_tick: self.welcome_tick,
-                            gate: self.gate.as_ref(),
-                            subscription_tier: self.subscription_tier.as_deref(),
                             session_picker_grouped: self.session_picker_grouped,
                             session_picker_source_filter: self.session_picker_source_filter,
                             chat_mode: self.chat_mode,
-                            credit_balance: self.credit_balance.as_ref(),
-                            auto_topup: self.auto_topup.as_ref(),
-                            usage_visible: self.usage_visible,
                             is_api_key_auth: self.is_api_key_auth,
                             changelog_bullets: &self.changelog_bullets,
                             changelog_has_full_notes: self.changelog_markdown.is_some(),
@@ -3947,8 +3729,6 @@ impl AppView {
                         self.welcome_import_banner_rect = result.import_banner_rect;
                         self.welcome_auth_url_rect = result.auth_url_rect;
                         self.welcome_auth_fallback_rect = result.auth_fallback_rect;
-                        self.welcome_refresh_rect = result.refresh_rect;
-                        self.welcome_gate_url_rect = result.gate_url_rect;
                         self.welcome_upgrade_cta_rect = result.upgrade_cta_rect;
                         self.welcome_privacy_banner_accept_rect = result.privacy_banner_accept_rect;
                         self.welcome_privacy_banner_customize_rect =
@@ -3998,19 +3778,6 @@ impl AppView {
                                 cached_lines,
                                 compact,
                                 &theme,
-                            );
-                        }
-                        if !has_access && !self.access_gate_shown_logged {
-                            self.access_gate_shown_logged = true;
-                            grow_diagnostics::session_ctx::log_event(
-                                grow_diagnostics::events::SubscriptionUpsellShown {
-                                    source:
-                                        grow_diagnostics::events::SubscriptionUpsell::WelcomeScreen,
-                                    auth_method: self
-                                        .login_method_id
-                                        .as_ref()
-                                        .map(|id| id.0.to_string()),
-                                },
                             );
                         }
                         if let Some(tutorial) = self.tutorial.as_mut() {
@@ -5330,16 +5097,7 @@ pub(crate) mod tests {
             auto_update: None,
             ask_user_question_timeout_enabled: None,
             zdr_access_enabled: false,
-            usage_billing_redirect_url: None,
-            access_gate_shown_logged: false,
             announcement_cta_impressions_logged: Default::default(),
-            gate: None,
-            subscription_tier: None,
-            paywall_check_started: None,
-            last_subscription_check_at: None,
-            subscription_watch_interval_secs: None,
-            pending_gate_verification: None,
-            gate_verify_gen: 0,
             bundle_state: BundleState::default(),
             scroll_debug_hud: crate::views::scroll_debug_hud::ScrollDebugHud::new(),
             fps_hud: crate::views::fps_hud::FpsHud::new(),
@@ -5365,8 +5123,6 @@ pub(crate) mod tests {
             welcome_on_changelog_cta: false,
             welcome_announcement: WelcomeAnnouncementState::default(),
             welcome_auth_fallback_rect: None,
-            welcome_refresh_rect: None,
-            welcome_gate_url_rect: None,
             welcome_upgrade_cta_rect: None,
             welcome_privacy_banner_accept_rect: None,
             welcome_privacy_banner_customize_rect: None,
@@ -5416,12 +5172,7 @@ pub(crate) mod tests {
             show_resolved_model: true,
             sharing_enabled: false,
             plugin_cta_enabled: false,
-            usage_visible: true,
-            tier_restricted_commands: Vec::new(),
             leader_mode: true,
-            credit_balance: None,
-            auto_topup: None,
-            billing_poll_wanted: false,
             leader_roster: Vec::new(),
             dashboard_local_sessions: Vec::new(),
             dashboard_sessions_loading: false,
@@ -5463,8 +5214,6 @@ pub(crate) mod tests {
                 restore_degree: None,
                 rate_limited: false,
                 model_incompatible: false,
-                credit_limit_blocked: false,
-                free_usage_blocked: false,
                 available_commands: Vec::new(),
                 available_commands_generation: 0,
                 available_tools: None,
@@ -5656,8 +5405,6 @@ pub(crate) mod tests {
             restore_degree: None,
             rate_limited: false,
             model_incompatible: false,
-            credit_limit_blocked: false,
-            free_usage_blocked: false,
             available_commands: Vec::new(),
             available_commands_generation: 0,
             available_tools: None,
@@ -6593,191 +6340,6 @@ pub(crate) mod tests {
         agent.note_terminal_size((120, 50));
         assert!(agent.show_ephemeral_tip(tip(), &mut counts));
         assert_eq!(counts.get("t_seen"), Some(&2));
-    }
-    #[test]
-    fn apply_auth_meta_disables_billing_surface_for_team_users() {
-        let mut app = test_app();
-        assert!(app.usage_visible);
-        let meta = grow_shell::auth::AuthMeta {
-            team_id: Some("team-uuid".into()),
-            team_name: Some("Acme Corp".into()),
-            ..Default::default()
-        };
-        app.apply_auth_meta(&meta);
-        assert!(!app.usage_visible);
-        assert_eq!(app.team_id.as_deref(), Some("team-uuid"));
-        assert!(
-            !app.welcome_prompt
-                .slash_controller
-                .billing_surface_visible()
-        );
-    }
-    #[test]
-    fn apply_auth_meta_enables_billing_surface_for_personal_users() {
-        let mut app = test_app();
-        app.usage_visible = false;
-        let meta = grow_shell::auth::AuthMeta::default();
-        app.apply_auth_meta(&meta);
-        assert!(app.usage_visible);
-    }
-    #[test]
-    fn apply_auth_meta_clears_api_key_flag_and_restores_billing_on_personal_login() {
-        let mut app = test_app();
-        app.is_api_key_auth = true;
-        app.usage_visible = false;
-        app.apply_auth_meta(&grow_shell::auth::AuthMeta::default());
-        assert!(!app.is_api_key_auth);
-        assert!(app.usage_visible);
-    }
-    #[test]
-    fn apply_auth_meta_api_key_skips_tier_gate() {
-        let mut app = test_app();
-        advertise_media_tools(&mut app);
-        app.apply_auth_meta(&grow_shell::auth::AuthMeta {
-            auth_mode: Some("ApiKey".into()),
-            subscription_tier: Some("API Key".into()),
-            ..Default::default()
-        });
-        assert!(app.is_api_key_auth);
-        assert!(!app.usage_visible);
-        assert!(app.tier_restricted_commands.is_empty());
-        assert_tier_restricted_commands_present(&app);
-        let mut app = test_app();
-        app.apply_auth_meta(&grow_shell::auth::AuthMeta {
-            subscription_tier: Some("api_key".into()),
-            ..Default::default()
-        });
-        assert!(app.is_api_key_auth);
-        assert!(app.tier_restricted_commands.is_empty());
-        app.apply_auth_meta(&grow_shell::auth::AuthMeta {
-            auth_mode: Some("Oidc".into()),
-            subscription_tier: Some("Free".into()),
-            ..Default::default()
-        });
-        assert!(!app.is_api_key_auth);
-        assert!(app.usage_visible);
-        assert!(!app.tier_restricted_commands.is_empty());
-    }
-    fn expected_tier_restricted_commands() -> Vec<String> {
-        TIER_RESTRICTED_COMMANDS
-            .iter()
-            .map(|n| (*n).to_string())
-            .collect()
-    }
-    /// Make every tier-restricted command visible on the welcome prompt so the
-    /// present/absent assertions exercise the deny list, not incidental
-    /// fail-closed hiding:
-    /// `/imagine` and `/imagine-video` are `required_tools()`-gated, so advertise
-    /// their tools; otherwise the registry fail-closes them.
-    fn advertise_media_tools(app: &mut AppView) {
-        app.welcome_prompt
-            .slash_controller
-            .registry_mut()
-            .set_available_tools(
-                ["image_gen", "image_to_video"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
-            );
-    }
-    fn assert_tier_restricted_commands_absent(app: &AppView) {
-        let reg = app.welcome_prompt.slash_controller.registry();
-        for name in TIER_RESTRICTED_COMMANDS {
-            assert!(
-                reg.get(name).is_none(),
-                "/{name} must be denied on a restricted tier"
-            );
-        }
-        assert!(reg.get("cost").is_none(), "/cost alias must be denied");
-    }
-    fn assert_tier_restricted_commands_present(app: &AppView) {
-        let reg = app.welcome_prompt.slash_controller.registry();
-        for name in TIER_RESTRICTED_COMMANDS {
-            assert!(
-                reg.get(name).is_some(),
-                "/{name} must be available when not tier-restricted (tools advertised)"
-            );
-        }
-    }
-    #[test]
-    fn apply_auth_meta_restricts_usage_for_free_tier() {
-        let mut app = test_app();
-        advertise_media_tools(&mut app);
-        app.apply_auth_meta(&grow_shell::auth::AuthMeta::default());
-        assert_eq!(
-            app.tier_restricted_commands,
-            expected_tier_restricted_commands()
-        );
-        assert_tier_restricted_commands_absent(&app);
-        assert!(app.usage_visible);
-    }
-    #[test]
-    fn apply_auth_meta_lifts_restrictions_for_paid_tiers_and_teams() {
-        let mut app = test_app();
-        advertise_media_tools(&mut app);
-        let meta = grow_shell::auth::AuthMeta {
-            subscription_tier: Some("Provider Plan".into()),
-            ..Default::default()
-        };
-        app.apply_auth_meta(&meta);
-        assert!(app.tier_restricted_commands.is_empty());
-        assert_tier_restricted_commands_present(&app);
-        let mut app = test_app();
-        advertise_media_tools(&mut app);
-        app.apply_auth_meta(&grow_shell::auth::AuthMeta::default());
-        assert!(!app.tier_restricted_commands.is_empty());
-        app.subscription_tier = Some("Provider Plan".into());
-        app.apply_tier_restrictions();
-        assert!(app.tier_restricted_commands.is_empty());
-        assert_tier_restricted_commands_present(&app);
-        let mut app = test_app();
-        let meta = grow_shell::auth::AuthMeta {
-            team_id: Some("team-uuid".into()),
-            team_name: Some("Acme Corp".into()),
-            ..Default::default()
-        };
-        app.apply_auth_meta(&meta);
-        assert!(app.tier_restricted_commands.is_empty());
-    }
-    #[test]
-    fn is_restricted_tier_classification() {
-        assert!(is_restricted_tier(None));
-        assert!(is_restricted_tier(Some("")));
-        assert!(is_restricted_tier(Some("Free")));
-        assert!(!is_restricted_tier(Some("Provider Plan")));
-        assert!(!is_restricted_tier(Some("Provider Plan High")));
-        assert!(!is_restricted_tier(Some("SomeFutureTier")));
-    }
-    #[test]
-    fn apply_auth_meta_clears_gate_on_subscription() {
-        let mut app = test_app();
-        app.gate = Some(grow_shell::auth::GateInfo {
-            message: "Subscribe to use Grow".into(),
-            url: Some("https://service.example.com/provider_plan?referrer=grow-build".into()),
-            label: None,
-        });
-        assert!(app.is_access_blocked());
-        let meta = grow_shell::auth::AuthMeta::default();
-        app.apply_auth_meta(&meta);
-        assert!(app.gate.is_none());
-        assert!(app.has_access());
-    }
-    #[test]
-    fn apply_auth_meta_gate_unchanged_when_still_gated() {
-        let mut app = test_app();
-        let gate = grow_shell::auth::GateInfo {
-            message: "Subscribe".into(),
-            url: None,
-            label: None,
-        };
-        app.gate = Some(gate.clone());
-        let meta = grow_shell::auth::AuthMeta {
-            gate: Some(gate),
-            ..Default::default()
-        };
-        app.apply_auth_meta(&meta);
-        assert!(app.gate.is_some());
-        assert!(app.is_access_blocked());
     }
     #[test]
     fn welcome_ctrl_q_requires_confirmation() {

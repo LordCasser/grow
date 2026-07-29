@@ -309,7 +309,7 @@ pub(super) async fn run_session(
                 // counter whenever the user switches models. The cap
                 // is per-(session, model) — switching is a deliberate
                 // user action that resets expectations. `.changed()`
-                // only resolves on switches AFTER subscription, so
+                // only resolves on switches after the stream starts, so
                 // there is no stored-permit hazard.
                 changed = model_switch_rx.changed() => {
                     if changed.is_ok() {
