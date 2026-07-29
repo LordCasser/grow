@@ -1119,14 +1119,14 @@ impl ToolServerHandler for WorkspaceRpcHandler {
     /// Hub-issued `tool_server.evict`. Always tears the evicted session down
     /// (MCP bridges + activity/writer state, like the `SessionEnded` hook), then
     /// runs the global two-phase drain **only** when no other session survives —
-    /// a global drain shuts down the *shared* upload queue, which must not happen
+    /// a global drain transitions the whole workspace, which must not happen
     /// while another session is live. Idempotent across fan-out and safe for an
     /// already-gone session id.
     ///
     /// Contract: the server-supplied `grace_period_ms` budgets the drain and is
     /// therefore honored only when evicting the **last** live session. For a
     /// multi-session workspace the evicted session is dropped immediately
-    /// (no per-session drain) because the shared upload queue cannot be flushed
+    /// (no per-session drain) because the workspace lifecycle cannot be advanced
     /// or closed without affecting the survivors.
     async fn handle_evict(&self, params: ToolServerEvictParams) {
         let sid = params.session_id.as_str();
@@ -1721,7 +1721,7 @@ mod tests {
         );
     }
     /// Once a terminal evict drain has started, a racing `bind`/create must be
-    /// rejected so the shared upload queue is never torn down under a fresh
+    /// rejected so the workspace cannot enter shutdown under a fresh
     /// session (race #3).
     #[tokio::test]
     async fn bind_rejected_after_evict_drain() {

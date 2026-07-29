@@ -71,7 +71,7 @@ See ~/.grow/README.md for more information.
     Wrap(WrapArgs),
     /// Export a session transcript as Markdown
     Export(crate::export_cmd::ExportArgs),
-    /// Export or upload session trace data
+    /// Save session trace data locally
     Trace(crate::trace_cmd::TraceArgs),
     /// Check for updates or install a specific version
     Update {

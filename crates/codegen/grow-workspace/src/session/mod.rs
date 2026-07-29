@@ -514,10 +514,6 @@ pub struct WorkspaceShared {
     /// the server; structured access goes through
     /// [`WorkspaceShared::server_metadata_typed`].
     pub(crate) server_metadata: Option<serde_json::Value>,
-    /// Owner identity, captured at construction; stamps
-    /// `workspace_environment.json` and attributes uploads. Empty in test /
-    /// local-only contexts.
-    pub(crate) identity: crate::upload_environment::WorkspaceIdentity,
     /// Workspace-level fuzzy search manager. Separate from the shell's
     /// own `FuzzySearchManager` — this instance serves remote (hub/RPC)
     /// clients.
@@ -530,20 +526,8 @@ pub struct WorkspaceShared {
     /// (from `GROW_WORKSPACE_REWIND_ALL_OUTCOMES`, default off).
     pub(crate) workspace_rewind_all_outcomes: bool,
     /// Resolved `$GROW_WORKSPACE_HOME` — the workspace-owned on-disk state root
-    /// (`<grow_home>/workspace` by default). The upload queue spills here.
+    /// (`<grow_home>/workspace` by default).
     pub(crate) workspace_home: std::path::PathBuf,
-    /// Whether collection is disabled (opt-out, or the fail-closed default).
-    pub(crate) data_collection_disabled: bool,
-    /// Whether per-session `workspace_tool_definitions.json` emission is
-    /// enabled (`GROW_WORKSPACE_TOOL_DEFS_ENABLED=true`).
-    pub(crate) tool_defs_enabled: bool,
-    /// `session_id` → last `ToolsChanged` re-emit `Instant`, debouncing
-    /// re-emits per session. The initial bind emission does not consult this map.
-    pub(crate) tool_defs_last_emit: dashmap::DashMap<String, std::time::Instant>,
-    /// Artifact-producer tasks, awaited by the drain and counted by the
-    /// status publisher — see
-    /// [`WorkspaceHandle::spawn_producer`](crate::handle::WorkspaceHandle).
-    pub(crate) producer_tasks: tokio_util::task::TaskTracker,
     /// `(path, size, mtime_ms) → sha256` memo for the client-facing
     /// `workspace.client_fs_*` ops, so unchanged files hash once per
     /// workspace instead of per stat/read.
@@ -563,10 +547,6 @@ impl WorkspaceShared {
     /// Resolved `$GROW_WORKSPACE_HOME` — the workspace-owned on-disk state root.
     pub fn workspace_home(&self) -> &std::path::Path {
         &self.workspace_home
-    }
-    /// Resolved owner identity of this workspace.
-    pub(crate) fn identity(&self) -> &crate::upload_environment::WorkspaceIdentity {
-        &self.identity
     }
     /// Stable hub server id (`--server-id`), if a hub config is present.
     pub(crate) fn server_id(&self) -> Option<String> {
@@ -823,4 +803,3 @@ impl WorkspaceShared {
         rebuilt
     }
 }
-

@@ -1935,7 +1935,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let agent_config = AgentConfig::new_from_toml_cfg(&config)
                     .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                return grow_pager::trace_cmd::run(trace_args, &agent_config).await;
+                return grow_pager::trace_cmd::run(trace_args).await;
             }
             Command::Memory(memory_args) => {
                 return grow_pager::memory_cmd::run(memory_args);

@@ -751,25 +751,8 @@ impl MvpAgent {
             return Ok(ops);
         }
         let (cwd, project_lsp_trusted) = self.prime_launch_dir_trust();
-        let workspace_identity = self
-            .auth_manager
-            .current_or_expired()
-            .map(|a| match a.team_id.filter(|t| !t.is_empty()) {
-                Some(team) => {
-                    grow_workspace::WorkspaceIdentity::team(a.user_id, team)
-                }
-                None => {
-                    grow_workspace::WorkspaceIdentity::new(
-                        a.user_id,
-                        a.principal_type,
-                        a.principal_id,
-                    )
-                }
-            })
-            .unwrap_or_default();
         let ops = match grow_workspace::handle::WorkspaceHandle::new_minimal(
             cwd.to_path_buf(),
-            workspace_identity,
             project_lsp_trusted,
         ) {
             Ok(handle) => grow_workspace::WorkspaceOps::local(handle),

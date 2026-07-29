@@ -101,20 +101,6 @@ struct Args {
     /// mesh-secured transport; the bearer crosses the network otherwise.
     #[arg(long)]
     allow_insecure_ws: bool,
-    /// Route per-turn uploads through the durable on-disk
-    /// upload queue (retries + spill-to-disk) instead of the legacy inline
-    /// `gcs::upload_bytes` path.
-    ///
-    /// Enabled by default. Pass `--upload-queue-enabled false` (or set the
-    /// `GROW_WORKSPACE_UPLOAD_QUEUE_ENABLED` env var to `false`) to fall back to
-    /// the legacy inline path. Accepts `true`/`false`.
-    #[arg(
-        long,
-        env = "GROW_WORKSPACE_UPLOAD_QUEUE_ENABLED",
-        default_value_t = true,
-        action = clap::ArgAction::Set,
-    )]
-    upload_queue_enabled: bool,
     /// Fail `session.bind`s without an explicit toolset closed (RPC-only)
     /// instead of widening to the built-in default catalog.
     #[arg(long)]
@@ -392,7 +378,6 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
         None,
         args.allow_insecure_ws,
         status_config,
-        args.upload_queue_enabled,
         args.project_lsp_trusted,
         Some(diag_handle.clone()),
         args.require_explicit_toolset,

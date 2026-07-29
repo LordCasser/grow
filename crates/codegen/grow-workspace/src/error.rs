@@ -47,8 +47,7 @@ pub enum WorkspaceError {
         message: String,
     },
     /// The workspace is draining/shutting down and is no longer accepting new
-    /// sessions. Surfaced when a `bind`/create races a terminal drain so the
-    /// shared upload queue is never torn down out from under a fresh session.
+    /// sessions. Surfaced when a `bind`/create races a terminal drain.
     #[error("workspace is shutting down; not accepting new sessions")]
     ShuttingDown,
     /// The session's toolset is externally owned — installed by a local

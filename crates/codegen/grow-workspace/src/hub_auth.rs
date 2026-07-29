@@ -17,7 +17,7 @@ use xai_computer_hub_sdk::{
 
 /// Plain bearer provider that also carries the owner identity parsed from the
 /// same auth.json entry. Used for the loopback / local-dev path (no OIDC
-/// refresh) so the workspace can still derive `WorkspaceIdentity` from the auth
+/// refresh) so the workspace can still use the current auth
 /// provider — without a second auth.json read.
 struct BearerWithIdentity {
     token: String,
@@ -122,7 +122,7 @@ fn build_oidc_provider(
     let mut builder = OidcAuthProviderBuilder::new(&entry.key, refresh_token, issuer, client_id);
 
     // Owner identity is surfaced via `AuthProvider::identity()` so the workspace
-    // derives `WorkspaceIdentity` from this provider — no separate auth.json read.
+    // uses this provider directly — no separate auth.json read.
     builder = builder.user_id(&entry.user_id);
     if let Some(ref pt) = entry.principal_type {
         builder = builder.principal_type(pt);

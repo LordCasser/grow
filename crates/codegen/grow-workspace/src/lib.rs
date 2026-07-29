@@ -37,7 +37,6 @@ pub mod status_config;
 pub(crate) mod telemetry;
 pub use status_config::StatusConfig;
 pub mod trust;
-pub(crate) mod upload_environment;
 pub mod util;
 pub mod workspace_ops;
 pub mod worktree;
@@ -59,7 +58,6 @@ pub use hub::HubConfig;
 pub use permission::*;
 pub use session::{WorkspaceSession, WorkspaceShared};
 pub use session::{file_state, git, jj};
-pub use upload_environment::{WorkspaceEnvironment, WorkspaceIdentity};
 pub use workspace_ops::{WorkspaceOp, WorkspaceOps};
 pub use xai_hunk_tracker::HunkTrackerHandle;
 /// Zero-init every workspace metric family so idle panels render a `0` baseline
@@ -204,11 +202,6 @@ mod init_metrics_tests {
             "grow_workspace_toolset_swap_rejected_total",
             &[("reason", "turn_active"), ("trigger", "update_tool_config")]
         ));
-        assert!(
-            families
-                .iter()
-                .any(|mf| mf.name() == "grow_workspace_env_capture_panic_total")
-        );
         assert!(
             families
                 .iter()

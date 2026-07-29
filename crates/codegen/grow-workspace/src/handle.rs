@@ -39,22 +39,6 @@ static DRAIN_DURATION: std::sync::LazyLock<Histogram> = std::sync::LazyLock::new
     )
     .unwrap()
 });
-static DRAIN_LOST_ITEMS_TOTAL: std::sync::LazyLock<IntCounter> = std::sync::LazyLock::new(|| {
-    register_int_counter!(
-        "grow_workspace_drain_lost_items_total",
-        "Upload-queue items still pending when a drain deadline was exceeded (expected 0)"
-    )
-    .unwrap()
-});
-static PRODUCER_SPAWNED_AFTER_DRAIN_TOTAL: std::sync::LazyLock<IntCounter> =
-    std::sync::LazyLock::new(|| {
-        register_int_counter!(
-            "grow_workspace_producer_spawned_after_drain_total",
-            "Artifact producers spawned after a drain started — still tracked, but \
-             their artifacts may miss the drain's queue flush (expected 0)"
-        )
-        .unwrap()
-    });
 /// Startup stages until hub connected. Labels: stage + outcome (ok/error).
 static STARTUP_STAGE_DURATION_SECONDS: std::sync::LazyLock<HistogramVec> =
     std::sync::LazyLock::new(|| {
@@ -168,16 +152,6 @@ pub(crate) static WORKSPACE_TERMINAL_BACKEND_ORPHANED_TOTAL: std::sync::LazyLock
         )
         .unwrap()
     });
-/// Environment-capture (`workspace_environment.json`) blocking task panics
-/// (tripwire, expected 0). A non-zero rate means `WorkspaceEnvironment::capture`
-/// is faulting for real sessions and dropping the artifact.
-static ENV_CAPTURE_PANIC_TOTAL: std::sync::LazyLock<IntCounter> = std::sync::LazyLock::new(|| {
-    register_int_counter!(
-        "grow_workspace_env_capture_panic_total",
-        "Environment-capture blocking task panics (tripwire, expected 0)"
-    )
-    .unwrap()
-});
 use crate::capability::CapabilityMode;
 use crate::config::{
     AgentSessionConfig, DEFAULT_EVENT_BUFFER_CAPACITY, HookSourceConfig, WorkspaceConfig,
@@ -321,20 +295,12 @@ pub(crate) fn init_metrics() {
             .with_label_values(&[reason.as_str()])
             .inc_by(0);
     }
-    for outcome in [
-        DrainOutcome::Full,
-        DrainOutcome::Partial,
-        DrainOutcome::ProducersTimeout,
-        DrainOutcome::Timeout,
-    ] {
+    for outcome in [DrainOutcome::Full, DrainOutcome::Partial] {
         DRAIN_COMPLETED_TOTAL
             .with_label_values(&[outcome.as_str()])
             .inc_by(0);
     }
-    DRAIN_LOST_ITEMS_TOTAL.inc_by(0);
-    PRODUCER_SPAWNED_AFTER_DRAIN_TOTAL.inc_by(0);
     WORKSPACE_BIND_UNSERVED_TOOLS_TOTAL.inc_by(0);
-    ENV_CAPTURE_PANIC_TOTAL.inc_by(0);
     std::sync::LazyLock::force(&DRAIN_DURATION);
     std::sync::LazyLock::force(&WORKSPACE_BIND_ADVERTISED_TOOLS);
     for stage in [
@@ -499,21 +465,13 @@ impl WorkspaceHandle {
         Self::build(
             config,
             ephemeral_workspace_home(),
-            true,
-            false,
             rewind_all_outcomes_from_env(),
-            tool_defs_enabled(),
-            crate::upload_environment::WorkspaceIdentity::default(),
         )
     }
     pub(crate) fn build(
         config: WorkspaceConfig,
         workspace_home: std::path::PathBuf,
-        _upload_queue_enabled: bool,
-        data_collection_disabled: bool,
         workspace_rewind_all_outcomes: bool,
-        tool_defs_enabled: bool,
-        identity: crate::upload_environment::WorkspaceIdentity,
     ) -> WorkspaceResult<Self> {
         let sessions = std::collections::HashMap::new();
         let local_registry = xai_computer_hub_sdk::LocalRegistry::new();
@@ -590,8 +548,6 @@ impl WorkspaceHandle {
                 config.status_config.preview_activity_window.as_millis() as u64,
             ),
         );
-        let producer_tasks = tokio_util::task::TaskTracker::new();
-        activity_tracker.set_producer_tasks(producer_tasks.clone());
         let shared = WorkspaceShared {
             default_tool_config: config.default_tool_config,
             require_explicit_toolset: config.require_explicit_toolset,
@@ -617,7 +573,6 @@ impl WorkspaceHandle {
             activity_tracker,
             status_config: config.status_config,
             server_metadata: config.server_metadata,
-            identity,
             fuzzy_searches: Arc::new(tokio::sync::Mutex::new(
                 crate::file_system::FuzzySearchManager::new(std::time::Duration::from_secs(300)),
             )),
@@ -627,10 +582,6 @@ impl WorkspaceHandle {
             )),
             workspace_rewind_all_outcomes,
             workspace_home,
-            data_collection_disabled,
-            tool_defs_enabled,
-            tool_defs_last_emit: dashmap::DashMap::new(),
-            producer_tasks,
             #[cfg(test)]
             post_resolve_test_hook: parking_lot::Mutex::new(None),
             client_fs_hash_memo: Default::default(),
@@ -1180,10 +1131,10 @@ impl WorkspaceHandle {
     ) {
         self.sync_session_yolo_mode(session_id, payload.yolo_mode);
         self.on_turn_boundary(
-                session_id,
-                crate::session::checkpoint::TurnBoundary::turn_start(payload.turn_number),
-            )
-            .await;
+            session_id,
+            crate::session::checkpoint::TurnBoundary::turn_start(payload.turn_number),
+        )
+        .await;
         tracing::debug!(
             session = %session_id,
             turn = payload.turn_number,
@@ -1207,22 +1158,21 @@ impl WorkspaceHandle {
         payload: &xai_tool_protocol::turn_hook::AfterTurnPayload,
     ) {
         self.on_turn_boundary(
-                session_id,
-                crate::session::checkpoint::TurnBoundary::turn_end(
-                    payload.turn_number,
-                    payload.duration_ms,
-                    payload.outcome,
-                    payload.written_repo_paths.clone(),
-                ),
-            )
-            .await;
+            session_id,
+            crate::session::checkpoint::TurnBoundary::turn_end(
+                payload.turn_number,
+                payload.duration_ms,
+                payload.outcome,
+                payload.written_repo_paths.clone(),
+            ),
+        )
+        .await;
         tracing::debug!(
             session = %session_id,
             turn = payload.turn_number,
             outcome = ?payload.outcome,
             "workspace: after_turn processed"
         );
-        self.spawn_tool_state_upload(session_id, payload.turn_number);
     }
     /// Answer a request/response `turn_hook` (sampler/shell → workspace).
     ///
@@ -1273,100 +1223,17 @@ impl WorkspaceHandle {
             self.on_yolo_toggled(session_id, yolo_mode);
         }
     }
-    /// Spawn an artifact-producer future tracked in the producer `TaskTracker`
-    /// so status counts it and the durability idle gate withholds `idle_since_ms`
-    /// while it runs; pokes status on start and completion. (The graceful drain
-    /// added in the next PR awaits these tasks in phase 1.5 before flushing the
-    /// queue — this PR only wires the tracking + idle-withholding.) Spawns after
-    /// drain start stay tracked (the idle gate must not go blind) but are warned
-    /// + counted as at-risk of missing the queue flush.
-    pub(crate) fn spawn_producer<F>(&self, fut: F) -> tokio::task::JoinHandle<F::Output>
-    where
-        F: std::future::Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        if self.shared.activity_tracker.drain_started() {
-            tracing::warn!(
-                "producer spawned after drain start — artifact may miss the queue flush"
-            );
-            PRODUCER_SPAWNED_AFTER_DRAIN_TOTAL.inc();
-        }
-        let activity = self.shared.activity_tracker.clone();
-        let tracked = self.shared.producer_tasks.track_future(fut);
-        let handle = tokio::spawn(async move {
-            let out = tracked.await;
-            activity.poke();
-            out
-        });
-        self.shared.activity_tracker.poke();
-        handle
-    }
-    /// Spawn a fire-and-forget per-turn `tool_state.json` snapshot (no-op: upload queue removed).
-    fn spawn_tool_state_upload(&self, _session_id: &str, _turn_number: u64) {
-        // Upload queue has been removed; this is a no-op.
-    }
-    /// Drain the workspace's upload queue (no-op: upload queue removed).
-    /// Always returns 0 since no queue is configured.
-    pub async fn drain_upload_queue(&self, _deadline: std::time::Duration) -> usize {
-        0
-    }
-    /// Serialize the session's workspace-side toolset to the Chat Completions
-    /// tool-definitions shape and enqueue it (fire-and-forget) at the
-    /// session-root path `{session_id}/workspace_tool_definitions.json`.
-    ///
-    /// This is the WORKSPACE-side subset; the shell's `tool_definitions.json`
-    /// remains the source of truth for the full set the model sees — consumers
-    /// union the two on `session_id`. Ordering is best-effort: the bind
-    /// emission bypasses the 5s debounce (so it can't suppress the immediate
-    /// post-bind `ToolsChanged` re-emit), and queue dispatch has no per-path
-    /// ordering, so a stale baseline-only write may rarely clobber a fresher
-    /// baseline+MCP snapshot — accepted as telemetry-only.
-    ///
-    /// No-op when the `GROW_WORKSPACE_TOOL_DEFS_ENABLED` flag is off
-    /// or the session is unknown.
-    pub(crate) fn emit_workspace_tool_definitions(&self, session_id: &str) {
-        if !self.shared.tool_defs_enabled {
-            return;
-        }
-        if !is_safe_object_segment(session_id) {
-            self.shared.tool_defs_last_emit.remove(session_id);
-            tracing::warn!(%session_id, "tool_defs: unsafe session id, skipping");
-            return;
-        }
-        // Upload queue removed — tool definitions emission is a no-op without it.
-        let _ = session_id;
-    }
-    /// Build the `(gcs_path, json_bytes)` payload for a session's workspace-side
-    /// tool definitions, or `None` for an unknown session. Uses the same
-    /// serializer as the shell's `tool_definitions.json`, so the two artifacts
-    /// share a byte-identical element shape. Free of flag/queue gating for
-    /// direct unit testing.
-    fn workspace_tool_definitions_payload(&self, session_id: &str) -> Option<(String, Vec<u8>)> {
-        let session = self.session(session_id)?;
-        let definitions = session.toolset().tool_definitions();
-        let bytes = serde_json::to_vec_pretty(&definitions)
-            .inspect_err(|e| {
-                tracing::warn!(%session_id, error = %e, "failed to serialize workspace tool definitions");
-            })
-            .ok()?;
-        Some((workspace_tool_definitions_path(session_id), bytes))
-    }
-    /// Preemption-aware graceful drain: phase 1 waits for tool calls, phase 1.5
-    /// for artifact producers, phase 2 flushes the upload queue (budgets per the
-    /// `phase*_budget` helpers). Shared by the SIGTERM and server-evict triggers so
-    /// they can't diverge.
+    /// Preemption-aware graceful drain. Shared by the SIGTERM and server-evict
+    /// triggers so they cannot diverge.
     ///
     /// The preStop drain marker is (re)written at every phase boundary — not
     /// just once at the start — with the live total of outstanding durability
-    /// work: active tool calls + background tasks (phase 1), in-flight artifact
-    /// producers that have not yet enqueued (phase 1.5), and queued uploads
-    /// (phase 2). This keeps a preStop hook from reading `0` while a tool call
-    /// is still running (queue and producers both empty) or while later phases
-    /// have yet to flush newly-produced work.
+    /// work: active tool calls and background tasks. This keeps a preStop hook
+    /// from reading `0` while local work is still running.
     ///
     /// Returns that same outstanding total after the deadline, so `0` means a
     /// fully clean drain — consistent with the final marker and
-    /// [`DrainOutcome::Full`]; a wedged producer or tool call keeps it non-zero.
+    /// [`DrainOutcome::Full`]; a wedged tool call keeps it non-zero.
     pub async fn two_phase_drain(
         &self,
         grace_budget: std::time::Duration,
@@ -1380,21 +1247,14 @@ impl WorkspaceHandle {
             .with_label_values(&[reason.as_str()])
             .inc();
         let active_at_start = tracker.total_active() as usize;
-        let pending_at_start = self.upload_queue_pending();
-        let producers_at_start = self.shared.producer_tasks.len();
         let drain_file = draining_file_path();
-        write_draining_marker(
-            &drain_file,
-            active_at_start + producers_at_start + pending_at_start,
-        );
+        write_draining_marker(&drain_file, active_at_start);
         dc_log!(
             info,
             drain_reason = reason.as_str(),
             grace_ms = grace_budget.as_millis() as u64,
             active_at_start,
-            pending_at_start,
-            producers_at_start,
-            "workspace: two-phase drain commencing"
+            "workspace: graceful drain commencing"
         );
         let phase1 = phase1_budget(grace_budget);
         let tools_idle = tokio::time::timeout(phase1, tracker.wait_until_tools_idle())
@@ -1407,75 +1267,48 @@ impl WorkspaceHandle {
             );
         }
         write_draining_marker(&drain_file, self.outstanding_drain_work());
-        let producers_done = wait_for_producers_idle(
-            &self.shared.producer_tasks,
-            phase15_budget(grace_budget.saturating_sub(start.elapsed())),
-        )
-        .await;
-        if !producers_done {
-            tracing::warn!(
-                producers = self.shared.producer_tasks.len(),
-                "drain phase 1.5 deadline exceeded — artifact producers still in flight"
-            );
-        }
-        write_draining_marker(&drain_file, self.outstanding_drain_work());
-        let phase2 = grace_budget.saturating_sub(start.elapsed());
-        let unfinished = self.drain_upload_queue(phase2).await;
-        let producers_unfinished = self.shared.producer_tasks.len();
         let active_unfinished = self.shared.activity_tracker.total_active() as usize;
-        let total_unfinished = active_unfinished + producers_unfinished + unfinished;
-        let outcome =
-            classify_drain_outcome(tools_idle, producers_done, producers_unfinished, unfinished);
+        let total_unfinished = active_unfinished;
+        let outcome = if tools_idle {
+            DrainOutcome::Full
+        } else {
+            DrainOutcome::Partial
+        };
         DRAIN_COMPLETED_TOTAL
             .with_label_values(&[outcome.as_str()])
             .inc();
         DRAIN_DURATION.observe(start.elapsed().as_secs_f64());
-        if unfinished > 0 {
-            DRAIN_LOST_ITEMS_TOTAL.inc_by(unfinished as u64);
-        }
         write_draining_marker(&drain_file, total_unfinished);
         if total_unfinished > 0 {
             tracing::warn!(
                 reason = reason.as_str(),
                 outcome = outcome.as_str(),
                 active_unfinished,
-                producers_unfinished,
-                unfinished,
                 total_unfinished,
                 duration_ms = start.elapsed().as_millis() as u64,
-                "workspace: two-phase drain finished with work still outstanding"
+                "workspace: graceful drain finished with work still outstanding"
             );
         } else {
             tracing::info!(
                 reason = reason.as_str(),
                 outcome = outcome.as_str(),
                 duration_ms = start.elapsed().as_millis() as u64,
-                "workspace: two-phase drain complete"
+                "workspace: graceful drain complete"
             );
         }
         total_unfinished
     }
-    /// Live pending upload-queue depth (always 0, upload queue removed).
-    fn upload_queue_pending(&self) -> usize {
-        0
-    }
-    /// Live total of outstanding durability work the two-phase drain must wait
-    /// on: active tool calls + background tasks (phase 1) + in-flight artifact
-    /// producers that have not yet enqueued (phase 1.5) + queued uploads
-    /// (phase 2). Used to refresh the preStop drain marker at each phase
-    /// boundary so it is never `0` while any phase still has work.
+    /// Live total of active tool calls and background tasks.
     fn outstanding_drain_work(&self) -> usize {
         self.shared.activity_tracker.total_active() as usize
-            + self.shared.producer_tasks.len()
     }
     /// Bookkeeping for a cancelled in-flight tool call: marks it as
     /// completed in the activity tracker. Does **not** abort execution
     /// of the tool — that requires `CancellationToken` plumbing (future work).
     pub fn cancel_tool_call(&self, session_id: &str, call_id: &str) {
-        self.shared.activity_tracker.tool_call_completed(
-            call_id,
-            Some(session_id),
-        );
+        self.shared
+            .activity_tracker
+            .tool_call_completed(call_id, Some(session_id));
         tracing::info!(%session_id, %call_id, "cancel_tool_call: marked as completed");
     }
     /// Cancel all in-flight tool calls for a session. Called when a
@@ -1492,7 +1325,6 @@ impl WorkspaceHandle {
     /// `unbind_session` lifecycle.
     pub fn on_session_ended(&self, session_id: &str) {
         self.shared.activity_tracker.session_ended(session_id);
-        self.shared.tool_defs_last_emit.remove(session_id);
         tracing::info!(%session_id, "session_ended cleanup completed");
     }
     /// Record a YOLO / always-approve mode toggle into the session's
@@ -2184,42 +2016,6 @@ impl WorkspaceHandle {
             tracing::debug!("codebase index event forwarder exited");
         })
     }
-    /// Re-emit `workspace_tool_definitions.json` on every `ToolsChanged` event,
-    /// debounced per session via [`tool_defs_reemit_gate`] so a cascade of
-    /// reclassifications does not churn the file. Returns `None` (no task, no
-    /// broadcast subscriber) when the feature flag is off; exits when the
-    /// broadcast channel closes. The returned handle is tracked on `HubHandle`
-    /// so shutdown aborts it — a reconnect must not stack a second subscriber.
-    fn spawn_tool_definitions_event_forwarder(&self) -> Option<tokio::task::JoinHandle<()>> {
-        if !self.shared.tool_defs_enabled {
-            return None;
-        }
-        let handle = self.clone();
-        Some(tokio::spawn(async move {
-            let mut rx = handle.shared.events.subscribe();
-            loop {
-                match rx.recv().await {
-                    Ok(grow_workspace_types::WorkspaceEvent::ToolsChanged { session_id }) => {
-                        if tool_defs_reemit_gate(
-                            handle.shared.tool_defs_enabled,
-                            &handle.shared.tool_defs_last_emit,
-                            &session_id,
-                            std::time::Instant::now(),
-                            TOOL_DEFS_DEBOUNCE,
-                        ) {
-                            handle.emit_workspace_tool_definitions(&session_id);
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(lagged = n, "tool definitions event forwarder lagged");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            tracing::debug!("tool definitions event forwarder exited");
-        }))
-    }
     /// Post-creation session setup (browser service seeding, etc.).
     ///
     /// When the optional browser backend is enabled, seeds a fresh per-session `BrowserService`
@@ -2234,41 +2030,8 @@ impl WorkspaceHandle {
     /// seed could land in a just-replaced, stale toolset and the live one
     /// would miss the browser service.
     ///
-    /// Also the initial `workspace_tool_definitions.json` emission point.
     pub(crate) async fn finalize_session_setup(&self, session: &crate::session::WorkspaceSession) {
         let _update_guard = session.update_lock.lock().await;
-        self.emit_workspace_tool_definitions(session.session_id());
-        self.maybe_emit_environment(session.session_id(), session.cwd());
-    }
-    /// Emit `workspace_environment.json` once at session bind. Emission is
-    /// unconditional except for the legitimate suppression conditions below:
-    /// it is a no-op when opted out or when
-    /// there is no upload queue. Runs as a tracked producer task so the bind
-    /// path never waits on the enqueue and the drain/idle gating still sees the
-    /// in-flight work.
-    fn maybe_emit_environment(&self, session_id: &str, cwd: &std::path::Path) {
-        if self.shared.data_collection_disabled {
-            return;
-        }
-        let trace_parent = fastrace::collector::SpanContext::current_local_parent();
-        let this = self.clone();
-        let session_id = session_id.to_owned();
-        let cwd = cwd.to_path_buf();
-        self.spawn_producer(async move {
-            let _ = this
-                .emit_environment_artifact(&session_id, &cwd, trace_parent)
-                .await;
-        });
-    }
-    /// Build and enqueue the environment artifact (no-op: upload queue removed).
-    /// Always returns `None` since no upload queue is configured.
-    async fn emit_environment_artifact(
-        &self,
-        _session_id: &str,
-        _cwd: &std::path::Path,
-        _trace_parent: Option<fastrace::collector::SpanContext>,
-    ) -> Option<()> {
-        None
     }
     /// Start MCP servers for a session and bridge them to the server.
     pub async fn start_session_mcp_servers(
@@ -2594,7 +2357,6 @@ impl WorkspaceHandle {
         session.abort_system_notify_forwarder();
         session.shutdown_terminal_backend();
         session.cancel_hunk_tracker();
-        self.shared.tool_defs_last_emit.remove(session_id);
         Ok(())
     }
     /// Re-resolve every session's toolset against `new_snapshot` and
@@ -3258,9 +3020,6 @@ impl WorkspaceHandle {
             }));
         }
         handle.set_codebase_index_forwarder_task(self.spawn_codebase_index_event_forwarder());
-        if let Some(task) = self.spawn_tool_definitions_event_forwarder() {
-            handle.set_tool_defs_forwarder_task(task);
-        }
         *hub_guard = Some(handle);
         Ok(())
     }
@@ -3373,17 +3132,13 @@ impl DrainReason {
         }
     }
 }
-/// Terminal classification of a two-phase drain — the metric label.
+/// Terminal classification of a graceful drain — the metric label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrainOutcome {
-    /// Tools, producers, and the upload queue all finished within budget.
+    /// All local work finished within budget.
     Full,
     /// Tool calls still in flight at the phase-1 deadline.
     Partial,
-    /// Producers still in flight at the phase-1.5 deadline (artifacts never queued).
-    ProducersTimeout,
-    /// Upload-queue deadline exceeded with items still pending (lost on exit).
-    Timeout,
 }
 impl DrainOutcome {
     /// Stable `outcome` label for `grow_workspace_drain_completed_total`.
@@ -3391,60 +3146,12 @@ impl DrainOutcome {
         match self {
             DrainOutcome::Full => "full",
             DrainOutcome::Partial => "partial",
-            DrainOutcome::ProducersTimeout => "producers_timeout",
-            DrainOutcome::Timeout => "timeout",
         }
     }
 }
 /// Phase-1 (in-flight tool call) budget: one third of the total grace budget.
-/// Phases 1.5 and 2 split the remainder.
 fn phase1_budget(grace_budget: std::time::Duration) -> std::time::Duration {
     grace_budget / 3
-}
-/// Phase-1.5 (artifact producer) budget: half the post-phase-1 remainder, so a
-/// wedged producer can't starve the phase-2 flush of already-enqueued items.
-fn phase15_budget(remaining: std::time::Duration) -> std::time::Duration {
-    remaining / 2
-}
-/// Poll the producer tracker until it reports zero in-flight tasks or `budget`
-/// elapses; `true` = idle reached. Replaces `close()` + `wait()` so the
-/// tracker stays open (reusable after a non-terminal drain).
-async fn wait_for_producers_idle(
-    tracker: &tokio_util::task::TaskTracker,
-    budget: std::time::Duration,
-) -> bool {
-    let deadline = tokio::time::Instant::now() + budget;
-    while !tracker.is_empty() {
-        if tokio::time::Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    true
-}
-/// Classify a drain by the earliest phase that blew its deadline:
-/// tools (`Partial`) > producers (`ProducersTimeout`) > queue (`Timeout`) >
-/// clean (`Full`). `producers_unfinished` is the final producer count after
-/// phase 2 (a producer can be spawned *during* phase 2, after `producers_done`
-/// was latched in phase 1.5); it is checked so `Full` and the drain marker
-/// agree — `Full` requires that no producer work remains, matching the marker /
-/// return total (active tool calls + producers + queue), which is `0` only when
-/// `tools_idle`, no producers remain, and the queue is empty.
-fn classify_drain_outcome(
-    tools_idle: bool,
-    producers_done: bool,
-    producers_unfinished: usize,
-    unfinished: usize,
-) -> DrainOutcome {
-    if !tools_idle {
-        DrainOutcome::Partial
-    } else if !producers_done || producers_unfinished > 0 {
-        DrainOutcome::ProducersTimeout
-    } else if unfinished > 0 {
-        DrainOutcome::Timeout
-    } else {
-        DrainOutcome::Full
-    }
 }
 /// The SIGTERM drain budget from `GROW_WORKSPACE_TERMINATION_GRACE_MS`
 /// (default [`DEFAULT_TERMINATION_GRACE_MS`]). The hub-evict path uses the
@@ -3556,7 +3263,6 @@ pub async fn connect_local_workspace(
     alpha_test_key: Option<String>,
     allow_insecure_ws: bool,
     status_config: crate::status_config::StatusConfig,
-    upload_queue_enabled: bool,
     project_lsp_trusted: bool,
     diag: Option<DiagHandle>,
     require_explicit_toolset: bool,
@@ -3564,8 +3270,6 @@ pub async fn connect_local_workspace(
 ) -> WorkspaceResult<WorkspaceHandle> {
     use crate::session::tool_config::WorkspaceSessionContextFactory;
     let time_to_ready_started = std::time::Instant::now();
-    let identity: crate::upload_environment::WorkspaceIdentity =
-        auth.identity().map(Into::into).unwrap_or_default();
     let workspace_home = resolve_workspace_home();
     std::fs::create_dir_all(&workspace_home).map_err(|e| {
         WorkspaceError::HubError(format!(
@@ -3574,8 +3278,6 @@ pub async fn connect_local_workspace(
         ))
     })?;
     let api_base_url = std::env::var("GROW_CLI_CHAT_PROXY_BASE_URL").unwrap_or_default();
-    let data_collection_disabled =
-        std::env::var("GROW_WORKSPACE_DATA_COLLECTION_DISABLED").as_deref() != Ok("false");
     let mut factory = WorkspaceSessionContextFactory::with_auth(auth.clone(), api_base_url.clone());
     if crate::session::tool_config::tool_state_enabled() {
         factory = factory.with_tool_state_home(workspace_home.clone());
@@ -3631,16 +3333,9 @@ pub async fn connect_local_workspace(
     tokio::task::spawn_blocking(|| {
         crate::worktree::run_auto_gc_best_effort();
     });
-    let ws_handle = WorkspaceHandle::build(
-        ws_config,
-        workspace_home,
-        upload_queue_enabled,
-        data_collection_disabled,
-        rewind_all_outcomes_from_env(),
-        tool_defs_enabled(),
-        identity,
-    )
-    .map_err(|e| WorkspaceError::HubError(format!("failed to create workspace: {e}")))?;
+    let ws_handle =
+        WorkspaceHandle::build(ws_config, workspace_home, rewind_all_outcomes_from_env())
+            .map_err(|e| WorkspaceError::HubError(format!("failed to create workspace: {e}")))?;
     let connect_result = ws_handle.connect_hub().await;
     observe_startup_stage(
         STARTUP_STAGE_TIME_TO_READY,
@@ -3727,63 +3422,7 @@ fn after_turn_watchdog() -> std::time::Duration {
         .unwrap_or(DEFAULT_MS);
     std::time::Duration::from_millis(ms)
 }
-/// Whether per-session `workspace_tool_definitions.json` emission is enabled
-/// (`GROW_WORKSPACE_TOOL_DEFS_ENABLED=true`; any other value keeps legacy
-/// behaviour).
-fn tool_defs_enabled() -> bool {
-    std::env::var("GROW_WORKSPACE_TOOL_DEFS_ENABLED").as_deref() == Ok("true")
-}
-/// Debounce window for `ToolsChanged`-driven re-emission: at most one re-emit
-/// per session per window.
-pub(crate) const TOOL_DEFS_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
-/// Session-root GCS object path for a session's workspace-side tool
-/// definitions (same cadence convention as `workspace_environment.json`).
-fn workspace_tool_definitions_path(session_id: &str) -> String {
-    format!("{session_id}/workspace_tool_definitions.json")
-}
-/// Whether `s` is safe to interpolate as the leading segment of a GCS object
-/// key: non-empty, no separators, `..`, or NUL (RPC ids are a trust boundary).
-fn is_safe_object_segment(s: &str) -> bool {
-    !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains("..") && !s.contains('\0')
-}
-/// Per-session re-emit gate: `true` (recording `now` as last-emit) only when
-/// `enabled` and at least `window` elapsed since the previous re-emit. Disabled
-/// records no state, so flipping the flag on later is never pre-empted by
-/// suppressed-while-off events; the check-and-set is atomic via the dashmap
-/// entry API so concurrent events for one session cannot both pass.
-fn tool_defs_reemit_gate(
-    enabled: bool,
-    last_emit: &dashmap::DashMap<String, std::time::Instant>,
-    session_id: &str,
-    now: std::time::Instant,
-    window: std::time::Duration,
-) -> bool {
-    if !enabled {
-        return false;
-    }
-    if let Some(prev) = last_emit.get(session_id)
-        && now.saturating_duration_since(*prev) < window
-    {
-        return false;
-    }
-    use dashmap::mapref::entry::Entry;
-    match last_emit.entry(session_id.to_owned()) {
-        Entry::Occupied(mut e) => {
-            if now.saturating_duration_since(*e.get()) >= window {
-                e.insert(now);
-                true
-            } else {
-                false
-            }
-        }
-        Entry::Vacant(e) => {
-            e.insert(now);
-            true
-        }
-    }
-}
-/// Per-process ephemeral workspace home for handles constructed without a
-/// backing upload queue (tests, local mode).
+/// Per-process ephemeral workspace home for test and local handles.
 fn ephemeral_workspace_home() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("grow-workspace-ephemeral-{}", std::process::id()))
 }
@@ -3960,11 +3599,8 @@ impl WorkspaceHandle {
 impl WorkspaceHandle {
     /// Minimal handle for local mode (no hub). Requires Tokio runtime.
     ///
-    /// `identity` is stored for parity with the standalone path; this local
-    /// path has no upload queue, so no environment artifact is emitted.
     pub fn new_minimal(
         cwd: std::path::PathBuf,
-        identity: crate::upload_environment::WorkspaceIdentity,
         project_lsp_trusted: bool,
     ) -> WorkspaceResult<Self> {
         use crate::session::tool_config::WorkspaceSessionContextFactory;
@@ -3993,11 +3629,7 @@ impl WorkspaceHandle {
         Self::build(
             config,
             ephemeral_workspace_home(),
-            true,
-            false,
             rewind_all_outcomes_from_env(),
-            tool_defs_enabled(),
-            identity,
         )
     }
 }
@@ -4117,16 +3749,9 @@ pub(crate) mod tests {
             require_explicit_toolset,
             confine_fs_to_workspace_root,
         };
-        let handle = WorkspaceHandle::build(
-            config,
-            ephemeral_workspace_home(),
-            false,
-            true,
-            rewind_all_outcomes,
-            false,
-            crate::upload_environment::WorkspaceIdentity::default(),
-        )
-        .expect("handle construction should succeed");
+        let handle =
+            WorkspaceHandle::build(config, ephemeral_workspace_home(), rewind_all_outcomes)
+                .expect("handle construction should succeed");
         handle
             .create_session("main")
             .expect("create main session should succeed");
@@ -5280,16 +4905,8 @@ pub(crate) mod tests {
             require_explicit_toolset: false,
             confine_fs_to_workspace_root: false,
         };
-        WorkspaceHandle::build(
-            config,
-            ephemeral_workspace_home(),
-            false,
-            true,
-            false,
-            false,
-            crate::upload_environment::WorkspaceIdentity::default(),
-        )
-        .expect("handle construction should succeed")
+        WorkspaceHandle::build(config, ephemeral_workspace_home(), false)
+            .expect("handle construction should succeed")
     }
     /// The persistent shell's state (a model-issued `cd`) survives a
     /// `Reresolved` toolset swap, because the shell lives inside the
@@ -5750,58 +5367,6 @@ pub(crate) mod tests {
             )
             .await;
     }
-    /// `on_session_ended` evicts the session's tool-defs debounce entry (no
-    /// per-session leak in a long-lived hub server).
-    #[tokio::test]
-    async fn session_end_evicts_tool_defs_debounce_entry() {
-        let handle = make_handle();
-        let sid = "sess-tool-defs-evict";
-        assert!(tool_defs_reemit_gate(
-            true,
-            &handle.shared().tool_defs_last_emit,
-            sid,
-            std::time::Instant::now(),
-            TOOL_DEFS_DEBOUNCE,
-        ));
-        assert!(
-            handle.shared().tool_defs_last_emit.contains_key(sid),
-            "debounce entry must be recorded after a gated re-emit"
-        );
-        handle.on_session_ended(sid);
-        assert!(
-            !handle.shared().tool_defs_last_emit.contains_key(sid),
-            "debounce entry must be evicted on session end (no per-session leak)"
-        );
-    }
-    /// The RPC `drop_session` path evicts the debounce entry like
-    /// `on_session_ended` does.
-    #[tokio::test]
-    async fn drop_session_evicts_tool_defs_debounce_entry() {
-        let handle = make_handle();
-        let sid = "main";
-        assert!(tool_defs_reemit_gate(
-            true,
-            &handle.shared().tool_defs_last_emit,
-            sid,
-            std::time::Instant::now(),
-            TOOL_DEFS_DEBOUNCE,
-        ));
-        handle.drop_session(sid, sid).expect("drop main session");
-        assert!(
-            !handle.shared().tool_defs_last_emit.contains_key(sid),
-            "drop_session must evict the debounce entry"
-        );
-    }
-    /// Object-key segment safety: separators, traversal, and NUL are refused.
-    #[test]
-    fn is_safe_object_segment_rejects_traversal() {
-        assert!(is_safe_object_segment("sess-1_a"));
-        assert!(!is_safe_object_segment(""));
-        assert!(!is_safe_object_segment("a/b"));
-        assert!(!is_safe_object_segment("a\\b"));
-        assert!(!is_safe_object_segment("../etc"));
-        assert!(!is_safe_object_segment("a\0b"));
-    }
     pub(crate) fn fork_cfg_with(
         agent_id: &str,
         capability: CapabilityMode,
@@ -5816,12 +5381,10 @@ pub(crate) mod tests {
     }
     /// `WorkspaceHandle::new` (the test/default path, not `connect_local_workspace`)
     /// must use an ephemeral temp `workspace_home` — never the real
-    /// `$GROW_WORKSPACE_HOME` — must NOT configure an upload queue, and must leave
-    /// the legacy inline-upload path inert (no storage config). This pins the
-    /// flag-off defaults so uploads never start implicitly
-    /// and `new` stays runtime-light (no queue worker spawned).
+    /// `$GROW_WORKSPACE_HOME`; `new` stays runtime-light and never touches
+    /// persistent workspace state.
     #[tokio::test]
-    async fn new_defaults_to_ephemeral_home_and_inert_legacy_upload() {
+    async fn new_defaults_to_ephemeral_home() {
         let handle = make_handle();
         let shared = handle.shared();
         let home = shared.workspace_home();
@@ -6083,8 +5646,8 @@ pub(crate) mod tests {
         );
     }
     /// A fork that races a terminal drain must be rejected by the same
-    /// shutdown gate as `create_session`, so it can't repopulate the session
-    /// map while the shared upload queue is being flushed/closed.
+    /// shutdown gate as `create_session`, so it cannot repopulate the session
+    /// map during shutdown.
     #[tokio::test]
     async fn fork_session_rejected_while_draining() {
         let handle = make_handle();
@@ -6864,16 +6427,8 @@ pub(crate) mod tests {
             Default::default(),
             baseline_config(),
         );
-        let handle = WorkspaceHandle::build(
-            config,
-            ephemeral_workspace_home(),
-            false,
-            true,
-            false,
-            false,
-            crate::upload_environment::WorkspaceIdentity::default(),
-        )
-        .expect("handle construction should succeed");
+        let handle = WorkspaceHandle::build(config, ephemeral_workspace_home(), false)
+            .expect("handle construction should succeed");
         let shared_auth = handle
             .shared()
             .auth_provider()
@@ -7840,143 +7395,6 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    fn workspace_tool_definitions_path_is_session_root() {
-        assert_eq!(
-            workspace_tool_definitions_path("sess-1"),
-            "sess-1/workspace_tool_definitions.json"
-        );
-    }
-    #[test]
-    fn tool_defs_reemit_gate_flag_off_never_emits_and_records_nothing() {
-        let map = dashmap::DashMap::new();
-        let now = std::time::Instant::now();
-        assert!(!tool_defs_reemit_gate(
-            false,
-            &map,
-            "s",
-            now,
-            TOOL_DEFS_DEBOUNCE
-        ));
-        assert!(
-            map.is_empty(),
-            "flag-off must not record any debounce state (legacy path stays inert)"
-        );
-        assert!(tool_defs_reemit_gate(
-            true,
-            &map,
-            "s",
-            now,
-            TOOL_DEFS_DEBOUNCE
-        ));
-    }
-    #[test]
-    fn tool_defs_reemit_gate_debounces_within_5s_window() {
-        let map = dashmap::DashMap::new();
-        let window = std::time::Duration::from_secs(5);
-        let t0 = std::time::Instant::now();
-        assert!(tool_defs_reemit_gate(true, &map, "s", t0, window));
-        assert!(!tool_defs_reemit_gate(
-            true,
-            &map,
-            "s",
-            t0 + std::time::Duration::from_secs(1),
-            window
-        ));
-        assert!(!tool_defs_reemit_gate(
-            true,
-            &map,
-            "s",
-            t0 + std::time::Duration::from_millis(4_999),
-            window
-        ));
-        assert!(tool_defs_reemit_gate(
-            true,
-            &map,
-            "s",
-            t0 + std::time::Duration::from_secs(5),
-            window
-        ));
-        assert!(!tool_defs_reemit_gate(
-            true,
-            &map,
-            "s",
-            t0 + std::time::Duration::from_secs(6),
-            window
-        ));
-    }
-    #[test]
-    fn tool_defs_reemit_gate_is_per_session() {
-        let map = dashmap::DashMap::new();
-        let now = std::time::Instant::now();
-        assert!(tool_defs_reemit_gate(
-            true,
-            &map,
-            "a",
-            now,
-            TOOL_DEFS_DEBOUNCE
-        ));
-        assert!(tool_defs_reemit_gate(
-            true,
-            &map,
-            "b",
-            now,
-            TOOL_DEFS_DEBOUNCE
-        ));
-        assert!(!tool_defs_reemit_gate(
-            true,
-            &map,
-            "a",
-            now,
-            TOOL_DEFS_DEBOUNCE
-        ));
-    }
-    #[tokio::test]
-    async fn workspace_tool_definitions_payload_matches_chat_completions_shape() {
-        let handle = make_handle();
-        let (path, bytes) = handle
-            .workspace_tool_definitions_payload("main")
-            .expect("payload for an existing session");
-        assert_eq!(path, "main/workspace_tool_definitions.json");
-        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
-        let arr = parsed.as_array().expect("a JSON array of tool definitions");
-        assert!(!arr.is_empty(), "baseline session must expose tools");
-        for def in arr {
-            assert_eq!(
-                def["type"], "function",
-                "tool def must be type=function: {def}"
-            );
-            let function = &def["function"];
-            assert!(
-                function["name"].as_str().is_some_and(|n| !n.is_empty()),
-                "function.name must be a non-empty string: {def}"
-            );
-            assert!(
-                function["parameters"].is_object(),
-                "function.parameters must be a JSON object: {def}"
-            );
-            let keys: std::collections::BTreeSet<&str> = function
-                .as_object()
-                .unwrap()
-                .keys()
-                .map(String::as_str)
-                .collect();
-            assert!(
-                keys.is_subset(&["name", "description", "parameters"].into_iter().collect()),
-                "unexpected function keys {keys:?}"
-            );
-        }
-        let names: std::collections::BTreeSet<&str> = arr
-            .iter()
-            .filter_map(|d| d["function"]["name"].as_str())
-            .collect();
-        for expected in ["read_file", "search_replace", "grep", "list_dir"] {
-            assert!(
-                names.contains(expected),
-                "missing baseline tool {expected}: {names:?}"
-            );
-        }
-    }
-    #[test]
     fn bundled_allowlist_ignores_complement() {
         let tmp = bundled_dir_fixture(&["bundled__pdf", "bundled__xlsx", "bundled__docx"]);
         let dir = tmp.path().to_string_lossy().into_owned();
@@ -8042,14 +7460,6 @@ pub(crate) mod tests {
             "only the allowlisted skill survives"
         );
     }
-    #[tokio::test]
-    async fn workspace_tool_definitions_payload_none_for_unknown_session() {
-        let handle = make_handle();
-        assert!(
-            handle.workspace_tool_definitions_payload("ghost").is_none(),
-            "unknown session yields no payload"
-        );
-    }
     #[test]
     fn phase1_budget_is_one_third_of_grace() {
         assert_eq!(
@@ -8062,52 +7472,11 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    fn phase15_budget_is_half_of_remaining() {
-        assert_eq!(
-            phase15_budget(std::time::Duration::from_secs(30)),
-            std::time::Duration::from_secs(15)
-        );
-        assert_eq!(
-            phase15_budget(std::time::Duration::ZERO),
-            std::time::Duration::ZERO
-        );
-    }
-    #[test]
-    fn classify_drain_outcome_covers_all_arms() {
-        assert_eq!(
-            classify_drain_outcome(false, false, 0, 1),
-            DrainOutcome::Partial
-        );
-        assert_eq!(
-            classify_drain_outcome(false, true, 0, 0),
-            DrainOutcome::Partial
-        );
-        assert_eq!(
-            classify_drain_outcome(true, false, 0, 2),
-            DrainOutcome::ProducersTimeout
-        );
-        assert_eq!(
-            classify_drain_outcome(true, false, 0, 0),
-            DrainOutcome::ProducersTimeout
-        );
-        assert_eq!(
-            classify_drain_outcome(true, true, 1, 0),
-            DrainOutcome::ProducersTimeout
-        );
-        assert_eq!(
-            classify_drain_outcome(true, true, 0, 3),
-            DrainOutcome::Timeout
-        );
-        assert_eq!(classify_drain_outcome(true, true, 0, 0), DrainOutcome::Full);
-    }
-    #[test]
     fn drain_reason_and_outcome_labels_are_stable() {
         assert_eq!(DrainReason::Sigterm.as_str(), "sigterm");
         assert_eq!(DrainReason::Evict.as_str(), "evict");
         assert_eq!(DrainOutcome::Full.as_str(), "full");
         assert_eq!(DrainOutcome::Partial.as_str(), "partial");
-        assert_eq!(DrainOutcome::ProducersTimeout.as_str(), "producers_timeout");
-        assert_eq!(DrainOutcome::Timeout.as_str(), "timeout");
     }
     #[test]
     fn grace_budget_from_raw_parses_and_falls_back() {
@@ -8139,14 +7508,14 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "0");
     }
     #[tokio::test]
-    async fn two_phase_drain_no_queue_marks_draining_and_returns_zero() {
+    async fn graceful_drain_marks_draining_and_returns_zero() {
         let handle = make_handle();
         let tracker = handle.activity_tracker().clone();
         assert!(!tracker.is_draining());
         let unfinished = handle
             .two_phase_drain(std::time::Duration::from_millis(300), DrainReason::Sigterm)
             .await;
-        assert_eq!(unfinished, 0, "no queue → nothing pending to lose");
+        assert_eq!(unfinished, 0, "no local work remains");
         assert!(
             tracker.is_draining(),
             "drain must mark the tracker draining"
@@ -8159,125 +7528,6 @@ pub(crate) mod tests {
         assert!(
             snap.drain_started_ms.is_some(),
             "drain_started_ms must be stamped at drain start"
-        );
-    }
-    #[tokio::test]
-    async fn spawn_producer_is_counted_and_withholds_idle() {
-        let handle = make_handle();
-        let tracker = handle.activity_tracker().clone();
-        assert_eq!(tracker.snapshot().artifact_producers_inflight, 0);
-        let gate = Arc::new(tokio::sync::Notify::new());
-        let gate2 = gate.clone();
-        let join = handle.spawn_producer(async move { gate2.notified().await });
-        let snap = tracker.snapshot();
-        assert_eq!(snap.artifact_producers_inflight, 1);
-        assert!(
-            snap.idle_since_ms.is_none(),
-            "an in-flight producer must report the workspace busy"
-        );
-        gate.notify_one();
-        join.await.expect("producer must finish");
-        let snap = tracker.snapshot();
-        assert_eq!(snap.artifact_producers_inflight, 0);
-        assert!(
-            snap.idle_since_ms.is_some(),
-            "idle must be restored after the producer completes"
-        );
-    }
-    /// A producer spawned after a drain has started stays TRACKED (the idle
-    /// gate must keep seeing it) and is counted as at-risk.
-    #[tokio::test]
-    async fn spawn_producer_after_drain_start_stays_tracked() {
-        let handle = make_handle();
-        handle.shared.activity_tracker.set_draining();
-        let before = PRODUCER_SPAWNED_AFTER_DRAIN_TOTAL.get();
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let join = handle.spawn_producer(async move {
-            let _ = rx.await;
-            42
-        });
-        assert_eq!(
-            handle.shared.producer_tasks.len(),
-            1,
-            "a late producer must remain visible to the durability idle gate"
-        );
-        assert_eq!(
-            PRODUCER_SPAWNED_AFTER_DRAIN_TOTAL.get(),
-            before + 1,
-            "the at-risk late spawn must be counted"
-        );
-        let _ = tx.send(());
-        assert_eq!(join.await.expect("task must run"), 42);
-    }
-    /// The producer tracker survives a completed drain: a workspace that keeps
-    /// running after a hub evict still tracks (and idle-gates) new producers.
-    #[tokio::test]
-    async fn producer_tracker_usable_after_drain() {
-        let handle = make_handle();
-        handle
-            .two_phase_drain(std::time::Duration::from_millis(200), DrainReason::Evict)
-            .await;
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let join = handle.spawn_producer(async move {
-            let _ = rx.await;
-            7
-        });
-        assert_eq!(
-            handle.shared.producer_tasks.len(),
-            1,
-            "post-drain spawns must still be tracked (TaskTracker never closed)"
-        );
-        let _ = tx.send(());
-        assert_eq!(join.await.expect("task must run"), 7);
-    }
-    /// Phase 1.5 is capped at half the post-phase-1 remainder: a producer that
-    /// would finish within the total budget (at 400ms of 600ms) but past the
-    /// cap (300ms) is cut off there, preserving the phase-2 floor.
-    #[tokio::test(start_paused = true)]
-    async fn drain_phase15_is_capped_at_half_the_remaining_budget() {
-        let handle = make_handle();
-        let _join = handle.spawn_producer(async {
-            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        });
-        let t0 = tokio::time::Instant::now();
-        let unfinished = handle
-            .two_phase_drain(std::time::Duration::from_millis(600), DrainReason::Sigterm)
-            .await;
-        let elapsed = t0.elapsed();
-        assert_eq!(
-            unfinished, 1,
-            "the producer cut off at the phase-1.5 cap is still in flight, so it \
-             counts as outstanding work in the returned total"
-        );
-        assert!(
-            elapsed < std::time::Duration::from_millis(400),
-            "phase 1.5 must give up at the cap, not wait for the \
-             400ms producer; drained in {elapsed:?}"
-        );
-    }
-    /// A producer that outlives the whole grace budget classifies as
-    /// `producers_timeout` and must not wedge the drain.
-    #[tokio::test(start_paused = true)]
-    async fn two_phase_drain_producer_exceeding_budget_times_out() {
-        let handle = make_handle();
-        let _join = handle.spawn_producer(std::future::pending::<()>());
-        let before = DRAIN_COMPLETED_TOTAL
-            .with_label_values(&[DrainOutcome::ProducersTimeout.as_str()])
-            .get();
-        let unfinished = handle
-            .two_phase_drain(std::time::Duration::from_millis(300), DrainReason::Sigterm)
-            .await;
-        assert_eq!(
-            unfinished, 1,
-            "no queue, but the wedged producer is outstanding work, so the returned \
-             total is 1 (it was 0 when the return value ignored producers)"
-        );
-        assert!(
-            DRAIN_COMPLETED_TOTAL
-                .with_label_values(&[DrainOutcome::ProducersTimeout.as_str()])
-                .get()
-                > before,
-            "the drain must classify as producers_timeout"
         );
     }
 }

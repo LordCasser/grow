@@ -1,8 +1,8 @@
 //! Per-session and connection-level activity tracking for tool server
 //! lifecycle status reporting.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use dashmap::DashMap;
@@ -14,11 +14,6 @@ const LIFECYCLE_SHUTTING_DOWN: u8 = 2;
 
 const DEFAULT_SESSION: &str = "__default__";
 const SESSION_IDLE_PRUNE_MS: u64 = 5 * 60 * 1000;
-
-/// Default cap (ms) on how long pending durability work (artifact producers)
-/// may withhold `idle_since_ms`. Overridable via
-/// `GROW_WORKSPACE_DURABILITY_IDLE_HOLD_MAX_MS`.
-const DEFAULT_DURABILITY_IDLE_HOLD_MAX_MS: u64 = 600_000;
 
 /// How long recent preview-proxy traffic withholds `idle_since_ms` — a decaying
 /// window (not a reset), so a polled preview stays alive but a single stale poll
@@ -70,13 +65,6 @@ pub struct ActivityTracker {
     notify: Arc<tokio::sync::Notify>,
     /// Epoch ms a graceful drain began; `0` means "not draining".
     drain_started_ms: AtomicU64,
-    /// Coupled artifact-producer task tracker; unset for bare trackers.
-    producer_tasks: OnceLock<tokio_util::task::TaskTracker>,
-    /// Epoch ms the durability-busy condition started; `0` while clear. Stamped
-    /// lazily at snapshot time.
-    durability_busy_since_ms: AtomicU64,
-    /// Cap (ms) on how long durability work may withhold `idle_since_ms`.
-    durability_idle_hold_max_ms: u64,
     /// When set, the idle verdict ignores background tasks so `idle_since_ms`
     /// tracks foreground tool-call activity only. Drain/`status` stay bg-aware.
     idle_ignores_background: bool,
@@ -109,19 +97,8 @@ impl ActivityTracker {
         Self::with_prune_window(std::time::Duration::from_millis(SESSION_IDLE_PRUNE_MS))
     }
 
-    /// Construct a tracker with a custom session-prune window. The durability
-    /// idle-hold cap comes from `GROW_WORKSPACE_DURABILITY_IDLE_HOLD_MAX_MS`
-    /// (default [`DEFAULT_DURABILITY_IDLE_HOLD_MAX_MS`]).
+    /// Construct a tracker with a custom session-prune window.
     pub fn with_prune_window(prune_window: std::time::Duration) -> Self {
-        Self::with_prune_window_and_idle_hold(prune_window, durability_idle_hold_max_from_env())
-    }
-
-    /// [`with_prune_window`](Self::with_prune_window) with an explicit
-    /// durability idle-hold cap, so tests never race process env.
-    pub fn with_prune_window_and_idle_hold(
-        prune_window: std::time::Duration,
-        durability_idle_hold_max_ms: u64,
-    ) -> Self {
         Self {
             active_tool_calls: AtomicU32::new(0),
             active_tools: DashMap::new(),
@@ -134,9 +111,6 @@ impl ActivityTracker {
             lifecycle: AtomicU8::new(LIFECYCLE_NONE),
             notify: Arc::new(tokio::sync::Notify::new()),
             drain_started_ms: AtomicU64::new(0),
-            producer_tasks: OnceLock::new(),
-            durability_busy_since_ms: AtomicU64::new(0),
-            durability_idle_hold_max_ms,
             idle_ignores_background: false,
             preview_activity_window_ms: PREVIEW_ACTIVITY_WINDOW_MS,
             last_preview_activity_ms: AtomicU64::new(0),
@@ -160,12 +134,6 @@ impl ActivityTracker {
         self
     }
 
-    /// Couple the artifact-producer tracker (status counts producers, withholds
-    /// idle while they run). Set once; a second call is a no-op.
-    pub fn set_producer_tasks(&self, tasks: tokio_util::task::TaskTracker) {
-        let _ = self.producer_tasks.set(tasks);
-    }
-
     /// Clone of the internal `Notify` for driving republishes.
     pub fn notify_handle(&self) -> Arc<tokio::sync::Notify> {
         self.notify.clone()
@@ -185,38 +153,12 @@ impl ActivityTracker {
         self.drain_started_ms.load(Ordering::Relaxed) != 0
     }
 
-    /// Durability tail shared by [`Self::snapshot`] and [`Self::snapshot_session`]
-    /// (one construction site so the two payloads can't drift).
-    fn durability_payload_fields(&self, idle_since: u64) -> (Option<u64>, u32) {
-        let producers = self
-            .producer_tasks
-            .get()
-            .map(|t| t.len() as u32)
-            .unwrap_or(0);
-        let durability_withhold = producers > 0
-            && {
-                let now = now_ms();
-                let since = match self.durability_busy_since_ms.compare_exchange(
-                    0,
-                    now,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => now,
-                    Err(prev) => prev,
-                };
-                now.saturating_sub(since) < self.durability_idle_hold_max_ms
-            };
-        if !durability_withhold {
-            self.durability_busy_since_ms.store(0, Ordering::Relaxed);
-        }
-        let withhold_idle = durability_withhold || self.preview_withholds_idle(now_ms());
-        let idle = if idle_since == 0 || withhold_idle {
+    fn resolved_idle_since(&self, idle_since: u64) -> Option<u64> {
+        if idle_since == 0 || self.preview_withholds_idle(now_ms()) {
             None
         } else {
             Some(idle_since)
-        };
-        (idle, producers)
+        }
     }
 
     /// Whether recent preview-proxy traffic should currently withhold idle.
@@ -270,11 +212,7 @@ impl ActivityTracker {
     /// `session_id` identifies the owning session for the caller's bookkeeping;
     /// the internal session counters key off the recorded `call_id → session`
     /// mapping.
-    pub fn tool_call_completed(
-        &self,
-        call_id: &str,
-        _session_id: Option<&str>,
-    ) {
+    pub fn tool_call_completed(&self, call_id: &str, _session_id: Option<&str>) {
         let Some((_, tool_name)) = self.active_tools.remove(call_id) else {
             return;
         };
@@ -556,7 +494,7 @@ impl ActivityTracker {
             ms => Some(ms),
         };
 
-        let (idle_since_ms, artifact_producers_inflight) = self.durability_payload_fields(idle_since);
+        let idle_since_ms = self.resolved_idle_since(idle_since);
 
         ToolServerStatusPayload {
             status,
@@ -575,7 +513,7 @@ impl ActivityTracker {
             upload_queue_pending_bytes: 0,
             upload_queue_inflight: 0,
             upload_queue_circuit_breaker_tripped: false,
-            artifact_producers_inflight,
+            artifact_producers_inflight: 0,
             drain_started_ms: drain_started,
             turn_active,
             idle_ignores_background: self.idle_ignores_background,
@@ -613,7 +551,7 @@ impl ActivityTracker {
             ms => Some(ms),
         };
 
-        let (idle_since_ms, artifact_producers_inflight) = self.durability_payload_fields(idle_since);
+        let idle_since_ms = self.resolved_idle_since(idle_since);
 
         ToolServerStatusPayload {
             status,
@@ -632,24 +570,12 @@ impl ActivityTracker {
             upload_queue_pending_bytes: 0,
             upload_queue_inflight: 0,
             upload_queue_circuit_breaker_tripped: false,
-            artifact_producers_inflight,
+            artifact_producers_inflight: 0,
             drain_started_ms: drain_started,
             turn_active: self.any_turn_active(),
             idle_ignores_background: self.idle_ignores_background,
         }
     }
-}
-
-/// The durability idle-hold cap from `GROW_WORKSPACE_DURABILITY_IDLE_HOLD_MAX_MS`.
-fn durability_idle_hold_max_from_env() -> u64 {
-    durability_idle_hold_from_raw(std::env::var("GROW_WORKSPACE_DURABILITY_IDLE_HOLD_MAX_MS").ok())
-}
-
-/// Pure parse of the idle-hold env value: a non-negative integer ms wins (0
-/// disables the hold entirely); absent or malformed falls back to the default.
-fn durability_idle_hold_from_raw(raw: Option<String>) -> u64 {
-    raw.and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_DURABILITY_IDLE_HOLD_MAX_MS)
 }
 
 /// Whether a preview-activity stamp still withholds idle at `now`: true while it
