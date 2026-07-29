@@ -329,7 +329,7 @@ fn summaries_to_overview_response(summaries: Vec<Summary>) -> Result<acp::ExtRes
 
     Ok(acp::ExtResponse::new(value))
 }
-// ── Merged session list (local + remote) ─────────────────────────────
+// ── Unified local session list ────────────────────────────────────────
 
 async fn handle_session_list(
     agent: &MvpAgent,

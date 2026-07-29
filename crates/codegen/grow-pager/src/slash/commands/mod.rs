@@ -335,7 +335,6 @@ mod tests {
             "welcome",
             "workflows",
             "yolo",
-            "?",
         ];
         for command in builtin_commands() {
             for key in std::iter::once(command.name()).chain(command.aliases().iter().copied()) {
@@ -352,7 +351,7 @@ mod tests {
         assert!(reg.get("welcome").is_some());
         assert!(reg.get("show-plan").is_some());
         assert!(reg.get("plan-view").is_some());
-        assert_eq!(reg.get("?").unwrap().name(), "shortcuts");
+        assert!(reg.get("?").is_none());
     }
     #[test]
     fn aliases_resolve_to_same_command() {

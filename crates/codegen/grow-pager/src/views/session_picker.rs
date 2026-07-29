@@ -838,7 +838,7 @@ pub(crate) fn build_content_header_label(
             spinner_frames[frame_idx]
         )
     } else if has_content_rows {
-        "Extended search results (remote and local sessions)".to_string()
+        "Extended search results (Grow, local, and external sessions)".to_string()
     } else {
         String::new()
     }
@@ -846,7 +846,7 @@ pub(crate) fn build_content_header_label(
 
 /// Hint shown on the default `Grow` view when the foreign-session scan loaded
 /// Claude/Codex/Cursor entries it hides. Grow-only: `next(Grow) == External`
-/// makes the copy literally true, and reaching Local/Remote already cycles
+/// makes the copy literally true, and reaching Local/External already cycles
 /// through External/All, so the discovery hint is only needed on the default
 /// state.
 pub(crate) fn hidden_external_hint(
@@ -1310,7 +1310,10 @@ mod tests {
     #[test]
     fn content_header_label_has_rows() {
         let label = build_content_header_label(false, true, 0);
-        assert_eq!(label, "Extended search results (remote and local sessions)");
+        assert_eq!(
+            label,
+            "Extended search results (Grow, local, and external sessions)"
+        );
     }
 
     #[test]
