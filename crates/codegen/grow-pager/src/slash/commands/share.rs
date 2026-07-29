@@ -1,9 +1,9 @@
-//! `/share` -- share current session via URL.
+//! `/share` -- prepare the current session for an optional share service.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 
-/// Share the current session via a public URL.
+/// Prepare the current session snapshot for a separately configured service.
 pub struct ShareCommand;
 
 impl SlashCommand for ShareCommand {
@@ -12,7 +12,7 @@ impl SlashCommand for ShareCommand {
     }
 
     fn description(&self) -> &str {
-        "Share this session via URL"
+        "Prepare this session for sharing"
     }
 
     fn session_scoped(&self) -> bool {

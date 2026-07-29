@@ -861,10 +861,6 @@ pub(crate) async fn run(
         .as_ref()
         .and_then(|s| s.show_resolved_model)
         .unwrap_or(true);
-    app.sharing_enabled = remote_settings
-        .as_ref()
-        .and_then(|s| s.sharing_enabled)
-        .unwrap_or(false);
     app.privacy_notice_rollout = grow_config::env_bool("GROW_PRIVACY_NOTICE_ROLLOUT")
         .or_else(|| {
             remote_settings

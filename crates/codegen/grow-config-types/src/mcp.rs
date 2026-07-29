@@ -516,29 +516,6 @@ impl McpServerConfig {
     }
 }
 
-/// Configuration for relay session sharing.
-/// Set in config.toml under [relay] section.
-///
-/// Example:
-/// ```toml
-/// [relay]
-/// enabled = true
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct RelaySyncConfig {
-    pub enabled: Option<bool>,
-}
-
-impl RelaySyncConfig {
-    /// Check if relay sync is enabled. Env var takes precedence over config.
-    pub fn is_enabled(&self) -> bool {
-        if let Ok(env_val) = std::env::var("GROW_RELAY_SYNC_ENABLED") {
-            return env_val.eq_ignore_ascii_case("true") || env_val == "1";
-        }
-        self.enabled.unwrap_or(false)
-    }
-}
-
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct McpConfig {
     #[serde(default, rename = "mcpServers")]

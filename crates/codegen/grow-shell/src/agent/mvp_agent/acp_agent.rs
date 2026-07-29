@@ -1012,18 +1012,6 @@ impl acp::Agent for MvpAgent {
         }
         let (summary_client, summary_model) = self
             .build_summary_client(&session_sampling)?;
-        let relay_sync = if let Some(sync) = self
-            .create_relay_sync(&session_id.0, &session_info)
-        {
-            Self::spawn_relay_state_forwarder(
-                sync.subscribe_state(),
-                sync.session_id().to_owned(),
-                self.gateway.clone(),
-            );
-            Some(sync)
-        } else {
-            None
-        };
         let model_id = resolved_custom_model
             .map(acp::ModelId::new)
             .unwrap_or_else(|| self.models_manager.current_model_id());
@@ -1033,7 +1021,6 @@ impl acp::Agent for MvpAgent {
             &session_info,
             model_id,
             summary_client,
-            relay_sync,
             Some(self.gateway.clone()),
             summary_model,
         )
@@ -1299,24 +1286,11 @@ impl acp::Agent for MvpAgent {
             );
         let (summary_client, summary_model) = self
             .build_summary_client(&load_session_sampling)?;
-        let relay_sync = if let Some(sync) = self
-            .create_relay_sync(&session_id.0, &session_info)
-        {
-            Self::spawn_relay_state_forwarder(
-                sync.subscribe_state(),
-                sync.session_id().to_owned(),
-                self.gateway.clone(),
-            );
-            Some(sync)
-        } else {
-            None
-        };
         let mut persistence_timer = crate::instrumentation_timer!("session.load_light");
         persistence_timer.with_field("session_id", session_id.0.as_ref());
         let (persistence_info, persistence) = crate::session::persistence::load_light(
                 &session_info,
                 summary_client,
-                relay_sync,
                 Some(self.gateway.clone()),
                 summary_model,
             )

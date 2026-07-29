@@ -120,7 +120,6 @@
             seed_pending_tool(agent, "create-plan-call", "CreatePlan");
             agent.active_modal = Some(crate::views::modal::ActiveModal::CommandPalette {
                 entries: crate::views::modal::default_palette_entries(
-                    agent.sharing_enabled,
                     agent.prompt.slash_controller.screen_mode(),
                 ),
                 state: crate::views::picker::PickerState::input_active(),
@@ -413,4 +412,3 @@
         assert!(agent.plan_mode_active);
         assert!(agent.plan_mode_pending.is_none());
     }
-

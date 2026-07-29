@@ -2894,7 +2894,7 @@ pub(crate) fn execute(
                 });
         }
         Effect::ShareSession { agent_id, session_id } => {
-            use grow_shell::session::{ShareSessionRequest, ShareSessionResponse};
+            use grow_shell::session::ShareSessionRequest;
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -2924,30 +2924,15 @@ pub(crate) fn execute(
                                     error: msg,
                                 };
                             }
-                            let inner = wrapper.get("result").unwrap_or(&wrapper);
-                            match serde_json::from_value::<
-                                ShareSessionResponse,
-                            >(inner.clone()) {
-                                Ok(share_resp) => {
-                                    TaskResult::ShareSessionComplete {
-                                        agent_id,
-                                        share_url: share_resp.share_url,
-                                    }
-                                }
-                                Err(_) => {
-                                    TaskResult::ShareSessionFailed {
-                                        agent_id,
-                                        error: "couldn't share session".to_string(),
-                                    }
-                                }
+                            TaskResult::ShareSessionFailed {
+                                agent_id,
+                                error: "Share service is not configured".to_string(),
                             }
                         }
                         Err(e) => {
                             TaskResult::ShareSessionFailed {
                                 agent_id,
-                                error: sanitize_user_error(
-                                    &format!("couldn't share session: {e}"),
-                                ),
+                                error: sanitize_user_error(&e.to_string()),
                             }
                         }
                     }

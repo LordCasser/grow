@@ -571,10 +571,6 @@ pub struct AppView {
     pub tip: Option<String>,
     /// Whether to show the resolved model ID in /session-info output.
     pub show_resolved_model: bool,
-    /// Whether the `/share` slash command is available. Gated by
-    /// `RemoteSettings.sharing_enabled`; defaults to `false` when remote
-    /// settings are unavailable or the field is absent.
-    pub sharing_enabled: bool,
     /// Whether the plugin marketplace CTA is enabled. Env `GROW_PLUGIN_CTA`
     /// overrides `RemoteSettings.plugin_cta` (remote settings); defaults to `false`.
     pub plugin_cta_enabled: bool,
@@ -1267,7 +1263,6 @@ impl AppView {
             welcome_doc_viewer: None,
             screen_mode: ScreenMode::Inline,
             show_resolved_model: true,
-            sharing_enabled: false,
             plugin_cta_enabled: false,
             leader_mode: false,
             leader_roster: Vec::new(),
@@ -5078,7 +5073,6 @@ pub(crate) mod tests {
             minimal_state: crate::minimal_api::MinimalState::default(),
             reconnect_pending: false,
             show_resolved_model: true,
-            sharing_enabled: false,
             plugin_cta_enabled: false,
             leader_mode: true,
             leader_roster: Vec::new(),

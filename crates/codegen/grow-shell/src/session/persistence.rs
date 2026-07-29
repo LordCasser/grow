@@ -1239,9 +1239,6 @@ struct SessionPersistence {
     /// Pending ACP notification for merging consecutive text chunks
     pending_notification: Option<acp::SessionNotification>,
     rx: mpsc::UnboundedReceiver<PersistenceMsg>,
-    /// WebSocket-based relay sync for real-time session sharing.
-    /// This streams updates to the relay backend in addition to local persistence.
-    relay_sync: Option<crate::relay::RelaySync>,
     /// Session title generation lifecycle.
     summary: crate::session::summary::SummaryGenerator,
     /// Client gateway for `SessionSummaryGenerated` notifications. Used to
@@ -1348,12 +1345,6 @@ impl SessionPersistence {
             .await
     }
 
-    fn queue_acp_sync(&self, notification: acp::SessionNotification) {
-        if let Some(relay) = &self.relay_sync {
-            relay.queue(notification);
-        }
-    }
-
     fn finish_pending_append(
         notification: acp::SessionNotification,
         result: Result<(), crate::session::storage::AppendUpdateError>,
@@ -1376,11 +1367,8 @@ impl SessionPersistence {
                 .write_update(&SessionUpdate::Acp(Box::new(notification.clone())))
                 .await;
             match Self::finish_pending_append(notification, result) {
-                PendingAppendOutcome::CommittedOk(notification) => {
-                    self.queue_acp_sync(notification);
-                }
-                PendingAppendOutcome::CommittedErr(notification, error) => {
-                    self.queue_acp_sync(notification);
+                PendingAppendOutcome::CommittedOk(_) => {}
+                PendingAppendOutcome::CommittedErr(_, error) => {
                     return Err(crate::session::storage::AppendUpdateError::Committed(error));
                 }
                 PendingAppendOutcome::NotCommittedErr(notification, error) => {
@@ -1403,24 +1391,13 @@ impl SessionPersistence {
             .storage
             .append_update_durable_commit_aware(&self.info, &update)
             .await;
-        match (&update, &result) {
-            (SessionUpdate::Acp(notification), Ok(()))
-            | (
-                SessionUpdate::Acp(notification),
-                Err(crate::session::storage::AppendUpdateError::Committed(_)),
-            ) => self.queue_acp_sync((**notification).clone()),
-            _ => {}
-        }
         result
     }
 
-    /// Flush any pending merged ACP notification to disk and an explicitly configured relay.
+    /// Flush any pending merged ACP notification to disk.
     async fn flush_pending(&mut self) {
         if let Err(error) = self.drain_pending().await {
             tracing::warn!(%error, "failed to write pending update");
-        }
-        if let Some(relay) = &self.relay_sync {
-            relay.flush();
         }
     }
 
@@ -1456,9 +1433,7 @@ impl SessionPersistence {
                                     Ok(())
                                     | Err(crate::session::storage::AppendUpdateError::Committed(
                                         _,
-                                    )) => {
-                                        self.queue_acp_sync(to_write);
-                                    }
+                                    )) => {}
                                     Err(error) => tracing::warn!(%error, "failed to write update"),
                                 }
                             }
@@ -1818,7 +1793,6 @@ pub(crate) async fn new(
     info: &Info,
     model_id: acp::ModelId,
     sampling_client: OaiCompatClient,
-    relay_sync: Option<crate::relay::RelaySync>,
     gateway: Option<GatewaySender>,
     session_summary_model: String,
 ) -> io::Result<PersistenceHandle> {
@@ -1850,7 +1824,6 @@ pub(crate) async fn new(
             storage: storage.clone(),
             pending_notification: None,
             rx,
-            relay_sync,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
                     sampling_client,
@@ -1918,7 +1891,6 @@ pub async fn new_with_explicit_dir(
             storage: storage.clone(),
             pending_notification: None,
             rx,
-            relay_sync: None,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
                     sampling_client,
@@ -1971,7 +1943,6 @@ pub struct PersistedInfoLight {
 pub(crate) async fn load(
     info: &Info,
     sampling_client: OaiCompatClient,
-    relay_sync: Option<crate::relay::RelaySync>,
     gateway: Option<GatewaySender>,
     session_summary_model: String,
 ) -> io::Result<(PersistedInfo, PersistenceHandle)> {
@@ -2018,7 +1989,6 @@ pub(crate) async fn load(
             storage: storage.clone(),
             pending_notification: None,
             rx,
-            relay_sync,
             summary: summary_gen,
             gateway,
         };
@@ -2034,7 +2004,6 @@ pub(crate) async fn load(
 pub(crate) async fn load_light(
     info: &Info,
     sampling_client: OaiCompatClient,
-    relay_sync: Option<crate::relay::RelaySync>,
     gateway: Option<GatewaySender>,
     session_summary_model: String,
 ) -> io::Result<(PersistedInfoLight, PersistenceHandle)> {
@@ -2088,7 +2057,6 @@ pub(crate) async fn load_light(
             storage: storage.clone(),
             pending_notification: None,
             rx,
-            relay_sync,
             summary: summary_gen,
             gateway,
         };

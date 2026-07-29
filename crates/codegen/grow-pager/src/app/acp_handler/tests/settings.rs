@@ -430,7 +430,7 @@
         let notif = acp::ExtNotification::new(
             "grow/settings/update",
             serde_json::value::to_raw_value(&serde_json::json!({
-                "sharing_enabled": true,
+                "show_resolved_model": false,
                 "announcements": [critical_announcement("from-settings")],
             }))
             .unwrap()
@@ -443,7 +443,7 @@
             vec![critical_announcement("from-push")],
             "settings/update must not replace the pushed announcements"
         );
-        assert!(app.sharing_enabled, "other settings fields still apply");
+        assert!(!app.show_resolved_model, "other settings fields still apply");
     }
 
     /// User-owned mode must not re-arm default_yolo or rewrite UI from remote.

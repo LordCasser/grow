@@ -224,7 +224,6 @@ fn test_app() -> AppView {
         minimal_state: crate::minimal_api::MinimalState::default(),
         reconnect_pending: false,
         show_resolved_model: true,
-        sharing_enabled: false,
         plugin_cta_enabled: false,
         leader_mode: true,
         leader_roster: Vec::new(),

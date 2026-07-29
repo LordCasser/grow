@@ -281,12 +281,6 @@ impl CommandRegistry {
         self.available_tools = Some(tools);
     }
 
-    /// Show or hide the /share command.
-    /// When hidden, it won't appear in the dropdown or be executable.
-    pub fn set_share_visible(&mut self, visible: bool) {
-        self.set_command_visible("share", visible);
-    }
-
     /// Show or hide the `/dashboard` command (feature-flag gating).
     ///
     /// The command is hidden by default (see [`Self::new`]) and revealed here
@@ -621,35 +615,6 @@ mod tests {
     }
 
     #[test]
-    fn set_share_visible_hides_and_restores_share_command() {
-        let share: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "share",
-            aliases: &[],
-        });
-        let other: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &[],
-        });
-        let mut registry = CommandRegistry::new(vec![share, other]);
-
-        // Default: /share is visible.
-        assert!(registry.get("share").is_some());
-        assert!(registry.triggers().iter().any(|t| t.canonical == "share"));
-
-        // Hiding /share removes it from lookup and triggers.
-        registry.set_share_visible(false);
-        assert!(registry.get("share").is_none());
-        assert!(!registry.triggers().iter().any(|t| t.canonical == "share"));
-        // Other commands are unaffected.
-        assert!(registry.get("exit").is_some());
-
-        // Re-enabling restores it.
-        registry.set_share_visible(true);
-        assert!(registry.get("share").is_some());
-        assert!(registry.triggers().iter().any(|t| t.canonical == "share"));
-    }
-
-    #[test]
     fn dashboard_command_hidden_by_default_and_toggleable() {
         let dashboard: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
             name: "dashboard",
@@ -981,9 +946,9 @@ mod tests {
     /// tool-gated commands stay unresolvable for dispatch, exactly like `get()`.
     #[test]
     fn get_for_dispatch_respects_hard_gates() {
-        // Hard-hidden by name (e.g. /dashboard default, /share toggle).
-        let share: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "share",
+        // Hard-hidden by name (e.g. /dashboard default).
+        let dashboard: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
+            name: "dashboard",
             aliases: &[],
         });
         // Tool-gated (toolset unknown → fail-closed).
@@ -991,10 +956,13 @@ mod tests {
             name: "loop",
             required: &["scheduler_create"],
         });
-        let mut reg = CommandRegistry::new(vec![share, gated]);
-        reg.set_share_visible(false);
+        let mut reg = CommandRegistry::new(vec![dashboard, gated]);
+        reg.set_dashboard_visible(false);
 
-        assert!(reg.get_for_dispatch("share").is_none(), "hidden stays hard");
+        assert!(
+            reg.get_for_dispatch("dashboard").is_none(),
+            "hidden stays hard"
+        );
         assert!(
             reg.get_for_dispatch("loop").is_none(),
             "tool-gated stays fail-closed pre-handshake"

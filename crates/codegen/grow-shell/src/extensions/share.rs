@@ -5,7 +5,7 @@
 
 use agent_client_protocol as acp;
 
-use super::{ExtResult, parse_params, to_raw_response};
+use super::{ExtResult, parse_params};
 use crate::agent::MvpAgent;
 use crate::session::export::ExportedSession;
 use crate::session::info::Info as SessionInfo;
@@ -13,17 +13,17 @@ use crate::session::persistence::list_summaries;
 use crate::session::share::ShareSessionRequest;
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
-pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+pub async fn handle(_agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "grow/share_session" => {
             tracing::info!("handling share session request");
-            handle_share_session(agent, args).await
+            handle_share_session(args).await
         }
         _ => Err(acp::Error::method_not_found()),
     }
 }
 
-async fn handle_share_session(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+async fn handle_share_session(args: &acp::ExtRequest) -> ExtResult {
     let request: ShareSessionRequest = parse_params(args)?;
 
     // Find session info by searching through summaries

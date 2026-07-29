@@ -179,11 +179,7 @@ fn dispatch_load_session_ungated(
         agent_mut.session.start_command(AgentCommand::RestoreCode);
         agent_mut.turn_started_at = Some(std::time::Instant::now());
     }
-    agent_mut.apply_app_scoped_gates(
-        app.sharing_enabled,
-        app.screen_mode,
-        &app.active_announcements,
-    );
+    agent_mut.apply_app_scoped_gates(app.screen_mode, &app.active_announcements);
     agent_mut
         .prompt
         .slash_controller

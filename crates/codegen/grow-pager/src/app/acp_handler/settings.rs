@@ -121,14 +121,6 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
     if let Some(v) = update.show_resolved_model {
         app.show_resolved_model = v;
     }
-    if let Some(v) = update.sharing_enabled {
-        app.sharing_enabled = v;
-        // Propagate to existing agents so slash-command registries stay
-        // in sync (same fan-out pattern used when creating new agents).
-        for agent in app.agents.values_mut() {
-            agent.set_sharing_enabled(v);
-        }
-    }
     // Env overrides win over live updates too, mirroring the startup
     // resolution in event_loop — otherwise the proxy's explicit `false`
     // (sent for kill-switch semantics) clobbers a local test override
@@ -396,8 +388,6 @@ pub(super) fn handle_announcements_update(notif: &acp::ExtNotification, app: &mu
 pub(super) struct PagerSettingsUpdate {
     #[serde(default)]
     show_resolved_model: Option<bool>,
-    #[serde(default)]
-    sharing_enabled: Option<bool>,
     #[serde(default)]
     privacy_notice_rollout: Option<bool>,
     #[serde(default)]

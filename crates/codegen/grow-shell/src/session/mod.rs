@@ -18,7 +18,7 @@ pub use self::persistence::{
     resolve_local_session, resolve_local_session_any_cwd, session_exists_for_cwd,
 };
 pub use self::result::{Empty, ExtMethodResult};
-pub use self::share::{ShareSessionRequest, ShareSessionResponse};
+pub use self::share::ShareSessionRequest;
 pub use xai_fsnotify::{FsConfig, FsEvent, FsEventKind, FsEventSource, FsNotifyError, GitMetaKind};
 /// `false` twin: this template is not compiled into this build, so no
 /// template matches. Keeps ungated call sites compiling in both
@@ -276,17 +276,12 @@ pub struct ClientFsConfig {
     pub fs: FsConfig,
     pub mode: ClientFsMode,
 }
-/// Share session request/response types
+/// Request type for preparing a local session snapshot for sharing.
 pub mod share {
-    /// Request to share a session via URL
+    /// Request to prepare a session for a separately configured share service.
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub struct ShareSessionRequest {
         pub session_id: String,
-    }
-    /// Response containing the shareable URL
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct ShareSessionResponse {
-        pub share_url: String,
     }
 }
 pub mod acp_conversion;

@@ -831,10 +831,6 @@ pub struct RemoteSettings {
     /// When `Some(false)`, hide the resolved model ID in /session-info.
     #[serde(default)]
     pub show_resolved_model: Option<bool>,
-    /// When `Some(true)`, enable session sharing.
-    /// When `Some(false)` or absent, sharing is disabled.
-    #[serde(default)]
-    pub sharing_enabled: Option<bool>,
     /// Whether ZDR (Zero Data Retention) users are allowed to use the product.
     /// Controlled via remote settings. Default `false` (blocked) during beta.
     #[serde(default)]

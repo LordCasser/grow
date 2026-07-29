@@ -738,12 +738,6 @@ pub struct ModelsConfig {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct RelayConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-}
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
 pub struct RemoteConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
@@ -1039,8 +1033,6 @@ pub struct Config {
     pub cli: CliConfig,
     #[serde(default, skip_serializing)]
     pub models: ModelsConfig,
-    #[serde(default, skip_serializing)]
-    pub relay: RelayConfig,
     #[serde(default, skip_serializing)]
     pub remote: RemoteConfig,
     /// Computer Hub configuration (`[hub]` in config.toml).
@@ -1424,7 +1416,6 @@ impl Default for Config {
             paths: PathsConfig::default(),
             cli: CliConfig::default(),
             models: ModelsConfig::default(),
-            relay: RelayConfig::default(),
             remote: RemoteConfig::default(),
             hub: HubConfig::default(),
             worktree_pool: WorktreePoolConfig::default(),
@@ -9033,8 +9024,6 @@ agent_type = "cursor"
             email_domain = "example.com"
             command = "/opt/bin/grow-identity"
             [repo_changes_dedup]
-            enabled = false
-            [relay]
             enabled = false
             [remote]
             secret = "value"

@@ -689,7 +689,6 @@ impl AgentView {
                 // Build filtered entries for count and non-selectable indices.
                 let filtered = crate::views::modal::filter_palette_entries(
                     state.query(),
-                    self.sharing_enabled,
                     self.prompt.slash_controller.screen_mode(),
                 );
                 let non_sel: Vec<bool> = filtered
@@ -878,13 +877,11 @@ impl AgentView {
                     }
                     PickerOutcome::QueryChanged => {
                         // Re-filter entries based on updated query.
-                        let sharing_enabled = self.sharing_enabled;
                         if let Some(ActiveModal::CommandPalette { entries, state, .. }) =
                             self.active_modal.as_mut()
                         {
                             *entries = crate::views::modal::filter_palette_entries(
                                 state.query(),
-                                sharing_enabled,
                                 self.prompt.slash_controller.screen_mode(),
                             );
                             state.selected = state.selected.min(entries.len().saturating_sub(1));
@@ -1664,7 +1661,6 @@ impl AgentView {
                 // Command palette: ModalWindow chrome + picker content.
                 let filtered = modal::filter_palette_entries(
                     state.query(),
-                    self.sharing_enabled,
                     self.prompt.slash_controller.screen_mode(),
                 );
                 let non_sel: Vec<bool> = filtered
@@ -2669,7 +2665,6 @@ mod command_palette_vim_input_tests {
     fn open_command_palette(agent: &mut AgentView) {
         agent.active_modal = Some(ActiveModal::CommandPalette {
             entries: crate::views::modal::default_palette_entries(
-                agent.sharing_enabled,
                 agent.prompt.slash_controller.screen_mode(),
             ),
             state: PickerState::input_active(),
@@ -2701,10 +2696,7 @@ mod command_palette_vim_input_tests {
             .set_screen_mode(crate::app::ScreenMode::Minimal);
         agent.prompt.set_text("keep this draft");
         agent.active_modal = Some(ActiveModal::CommandPalette {
-            entries: crate::views::modal::default_palette_entries(
-                agent.sharing_enabled,
-                crate::app::ScreenMode::Minimal,
-            ),
+            entries: crate::views::modal::default_palette_entries(crate::app::ScreenMode::Minimal),
             state: {
                 let mut state = PickerState::input_active();
                 // Contiguous substring of the label ("Edit Prompt in External Editor").

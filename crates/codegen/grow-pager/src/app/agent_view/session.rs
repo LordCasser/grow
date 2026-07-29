@@ -289,7 +289,6 @@ impl AgentView {
             active_subagent: None,
             is_subagent_view: false,
             hit_subagent_frame_close: Default::default(),
-            sharing_enabled: false,
             scheduler_background_loops: None,
             input_log: crate::input_log::InputRingBuffer::new(),
             esc_pressed_at: None,
@@ -864,18 +863,6 @@ impl AgentView {
             textarea_changed: delta.textarea_changed,
         });
     }
-    /// Set the sharing-enabled flag on this view and propagate it to the
-    /// slash-command registry so the `/share` entry stays hidden/visible in
-    /// lockstep with `AgentView::sharing_enabled`. Use this instead of
-    /// mutating `sharing_enabled` directly when a new agent is created or a
-    /// session is loaded, so the field and registry can't drift.
-    pub fn set_sharing_enabled(&mut self, enabled: bool) {
-        self.sharing_enabled = enabled;
-        self.prompt
-            .slash_controller
-            .registry_mut()
-            .set_share_visible(enabled);
-    }
     /// Show or hide the `/dashboard` slash command in this agent's registry.
     /// Driven by the dashboard feature flag
     /// (`crate::views::dashboard::dashboard_enabled()`) at agent-creation
@@ -895,11 +882,9 @@ impl AgentView {
     /// One place for the app-scoped gates a new/adopted session inherits so the session-creation sites cannot drift.
     pub(crate) fn apply_app_scoped_gates(
         &mut self,
-        sharing_enabled: bool,
         screen_mode: crate::app::ScreenMode,
         announcements: &[grow_announcements::Announcement],
     ) {
-        self.set_sharing_enabled(sharing_enabled);
         self.prompt.set_screen_mode(screen_mode);
         self.set_dashboard_visible(crate::views::dashboard::dashboard_enabled());
         self.set_has_session_announcements(crate::views::announcements::has_session_announcements(

@@ -778,15 +778,21 @@ fn dispatch_fork_stashes_directive_in_pending_first_prompt() {
 }
 
 #[test]
-fn dispatch_fork_inherits_appearance_sharing_and_plugin_visibility() {
+fn dispatch_fork_inherits_appearance_and_plugin_visibility() {
     let mut app = fork_test_app();
     // Tweak app-level state so we can verify the sweep applied it.
     app.appearance.prompt.compact = true;
-    app.sharing_enabled = false;
     app.appearance.disable_plugins = true;
     dispatch(Action::Fork(fork_args(Some(false), None)), &mut app);
     let new_agent = app.agents.get(&AgentId(1)).unwrap();
-    assert!(!new_agent.sharing_enabled);
+    assert!(
+        new_agent
+            .prompt
+            .slash_controller
+            .registry()
+            .get("share")
+            .is_some()
+    );
     assert!(
         new_agent
             .prompt

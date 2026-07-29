@@ -1339,9 +1339,6 @@ pub struct AgentView {
     pub is_subagent_view: bool,
     /// Hit area for the [✗] close button in the subagent frame title bar.
     pub hit_subagent_frame_close: HitArea,
-    /// Whether the `/share` slash command is available (mirrors
-    /// `AppView::sharing_enabled`). Used to gate palette entries.
-    pub sharing_enabled: bool,
     /// Whether THIS session's scheduled fires run as detached background
     /// subagents, as resolved by the shell when the session's actor spawned and
     /// delivered on the `session/new` / `session/load` response. `/loop` reads

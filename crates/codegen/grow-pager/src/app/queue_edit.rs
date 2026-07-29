@@ -1322,7 +1322,6 @@ mod tests {
         agent.prompt_mode = editing_lone_local();
         agent.active_modal = Some(ActiveModal::CommandPalette {
             entries: crate::views::modal::default_palette_entries(
-                agent.sharing_enabled,
                 agent.prompt.slash_controller.screen_mode(),
             ),
             state: crate::views::picker::PickerState::input_active(),

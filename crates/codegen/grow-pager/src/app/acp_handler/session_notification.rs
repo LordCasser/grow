@@ -397,7 +397,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             let mut child_view = AgentView::new(child_session, child_scrollback);
             child_view.set_input_mode(InputMode::Vim);
             child_view.active_pane = crate::views::agent::ActivePane::Scrollback;
-            child_view.set_sharing_enabled(agent.sharing_enabled);
             let dashboard_visible = agent
                 .prompt
                 .slash_controller

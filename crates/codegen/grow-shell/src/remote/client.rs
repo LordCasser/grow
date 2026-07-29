@@ -1,19 +1,9 @@
 //! HTTP client for backend CRUD operations.
 use crate::auth::{ProviderAuth, ServiceAuthConfig};
-use crate::session::export::{ExportedMessage, ExportedMetadata, ExportedSession};
 use indexmap::IndexMap;
 use prod_mc_cli_chat_proxy_types::SubagentBundle;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::time::Duration;
-const GROW_CODE_BACKEND_URL: &str = "";
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const GROW_CODE_WEB_URL: &str = "";
-/// Build a share URL from a permission ID
-pub fn share_url(permission_id: &str) -> String {
-    let web_url =
-        std::env::var("GROW_CODE_WEB_URL").unwrap_or_else(|_| GROW_CODE_WEB_URL.to_string());
-    format!("{}/build/share/{}", web_url, permission_id)
-}
 fn add_cli_chat_proxy_headers_blocking(
     builder: reqwest::blocking::RequestBuilder,
     auth: &ProviderAuth,
@@ -209,34 +199,6 @@ async fn fetch_bundle_inner(
     .await?;
     Ok(FetchedBundle::Legacy(bundle))
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareResponse {
-    pub permission_id: String,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SaveDataRequest {
-    pub messages: Vec<ExportedMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpsertSessionRequest {
-    pub session: SessionUpdate,
-    pub agent_id: String,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionUpdate {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
-}
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
     #[error("Network error: {0}")]
@@ -247,219 +209,6 @@ pub enum BackendError {
     Serialization(#[from] serde_json::Error),
     #[error("Auth error: {0}")]
     Auth(String),
-}
-pub struct BackendClient {
-    reqwest_client: reqwest::Client,
-    client: reqwest_middleware::ClientWithMiddleware,
-    base_url: String,
-    pub(crate) auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
-}
-impl Default for BackendClient {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl BackendClient {
-    fn build_default_client() -> reqwest::Client {
-        reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(DEFAULT_TIMEOUT)
-            .build()
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "failed to build backend HTTP client; falling back to shared client");
-                crate::http::shared_client()
-            })
-    }
-    pub fn new() -> Self {
-        let reqwest_client = Self::build_default_client();
-        Self {
-            client: reqwest_middleware::ClientBuilder::new(reqwest_client.clone()).build(),
-            reqwest_client,
-            base_url: std::env::var("GROW_CODE_BACKEND_URL")
-                .unwrap_or_else(|_| GROW_CODE_BACKEND_URL.to_string()),
-            auth_manager: None,
-        }
-    }
-    pub fn with_base_url(base_url: impl Into<String>) -> Self {
-        let reqwest_client = Self::build_default_client();
-        Self {
-            client: reqwest_middleware::ClientBuilder::new(reqwest_client.clone()).build(),
-            reqwest_client,
-            base_url: base_url.into(),
-            auth_manager: None,
-        }
-    }
-    /// Attach a live `AuthManager` so every request resolves a fresh token
-    /// instead of requiring the caller to pass `&ProviderAuth`.
-    pub fn with_auth_manager(mut self, manager: std::sync::Arc<crate::auth::AuthManager>) -> Self {
-        let credentials: std::sync::Arc<dyn grow_auth::AuthCredentialProvider> =
-            std::sync::Arc::new(
-                crate::auth::credential_provider::ShellAuthCredentialProvider::new(
-                    manager.clone(),
-                    None,
-                    None,
-                ),
-            );
-        self.client = crate::http::with_auth_retry(self.reqwest_client.clone(), credentials);
-        self.auth_manager = Some(manager);
-        self
-    }
-    /// Resolve auth from the attached `AuthManager`.
-    async fn resolve_auth(&self) -> Result<ProviderAuth, BackendError> {
-        let manager = self
-            .auth_manager
-            .as_ref()
-            .ok_or_else(|| BackendError::Auth("No AuthManager configured".into()))?;
-        manager
-            .auth()
-            .await
-            .map_err(|e| BackendError::Auth(format!("{e}")))
-    }
-    pub fn base_url(&self) -> &str {
-        &self.base_url
-    }
-    /// Upload session and create share link.
-    ///
-    /// The session data (`save_session_data`) is sent inline to the backend.
-    /// If the backend responds with 413 (payload too large), the error is
-    /// logged as a warning and the share continues — the caller is expected
-    /// to have already uploaded the data to GCS via a signed URL as a
-    /// fallback.
-    pub async fn share_session(
-        &self,
-        session: &ExportedSession,
-        agent_id: &str,
-    ) -> Result<String, BackendError> {
-        self.upsert_session(&session.session_id, &session.metadata, agent_id)
-            .await?;
-        match self
-            .save_session_data(
-                &session.session_id,
-                &session.messages,
-                Some(&session.metadata),
-            )
-            .await
-        {
-            Ok(()) => {}
-            Err(BackendError::RequestFailed { status: 413, .. }) => {
-                tracing::warn!(
-                    session_id = %session.session_id,
-                    "Backend returned 413 for save_session_data; \
-                     session data should already be in GCS via signed URL"
-                );
-            }
-            Err(e) => return Err(e),
-        }
-        let share_response = self.create_share_link(&session.session_id).await?;
-        Ok(share_url(&share_response.permission_id))
-    }
-    /// Build auth + identity headers.
-    /// Must include X-Grow-Token-Auth so nginx auth subrequest routes to authenticate_grow_cli_token.
-    /// See: crates/codegen/grow-shell/src/agent/app.rs:run_headless
-    async fn auth_header_map(&self) -> Result<reqwest::header::HeaderMap, BackendError> {
-        use reqwest::header::{HeaderMap, HeaderValue};
-        let auth = self.resolve_auth().await?;
-        let mut headers = HeaderMap::new();
-        let required = |value: &str, name: &str| -> Result<HeaderValue, BackendError> {
-            HeaderValue::from_str(value)
-                .map_err(|e| BackendError::Auth(format!("invalid {name} header: {e}")))
-        };
-        headers.insert(
-            "X-Grow-Token-Auth",
-            required(
-                &ServiceAuthConfig::default().token_header,
-                "X-Grow-Token-Auth",
-            )?,
-        );
-        headers.insert("x-userid", required(&auth.user_id, "x-userid")?);
-        if let Some(email) = &auth.email
-            && let Ok(v) = HeaderValue::from_str(email)
-        {
-            headers.insert("x-email", v);
-        }
-        if let Ok(v) = HeaderValue::from_str(&crate::http::process_client_identifier()) {
-            headers.insert("x-grow-client-identifier", v);
-        }
-        headers.insert(
-            crate::http::CLIENT_MODE_HEADER,
-            HeaderValue::from_static(crate::http::process_client_mode()),
-        );
-        headers.insert(
-            "x-grow-client-version",
-            HeaderValue::from_static(grow_version::VERSION),
-        );
-        Ok(headers)
-    }
-    async fn send_with_auth(
-        &self,
-        builder: reqwest::RequestBuilder,
-    ) -> Result<reqwest::Response, BackendError> {
-        let headers = self.auth_header_map().await?;
-        let builder = builder.timeout(DEFAULT_TIMEOUT).headers(headers);
-        let request = builder.build()?;
-        self.client.execute(request).await.map_err(|e| match e {
-            reqwest_middleware::Error::Reqwest(e) => BackendError::Network(e),
-            reqwest_middleware::Error::Middleware(e) => BackendError::Auth(e.to_string()),
-        })
-    }
-    pub async fn upsert_session(
-        &self,
-        session_id: &str,
-        metadata: &ExportedMetadata,
-        agent_id: &str,
-    ) -> Result<(), BackendError> {
-        let url = format!("{}/sessions/{}", self.base_url, session_id);
-        let request = UpsertSessionRequest {
-            session: SessionUpdate {
-                title: metadata.title.clone(),
-                cwd: Some(metadata.cwd.clone()),
-                status: Some("active".to_string()),
-                metadata: serde_json::to_value(metadata).ok(),
-            },
-            agent_id: agent_id.to_string(),
-        };
-        let response = self
-            .send_with_auth(self.reqwest_client.put(&url).json(&request))
-            .await?;
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(BackendError::RequestFailed { status, body });
-        }
-        Ok(())
-    }
-    pub async fn save_session_data(
-        &self,
-        session_id: &str,
-        messages: &[ExportedMessage],
-        metadata: Option<&ExportedMetadata>,
-    ) -> Result<(), BackendError> {
-        let url = format!("{}/sessions/{}/data", self.base_url, session_id);
-        let request = SaveDataRequest {
-            messages: messages.to_vec(),
-            metadata: metadata.and_then(|m| serde_json::to_value(m).ok()),
-        };
-        let response = self
-            .send_with_auth(self.reqwest_client.post(&url).json(&request))
-            .await?;
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(BackendError::RequestFailed { status, body });
-        }
-        Ok(())
-    }
-    pub async fn create_share_link(&self, session_id: &str) -> Result<ShareResponse, BackendError> {
-        let url = format!("{}/sessions/{}/share", self.base_url, session_id);
-        let response = self.send_with_auth(self.reqwest_client.post(&url)).await?;
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(BackendError::RequestFailed { status, body });
-        }
-        let share_response: ShareResponse = response.json().await?;
-        Ok(share_response)
-    }
 }
 /// Outcome of a blocking settings fetch.
 #[derive(Debug)]
@@ -2005,40 +1754,6 @@ mod tests {
         }
         server.abort();
     }
-    /// `BackendClient::save_session_data` resolves auth from the attached
-    /// `AuthManager` and sends the token as `Bearer <key>` on the wire.
-    /// This path is currently used only by explicit session sharing.
-    #[tokio::test(flavor = "current_thread")]
-    async fn backend_client_resolves_auth_from_auth_manager() {
-        let captured_auth = Arc::new(Mutex::new(None::<String>));
-        let captured = captured_auth.clone();
-        let app = Router::new().route(
-            "/sessions/{id}/data",
-            axum::routing::post(move |headers: HeaderMap| async move {
-                *captured.lock().unwrap() = headers
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned);
-                StatusCode::OK
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let am = test_auth_manager();
-        let client = BackendClient::with_base_url(format!("http://{addr}")).with_auth_manager(am);
-        client
-            .save_session_data("test-session", &[], None)
-            .await
-            .unwrap();
-        let sent = captured_auth
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("server must receive Authorization header");
-        assert_eq!(sent, "Bearer token", "must use token from AuthManager");
-        server.abort();
-    }
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_bundle_propagates_legacy_error_after_fallback() {
         let (proxy_base_url, server) = start_dual_bundle_server(DualBundleServerState {
@@ -2057,27 +1772,5 @@ mod tests {
             BackendError::RequestFailed { status: 401, .. }
         ));
         server.abort();
-    }
-    /// Regression: reqwest .header() appends — duplicate
-    /// or overlapping headers cause Cloudflare to reject the request.
-    #[tokio::test(flavor = "current_thread")]
-    async fn auth_headers_do_not_collide_with_json() {
-        let client =
-            BackendClient::with_base_url("http://localhost").with_auth_manager(test_auth_manager());
-        let auth_headers = client.auth_header_map().await.unwrap();
-        assert!(
-            !auth_headers.contains_key("content-type"),
-            "content-type in auth map would overwrite .json()"
-        );
-        let request = reqwest::Client::new()
-            .put("http://localhost/sessions/test")
-            .json(&serde_json::json!({"test": true}))
-            .headers(auth_headers)
-            .build()
-            .unwrap();
-        for name in request.headers().keys() {
-            let count = request.headers().get_all(name).iter().count();
-            assert_eq!(count, 1, "duplicate header {name}");
-        }
     }
 }

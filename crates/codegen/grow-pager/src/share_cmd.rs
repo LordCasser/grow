@@ -1,6 +1,6 @@
 use anyhow::Result;
 use grow_shell::agent::config::Config as AgentConfig;
-use grow_shell::session::share::{ShareSessionRequest, ShareSessionResponse};
+use grow_shell::session::share::ShareSessionRequest;
 use tokio_util::sync::CancellationToken;
 
 use agent_client_protocol as acp;
@@ -43,9 +43,6 @@ pub async fn run(args: &ShareArgs, agent_config: &AgentConfig) -> Result<()> {
     })?;
     let ext_req = acp::ExtRequest::new("grow/share_session", params.into());
 
-    let ext_resp: acp::ExtResponse = acp_send(ext_req, &spawned.channel.tx).await?;
-    let response: ShareSessionResponse = serde_json::from_str(ext_resp.0.get())?;
-
-    println!("{}", response.share_url);
-    Ok(())
+    let _: acp::ExtResponse = acp_send(ext_req, &spawned.channel.tx).await?;
+    anyhow::bail!("Share service is not configured")
 }

@@ -23,7 +23,6 @@ fn test_actor(info: Info, storage: Arc<dyn StorageAdapter>) -> ActorGuard {
             storage,
             pending_notification: None,
             rx,
-            relay_sync: None,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
                     sampling_client,

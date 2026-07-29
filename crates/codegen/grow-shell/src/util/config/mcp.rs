@@ -22,7 +22,7 @@ pub use grow_config_types::{
     PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
 };
 // Relay-sync + MCP-config value types extracted; re-exported to keep paths stable.
-pub use grow_config_types::{McpConfig, RelaySyncConfig};
+pub use grow_config_types::McpConfig;
 // Worktree-pool config value type extracted; re-exported to keep paths stable.
 pub use grow_config_types::PoolConfig;
 

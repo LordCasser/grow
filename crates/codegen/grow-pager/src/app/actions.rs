@@ -2418,11 +2418,6 @@ pub enum TaskResult {
         agent_id: AgentId,
         result: Result<(), String>,
     },
-    /// Share session completed successfully.
-    ShareSessionComplete {
-        agent_id: AgentId,
-        share_url: String,
-    },
     /// Share session failed.
     ShareSessionFailed {
         agent_id: AgentId,

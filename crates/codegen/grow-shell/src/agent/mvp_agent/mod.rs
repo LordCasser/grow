@@ -357,7 +357,6 @@ pub(crate) fn build_prompt_response_meta(
 #[derive(serde::Serialize)]
 struct SettingsUpdateNotification {
     show_resolved_model: Option<bool>,
-    sharing_enabled: Option<bool>,
     privacy_notice_rollout: Option<bool>,
     privacy_banner_reshow_days: Option<u64>,
     session_picker_grouped: Option<bool>,
@@ -523,7 +522,6 @@ pub struct MvpAgent {
     pub(crate) config_watcher_path_tx: Option<
         tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>,
     >,
-    relay_sync_enabled: bool,
     /// Buffering configuration. LEADER-SAFE(init-once): set once per connection
     /// during initialize from client capabilities, read when spawning sessions.
     /// In leader mode, the last client to initialize overwrites previous settings
@@ -1510,7 +1508,6 @@ impl MvpAgent {
             let rs = cfg.remote_settings.as_ref();
             SettingsUpdateNotification {
                 show_resolved_model: rs.and_then(|s| s.show_resolved_model),
-                sharing_enabled: rs.and_then(|s| s.sharing_enabled),
                 privacy_notice_rollout: rs.and_then(|s| s.privacy_notice_rollout),
                 privacy_banner_reshow_days: rs
                     .and_then(|s| s.privacy_banner_reshow_days),

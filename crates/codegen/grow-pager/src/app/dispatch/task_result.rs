@@ -767,26 +767,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::SkillsToggleDone { agent_id, result } => {
             handle_skills_toggle_done(app, agent_id, result)
         }
-        TaskResult::ShareSessionComplete {
-            agent_id,
-            share_url,
-        } => {
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Session shared: {share_url}"
-                    )));
-            }
-            vec![]
-        }
         TaskResult::ShareSessionFailed { agent_id, error } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Couldn't share session: {error}"
-                    )));
+                    .push_block(crate::scrollback::block::RenderBlock::system(error));
             }
             vec![]
         }

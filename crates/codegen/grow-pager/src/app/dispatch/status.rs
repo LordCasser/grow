@@ -17,15 +17,11 @@ use crate::scrollback::block::RenderBlock;
 /// restore the stashed prompt. Future incoming permissions will be
 /// auto-approved in `handle_permission_request`.
 ///
-/// Share the current session via a public URL.
+/// Prepare the current session snapshot for a separately configured share service.
 ///
 /// Produces Effect::ShareSession which spawns an async ACP ext request.
-/// On completion, TaskResult::ShareSessionComplete shows the URL in scrollback.
+/// Until a service is configured, the request reports that state in scrollback.
 pub(super) fn dispatch_share_session(app: &mut AppView) -> Vec<Effect> {
-    if !app.sharing_enabled {
-        app.show_toast("Sharing is disabled");
-        return vec![];
-    }
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
