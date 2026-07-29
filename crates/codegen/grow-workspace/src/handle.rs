@@ -417,7 +417,7 @@ impl WorkspaceHandle {
         workspace_rewind_all_outcomes: bool,
     ) -> WorkspaceResult<Self> {
         let sessions = std::collections::HashMap::new();
-        let local_registry = xai_computer_hub_sdk::LocalRegistry::new();
+        let local_registry = xai_computer_hub_core::LocalRegistry::new();
         let capacity = if config.event_buffer_capacity == 0 {
             DEFAULT_EVENT_BUFFER_CAPACITY
         } else {
@@ -3501,7 +3501,7 @@ impl WorkspaceHandle {
             .session(session_id)
             .ok_or_else(|| WorkspaceError::SessionNotFound(session_id.to_string()))?;
         let toolset = session.toolset();
-        let registry = xai_computer_hub_sdk::LocalRegistry::new();
+        let registry = xai_computer_hub_core::LocalRegistry::new();
         for def in toolset.tool_definitions() {
             let tool_name = def.function.name.clone();
             let desc = xai_tool_types::ToolDescription::new(

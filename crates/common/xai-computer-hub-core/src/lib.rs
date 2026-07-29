@@ -10,6 +10,7 @@
 
 pub mod inner;
 pub mod local;
+pub mod local_registry;
 pub mod registry;
 pub mod remote;
 pub mod resolver;
@@ -17,6 +18,7 @@ pub mod transport;
 
 pub use inner::InnerDispatchForResolver;
 pub use local::{LOCAL_INVOKE_SCOPE, LocalTransport};
+pub use local_registry::{LocalRegistry, ModelOutputExtractor, extractor_for};
 pub use registry::{
     ConnectionCleanupReport, SessionCleanupReport, ToolRegistry, ToolSessionBindOutcome,
     ToolSessionUnbindOutcome,

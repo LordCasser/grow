@@ -43,10 +43,7 @@ pub mod oidc_provider;
 pub use auth::{AuthCredential, AuthIdentity, AuthProvider, PrincipalKey, SharedAuthProvider};
 pub use connection::{ConnKey, HubConnection, ReconnectEvent};
 pub use error::ClientError;
-pub use harness::{
-    CancelOnDrop, LocalRegistry, ModelOutputExtractor, SessionBindReport, ToolHarness,
-    ToolHarnessBuilder, extractor_for,
-};
+pub use harness::{CancelOnDrop, SessionBindReport, ToolHarness, ToolHarnessBuilder};
 pub use notification::HubNotification;
 pub use observability::ObservabilityBridge;
 pub use oidc_provider::{
@@ -57,6 +54,7 @@ pub use server::{
     ResolvedSessionHandlers, SessionHandlerResolver, SystemNotifyAck, ToolServer,
     ToolServerBuilder, ToolServerHandler, WeakToolServer,
 };
+pub use xai_computer_hub_core::{LocalRegistry, ModelOutputExtractor, extractor_for};
 // Re-exported so consumers that depend only on the SDK can recognize the
 // server's `workspace_unavailable` error without also pulling in the core crate.
 pub use xai_computer_hub_core::is_workspace_unavailable;

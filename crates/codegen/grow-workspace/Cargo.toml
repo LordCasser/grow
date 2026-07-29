@@ -75,6 +75,7 @@ grow-hooks = { path = "../grow-hooks" }
 xai-hunk-tracker = { path = "../xai-hunk-tracker" }
 # `metrics` enables process-local Prometheus counters used by the workspace.
 xai-computer-hub-sdk = { workspace = true, features = ["metrics"] }
+xai-computer-hub-core = { workspace = true }
 xai-computer-hub-mcp-adapter = { path = "../../common/xai-computer-hub-mcp-adapter" }
 grow-mcp = { path = "../grow-mcp" }
 xai-file-utils = { path = "../xai-file-utils" }

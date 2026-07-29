@@ -5195,7 +5195,7 @@ mod tests {
     /// into a `LocalRegistry` must preserve both entries (no silent overwrite).
     #[test]
     fn test_same_raw_name_different_servers_no_local_registry_collision() {
-        use xai_computer_hub_sdk::LocalRegistry;
+        use xai_computer_hub_core::LocalRegistry;
         use xai_tool_runtime::Tool;
 
         let mcp_state = Arc::new(Mutex::new(McpState::new(vec![])));

@@ -372,7 +372,7 @@ struct ToolEntry {
     >,
     /// Registers this tool into a `LocalRegistry` using the concrete type.
     /// Captured at `register::<T>()` time when T is known.
-    register_in_local: Box<dyn Fn(&xai_computer_hub_sdk::LocalRegistry) + Send + Sync>,
+    register_in_local: Box<dyn Fn(&xai_computer_hub_core::LocalRegistry) + Send + Sync>,
 }
 /// Per-reminder metadata stored in the builder.
 struct ReminderEntry {
@@ -428,7 +428,7 @@ pub struct FinalizedToolset {
     scheduler_cancel: Option<tokio_util::sync::CancellationToken>,
     /// Shared local registry for in-process dispatch.
     /// Contains only config-enabled tools. Can be shared with ToolHarness.
-    local_registry: xai_computer_hub_sdk::LocalRegistry,
+    local_registry: xai_computer_hub_core::LocalRegistry,
     /// Lock-free access to the template renderer for tool name/param resolution.
     /// Cloned into `ToolCallContext::extensions` on each `call()` so tools
     /// can resolve names without acquiring the `resources` mutex.
@@ -497,7 +497,7 @@ impl RequirementError {
 pub struct ToolRegistryBuilder {
     tools: HashMap<String, ToolEntry>,
     reminders: Vec<ReminderEntry>,
-    shared_local_registry: Option<xai_computer_hub_sdk::LocalRegistry>,
+    shared_local_registry: Option<xai_computer_hub_core::LocalRegistry>,
 }
 impl Default for ToolRegistryBuilder {
     fn default() -> Self {
@@ -591,7 +591,7 @@ impl ToolRegistryBuilder {
                     let typed = serde_json::from_value::<T::Args>(json)?;
                     Ok(typed.into())
                 }),
-                register_in_local: Box::new(|lr: &xai_computer_hub_sdk::LocalRegistry| {
+                register_in_local: Box::new(|lr: &xai_computer_hub_core::LocalRegistry| {
                     lr.register(T::default());
                 }),
             },
@@ -718,7 +718,7 @@ impl ToolRegistryBuilder {
         }
         b
     }
-    pub fn with_local_registry(mut self, registry: xai_computer_hub_sdk::LocalRegistry) -> Self {
+    pub fn with_local_registry(mut self, registry: xai_computer_hub_core::LocalRegistry) -> Self {
         self.shared_local_registry = Some(registry);
         self
     }
@@ -1211,7 +1211,7 @@ impl FinalizedToolset {
             )),
             resources_persistence: Arc::new(ResourcesPersistence::noop()),
             scheduler_cancel: None,
-            local_registry: xai_computer_hub_sdk::LocalRegistry::new(),
+            local_registry: xai_computer_hub_core::LocalRegistry::new(),
             renderer: Arc::new(TemplateRenderer::new(
                 std::collections::HashMap::new(),
                 std::collections::HashMap::new(),
@@ -1220,7 +1220,7 @@ impl FinalizedToolset {
             workspace_viewer_ctx: None,
         }
     }
-    pub fn local_registry(&self) -> &xai_computer_hub_sdk::LocalRegistry {
+    pub fn local_registry(&self) -> &xai_computer_hub_core::LocalRegistry {
         &self.local_registry
     }
     /// Get all tool definitions to send to the client.
