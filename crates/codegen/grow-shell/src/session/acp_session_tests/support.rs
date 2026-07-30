@@ -35,8 +35,7 @@ pub(crate) async fn test_grow_build_agent_with_todo() -> grow_agent::Agent {
     test_agent_with_tools(vec![ToolConfig::for_tool::<TodoWriteTool>()]).await
 }
 /// Agent with the real `enter_plan_mode` + `exit_plan_mode` tools registered so
-/// `prepare_tool_call` can parse a genuine `exit_plan_mode` call.
-/// `exit_plan_mode` only finalizes when `enter_plan_mode` is also present.
+/// `prepare_tool_call` can parse both control transitions.
 #[cfg(test)]
 pub(crate) async fn test_agent_with_plan_tools() -> grow_agent::Agent {
     use grow_tools::implementations::grow_build::enter_plan_mode::EnterPlanModeTool;
@@ -294,7 +293,7 @@ pub(crate) async fn create_test_actor_ex(
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
         turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         plan_mode: Arc::new(parking_lot::Mutex::new(
-            crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
+            crate::session::plan_mode::BehaviorController::new(std::path::PathBuf::from(
                 "/tmp/test-session",
             )),
         )),

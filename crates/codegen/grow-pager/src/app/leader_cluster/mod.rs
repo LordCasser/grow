@@ -137,8 +137,6 @@ impl ClusterClient {
     /// (that fn is event_loop-private; this mirrors its body).
     fn process_effects(&mut self, effs: Vec<super::actions::Effect>) {
         let flags = effects::SessionFlags {
-            plan_mode: self.app.plan_mode,
-            subagents: self.app.subagents,
             ask_user: self.app.ask_user,
             restore_code: self.app.restore_code,
             agent_override: self.app.agent_override.clone(),

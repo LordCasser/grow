@@ -107,7 +107,7 @@ async fn subagent_inherits_session_cli_overrides() {
     use grow_agent::config::{AgentDefinition, PermissionMode};
     let mut probe = AgentDefinition::general_purpose();
     probe.name = "session-override-probe".into();
-    probe.permission_mode = PermissionMode::Plan;
+    probe.permission_mode = PermissionMode::DontAsk;
     probe.disallowed_tools = vec!["write".into()];
     let mut config = crate::agent::config::Config::default();
     config.cli_agents = vec![probe];

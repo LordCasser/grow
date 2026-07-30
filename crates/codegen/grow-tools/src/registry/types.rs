@@ -1956,15 +1956,6 @@ fn explain_requirement_failure(
                 .with_expected("include Grow:exit_plan_mode")
                 .with_category("requirements")
         }
-        "Grow:exit_plan_mode" => {
-            RequirementError::new(
-                    fq_tool_id,
-                    "exit_plan_mode requires Grow:enter_plan_mode so plan mode can be entered before exiting",
-                )
-                .with_field_path("tools")
-                .with_expected("include Grow:enter_plan_mode")
-                .with_category("requirements")
-        }
         _ => {
             RequirementError::new(fq_tool_id, "unsatisfied requirements")
                 .with_category("requirements")
@@ -4043,9 +4034,9 @@ mod tests {
             "mixed file-toolset should be rejected: {errors:?}"
         );
     }
-    /// Empty-struct tool inputs produce schemas with explicit `properties: {}` and `required: []`
+    /// Plan control tools expose the input contract used by each transition.
     #[tokio::test]
-    async fn empty_struct_schema_has_properties_and_required() {
+    async fn plan_tool_schemas_match_transition_inputs() {
         let tmp = TempDir::new().unwrap();
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
@@ -4060,23 +4051,48 @@ mod tests {
             .finalize(config, ctx)
             .expect("finalize should succeed with plan mode tools");
         let defs = toolset.tool_definitions();
-        for tool_name in &["enter_plan_mode", "exit_plan_mode"] {
-            let def = defs
+        let enter = defs
+            .iter()
+            .find(|definition| definition.function.name == "enter_plan_mode")
+            .expect("enter_plan_mode definition not found");
+        assert_eq!(
+            enter.function.parameters.get("properties"),
+            Some(&serde_json::json!({}))
+        );
+        assert_eq!(
+            enter.function.parameters.get("required"),
+            Some(&serde_json::json!([]))
+        );
+
+        let exit = defs
+            .iter()
+            .find(|definition| definition.function.name == "exit_plan_mode")
+            .expect("exit_plan_mode definition not found");
+        assert!(exit.function.parameters["properties"]["plan"].is_object());
+        assert_eq!(
+            exit.function.parameters.get("required"),
+            Some(&serde_json::json!(["plan"]))
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_plan_finalizes_without_enter_plan() {
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(
+                ToolServerConfig {
+                    tools: vec![ToolConfig::for_tool::<grow_build::ExitPlanModeTool>()],
+                    behavior_preset: None,
+                },
+                test_session_context(&tmp),
+            )
+            .expect("ACP-selected Plan only requires ExitPlan");
+        assert!(
+            toolset
+                .tool_definitions()
                 .iter()
-                .find(|d| d.function.name == *tool_name)
-                .unwrap_or_else(|| panic!("{tool_name} definition not found"));
-            let params = &def.function.parameters;
-            assert_eq!(
-                params.get("properties"),
-                Some(&serde_json::json!({})),
-                "{tool_name}: schema must have `properties: {{}}`",
-            );
-            assert_eq!(
-                params.get("required"),
-                Some(&serde_json::json!([])),
-                "{tool_name}: schema must have `required: []`",
-            );
-        }
+                .any(|definition| definition.function.name == "exit_plan_mode")
+        );
     }
     /// End-to-end: construct a hashline ToolServerConfig with custom
     /// params + shared utilities, finalize, and verify the resulting

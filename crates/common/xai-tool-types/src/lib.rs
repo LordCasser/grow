@@ -11,9 +11,9 @@ pub use serde_lenient::{
     deserialize_lenient_bool, deserialize_lenient_option_bool, lenient_bool_from_json,
 };
 pub use task::{
-    BUILTIN_SUBAGENTS, BuiltinSubagent, EXPLORE_PROMPT, EXPLORE_SUBAGENT, GENERAL_PURPOSE_PROMPT,
-    GENERAL_PURPOSE_SUBAGENT, KillTaskOutput, KillTaskResult, KillTaskToolInput,
-    KillTaskToolNaming, MAX_MULTI_WAIT_IDS, MultiTaskOutputResult, PLAN_PROMPT, PLAN_SUBAGENT,
+    BUILTIN_SUBAGENTS, BehaviorId, BuiltinSubagent, EXPLORE_PROMPT, EXPLORE_SUBAGENT,
+    GENERAL_PURPOSE_PROMPT, GENERAL_PURPOSE_SUBAGENT, KillTaskOutput, KillTaskResult,
+    KillTaskToolInput, KillTaskToolNaming, MAX_MULTI_WAIT_IDS, MultiTaskOutputResult,
     SubagentCapabilityMode, SubagentCompletedOutput, SubagentDescriptor, SubagentIsolationMode,
     SubagentToolNaming, TaskOutputOutput, TaskOutputResult, TaskOutputToolInput,
     TaskOutputToolNaming, TaskToolInput, TaskToolNaming, WaitMode, WaitTasksToolInput,

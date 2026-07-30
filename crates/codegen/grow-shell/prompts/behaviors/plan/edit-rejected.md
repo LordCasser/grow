@@ -1,0 +1,1 @@
+Rejected: ordinary file editing is prohibited while Plan behavior is active. Continue investigating with other already-authorized tools, or submit the complete plan through `${{ tools.by_kind.exit_plan }}` using its `plan` argument.

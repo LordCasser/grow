@@ -3,13 +3,21 @@
 //! Markdown files under `prompts/` are the single source of truth. Rust embeds
 //! them directly so packaged binaries do not depend on runtime prompt files.
 
-pub(crate) const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../../prompts/default.md");
+pub(crate) const MANDATORY_CORE_PROMPT: &str =
+    include_str!("../../prompts/foundation/mandatory-core.md");
+pub(crate) const STANDARD_PROMPT: &str = include_str!("../../prompts/foundation/standard.md");
+pub(crate) const PRIMARY_AUDIENCE_PROMPT: &str = include_str!("../../prompts/audience/primary.md");
+pub(crate) const SUBAGENT_AUDIENCE_PROMPT: &str =
+    include_str!("../../prompts/audience/subagent.md");
+pub(crate) const RUNTIME_CONTEXT_PROMPT: &str = include_str!("../../prompts/runtime/context.md");
+#[cfg(test)]
+pub(crate) const DEFAULT_SYSTEM_PROMPT: &str = MANDATORY_CORE_PROMPT;
 pub(crate) const APPLY_PATCH_SYSTEM_PROMPT: &str = include_str!("../../prompts/apply_patch.md");
-pub(crate) const SUBAGENT_SYSTEM_PROMPT: &str = include_str!("../../prompts/subagent.md");
+#[cfg(test)]
+pub(crate) const SUBAGENT_SYSTEM_PROMPT: &str = SUBAGENT_AUDIENCE_PROMPT;
 
 /// The compact system prompt used after conversation compaction.
-pub const COMPACT_SYSTEM_PROMPT: &str = "You are an AI coding agent. You operate in a workspace with a provided codebase.\n\n\
-     Your main goal is to complete the user's request, denoted within the <user_query> tag.";
+pub const COMPACT_SYSTEM_PROMPT: &str = include_str!("../../prompts/compact.md");
 
 #[cfg(test)]
 mod tests {
@@ -151,8 +159,8 @@ mod tests {
     #[test]
     fn test_base_template_renders() {
         let prompt = render_base(&default_renderer(), &default_placeholders());
-        assert!(prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL));
-        assert!(prompt.contains("user_query"));
+        assert!(prompt.contains("<instruction_priority>"));
+        assert!(prompt.contains("<tool_calling>"));
     }
 
     #[test]
@@ -250,7 +258,7 @@ mod tests {
             "monitor section should describe streaming stdout as notifications"
         );
         assert!(
-            prompt.contains("Use the `monitor` tool"),
+            prompt.contains("use `monitor`"),
             "monitor section should resolve the Monitor tool name"
         );
     }
@@ -270,9 +278,10 @@ mod tests {
             !prompt.contains("For watch processes"),
             "monitor section should NOT render without Monitor tool"
         );
+        assert!(!prompt.contains("`monitor`"));
         assert!(
-            !prompt.contains("<background_tasks>"),
-            "background_tasks section is gated on the Monitor tool and is omitted without it"
+            prompt.contains("<background_tasks>"),
+            "background execution guidance remains available without Monitor"
         );
     }
 
@@ -282,22 +291,17 @@ mod tests {
     fn test_base_template_contains_required_sections() {
         let p = default_placeholders();
         let prompt = render_base(&default_renderer(), &p);
-        assert!(
-            prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL),
-            "Must contain agent identity"
-        );
-        assert!(
-            prompt.contains("user_query"),
-            "Must reference user_query tag"
-        );
+        assert!(prompt.contains("<instruction_priority>"));
+        assert!(prompt.contains("<action_safety>"));
+        assert!(prompt.contains("<tool_calling>"));
+        assert!(prompt.contains("<project_instructions_spec>"));
     }
 
     #[test]
     fn test_compact_prompt_matches_expected() {
         assert_eq!(
             COMPACT_SYSTEM_PROMPT,
-            "You are an AI coding agent. You operate in a workspace with a provided codebase.\n\n\
-             Your main goal is to complete the user's request, denoted within the <user_query> tag.",
+            include_str!("../../prompts/compact.md"),
         );
     }
 
@@ -684,8 +688,8 @@ mod tests {
 
     #[test]
     fn test_template_vars_are_always_guarded() {
-        assert_guards(DEFAULT_SYSTEM_PROMPT, "default.md");
-        assert_guards(SUBAGENT_SYSTEM_PROMPT, "subagent.md");
+        assert_guards(DEFAULT_SYSTEM_PROMPT, "foundation/mandatory-core.md");
+        assert_guards(SUBAGENT_SYSTEM_PROMPT, "audience/subagent.md");
         assert_guards(APPLY_PATCH_SYSTEM_PROMPT, "apply_patch.md");
     }
 
@@ -701,29 +705,19 @@ mod tests {
     // when `is_non_interactive=true` and remain when it's false.
 
     #[test]
-    fn interactive_renders_shell_prefix_tip_and_user_guide() {
-        // The `! <command>` shell-prefix tip was removed from the minimal
-        // prompt. The <user_guide> block still renders for interactive
-        // sessions only, so that's what we assert here.
+    fn interactive_renders_grow_client_context() {
         let mut p = default_placeholders();
         p["is_non_interactive"] = serde_json::json!(false);
         let prompt = render_base(&default_renderer(), &p);
         assert!(
-            prompt.contains("<user_guide>"),
-            "interactive prompt must keep the <user_guide> block"
+            prompt.contains("<grow_client>"),
+            "interactive prompt must keep the Grow client context"
         );
-        assert!(
-            prompt.contains("interactive CLI tool"),
-            "interactive prompt must declare interactive mode in the header"
-        );
-        assert!(
-            !prompt.contains("autonomous agent"),
-            "interactive prompt must NOT advertise non-interactive (autonomous) mode"
-        );
+        assert!(!prompt.contains("autonomous agent"));
     }
 
     #[test]
-    fn non_interactive_suppresses_shell_prefix_tip_and_user_guide() {
+    fn non_interactive_suppresses_grow_client_context() {
         let mut p = default_placeholders();
         p["is_non_interactive"] = serde_json::json!(true);
         let prompt = render_base(&default_renderer(), &p);
@@ -732,20 +726,11 @@ mod tests {
             "non-interactive prompt must suppress the shell-prefix tip"
         );
         assert!(
-            !prompt.contains("<user_guide>"),
-            "non-interactive prompt must suppress the <user_guide> block"
+            !prompt.contains("<grow_client>"),
+            "non-interactive prompt must suppress the Grow client block"
         );
-        assert!(
-            prompt.contains("autonomous agent"),
-            "non-interactive prompt must declare autonomous mode in the header"
-        );
-        assert!(
-            !prompt.contains("interactive CLI tool"),
-            "non-interactive prompt must NOT claim to be the interactive CLI"
-        );
-        // Sanity: rest of the template still renders.
-        assert!(prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL));
-        assert!(prompt.contains("user_query"));
+        assert!(!prompt.contains("autonomous agent"));
+        assert!(prompt.contains("<instruction_priority>"));
     }
 
     #[test]

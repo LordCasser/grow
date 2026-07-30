@@ -1210,7 +1210,6 @@ pub struct AgentView {
     /// Active plan approval view (from `exit_plan_mode` ext_method). When `Some`,
     /// the prompt area shows the plan approval overlay and input is modal.
     pub(crate) plan_approval_view: Option<PlanApprovalViewState>,
-    pub(crate) latest_inline_plan_content: Option<String>,
     pub(crate) plan_comments: Vec<PlanComment>,
     /// Monotonic counter for casual plan comment IDs.
     pub(crate) plan_next_comment_id: u64,

@@ -381,8 +381,7 @@ mod tests {
         assert!(ids.contains(&"GrowHashline:hashline_grep"));
     }
 
-    /// Plan/explore omit `search_replace` by contract ("no Write/Edit/
-    /// MultiEdit"); the hashline override must not hand it back as
+    /// Explore omits `search_replace` by contract; the hashline override must not hand it back as
     /// `hashline_edit`.
     #[test]
     fn file_toolset_override_never_grants_edit_to_read_only_toolsets() {
@@ -390,10 +389,7 @@ mod tests {
             .tool_configs(&HashlineSchemeConfig::default())
             .unwrap();
 
-        for mut def in [
-            grow_agent::config::AgentDefinition::plan(),
-            grow_agent::config::AgentDefinition::explore(),
-        ] {
+        for mut def in [grow_agent::config::AgentDefinition::explore()] {
             let name = def.name.clone();
             assert!(
                 !def.tool_config

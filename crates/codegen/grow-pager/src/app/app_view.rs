@@ -9233,7 +9233,7 @@ pub(crate) mod tests {
                 let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
                     session_id: "s".into(),
                     tool_call_id: "c".into(),
-                    plan_content: Some("p".into()),
+                    plan_content: "p".into(),
                 };
                 let stashed = crate::views::prompt_widget::StashedPrompt {
                     text: String::new(),
@@ -9555,7 +9555,7 @@ pub(crate) mod tests {
         let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
             session_id: "s".into(),
             tool_call_id: "c".into(),
-            plan_content: Some("p".into()),
+            plan_content: "p".into(),
         };
         let stashed = crate::views::prompt_widget::StashedPrompt {
             text: String::new(),
@@ -9793,7 +9793,7 @@ pub(crate) mod tests {
         let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
             session_id: "s".into(),
             tool_call_id: "c".into(),
-            plan_content: Some("# Plan\n- step one\n- step two".into()),
+            plan_content: "# Plan\n- step one\n- step two".into(),
         };
         let view = crate::views::plan_approval_view::PlanApprovalViewState::new(
             request,

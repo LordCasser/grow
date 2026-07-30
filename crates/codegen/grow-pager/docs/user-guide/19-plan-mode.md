@@ -1,6 +1,6 @@
 # Plan Mode
 
-Plan mode is a structured planning phase: the agent explores the codebase and designs an implementation approach before writing any code. Use it for tasks with genuine ambiguity about the right approach, where getting your input before coding prevents significant rework.
+Plan mode is a structured planning behavior: the agent investigates available facts and produces a decision-ready approach before implementation. Use it for work with genuine ambiguity, where getting your input first prevents significant rework.
 
 ---
 
@@ -8,12 +8,12 @@ Plan mode is a structured planning phase: the agent explores the codebase and de
 
 When plan mode is active, the agent:
 
-1. Reads and searches the codebase to understand existing patterns and architecture
-2. Designs an implementation approach and writes it to the plan file
+1. Investigates the available environment, constraints, and existing design
+2. Builds the complete plan in context
 3. May use `ask_user_question` to clarify specific questions
 4. Calls `exit_plan_mode` to present the plan for your approval
 
-Plan mode is read-only except for the plan file: plan-file edits (`plan.md` in the session directory) are auto-approved, and edits to any other file are rejected outright — the tool call fails with a short message naming the plan file as the only editable path. This holds in every permission mode, including always-approve. Separating planning from implementation lets you review and correct the approach before any code is written.
+Plan mode is a planning behavior, not a tool preset or a strict no-side-effect sandbox. Ordinary file-edit calls are rejected outright in every permission mode, including always-approve. Other tools already authorized for the Agent remain available for investigation and verification and continue through their normal permission flow. The completed plan is submitted through `exit_plan_mode` and stored as session-owned state before approval.
 
 ---
 
@@ -48,9 +48,11 @@ After a plan exists, run **`/view-plan`** (aliases `/show-plan`, `/plan-view`) t
 
 ---
 
-## The Plan File
+## The Plan Artifact
 
-The plan is written to `plan.md` inside the session directory (`~/.grow/sessions/<cwd>/<session-id>/plan.md`, where `<cwd>` is an encoded directory name, not the literal path).
+The complete plan is passed in the `plan` argument to `exit_plan_mode`. Before approval opens, Grow atomically persists it as a session-owned artifact at `plan.md` inside the session directory (`~/.grow/sessions/<cwd>/<session-id>/plan.md`, where `<cwd>` is an encoded directory name, not the literal path).
+
+This artifact belongs to the session control plane. It is not exposed as a model-editable workspace target and does not grant the Agent arbitrary file-write access.
 
 The plan file contains:
 
@@ -64,9 +66,9 @@ The plan file contains:
 
 ## Plan Approval
 
-When the agent finishes planning, it calls the `exit_plan_mode` tool. The tool reads the plan file from disk, and the TUI opens a scrollable preview of the plan with an action bar along the bottom.
+When the agent finishes planning, it calls `exit_plan_mode(plan=...)`. Grow validates that the submitted plan is non-empty, atomically persists it, and then opens a scrollable preview with an action bar along the bottom.
 
-If the agent exits without writing a plan (empty or missing `plan.md`), the same approval surface still opens with a clear empty-state message so you can approve and start implementing, request changes (send the agent back to planning), or quit. In minimal mode the empty notice is committed into scrollback and the controls strip header reads **No plan written yet**.
+An empty or whitespace-only plan is rejected and Plan remains active. If persistence fails, approval does not open and the Agent receives the failure so it can retry.
 
 ### Reviewing the Plan
 
@@ -106,7 +108,7 @@ The plan mode state machine has four states:
 | -------------- | -------------------------------------------------------------- |
 | `Inactive`     | Normal operating mode. No plan mode constraints.               |
 | `Pending`      | Client toggled plan mode ON, but no prompt has been sent yet.  |
-| `Active`       | Plan mode is active. Plan-file edits are auto-approved; edits to other files are rejected. |
+| `Active`       | Plan behavior is active. All ordinary file-edit calls are rejected. |
 | `ExitPending`  | User toggled plan mode OFF while a turn is in-flight.          |
 
 Transitions:
@@ -126,13 +128,13 @@ Plan mode state is persisted to disk and survives process restarts. Transient st
 
 ## Edits During Plan Mode
 
-During active plan mode, edits to the plan file are auto-approved without prompting, so the agent can iterate on the plan freely. Edits to **any other file are rejected** before they run — the agent receives a short message naming the plan file as the only editable path.
+During active Plan behavior, **all ordinary file-edit calls are rejected before permission evaluation**, including attempts to edit the session artifact path. The Agent revises the plan in context and submits the complete version through `exit_plan_mode`.
 
 This enforcement is independent of the permission mode:
 
 - **Always-approve (yolo) stays armed underneath plan mode.** Non-edit tools (bash commands, reads, MCP tools) still auto-run, but file edits are blocked until you approve exiting plan mode. Once the plan is approved, always-approve resumes for implementation.
 - Bash commands are not inspected for file writes — plan mode blocks the edit tools, not shell redirection.
-- Subagents are not covered by the parent session's plan-mode edit gate. Each subagent starts with a fresh plan-mode tracker (`Inactive`), so a `general-purpose` (or other write-capable) subagent can edit files while the parent is still in plan mode — and it inherits the parent's permission mode (including always-approve). Read-only types such as `explore` remain limited by their own toolset.
+- Behavior is selected independently for each subagent task. A parent in Plan does not change the child's role, tool allow/deny policy, or capability mode. Select `behavior: plan` for a child that must use the same Plan guidance and edit gate; otherwise its own resolved permissions apply.
 
 The status flag shows `plan` while plan mode is active. If always-approve is enabled underneath, its flag reappears when plan mode exits.
 

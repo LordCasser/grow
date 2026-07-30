@@ -9,7 +9,7 @@ use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::list_pane::ListItem;
-use crate::views::plan_approval_view::{PlanApprovalFocus, PlanComment, PlanReviewSource};
+use crate::views::plan_approval_view::{PlanApprovalFocus, PlanComment};
 use crate::views::prompt_widget::{EnterOutcome, PromptEvent};
 #[cfg(test)]
 use crossterm::event::KeyModifiers;
@@ -69,28 +69,18 @@ impl AgentView {
     fn inline_plan_content(&self) -> Option<&str> {
         self.plan_approval_view
             .as_ref()
-            .filter(|p| p.source == PlanReviewSource::Inline)
-            .and_then(|p| p.plan_content.as_deref())
+            .map(|p| p.plan_content.as_str())
             .filter(|s| !s.trim().is_empty())
     }
     /// Resolve the plan body for the line-viewer preview.
     ///
-    /// Prefers content carried on the approval request (inline plan-creation or
-    /// the shell-read file body), then falls back to the on-disk plan file.
-    /// Request body first keeps file-backed previews working when the path
-    /// resolution fails or the file disappears between intercept and open.
+    /// Prefers content carried on the approval request, then falls back to the
+    /// session artifact for previews outside the approval flow.
     pub(super) fn plan_body_for_preview(&self) -> Option<String> {
         if let Some(content) = self
             .plan_approval_view
             .as_ref()
-            .and_then(|p| p.plan_content.as_deref())
-            .filter(|s| !s.trim().is_empty())
-        {
-            return Some(content.to_owned());
-        }
-        if let Some(content) = self
-            .latest_inline_plan_content
-            .as_deref()
+            .map(|p| p.plan_content.as_str())
             .filter(|s| !s.trim().is_empty())
         {
             return Some(content.to_owned());
@@ -99,32 +89,17 @@ impl AgentView {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .filter(|s| !s.trim().is_empty())
     }
-    /// Open the plan preview when content exists, or when plan approval is
-    /// parked with an empty body (so the decision surface always pops).
+    /// Open the plan preview when content exists.
     pub(crate) fn show_plan_preview_if_available(&mut self) {
-        if self.plan_preview_available() || self.plan_approval_view.is_some() {
+        if self.plan_preview_available() {
             self.show_plan_preview();
         }
     }
     /// Show the plan in the line viewer overlay or a "no plan" toast.
-    ///
-    /// When plan approval is parked without a body, opens a placeholder
-    /// preview so the user always sees a decision surface (a/s/q) instead of
-    /// a dead "Waiting on plan approval" line with a no-op Tab:plan.
     pub fn show_plan_preview(&mut self) {
         let body = self.plan_body_for_preview();
-        let approval_empty = self
-            .plan_approval_view
-            .as_ref()
-            .is_some_and(|p| !p.has_plan);
         let Some(mut viewer) = (if let Some(content) = body {
             LineViewerState::open_markdown_content("plan.md", content, None)
-        } else if approval_empty {
-            LineViewerState::open_markdown_content(
-                "plan.md",
-                crate::views::plan_approval_view::EMPTY_PLAN_PLACEHOLDER.to_owned(),
-                None,
-            )
         } else if let Some(plan_path) = self.plan_file_path() {
             LineViewerState::open_markdown(&plan_path, None)
         } else {
@@ -134,11 +109,7 @@ impl AgentView {
             return;
         };
         viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
-        viewer.title_override = Some(if approval_empty {
-            "plan.md (empty)".to_string()
-        } else {
-            "plan.md".to_string()
-        });
+        viewer.title_override = Some("plan.md".to_string());
         viewer.fullscreen = true;
         {
             let plan = viewer.plan_mut();
@@ -193,7 +164,6 @@ impl AgentView {
             None
         };
         pav.send_approved();
-        self.latest_inline_plan_content = None;
         self.plan_next_comment_id = pav.next_comment_id;
         self.prompt.restore(pav.stashed_prompt);
         self.line_viewer = None;
@@ -220,7 +190,6 @@ impl AgentView {
         };
         pav.send_abandoned();
         self.plan_mode_pending = Some(false);
-        self.latest_inline_plan_content = None;
         self.plan_next_comment_id = pav.next_comment_id;
         self.prompt.restore(pav.stashed_prompt);
         self.line_viewer = None;
@@ -252,9 +221,6 @@ impl AgentView {
                 .push_block(crate::scrollback::RenderBlock::user_prompt(msg.to_string()));
         }
         pav.send_cancelled(to_send);
-        if pav.source == PlanReviewSource::Inline {
-            self.latest_inline_plan_content = None;
-        }
         self.plan_next_comment_id = pav.next_comment_id;
         self.prompt.restore(pav.stashed_prompt);
         self.line_viewer = None;

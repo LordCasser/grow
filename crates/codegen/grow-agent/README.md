@@ -97,9 +97,9 @@ You are a senior code reviewer. Analyze code and provide
 actionable feedback organized by severity.
 ```
 
-With `promptMode: extend` (the default), the body is appended to the
-base template which includes tool calling conventions, formatting
-rules, and user info. The author only writes persona-specific content.
+With `promptComposition: extend` (the default), the body is appended after
+the mandatory foundation, audience, and standard guidance. Runtime context is
+added last. The author only writes role-specific content.
 
 ### Full prompt override
 
@@ -107,7 +107,7 @@ rules, and user info. The author only writes persona-specific content.
 ---
 name: custom-agent
 description: Agent with full control over the system prompt
-promptMode: full
+promptComposition: full
 tools:
   - read_file
   - search_replace
@@ -131,9 +131,9 @@ Date: ${{ current_date }}
 </user_info>
 ```
 
-With `promptMode: full`, the body IS the complete system prompt,
-rendered through MiniJinja with custom `${{ }}`/`${% %}` delimiters
-(to avoid collisions with literal `{{ }}` in prose).
+With `promptComposition: full`, the body replaces the optional standard/role
+guidance and is rendered through MiniJinja. Mandatory foundation, audience,
+and runtime context remain in force.
 
 ### With completion requirement (orchestrated mode)
 
@@ -166,9 +166,10 @@ inheritance and owned servers, hooks, memory, completion requirements, and the
 first-user-message template.
 
 Top-level frontmatter keys use **camelCase**. The records nested below
-`toolConfig.tools` use the `grow-tools` wire names in **snake_case**. Declaring
-`toolConfig` replaces the built-in core tool list; `tools` and
-`disallowedTools` then filter the assembled result.
+`additionalTools` use the `grow-tools` wire names in **snake_case**. The
+`toolPreset` is resolved first, `additionalTools` are layered next, and `tools`
+plus `disallowedTools` later filter the assembled result. `subagents.allow`
+and `subagents.deny` independently control delegation targets.
 
 ### Harness and OpenCode compatibility
 
@@ -192,14 +193,13 @@ single source of truth and are embedded into the binary at compile time; no
 prompt files or generation step are required at runtime.
 
 ```
-promptMode: extend                     promptMode: full
-──────────────────                     ─────────────────
-1. Base template (MiniJinja)           1. Markdown body (MiniJinja, ${{ }}/${% %})
-   (tool conventions, formatting,      2. AGENTS.md section (if agentsMd: true)
-    user_info, background tasks)       3. Skills section
-2. Markdown body (appended raw)
-3. AGENTS.md section (if agentsMd: true)
-4. Skills section
+promptComposition: extend              promptComposition: full
+─────────────────────────              ────────────────────────
+1. Mandatory Core                      1. Mandatory Core
+2. Audience                            2. Audience
+3. Standard guidance                   3. Markdown role body
+4. Markdown role body                  4. Runtime Context
+5. Runtime Context
 ```
 
 ### Template Variables (full mode)

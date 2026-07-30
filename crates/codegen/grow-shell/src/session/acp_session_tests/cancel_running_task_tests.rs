@@ -204,7 +204,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 )),
                 active_skill: parking_lot::Mutex::new(None),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
-                    crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
+                    crate::session::plan_mode::BehaviorController::new(std::path::PathBuf::from(
                         "/tmp/test-session",
                     )),
                 )),
@@ -644,7 +644,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 )),
                 active_skill: parking_lot::Mutex::new(None),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
-                    crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
+                    crate::session::plan_mode::BehaviorController::new(std::path::PathBuf::from(
                         "/tmp/test-session",
                     )),
                 )),
@@ -896,7 +896,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 )),
                 active_skill: parking_lot::Mutex::new(None),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
-                    crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
+                    crate::session::plan_mode::BehaviorController::new(std::path::PathBuf::from(
                         "/tmp/test-session",
                     )),
                 )),
@@ -2082,7 +2082,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 )),
                 active_skill: parking_lot::Mutex::new(None),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
-                    crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
+                    crate::session::plan_mode::BehaviorController::new(std::path::PathBuf::from(
                         "/tmp/test-session",
                     )),
                 )),

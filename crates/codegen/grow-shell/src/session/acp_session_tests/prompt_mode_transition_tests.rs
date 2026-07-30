@@ -64,9 +64,9 @@ fn cursor_filter_is_noop_for_non_cursor_tools() {
 /// Plan → Pending, idempotent, non-plan modes exit cleanly.
 #[test]
 fn prompt_mode_plan_drives_tracker_into_pending_when_inactive() {
-    use crate::session::plan_mode::{PlanModeState, PlanModeTracker};
+    use crate::session::plan_mode::{BehaviorController, PlanModeState};
     use std::path::PathBuf;
-    fn reconcile(tracker: &mut PlanModeTracker, mode: PromptMode) {
+    fn reconcile(tracker: &mut BehaviorController, mode: PromptMode) {
         match mode {
             PromptMode::Plan => {
                 tracker.enter_pending();
@@ -78,7 +78,7 @@ fn prompt_mode_plan_drives_tracker_into_pending_when_inactive() {
             }
         }
     }
-    let mut tracker = PlanModeTracker::new(PathBuf::from("/tmp/test"));
+    let mut tracker = BehaviorController::new(PathBuf::from("/tmp/test"));
     assert_eq!(tracker.state(), PlanModeState::Inactive);
     reconcile(&mut tracker, PromptMode::Plan);
     assert_eq!(tracker.state(), PlanModeState::Pending);

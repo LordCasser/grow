@@ -22,4 +22,4 @@
 //!   Grep       → `${{ tools.by_kind.search }}`
 //!   Bash       → `${{ tools.by_kind.execute }}`
 
-pub use xai_tool_types::{EXPLORE_PROMPT, GENERAL_PURPOSE_PROMPT, PLAN_PROMPT};
+pub use xai_tool_types::{EXPLORE_PROMPT, GENERAL_PURPOSE_PROMPT};

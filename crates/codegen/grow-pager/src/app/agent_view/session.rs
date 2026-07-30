@@ -261,7 +261,6 @@ impl AgentView {
             permission_stashed_prompt: None,
             permission_stashed_pane: None,
             plan_approval_view: None,
-            latest_inline_plan_content: None,
             plan_comments: Vec::new(),
             plan_next_comment_id: 0,
             casual_commenting_range: None,

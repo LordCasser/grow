@@ -265,7 +265,7 @@
         let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
             session_id: "sess-A".into(),
             tool_call_id: "tc-persist".into(),
-            plan_content: Some("# Plan\nDo stuff".into()),
+            plan_content: "# Plan\nDo stuff".into(),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         handle(
@@ -301,18 +301,11 @@
     #[test]
     fn reopen_viewer_restores_approval_buttons() {
         let mut app = make_app_with_agent("sess-A");
-        // Seed a CreatePlan tool so the source is Inline (plan content
-        // is carried in the ext_method params, not read from disk).
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            seed_pending_tool(agent, "tc-reopen", "CreatePlan");
-        }
-
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
             session_id: "sess-A".into(),
             tool_call_id: "tc-reopen".into(),
-            plan_content: Some("# Plan\nStep 1".into()),
+            plan_content: "# Plan\nStep 1".into(),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         handle(
@@ -328,7 +321,7 @@
         agent.cancel_line_viewer();
         assert!(agent.line_viewer.is_none());
 
-        // Reopen plan preview — inline content is in plan_approval_view.plan_content.
+        // Reopen plan preview from the submitted approval content.
         agent.show_plan_preview();
 
         assert!(agent.line_viewer.is_some(), "viewer should reopen");
@@ -341,16 +334,11 @@
     #[test]
     fn approve_after_reopen_does_not_overwrite_prompt() {
         let mut app = make_app_with_agent("sess-A");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            seed_pending_tool(agent, "tc-prompt", "CreatePlan");
-        }
-
         let (tx, rx) = tokio::sync::oneshot::channel();
         let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
             session_id: "sess-A".into(),
             tool_call_id: "tc-prompt".into(),
-            plan_content: Some("# Plan\nDo things".into()),
+            plan_content: "# Plan\nDo things".into(),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         handle(
@@ -384,4 +372,3 @@
         let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).unwrap();
         assert_eq!(parsed["outcome"], "approved");
     }
-

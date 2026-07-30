@@ -11,7 +11,7 @@
 pub struct ExitPlanModeExtRequest {
     pub session_id: String,
     pub tool_call_id: String,
-    pub plan_content: Option<String>,
+    pub plan_content: String,
 }
 
 /// ACP `ext_method` response payload (client/pager returns to shell coordinator).
@@ -33,7 +33,7 @@ mod tests {
         let req = ExitPlanModeExtRequest {
             session_id: "sess-1".into(),
             tool_call_id: "tc-1".into(),
-            plan_content: Some("# Plan".into()),
+            plan_content: "# Plan".into(),
         };
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("sessionId").is_some());
@@ -50,28 +50,22 @@ mod tests {
         let req = ExitPlanModeExtRequest {
             session_id: "sess-1".into(),
             tool_call_id: "tc-1".into(),
-            plan_content: Some("# Plan\n\n## Step 1\nDo something".into()),
+            plan_content: "# Plan\n\n## Step 1\nDo something".into(),
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: ExitPlanModeExtRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.session_id, "sess-1");
         assert_eq!(back.tool_call_id, "tc-1");
-        assert_eq!(
-            back.plan_content.as_deref(),
-            Some("# Plan\n\n## Step 1\nDo something")
-        );
+        assert_eq!(back.plan_content, "# Plan\n\n## Step 1\nDo something");
     }
 
     #[test]
-    fn ext_request_round_trips_no_plan() {
-        let req = ExitPlanModeExtRequest {
-            session_id: "sess-2".into(),
-            tool_call_id: "tc-2".into(),
-            plan_content: None,
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        let back: ExitPlanModeExtRequest = serde_json::from_str(&json).unwrap();
-        assert!(back.plan_content.is_none());
+    fn ext_request_requires_plan_content() {
+        let json = serde_json::json!({
+            "sessionId": "sess-2",
+            "toolCallId": "tc-2"
+        });
+        assert!(serde_json::from_value::<ExitPlanModeExtRequest>(json).is_err());
     }
 
     #[test]

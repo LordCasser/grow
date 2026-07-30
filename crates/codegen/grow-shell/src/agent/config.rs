@@ -40,7 +40,7 @@ pub enum AgentMode {
     Generic,
 }
 /// Default agent type when the server or user config doesn't specify one.
-pub const DEFAULT_AGENT_TYPE: &str = "grow-build-plan";
+pub const DEFAULT_AGENT_TYPE: &str = "grow";
 /// Serde default for `ModelInfo.agent_type` and `ModelEntryConfig.agent_type`.
 pub fn default_agent_type() -> String {
     DEFAULT_AGENT_TYPE.to_owned()
@@ -3156,7 +3156,7 @@ pub struct ModelInfo {
     /// concise tool output, concise user message prefix, reduced toolset).
     pub use_concise: bool,
     /// The type of agent configuration to use for this model.
-    /// Always has a value; defaults to `"grow-build-plan"` when the server
+    /// Always has a value; defaults to `"grow"` when the server
     /// or user config doesn't specify one.
     #[serde(default = "default_agent_type")]
     pub agent_type: String,
@@ -4265,7 +4265,7 @@ reasoning_effort = "low"
     }
     #[test]
     fn subagent_permission_mode_precedence() {
-        let own = PermissionMode::Plan;
+        let own = PermissionMode::DontAsk;
         let cases = [
             (
                 PermissionMode::BypassPermissions,
@@ -4275,7 +4275,6 @@ reasoning_effort = "low"
             (PermissionMode::Auto, PermissionMode::Auto),
             (PermissionMode::Default, own.clone()),
             (PermissionMode::DontAsk, own.clone()),
-            (PermissionMode::Plan, own.clone()),
         ];
         for (parent, expected) in cases {
             assert_eq!(
@@ -8417,7 +8416,7 @@ reverify_after = 6
         let toml_str = r#"
 [goal]
 enabled = true
-planner_model = { model = "grow-build", agent_type = "grow-build-plan" }
+planner_model = { model = "grow-build", agent_type = "grow" }
 
 [goal.strategist_model]
 model = "grow-composer-2.5-fast"
@@ -8425,7 +8424,7 @@ agent_type = "cursor"
 
 [[goal.skeptic_models]]
 model = "grow-build"
-agent_type = "grow-build-plan"
+agent_type = "grow"
 
 [[goal.skeptic_models]]
 model = "grow-composer-2.5-fast"
@@ -8453,7 +8452,7 @@ agent_type = "cursor"
 [goal]
 enabled = true
 classifier_max_runs = 6
-planner_model = { agent_type = "grow-build-plan" }
+planner_model = { agent_type = "grow" }
 "#;
         let raw: toml::Value = toml::from_str(toml_str).unwrap();
         let cfg = Config::new_from_toml_cfg(&raw)
@@ -8469,7 +8468,7 @@ enabled = true
 
 [[goal.skeptic_models]]
 model = "grow-build"
-agent_type = "grow-build-plan"
+agent_type = "grow"
 
 [[goal.skeptic_models]]
 agent_type = "cursor"
@@ -8499,12 +8498,12 @@ classifier_enabled = true
 planner_enabled = true
 verifier_count = 3
 classifier_max_runs = 6
-planner_model = { model = "grow-build", agent_type = "grow-build-plan" }
+planner_model = { model = "grow-build", agent_type = "grow" }
 strategist_model = { model = "grow-composer-2.5-fast", agent_type = "cursor" }
 
 [[goal.skeptic_models]]
 model = "grow-build"
-agent_type = "grow-build-plan"
+agent_type = "grow"
 
 [[goal.skeptic_models]]
 model = "grow-composer-2.5-fast"
@@ -8515,7 +8514,7 @@ agent_type = "cursor"
         let cfg = Config::new_from_toml_cfg(&raw).expect("[goal] config must parse");
         let grow_build = crate::util::config::GoalRoleModel {
             model: "grow-build".into(),
-            agent_type: "grow-build-plan".into(),
+            agent_type: "grow".into(),
         };
         let composer = crate::util::config::GoalRoleModel {
             model: "grow-composer-2.5-fast".into(),

@@ -7,10 +7,11 @@
 //! Rendering is done by `ToolBridge::render_prompt()` which delegates to
 //! `TemplateRenderer` in `grow-tools`. This struct does NOT own a
 //! render engine — it provides placeholders and discovered sections.
-use crate::config::PromptMode;
+use crate::config::PromptComposition;
 use crate::prompt::agents_md::{self, AgentConfigFile};
 use crate::prompt::template::{
-    APPLY_PATCH_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT,
+    APPLY_PATCH_SYSTEM_PROMPT, MANDATORY_CORE_PROMPT, PRIMARY_AUDIENCE_PROMPT,
+    RUNTIME_CONTEXT_PROMPT, STANDARD_PROMPT, SUBAGENT_AUDIENCE_PROMPT,
 };
 use serde::de;
 use serde::{Deserialize, Serialize};
@@ -87,13 +88,14 @@ pub struct PromptContext {
     /// Schema version for forward-compatible persistence.
     pub version: u32,
     /// Which prompt mode produced this context.
-    pub prompt_mode: PromptMode,
+    pub prompt_composition: PromptComposition,
     /// Whether this is a primary (parent) or subagent (child) session.
     /// Controls base template choice and catalog section rendering.
     #[serde(default)]
     pub audience: PromptAudience,
-    /// Custom body: appended after base template (Extend) or the entire
-    /// prompt (Full). `None` = base template only.
+    /// Agent role body: appended after standard guidance in Extend mode, or
+    /// used as the complete role layer in Full mode. Mandatory foundation,
+    /// audience, and runtime layers always remain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_body: Option<String>,
     /// Which base template to use for `Extend` mode.
@@ -176,7 +178,7 @@ impl Default for PromptContext {
     fn default() -> Self {
         Self {
             version: 1,
-            prompt_mode: PromptMode::Extend,
+            prompt_composition: PromptComposition::Extend,
             audience: PromptAudience::default(),
             prompt_body: None,
             system_prompt: TemplateOverride::None,
@@ -271,28 +273,28 @@ impl PromptContext {
     pub fn render_with_renderer(&self, renderer: &TemplateRenderer) -> Option<String> {
         let placeholders = self.placeholders();
         let render = |template: &str| renderer.render_with_extra(template, &placeholders).ok();
-        let prompt = match self.prompt_mode {
-            PromptMode::Extend => {
-                let base = match &self.system_prompt {
-                    TemplateOverride::Custom(template) => template.as_str(),
-                    TemplateOverride::Codex => APPLY_PATCH_SYSTEM_PROMPT,
-                    TemplateOverride::None => {
-                        if self.audience == PromptAudience::Subagent {
-                            SUBAGENT_SYSTEM_PROMPT
-                        } else {
-                            DEFAULT_SYSTEM_PROMPT
-                        }
-                    }
-                };
-                let mut prompt = render(base)?;
-                if let Some(body) = &self.prompt_body {
-                    prompt.push_str("\n\n");
-                    prompt.push_str(&render(body).unwrap_or_else(|| body.clone()));
-                }
-                prompt
-            }
-            PromptMode::Full => render(self.prompt_body.as_deref().unwrap_or(""))?,
-        };
+        let mut sections = vec![render(MANDATORY_CORE_PROMPT)?];
+        sections.push(render(match self.audience {
+            PromptAudience::Primary => PRIMARY_AUDIENCE_PROMPT,
+            PromptAudience::Subagent => SUBAGENT_AUDIENCE_PROMPT,
+        })?);
+        if self.prompt_composition == PromptComposition::Extend {
+            let standard = match &self.system_prompt {
+                TemplateOverride::Custom(template) => template.as_str(),
+                TemplateOverride::Codex => APPLY_PATCH_SYSTEM_PROMPT,
+                TemplateOverride::None => STANDARD_PROMPT,
+            };
+            sections.push(render(standard)?);
+        }
+        if let Some(body) = &self.prompt_body {
+            sections.push(render(body).unwrap_or_else(|| body.clone()));
+        }
+        sections.push(render(RUNTIME_CONTEXT_PROMPT)?);
+        let prompt = sections
+            .into_iter()
+            .filter(|section| !section.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         Some(prompt)
     }
 }
@@ -304,7 +306,7 @@ mod tests {
     fn test_context() -> PromptContext {
         PromptContext {
             version: 1,
-            prompt_mode: PromptMode::Extend,
+            prompt_composition: PromptComposition::Extend,
             audience: PromptAudience::Primary,
             prompt_body: None,
             system_prompt: TemplateOverride::None,
@@ -387,7 +389,7 @@ mod tests {
     fn test_prompt_context_legacy_system_prompt_field() {
         let legacy_json = r#"{
             "version": 1,
-            "prompt_mode": "extend",
+            "prompt_composition": "extend",
             "os_name": "linux",
             "shell_path": "/bin/bash",
             "working_directory": "/workspace",
@@ -405,7 +407,7 @@ mod tests {
     fn test_prompt_context_missing_system_prompt_field() {
         let json = r#"{
             "version": 1,
-            "prompt_mode": "extend",
+            "prompt_composition": "extend",
             "os_name": "linux",
             "shell_path": "/bin/bash",
             "working_directory": "/workspace",
@@ -433,7 +435,7 @@ mod tests {
     }
     #[test]
     fn test_missing_system_prompt_label_deserializes_to_default() {
-        let json = r#"{"version":1,"prompt_mode":"extend","agents_md_files":[],"build_timestamp_utc":"2025-06-15T12:00:00+00:00"}"#;
+        let json = r#"{"version":1,"prompt_composition":"extend","agents_md_files":[],"build_timestamp_utc":"2025-06-15T12:00:00+00:00"}"#;
         let ctx: PromptContext = serde_json::from_str(json).unwrap();
         assert_eq!(ctx.system_prompt_label, DEFAULT_SYSTEM_PROMPT_LABEL);
     }
@@ -499,7 +501,7 @@ mod tests {
     fn test_user_info_backward_compat_deserialization() {
         let json = r#"{
             "version": 1,
-            "prompt_mode": "extend",
+            "prompt_composition": "extend",
             "build_timestamp_utc": "2025-01-01T00:00:00Z",
             "agents_md_files": []
         }"#;
@@ -520,7 +522,7 @@ mod tests {
     fn test_default_context() {
         let ctx = PromptContext::default();
         assert_eq!(ctx.version, 1);
-        assert!(matches!(ctx.prompt_mode, PromptMode::Extend));
+        assert!(matches!(ctx.prompt_composition, PromptComposition::Extend));
         assert!(ctx.prompt_body.is_none());
         assert!(ctx.agents_md_files.is_empty());
     }
@@ -586,7 +588,7 @@ mod tests {
         use crate::prompt::subagent_prompts;
         PromptContext {
             version: 1,
-            prompt_mode: PromptMode::Extend,
+            prompt_composition: PromptComposition::Extend,
             audience: PromptAudience::Subagent,
             prompt_body: Some(subagent_prompts::GENERAL_PURPOSE_PROMPT.to_string()),
             system_prompt: TemplateOverride::None,
@@ -667,7 +669,7 @@ mod tests {
     fn child_prompt_uses_extend_mode() {
         let ctx = child_general_purpose_context();
         assert!(
-            matches!(ctx.prompt_mode, PromptMode::Extend),
+            matches!(ctx.prompt_composition, PromptComposition::Extend),
             "CURRENT: child uses Extend mode (inherits full base template)"
         );
     }
@@ -754,7 +756,7 @@ mod tests {
     fn child_prompt_context_is_complete() {
         let ctx = child_general_purpose_context();
         assert!(ctx.prompt_body.is_some());
-        assert!(matches!(ctx.prompt_mode, PromptMode::Extend));
+        assert!(matches!(ctx.prompt_composition, PromptComposition::Extend));
         assert_eq!(ctx.audience, super::PromptAudience::Subagent);
         assert!(ctx.memory_enabled);
         assert!(ctx.system_prompt == TemplateOverride::None);
@@ -773,8 +775,14 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        env.add_template("prompt", crate::prompt::template::SUBAGENT_SYSTEM_PROMPT)
-            .unwrap();
+        let prompt = format!(
+            "{}\n\n{}\n\n{}\n\n{}",
+            crate::prompt::template::MANDATORY_CORE_PROMPT,
+            crate::prompt::template::SUBAGENT_AUDIENCE_PROMPT,
+            crate::prompt::template::STANDARD_PROMPT,
+            crate::prompt::template::RUNTIME_CONTEXT_PROMPT,
+        );
+        env.add_template_owned("prompt", prompt).unwrap();
         env.get_template("prompt").unwrap().render(ctx).unwrap()
     }
     fn base_template_ctx() -> minijinja::Value {
@@ -820,11 +828,11 @@ mod tests {
             "should contain Shell value"
         );
         assert!(
-            rendered.contains("Workspace Path: /workspace"),
-            "should contain Workspace Path value"
+            rendered.contains("Workspace: /workspace"),
+            "should contain Workspace value"
         );
         assert!(
-            rendered.contains("Current Date: 2026-03-26"),
+            rendered.contains("Current date: 2026-03-26"),
             "should contain Current Date value"
         );
     }
@@ -836,11 +844,11 @@ mod tests {
             "subagent must include project_instructions_spec"
         );
         assert!(
-            rendered.contains("## Project Instruction Files"),
-            "subagent project instructions must match the main agent spec"
+            rendered.contains("Project instruction files"),
+            "subagent project instructions must match the mandatory core"
         );
         assert!(
-            rendered.contains("you must check for additional project instruction files"),
+            rendered.contains("Check for applicable nested instruction files"),
             "subagent must be told to proactively check nested AGENTS.md"
         );
     }
@@ -885,12 +893,12 @@ mod tests {
     fn child_rendered_prompt_has_hashline_guidance() {
         let rendered = render_subagent_template(base_template_ctx());
         assert!(
-            rendered.contains("hashline workflow"),
+            rendered.contains("For hashline file tools"),
             "should include hashline guidance"
         );
         assert!(
-            rendered.contains("batch semantics"),
-            "should include batch semantics"
+            rendered.contains("Edit batches are atomic"),
+            "should include atomic batch semantics"
         );
     }
     #[test]
@@ -909,12 +917,8 @@ mod tests {
     fn child_rendered_prompt_has_code_change_rules_when_edit_available() {
         let rendered = render_subagent_template(base_template_ctx());
         assert!(
-            rendered.contains("<making_code_changes>"),
-            "should include making_code_changes when edit tools are available"
-        );
-        assert!(
-            rendered.contains("</making_code_changes>"),
-            "making_code_changes section should be properly closed"
+            rendered.contains("Use `hashline_edit` for ordinary file creation and editing"),
+            "should include edit-tool guidance when edit is available"
         );
     }
     #[test]
@@ -941,7 +945,7 @@ mod tests {
             "background_tasks should be absent without execute tool"
         );
         assert!(
-            rendered.contains("hashline workflow"),
+            rendered.contains("For hashline file tools"),
             "hashline guidance should still be present"
         );
     }
@@ -949,7 +953,7 @@ mod tests {
     fn child_rendered_template_is_compact() {
         let rendered = render_subagent_template(base_template_ctx());
         assert!(
-            rendered.len() < 3700,
+            rendered.len() < 5000,
             "rendered child template too large: {} chars",
             rendered.len()
         );
@@ -975,20 +979,17 @@ mod tests {
 
         };
         let rendered = render_subagent_template(ctx);
-        assert!(
-            !rendered.contains("<making_code_changes>"),
-            "read-only agents should not see code change rules"
-        );
+        assert!(!rendered.contains("for ordinary file creation and editing"));
         assert!(rendered.contains("<tool_calling>"));
         assert!(rendered.contains("<background_tasks>"));
-        assert!(rendered.contains("<formatting>"));
+        assert!(rendered.contains("<output>"));
     }
     #[test]
     fn rendered_prompt_size_general_purpose() {
         let rendered = render_subagent_template(base_template_ctx());
         assert!(
-            rendered.len() < 3700,
-            "general-purpose rendered prompt: {} chars (ceiling 3700)",
+            rendered.len() < 5000,
+            "general-purpose rendered prompt: {} chars (ceiling 5000)",
             rendered.len()
         );
     }
@@ -1014,8 +1015,8 @@ mod tests {
         };
         let rendered = render_subagent_template(ctx);
         assert!(
-            rendered.len() < 2800,
-            "read-only rendered prompt: {} chars (ceiling 2800)",
+            rendered.len() < 4500,
+            "read-only rendered prompt: {} chars (ceiling 4500)",
             rendered.len()
         );
         let full = render_subagent_template(base_template_ctx());
@@ -1108,7 +1109,7 @@ mod tests {
         );
         assert!(!rendered.contains("Reserve"), "should not mention Reserve");
         assert!(
-            rendered.contains("`read_file` for reading."),
+            rendered.contains("Use `read_file` for file reading"),
             "tool_calling line should end cleanly after read reference"
         );
     }
@@ -1171,7 +1172,6 @@ mod tests {
     fn built_in_prompts_do_not_contain_user_info_block() {
         let gp = super::super::subagent_prompts::GENERAL_PURPOSE_PROMPT;
         let explore = super::super::subagent_prompts::EXPLORE_PROMPT;
-        let plan = super::super::subagent_prompts::PLAN_PROMPT;
         assert!(
             !gp.contains("OS: linux"),
             "prompt text should not contain actual OS value"
@@ -1179,10 +1179,6 @@ mod tests {
         assert!(
             !explore.contains("Workspace Path:"),
             "prompt text should not contain Workspace Path field"
-        );
-        assert!(
-            !plan.contains("Shell: /bin/bash"),
-            "prompt text should not contain actual Shell value"
         );
     }
     #[test]
@@ -1207,18 +1203,6 @@ mod tests {
         assert!(
             prompt.contains("default search scope"),
             "explore should mention default search scope"
-        );
-    }
-    #[test]
-    fn workspace_boundary_in_plan_prompt() {
-        let prompt = super::super::subagent_prompts::PLAN_PROMPT;
-        assert!(
-            prompt.contains("Workspace boundary"),
-            "plan prompt should contain workspace boundary guidance"
-        );
-        assert!(
-            prompt.contains("default analysis scope"),
-            "plan should mention default analysis scope"
         );
     }
     #[test]
@@ -1257,28 +1241,9 @@ mod tests {
         }
     }
     #[test]
-    fn plan_prompt_specialization_keywords() {
-        let prompt = super::super::subagent_prompts::PLAN_PROMPT;
-        let keywords = [
-            "read-only",
-            "READ-ONLY MODE",
-            "architect",
-            "Critical Files for Implementation",
-            "trade-offs",
-            "step-by-step",
-        ];
-        for kw in &keywords {
-            assert!(
-                prompt.contains(kw),
-                "plan prompt missing specialization keyword: {kw}"
-            );
-        }
-    }
-    #[test]
     fn trimmed_prompts_are_compact() {
         let gp = super::super::subagent_prompts::GENERAL_PURPOSE_PROMPT;
         let explore = super::super::subagent_prompts::EXPLORE_PROMPT;
-        let plan = super::super::subagent_prompts::PLAN_PROMPT;
         assert!(
             gp.len() < 1200,
             "general-purpose prompt too large: {} chars",
@@ -1289,22 +1254,12 @@ mod tests {
             "explore prompt too large: {} chars",
             explore.len()
         );
-        assert!(
-            plan.len() < 1350,
-            "plan prompt too large: {} chars",
-            plan.len()
-        );
     }
     #[test]
     fn trimmed_prompts_no_redundant_identity() {
         let gp = super::super::subagent_prompts::GENERAL_PURPOSE_PROMPT;
         let explore = super::super::subagent_prompts::EXPLORE_PROMPT;
-        let plan = super::super::subagent_prompts::PLAN_PROMPT;
-        for (name, prompt) in [
-            ("general-purpose", gp),
-            ("explore", explore),
-            ("plan", plan),
-        ] {
+        for (name, prompt) in [("general-purpose", gp), ("explore", explore)] {
             assert!(
                 !prompt.contains("You are a Grow agent"),
                 "{name} prompt should not duplicate base template identity"
@@ -1315,12 +1270,7 @@ mod tests {
     fn trimmed_prompts_no_redundant_formatting_rules() {
         let gp = super::super::subagent_prompts::GENERAL_PURPOSE_PROMPT;
         let explore = super::super::subagent_prompts::EXPLORE_PROMPT;
-        let plan = super::super::subagent_prompts::PLAN_PROMPT;
-        for (name, prompt) in [
-            ("general-purpose", gp),
-            ("explore", explore),
-            ("plan", plan),
-        ] {
+        for (name, prompt) in [("general-purpose", gp), ("explore", explore)] {
             assert!(
                 !prompt.contains("avoid using emojis"),
                 "{name} prompt should not duplicate formatting rules from base template"
@@ -1331,12 +1281,7 @@ mod tests {
     fn all_prompts_reference_tool_templates() {
         let gp = super::super::subagent_prompts::GENERAL_PURPOSE_PROMPT;
         let explore = super::super::subagent_prompts::EXPLORE_PROMPT;
-        let plan = super::super::subagent_prompts::PLAN_PROMPT;
-        for (name, prompt) in [
-            ("general-purpose", gp),
-            ("explore", explore),
-            ("plan", plan),
-        ] {
+        for (name, prompt) in [("general-purpose", gp), ("explore", explore)] {
             assert!(
                 prompt.contains("${{ tools.by_kind."),
                 "{name} prompt should reference tool template variables"
@@ -1344,19 +1289,10 @@ mod tests {
         }
     }
     #[test]
-    fn read_only_prompts_share_consistent_constraint() {
+    fn explore_prompt_declares_read_only_constraint() {
         let explore = super::super::subagent_prompts::EXPLORE_PROMPT;
-        let plan = super::super::subagent_prompts::PLAN_PROMPT;
-        for (name, prompt) in [("explore", explore), ("plan", plan)] {
-            assert!(
-                prompt.contains("NO file editing tools"),
-                "{name} prompt must declare no editing tools"
-            );
-            assert!(
-                prompt.contains("Do not create, modify, or delete"),
-                "{name} prompt must forbid create/modify/delete"
-            );
-        }
+        assert!(explore.contains("NO file editing tools"));
+        assert!(explore.contains("Do not create, modify, or delete"));
         let gp = super::super::subagent_prompts::GENERAL_PURPOSE_PROMPT;
         assert!(
             !gp.contains("READ-ONLY MODE"),

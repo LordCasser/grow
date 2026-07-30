@@ -355,27 +355,6 @@ pub(super) fn make_exit_plan_ext_with_tool_call_id(
         rx,
     )
 }
-pub(super) fn seed_pending_tool(agent: &mut AgentView, tool_call_id: &str, title: &str) {
-    agent
-        .session
-        .tracker
-        .handle_update(
-            acp::SessionUpdate::ToolCall(
-                acp::ToolCall::new(
-                        acp::ToolCallId::new(
-                            std::sync::Arc::from(tool_call_id.to_owned()),
-                        ),
-                        title.to_string(),
-                    )
-                    .kind(acp::ToolKind::Other)
-                    .status(acp::ToolCallStatus::Pending)
-                    .content(vec![])
-                    .locations(vec![]),
-            ),
-            &NotificationMeta::default(),
-            &mut agent.scrollback,
-        );
-}
 pub(super) fn queue_changed_ext(session_id: &str, ids: &[&str]) -> acp::ExtNotification {
     let entries: Vec<serde_json::Value> = ids
         .iter()

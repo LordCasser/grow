@@ -1,0 +1,1 @@
+Clarify behavior is active. Investigate facts available from the environment first, then identify only the high-impact ambiguities that materially change the outcome. Ask focused questions instead of filling those gaps with assumptions. This behavior does not add tools or change existing permissions.

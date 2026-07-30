@@ -757,7 +757,7 @@ pub(crate) struct SessionActor {
     /// the session actor just calls into the tracker at the appropriate points.
     /// `Arc`-shared with the notification bridge so `PlanModeEntered` /
     /// `PlanModeExited` tool notifications can transition state directly.
-    pub(crate) plan_mode: Arc<parking_lot::Mutex<crate::session::plan_mode::PlanModeTracker>>,
+    pub(crate) plan_mode: Arc<parking_lot::Mutex<crate::session::plan_mode::BehaviorController>>,
     /// Whether goal mode (`/goal`) is enabled for this session (feature flag).
     pub(crate) goal_enabled: bool,
     pub(crate) background_workflows_enabled: bool,
@@ -1551,7 +1551,7 @@ mod plan_approval_resume_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/plan_exit_batch_barrier_tests.rs"]
 mod plan_exit_batch_barrier_tests;
-/// Plan-mode edit gate: read-only except the plan file, even under allow-all.
+/// Plan Behavior gate: ordinary file edits are rejected even under allow-all.
 #[cfg(test)]
 #[path = "acp_session_tests/plan_mode_edit_gate_tests.rs"]
 mod plan_mode_edit_gate_tests;

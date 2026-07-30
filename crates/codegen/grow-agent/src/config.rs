@@ -91,55 +91,6 @@ fn registered_public_toolset_preset_names() -> Vec<String> {
         .map(|(name, _)| name.clone())
         .collect()
 }
-/// Orchestrator-specific prompt body appended to the standard Grow
-/// system prompt (`prompt.md`). Instructs the GBL model to delegate
-/// coding and exploration work to subagents.
-const ORCHESTRATOR_PROMPT_BODY: &str = "\
-## Orchestrator Mode
-
-You are a technical lead orchestrating a team of senior-engineer subagents. Your subagents \
-are highly capable \u{2014} treat them as expert peers, not junior helpers. Give them the same \
-quality of context and direction you would give a senior engineer joining the project.
-
-Your job is to think, plan, coordinate, and review. Their job is to explore, implement, \
-and execute. Use them aggressively and liberally \u{2014} spawn subagents early and often.
-
-### Your direct responsibilities:
-- High-level planning and architecture decisions
-- Reading files for quick context (${{ tools.by_kind.read }}, ${{ tools.by_kind.search }}, ${{ tools.by_kind.list }})
-- Running quick terminal commands for orientation (${{ tools.by_kind.execute }})
-- Invoking skills and MCP tools (${{ tools.by_kind.skill }}, ${{ tools.by_kind.search_tool }}, ${{ tools.by_kind.use_tool }})
-- Web research through configured MCP tools and ${{ tools.by_kind.web_fetch }}
-- Asking the user questions (${{ tools.by_kind.ask_user }})
-- Managing task lists and tracking progress (${{ tools.by_kind.plan }})
-- Reviewing subagent results and synthesizing responses for the user
-
-### ALWAYS delegate to subagents:
-- **ALL file modifications** \u{2014} creating, editing, deleting files (`general-purpose`)
-- **ALL builds, tests, and verification** \u{2014} running test suites, linters, compilers (`general-purpose`)
-- **Deep codebase exploration** \u{2014} searching across many files, understanding patterns (`explore`)
-- **Multi-step implementation** \u{2014} any task involving more than reading (`general-purpose`)
-- **Any research requiring thoroughness** \u{2014} don\u{2019}t do shallow searches yourself, spawn an `explore` subagent
-
-### How to talk to subagents:
-Write prompts the way you would brief a senior engineer:
-- Explain WHAT you need done and WHY (the context behind the task)
-- Share what you already know \u{2014} file paths, function names, architectural decisions
-- Describe the end state, not step-by-step commands \u{2014} trust their judgment on HOW
-- If you have opinions on approach, share them as guidance, not rigid instructions
-- Include acceptance criteria: what does \"done\" look like?
-
-### Parallelism:
-- Break independent tasks into separate subagents and run them in parallel
-- Use `explore` subagents to investigate multiple areas simultaneously
-- Launch implementation subagents for independent files/modules at the same time
-- Do NOT wait for one subagent before spawning others that don\u{2019}t depend on it
-
-### Anti-patterns to avoid:
-- Do NOT do shallow 1-2 file reads yourself when an `explore` agent would be more thorough
-- Do NOT implement code changes yourself \u{2014} you have no file editing tools
-- Do NOT give subagents overly prescriptive step-by-step instructions \u{2014} trust their expertise
-- Do NOT summarize or re-explain what the user said \u{2014} get to work immediately";
 /// Bash tool with clearer model-facing names:
 /// `run_terminal_cmd` → `run_terminal_command`, `is_background` → `background`.
 fn bash_tool_config() -> ToolConfig {
@@ -213,12 +164,16 @@ fn grow_computer_toolset() -> ToolServerConfig {
 /// Native (in-crate) toolset presets.
 fn native_toolset_presets() -> Vec<(&'static str, ToolServerConfig)> {
     vec![
-        ("grow-build", workspace_grow_build_toolset()),
+        // Runtime-only tools (Plan protocol, AskUser, web, memory, LSP, write
+        // fallback) are injected later by AgentBuilder. Keeping the preset at
+        // the declared base prevents toolPreset resolution from duplicating
+        // those fixed runtime additions.
+        ("grow-build", default_grow_build_toolset()),
         ("grow-build-concise", grow_build_concise_toolset()),
-        ("grow-build-plan", grow_build_plan_toolset()),
         ("codex", codex_toolset()),
+        ("opencode", opencode_toolset()),
         ("explore", explore_toolset()),
-        ("plan", plan_toolset()),
+        ("grow-build-orchestrator", orchestrator_toolset()),
         ("grow-computer", grow_computer_toolset()),
     ]
 }
@@ -366,59 +321,6 @@ fn explore_toolset() -> ToolServerConfig {
         behavior_preset: None,
     }
 }
-/// Plan-mode toolset — read-only inspection tools, no shell, no file-editing.
-///
-/// Enforces read-only at the toolset: the agent may inspect the repo and keep
-/// a todo list, but `search_replace` (file edits) and `run_terminal_command`
-/// (shell) are both omitted so it cannot mutate the workspace.
-fn plan_toolset() -> ToolServerConfig {
-    ToolServerConfig {
-        tools: vec![
-            (&grow_build::ReadFileTool).into(),
-            (&grow_build::ListDirTool).into(),
-            (&grow_build::GrepTool).into(),
-            // (&grow_build::SkillTool).into(),
-            (&grow_build::TodoWriteTool).into(),
-            // search_replace + run_terminal_command intentionally omitted (read-only)
-        ],
-        behavior_preset: None,
-    }
-}
-/// Grow + plan mode toolset.
-///
-/// Extends the default `grow-build` toolset with plan mode tools:
-/// `enter_plan_mode`, `exit_plan_mode`, and `ask_user_question`.
-/// This allows the agent to enter a structured planning phase before
-/// writing code, with user-approved plans.
-fn grow_build_plan_toolset() -> ToolServerConfig {
-    ToolServerConfig {
-        tools: vec![
-            // Standard grow-build tools
-            bash_tool_config(),
-            (&grow_build::ReadFileTool).into(),
-            (&grow_build::SearchReplaceTool).into(),
-            (&grow_build::ListDirTool).into(),
-            (&grow_build::GrepTool).into(),
-            kill_task_tool_config(),
-            (&grow_build::TodoWriteTool).into(),
-            task_output_tool_config(),
-            task_tool_config(),
-            (&grow_build::SchedulerCreateTool).into(),
-            (&grow_build::SchedulerDeleteTool).into(),
-            (&grow_build::SchedulerListTool).into(),
-            (&grow_build::MonitorTool).into(),
-            (&search_tool::SearchTool).into(),
-            (&use_tool::UseTool).into(),
-            (&grow_build::UpdateGoalTool).into(),
-            (&grow_build::WorkflowTool).into(),
-            // Plan mode tools
-            (&grow_build::EnterPlanModeTool).into(),
-            (&grow_build::ExitPlanModeTool).into(),
-            (&grow_build::AskUserQuestionTool).into(),
-        ],
-        behavior_preset: None,
-    }
-}
 /// Orchestrator toolset: read/search/orchestration tools only.
 ///
 /// No terminal execution, no file editing. The orchestrator delegates
@@ -465,71 +367,6 @@ fn orchestrator_toolset() -> ToolServerConfig {
         behavior_preset: None,
     }
 }
-/// Grow + plan mode toolset WITHOUT subagent tools.
-///
-/// Same as `grow_build_plan_toolset` but excludes `TaskTool`,
-/// `TaskOutputTool`, and `KillTaskTool`. Use this when the shell
-/// does not have subagent infrastructure wired up.
-fn grow_build_plan_no_subagents_toolset() -> ToolServerConfig {
-    ToolServerConfig {
-        tools: vec![
-            // Standard grow-build tools (minus TaskTool only — KillTaskTool and
-            // TaskOutputTool are kept because BashTool's background mode requires them)
-            bash_tool_config(),
-            (&grow_build::ReadFileTool).into(),
-            (&grow_build::SearchReplaceTool).into(),
-            (&grow_build::ListDirTool).into(),
-            (&grow_build::GrepTool).into(),
-            kill_task_tool_config(),
-            (&grow_build::TodoWriteTool).into(),
-            task_output_tool_config(),
-            (&grow_build::SchedulerCreateTool).into(),
-            (&grow_build::SchedulerDeleteTool).into(),
-            (&grow_build::SchedulerListTool).into(),
-            (&grow_build::MonitorTool).into(),
-            (&search_tool::SearchTool).into(),
-            (&use_tool::UseTool).into(),
-            (&grow_build::UpdateGoalTool).into(),
-            (&grow_build::WorkflowTool).into(),
-            // Plan mode tools
-            (&grow_build::EnterPlanModeTool).into(),
-            (&grow_build::ExitPlanModeTool).into(),
-            (&grow_build::AskUserQuestionTool).into(),
-        ],
-        behavior_preset: None,
-    }
-}
-/// Default Grow toolset + `ask_user_question`.
-///
-/// Same as `default_grow_build_toolset` with the `AskUserQuestionTool` added,
-/// allowing the agent to ask structured questions without full plan mode.
-fn grow_build_ask_user_toolset() -> ToolServerConfig {
-    ToolServerConfig {
-        tools: vec![
-            bash_tool_config(),
-            (&grow_build::ReadFileTool).into(),
-            (&grow_build::SearchReplaceTool).into(),
-            (&grow_build::ListDirTool).into(),
-            (&grow_build::GrepTool).into(),
-            kill_task_tool_config(),
-            (&grow_build::TodoWriteTool).into(),
-            task_output_tool_config(),
-            wait_tasks_tool_config(),
-            task_tool_config(),
-            (&grow_build::SchedulerCreateTool).into(),
-            (&grow_build::SchedulerDeleteTool).into(),
-            (&grow_build::SchedulerListTool).into(),
-            (&grow_build::MonitorTool).into(),
-            (&search_tool::SearchTool).into(),
-            (&use_tool::UseTool).into(),
-            (&grow_build::UpdateGoalTool).into(),
-            (&grow_build::WorkflowTool).into(),
-            // Ask user tool (without plan mode)
-            (&grow_build::AskUserQuestionTool).into(),
-        ],
-        behavior_preset: None,
-    }
-}
 fn opencode_toolset() -> ToolServerConfig {
     ToolServerConfig {
         tools: vec![
@@ -547,20 +384,6 @@ fn opencode_toolset() -> ToolServerConfig {
         behavior_preset: None,
     }
 }
-const AGENT_TASK_KEYWORDS: &str = "Agent|Task";
-/// Splits `"Agent(a, b), read_file"` → `["Agent(a, b)", "read_file"]`.
-pub static AGENT_TASK_TOKENIZER_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| {
-        regex::Regex::new(&format!(r"(?i:{AGENT_TASK_KEYWORDS})\([^)]*\)|[^,]+"))
-            .expect("valid regex")
-    });
-/// Matches `"Agent(a, b)"` and captures `"a, b"` in group 1. `None` for bare `Agent`.
-pub static AGENT_TASK_CLASSIFIER_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| {
-        regex::Regex::new(&format!(r"^(?i:{AGENT_TASK_KEYWORDS})(?:\(([^)]*)\))?$"))
-            .expect("valid regex")
-    });
-
 /// Per-Agent restriction on which peer definitions may be launched through
 /// the task tool. This is a tool capability, not an Agent hierarchy: the same
 /// definition remains selectable as a primary Agent and launchable anywhere
@@ -569,6 +392,16 @@ pub static AGENT_TASK_CLASSIFIER_RE: std::sync::LazyLock<regex::Regex> =
 pub struct SubagentFilter {
     allow: Option<HashSet<String>>,
     deny: HashSet<String>,
+}
+
+/// Explicit subagent authorization, independent of ordinary tool names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SubagentPolicy {
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    pub allow: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    pub deny: Vec<String>,
 }
 
 impl SubagentFilter {
@@ -592,9 +425,8 @@ where
             f.write_str("a comma-separated string or an array of strings")
         }
         fn visit_str<E: de::Error>(self, s: &str) -> Result<Self::Value, E> {
-            Ok(AGENT_TASK_TOKENIZER_RE
-                .find_iter(s)
-                .map(|m| m.as_str().trim().to_string())
+            Ok(s.split(',')
+                .map(|item| item.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect())
         }
@@ -631,7 +463,7 @@ where
 /// are defined in exactly one place. The enum covers all built-in
 /// agents for centralized name management and `by_name()` dispatch.
 ///
-/// `subagent_variants()` returns only the 3 that are exposed to the LLM
+/// `subagent_variants()` returns only the 2 that are exposed to the LLM
 /// via the `TaskTool` description. The remaining 6 are top-level agent
 /// profiles resolvable by name but not advertised as subagent types.
 #[derive(
@@ -639,21 +471,14 @@ where
 )]
 #[strum(serialize_all = "kebab-case")]
 pub enum BuiltinAgentName {
-    #[strum(serialize = "grow-build")]
+    #[strum(serialize = "grow")]
     Grow,
     #[strum(serialize = "grow-build-concise")]
     GrowConcise,
-    #[strum(serialize = "grow-build-plan")]
-    GrowPlan,
-    #[strum(serialize = "grow-build-plan-no-subagents")]
-    GrowPlanNoSubagents,
-    #[strum(serialize = "grow-build-ask-user")]
-    GrowAskUser,
     Codex,
     Opencode,
     GeneralPurpose,
     Explore,
-    Plan,
     BrowserUse,
     #[strum(serialize = "grow-build-orchestrator")]
     GrowOrchestrator,
@@ -675,21 +500,17 @@ impl BuiltinAgentName {
         match self {
             Self::Grow => AgentDefinition::default_grow_build(),
             Self::GrowConcise => AgentDefinition::grow_build_concise(),
-            Self::GrowPlan => AgentDefinition::grow_build_plan(),
-            Self::GrowPlanNoSubagents => AgentDefinition::grow_build_plan_no_subagents(),
-            Self::GrowAskUser => AgentDefinition::grow_build_ask_user(),
             Self::Codex => AgentDefinition::codex(),
             Self::Opencode => AgentDefinition::opencode(),
             Self::GeneralPurpose => AgentDefinition::general_purpose(),
             Self::Explore => AgentDefinition::explore(),
-            Self::Plan => AgentDefinition::plan(),
             Self::BrowserUse => AgentDefinition::browser_use(),
             Self::GrowOrchestrator => AgentDefinition::grow_build_orchestrator(),
         }
     }
     /// Built-in agents available as subagents via the Task tool.
     pub fn subagent_variants() -> &'static [Self] {
-        &[Self::GeneralPurpose, Self::Explore, Self::Plan]
+        &[Self::GeneralPurpose, Self::Explore]
     }
 }
 /// Portable agent identity — parsed from .grow/agents/*.md.
@@ -707,9 +528,16 @@ pub struct AgentDefinition {
     /// Plugin namespace for plugin-backed agents only.
     #[serde(skip)]
     pub plugin_name: Option<String>,
-    #[serde(default = "default_prompt_mode")]
-    pub prompt_mode: PromptMode,
-    #[serde(default = "default_grow_build_toolset")]
+    #[serde(default = "default_prompt_composition")]
+    pub prompt_composition: PromptComposition,
+    /// Named base tool preset. This is resolved before additional tools and
+    /// never carries Behavior semantics.
+    #[serde(default = "default_tool_preset")]
+    pub tool_preset: String,
+    /// Tools layered onto `tool_preset` before runtime injection/filtering.
+    #[serde(default)]
+    pub additional_tools: Vec<ToolConfig>,
+    #[serde(skip, default = "default_grow_build_toolset")]
     pub tool_config: ToolServerConfig,
     /// Runtime capability mode that constrains which tool kinds the agent
     /// can use. Applied during subagent spawn in `handle_subagent_request`
@@ -743,12 +571,15 @@ pub struct AgentDefinition {
     /// verbatim with only the subagent strip applied.
     #[serde(default = "default_true")]
     pub inject_default_tools: bool,
-    /// Tool allowlist. Empty = inherit all. Also carries `Agent(type)` directives.
+    /// Optional ordinary-tool allowlist. It never authorizes subagents.
     #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     pub tools: Vec<String>,
-    /// Tool denylist. `Agent(type)` entries strip spawn permissions.
+    /// Ordinary-tool denylist. It never authorizes subagents.
     #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     pub disallowed_tools: Vec<String>,
+    /// Peer Agent authorization for the Task tool.
+    #[serde(default)]
+    pub subagents: SubagentPolicy,
     #[serde(default)]
     pub effort: Option<Effort>,
     #[serde(default, deserialize_with = "deserialize_nonzero_u32")]
@@ -852,16 +683,17 @@ pub struct ToolRetryConfig {
 /// How the Markdown body interacts with the base prompt template.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum PromptMode {
-    /// Body is appended to the base template (tool conventions,
-    /// formatting rules, user_info). Default.
+pub enum PromptComposition {
+    /// Body is appended after the mandatory foundation, audience, and
+    /// standard guidance. Default.
     #[default]
     Extend,
-    /// Body IS the complete system prompt. No base template.
+    /// Skip optional standard guidance and use the body as the complete role
+    /// layer. Mandatory foundation, audience, and runtime context still apply.
     Full,
 }
-fn default_prompt_mode() -> PromptMode {
-    PromptMode::Extend
+fn default_prompt_composition() -> PromptComposition {
+    PromptComposition::Extend
 }
 /// Where the agent definition was discovered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -960,7 +792,6 @@ pub enum PermissionMode {
     /// Silently deny non-pre-approved tools.
     DontAsk,
     BypassPermissions,
-    Plan,
 }
 impl PermissionMode {
     pub const VALID_VALUES: &[&str] = &[
@@ -969,7 +800,6 @@ impl PermissionMode {
         "auto",
         "dontAsk",
         "bypassPermissions",
-        "plan",
     ];
 }
 const _: () =
@@ -1219,6 +1049,9 @@ fn default_output_byte_limit() -> usize {
 fn default_true() -> bool {
     true
 }
+fn default_tool_preset() -> String {
+    "grow-build".to_string()
+}
 /// Strip a tool id's `Namespace:` prefix, yielding its short name.
 pub(crate) fn short_tool_name(id: &str) -> &str {
     id.rsplit(':').next().unwrap_or(id)
@@ -1232,61 +1065,31 @@ pub(crate) fn tool_id_matches(list: &[String], id: &str) -> bool {
     list.iter().any(|e| tool_id_eq(e, id))
 }
 impl AgentDefinition {
-    /// Resolve `Agent(...)` / `Task(...)` entries from this definition's tool
-    /// filters into the peer Agents visible to its task tool.
-    ///
-    /// An empty `tools` list inherits all peer Agents. A bare `Agent` or the
-    /// concrete `task` tool also permits all. Typed entries form an allowlist;
-    /// omitting task/Agent from a non-empty tool allowlist permits none.
-    /// `disallowedTools` is applied last and therefore wins.
+    /// Resolve the explicit `subagents.allow/deny` policy. Ordinary tool
+    /// allow/deny entries have no effect on peer Agent authorization.
     pub fn subagent_filter(&self) -> SubagentFilter {
-        fn clauses(entries: &[String]) -> (bool, HashSet<String>) {
-            let mut all = false;
-            let mut names = HashSet::new();
-            for entry in entries {
-                if tool_id_eq("task", entry) {
-                    all = true;
-                    continue;
-                }
-                let Some(captures) = AGENT_TASK_CLASSIFIER_RE.captures(entry) else {
-                    continue;
-                };
-                let Some(list) = captures.get(1) else {
-                    all = true;
-                    continue;
-                };
-                let mut found_name = false;
-                for name in list
-                    .as_str()
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    found_name = true;
-                    names.insert(name.to_owned());
-                }
-                if !found_name {
-                    all = true;
-                }
-            }
-            (all, names)
-        }
-
-        let (allow_all, allowed) = clauses(&self.tools);
-        let allow = if self.tools.is_empty() || allow_all {
+        let allow = if self.subagents.allow.is_empty() {
             None
         } else {
-            Some(allowed)
+            Some(self.subagents.allow.iter().cloned().collect())
         };
-        let (deny_all, denied) = clauses(&self.disallowed_tools);
         SubagentFilter {
-            allow: if deny_all {
-                Some(HashSet::new())
-            } else {
-                allow
-            },
-            deny: denied,
+            allow,
+            deny: self.subagents.deny.iter().cloned().collect(),
         }
+    }
+
+    fn resolve_declared_toolset(&mut self) -> Result<(), AgentBuildError> {
+        let mut tool_config = toolset_for_preset(&self.tool_preset).ok_or_else(|| {
+            AgentBuildError::ParseError(format!(
+                "unknown toolPreset '{}'; expected one of: {}",
+                self.tool_preset,
+                preset_names().join(", ")
+            ))
+        })?;
+        tool_config.tools.extend(self.additional_tools.clone());
+        self.tool_config = tool_config;
+        Ok(())
     }
 
     /// Parse an agent definition from a Markdown file with YAML frontmatter.
@@ -1328,6 +1131,7 @@ impl AgentDefinition {
         let yaml_content = &after_opening[..closing_idx];
         let mut def: AgentDefinition = serde_yaml::from_str(yaml_content)
             .map_err(|e| AgentBuildError::ParseError(e.to_string()))?;
+        def.resolve_declared_toolset()?;
         def.name = file_stem_agent_id(path)?;
         def.permission_mode = PermissionMode::Default;
         def.prompt_body = None;
@@ -1360,6 +1164,7 @@ impl AgentDefinition {
         };
         let mut def: AgentDefinition = serde_yaml::from_str(yaml_content)
             .map_err(|e| AgentBuildError::ParseError(e.to_string()))?;
+        def.resolve_declared_toolset()?;
         // File definitions are prompt profiles. Models and permissions remain
         // session/workspace state even when compatibility frontmatter carries
         // similarly named fields.
@@ -1468,17 +1273,15 @@ impl AgentDefinition {
             }
         }
     }
-    /// Shared defaults for built-in constructors.
-    fn base(name: BuiltinAgentName, description: &str) -> Self {
-        Self::builtin_defaults(name.as_ref(), description)
-    }
     /// Shared defaults for out-of-tree built-in agent registrations.
     pub fn builtin_defaults(name: &str, description: &str) -> Self {
         Self {
             name: name.to_owned(),
             description: description.to_string(),
             plugin_name: None,
-            prompt_mode: PromptMode::Extend,
+            prompt_composition: PromptComposition::Extend,
+            tool_preset: default_tool_preset(),
+            additional_tools: vec![],
             tool_config: default_grow_build_toolset(),
             capability_mode: None,
             permission_mode: PermissionMode::Default,
@@ -1488,6 +1291,7 @@ impl AgentDefinition {
             inherit_skills: true,
             inject_default_tools: true,
             disallowed_tools: vec![],
+            subagents: SubagentPolicy::default(),
             tools: vec![],
             effort: None,
             max_turns: None,
@@ -1516,119 +1320,40 @@ impl AgentDefinition {
         }
     }
     pub fn default_grow_build() -> Self {
-        Self::base(
-            BuiltinAgentName::Grow,
-            "Grow agent for software engineering tasks.",
-        )
+        let mut definition = Self::parse(include_str!("../prompts/agents/grow.md"))
+            .expect("embedded grow Agent definition must be valid");
+        definition.scope = AgentScope::BuiltIn;
+        definition
     }
     /// Grow Concise agent definition — concise output format for SFT/RL.
     pub fn grow_build_concise() -> Self {
-        Self {
-            tool_config: grow_build_concise_toolset(),
-            agents_md: false,
-            ..Self::base(
-                BuiltinAgentName::GrowConcise,
-                "Grow agent with concise output format.",
-            )
-        }
-    }
-    /// Grow agent with plan mode tools.
-    pub fn grow_build_plan() -> Self {
-        Self {
-            tool_config: grow_build_plan_toolset(),
-            ..Self::base(
-                BuiltinAgentName::GrowPlan,
-                "Grow agent with plan mode support.",
-            )
-        }
-    }
-    /// Grow + plan mode WITHOUT subagent tools.
-    pub fn grow_build_plan_no_subagents() -> Self {
-        Self {
-            tool_config: grow_build_plan_no_subagents_toolset(),
-            ..Self::base(
-                BuiltinAgentName::GrowPlanNoSubagents,
-                "Grow agent with plan mode (no subagents).",
-            )
-        }
-    }
-    /// Default Grow agent with the `ask_user_question` tool.
-    pub fn grow_build_ask_user() -> Self {
-        Self {
-            tool_config: grow_build_ask_user_toolset(),
-            ..Self::base(
-                BuiltinAgentName::GrowAskUser,
-                "Grow agent with ask-user-question tool.",
-            )
-        }
+        Self::embedded_builtin(include_str!("../prompts/agents/grow-build-concise.md"))
     }
     pub fn codex() -> Self {
-        Self {
-            tool_config: codex_toolset(),
-            system_prompt: TemplateOverride::Codex,
-            ..Self::base(BuiltinAgentName::Codex, "Codex toolset and prompt")
-        }
+        let mut definition = Self::embedded_builtin(include_str!("../prompts/agents/codex.md"));
+        definition.system_prompt = TemplateOverride::Codex;
+        definition
     }
     pub fn opencode() -> Self {
-        Self {
-            tool_config: opencode_toolset(),
-            ..Self::base(
-                BuiltinAgentName::Opencode,
-                "OpenCode toolset — opencode-style tools and parameter conventions",
-            )
-        }
+        Self::embedded_builtin(include_str!("../prompts/agents/opencode.md"))
     }
     /// General-purpose subagent definition.
     pub fn general_purpose() -> Self {
-        use crate::prompt::subagent_prompts;
-        Self {
-            description: xai_tool_types::GENERAL_PURPOSE_SUBAGENT
-                .description
-                .to_string(),
-            prompt_body: Some(subagent_prompts::GENERAL_PURPOSE_PROMPT.to_string()),
-            ..Self::base(BuiltinAgentName::GeneralPurpose, "")
-        }
+        let mut definition = Self::parse(include_str!("../prompts/agents/general-purpose.md"))
+            .expect("embedded general-purpose Agent definition must be valid");
+        definition.scope = AgentScope::BuiltIn;
+        definition
     }
     /// Explore subagent — fast, read-only codebase exploration.
     pub fn explore() -> Self {
-        use crate::prompt::subagent_prompts;
-        Self {
-            description: xai_tool_types::EXPLORE_SUBAGENT.description.to_string(),
-            tool_config: explore_toolset(),
-            permission_mode: PermissionMode::Plan,
-            prompt_body: Some(subagent_prompts::EXPLORE_PROMPT.to_string()),
-            inherit_skills: false,
-            ..Self::base(BuiltinAgentName::Explore, "")
-        }
-    }
-    /// Plan subagent — read-only architect for implementation plans.
-    pub fn plan() -> Self {
-        use crate::prompt::subagent_prompts;
-        Self {
-            description: xai_tool_types::PLAN_SUBAGENT.description.to_string(),
-            tool_config: plan_toolset(),
-            permission_mode: PermissionMode::Plan,
-            prompt_body: Some(subagent_prompts::PLAN_PROMPT.to_string()),
-            inherit_skills: false,
-            ..Self::base(BuiltinAgentName::Plan, "")
-        }
+        let mut definition = Self::parse(include_str!("../prompts/agents/explore.md"))
+            .expect("embedded explore Agent definition must be valid");
+        definition.scope = AgentScope::BuiltIn;
+        definition
     }
     /// Browser Use agent definition.
     pub fn browser_use() -> Self {
-        Self {
-            prompt_mode: PromptMode::Full,
-            agents_md: false,
-            prompt_body: Some(
-                "You are a web browsing agent. You can navigate, interact with, and \
-                 extract information from web pages. Use the available browsing tools \
-                 to complete the user's request."
-                    .to_string(),
-            ),
-            ..Self::base(
-                BuiltinAgentName::BrowserUse,
-                "Web browsing and interaction agent.",
-            )
-        }
+        Self::embedded_builtin(include_str!("../prompts/agents/browser-use.md"))
     }
     /// Grow Orchestrator — GBL model with full Grow tools
     /// (skills, MCPs, plan mode) that delegates coding/exploration to
@@ -1638,15 +1363,13 @@ impl AgentDefinition {
     /// general-purpose children get `implementer_toolset()` and explore
     /// children get `explorer_toolset()`, both with the subagent model.
     pub fn grow_build_orchestrator() -> Self {
-        Self {
-            tool_config: orchestrator_toolset(),
-            inject_default_tools: false,
-            prompt_body: Some(ORCHESTRATOR_PROMPT_BODY.to_string()),
-            ..Self::base(
-                BuiltinAgentName::GrowOrchestrator,
-                "Grow orchestrator that delegates coding to specialized subagents",
-            )
-        }
+        Self::embedded_builtin(include_str!("../prompts/agents/grow-build-orchestrator.md"))
+    }
+
+    fn embedded_builtin(source: &'static str) -> Self {
+        let mut definition = Self::parse(source).expect("embedded Agent definition must be valid");
+        definition.scope = AgentScope::BuiltIn;
+        definition
     }
     /// Deserialize an agent definition from a JSON value (e.g. from ACP `_meta.agentProfile`).
     ///
@@ -1658,7 +1381,7 @@ impl AgentDefinition {
     /// {
     ///   "name": "my-agent",
     ///   "description": "A custom agent profile.",
-    ///   "promptMode": "extend",
+    ///   "promptComposition": "extend",
     ///   "permissionMode": "dontAsk",
     ///   "promptBody": "You are a specialized coding assistant..."
     /// }
@@ -1681,9 +1404,7 @@ impl AgentDefinition {
                 def.prompt_body = Some(trimmed.to_string());
             }
         }
-        if !value.get("toolConfig").is_some_and(|v| v.is_object()) {
-            def.tool_config = default_grow_build_toolset();
-        }
+        def.resolve_declared_toolset()?;
         def.permission_mode = PermissionMode::Default;
         def.scope = AgentScope::BuiltIn;
         Ok(def)
@@ -1708,10 +1429,8 @@ mod tests {
             "grow-build",
             "grow_build",
             "grow-build-concise",
-            "grow-build-plan",
             "codex",
             "explore",
-            "plan",
             "grow-computer",
             "grow_computer",
         ] {
@@ -1725,10 +1444,10 @@ mod tests {
     #[test]
     fn presets_select_distinct_toolsets_by_size() {
         let gb = toolset_for_preset("grow-build").unwrap();
-        let plan = toolset_for_preset("plan").unwrap();
         let explore = toolset_for_preset("explore").unwrap();
-        assert!(explore.tools.len() < plan.tools.len());
-        assert!(plan.tools.len() < gb.tools.len());
+        let orchestrator = toolset_for_preset("grow-build-orchestrator").unwrap();
+        assert!(explore.tools.len() < gb.tools.len());
+        assert_ne!(orchestrator.tools.len(), explore.tools.len());
     }
     fn grow_computer_exclusive_ids() -> Vec<String> {
         #[allow(unused_mut)]
@@ -1741,7 +1460,7 @@ mod tests {
     #[test]
     fn grow_computer_preset_is_curated_grow_build_subset() {
         let gc = toolset_for_preset("grow-computer").unwrap();
-        let gb = toolset_for_preset("grow-build").unwrap();
+        let gb = workspace_grow_build_toolset();
         let gb_ids: std::collections::HashSet<&str> =
             gb.tools.iter().map(|t| t.id.as_str()).collect();
         let exclusive_ids = grow_computer_exclusive_ids();
@@ -1752,7 +1471,7 @@ mod tests {
             }
             assert!(
                 gb_ids.contains(t.id.as_str()),
-                "grow-computer tool `{}` must also ship in the grow-build preset",
+                "grow-computer tool `{}` must also ship in the resolved grow-build toolset",
                 t.id
             );
         }
@@ -1840,12 +1559,8 @@ mod tests {
             BuiltinAgentName::Codex | BuiltinAgentName::GrowOrchestrator => true,
             BuiltinAgentName::Grow
             | BuiltinAgentName::GrowConcise
-            | BuiltinAgentName::GrowPlan
-            | BuiltinAgentName::GrowPlanNoSubagents
-            | BuiltinAgentName::GrowAskUser
             | BuiltinAgentName::GeneralPurpose
             | BuiltinAgentName::Explore
-            | BuiltinAgentName::Plan
             | BuiltinAgentName::Opencode
             | BuiltinAgentName::BrowserUse => false,
         }
@@ -1875,10 +1590,8 @@ mod tests {
             );
         }
         for non_strict in [
-            "grow-build",
-            "grow-build-plan",
+            "grow",
             "grow-build-concise",
-            "grow-build-ask-user",
             "opencode",
             "browser-use",
             "custom-user-agent",
@@ -1896,11 +1609,11 @@ mod tests {
         let content = r#"---
 name: test-agent
 description: A test agent
-promptMode: full
+promptComposition: full
 tools:
   - read_file
   - grep
-permissionMode: plan
+permissionMode: dontAsk
 agentsMd: false
 ---
 
@@ -1909,7 +1622,7 @@ You are a test agent.
         let def = AgentDefinition::parse(content).unwrap();
         assert_eq!(def.name, "test-agent");
         assert_eq!(def.description, "A test agent");
-        assert_eq!(def.prompt_mode, PromptMode::Full);
+        assert_eq!(def.prompt_composition, PromptComposition::Full);
         assert_eq!(def.permission_mode, PermissionMode::Default);
         assert!(!def.agents_md);
         assert_eq!(def.prompt_body.as_deref(), Some("You are a test agent."));
@@ -1925,7 +1638,7 @@ You are a test agent.
             .expect("repository-root agent.md.example must remain a valid Agent definition");
 
         assert_eq!(def.name, "example-agent");
-        assert_eq!(def.prompt_mode, PromptMode::Extend);
+        assert_eq!(def.prompt_composition, PromptComposition::Extend);
         assert_eq!(
             def.capability_mode,
             Some(xai_tool_types::SubagentCapabilityMode::ReadWrite)
@@ -1943,8 +1656,9 @@ You are a test agent.
         assert!(def.inject_default_tools);
         assert!(!def.tools.is_empty());
         assert_eq!(def.disallowed_tools, ["deploy_app"]);
-        assert_eq!(def.tool_config.behavior_preset.as_deref(), Some("current"));
-        assert_eq!(def.tool_config.tools.len(), 2);
+        assert!(def.tool_config.behavior_preset.is_none());
+        assert_eq!(def.additional_tools.len(), 2);
+        assert!(def.tool_config.tools.len() > def.additional_tools.len());
         assert_eq!(def.mcp_servers.len(), 2);
         assert_eq!(
             def.mcp_inheritance,
@@ -1995,11 +1709,13 @@ Mixed agent.
         );
     }
     #[test]
-    fn test_parse_tools_with_agent_parens() {
+    fn explicit_subagent_policy_parses_independently_from_tools() {
         let content = r#"---
 name: coordinator
 description: test
-tools: Agent(worker, researcher), Read, Bash
+tools: Read, Bash
+subagents:
+  allow: [worker, researcher]
 ---
 
 Agent.
@@ -2007,40 +1723,41 @@ Agent.
         let def = AgentDefinition::parse(content).unwrap();
         assert_eq!(
             def.tools,
-            vec!["Agent(worker, researcher)", "Read", "Bash"],
-            "Agent(a, b) must be kept as a single token"
+            vec!["Read", "Bash"],
+            "ordinary tool parsing must not carry subagent syntax"
         );
+        assert!(def.subagent_filter().allows("worker"));
+        assert!(def.subagent_filter().allows("researcher"));
     }
     #[test]
-    fn subagent_filter_uses_typed_agent_entries_as_allowlist() {
+    fn subagent_filter_uses_explicit_allowlist() {
         let mut def = AgentDefinition::default_grow_build();
-        def.tools = vec!["read_file".into(), "Agent(explore, reviewer)".into()];
+        def.subagents.allow = vec!["explore".into(), "reviewer".into()];
         let filter = def.subagent_filter();
         assert!(filter.allows("explore"));
         assert!(filter.allows("reviewer"));
         assert!(!filter.allows("plan"));
     }
     #[test]
-    fn subagent_filter_denylist_wins_and_bare_task_allows_all() {
+    fn subagent_filter_denylist_wins() {
         let mut def = AgentDefinition::default_grow_build();
-        def.tools = vec!["Grow:task".into(), "read_file".into()];
-        def.disallowed_tools = vec!["Agent(plan)".into()];
+        def.subagents.deny = vec!["plan".into()];
         let filter = def.subagent_filter();
         assert!(filter.allows("explore"));
         assert!(!filter.allows("plan"));
 
-        def.disallowed_tools = vec!["Agent".into()];
+        def.subagents.allow = vec!["plan".into()];
+        def.subagents.deny = vec!["plan".into()];
         let filter = def.subagent_filter();
-        assert!(!filter.allows("explore"));
         assert!(!filter.allows("plan"));
     }
     #[test]
-    fn subagent_filter_requires_task_entry_in_explicit_tool_allowlist() {
+    fn subagent_filter_is_independent_of_tool_allowlist() {
         let mut def = AgentDefinition::default_grow_build();
         assert!(def.subagent_filter().allows("explore"));
 
         def.tools = vec!["read_file".into(), "grep".into()];
-        assert!(!def.subagent_filter().allows("explore"));
+        assert!(def.subagent_filter().allows("explore"));
     }
     #[test]
     fn test_parse_tools_comma_separated() {
@@ -2066,11 +1783,11 @@ Agent.
         );
     }
     #[test]
-    fn test_parse_tools_case_insensitive_agent() {
+    fn test_parse_tool_names_preserves_case() {
         let content = r#"---
 name: ci-test
 description: test
-tools: agent(worker, researcher), Read
+tools: read, Read
 ---
 
 Agent.
@@ -2078,8 +1795,8 @@ Agent.
         let def = AgentDefinition::parse(content).unwrap();
         assert_eq!(
             def.tools,
-            vec!["agent(worker, researcher)", "Read"],
-            "lowercase agent(a, b) must be kept as a single token"
+            vec!["read", "Read"],
+            "ordinary tool names should preserve their declared case"
         );
     }
     #[test]
@@ -2139,7 +1856,7 @@ description: Minimal agent
         let def = AgentDefinition::parse(content).unwrap();
         assert_eq!(def.name, "minimal");
         assert_eq!(def.description, "Minimal agent");
-        assert_eq!(def.prompt_mode, PromptMode::Extend);
+        assert_eq!(def.prompt_composition, PromptComposition::Extend);
         assert!(def.agents_md);
         assert!(def.prompt_body.is_none());
     }
@@ -2295,7 +2012,7 @@ completionRequirement:
     fn test_builtin_browser_use() {
         let def = AgentDefinition::browser_use();
         assert_eq!(def.name, "browser-use");
-        assert_eq!(def.prompt_mode, PromptMode::Full);
+        assert_eq!(def.prompt_composition, PromptComposition::Full);
         assert!(!def.agents_md);
     }
     #[test]
@@ -2343,12 +2060,15 @@ description: Test default tool config
         }
     }
     #[test]
-    fn test_prompt_mode_round_trips() {
-        for (yaml_val, expected) in [("extend", PromptMode::Extend), ("full", PromptMode::Full)] {
+    fn test_prompt_composition_round_trips() {
+        for (yaml_val, expected) in [
+            ("extend", PromptComposition::Extend),
+            ("full", PromptComposition::Full),
+        ] {
             let content =
-                format!("---\nname: test\ndescription: Test\npromptMode: {yaml_val}\n---\n");
+                format!("---\nname: test\ndescription: Test\npromptComposition: {yaml_val}\n---\n");
             let def = AgentDefinition::parse(&content).unwrap();
-            assert_eq!(def.prompt_mode, expected, "Failed for: {yaml_val}");
+            assert_eq!(def.prompt_composition, expected, "Failed for: {yaml_val}");
         }
     }
     #[test]
@@ -2373,7 +2093,7 @@ description: Test default tool config
         let def = AgentDefinition::from_json(&json).unwrap();
         assert_eq!(def.name, "acp-agent");
         assert_eq!(def.description, "An agent from ACP");
-        assert_eq!(def.prompt_mode, PromptMode::Extend);
+        assert_eq!(def.prompt_composition, PromptComposition::Extend);
         assert!(def.agents_md);
         assert!(def.prompt_body.is_none());
         assert_eq!(def.scope, AgentScope::BuiltIn);
@@ -2383,7 +2103,7 @@ description: Test default tool config
         let json = serde_json::json!({
             "name": "grow-build",
             "description": "Multi-surface coding agent.",
-            "promptMode": "extend",
+            "promptComposition": "extend",
             "permissionMode": "dontAsk",
             "agentsMd": true,
             "promptBody": "You are a coding assistant."
@@ -2495,14 +2215,12 @@ description: Test default tool config
     fn test_builtin_agent_name_strum_round_trip() {
         use std::str::FromStr;
         for (s, expected) in [
-            ("grow-build", BuiltinAgentName::Grow),
+            ("grow", BuiltinAgentName::Grow),
             ("grow-build-concise", BuiltinAgentName::GrowConcise),
-            ("grow-build-ask-user", BuiltinAgentName::GrowAskUser),
             ("codex", BuiltinAgentName::Codex),
             ("opencode", BuiltinAgentName::Opencode),
             ("general-purpose", BuiltinAgentName::GeneralPurpose),
             ("explore", BuiltinAgentName::Explore),
-            ("plan", BuiltinAgentName::Plan),
             ("browser-use", BuiltinAgentName::BrowserUse),
         ] {
             let parsed = BuiltinAgentName::from_str(s).unwrap();
@@ -2532,10 +2250,13 @@ description: Test default tool config
     #[test]
     fn test_builtin_agent_name_subagent_variants() {
         let variants = BuiltinAgentName::subagent_variants();
-        assert_eq!(variants.len(), 3);
+        assert_eq!(variants.len(), 2);
         assert!(variants.contains(&BuiltinAgentName::GeneralPurpose));
         assert!(variants.contains(&BuiltinAgentName::Explore));
-        assert!(variants.contains(&BuiltinAgentName::Plan));
+        assert_eq!(
+            variants,
+            &[BuiltinAgentName::GeneralPurpose, BuiltinAgentName::Explore]
+        );
     }
     #[test]
     fn mcp_inheritance_default_when_omitted() {

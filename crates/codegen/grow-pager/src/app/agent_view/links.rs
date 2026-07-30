@@ -1210,7 +1210,7 @@ mod link_click_tests {
         let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
             session_id: "test-session".into(),
             tool_call_id: "call-1".into(),
-            plan_content: Some("# Plan\n\nStep one\nStep two".into()),
+            plan_content: "# Plan\n\nStep one\nStep two".into(),
         };
         agent.plan_approval_view = Some(
             crate::views::plan_approval_view::PlanApprovalViewState::new(

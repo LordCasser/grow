@@ -1285,200 +1285,10 @@ async fn debounce_session_search_echoes_query_and_seq() {
         other => panic!("expected SessionSearchDebounceExpired, got {other:?}"),
     }
 }
-/// Verify that every profile name produced by `SessionFlags::agent_profile()`
-/// is a valid `BuiltinAgentName` that the shell can resolve.
+/// The explicit role override is the only `agentProfile` source.
 #[test]
-fn agent_profile_names_are_valid_builtins() {
-    use std::str::FromStr;
-    use grow_agent::config::BuiltinAgentName;
-    let test_cases: &[(SessionFlags, &str)] = &[
-        (
-            SessionFlags {
-                plan_mode: true,
-                subagents: true,
-                ask_user: false,
-                ..Default::default()
-            },
-            "grow-build-plan",
-        ),
-        (
-            SessionFlags {
-                plan_mode: true,
-                subagents: false,
-                ask_user: false,
-                ..Default::default()
-            },
-            "grow-build-plan-no-subagents",
-        ),
-        (
-            SessionFlags {
-                plan_mode: true,
-                subagents: true,
-                ask_user: true,
-                ..Default::default()
-            },
-            "grow-build-plan",
-        ),
-        (
-            SessionFlags {
-                plan_mode: true,
-                subagents: false,
-                ask_user: true,
-                ..Default::default()
-            },
-            "grow-build-plan-no-subagents",
-        ),
-        (
-            SessionFlags {
-                plan_mode: false,
-                subagents: false,
-                ask_user: true,
-                ..Default::default()
-            },
-            "grow-build-ask-user",
-        ),
-        (
-            SessionFlags {
-                plan_mode: false,
-                subagents: true,
-                ask_user: true,
-                ..Default::default()
-            },
-            "grow-build-ask-user",
-        ),
-    ];
-    for (flags, expected_name) in test_cases {
-        let profile = flags.agent_profile();
-        assert_eq!(
-                profile,
-                Some(*expected_name),
-                "flags {flags:?} should produce profile {expected_name:?}"
-            );
-        let builtin = BuiltinAgentName::from_str(expected_name);
-        assert!(
-                builtin.is_ok(),
-                "profile name {expected_name:?} is not a valid BuiltinAgentName: {:?}",
-                builtin.err()
-            );
-    }
-}
-/// Default flags produce no agent profile (uses grow-build default).
-#[test]
-fn default_flags_produce_no_profile() {
-    let flags = SessionFlags::default();
-    assert_eq!(flags.agent_profile(), None);
-}
-/// --subagents alone produces no profile (grow-build already has TaskTool).
-#[test]
-fn subagents_without_plan_produces_no_profile() {
+fn session_flags_do_not_emit_agent_profile_without_explicit_override() {
     let flags = SessionFlags {
-        plan_mode: false,
-        subagents: true,
-        ask_user: false,
-        ..Default::default()
-    };
-    assert_eq!(flags.agent_profile(), None);
-}
-/// Neutralize `GROW_AGENT` for the profile-matrix tests below: agent-driven
-/// dev shells export it, which flips `to_meta` into the defer-to-shell
-/// escape hatch and drops `agentProfile` — the tests would then assert the
-/// wrong branch. Empty string counts as unset (`!s.trim().is_empty()`).
-/// Callers must be `#[serial_test::serial(GROW_AGENT)]` (process-global env).
-fn without_grow_agent() -> crate::test_util::EnvVarGuard {
-    crate::test_util::EnvVarGuard::set("GROW_AGENT", "")
-}
-/// At the runtime defaults (every `--no-*` flag false → every
-/// `SessionFlags` bool true via `!args.no_*`), `to_meta()` reflects the
-/// full plan profile and no separate `askUserQuestion` toggle.
-#[serial_test::serial(GROW_AGENT)]
-#[test]
-fn runtime_default_flags_produce_plan_meta() {
-    let _env = without_grow_agent();
-    let flags = SessionFlags {
-        plan_mode: true,
-        subagents: true,
-        ask_user: true,
-        ..Default::default()
-    };
-    let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grow-build-plan");
-    assert!(meta.get("askUserQuestion").is_none());
-    assert_eq!(meta["yoloMode"], false);
-}
-/// --plan alone produces meta with `agentProfile` only and a
-/// `askUserQuestion: false` since `ask_user` is off here.
-#[serial_test::serial(GROW_AGENT)]
-#[test]
-fn plan_only_meta() {
-    let _env = without_grow_agent();
-    let flags = SessionFlags {
-        plan_mode: true,
-        subagents: false,
-        ask_user: false,
-        ..Default::default()
-    };
-    let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grow-build-plan-no-subagents");
-    assert_eq!(meta["askUserQuestion"], false);
-    assert_eq!(meta["yoloMode"], false);
-}
-/// --plan --subagents selects the full plan profile.
-#[serial_test::serial(GROW_AGENT)]
-#[test]
-fn plan_with_subagents_meta() {
-    let _env = without_grow_agent();
-    let flags = SessionFlags {
-        plan_mode: true,
-        subagents: true,
-        ask_user: false,
-        ..Default::default()
-    };
-    let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grow-build-plan");
-    assert_eq!(meta["askUserQuestion"], false);
-    assert_eq!(meta["yoloMode"], false);
-}
-/// --ask-user alone selects the grow-build-ask-user profile.
-#[serial_test::serial(GROW_AGENT)]
-#[test]
-fn ask_user_alone_meta() {
-    let _env = without_grow_agent();
-    let flags = SessionFlags {
-        plan_mode: false,
-        subagents: false,
-        ask_user: true,
-        ..Default::default()
-    };
-    let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grow-build-ask-user");
-    assert!(meta.get("askUserQuestion").is_none());
-    assert_eq!(meta["yoloMode"], false);
-}
-/// --plan --ask-user: plan already includes ask-user; profile is plan.
-#[serial_test::serial(GROW_AGENT)]
-#[test]
-fn plan_with_ask_user_uses_plan_profile() {
-    let _env = without_grow_agent();
-    let flags = SessionFlags {
-        plan_mode: true,
-        subagents: false,
-        ask_user: true,
-        ..Default::default()
-    };
-    let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grow-build-plan-no-subagents");
-    assert!(meta.get("askUserQuestion").is_none());
-    assert_eq!(meta["yoloMode"], false);
-}
-/// --no-plan --no-subagents --no-ask-user picks the default profile but
-/// must still emit `askUserQuestion: false` so the shell can strip the
-/// tool at the builder. Mirrors the runtime: `subagents` toggle alone
-/// does not need an `agentProfile` (default `grow-build` already has it).
-#[test]
-fn subagents_alone_emits_only_ask_user_question_disable() {
-    let flags = SessionFlags {
-        plan_mode: false,
-        subagents: true,
         ask_user: false,
         ..Default::default()
     };
@@ -1486,70 +1296,31 @@ fn subagents_alone_emits_only_ask_user_question_disable() {
     assert!(meta.get("agentProfile").is_none());
     assert_eq!(meta["askUserQuestion"], false);
 }
-/// All three flags on at the runtime default produce grow-build-plan
-/// and no `askUserQuestion` field.
-#[serial_test::serial(GROW_AGENT)]
-#[test]
-fn all_flags_meta() {
-    let _env = without_grow_agent();
-    let flags = SessionFlags {
-        plan_mode: true,
-        subagents: true,
-        ask_user: true,
-        ..Default::default()
-    };
-    let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grow-build-plan");
-    assert!(meta.get("askUserQuestion").is_none());
-    assert_eq!(meta["yoloMode"], false);
-}
 /// `--no-ask-user` is the user-discovered bug — the flag must surface
 /// as `_meta.askUserQuestion = false` regardless of which profile (if
 /// any) the other flags select.
 #[test]
 fn to_meta_emits_ask_user_question_false_when_disabled() {
-    for plan in [false, true] {
-        for subagents in [false, true] {
-            let flags = SessionFlags {
-                plan_mode: plan,
-                subagents,
-                ask_user: false,
-                ..Default::default()
-            };
-            let meta = flags
-                .to_meta()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "ask_user=false must always emit meta (plan={plan}, subagents={subagents})"
-                    )
-                });
-            assert_eq!(
-                    meta["askUserQuestion"], false,
-                    "askUserQuestion must be false (plan={plan}, subagents={subagents}); meta={meta:?}"
-                );
-        }
-    }
+    let flags = SessionFlags {
+        ask_user: false,
+        ..Default::default()
+    };
+    let meta = flags
+        .to_meta()
+        .expect("ask_user=false must always emit meta");
+    assert_eq!(meta["askUserQuestion"], false);
 }
 /// Symmetric positive control: when `ask_user` is enabled the field is
 /// omitted entirely (the shell defaults to enabled when the key is
 /// absent — see `parse_ask_user_question_from_meta`).
 #[test]
 fn to_meta_omits_ask_user_question_when_enabled() {
-    for plan in [false, true] {
-        for subagents in [false, true] {
-            let flags = SessionFlags {
-                plan_mode: plan,
-                subagents,
-                ask_user: true,
-                ..Default::default()
-            };
-            if let Some(meta) = flags.to_meta() {
-                assert!(
-                        meta.get("askUserQuestion").is_none(),
-                        "askUserQuestion must be absent when enabled (plan={plan}, subagents={subagents}); meta={meta:?}"
-                    );
-            }
-        }
+    let flags = SessionFlags {
+        ask_user: true,
+        ..Default::default()
+    };
+    if let Some(meta) = flags.to_meta() {
+        assert!(meta.get("askUserQuestion").is_none());
     }
 }
 #[test]
@@ -1598,25 +1369,6 @@ fn to_meta_yolo_suppresses_auto_mode() {
             meta["autoMode"], false,
             "yolo wins; autoMode must be explicitly false (not omitted)"
         );
-}
-/// Verify that each resolved profile name produces a valid
-/// `AgentDefinition` whose name matches the expected kebab-case string.
-#[test]
-fn agent_profile_definitions_have_correct_names() {
-    use std::str::FromStr;
-    use grow_agent::config::BuiltinAgentName;
-    for name in [
-        "grow-build-plan",
-        "grow-build-plan-no-subagents",
-        "grow-build-ask-user",
-    ] {
-        let builtin = BuiltinAgentName::from_str(name).unwrap();
-        let def = builtin.definition();
-        assert_eq!(
-                def.name, name,
-                "definition name should match the kebab-case profile name"
-            );
-    }
 }
 fn make_session_info(
     model: &str,

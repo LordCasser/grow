@@ -3185,8 +3185,6 @@ fn process_effects(
     app: &mut AppView,
 ) -> bool {
     let flags = effects::SessionFlags {
-        plan_mode: app.plan_mode,
-        subagents: app.subagents,
         ask_user: app.ask_user,
         restore_code: app.restore_code,
         agent_override: app.agent_override.clone(),

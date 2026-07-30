@@ -1,7 +1,7 @@
 //! Goal mode state machine.
 //!
 //! This module contains [`GoalTracker`], a pure state machine (no async I/O)
-//! modeled after [`PlanModeTracker`](super::plan_mode::PlanModeTracker).
+//! modeled after [`BehaviorController`](super::plan_mode::BehaviorController).
 //! The `SessionActor` owns one `GoalTracker` behind a `Mutex` and calls
 //! its methods at the appropriate orchestration points.
 //!

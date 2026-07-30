@@ -1,0 +1,1 @@
+Plan behavior remains active. Ordinary file editing is prohibited. Use other authorized tools only to investigate or verify, under their existing permission rules, and submit the complete plan through `${{ tools.by_kind.exit_plan }}` using its `plan` argument.

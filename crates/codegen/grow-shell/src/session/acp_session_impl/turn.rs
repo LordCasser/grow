@@ -280,7 +280,7 @@ impl SessionActor {
         *self.turn_start_prompt_mode.lock() = prompt_mode;
         *self.turn_prompt_mode.lock() = prompt_mode;
         self.signals_handle().increment_turn();
-        self.reconcile_plan_mode_with_prompt(prompt_mode);
+        self.reconcile_plan_mode_with_prompt(prompt_mode).await;
         let _turn_active_guard =
             TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());
         let _session_turn_active_guard = TurnActiveGuard::activate(Some(&self.session_turn_active));
@@ -679,7 +679,7 @@ impl SessionActor {
         self.maybe_inject_mcp_reminder().await;
         self.maybe_inject_mcp_connecting_reminder().await;
         self.maybe_inject_date_rollover_reminder().await;
-        self.inject_plan_mode_reminders().await;
+        self.inject_behavior_reminders().await;
         self.inject_resumed_tasks_reminder();
         if matches!(&origin, super::super::PromptOrigin::User) {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {

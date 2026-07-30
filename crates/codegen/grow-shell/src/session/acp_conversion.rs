@@ -583,9 +583,6 @@ pub fn acp_tool_update(
                 grow_tools::types::output::ExitPlanModeOutput::PlanReady { message, .. } => {
                     message.clone()
                 }
-                grow_tools::types::output::ExitPlanModeOutput::EmptyPlan { message, .. } => {
-                    message.clone()
-                }
             };
             Some(acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(Arc::from(tool_call_id)),

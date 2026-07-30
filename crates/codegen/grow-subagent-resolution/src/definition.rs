@@ -242,7 +242,7 @@ pub fn render_subagent_system_prompt(
     working_directory: &Path,
 ) -> Option<String> {
     let context = PromptContext {
-        prompt_mode: definition.prompt_mode.clone(),
+        prompt_composition: definition.prompt_composition.clone(),
         audience: PromptAudience::Subagent,
         prompt_body: definition.prompt_body.clone(),
         system_prompt: definition.system_prompt.clone(),
@@ -358,8 +358,8 @@ mod tests {
         )
         .unwrap();
         assert!(prompt.contains("<project_instructions_spec>"));
-        assert!(prompt.contains("read-only codebase exploration agent"));
-        assert!(prompt.contains(&format!("Workspace Path: {}", cwd.path().display())));
+        assert!(prompt.contains("Investigate the assigned question"));
+        assert!(prompt.contains(&format!("Workspace: {}", cwd.path().display())));
         assert!(!prompt.contains("${{"));
     }
     #[tokio::test]

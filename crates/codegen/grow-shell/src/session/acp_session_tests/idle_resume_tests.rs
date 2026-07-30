@@ -235,7 +235,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 )),
                 active_skill: parking_lot::Mutex::new(None),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
-                    crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
+                    crate::session::plan_mode::BehaviorController::new(std::path::PathBuf::from(
                         "/tmp/test-session",
                     )),
                 )),

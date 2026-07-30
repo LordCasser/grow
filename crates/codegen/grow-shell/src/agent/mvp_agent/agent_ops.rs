@@ -2025,15 +2025,15 @@ impl MvpAgent {
                             error = %e,
                             "Failed to load agent definition from file, falling back to default"
                         );
-                        AgentDefinition::grow_build_plan()
+                        AgentDefinition::default_grow_build()
                     }
                 }
             }
             Some(name) => {
                 grow_agent::discovery::by_name_in_cwd(name, cwd)
-                    .unwrap_or_else(AgentDefinition::grow_build_plan)
+                    .unwrap_or_else(AgentDefinition::default_grow_build)
             }
-            None => AgentDefinition::grow_build_plan(),
+            None => AgentDefinition::default_grow_build(),
         }
     }
     /// Extract per-client terminal/fs capabilities from request `_meta`

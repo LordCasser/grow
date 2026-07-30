@@ -1947,7 +1947,8 @@ impl AgentView {
                 self.last_activity = activity.clone();
             }
             self.hit_plan_approval_status.clear();
-            if let Some(ref pav) = self.plan_approval_view {
+            if self.plan_approval_view.is_some() {
+                let status_label = "Waiting on plan approval";
                 let diamond_color = crate::views::turn_status::pending_diamond_color(
                     &theme,
                     theme.accent_plan,
@@ -1960,14 +1961,12 @@ impl AgentView {
                 } else {
                     Style::default().fg(theme.gray)
                 };
-                let status_label =
-                    crate::views::plan_approval_view::plan_approval_status_label(pav.has_plan);
                 let spans = vec![
                     Span::styled(
                         format!("{} ", crate::glyphs::diamond_filled()),
                         Style::default().fg(diamond_color),
                     ),
-                    Span::styled(status_label, text_style),
+                    Span::styled("Waiting on plan approval", text_style),
                 ];
                 buf.set_line_safe(
                     turn_area.x,

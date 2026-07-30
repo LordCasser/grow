@@ -2,14 +2,9 @@
     use super::*;
 
     #[test]
-    fn exit_plan_mode_auto_opens_inline_cursor_plan_preview() {
+    fn exit_plan_mode_opens_submitted_plan_preview() {
         let mut app = make_app_with_agent("sess-1");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
-        }
-        let (ext, _rx) =
-            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Cursor Plan"));
+        let (ext, _rx) = make_exit_plan_ext(Some("# Submitted Plan"));
 
         assert!(handle_exit_plan_mode(ext, &mut app));
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -20,27 +15,18 @@
                 .line_viewer
                 .as_ref()
                 .and_then(|v| v.markdown_content_for_test()),
-            Some("# Cursor Plan")
+            Some("# Submitted Plan")
         );
     }
 
     #[test]
     fn exit_plan_keeps_inline_plan_preview_available() {
         let mut app = make_app_with_agent("sess-1");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
-        }
-        let (ext, _rx) =
-            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# First Plan"));
+        let (ext, _rx) = make_exit_plan_ext(Some("# First Plan"));
 
         assert!(handle_exit_plan_mode(ext, &mut app));
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            assert_eq!(
-                agent.plan_approval_view.as_ref().map(|s| s.source),
-                Some(crate::views::plan_approval_view::PlanReviewSource::Inline)
-            );
             agent.line_viewer = None;
             agent.show_plan_preview();
             assert_eq!(
@@ -54,57 +40,31 @@
     }
 
     #[test]
-    fn exit_plan_without_inline_content_uses_file_backed_source() {
+    fn approval_uses_request_content_without_tracked_tool() {
         let mut app = make_app_with_agent("sess-1");
-        let (ext, _rx) = make_exit_plan_ext(Some("# File Plan"));
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("untracked-call", Some("# Request Plan"));
 
         assert!(handle_exit_plan_mode(ext, &mut app));
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        assert!(agent.latest_inline_plan_content.is_none());
-
-        assert_eq!(
-            agent.plan_approval_view.as_ref().map(|s| s.source),
-            Some(crate::views::plan_approval_view::PlanReviewSource::FileBacked)
-        );
-        // File-backed bodies still open via request plan_content even when
-        // plan.md is not on disk under the agent's cwd.
         assert_eq!(
             agent
                 .line_viewer
                 .as_ref()
                 .and_then(|v| v.markdown_content_for_test()),
-            Some("# File Plan")
+            Some("# Request Plan")
         );
     }
 
     #[test]
-    fn exit_plan_mode_empty_opens_placeholder_preview() {
-        // Empty plan.md must still surface a decision UI — otherwise the user
-        // only sees "Waiting on plan approval" with a dead Tab:plan and thinks
-        // the session is stuck.
+    fn exit_plan_mode_missing_content_is_rejected() {
         let mut app = make_app_with_agent("sess-1");
-        let (ext, _rx) = make_exit_plan_ext(None);
+        let (ext, mut rx) = make_exit_plan_ext(None);
 
-        assert!(handle_exit_plan_mode(ext, &mut app));
+        assert!(!handle_exit_plan_mode(ext, &mut app));
         let agent = app.agents.get(&AgentId(0)).unwrap();
-
-        let pav = agent
-            .plan_approval_view
-            .as_ref()
-            .expect("plan_approval_view must be set");
-        assert!(!pav.has_plan);
-        assert_eq!(
-            pav.focus,
-            crate::views::plan_approval_view::PlanApprovalFocus::Preview,
-            "empty approval must keep Preview focus once the placeholder opens"
-        );
-        assert_eq!(
-            agent
-                .line_viewer
-                .as_ref()
-                .and_then(|v| v.markdown_content_for_test()),
-            Some(crate::views::plan_approval_view::EMPTY_PLAN_PLACEHOLDER)
-        );
+        assert!(agent.plan_approval_view.is_none());
+        assert!(matches!(rx.try_recv(), Ok(Err(_))));
     }
 
     #[test]
@@ -117,7 +77,6 @@
         let mut app = make_app_with_agent("sess-1");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
             agent.active_modal = Some(crate::views::modal::ActiveModal::CommandPalette {
                 entries: crate::views::modal::default_palette_entries(
                     agent.prompt.slash_controller.screen_mode(),
@@ -127,8 +86,7 @@
             });
         }
 
-        let (ext, _rx) =
-            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Cursor Plan"));
+        let (ext, _rx) = make_exit_plan_ext(Some("# Submitted Plan"));
         assert!(handle_exit_plan_mode(ext, &mut app));
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -149,15 +107,13 @@
         let mut app = make_app_with_agent("sess-1");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
             agent.block_viewer = Some(crate::views::block_viewer::BlockViewerPane::for_plain_text(
                 "edit",
                 "diff content",
             ));
         }
 
-        let (ext, _rx) =
-            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Cursor Plan"));
+        let (ext, _rx) = make_exit_plan_ext(Some("# Submitted Plan"));
         assert!(handle_exit_plan_mode(ext, &mut app));
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -170,35 +126,27 @@
     }
 
     #[test]
-    fn later_empty_exit_plan_request_clears_stale_inline_plan() {
+    fn later_invalid_exit_plan_request_preserves_current_plan() {
         let mut app = make_app_with_agent("sess-1");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
-        }
-        let (first, _first_rx) =
-            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# First Plan"));
+        let (first, _first_rx) = make_exit_plan_ext(Some("# First Plan"));
         let (second, _second_rx) = make_exit_plan_ext(None);
 
         assert!(handle_exit_plan_mode(first, &mut app));
-        {
-            let agent = app.agents.get(&AgentId(0)).unwrap();
-            assert_eq!(
-                agent.latest_inline_plan_content.as_deref(),
-                Some("# First Plan")
-            );
-        }
-        assert!(handle_exit_plan_mode(second, &mut app));
+        assert!(!handle_exit_plan_mode(second, &mut app));
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        assert!(agent.latest_inline_plan_content.is_none());
-        // Empty approval still opens the placeholder decision surface (not a
-        // silent "no plan" toast) so the user always sees a way to proceed.
+        assert_eq!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .map(|view| view.plan_content.as_str()),
+            Some("# First Plan")
+        );
         assert_eq!(
             agent
                 .line_viewer
                 .as_ref()
                 .and_then(|v| v.markdown_content_for_test()),
-            Some(crate::views::plan_approval_view::EMPTY_PLAN_PLACEHOLDER)
+            Some("# First Plan")
         );
     }
 
@@ -211,7 +159,7 @@
         let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
             session_id: "sess-A".into(),
             tool_call_id: "tc-normal".into(),
-            plan_content: Some("# Plan\nDo stuff".into()),
+            plan_content: "# Plan\nDo stuff".into(),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         let msg = AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
@@ -242,7 +190,7 @@
         let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
             session_id: "sess-A".into(),
             tool_call_id: "tc-yolo".into(),
-            plan_content: Some("# Plan\nDo stuff".into()),
+            plan_content: "# Plan\nDo stuff".into(),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         let msg = AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
@@ -273,7 +221,7 @@
         let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
             session_id: "sess-B".into(),
             tool_call_id: "tc-bg-plan".into(),
-            plan_content: Some("# Plan".into()),
+            plan_content: "# Plan".into(),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         let msg = AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {

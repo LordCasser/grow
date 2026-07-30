@@ -12,7 +12,7 @@ use grow_diagnostics::session_ctx::log_event;
 /// Show the current plan: if a plan file exists, open it in the preview
 /// overlay popover. If no plan has been written yet, show a toast.
 ///
-/// Delegates to `AgentView::show_plan_preview()` which reads the plan file
+/// Delegates to `AgentView::show_plan_preview()` which reads the session artifact
 /// from `~/.grow/sessions/<urlencoded_cwd>/<session_id>/plan.md`.
 pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
     with_active_agent(app, |agent| {

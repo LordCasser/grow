@@ -852,6 +852,7 @@ mod grow_event_id_stamping_tests {
                     persistence_tx,
                 )
                 .await;
+                *actor.agent.borrow_mut() = super::support::test_agent_with_plan_tools().await;
                 actor
                     .send_update(
                         acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(

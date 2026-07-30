@@ -265,15 +265,12 @@ pub struct AgentsModalState {
     pub persona_expanded: std::collections::HashSet<usize>,
 }
 /// Built-in agent names that should be shown to the user.
-/// Skips internal variants (GrowConcise, GrowPlan,
-/// GrowPlanNoSubagents, GrowAskUser, Codex, Opencode,
-/// CursorExtended, GrowOrchestrator).
+/// Skips internal harness profiles.
 fn user_visible_builtins() -> &'static [BuiltinAgentName] {
     &[
         BuiltinAgentName::Grow,
         BuiltinAgentName::GeneralPurpose,
         BuiltinAgentName::Explore,
-        BuiltinAgentName::Plan,
         BuiltinAgentName::BrowserUse,
     ]
 }
@@ -770,9 +767,9 @@ pub fn toggle_agent(name: &str, enabled: bool) -> Result<(), String> {
 pub fn format_agent_detail(entry: &AgentListEntry) -> Vec<String> {
     let def = &entry.definition;
     let mut lines = Vec::new();
-    let mode_label = match def.prompt_mode {
-        grow_agent::config::PromptMode::Extend => "extend",
-        grow_agent::config::PromptMode::Full => "full",
+    let mode_label = match def.prompt_composition {
+        grow_agent::config::PromptComposition::Extend => "extend",
+        grow_agent::config::PromptComposition::Full => "full",
     };
     lines.push(format!("  Prompt mode: {mode_label}"));
     let tools = &def.tool_config.tools;

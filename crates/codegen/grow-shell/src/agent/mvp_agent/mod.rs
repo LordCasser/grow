@@ -145,7 +145,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub client_fs_write: bool,
     pub preloaded_envrc: Option<std::collections::HashMap<String, String>>,
     pub persisted_signals: Option<crate::session::signals::SessionSignals>,
-    pub persisted_plan_mode: Option<crate::session::plan_mode::PlanModeSnapshot>,
+    pub persisted_plan_mode: Option<crate::session::plan_mode::BehaviorSnapshot>,
     pub persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
     pub persisted_workflow_runs: Vec<
         crate::session::workflow::store::RestoredWorkflowRun,

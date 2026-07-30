@@ -775,56 +775,18 @@ impl ToolOutput {
             }
             ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
                 message,
-                plan_file_path,
                 tool_hints,
-                plan_file_seed,
             }) => {
                 let ask = &tool_hints.ask_user;
                 let exit = &tool_hints.exit_plan;
-                let task_hint = if tool_hints.task.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "\n     You can use the {} tool with subagent_type=\"explore\" to \
-                         parallelize codebase exploration without filling your context window.",
-                        tool_hints.task
-                    )
-                };
-                let plan_status = match plan_file_seed {
-                    PlanFileSeedStatus::Empty => {
-                        format!(
-                            "Write your plan to {plan_file_path}. The file exists and is empty."
-                        )
-                    }
-                    PlanFileSeedStatus::NonEmpty => {
-                        format!(
-                            "Write your plan to {plan_file_path}. The file exists but is not empty."
-                        )
-                    }
-                    PlanFileSeedStatus::Missing(reason) => {
-                        let detail = match reason {
-                            PlanFileSeedFailure::NotCreated => "The file has not yet been created.",
-                            PlanFileSeedFailure::NotAFile => {
-                                "A directory already exists at that path."
-                            }
-                            PlanFileSeedFailure::Inaccessible => "The file could not be accessed.",
-                            PlanFileSeedFailure::Unavailable => {
-                                "The plan file location is unavailable."
-                            }
-                        };
-                        format!("Write your plan to {plan_file_path}. {detail}")
-                    }
-                };
                 format!(
                     "{message}\n\n\
-                     {plan_status}\n\n\
                      In plan mode, you should:\n\
-                     1. Thoroughly explore the codebase to understand existing patterns{task_hint}\n\
-                     2. Identify similar features, codebase architecture, and understand trade-offs\n\
-                     3. Use {ask} if you need to clarify the approach\n\
-                     4. Design a concrete implementation strategy\n\
-                     5. Write your plan to the plan file above\n\
-                     6. When ready, use {exit} to present your plan to the user."
+                     1. Investigate discoverable facts with the tools already available to you\n\
+                     2. Use {ask} only for consequential questions that cannot be answered locally\n\
+                     3. Define a decision-complete plan with interfaces, failure handling, and tests\n\
+                     4. Do not make ordinary file edits\n\
+                     5. When ready, call {exit} with the complete plan in its `plan` argument."
                 )
             }
             ToolOutput::ExitPlanMode(exit) => match exit {
@@ -838,7 +800,6 @@ impl ToolOutput {
                          ## Plan:\n{plan_content}"
                     )
                 }
-                ExitPlanModeOutput::EmptyPlan { message, .. } => message.clone(),
             },
             ToolOutput::AskUserQuestion(
                 AskUserQuestionOutput::QuestionsSent { message, .. }
@@ -907,46 +868,9 @@ pub enum TodoWriteOutput {
     /// line, instead of the framework's wrapper around a `ToolError`.
     InvalidArgument(String),
 }
-/// Why the session plan file is not a ready (empty/non-empty) file.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanFileSeedFailure {
-    /// Did not exist and could not be created.
-    #[default]
-    NotCreated,
-    /// A directory (or other non-regular file) occupies the path.
-    NotAFile,
-    /// Exists but could not be read (permission / other IO error).
-    Inaccessible,
-    /// No `FileSystem` resource or no absolute path was available to seed.
-    Unavailable,
-}
-/// Result of probing / seeding the session plan file on `enter_plan_mode`.
-///
-/// Defaults to `Missing(NotCreated)` when the field is absent on older payloads
-/// (fail-closed in `to_prompt_format`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanFileSeedStatus {
-    /// Not ready; carries why (see [`PlanFileSeedFailure`]).
-    Missing(PlanFileSeedFailure),
-    /// Present and empty (fresh seed or pre-existing empty).
-    Empty,
-    /// Present with prior content (re-entry; not truncated).
-    NonEmpty,
-}
-impl Default for PlanFileSeedStatus {
-    fn default() -> Self {
-        Self::Missing(PlanFileSeedFailure::NotCreated)
-    }
-}
 /// Output from the `EnterPlanMode` tool.
 ///
-/// Confirms plan mode entry and reports session plan-file seed status.
-/// The tool may create an empty session plan file (never truncating non-empty
-/// content); broader read-only enforcement is handled by orchestration.
+/// Confirms plan behavior entry without mutating storage.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum EnterPlanModeOutput {
     /// Successfully signaled plan mode entry.
@@ -954,18 +878,12 @@ pub enum EnterPlanModeOutput {
         /// Confirmation message for the model, nudging it into
         /// exploration/planning behavior.
         message: String,
-        /// Absolute or display path to the plan file so the model knows
-        /// where to write its plan immediately.
-        plan_file_path: String,
         /// Pre-resolved tool name hints for `to_prompt_format()`.
         /// Resolved at runtime via `TemplateRenderer` so no tool names
         /// are hardcoded. Falls back to canonical names when the
         /// renderer is unavailable.
         #[serde(default)]
         tool_hints: EnterPlanModeToolHints,
-        /// Probe / seed outcome; defaults to `Missing` when absent.
-        #[serde(default)]
-        plan_file_seed: PlanFileSeedStatus,
     },
 }
 /// Pre-resolved tool name hints embedded in `EnterPlanModeOutput`.
@@ -1034,25 +952,16 @@ pub enum AskUserQuestionOutput {
 }
 /// Output from the `ExitPlanMode` tool.
 ///
-/// The tool reads the plan file from disk and surfaces its content. The
-/// orchestration layer / client is responsible for presenting the plan to
-/// the user for approval and determining the exit outcome.
+/// The tool persists the submitted plan and surfaces it for approval.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum ExitPlanModeOutput {
-    /// Plan file had content — surfaced for approval.
+    /// Submitted plan persisted and surfaced for approval.
     PlanReady {
         /// Confirmation message for the model.
         message: String,
-        /// The plan file content read from disk.
+        /// The submitted plan content.
         plan_content: String,
         /// Path to the plan file (for the model to reference later).
-        plan_file_path: String,
-    },
-    /// Plan file was empty or did not exist.
-    EmptyPlan {
-        /// Message informing the model there was no plan content.
-        message: String,
-        /// Path where the plan file was expected.
         plan_file_path: String,
     },
 }
@@ -1814,231 +1723,29 @@ mod tests {
         assert!(hints.task.is_empty());
     }
     #[test]
-    fn enter_plan_mode_prompt_format_with_default_hints() {
+    fn enter_plan_mode_prompt_format_submits_inline_plan() {
         let output = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
-            message: "Entered plan mode.".into(),
-            plan_file_path: "/tmp/plan.md".into(),
+            message: "Entered plan behavior.".into(),
             tool_hints: EnterPlanModeToolHints::default(),
-            plan_file_seed: PlanFileSeedStatus::Empty,
         });
         let prompt = output.to_prompt_format();
-        assert!(prompt.contains("Entered plan mode."));
-        assert!(prompt.contains("Write your plan to /tmp/plan.md. The file exists and is empty."));
-        assert!(prompt.contains("/tmp/plan.md"));
-        assert!(prompt.contains("ask_user_question"));
+        assert!(prompt.contains("Entered plan behavior."));
         assert!(prompt.contains("exit_plan_mode"));
-        assert!(prompt.contains("5. Write your plan to the plan file above"));
-        assert!(prompt.contains("present your plan to the user"));
-        assert!(
-            !prompt.contains("subagent_type"),
-            "should not contain subagent guidance without task tool"
-        );
+        assert!(prompt.contains("plan"));
+        assert!(!prompt.contains("plan.md"));
+        assert!(!prompt.contains("Edit"));
     }
+
     #[test]
-    fn enter_plan_mode_prompt_format_with_task_tool() {
-        let output = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
-            message: "Entered plan mode.".into(),
-            plan_file_path: "/tmp/plan.md".into(),
-            tool_hints: EnterPlanModeToolHints {
-                ask_user: "ask_user_question".into(),
-                exit_plan: "exit_plan_mode".into(),
-                task: "task".into(),
-            },
-            plan_file_seed: PlanFileSeedStatus::Empty,
-        });
-        let prompt = output.to_prompt_format();
-        assert!(
-            prompt.contains("task tool with subagent_type"),
-            "should include subagent guidance when task tool is set"
-        );
-        assert!(prompt.contains("parallelize codebase exploration"));
-    }
-    #[test]
-    fn enter_plan_mode_prompt_format_with_custom_tool_names() {
-        let output = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
-            message: "Entered plan mode.".into(),
-            plan_file_path: "/session/plan.md".into(),
-            tool_hints: EnterPlanModeToolHints {
-                ask_user: "AskUser".into(),
-                exit_plan: "FinishPlan".into(),
-                task: String::new(),
-            },
-            plan_file_seed: PlanFileSeedStatus::Empty,
-        });
-        let prompt = output.to_prompt_format();
-        assert!(prompt.contains("Use AskUser if you need"));
-        assert!(prompt.contains("use FinishPlan to present"));
-        assert!(!prompt.contains("ask_user_question"));
-        assert!(!prompt.contains("exit_plan_mode"));
-    }
-    #[test]
-    fn enter_plan_mode_prompt_format_contains_six_steps() {
-        let output = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
-            message: "Entered plan mode.".into(),
-            plan_file_path: "/tmp/plan.md".into(),
-            tool_hints: EnterPlanModeToolHints::default(),
-            plan_file_seed: PlanFileSeedStatus::Empty,
-        });
-        let prompt = output.to_prompt_format();
-        assert!(prompt.contains("1. Thoroughly explore"));
-        assert!(prompt.contains("2. Identify similar"));
-        assert!(prompt.contains("3. Use ask_user_question"));
-        assert!(prompt.contains("4. Design a concrete"));
-        assert!(prompt.contains("5. Write your plan to the plan file above"));
-        assert!(prompt.contains("6. When ready, use exit_plan_mode"));
-    }
-    #[test]
-    fn enter_plan_mode_output_serde_with_tool_hints() {
-        let output = EnterPlanModeOutput::Entered {
-            message: "Entered plan mode.".into(),
-            plan_file_path: "/tmp/plan.md".into(),
-            tool_hints: EnterPlanModeToolHints {
-                ask_user: "AskUser".into(),
-                exit_plan: "FinishPlan".into(),
-                task: "delegate".into(),
-            },
-            plan_file_seed: PlanFileSeedStatus::Empty,
-        };
-        let json = serde_json::to_value(&output).unwrap();
-        assert_eq!(json["Entered"]["tool_hints"]["ask_user"], "AskUser");
-        assert_eq!(json["Entered"]["tool_hints"]["exit_plan"], "FinishPlan");
-        assert_eq!(json["Entered"]["tool_hints"]["task"], "delegate");
-        assert_eq!(json["Entered"]["plan_file_seed"], "empty");
-        let deserialized: EnterPlanModeOutput = serde_json::from_value(json).unwrap();
-        match deserialized {
-            EnterPlanModeOutput::Entered {
-                tool_hints,
-                plan_file_seed,
-                ..
-            } => {
-                assert_eq!(tool_hints.ask_user, "AskUser");
-                assert_eq!(tool_hints.exit_plan, "FinishPlan");
-                assert_eq!(tool_hints.task, "delegate");
-                assert_eq!(plan_file_seed, PlanFileSeedStatus::Empty);
-            }
-        }
-    }
-    #[test]
-    fn enter_plan_mode_output_serde_defaults_tool_hints_when_absent() {
-        let json = json!({
-            "Entered": {
-                "message": "Entered plan mode.",
-                "plan_file_path": "/tmp/plan.md"
-            }
-        });
-        let deserialized: EnterPlanModeOutput = serde_json::from_value(json).unwrap();
-        match deserialized {
-            EnterPlanModeOutput::Entered {
-                tool_hints,
-                plan_file_seed,
-                ..
-            } => {
-                assert_eq!(tool_hints.ask_user, "ask_user_question");
-                assert_eq!(tool_hints.exit_plan, "exit_plan_mode");
-                assert!(tool_hints.task.is_empty());
-                assert_eq!(
-                    plan_file_seed,
-                    PlanFileSeedStatus::Missing(PlanFileSeedFailure::NotCreated)
-                );
-            }
-        }
-    }
-    #[test]
-    fn enter_plan_mode_prompt_format_nonempty_seed() {
-        let output = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
-            message: "Entered plan mode.".into(),
-            plan_file_path: "/tmp/plan.md".into(),
-            tool_hints: EnterPlanModeToolHints::default(),
-            plan_file_seed: PlanFileSeedStatus::NonEmpty,
-        });
-        let prompt = output.to_prompt_format();
-        assert!(
-            prompt.contains("Write your plan to /tmp/plan.md. The file exists but is not empty.")
-        );
-        assert!(!prompt.contains("and is empty"));
-        assert!(prompt.contains("5. Write your plan to the plan file above\n"));
-    }
-    #[test]
-    fn enter_plan_mode_prompt_format_missing_seed() {
-        let output = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
-            message: "Entered plan mode.".into(),
-            plan_file_path: "/tmp/plan.md".into(),
-            tool_hints: EnterPlanModeToolHints::default(),
-            plan_file_seed: PlanFileSeedStatus::Missing(PlanFileSeedFailure::NotCreated),
-        });
-        let prompt = output.to_prompt_format();
-        assert!(
-            prompt.contains("Write your plan to /tmp/plan.md. The file has not yet been created.")
-        );
-        assert!(prompt.contains("5. Write your plan to the plan file above"));
-    }
-    #[test]
-    fn enter_plan_mode_absent_seed_field_prompt_is_missing() {
-        let json = json!({
-            "Entered": {
-                "message": "Entered plan mode.",
-                "plan_file_path": "/tmp/plan.md"
-            }
-        });
-        let deserialized: EnterPlanModeOutput = serde_json::from_value(json).unwrap();
-        let prompt = ToolOutput::EnterPlanMode(deserialized).to_prompt_format();
-        assert!(
-            prompt.contains("Write your plan to /tmp/plan.md. The file has not yet been created.")
-        );
-    }
-    #[test]
-    fn enter_plan_mode_missing_reason_suffixes() {
-        let cases = [
-            (
-                PlanFileSeedFailure::NotCreated,
-                "The file has not yet been created.",
-            ),
-            (
-                PlanFileSeedFailure::NotAFile,
-                "A directory already exists at that path.",
-            ),
-            (
-                PlanFileSeedFailure::Inaccessible,
-                "The file could not be accessed.",
-            ),
-            (
-                PlanFileSeedFailure::Unavailable,
-                "The plan file location is unavailable.",
-            ),
-        ];
-        for (reason, expected) in cases {
-            let output = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
-                message: "Entered plan mode.".into(),
-                plan_file_path: "/tmp/plan.md".into(),
-                tool_hints: EnterPlanModeToolHints::default(),
-                plan_file_seed: PlanFileSeedStatus::Missing(reason),
-            });
-            let prompt = output.to_prompt_format();
-            assert!(
-                prompt.contains(&format!("Write your plan to /tmp/plan.md. {expected}")),
-                "reason {reason:?}: {prompt}"
-            );
-        }
-    }
-    #[test]
-    fn plan_file_seed_missing_serde_shape() {
+    fn enter_plan_mode_output_serde_contains_no_artifact_fields() {
         let output = EnterPlanModeOutput::Entered {
             message: "m".into(),
-            plan_file_path: "/tmp/plan.md".into(),
             tool_hints: EnterPlanModeToolHints::default(),
-            plan_file_seed: PlanFileSeedStatus::Missing(PlanFileSeedFailure::NotAFile),
         };
-        let json = serde_json::to_value(&output).unwrap();
-        assert_eq!(
-            json["Entered"]["plan_file_seed"],
-            json!({ "missing": "not_a_file" })
-        );
-        let back: EnterPlanModeOutput = serde_json::from_value(json).unwrap();
-        let EnterPlanModeOutput::Entered { plan_file_seed, .. } = back;
-        assert_eq!(
-            plan_file_seed,
-            PlanFileSeedStatus::Missing(PlanFileSeedFailure::NotAFile)
-        );
+        let json = serde_json::to_value(output).unwrap();
+        let text = json.to_string();
+        assert!(!text.contains("plan_file_path"));
+        assert!(!text.contains("plan_file_seed"));
     }
     #[test]
     fn subagent_completed_hints_absent_when_no_persona() {

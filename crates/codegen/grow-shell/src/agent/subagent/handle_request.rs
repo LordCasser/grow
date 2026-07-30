@@ -1087,7 +1087,11 @@ pub(crate) async fn run_shell_child(
     let _ = child_handle.cmd_tx.send(SessionCommand::Prompt {
         prompt_id: child_prompt_id.clone(),
         prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(prompt_text))],
-        prompt_mode: crate::session::plan_mode::PromptMode::Agent,
+        prompt_mode: match request.runtime_overrides.behavior {
+            Some(xai_tool_types::BehaviorId::Clarify) => crate::session::plan_mode::PromptMode::Ask,
+            Some(xai_tool_types::BehaviorId::Plan) => crate::session::plan_mode::PromptMode::Plan,
+            None => crate::session::plan_mode::PromptMode::Agent,
+        },
         client_identifier: None,
         screen_mode: None,
         verbatim: true,

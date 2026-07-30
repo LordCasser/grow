@@ -97,7 +97,7 @@ pub enum PersistenceMsg {
     },
     PlanState(TodoState),
     /// Plan mode lifecycle state to persist
-    PlanModeState(crate::session::plan_mode::PlanModeSnapshot),
+    PlanModeState(crate::session::plan_mode::BehaviorSnapshot),
     /// A rewind point to persist
     RewindPoint(RewindPoint),
     /// Truncate rewind points from a specific prompt index (inclusive).
@@ -1921,7 +1921,7 @@ pub struct PersistedInfoLight {
     pub summary: Summary,
     pub chat_history: Vec<ConversationItem>,
     pub plan_state: Option<TodoState>,
-    pub plan_mode_state: Option<crate::session::plan_mode::PlanModeSnapshot>,
+    pub plan_mode_state: Option<crate::session::plan_mode::BehaviorSnapshot>,
     /// Path to updates file for streaming reads
     pub updates_file_path: Option<std::path::PathBuf>,
     /// Adapter-owned path to `rewind_points.jsonl` for the session's
@@ -2488,13 +2488,7 @@ mod agent_name_persistence_tests {
 
     #[test]
     fn summary_round_trips_various_agent_names() {
-        for name in [
-            "cursor",
-            "grow-build",
-            "grow-build-plan",
-            "codex",
-            "browser-use",
-        ] {
+        for name in ["cursor", "grow-build", "grow", "codex", "browser-use"] {
             let mut summary = Summary::new(
                 &Info {
                     id: acp::SessionId::new("test"),

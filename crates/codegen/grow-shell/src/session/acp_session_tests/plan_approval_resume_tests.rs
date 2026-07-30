@@ -82,7 +82,7 @@ async fn request_plan_approval_issues_reverse_request_and_clears_flag() {
 
             let tool_call_id = acp::ToolCallId::new(Arc::from("tc-resume"));
             let parsed = actor
-                .request_plan_approval(&tool_call_id, Some("# Plan".into()))
+                .request_plan_approval(&tool_call_id, "# Plan".into())
                 .await
                 .expect("approval round-trip should succeed");
 
@@ -129,7 +129,7 @@ async fn request_plan_approval_clears_flag_on_request_changes() {
 
             let tool_call_id = acp::ToolCallId::new(Arc::from("tc-resume-revise"));
             let parsed = actor
-                .request_plan_approval(&tool_call_id, Some("# Plan".into()))
+                .request_plan_approval(&tool_call_id, "# Plan".into())
                 .await
                 .expect("approval round-trip should succeed");
 
@@ -174,7 +174,7 @@ async fn request_plan_approval_parse_fallback_fails_closed() {
 
             let tool_call_id = acp::ToolCallId::new(Arc::from("tc-garbage"));
             let parsed = actor
-                .request_plan_approval(&tool_call_id, Some("# Plan".into()))
+                .request_plan_approval(&tool_call_id, "# Plan".into())
                 .await
                 .expect("round-trip returns Ok even for a garbage payload");
             assert_eq!(parsed.outcome, "cancelled");
@@ -196,13 +196,12 @@ async fn real_exit_plan_mode_disconnect_keeps_awaiting_persisted() {
             let (actor, mut gateway_rx, mut persistence_rx) = actor_with_channels().await;
             // Real enter/exit_plan_mode tools so prepare_tool_call parses a genuine call.
             *actor.agent.borrow_mut() = test_agent_with_plan_tools().await;
-            // Plan mode Active with a real plan.md at the tracker path.
+            // Plan mode Active with a session artifact path.
             let dir = tempfile::tempdir().unwrap();
-            std::fs::write(dir.path().join("plan.md"), "# Plan\n- step 1\n").unwrap();
             {
                 let mut tracker = actor.plan_mode.lock();
                 *tracker =
-                    crate::session::plan_mode::PlanModeTracker::new(dir.path().to_path_buf());
+                    crate::session::plan_mode::BehaviorController::new(dir.path().to_path_buf());
                 tracker.activate_from_tool();
             }
 
@@ -225,7 +224,10 @@ async fn real_exit_plan_mode_disconnect_keeps_awaiting_persisted() {
             let call = crate::sampling::types::ToolCallResponse {
                 id: "call-exit".to_string(),
                 kind: "function".to_string(),
-                function: crate::sampling::types::ToolCallFunction::new("exit_plan_mode", "{}"),
+                function: crate::sampling::types::ToolCallFunction::new(
+                    "exit_plan_mode",
+                    serde_json::json!({"plan": "# Plan\n- step 1"}).to_string(),
+                ),
             };
             let mut deferred = Vec::new();
             let outcome = actor
@@ -270,18 +272,20 @@ async fn real_exit_plan_mode_no_client_executes_tool() {
             drop(gateway_rx);
             *actor.agent.borrow_mut() = test_agent_with_plan_tools().await;
             let dir = tempfile::tempdir().unwrap();
-            std::fs::write(dir.path().join("plan.md"), "# Plan\n- step 1\n").unwrap();
             {
                 let mut tracker = actor.plan_mode.lock();
                 *tracker =
-                    crate::session::plan_mode::PlanModeTracker::new(dir.path().to_path_buf());
+                    crate::session::plan_mode::BehaviorController::new(dir.path().to_path_buf());
                 tracker.activate_from_tool();
             }
 
             let call = crate::sampling::types::ToolCallResponse {
                 id: "call-exit-headless".to_string(),
                 kind: "function".to_string(),
-                function: crate::sampling::types::ToolCallFunction::new("exit_plan_mode", "{}"),
+                function: crate::sampling::types::ToolCallFunction::new(
+                    "exit_plan_mode",
+                    serde_json::json!({"plan": "# Plan\n- step 1"}).to_string(),
+                ),
             };
             let mut deferred = Vec::new();
             let outcome = actor
@@ -293,6 +297,50 @@ async fn real_exit_plan_mode_no_client_executes_tool() {
                 outcome.is_ok(),
                 "headless exit_plan_mode should fall through to execute the tool"
             );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn exit_plan_artifact_failure_keeps_behavior_active_without_approval() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, mut gateway_rx, _persistence_rx) = actor_with_channels().await;
+            *actor.agent.borrow_mut() = test_agent_with_plan_tools().await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let blocked_session_dir = dir.path().join("not-a-directory");
+            std::fs::write(&blocked_session_dir, "occupied").unwrap();
+            {
+                let mut tracker = actor.plan_mode.lock();
+                *tracker = crate::session::plan_mode::BehaviorController::new(blocked_session_dir);
+                tracker.activate_from_tool();
+            }
+
+            let call = crate::sampling::types::ToolCallResponse {
+                id: "call-exit-write-failure".to_string(),
+                kind: "function".to_string(),
+                function: crate::sampling::types::ToolCallFunction::new(
+                    "exit_plan_mode",
+                    serde_json::json!({"plan": "# Plan\n- cannot persist"}).to_string(),
+                ),
+            };
+            let mut deferred = Vec::new();
+            let outcome = actor
+                .prepare_tool_call(call, &mut deferred)
+                .await
+                .expect("persistence failure is reported as a handled tool result");
+
+            assert!(matches!(outcome, Err(ToolLoop::Continue)));
+            assert!(actor.plan_mode.lock().is_active());
+            assert!(!actor.plan_mode.lock().is_awaiting_plan_approval());
+            while let Ok(message) = gateway_rx.try_recv() {
+                assert!(
+                    !matches!(message, xai_acp_lib::AcpClientMessage::ExtMethod(_)),
+                    "artifact failure must not open the approval protocol"
+                );
+            }
         })
         .await;
 }
@@ -324,7 +372,7 @@ async fn request_plan_approval_keeps_flag_when_client_disconnects() {
 
             let tool_call_id = acp::ToolCallId::new(Arc::from("tc-resume-quit"));
             let result = actor
-                .request_plan_approval(&tool_call_id, Some("# Plan".into()))
+                .request_plan_approval(&tool_call_id, "# Plan".into())
                 .await;
 
             assert!(result.is_err(), "disconnect should surface as an error");
@@ -370,8 +418,7 @@ async fn request_plan_approval_future_drop_clears_flag() {
             });
 
             let tool_call_id = acp::ToolCallId::new(Arc::from("tc-drop"));
-            let mut fut =
-                Box::pin(actor.request_plan_approval(&tool_call_id, Some("# Plan".into())));
+            let mut fut = Box::pin(actor.request_plan_approval(&tool_call_id, "# Plan".into()));
             // Poll until the request is parked (awaiting flag set), then drop.
             tokio::select! {
                 _ = &mut fut => panic!("request should still be parked (no answer)"),
@@ -402,7 +449,7 @@ async fn resume_no_plan_md_clears_flag_without_request() {
             {
                 let mut tracker = actor.plan_mode.lock();
                 *tracker =
-                    crate::session::plan_mode::PlanModeTracker::new(dir.path().to_path_buf());
+                    crate::session::plan_mode::BehaviorController::new(dir.path().to_path_buf());
                 tracker.activate_from_tool();
                 tracker.set_awaiting_plan_approval(true);
             }

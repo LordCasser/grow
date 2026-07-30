@@ -40,7 +40,7 @@ pub struct NotificationBridgeConfig {
     /// Plan mode tracker shared with the session actor.
     /// Used to transition state on `PlanModeEntered` / `PlanModeExited`
     /// tool notifications.
-    pub plan_mode: Arc<parking_lot::Mutex<crate::session::plan_mode::PlanModeTracker>>,
+    pub plan_mode: Arc<parking_lot::Mutex<crate::session::plan_mode::BehaviorController>>,
     /// Session-level prompt mode shared with the session actor.
     /// Updated on `PlanModeEntered` / `PlanModeExited` and `session/set_mode`
     /// so the next turn starts in the correct mode.
@@ -842,7 +842,9 @@ mod tests {
             persistence: PersistenceHandle::from_sender_for_test(persistence_tx),
             incremental_bash_output: false,
             plan_mode: Arc::new(parking_lot::Mutex::new(
-                crate::session::plan_mode::PlanModeTracker::new(PathBuf::from("/tmp/test-session")),
+                crate::session::plan_mode::BehaviorController::new(PathBuf::from(
+                    "/tmp/test-session",
+                )),
             )),
             current_prompt_mode: Arc::new(parking_lot::Mutex::new(
                 crate::session::plan_mode::PromptMode::Agent,

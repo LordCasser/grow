@@ -20,10 +20,10 @@ pub struct TaskToolInput {
     #[schemars(description = "Short description of the task (3-5 words).")]
     pub description: String,
 
-    /// Name of the subagent type to launch. Built-in types: "general-purpose",
-    /// "explore", "plan". Additional user-defined types may also be available.
+    /// Name of the subagent type to launch. Built-in types: "general-purpose"
+    /// and "explore". Additional user-defined types may also be available.
     #[schemars(
-        description = "Name of the subagent type to launch. Built-in types: \"general-purpose\", \"explore\", \"plan\". Additional user-defined types may also be available."
+        description = "Name of the subagent type to launch. Built-in types: \"general-purpose\" and \"explore\". Additional user-defined types may also be available."
     )]
     #[serde(default = "default_subagent_type")]
     pub subagent_type: String,
@@ -49,6 +49,16 @@ pub struct TaskToolInput {
     )]
     #[serde(default)]
     pub capability_mode: Option<SubagentCapabilityMode>,
+
+    /// Optional behavior applied to this child session. Behaviors guide and
+    /// constrain how an existing role works; they do not grant tools or alter
+    /// the selected subagent type.
+    #[schemars(
+        description = "Optional behavior for this subagent: \"clarify\" or \"plan\". \
+            A behavior never grants tools and is independent of subagent_type."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<BehaviorId>,
 
     /// Isolation mode for the child's execution environment.
     #[schemars(
@@ -112,6 +122,14 @@ pub struct TaskToolInput {
 /// Default `subagent_type` for [`TaskToolInput`] when the caller omits it.
 pub fn default_subagent_type() -> String {
     "general-purpose".to_string()
+}
+
+/// A session work behavior, orthogonal to the Agent role and tool capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BehaviorId {
+    Clarify,
+    Plan,
 }
 
 /// True when `s` is not a model-emitted placeholder (`""`, `"null"`, `"none"`,
@@ -733,41 +751,6 @@ Workspace boundary:
 - Your default search scope is the workspace in <user_info>. Do not search outside it unless asked.
 - If not found in the workspace, report that rather than broadening scope.";
 
-/// Prompt body for the **plan** subagent.
-///
-/// A read-only architect agent that explores the codebase and produces
-/// implementation plans.
-pub const PLAN_PROMPT: &str = "\
-You are a read-only software architect. Explore the codebase and design implementation plans.
-
-=== READ-ONLY MODE ===
-\
-You have NO file editing tools. Do not create, modify, or delete files.\
-${%- if tools.by_kind.execute %} \
-Use ${{ tools.by_kind.execute }} only for read-only commands \
-(ls, git status, git log, git diff, find, cat, head, tail).\
-${%- endif %}
-
-Process:
-1. **Understand** the requirements and any assigned perspective.
-2. **Explore**: read provided files, find patterns with ${{ tools.by_kind.list }}/${{ tools.by_kind.search }}/${{ tools.by_kind.read }}, trace relevant code paths.
-3. **Design**: consider trade-offs, follow existing patterns, create implementation approach.
-4. **Detail**: step-by-step strategy, dependencies, sequencing, potential challenges.
-
-## Required Output
-
-End your response with:
-
-### Critical Files for Implementation
-List 3-5 files most critical for implementing this plan:
-- path/to/file1 - [Brief reason: e.g., \"Core logic to modify\"]
-- path/to/file2 - [Brief reason: e.g., \"Interfaces to implement\"]
-- path/to/file3 - [Brief reason: e.g., \"Pattern to follow\"]
-
-Workspace boundary:
-- Your default analysis scope is the workspace in <user_info>. Stay within it unless asked otherwise.
-- Note explicitly if the design requires understanding external dependencies.";
-
 /// The **general-purpose** built-in subagent.
 pub const GENERAL_PURPOSE_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     name: "general-purpose",
@@ -788,20 +771,8 @@ pub const EXPLORE_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     prompt_template: EXPLORE_PROMPT,
 };
 
-/// The **plan** built-in subagent.
-pub const PLAN_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
-    name: "plan",
-    description: "Software architect for planning implementation strategies.",
-    tools_template: "Read-only \u{2014} has access to all tools except file editing \
-         (${{ tools.by_kind.edit }} is not available): \
-         ${{ tools.by_kind.read }}, ${{ tools.by_kind.list }}, ${{ tools.by_kind.search }}, \
-         and ${{ tools.by_kind.plan }}.",
-    prompt_template: PLAN_PROMPT,
-};
-
 /// The built-in subagent types advertised to the model, in display order.
-pub const BUILTIN_SUBAGENTS: [BuiltinSubagent; 3] =
-    [GENERAL_PURPOSE_SUBAGENT, EXPLORE_SUBAGENT, PLAN_SUBAGENT];
+pub const BUILTIN_SUBAGENTS: [BuiltinSubagent; 2] = [GENERAL_PURPOSE_SUBAGENT, EXPLORE_SUBAGENT];
 
 /// Look up a built-in subagent by its `subagent_type` name
 /// (e.g. `"explore"`), or `None` for user-defined / unknown types.
@@ -1136,6 +1107,19 @@ mod tests {
     }
 
     #[test]
+    fn task_tool_input_behavior_is_independent_of_subagent_type() {
+        let input: TaskToolInput = serde_json::from_str(
+            r#"{"description":"d","prompt":"p","subagent_type":"explore","behavior":"plan"}"#,
+        )
+        .unwrap();
+        assert_eq!(input.subagent_type, "explore");
+        assert_eq!(input.behavior, Some(BehaviorId::Plan));
+
+        let value = serde_json::to_value(input).unwrap();
+        assert_eq!(value["behavior"], "plan");
+    }
+
+    #[test]
     fn task_tool_input_model_none_skips_serialize() {
         let input = TaskToolInput {
             prompt: "p".into(),
@@ -1143,6 +1127,7 @@ mod tests {
             subagent_type: default_subagent_type(),
             run_in_background: false,
             capability_mode: None,
+            behavior: None,
             isolation: None,
             resume_from: None,
             cwd: None,
@@ -1221,7 +1206,7 @@ mod tests {
     fn builtin_subagent_catalog_names_and_descriptor_conversion() {
         assert_eq!(
             BUILTIN_SUBAGENTS.map(|b| b.name),
-            ["general-purpose", "explore", "plan"]
+            ["general-purpose", "explore"]
         );
 
         let desc = EXPLORE_SUBAGENT.to_descriptor(&plain_tool_naming());
@@ -1249,10 +1234,7 @@ mod tests {
             builtin_subagent_by_name("general-purpose").map(|b| b.prompt_template),
             Some(GENERAL_PURPOSE_PROMPT)
         );
-        assert_eq!(
-            builtin_subagent_by_name("plan").map(|b| b.prompt_template),
-            Some(PLAN_PROMPT)
-        );
+        assert!(builtin_subagent_by_name("plan").is_none());
         assert!(builtin_subagent_by_name("code-reviewer").is_none());
     }
 
@@ -1272,7 +1254,6 @@ mod tests {
         }
         // Read-only profiles carry the read-only banner; general-purpose doesn't.
         assert!(EXPLORE_PROMPT.contains("=== READ-ONLY MODE ==="));
-        assert!(PLAN_PROMPT.contains("=== READ-ONLY MODE ==="));
         assert!(!GENERAL_PURPOSE_PROMPT.contains("READ-ONLY"));
     }
 
@@ -1305,13 +1286,6 @@ mod tests {
         let explore = EXPLORE_SUBAGENT.render_prompt(&by_kind).unwrap();
         assert!(explore.contains("Use run_terminal_cmd only for read-only commands"));
         assert!(explore.contains("Use list_dir for file pattern matching"));
-
-        // Missing execute tool hides its `${%- if %}` section.
-        let mut without_execute = by_kind.clone();
-        without_execute.remove("execute");
-        let plan = PLAN_SUBAGENT.render_prompt(&without_execute).unwrap();
-        assert!(!plan.contains("only for read-only commands"));
-        assert!(plan.contains("=== READ-ONLY MODE ==="));
     }
 
     /// A [`SubagentToolNaming`] whose fields are the bare kind names, so
@@ -1334,12 +1308,6 @@ mod tests {
             GENERAL_PURPOSE_SUBAGENT.render_tools(&plain_tool_naming()),
             "Has access to all tools: execute, read, edit, list, search, and plan."
         );
-        assert_eq!(
-            PLAN_SUBAGENT.render_tools(&plain_tool_naming()),
-            "Read-only \u{2014} has access to all tools except file editing (edit is not available): \
-             read, list, search, and plan."
-        );
-
         // Real tool names are substituted per kind.
         let naming = SubagentToolNaming {
             execute: "run_terminal_cmd",

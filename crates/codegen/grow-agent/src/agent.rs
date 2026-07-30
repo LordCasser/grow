@@ -208,7 +208,7 @@ impl Agent {
     /// the existing ToolBridge. Used for mid-session mode switching.
     pub async fn render_prompt_for_definition(&self, definition: &AgentDefinition) -> String {
         let mut ctx = self.prompt_context.clone();
-        ctx.prompt_mode = definition.prompt_mode.clone();
+        ctx.prompt_composition = definition.prompt_composition.clone();
         ctx.prompt_body = definition.prompt_body.clone();
         ctx.system_prompt = definition.system_prompt.clone();
         ctx.build_timestamp_utc = chrono::Utc::now().to_rfc3339();

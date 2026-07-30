@@ -7,44 +7,11 @@ pub use grow_tools::implementations::grow_build::exit_plan_mode::{
 
 use crate::views::prompt_widget::StashedPrompt;
 
-/// Placeholder body for the plan-approval preview when `exit_plan_mode` parks
-/// with no plan content (missing/empty `plan.md`, or a whitespace-only body).
-///
-/// Must be non-empty after trim so `LineViewerState::open_markdown_content`
-/// accepts it — empty bodies are rejected there.
-pub const EMPTY_PLAN_PLACEHOLDER: &str = "\
-# No plan written yet
-
-The agent exited plan mode without writing a plan.
-
-- **Approve** — leave plan mode and start implementing
-- **Request changes** — send the agent back to planning
-- **Quit** — abandon and turn plan mode off
-";
-
-/// Status-line label while plan approval is parked.
-///
-/// Empty plans use an active decision prompt instead of "Waiting…", so the
-/// UI doesn't look stuck when there is no preview body to open.
-pub fn plan_approval_status_label(has_plan: bool) -> &'static str {
-    if has_plan {
-        "Waiting on plan approval"
-    } else {
-        "No plan written — approve or request changes"
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanApprovalFocus {
     Preview,
     Prompt,
     Commenting,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlanReviewSource {
-    Inline,
-    FileBacked,
 }
 
 #[derive(Debug, Clone)]
@@ -56,9 +23,7 @@ pub struct PlanComment {
 
 pub struct PlanApprovalViewState {
     pub tool_call_id: String,
-    pub has_plan: bool,
-    pub plan_content: Option<String>,
-    pub source: PlanReviewSource,
+    pub plan_content: String,
     pub stashed_prompt: StashedPrompt,
     pub response_tx: Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>>,
 
@@ -77,27 +42,9 @@ impl PlanApprovalViewState {
         stashed_prompt: StashedPrompt,
         response_tx: tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>,
     ) -> Self {
-        Self::with_source(
-            request,
-            PlanReviewSource::Inline,
-            stashed_prompt,
-            response_tx,
-        )
-    }
-
-    pub fn with_source(
-        request: ExitPlanModeExtRequest,
-        source: PlanReviewSource,
-        stashed_prompt: StashedPrompt,
-        response_tx: tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>,
-    ) -> Self {
-        let plan_content = request.plan_content.filter(|s| !s.trim().is_empty());
-        let has_plan = plan_content.is_some();
         Self {
             tool_call_id: request.tool_call_id,
-            has_plan,
-            plan_content,
-            source,
+            plan_content: request.plan_content,
             stashed_prompt,
             response_tx: Some(response_tx),
             focus: PlanApprovalFocus::Preview,
@@ -113,31 +60,28 @@ impl PlanApprovalViewState {
         let mut parts: Vec<String> = self
             .comments
             .iter()
-            .map(|comment| match self.source {
-                PlanReviewSource::Inline => {
-                    let label = if comment.line_range.len() == 1 {
-                        format!("Proposed plan line {}:", comment.line_range.start)
-                    } else {
-                        format!(
-                            "Proposed plan lines {}-{}:",
-                            comment.line_range.start,
-                            comment.line_range.end - 1
-                        )
-                    };
-                    let snippets =
-                        inline_plan_snippets(self.plan_content.as_deref(), &comment.line_range);
-                    format!("{label}\n{snippets}\n\nComment:\n{}", comment.text)
-                }
-                PlanReviewSource::FileBacked => format_file_backed_plan_comment(comment),
+            .map(|comment| {
+                let label = if comment.line_range.len() == 1 {
+                    format!("Proposed plan line {}:", comment.line_range.start)
+                } else {
+                    format!(
+                        "Proposed plan lines {}-{}:",
+                        comment.line_range.start,
+                        comment.line_range.end - 1
+                    )
+                };
+                let snippets = inline_plan_snippets(Some(&self.plan_content), &comment.line_range);
+                format!("{label}\n{snippets}\n\nComment:\n{}", comment.text)
             })
             .collect();
 
         if let Some(text) = freeform
             && !text.trim().is_empty()
         {
-            let text = match (self.source, self.comments.is_empty()) {
-                (PlanReviewSource::Inline, false) => format!("Additional feedback:\n{text}"),
-                _ => text.to_owned(),
+            let text = if self.comments.is_empty() {
+                text.to_owned()
+            } else {
+                format!("Additional feedback:\n{text}")
             };
             parts.push(text);
         }
@@ -189,19 +133,6 @@ impl PlanApprovalViewState {
     pub fn send_stale_cancel(&mut self) -> bool {
         self.send_cancelled(None)
     }
-}
-
-fn format_file_backed_plan_comment(comment: &PlanComment) -> String {
-    let range = if comment.line_range.len() == 1 {
-        format!("@plan.md:{}", comment.line_range.start)
-    } else {
-        format!(
-            "@plan.md:{}-{}",
-            comment.line_range.start,
-            comment.line_range.end - 1
-        )
-    };
-    format!("{range}\n{}", comment.text)
 }
 
 pub(crate) fn inline_plan_snippets(
@@ -260,7 +191,7 @@ mod tests {
         let request = ExitPlanModeExtRequest {
             session_id: "test-session".into(),
             tool_call_id: "call_123".into(),
-            plan_content: Some("# Plan\n\n## Step 1\nDo something".into()),
+            plan_content: "# Plan\n\n## Step 1\nDo something".into(),
         };
         let state = PlanApprovalViewState::new(
             request,
@@ -349,12 +280,7 @@ mod tests {
     fn test_constructor_defaults() {
         let (state, _rx) = make_test_state();
         assert_eq!(state.tool_call_id, "call_123");
-        assert!(state.has_plan);
-        assert_eq!(
-            state.plan_content.as_deref(),
-            Some("# Plan\n\n## Step 1\nDo something")
-        );
-        assert_eq!(state.source, PlanReviewSource::Inline);
+        assert_eq!(state.plan_content, "# Plan\n\n## Step 1\nDo something");
         assert_eq!(state.stashed_prompt.text, "stashed text");
         assert!(state.response_tx.is_some());
         assert_eq!(state.focus, PlanApprovalFocus::Preview);
@@ -365,77 +291,10 @@ mod tests {
         assert!(state.stashed_feedback_prompt.is_none());
     }
 
-    fn make_empty_plan_state() -> (
-        PlanApprovalViewState,
-        tokio::sync::oneshot::Receiver<AcpResult<acp::ExtResponse>>,
-    ) {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let request = ExitPlanModeExtRequest {
-            session_id: "test-session".into(),
-            tool_call_id: "call_456".into(),
-            plan_content: None,
-        };
-        let state = PlanApprovalViewState::new(
-            request,
-            StashedPrompt {
-                text: "stashed".into(),
-                cursor: 0,
-                images: Vec::new(),
-                chip_elements: Vec::new(),
-                image_counter: 0,
-                image_undo_stash: Vec::new(),
-            },
-            tx,
-        );
-        (state, rx)
-    }
-
-    #[test]
-    fn test_empty_plan_has_plan_false() {
-        let (state, _rx) = make_empty_plan_state();
-        assert!(!state.has_plan);
-        assert!(state.plan_content.is_none());
-    }
-
-    #[test]
-    fn plan_approval_status_label_distinguishes_empty() {
-        assert_eq!(plan_approval_status_label(true), "Waiting on plan approval");
-        assert_eq!(
-            plan_approval_status_label(false),
-            "No plan written — approve or request changes"
-        );
-        // Placeholder must be non-empty so the line viewer accepts it.
-        assert!(!EMPTY_PLAN_PLACEHOLDER.trim().is_empty());
-    }
-
-    #[test]
-    fn test_empty_plan_whitespace_only() {
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        let request = ExitPlanModeExtRequest {
-            session_id: "test-session".into(),
-            tool_call_id: "call_789".into(),
-            plan_content: Some("   \n\n  ".into()),
-        };
-        let state = PlanApprovalViewState::new(
-            request,
-            StashedPrompt {
-                text: "stashed".into(),
-                cursor: 0,
-                images: Vec::new(),
-                chip_elements: Vec::new(),
-                image_counter: 0,
-                image_undo_stash: Vec::new(),
-            },
-            tx,
-        );
-        assert!(!state.has_plan);
-        assert!(state.plan_content.is_none());
-    }
-
     #[test]
     fn inline_plan_feedback_quotes_selected_line_snippets() {
         let (mut state, _rx) = make_test_state();
-        state.plan_content = Some("alpha\nbravo\ncharlie\ndelta".into());
+        state.plan_content = "alpha\nbravo\ncharlie\ndelta".into();
         state.comments.push(PlanComment {
             id: 0,
             line_range: 2..3,
@@ -458,7 +317,7 @@ mod tests {
     #[test]
     fn inline_plan_feedback_handles_out_of_range_lines() {
         let (mut state, _rx) = make_test_state();
-        state.plan_content = Some("alpha".into());
+        state.plan_content = "alpha".into();
         state.comments.push(PlanComment {
             id: 0,
             line_range: 9..10,
@@ -468,23 +327,6 @@ mod tests {
         assert_eq!(
             state.format_feedback(None),
             "Proposed plan line 9:\n> [selected lines unavailable]\n\nComment:\nwhere is this"
-        );
-    }
-
-    #[test]
-    fn file_backed_plan_feedback_keeps_plan_md_references() {
-        let (mut state, _rx) = make_test_state();
-        state.source = PlanReviewSource::FileBacked;
-        state.plan_content = Some("alpha\nbravo".into());
-        state.comments.push(PlanComment {
-            id: 0,
-            line_range: 1..3,
-            text: "keep file ref".into(),
-        });
-
-        assert_eq!(
-            state.format_feedback(Some("freeform")),
-            "@plan.md:1-2\nkeep file ref\n\nfreeform"
         );
     }
 }

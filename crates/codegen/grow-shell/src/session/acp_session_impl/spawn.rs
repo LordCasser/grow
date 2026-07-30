@@ -242,7 +242,7 @@ pub(crate) async fn spawn_session_actor(
     compat: CompatConfig,
     incremental_bash_output: bool,
     persisted_signals: Option<crate::session::signals::SessionSignals>,
-    persisted_plan_mode: Option<crate::session::plan_mode::PlanModeSnapshot>,
+    persisted_plan_mode: Option<crate::session::plan_mode::BehaviorSnapshot>,
     persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
     persisted_workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
     persisted_announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
@@ -537,9 +537,9 @@ pub(crate) async fn spawn_session_actor(
     let plan_mode = {
         let session_dir = crate::session::persistence::session_dir(&session_info);
         let tracker = if let Some(snapshot) = persisted_plan_mode {
-            crate::session::plan_mode::PlanModeTracker::from_snapshot(session_dir, snapshot)
+            crate::session::plan_mode::BehaviorController::from_snapshot(session_dir, snapshot)
         } else {
-            crate::session::plan_mode::PlanModeTracker::new(session_dir)
+            crate::session::plan_mode::BehaviorController::new(session_dir)
         };
         Arc::new(parking_lot::Mutex::new(tracker))
     };
@@ -2006,7 +2006,7 @@ pub(crate) async fn spawn_session_on_thread(
     compat: CompatConfig,
     incremental_bash_output: bool,
     persisted_signals: Option<crate::session::signals::SessionSignals>,
-    persisted_plan_mode: Option<crate::session::plan_mode::PlanModeSnapshot>,
+    persisted_plan_mode: Option<crate::session::plan_mode::BehaviorSnapshot>,
     persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
     persisted_workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
     persisted_announcement_state: Option<crate::session::announcement_state::AnnouncementState>,

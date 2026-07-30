@@ -17,8 +17,14 @@ description: >-
 
 # How the Markdown body below contributes to the system prompt:
 #   extend (default): append it to Grow's built-in prompt.
-#   full:             use it as the complete MiniJinja system prompt.
-promptMode: extend
+#   full:             replace only the optional standard/role guidance.
+# Mandatory foundation, audience, and runtime layers always remain.
+promptComposition: extend
+
+# Base tool declaration. Runtime injection, capability/depth filtering, Agent
+# filters, session clamps, and Behavior gates are applied later and can only
+# narrow this result.
+toolPreset: grow-build
 
 # Optional subagent defaults. They do not select a provider/model.
 # capabilityMode: read-only | read-write | execute | all
@@ -52,39 +58,39 @@ agentsMd: true
 injectDefaultTools: true
 
 # Final Agent-authored filters. Omit/empty `tools` to allow every assembled
-# tool. The denylist takes priority. `Agent(name)` entries also control which
-# agent types may be spawned.
+# tool. The denylist takes priority. Subagent authorization is separate.
 tools:
   - read_file
   - grep
   - list_dir
   - run_terminal_cmd
-  - Agent(explore, general-purpose)
 disallowedTools:
   - deploy_app
 
-# Advanced tool assembly. Declaring `toolConfig` replaces the built-in core
-# tool list, so include every core tool this Agent needs. Per-tool record keys
-# deliberately use snake_case because they are the grow-tools wire contract.
-toolConfig:
-  behavior_preset: current
-  tools:
-    - id: Grow:read_file
-      params: {}
-      name_override: inspect_file
-      params_name_overrides:
-        target_file: path
-      description_override: Read a UTF-8 text file or a supported document.
-      behavior_version: current
-      # kind is used by capabilityMode filtering.
-      kind: read
-    - id: Grow:grep
-      params: null
-      name_override: null
-      params_name_overrides: null
-      description_override: null
-      behavior_version: null
-      kind: search
+subagents:
+  allow:
+    - explore
+    - general-purpose
+  deny: []
+
+# Additional tools are layered after toolPreset. Per-tool record keys use the
+# grow-tools wire contract.
+additionalTools:
+  - id: Grow:read_file
+    params: {}
+    name_override: inspect_file
+    params_name_overrides:
+      target_file: path
+    description_override: Read a UTF-8 text file or a supported document.
+    behavior_version: current
+    kind: read
+  - id: Grow:grep
+    params: null
+    name_override: inspect_matches
+    params_name_overrides: null
+    description_override: null
+    behavior_version: null
+    kind: search
 
 # When this definition is spawned as a subagent, Agent-owned MCP servers are
 # available to trusted, non-plugin Agent files. A string references a server

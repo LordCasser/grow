@@ -148,6 +148,15 @@ pub(super) fn handle_exit_plan_mode(
             return false;
         }
     };
+    if params.plan_content.trim().is_empty() {
+        ext.response_tx
+            .send(Err(acp::Error::new(
+                -32602,
+                "Invalid exit_plan_mode params: planContent must be non-empty",
+            )))
+            .ok();
+        return false;
+    }
 
     // 2. Route by the request's session id (like `session/update`), so a
     // plan-approval raised by a BACKGROUND session lands on its own view even
@@ -191,8 +200,6 @@ pub(super) fn handle_exit_plan_mode(
     agent.active_modal = None;
     agent.block_viewer = None;
 
-    let source = plan_review_source_for_tool(&params.tool_call_id, agent);
-
     // If the user was mid-casual-comment when this new plan-approval
     // request arrived, restore the pre-comment prompt first so the
     // upcoming `stash()` captures the user's original text rather
@@ -204,16 +211,11 @@ pub(super) fn handle_exit_plan_mode(
     }
 
     let stashed = agent.prompt.stash();
-    let state = PlanApprovalViewState::with_source(params, source, stashed, ext.response_tx);
+    let state = PlanApprovalViewState::new(params, stashed, ext.response_tx);
 
     agent.plan_comments.clear();
     agent.plan_next_comment_id = 0;
 
-    if state.source == PlanReviewSource::Inline {
-        agent.latest_inline_plan_content = state.plan_content.clone();
-    } else {
-        agent.latest_inline_plan_content = None;
-    }
     agent.plan_approval_view = Some(state);
     agent.prompt.set_text("");
 
@@ -238,16 +240,4 @@ pub(super) fn handle_exit_plan_mode(
     // Background-parked approval renders when the user switches to the session;
     // only the active view needs an immediate redraw.
     is_active
-}
-
-pub(super) fn plan_review_source_for_tool(
-    tool_call_id: &str,
-    agent: &AgentView,
-) -> PlanReviewSource {
-    agent
-        .session
-        .tracker
-        .tool_title(tool_call_id)
-        .filter(|title| *title == "CreatePlan" || *title == "Plan: Submit for approval")
-        .map_or(PlanReviewSource::FileBacked, |_| PlanReviewSource::Inline)
 }

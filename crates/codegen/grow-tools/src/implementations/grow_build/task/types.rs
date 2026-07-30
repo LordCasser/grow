@@ -23,7 +23,7 @@ use std::sync::Arc;
 use educe::Educe;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use xai_tool_types::{SubagentCapabilityMode, SubagentIsolationMode, WaitMode};
+use xai_tool_types::{BehaviorId, SubagentCapabilityMode, SubagentIsolationMode, WaitMode};
 
 use crate::register_resource;
 
@@ -156,11 +156,13 @@ pub struct SubagentRuntimeOverrides {
     pub persona: Option<String>,
     /// Capability mode controlling tool access.
     pub capability_mode: Option<SubagentCapabilityMode>,
+    /// Work behavior for the child. Independent of role and capability.
+    pub behavior: Option<BehaviorId>,
     /// Isolation mode for child execution environment.
     /// `None` means "use role/persona default" (which itself defaults to `None`/shared workspace).
     pub isolation: Option<SubagentIsolationMode>,
-    /// `/goal`-only harness override: the `agent_type` (e.g. `"cursor"`,
-    /// `"grow-build-plan"`) whose `AgentDefinition` decides the child's harness
+    /// `/goal`-only harness override: the `agent_type` (e.g. `"cursor"` or
+    /// `"grow"`) whose `AgentDefinition` decides the child's harness
     /// flavor — system prompt + toolset — applied
     /// REGARDLESS of the parent agent (so a session can pin a
     /// compat-harness verifier and vice versa).

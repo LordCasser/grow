@@ -1506,7 +1506,7 @@ impl StorageAdapter for JsonlStorageAdapter {
     async fn write_plan_mode_state(
         &self,
         info: &Info,
-        state: &crate::session::plan_mode::PlanModeSnapshot,
+        state: &crate::session::plan_mode::BehaviorSnapshot,
     ) -> io::Result<()> {
         let json = serde_json::to_vec_pretty(state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -1624,7 +1624,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         let updates = self.read_updates_jsonl(self.updates_file(info))?;
         let plan_state = self.read_optional_json_sync::<TodoState>(&self.plan_file(info))?;
         let plan_mode_state = self
-            .read_optional_json_sync::<crate::session::plan_mode::PlanModeSnapshot>(
+            .read_optional_json_sync::<crate::session::plan_mode::BehaviorSnapshot>(
                 &self.plan_mode_state_file(info),
             )?;
         let signals = self.read_optional_json_sync::<crate::session::signals::SessionSignals>(
@@ -1678,7 +1678,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         let chat_history = self.read_chat_history_sync(chat_file, summary.chat_format_version)?;
         let plan_state = self.read_optional_json_sync::<TodoState>(&self.plan_file(info))?;
         let plan_mode_state = self
-            .read_optional_json_sync::<crate::session::plan_mode::PlanModeSnapshot>(
+            .read_optional_json_sync::<crate::session::plan_mode::BehaviorSnapshot>(
                 &self.plan_mode_state_file(info),
             )?;
         let signals = self.read_optional_json_sync::<crate::session::signals::SessionSignals>(

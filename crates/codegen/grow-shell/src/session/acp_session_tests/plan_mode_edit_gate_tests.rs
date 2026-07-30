@@ -1,5 +1,5 @@
 //! Plan-mode edit gate through the real `prepare_tool_call` path: plan mode
-//! is read-only except the plan file in EVERY permission mode. The fixture's
+//! rejects every ordinary file edit in EVERY permission mode. The fixture's
 //! `PermissionHandle::allow_all()` is the always-approve worst case — before
 //! the gate, it silently approved any edit in plan mode (the "yolo edits in
 //! plan mode" bug); these tests pin that the gate rejects
@@ -78,10 +78,10 @@ async fn tool_result_text(actor: &SessionActor, call_id: &str) -> String {
         .unwrap_or_else(|| panic!("no tool_result for {call_id} in {conv:?}"))
 }
 /// The headline: plan mode Active + allow-all permissions (the always-approve
-/// worst case) still rejects a grow edit outside the plan file, without ever
+/// worst case) still rejects a grow edit, without ever
 /// reaching the permission layer, and steers the model to `exit_plan_mode`.
 #[tokio::test(flavor = "current_thread")]
-async fn plan_mode_rejects_grow_edit_outside_plan_file_despite_allow_all_permissions() {
+async fn plan_mode_rejects_grow_edit_despite_allow_all_permissions() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -95,24 +95,17 @@ async fn plan_mode_rejects_grow_edit_outside_plan_file_despite_allow_all_permiss
             );
             let text = tool_result_text(&actor, "call_gate").await;
             assert!(
-                text.contains("Rejected: file edits are not allowed in plan mode"),
+                text.contains("ordinary file editing is prohibited"),
                 "rejection text: {text}"
             );
-            assert!(
-                text.contains("/tmp/test-session/plan.md"),
-                "must name the plan file so the model knows the one editable path: {text}"
-            );
-            assert!(
-                !text.contains("exit_plan_mode"),
-                "rejection should stay short (no exit-tool steering): {text}"
-            );
+            assert!(text.contains("exit_plan_mode"), "rejection text: {text}");
         })
         .await;
 }
-/// The carve-out: the plan file itself prepares cleanly (the gate defers to
-/// `should_auto_approve_edit`, the same predicate as the permission bypass).
+/// The session artifact path is not a carve-out: it is rejected like every
+/// ordinary Edit call because only the ExitPlan control protocol may write it.
 #[tokio::test(flavor = "current_thread")]
-async fn plan_mode_allows_plan_file_edit() {
+async fn plan_mode_rejects_session_plan_artifact_edit() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -123,11 +116,7 @@ async fn plan_mode_allows_plan_file_edit() {
                 search_replace_call("call_plan_file", "/tmp/test-session/plan.md"),
             )
             .await;
-            assert!(
-                result.is_ok(),
-                "plan-file edit must pass the gate and prepare; got {:?}",
-                result.err()
-            );
+            assert!(matches!(result, Err(ToolLoop::Continue)), "got {result:?}");
         })
         .await;
 }

@@ -1093,7 +1093,6 @@ impl AgentView {
                 .take()
                 .expect("plan_approval_view is Some (just checked)");
             pav.send_stale_cancel();
-            self.latest_inline_plan_content = None;
             self.plan_next_comment_id = pav.next_comment_id;
             self.prompt.restore(pav.stashed_prompt);
             self.line_viewer = None;

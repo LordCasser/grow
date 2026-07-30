@@ -694,7 +694,7 @@ pub struct PersistedData {
     pub updates: Vec<SessionUpdate>,
     pub plan_state: Option<TodoState>,
     /// Persisted plan mode lifecycle state (None for sessions created before plan mode)
-    pub plan_mode_state: Option<crate::session::plan_mode::PlanModeSnapshot>,
+    pub plan_mode_state: Option<crate::session::plan_mode::BehaviorSnapshot>,
     /// Rewind points for session rewind functionality
     pub rewind_points: Vec<RewindPoint>,
     /// Persisted session signals (None for sessions created before signals persistence)
@@ -712,7 +712,7 @@ pub struct PersistedDataLight {
     pub summary: Summary,
     pub chat_history: Vec<ConversationItem>,
     pub plan_state: Option<TodoState>,
-    pub plan_mode_state: Option<crate::session::plan_mode::PlanModeSnapshot>,
+    pub plan_mode_state: Option<crate::session::plan_mode::BehaviorSnapshot>,
     // No `rewind_points` field: the resume path defers them (loaded lazily by
     // `FileStateTracker`). Use `load_session` for the eager set.
     /// Persisted session signals (None for sessions created before signals persistence)
@@ -1089,7 +1089,7 @@ pub trait StorageAdapter: Send + Sync {
     async fn write_plan_mode_state(
         &self,
         info: &Info,
-        state: &crate::session::plan_mode::PlanModeSnapshot,
+        state: &crate::session::plan_mode::BehaviorSnapshot,
     ) -> io::Result<()>;
 
     /// Write/update the session signals snapshot

@@ -3028,7 +3028,14 @@ fn picker_long_description_wraps_to_multiple_lines() {
         !opt_in_full.contains('\u{2026}'),
         "wrapped Opt-in description must NOT contain `…`, got:\n{opt_in_full}"
     );
-    for word in ["Allow", "synthetic", "preserve", "wrapping", "terminal", "rows"] {
+    for word in [
+        "Allow",
+        "synthetic",
+        "preserve",
+        "wrapping",
+        "terminal",
+        "rows",
+    ] {
         assert!(
             opt_in_full.contains(word),
             "Opt-in description must include word {word:?}, got:\n{opt_in_full}"

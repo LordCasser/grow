@@ -124,7 +124,8 @@ pub struct SessionHandle {
     /// Plan mode tracker — shared with the session actor via Arc.
     /// Exposed so the `grow/toggle_plan_mode` handler can toggle plan mode
     /// without going through the session command channel.
-    pub plan_mode: std::sync::Arc<parking_lot::Mutex<crate::session::plan_mode::PlanModeTracker>>,
+    pub plan_mode:
+        std::sync::Arc<parking_lot::Mutex<crate::session::plan_mode::BehaviorController>>,
     /// Debug flag: when set to `true`, the next turn unconditionally triggers
     /// auto-compaction regardless of context window usage. Consumed (reset to
     /// `false`) atomically on use via `compare_exchange`.

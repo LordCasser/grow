@@ -210,31 +210,14 @@ pub(crate) fn sanitize_user_error(raw: &str) -> String {
     }
     result
 }
-/// Additive session creation flags passed from CLI → AppView → effects.
+/// Session creation flags passed from CLI → AppView → effects.
 ///
-/// The flags map to built-in `BuiltinAgentName` profiles (`agentProfile`)
-/// and, independently, gate the `ask_user_question` tool at the builder
-/// (`askUserQuestion`). `--no-ask-user` always strips the tool, regardless
-/// of which profile was selected.
-///
-/// The `askUserQuestion` column is the value the pager stamps into `_meta`;
-/// `omitted` means the shell resolves the gate itself (default ON).
-///
-/// | plan  | subagents | ask-user | agentProfile                   | askUserQuestion    |
-/// |-------|-----------|----------|--------------------------------|--------------------|
-/// | false | false     | false    | `grow-build` (default)         | `false`            |
-/// | false | true      | false    | `grow-build` (default)         | `false`            |
-/// | false | false     | true     | `grow-build-ask-user`          | omitted (shell gate) |
-/// | false | true      | true     | `grow-build-ask-user`          | omitted (shell gate) |
-/// | true  | false     | false    | `grow-build-plan-no-subagents` | `false`            |
-/// | true  | true      | false    | `grow-build-plan`              | `false`            |
-/// | true  | false     | true     | `grow-build-plan-no-subagents` | omitted (shell gate) |
-/// | true  | true      | true     | `grow-build-plan`              | omitted (shell gate) |
-///
+/// Plan is delivered independently through ACP `SetSessionMode`, and subagent
+/// availability is fixed by the existing process/session capability path.
+/// Neither belongs in session-creation metadata. `askUserQuestion: false`
+/// remains an independent final tool clamp.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SessionFlags {
-    pub plan_mode: bool,
-    pub subagents: bool,
     pub ask_user: bool,
     /// Restore code state on resume (`--restore-code`).
     /// Injected as `grow/restore_code` into `LoadSession` meta, or passed
@@ -260,18 +243,6 @@ pub(crate) struct SessionFlags {
     pub resume_local_miss: Option<String>,
 }
 impl SessionFlags {
-    /// Resolve the agent profile name from the flags.
-    ///
-    /// Returns `None` for the default `grow-build` profile (no `_meta`
-    /// needed; it already includes TaskTool).
-    pub(super) fn agent_profile(&self) -> Option<&'static str> {
-        match (self.plan_mode, self.subagents, self.ask_user) {
-            (true, true, _) => Some("grow-build-plan"),
-            (true, false, _) => Some("grow-build-plan-no-subagents"),
-            (false, _, true) => Some("grow-build-ask-user"),
-            (false, _, false) => None,
-        }
-    }
     /// Build the `_meta` JSON value for ACP `NewSessionRequest` / `LoadSessionRequest`.
     ///
     /// In practice always `Some`: the permission seeds (`yoloMode` /
@@ -284,9 +255,6 @@ impl SessionFlags {
         let mut meta = serde_json::Map::new();
         if let Some(ref profile) = self.agent_override {
             meta.insert("agentProfile".into(), profile.clone());
-        } else if std::env::var("GROW_AGENT").ok().is_some_and(|s| !s.trim().is_empty())
-        {} else if let Some(profile) = self.agent_profile() {
-            meta.insert("agentProfile".into(), serde_json::json!(profile));
         }
         if !self.ask_user {
             meta.insert("askUserQuestion".into(), serde_json::json!(false));

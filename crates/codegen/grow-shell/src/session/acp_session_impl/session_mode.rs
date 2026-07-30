@@ -33,6 +33,24 @@ impl SessionActor {
         *self.current_prompt_mode.lock() = prompt_mode;
         let mode = SessionMode::from_id(session_mode_id.0.as_ref());
         if mode.is_plan() {
+            if self
+                .agent
+                .borrow()
+                .tool_bridge()
+                .tool_for_kind(grow_tools::types::tool::ToolKind::ExitPlan)
+                .await
+                .is_none()
+            {
+                *self.current_prompt_mode.lock() = PromptMode::Agent;
+                self.enqueue_current_mode_update(acp::SessionModeId::new(
+                    SessionMode::Default.as_id(),
+                ));
+                tracing::warn!(
+                    session_id = %self.session_info.id.0,
+                    "Plan behavior activation rejected: final ToolBridge has no ExitPlan tool"
+                );
+                return;
+            }
             let entered = self.plan_mode.lock().enter_pending();
             if entered {
                 self.persist_plan_mode_state();
@@ -98,6 +116,10 @@ impl SessionActor {
             )
             .in_scope(|| {});
         }
+        self.plan_mode
+            .lock()
+            .set_idle_behavior(prompt_mode.behavior());
+        self.persist_plan_mode_state();
         let agent_def = match session_mode_id.0.as_ref() {
             "browser_use" => Some(AgentDefinition::browser_use()),
             name => {
@@ -110,7 +132,7 @@ impl SessionActor {
                 session_id = %self.session_info.id.0,
                 agent_name = %def.name,
                 agent_scope = %def.scope,
-                prompt_mode = ?def.prompt_mode,
+                prompt_composition = ?def.prompt_composition,
                 has_completion_req = def.completion_requirement.is_some(),
                 tool_configs = def.tool_config.tools.len(),
                 "Resolved AgentDefinition for session mode"
@@ -138,11 +160,26 @@ impl SessionActor {
     /// Mirrors `handle_session_mode` but driven from `_meta.mode` on the
     /// prompt — the only signal the client sends. Both transitions are
     /// idempotent, so `set_mode`-driven flows are unaffected.
-    pub(super) fn reconcile_plan_mode_with_prompt(&self, prompt_mode: PromptMode) {
+    pub(super) async fn reconcile_plan_mode_with_prompt(&self, prompt_mode: PromptMode) {
         use crate::session::plan_mode::PlanModeState;
         *self.current_prompt_mode.lock() = prompt_mode;
         match prompt_mode {
             PromptMode::Plan => {
+                if self
+                    .agent
+                    .borrow()
+                    .tool_bridge()
+                    .tool_for_kind(grow_tools::types::tool::ToolKind::ExitPlan)
+                    .await
+                    .is_none()
+                {
+                    *self.current_prompt_mode.lock() = PromptMode::Agent;
+                    tracing::warn!(
+                        session_id = %self.session_info.id.0,
+                        "Plan behavior prompt rejected: final ToolBridge has no ExitPlan tool"
+                    );
+                    return;
+                }
                 let entered = self.plan_mode.lock().enter_pending();
                 if entered {
                     self.persist_plan_mode_state();
@@ -155,12 +192,15 @@ impl SessionActor {
                 };
                 if was_plan {
                     self.plan_mode.lock().user_exit(false);
-                    self.persist_plan_mode_state();
                 }
+                self.plan_mode
+                    .lock()
+                    .set_idle_behavior(prompt_mode.behavior());
+                self.persist_plan_mode_state();
             }
         }
     }
-    /// Inject plan mode system-reminders into the conversation.
+    /// Inject active Behavior guidance into the conversation.
     ///
     /// Called once per turn from `handle_prompt()`, before the user's actual
     /// message is pushed. Handles three mutually-ordered cases:
@@ -175,15 +215,18 @@ impl SessionActor {
     /// All reminders are pushed as `<system-reminder>`-wrapped user messages
     /// so the model sees them in the same turn as the user's prompt.
     /// Tool names are resolved at render time via `TemplateRenderer`.
-    pub(super) async fn inject_plan_mode_reminders(&self) {
+    pub(super) async fn inject_behavior_reminders(&self) {
         use crate::session::plan_mode::{
-            PlanModeState, plan_mode_exit_reminder_template, plan_mode_reminder_full_template,
-            plan_mode_reminder_sparse_template,
+            PlanModeState, clarify_reminder_template, plan_mode_exit_reminder_template,
+            plan_mode_reminder_full_template, plan_mode_reminder_sparse_template,
         };
         let use_cursor_reminders = self.is_cursor_harness();
         let push_reminder = |this: &Self, content: &str| {
             this.push_system_reminder_with_tag(content, this.reminder_wrapper_tag());
         };
+        if self.plan_mode.lock().behavior() == Some(xai_tool_types::BehaviorId::Clarify) {
+            push_reminder(self, clarify_reminder_template());
+        }
         let mut injected_this_turn = false;
         let activation = {
             let tracker = self.plan_mode.lock();
@@ -252,7 +295,7 @@ impl SessionActor {
     }
     /// Activate plan mode for a turn that is already running.
     ///
-    /// Mid-turn counterpart of `inject_plan_mode_reminders` case 1: the user
+    /// Mid-turn counterpart of `inject_behavior_reminders` case 1: the user
     /// toggled plan mode ON (Ctrl+R) while the model was thinking, so the
     /// tracker sits in `Pending` and the running turn would otherwise proceed
     /// without any plan-mode instruction. Activate immediately (so
@@ -314,7 +357,7 @@ impl SessionActor {
     }
     /// The activation reminder template for the active template (no
     /// first-entry/reentry distinction), or grow's reentry/full variant.
-    /// Shared by turn-start injection (`inject_plan_mode_reminders` case 1)
+    /// Shared by turn-start injection (`inject_behavior_reminders` case 1)
     /// and the mid-turn toggle (`activate_plan_mode_mid_turn`).
     fn plan_activation_template(&self, is_reentry: bool) -> &'static str {
         use crate::session::plan_mode::{
@@ -328,18 +371,25 @@ impl SessionActor {
     }
     /// Render a plan mode template via the tool bridge's `TemplateRenderer`.
     ///
-    /// Passes `plan_path` and `plan_has_content` as extra context alongside the
-    /// registry's `tools.by_kind.*` mappings.
+    /// The host reads the session artifact and injects its content directly;
+    /// the Agent does not need Read or Edit access to that storage location.
     pub(super) async fn render_plan_template(
         &self,
         template: &str,
         plan_path: &std::path::Path,
         plan_has_content: bool,
     ) -> Option<String> {
-        let extra = serde_json::json!({
-            "plan_path": plan_path.display().to_string(),
-            "plan_has_content": plan_has_content,
-        });
+        let plan_content = if plan_has_content {
+            tokio::fs::read_to_string(plan_path)
+                .await
+                .ok()
+                .map(|content| content.trim().to_owned())
+                .filter(|content| !content.is_empty())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let extra = serde_json::json!({ "plan_content": plan_content });
         self.agent
             .borrow()
             .tool_bridge()

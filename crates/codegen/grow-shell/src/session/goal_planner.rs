@@ -43,7 +43,7 @@ pub(crate) const GOAL_ROLE_AWAIT_BUDGET_EXCEEDED: &str =
 pub(crate) struct RoleSpawnOverride {
     /// Resolved, post-auth, post-fail-open model id, or `None` to inherit.
     pub model: Option<String>,
-    /// Resolved harness `agent_type` (e.g. `"grow-build-plan"`)
+    /// Resolved harness `agent_type` (for example `"grow"`)
     /// whose `AgentDefinition` decides the spawned subagent's harness flavor
     /// (system prompt + toolset), applied REGARDLESS of the
     /// parent agent. `None` ⇒ inherit the session harness. NOT a subagent type —

@@ -1,8 +1,8 @@
 //! AgentBuilder — fluent construction API for building Agents.
 use crate::agent::Agent;
 use crate::compaction::CompactionPolicy;
-use crate::config::{AGENT_TASK_CLASSIFIER_RE, short_tool_name, tool_id_eq, tool_id_matches};
-use crate::config::{AgentDefinition, BuiltinAgentName, PermissionMode, PromptMode};
+use crate::config::{AgentDefinition, BuiltinAgentName, PermissionMode, PromptComposition};
+use crate::config::{short_tool_name, tool_id_eq, tool_id_matches};
 use crate::discovery::{SubagentEntry, SubagentSource};
 use crate::error::AgentBuildError;
 use crate::prompt::context::PromptContext;
@@ -69,7 +69,7 @@ pub struct AgentBuilder {
     persona_instructions: Option<String>,
     name: Option<String>,
     description: Option<String>,
-    prompt_mode: PromptMode,
+    prompt_composition: PromptComposition,
     tools: Option<Vec<String>>,
     disallowed_tools: Vec<String>,
     skill_names: Vec<String>,
@@ -204,7 +204,7 @@ impl AgentBuilder {
             persona_instructions: None,
             name: None,
             description: None,
-            prompt_mode: PromptMode::Extend,
+            prompt_composition: PromptComposition::Extend,
             tools: None,
             disallowed_tools: vec![],
             skill_names: vec![],
@@ -299,8 +299,8 @@ impl AgentBuilder {
         self.description = Some(desc.into());
         self
     }
-    pub fn with_prompt_mode(mut self, mode: PromptMode) -> Self {
-        self.prompt_mode = mode;
+    pub fn with_prompt_composition(mut self, mode: PromptComposition) -> Self {
+        self.prompt_composition = mode;
         self
     }
     pub fn with_tools(mut self, tools: Vec<String>) -> Self {
@@ -559,7 +559,7 @@ impl AgentBuilder {
         if let Some(ref desc) = self.description {
             def.description = desc.clone();
         }
-        def.prompt_mode = self.prompt_mode.clone();
+        def.prompt_composition = self.prompt_composition.clone();
         def.permission_mode = self.permission_mode.clone();
         def.agents_md = self.agents_md;
         if let Some(ref prompt) = self.custom_system_prompt {
@@ -766,9 +766,6 @@ impl AgentBuilder {
                 tool_config.tools.iter().map(|tc| tc.id.clone()).collect();
             let removed: std::collections::HashSet<&String> = before.difference(&after).collect();
             for d in &definition.disallowed_tools {
-                if AGENT_TASK_CLASSIFIER_RE.is_match(d) {
-                    continue;
-                }
                 let matched = removed.iter().any(|&id| tool_id_eq(d, id));
                 if !matched {
                     tracing::warn!(agent = %definition.name, tool = %d, "disallowedTools entry matched nothing");
@@ -776,11 +773,6 @@ impl AgentBuilder {
             }
         }
         if !definition.tools.is_empty() {
-            let has_agent_entry = definition
-                .tools
-                .iter()
-                .any(|t| AGENT_TASK_CLASSIFIER_RE.is_match(t));
-            let task_deps = ["task", "get_task_output", "kill_task", "wait_tasks"];
             let registered_tool_ids = tool_bridge_builder.known_tool_ids();
             let present_kinds: std::collections::HashSet<ToolKind> =
                 tool_config.tools.iter().filter_map(|tc| tc.kind).collect();
@@ -789,9 +781,6 @@ impl AgentBuilder {
             let mut unresolved: Vec<&str> = Vec::new();
             let mut recognized_but_unavailable: Vec<&str> = Vec::new();
             for t in &definition.tools {
-                if AGENT_TASK_CLASSIFIER_RE.is_match(t) {
-                    continue;
-                }
                 if t.starts_with("mcp__") {
                     continue;
                 }
@@ -823,7 +812,6 @@ impl AgentBuilder {
                 tool_config.tools.retain(|tc| {
                     tool_id_matches(&definition.tools, &tc.id)
                         || tc.kind.is_some_and(|k| allow_kinds.contains(&k))
-                        || (has_agent_entry && task_deps.contains(&short_tool_name(&tc.id)))
                         || matches!(tc.kind, Some(ToolKind::SearchTool | ToolKind::UseTool))
                 });
                 tracing::debug!(agent = %definition.name, allowed = ?definition.tools, "tools allowlist applied");
@@ -840,18 +828,10 @@ impl AgentBuilder {
             .tools
             .retain(|tc| definition.session_tools_allowed(&tc.id));
         let task_deps = ["task", "get_task_output", "kill_task", "wait_tasks"];
-        let bare_agent_denied = definition.disallowed_tools.iter().any(|entry| {
-            AGENT_TASK_CLASSIFIER_RE
-                .captures(entry)
-                .is_some_and(|captures| {
-                    captures.get(1).is_none_or(|m| m.as_str().trim().is_empty())
-                })
-        });
-        let task_enabled = !bare_agent_denied
-            && tool_config
-                .tools
-                .iter()
-                .any(|tool| short_tool_name(&tool.id) == "task");
+        let task_enabled = tool_config
+            .tools
+            .iter()
+            .any(|tool| short_tool_name(&tool.id) == "task");
         if !task_enabled {
             tool_config
                 .tools
@@ -990,7 +970,7 @@ impl AgentBuilder {
             .unwrap_or_else(|| self.working_directory.to_string_lossy().into_owned());
         let prompt_context = PromptContext {
             version: 1,
-            prompt_mode: definition.prompt_mode.clone(),
+            prompt_composition: definition.prompt_composition.clone(),
             audience: self.prompt_audience,
             prompt_body: definition.prompt_body.clone(),
             system_prompt: definition.system_prompt.clone(),
@@ -1057,7 +1037,7 @@ context (e.g., a parallel search while you continue working).\n\
 \n\
 Prefer doing the work yourself unless delegation is clearly necessary.\n\
 \n\
-Usage: specify ${{ params.task.subagent_type }} (\"general-purpose\", \"explore\", or \"plan\"), \n\
+Usage: specify ${{ params.task.subagent_type }} (\"general-purpose\" or \"explore\"), \n\
 a short ${{ params.task.description }}, and a detailed ${{ params.task.prompt }}.\n\
 ${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use the task output tool to retrieve results. This is set to true by default.";
 /// CLI [`xai_tool_types::SubagentToolNaming`]: each kind maps to its
@@ -1081,7 +1061,6 @@ fn builtin_tools_fragment(name: BuiltinAgentName) -> String {
     let subagent = match name {
         BuiltinAgentName::GeneralPurpose => xai_tool_types::GENERAL_PURPOSE_SUBAGENT,
         BuiltinAgentName::Explore => xai_tool_types::EXPLORE_SUBAGENT,
-        BuiltinAgentName::Plan => xai_tool_types::PLAN_SUBAGENT,
         _ => return String::new(),
     };
     subagent.render_tools(&SUBAGENT_TOOL_NAMING)
@@ -1440,42 +1419,6 @@ mod tests {
                 subagents: false,
                 ask_user: false,
             },
-            PagerFlagCase {
-                label: "grow-build-ask-user / subagents",
-                profile: AgentDefinition::grow_build_ask_user,
-                subagents: true,
-                ask_user: true,
-            },
-            PagerFlagCase {
-                label: "grow-build-ask-user / no-subagents",
-                profile: AgentDefinition::grow_build_ask_user,
-                subagents: false,
-                ask_user: true,
-            },
-            PagerFlagCase {
-                label: "grow-build-plan",
-                profile: AgentDefinition::grow_build_plan,
-                subagents: true,
-                ask_user: true,
-            },
-            PagerFlagCase {
-                label: "grow-build-plan / no-ask-user",
-                profile: AgentDefinition::grow_build_plan,
-                subagents: true,
-                ask_user: false,
-            },
-            PagerFlagCase {
-                label: "grow-build-plan-no-subagents",
-                profile: AgentDefinition::grow_build_plan_no_subagents,
-                subagents: false,
-                ask_user: true,
-            },
-            PagerFlagCase {
-                label: "grow-build-plan-no-subagents / no-ask-user",
-                profile: AgentDefinition::grow_build_plan_no_subagents,
-                subagents: false,
-                ask_user: false,
-            },
         ];
         for case in cases {
             let PagerFlagCase {
@@ -1703,13 +1646,14 @@ mod tests {
         assert!(!names.iter().any(|name| name == "task"));
     }
     #[tokio::test]
-    async fn typed_agent_allowlist_filters_task_description() {
+    async fn explicit_subagent_allowlist_filters_task_description() {
         use grow_tools::computer::local::LocalTerminalBackend;
         use grow_tools::notification::ToolNotificationHandle;
         let mut tools: Vec<String> = AGENT_TOOLS_BASE.iter().map(|s| s.to_string()).collect();
-        tools.push("Agent(explore)".into());
+        tools.push("spawn_subagent".into());
         let mut definition = crate::config::AgentDefinition::default_grow_build();
         definition.tools = tools;
+        definition.subagents.allow = vec!["explore".into()];
         let agent = AgentBuilder::new(
             std::env::temp_dir(),
             Arc::new(LocalTerminalBackend::new()),
@@ -1725,7 +1669,7 @@ mod tests {
             .await
             .into_iter()
             .find(|definition| definition.function.name == "spawn_subagent")
-            .expect("Agent(explore) must retain the task tool");
+            .expect("explicit subagent policy must retain the task tool");
         let description = task
             .function
             .description
