@@ -115,10 +115,11 @@ pub fn dynamic_enum_choices(
                 display: "(no override)".to_string(),
                 description: "Inherit the default model (no per-user override).".to_string(),
             });
-            for (name, _id) in &snapshot.available_models {
+            for (_name, id) in &snapshot.available_models {
+                let canonical = id.0.to_string();
                 out.push(OwnedEnumChoice {
-                    canonical: name.clone(),
-                    display: name.clone(),
+                    canonical: canonical.clone(),
+                    display: canonical,
                     description: String::new(),
                 });
             }
@@ -237,9 +238,9 @@ pub struct PagerLocalSnapshot {
     /// Mutually exclusive with `yolo_mode` in practice (yolo wins); read by
     /// `/auto` so it can toggle off when already on.
     pub auto_mode: bool,
-    /// Currently-selected model's display name, or `None` if no catalog
-    /// has loaded yet.
-    pub current_model_name: Option<String>,
+    /// Currently-selected model's canonical id, or `None` if no model has
+    /// been selected yet.
+    pub current_model_id: Option<String>,
     /// `(display_name, ModelId)` pairs from the active session's catalog.
     /// Cloned into the snapshot so the modal's validator/resolver is
     /// self-contained (the modal outlives the borrow on `app.agents`).
@@ -281,7 +282,7 @@ impl Default for PagerLocalSnapshot {
             multiline_mode: false,
             yolo_mode: false,
             auto_mode: false,
-            current_model_name: None,
+            current_model_id: None,
             available_models: Vec::new(),
             plan_mode_active: false,
             show_tips: None,
@@ -330,13 +331,10 @@ impl PagerLocalSnapshot {
         self.available_models.iter().map(|(name, _)| name.as_str())
     }
 
-    /// Resolve a user-supplied name to a `ModelId` via the snapshot.
-    /// Case-insensitive ASCII match against display names only (ids
-    /// aren't carried in the snapshot's primary key — callers needing
-    /// id-based resolution should reach for `ModelState::resolve_by_name_or_id`).
-    pub fn resolve_model_name(&self, query: &str) -> Option<acp::ModelId> {
+    /// Resolve a user-supplied display name or canonical id to a `ModelId`.
+    pub fn resolve_model_name_or_id(&self, query: &str) -> Option<acp::ModelId> {
         self.available_models.iter().find_map(|(name, id)| {
-            if name.eq_ignore_ascii_case(query) {
+            if name.eq_ignore_ascii_case(query) || id.0.as_ref().eq_ignore_ascii_case(query) {
                 Some(id.clone())
             } else {
                 None
@@ -605,10 +603,10 @@ pub fn current_value_for(
             )
             .as_canonical(),
         )),
-        // default_model: reads from pager snapshot (not UiConfig).
-        // None (no catalog yet) → empty string.
+        // default_model: reads the canonical catalog id from the pager snapshot
+        // (not UiConfig). None (no catalog yet) → empty string.
         "default_model" => Some(SettingValue::String(
-            pager.current_model_name.clone().unwrap_or_default(),
+            pager.current_model_id.clone().unwrap_or_default(),
         )),
         // max_thoughts_width: `u16` widened to `i64`.
         "max_thoughts_width" => Some(SettingValue::Int(ui.max_thoughts_width as i64)),
@@ -655,6 +653,38 @@ pub fn default_value_for(meta: &SettingMeta) -> SettingValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_settings_display_canonical_provider_qualified_ids() {
+        let other_id = acp::ModelId::new(std::sync::Arc::from("other/deepseek-v4-pro"));
+        let id = acp::ModelId::new(std::sync::Arc::from("deepseek/deepseek-v4-pro"));
+        let pager = PagerLocalSnapshot {
+            current_model_id: Some(id.0.to_string()),
+            available_models: vec![
+                ("deepseek-v4-pro".to_string(), other_id),
+                ("deepseek-v4-pro".to_string(), id.clone()),
+            ],
+            ..PagerLocalSnapshot::default()
+        };
+        let ui = UiConfig {
+            fork_secondary_model: id.0.to_string(),
+            ..UiConfig::default()
+        };
+
+        assert_eq!(
+            current_value_for("default_model", &ui, &pager),
+            Some(SettingValue::String(id.0.to_string())),
+        );
+        assert_eq!(
+            current_value_for("fork_secondary_model", &ui, &pager),
+            Some(SettingValue::String(id.0.to_string())),
+        );
+
+        let choices = dynamic_enum_choices(DynamicEnumSource::ActiveModelCatalog, &pager);
+        assert_eq!(choices[2].canonical, id.0.as_ref());
+        assert_eq!(choices[2].display, id.0.as_ref());
+        assert_eq!(pager.resolve_model_name_or_id(id.0.as_ref()), Some(id));
+    }
 
     /// Every SHELL/SHARED setting's default must match `UiConfig::default()`.
     /// PAGER-owned settings are covered by `defaults_match_pager_state`.

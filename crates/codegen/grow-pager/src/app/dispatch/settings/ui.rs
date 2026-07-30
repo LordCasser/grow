@@ -69,7 +69,11 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 multiline_mode: agent.multiline_mode,
                 yolo_mode: agent.session.is_yolo(),
                 auto_mode: agent.session.is_auto(),
-                current_model_name: agent.session.models.current_model_name(),
+                current_model_id: agent
+                    .session
+                    .models
+                    .current_model_id_str()
+                    .map(str::to_owned),
                 available_models: agent
                     .session
                     .models
@@ -212,7 +216,11 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         multiline_mode: agent.multiline_mode,
         yolo_mode: agent.session.is_yolo(),
         auto_mode: agent.session.is_auto(),
-        current_model_name: agent.session.models.current_model_name(),
+        current_model_id: agent
+            .session
+            .models
+            .current_model_id_str()
+            .map(str::to_owned),
         available_models: agent
             .session
             .models
@@ -669,17 +677,20 @@ fn agent_plan_mode(app: &AppView) -> bool {
     false
 }
 
-/// Helper to read the active agent's currently-selected model
-/// display name. Returns `None` when no agent is active OR when the
-/// catalog hasn't loaded yet (e.g. early startup). See
+/// Helper to read the active agent's currently-selected canonical model id.
+/// Returns `None` when no agent is active OR no model has been selected. See
 /// [`agent_multiline_mode`] for the no-agent fallback rationale.
 ///
 /// Used by the `default_model` row's `current_value_for`.
-fn agent_current_model_name(app: &AppView) -> Option<String> {
+fn agent_current_model_id(app: &AppView) -> Option<String> {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
     {
-        return agent.session.models.current_model_name();
+        return agent
+            .session
+            .models
+            .current_model_id_str()
+            .map(str::to_owned);
     }
     None
 }
@@ -711,7 +722,7 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         multiline_mode: agent_multiline_mode(app),
         yolo_mode: agent_yolo_mode(app),
         auto_mode: agent_auto_mode(app),
-        current_model_name: agent_current_model_name(app),
+        current_model_id: agent_current_model_id(app),
         available_models: agent_available_models(app),
         plan_mode_active: agent_plan_mode(app),
         show_tips: app.show_tips,

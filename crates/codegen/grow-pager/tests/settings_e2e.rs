@@ -4238,7 +4238,7 @@ fn pr14_default_model_picker_commits_resolved_model_id() {
         "Enter must transition to PickingEnum for default_model"
     );
 
-    // Walk down past row 0 ("(no override)") to row 1 ("Grow 4.5").
+    // Walk down past row 0 ("(no override)") to row 1 ("grow-4.5").
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Down));
     assert!(
         matches!(outcome, SettingsKeyOutcome::Changed),
@@ -4545,7 +4545,7 @@ fn pr8_default_model_and_max_thoughts_width_defaults_roundtrip() {
     // default_model: registered default is the empty-string sentinel
     // (no UiConfig mirror — cfg.models.default is resolved
     // dynamically). `current_value_for` reads from
-    // `pager.current_model_name` which is None by default →
+    // `pager.current_model_id` which is None by default →
     // `unwrap_or_default()` produces the empty string. Both paths
     // converge on `SettingValue::String("")`.
     let dm_meta = reg.find("default_model").unwrap();

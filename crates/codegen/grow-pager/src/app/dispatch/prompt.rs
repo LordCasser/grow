@@ -497,7 +497,11 @@ pub(super) fn dispatch_send_prompt_inner(
                     multiline_mode: agent.multiline_mode,
                     yolo_mode: agent.session.is_yolo(),
                     auto_mode: agent.session.is_auto(),
-                    current_model_name: agent.session.models.current_model_name(),
+                    current_model_id: agent
+                        .session
+                        .models
+                        .current_model_id_str()
+                        .map(str::to_owned),
                     available_models: agent
                         .session
                         .models

@@ -932,7 +932,7 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
 }
 
 /// Construct `Action::Set*` commit variant for a String setting.
-/// Resolves model names via the snapshot before producing the action.
+/// Resolves model names or canonical ids via the snapshot before producing the action.
 /// Empty buffer maps to `Action::Clear*` for model settings.
 pub(super) fn action_for_string(
     key: SettingKey,
@@ -945,7 +945,7 @@ pub(super) fn action_for_string(
                 Some(Action::ClearDefaultModel)
             } else {
                 snapshot
-                    .resolve_model_name(&value)
+                    .resolve_model_name_or_id(&value)
                     .map(Action::SetDefaultModel)
             }
         }
@@ -954,7 +954,7 @@ pub(super) fn action_for_string(
                 Some(Action::ClearForkSecondaryModel)
             } else {
                 snapshot
-                    .resolve_model_name(&value)
+                    .resolve_model_name_or_id(&value)
                     .map(Action::SetForkSecondaryModel)
             }
         }
@@ -1004,9 +1004,9 @@ pub(super) fn validate_string(
             if available_models.is_empty() {
                 return Some("Model catalog still loading — try again".to_string());
             }
-            let matched = available_models
-                .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case(buffer));
+            let matched = available_models.iter().any(|(name, id)| {
+                name.eq_ignore_ascii_case(buffer) || id.0.as_ref().eq_ignore_ascii_case(buffer)
+            });
             if matched {
                 None
             } else {

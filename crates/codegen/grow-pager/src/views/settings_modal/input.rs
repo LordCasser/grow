@@ -140,7 +140,7 @@ fn handle_picking_enum(state: &mut SettingsModalState, key: &KeyEvent) -> Settin
             // `action_for_enum_commit` — the canonical is a runtime
             // string sourced from the model catalog, which
             // `action_for_string` already knows how to resolve via
-            // `snapshot.resolve_model_name` AND treats the empty
+            // `snapshot.resolve_model_name_or_id` AND treats the empty
             // canonical as a `Clear*` sentinel.
             let kind_is_dynamic = matches!(
                 state.registry.find(setting_key).map(|m| &m.kind),
