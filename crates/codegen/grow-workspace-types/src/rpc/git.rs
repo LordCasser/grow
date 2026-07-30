@@ -601,7 +601,7 @@ pub struct GitInfoData {
     /// Default branch of the primary remote.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_branch: Option<String>,
-    /// The detected VCS kind. Desktop uses this to disable features for unsupported VCS.
+    /// The detected VCS kind. Clients can use this to disable features for unsupported VCS.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vcs_kind: Option<VcsKind>,
 }

@@ -38,7 +38,7 @@ pub trait AuthCredentialProvider: HttpAuth + Send + Sync + 'static {
     /// Return the current credential snapshot. Implementations should
     /// issue a cheap disk re-read (`AuthManager::refresh`) before
     /// snapshotting so callers see updates from sibling processes
-    /// (`grow-desktop`, `grow login`). The `token` field MUST mirror
+    /// (an embedding client or `grow login`). The `token` field MUST mirror
     /// the bearer that `HttpAuth::apply` would send on the wire so
     /// 401-attribution prefixes match the actual request.
     fn snapshot(&self) -> CredentialSnapshot;

@@ -116,11 +116,6 @@ pub enum ClientType {
     /// `"grow_pager"` form for symmetry with the rest of this enum.
     #[serde(rename = "grow-pager", alias = "grow_pager")]
     GrowPager,
-    /// Grow Desktop (Electron) client - identified by clientIdentifier "grow-desktop".
-    /// Uses TUI-style bash permission options (primary command extraction + prefix matching)
-    /// but without interactive `<`/`>` word selection.
-    #[serde(rename = "grow_desktop")]
-    Desktop,
 }
 impl ClientType {
     /// Product token for the `User-Agent` header (e.g. `grow-pager`).
@@ -132,16 +127,14 @@ impl ClientType {
             Self::Nebula => "nebula",
             Self::Extension => "grow-code-extension",
             Self::GrowPager => "grow-pager",
-            Self::Desktop => "grow-desktop",
         }
     }
-    /// Resolve from ACP `clientIdentifier` string (e.g. `"grow-web"`, `"grow-desktop"`).
+    /// Resolve from an ACP `clientIdentifier` string.
     pub fn from_client_identifier(id: Option<&str>) -> Self {
         match id {
             Some("grow-web") => Self::GrowWeb,
             Some("nebula") => Self::Nebula,
             Some("grow-code-extension") => Self::Extension,
-            Some("grow-desktop") => Self::Desktop,
             Some("grow-pager") => Self::GrowPager,
             _ => Self::Generic,
         }
@@ -154,7 +147,6 @@ impl ClientType {
             Self::Nebula => "nebula",
             Self::Extension => "extension",
             Self::Generic => "agent",
-            Self::Desktop => "desktop",
         }
     }
 }

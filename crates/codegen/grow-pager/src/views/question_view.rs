@@ -1961,7 +1961,7 @@ mod tests {
     fn gb3747_question() -> Question {
         Question {
             question: "When renaming the shared helper module used by both the \
-                       CLI and the desktop client, which compatibility approach \
+                       CLI and another client, which compatibility approach \
                        should we take for the public config keys?"
                 .to_string(),
             options: vec![

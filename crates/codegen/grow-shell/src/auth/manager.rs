@@ -1334,7 +1334,7 @@ impl AuthManager {
             TokenType::LegacySession => {
                 // Deliberate side effect: re-read auth.json under the
                 // assumption that a sibling process (`grow login` from
-                // another shell, the desktop app, etc.) may have refreshed
+                // another shell or embedding client may have refreshed
                 // the on-disk credentials. `pick_up_sibling_token` only
                 // mutates inner when the disk holds a *different valid*
                 // token, so the common cache-hit case is a single read.
@@ -2442,7 +2442,7 @@ impl AuthManager {
         *self.process_static_api_key.write() = key;
     }
 
-    /// Static/BYOK key for export paths (e.g. desktop `getBearerToken`). Never a
+    /// Static/BYOK key for export paths (e.g. an ACP `getBearerToken` request). Never a
     /// session JWT; respects kill-switch and preferred-method pin.
     pub(crate) fn static_api_key_for_export(&self) -> Option<String> {
         resolve_static_api_key(self)

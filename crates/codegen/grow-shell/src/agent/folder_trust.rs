@@ -43,9 +43,8 @@ use parking_lot::Mutex;
 // `revoke_folder_trust` wrapper, inviting a stale-untrust security bug.
 pub use grow_workspace::folder_trust::grant_folder_trust;
 use grow_workspace::folder_trust::{
-    DecideInputs, TrustOutcome, claude_project_mcp_names, decide, decide_inputs,
-    decide_inputs_with_interactive, feature_enabled, folder_trust_inert, persist_trust,
-    prompt_for_trust,
+    DecideInputs, TrustOutcome, claude_project_mcp_names, decide, decide_inputs, feature_enabled,
+    folder_trust_inert, persist_trust, prompt_for_trust,
 };
 
 use crate::session::managed_mcp::mcp_server_name;
@@ -144,44 +143,6 @@ pub fn project_scope_allowed(cwd: &Path) -> bool {
         // inert allow; untrusted + configs deny).
         None => resolve_and_record(cwd, None, false),
     }
-}
-
-/// Whether an interactive GUI trust PROMPT is warranted for `cwd`: the feature
-/// is on, the workspace is NOT store-trusted, and repo-local code-exec configs
-/// are present (something to gate). Interactivity is forced `true` because the
-/// caller already confirmed the client can prompt (it advertised
-/// `grow/folderTrust.interactive`); the TTY-based [`decide_inputs`] default is
-/// false under the ACP stdio transport. Mirrors the [`decide`] precedence so it
-/// cannot drift from the gate: feature-off (kill-switch / opt-out) / store-trusted
-/// / no-configs all collapse to a non-`Prompt` verdict and return false.
-pub(crate) fn prompt_warranted(cwd: &Path, remote: Option<&RemoteSettings>) -> bool {
-    let key = workspace_key(cwd);
-    matches!(
-        decide(
-            feature_enabled(remote),
-            &decide_inputs_with_interactive(cwd, &key, true),
-        ),
-        TrustOutcome::Prompt
-    )
-}
-
-/// Display-only summary of which repo-local code-exec config kinds are present for
-/// `cwd` — the reasons the folder is gated — for the interactive trust prompt's
-/// UI. Single-sourced from the SAME scan as the canonical gate
-/// ([`grow_workspace::folder_trust::repo_config_kinds`] /
-/// [`repo_configs_present`]) so the prompt's reason list cannot drift from what
-/// actually gated the folder (same markers, same cwd→git-root walk).
-///
-/// ALL detected kinds are reported, including `lsp`: it is a genuine reason the
-/// folder is gated (so an `.grow/lsp.json`-only repo still has a non-empty reason
-/// list). Only the post-grant *hot-reload* skips LSP — project LSP applies on the
-/// next session open (the backend is spawn-baked into the tool bridge). See the
-/// `mvp_agent::folder_trust_prompt` module docs.
-pub(crate) fn detected_config_kinds(cwd: &Path) -> Vec<String> {
-    grow_workspace::folder_trust::repo_config_kinds(cwd)
-        .into_iter()
-        .map(str::to_string)
-        .collect()
 }
 
 /// Whether an agent's inline `hooks:` block may be appended to the live hook
@@ -520,7 +481,6 @@ mod tests {
     fn simulate_release_build() -> EnvGuard {
         EnvGuard::set(grow_version::TEST_VERSION_ENV, "0.0.0-sim")
     }
-
     #[test]
     fn record_and_lookup_round_trip() {
         // `repo_tmp` git-inits the dir so `workspace_key` yields a unique key
@@ -1567,107 +1527,5 @@ mod tests {
             Some(&"1".to_string()),
             "local build: `.envrc` must load without any store grant"
         );
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn prompt_warranted_true_for_untrusted_repo_with_configs() {
-        // Feature on (via remote), untrusted (empty store), repo configs present
-        // => the GUI prompt is warranted. GROW_HOME-isolated so the store starts
-        // empty; `#[serial]` because GROW_HOME is process-global.
-        let home = tempfile::tempdir().unwrap();
-        let _env = EnvGuard::set("GROW_HOME", home.path());
-        let tmp = repo_tmp();
-        std::fs::write(tmp.path().join(".mcp.json"), "{}").unwrap();
-        // Simulate a release-stamped build so the inert local-build gate is off
-        // and the remote `folder_trust_enabled` flag actually engages.
-        // GROW_FOLDER_TRUST unset: env outranks the remote flag, so an ambient
-        // opt-out would otherwise false-fail the Prompt assertion.
-        let _sim = EnvGuard::set(grow_version::TEST_VERSION_ENV, "0.0.0-sim");
-        let _flag = EnvGuard::unset("GROW_FOLDER_TRUST");
-        let remote = RemoteSettings {
-            folder_trust_enabled: Some(true),
-            ..Default::default()
-        };
-        assert!(prompt_warranted(tmp.path(), Some(&remote)));
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn prompt_warranted_false_when_feature_disabled() {
-        // The remote kill-switch (folder_trust_enabled = Some(false)) disables the
-        // feature even on a release-stamped build, so no prompt is warranted even
-        // with repo configs present. Simulate a release build so the inert
-        // local-build path is not what's under test; GROW_HOME-isolated and
-        // GROW_FOLDER_TRUST unset so the kill-switch is the only signal.
-        let home = tempfile::tempdir().unwrap();
-        let _env = EnvGuard::set("GROW_HOME", home.path());
-        let _flag = EnvGuard::unset("GROW_FOLDER_TRUST");
-        let _sim = simulate_release_build();
-        let tmp = repo_tmp();
-        std::fs::write(tmp.path().join(".mcp.json"), "{}").unwrap();
-        let remote = RemoteSettings {
-            folder_trust_enabled: Some(false),
-            ..Default::default()
-        };
-        assert!(!prompt_warranted(tmp.path(), Some(&remote)));
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn prompt_warranted_false_when_store_trusted() {
-        // A folder the user already trusted resolves Trusted, not Prompt.
-        let home = tempfile::tempdir().unwrap();
-        let _env = EnvGuard::set("GROW_HOME", home.path());
-        let tmp = repo_tmp();
-        std::fs::write(tmp.path().join(".mcp.json"), "{}").unwrap();
-        let mut store = TrustStore::load();
-        store.set_trusted(&workspace_key(tmp.path())).unwrap();
-        let remote = RemoteSettings {
-            folder_trust_enabled: Some(true),
-            ..Default::default()
-        };
-        assert!(!prompt_warranted(tmp.path(), Some(&remote)));
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn prompt_warranted_false_without_repo_configs() {
-        // Nothing repo-local to gate => Trusted, not Prompt.
-        let home = tempfile::tempdir().unwrap();
-        let _env = EnvGuard::set("GROW_HOME", home.path());
-        let tmp = repo_tmp();
-        let remote = RemoteSettings {
-            folder_trust_enabled: Some(true),
-            ..Default::default()
-        };
-        assert!(!prompt_warranted(tmp.path(), Some(&remote)));
-    }
-
-    #[test]
-    fn detected_config_kinds_summarizes_present_markers() {
-        let tmp = repo_tmp();
-        std::fs::write(tmp.path().join(".mcp.json"), "{}").unwrap();
-        std::fs::create_dir_all(tmp.path().join(".grow").join("hooks")).unwrap();
-        std::fs::write(tmp.path().join(".grow").join("lsp.json"), "{}").unwrap();
-        std::fs::write(tmp.path().join(".envrc"), "export X=1\n").unwrap();
-        let kinds = detected_config_kinds(tmp.path());
-        assert!(kinds.contains(&"mcp".to_string()));
-        assert!(kinds.contains(&"hooks".to_string()));
-        assert!(kinds.contains(&"envrc".to_string()));
-        // `lsp` is reported (a real gate reason), NOT filtered out — so an
-        // lsp-only repo never prompts with an empty reason list.
-        assert!(kinds.contains(&"lsp".to_string()));
-    }
-
-    #[test]
-    fn detected_config_kinds_reports_lsp_only_repo() {
-        // Regression for the "empty configKinds" bug: a repo gated SOLELY by
-        // `.grow/lsp.json` must still produce a non-empty reason list.
-        let tmp = repo_tmp();
-        std::fs::create_dir_all(tmp.path().join(".grow")).unwrap();
-        std::fs::write(tmp.path().join(".grow").join("lsp.json"), "{}").unwrap();
-        let kinds = detected_config_kinds(tmp.path());
-        assert_eq!(kinds, vec!["lsp".to_string()]);
     }
 }

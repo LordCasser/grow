@@ -343,8 +343,7 @@ impl ScrollConfig {
                 | TerminalName::Windsurf
                 | TerminalName::Zed => 1,
                 TerminalName::Kitty => 3,
-                TerminalName::GrowDesktop
-                | TerminalName::Vte
+                TerminalName::Vte
                 | TerminalName::Terminator
                 | TerminalName::WindowsTerminal
                 | TerminalName::JetBrains

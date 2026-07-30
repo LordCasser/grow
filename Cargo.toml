@@ -240,7 +240,6 @@ tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "smallvec", "tracing-log", "std", "ansi"] }
-ts-rs = "12.0"
 tui-scrollbar = "0.2"
 two-face = { version = "0.4", default-features = false, features = ["syntect-fancy"] }
 unicode-segmentation = "1.12.0"
@@ -334,16 +333,6 @@ strip = false
 codegen-units = 1
 debug = "line-tables-only"
 panic = "unwind"
-
-# Desktop release profile. Functionally identical to release-dist — kept as a
-# named alias so the desktop workflow can reference it without coupling to the
-# CLI pipeline's profile name. Alpha and stable share a single release-dist
-# profile so that stable promotion can pointer-swap the alpha binary without
-# rebuilding.
-[profile.release-dist-jemalloc]
-inherits = "release-dist"
-# All settings now match the parent — this is an intentional alias.
-
 
 [profile.dev]
 panic = "abort"

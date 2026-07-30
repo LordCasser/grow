@@ -251,7 +251,6 @@
             TerminalName::Rio,
             TerminalName::Foot,
             TerminalName::JetBrains,
-            TerminalName::GrowDesktop,
             TerminalName::Vte,
             TerminalName::Terminator,
             TerminalName::WindowsTerminal,
@@ -277,7 +276,6 @@
                 | TerminalName::Rio
                 | TerminalName::Foot
                 | TerminalName::JetBrains
-                | TerminalName::GrowDesktop
                 | TerminalName::Vte
                 | TerminalName::Terminator
                 | TerminalName::WindowsTerminal

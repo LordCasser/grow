@@ -874,7 +874,7 @@ fn resolve_program_resolves_against_cwd() {
     );
 }
 
-/// The `args` form (the portable, no-shell shape a desktop/Windows helper
+/// The `args` form (the portable, no-shell shape an embedding/Windows helper
 /// should use) resolves a relative program against the provider's `cwd`.
 #[cfg(unix)]
 #[tokio::test]

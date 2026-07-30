@@ -1026,9 +1026,6 @@ pub struct Config {
     pub compaction: CompactionConfig,
     #[serde(default, skip_serializing)]
     pub managed_mcps: crate::config::ManagedMcpsConfig,
-    /// `[desktop]` section — owned by grow-desktop (Electron app), opaque to the CLI agent.
-    #[serde(default, skip_serializing)]
-    pub desktop: Option<toml::Value>,
     /// Final top-level local `announcements` array. The default is Grow's
     /// built-in notice; an explicitly configured empty array disables it.
     #[serde(
@@ -1383,7 +1380,6 @@ impl Default for Config {
             memory: crate::config::MemoryConfig::default(),
             compaction: CompactionConfig::default(),
             managed_mcps: crate::config::ManagedMcpsConfig::default(),
-            desktop: None,
             announcements: grow_announcements::default_announcements(),
             tips: None,
             permission: PermissionKnownKeys::default(),
@@ -8711,8 +8707,6 @@ agent_type = "cursor"
             tool = "bash"
             [tools]
             respect_gitignore = false
-            [desktop]
-            some_key = "value"
         "#,
         );
         assert!(

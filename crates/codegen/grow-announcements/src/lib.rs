@@ -15,8 +15,6 @@ use serde::{Deserialize, Serialize};
 
 /// A locally configured announcement shown by Grow clients.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts", ts(export, optional_fields = nullable))]
 pub struct Announcement {
     #[serde(default)]
     pub id: Option<String>,
@@ -38,8 +36,6 @@ pub struct Announcement {
 
 /// Optional call-to-action rendered as a clickable link or button.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts", ts(export, optional_fields = nullable))]
 pub struct AnnouncementCta {
     #[serde(default)]
     pub label: Option<String>,
@@ -51,8 +47,6 @@ pub struct AnnouncementCta {
 
 /// Payload for the local `grow/announcements/update` ACP notification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts", ts(export))]
 pub struct AnnouncementsUpdated {
     #[serde(default)]
     pub announcements: Vec<Announcement>,
@@ -197,28 +191,6 @@ pub fn is_expired_at(a: &Announcement, now: DateTime<Utc>) -> bool {
         return dt <= now;
     }
     false
-}
-
-#[cfg(all(test, feature = "ts"))]
-mod bindings_export {
-    use super::*;
-    use ts_rs::TS;
-
-    /// Explicitly (re)generate every binding (the export-test pattern).
-    /// ts-rs also emits a hidden per-type test from `#[ts(export)]`; this is
-    /// the single entry point `generate.sh` drives, failing loudly if any
-    /// type can't export. Destination: `TS_RS_EXPORT_DIR`, default `bindings/`.
-    #[test]
-    fn export_all_bindings() {
-        let cfg = ts_rs::Config::from_env();
-        macro_rules! export {
-            ($($t:ty),+ $(,)?) => {$(
-                <$t as TS>::export(&cfg).unwrap_or_else(|e| panic!(
-                    "exporting {}: {e}", stringify!($t)));
-            )+};
-        }
-        export!(Announcement, AnnouncementCta, AnnouncementsUpdated);
-    }
 }
 
 #[cfg(test)]

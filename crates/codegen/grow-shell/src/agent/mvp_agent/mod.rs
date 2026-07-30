@@ -462,19 +462,6 @@ pub struct MvpAgent {
     /// as `client_type`.  Using `Cell<bool>` (not `RefCell`) so `.get()` is a
     /// plain copy with no borrow that could be held across an await point.
     code_nav_enabled: std::cell::Cell<bool>,
-    /// Whether the current client advertised `grow/folderTrust.interactive` (it
-    /// can render the interactive folder-trust prompt). Set on every
-    /// `initialize()` (last-client-wins, like `code_nav_enabled`); gates the
-    /// DORMANT agent→client trust round-trip in `new_session`/`load_session`.
-    /// `Cell<bool>` so `.get()` is a borrow-free copy across await points.
-    interactive_trust_client: std::cell::Cell<bool>,
-    /// Workspaces (canonical `workspace_key`) already prompted/decided for the
-    /// interactive folder-trust round-trip this process — dedups re-prompts on
-    /// `load_session` reconnect and concurrent same-workspace sessions. Agent-
-    /// owned (mirrors the `DECISIONS` cache, but not a process global), captured
-    /// into the detached prompt task; cleared for a workspace on GUI untrust
-    /// (`execute_hooks_action`) so a later re-open can re-prompt.
-    interactive_trust_prompted: Rc<RefCell<std::collections::HashSet<PathBuf>>>,
     /// Default YOLO mode - when true, sessions start with auto-approve enabled.
     /// Per-session YOLO tracking lives in SessionHandle.yolo_mode.
     default_yolo_mode: bool,
@@ -579,7 +566,7 @@ pub struct MvpAgent {
     /// `plugin_registry_handle`.
     ///
     /// Boot-time plugin discovery is deferred past ACP `initialize` (it walks
-    /// cwd→git root plus user/marketplace dirs and stalled grow-desktop's first
+    /// cwd→git root plus user/marketplace dirs and stalled embedding clients' first
     /// `initialize`), so the shared snapshot starts empty. It is built once on
     /// the first session-creating call via [`Self::ensure_plugin_registry`];
     /// this flag keeps that to a single discovery walk.
@@ -911,7 +898,6 @@ impl Drop for SessionLoadGuard<'_> {
     }
 }
 mod code_nav;
-mod folder_trust_prompt;
 mod session_lifecycle;
 mod subagent_coordinator;
 mod agent_ops;

@@ -11,7 +11,7 @@
   },
   {
     "category": "features",
-    "description": "**Desktop clients can now detect** when a terminal is busy running a foreground process.",
+    "description": "**ACP clients can now detect** when a terminal is busy running a foreground process.",
     "breaking_change": false
   },
   {

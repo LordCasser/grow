@@ -177,15 +177,6 @@ pub fn hyperlink_capabilities(brand: TerminalName) -> HyperlinkCapabilities {
             native_link_hover: false,
             native_plain_url_open: false,
         },
-        // Electron app; behavior undocumented.
-        TerminalName::GrowDesktop => HyperlinkCapabilities {
-            osc8: Unknown,
-            id_param: false,
-            scheme_filter: SchemeFilter::Standard,
-            osc22_cursor: false,
-            native_link_hover: false,
-            native_plain_url_open: false,
-        },
         TerminalName::Otty | TerminalName::Unknown => HyperlinkCapabilities {
             osc8: Unknown,
             id_param: false,

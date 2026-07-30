@@ -379,7 +379,7 @@ impl MvpAgent {
     }
     /// Resolve folder trust and load launch-dir MCP configs after `initialize`
     /// returns. The walks are synchronous and expensive in large monorepos; they
-    /// must not block the ACP response (grow-desktop sends `initialize` immediately).
+    /// must not block the ACP response (embedding clients initialize immediately).
     pub(super) fn spawn_initialize_launch_mcp_setup(&self, fetch_managed_mcps: bool) {
         let cwd = self.launch_cwd.clone();
         let compat = self.cfg.borrow().compat_resolved;
@@ -443,7 +443,7 @@ impl MvpAgent {
     /// Build the launch-dir plugin registry snapshot on first use.
     ///
     /// Boot-time discovery was deferred past ACP `initialize` (the cwd→git-root
-    /// plus user/marketplace walks stalled grow-desktop's first `initialize`),
+    /// plus user/marketplace walks stalled embedding clients' first `initialize`),
     /// leaving `plugin_registry_handle` empty. That shared snapshot still backs
     /// the launch-dir plugin MCP/LSP merges read in `resolve_mcp_servers` and
     /// the session LSP build, so populate it lazily — off the `initialize`
@@ -592,7 +592,7 @@ impl MvpAgent {
     ///
     /// Deferred past ACP wiring so `initialize` can respond before folder-trust
     /// scans and `WorkspaceHandle::new_minimal` run (same boot stall as plugin
-    /// discovery on grow-desktop Windows).
+    /// discovery for persistent ACP clients on Windows).
     fn ensure_local_workspace_ops(
         &self,
     ) -> Result<grow_workspace::WorkspaceOps, acp::Error> {
@@ -1289,10 +1289,6 @@ impl MvpAgent {
             interactive_auth: Default::default(),
             client_type: RefCell::new(ClientType::default()),
             code_nav_enabled: std::cell::Cell::new(false),
-            interactive_trust_client: std::cell::Cell::new(false),
-            interactive_trust_prompted: Rc::new(
-                RefCell::new(std::collections::HashSet::new()),
-            ),
             default_yolo_mode,
             default_auto_mode,
             memory_config: None,
@@ -1713,13 +1709,6 @@ impl MvpAgent {
         session_id: &acp::SessionId,
         action: xai_hooks_plugins_types::HooksAction,
     ) -> Option<xai_hooks_plugins_types::ActionOutcome> {
-        if matches!(action, xai_hooks_plugins_types::HooksAction::Untrust)
-            && let Some(cwd) = self.get_session_cwd(session_id)
-        {
-            self.interactive_trust_prompted
-                .borrow_mut()
-                .remove(&grow_workspace::trust::workspace_key(&cwd));
-        }
         let handle = self.get_session_handle(session_id)?;
         handle.execute_hooks_action(action).await
     }

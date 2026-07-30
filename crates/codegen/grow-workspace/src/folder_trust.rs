@@ -236,24 +236,10 @@ pub fn persist_trust(store: &mut TrustStore, key: &Path) {
 /// Whether any repo-local trust-sensitive config is present for `cwd`. When none
 /// are present there is nothing to gate, so we skip the prompt entirely.
 ///
-/// Thin wrapper over [`collect_repo_config_kinds`] with `first_only = true`, so
-/// the gate and the display-only [`repo_config_kinds`] enumerate the EXACT same
-/// markers (they cannot drift) while this hot path still short-circuits on the
-/// first hit.
+/// Detection short-circuits on the first marker because callers only need the
+/// gate decision, not a presentation-oriented inventory.
 pub fn repo_configs_present(cwd: &Path) -> bool {
-    !collect_repo_config_kinds(cwd, true).is_empty()
-}
-
-/// Display-only: which repo-local trust-sensitive config KINDS are present for
-/// `cwd` (`mcp`, `plugins`, `permission`, `lsp`, `envrc`, `claude`, `hooks`,
-/// `agents`, `roles`, `personas`, `workflows`), deduped in cheap→expensive
-/// marker order. Single source with [`repo_configs_present`] (which is
-/// `!repo_config_kinds(cwd).is_empty()`), so a folder that the gate fired on
-/// always has a non-empty, accurate kind list — no `[plugins].paths` /
-/// `[permission]` / `.claude` / `.grow/agents` / subdir-launch gaps. NOT itself
-/// the trust gate.
-pub fn repo_config_kinds(cwd: &Path) -> Vec<&'static str> {
-    collect_repo_config_kinds(cwd, false)
+    first_repo_config_kind(cwd).is_some()
 }
 
 /// Whether a project `.grow/config.toml` `[permission]` value would contribute
@@ -299,31 +285,20 @@ fn directory_present_or_uncertain(path: &Path) -> bool {
     }
 }
 
-/// Shared scanner behind [`repo_configs_present`] and [`repo_config_kinds`]. With
-/// `first_only` it returns immediately after the first marker (the gate's
-/// historical short-circuit); otherwise it collects every distinct kind.
-fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> {
+/// Return the first trust-sensitive repo configuration kind, if one exists.
+fn first_repo_config_kind(cwd: &Path) -> Option<&'static str> {
     // Resolve the git root + cwd→root dir chain ONCE and reuse it across the
     // git2-based marker checks below: this gate does 1 git2 discover + 1 git2
     // walk (+ the settings-compat path's own cheap `.git`-existence walk, intentionally separate —
     // see its check). Each walker used to run its own git2 discover + walk (~5
     // discovers), and on a non-git dir each discover walks to the filesystem root
     // — wasteful anywhere, and Windows taxes every such syscall 10-100x.
-    // Cheap→expensive, short-circuiting on first hit when `first_only`.
+    // Cheap→expensive, short-circuiting on first hit.
     let chain = grow_agent::repo::RepoDirChain::resolve(cwd);
-    let mut kinds: Vec<&'static str> = Vec::new();
-    // Record a distinct kind; when `first_only`, return as soon as one is found
-    // (preserves the gate's first-hit short-circuit exactly).
     macro_rules! hit {
-        ($k:expr) => {{
-            let k: &'static str = $k;
-            if !kinds.contains(&k) {
-                kinds.push(k);
-            }
-            if first_only {
-                return kinds;
-            }
-        }};
+        ($kind:expr) => {
+            return Some($kind)
+        };
     }
 
     // `.mcp.json` anywhere from repo root down to cwd.
@@ -436,7 +411,7 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
     if claude_project_mcp_present(cwd) {
         hit!("mcp");
     }
-    kinds
+    None
 }
 
 /// Display names under `~/.claude.json projects.<cwd>.mcpServers`, or `None`
@@ -657,7 +632,6 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(".grow").join("roles")).unwrap();
 
         assert!(repo_configs_present(tmp.path()));
-        assert!(repo_config_kinds(tmp.path()).contains(&"roles"));
     }
 
     #[test]
@@ -666,7 +640,6 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(".grow").join("personas")).unwrap();
 
         assert!(repo_configs_present(tmp.path()));
-        assert!(repo_config_kinds(tmp.path()).contains(&"personas"));
     }
 
     #[test]
@@ -716,7 +689,6 @@ mod tests {
         let subdir = tmp.path().join("crates").join("inner");
         std::fs::create_dir_all(&subdir).unwrap();
         assert!(repo_configs_present(&subdir));
-        assert!(repo_config_kinds(&subdir).contains(&"workflows"));
     }
 
     #[test]
@@ -750,7 +722,6 @@ mod tests {
         std::fs::write(grow.join("hooks"), "{}").unwrap();
 
         assert!(repo_configs_present(tmp.path()));
-        assert!(repo_config_kinds(tmp.path()).contains(&"hooks"));
     }
 
     #[cfg(unix)]
@@ -762,7 +733,6 @@ mod tests {
         std::os::unix::fs::symlink("missing-hooks", grow.join("hooks")).unwrap();
 
         assert!(repo_configs_present(tmp.path()));
-        assert!(repo_config_kinds(tmp.path()).contains(&"hooks"));
     }
 
     #[test]
@@ -846,10 +816,6 @@ mod tests {
         )
         .unwrap();
         assert!(repo_configs_present(tmp.path()));
-        assert!(
-            repo_config_kinds(tmp.path()).contains(&"permission"),
-            "permission-only repo must report the permission kind"
-        );
         let subdir = tmp.path().join("crates").join("inner");
         std::fs::create_dir_all(&subdir).unwrap();
         assert!(
@@ -871,48 +837,6 @@ mod tests {
         )
         .unwrap();
         assert!(!repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_config_kinds_matches_gate_and_reports_all_kinds() {
-        // SSOT guard: `repo_config_kinds` (full scan) must agree with the gate
-        // (`repo_configs_present == !repo_config_kinds(..).is_empty()`) AND report
-        // the kinds the single-source refactor added — `plugins` via
-        // `[plugins].paths`, `claude` via `.claude/settings.json`, `agents` via
-        // `.grow/agents` — even when launched from a SUBDIR (the cwd→git-root walk
-        // that `first_only` shares). Guards against silent drift between the two.
-        let tmp = repo_tmp();
-        let grow = tmp.path().join(".grow");
-        std::fs::create_dir_all(grow.join("agents")).unwrap();
-        std::fs::write(grow.join("config.toml"), "[plugins]\npaths = [\"./x\"]\n").unwrap();
-        let claude = tmp.path().join(".claude");
-        std::fs::create_dir_all(&claude).unwrap();
-        std::fs::write(claude.join("settings.json"), r#"{"env":{"X":"1"}}"#).unwrap();
-        // Launch from a subdir: the walk must still find the root-level markers.
-        let subdir = tmp.path().join("crates").join("inner");
-        std::fs::create_dir_all(&subdir).unwrap();
-
-        let kinds = repo_config_kinds(&subdir);
-        for expected in ["plugins", "claude", "agents"] {
-            assert!(
-                kinds.contains(&expected),
-                "repo_config_kinds missing {expected:?} (subdir launch); got {kinds:?}"
-            );
-        }
-        // Gate ↔ kinds equivalence: a configured repo and an empty one.
-        assert_eq!(
-            repo_configs_present(&subdir),
-            !repo_config_kinds(&subdir).is_empty(),
-            "gate must equal !kinds.is_empty() for a configured repo"
-        );
-        let empty = repo_tmp();
-        assert!(!repo_configs_present(empty.path()));
-        assert!(repo_config_kinds(empty.path()).is_empty());
-        assert_eq!(
-            repo_configs_present(empty.path()),
-            !repo_config_kinds(empty.path()).is_empty(),
-            "gate must equal !kinds.is_empty() for an empty repo"
-        );
     }
 
     // GROW_HOME-isolation idiom mirrored from this crate's `permission::claude_compat`

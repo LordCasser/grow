@@ -26,8 +26,6 @@ pub enum ClientType {
     Extension,
     /// Remote workspace / hosted agent client (wire value `nebula`).
     Nebula,
-    /// Desktop (Electron app)
-    Desktop,
 }
 
 impl std::fmt::Display for ClientType {
@@ -38,7 +36,6 @@ impl std::fmt::Display for ClientType {
             ClientType::Web => write!(f, "web"),
             ClientType::Extension => write!(f, "extension"),
             ClientType::Nebula => write!(f, "nebula"),
-            ClientType::Desktop => write!(f, "desktop"),
         }
     }
 }

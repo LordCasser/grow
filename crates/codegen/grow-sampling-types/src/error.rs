@@ -157,7 +157,7 @@ impl SamplingError {
         // or other policy denials unrelated to credentials). Treating 403
         // as an auth error triggers a pointless
         // OIDC refresh and then surfaces as acp::Error::auth_required on
-        // the client, which in the desktop app tears down the session and
+        // the client, which in embedding clients may tear down the session and
         // can race with invalid_grant_threshold to wipe auth.json.
         matches!(
             self,

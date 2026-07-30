@@ -2842,7 +2842,7 @@ mod tests {
     #[test]
     fn notification_none_protocol_no_warnings() {
         let ctx = TerminalContext {
-            brand: TerminalName::GrowDesktop,
+            brand: TerminalName::Unknown,
             ..Default::default()
         };
         let query = FakeTmuxQuery::healthy_modern();
@@ -2867,7 +2867,6 @@ mod tests {
         assert!(supports_focus_tracking(TerminalName::Terminator));
         assert!(supports_focus_tracking(TerminalName::WarpTerminal));
         assert!(supports_focus_tracking(TerminalName::VsCode));
-        assert!(supports_focus_tracking(TerminalName::GrowDesktop));
         assert!(!supports_focus_tracking(TerminalName::AppleTerminal));
         assert!(!supports_focus_tracking(TerminalName::Unknown));
         assert!(!supports_focus_tracking(TerminalName::Otty));

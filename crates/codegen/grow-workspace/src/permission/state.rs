@@ -580,13 +580,13 @@ allowed_mcp_servers = ["a"]
     async fn per_client_legacy_migration_rewrites_only_loaded_file() {
         let tmp = tempfile::tempdir().unwrap();
         let shared = state_file_path(tmp.path(), None);
-        let per_client = state_file_path(tmp.path(), Some("desktop"));
+        let per_client = state_file_path(tmp.path(), Some("extension"));
         let mut shared_state = PermissionState::default();
         shared_state.allowed_mcp_servers.insert("shared".to_owned());
         persist_state_to_dir(tmp.path(), &shared_state, None).await;
         write_legacy_mcp_state(&per_client).await;
 
-        assert_legacy_mcp_state_migrated(&load_state_from_dir(tmp.path(), Some("desktop")).await);
+        assert_legacy_mcp_state_migrated(&load_state_from_dir(tmp.path(), Some("extension")).await);
         let shared_after: PermissionState =
             toml::from_str(&tokio::fs::read_to_string(shared).await.unwrap()).unwrap();
         assert!(shared_after.allowed_mcp_servers.contains("shared"));

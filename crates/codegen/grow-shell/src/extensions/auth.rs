@@ -47,7 +47,7 @@ fn handle_cancel(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 }
 
 async fn handle_get_bearer_token(agent: &MvpAgent) -> ExtResult {
-    // Fail closed for session tokens: desktop resume treats non-null as success.
+    // Fail closed for session tokens: embedding clients may treat non-null as success.
     // Never return a hard-expired AT. Still surface wire-valid session ATs and
     // static/BYOK keys (process model key / env / disk api_key) so non-session
     // sessions keep working when AuthManager has no OIDC entry.

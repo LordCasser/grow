@@ -122,7 +122,6 @@ fn macos_capabilities(brand: TerminalName) -> KeyboardCapabilities {
         // Apple Terminal: Cmd+Bsp captured by the window manager.
         // Opt+Bsp and modified Enter are dropped; CG can rescue both.
         TerminalName::AppleTerminal => (Unrecoverable, Dropped, Dropped),
-        TerminalName::GrowDesktop => (Unknown, Unknown, Unknown),
         // VTE-based terminals (incl. Terminator) on macOS are unusual;
         // classify when we have evidence rather than guessing.
         TerminalName::Vte | TerminalName::Terminator => (Unknown, Unknown, Unknown),
@@ -206,7 +205,6 @@ mod tests {
     fn unknown_brands_skip_rescue() {
         for brand in [
             TerminalName::Unknown,
-            TerminalName::GrowDesktop,
             TerminalName::Vte,
             TerminalName::JetBrains,
         ] {

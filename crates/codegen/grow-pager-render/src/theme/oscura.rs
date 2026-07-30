@@ -33,7 +33,7 @@ mod palette {
     pub const MUTED: Color = rgb(129, 134, 143); // #81868F  oklch(0.62 0.015 260)
     pub const SUBTLE: Color = rgb(94, 100, 108); // #5E646C  oklch(0.5 0.015 260)
 
-    // -- semantic colors (from desktop action tokens) -------------------------
+    // -- semantic colors ------------------------------------------------------
     pub const GOLD: Color = rgb(235, 217, 110); // #EBD96E  oklch(0.88 0.13 100)
     pub const RED: Color = rgb(220, 90, 100); // #DC5A64  muted rose-red
     pub const TEAL: Color = rgb(80, 180, 140); // #50B48C  softened teal

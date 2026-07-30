@@ -501,7 +501,7 @@ async fn handle_plugins_reload(agent: &MvpAgent) -> ExtResult {
         let remote_settings = agent.cfg.borrow().remote_settings.clone();
         crate::agent::folder_trust::resolve_and_record(c, remote_settings.as_ref(), false)
     });
-    // Explicit desktop `grow/plugins/reload`: force a full local-install re-copy.
+    // Explicit ACP `grow/plugins/reload`: force a full local-install re-copy.
     agent
         .plugin_registry_handle()
         .reload(session_cwd.as_deref(), &disk_cfg, project_trusted, true);
@@ -538,11 +538,11 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
     // For a given cwd, compute the plugin registry the same way a session would
     // at spawn time (via build_for_cwd) and the same way reload_plugins_impl does
     // (ancestor project config walk + vendor compat merge). This is required so
-    // that `grow/commands/list` (the pull used by grow-desktop after session
+    // that `grow/commands/list` (the pull used by embedding clients after session
     // start) returns plugin-provided slash commands for the target cwd.
     //
     // The shared snapshot is only populated at agent boot (using process CWD)
-    // and by explicit reloads. In desktop<->docker (and ssh) setups the agent's
+    // and by explicit reloads. In client<->container (and SSH) setups the agent's
     // launch CWD is unrelated to the user's chosen workspace dir, so relying on
     // snapshot() alone meant the post-start pull returned no project plugin
     // skills until the user manually reloaded.

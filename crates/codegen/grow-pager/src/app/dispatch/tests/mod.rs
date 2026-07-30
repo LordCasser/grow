@@ -742,7 +742,7 @@ fn read_toast(app: &AppView) -> String {
 /// default-selected by the real `enqueue_permission` helper),
 /// a regular "opt-allow-once" (AllowOnce kind, position 1), and
 /// a "opt-reject-once" (RejectOnce, position 2). Mirrors the
-/// option list the shell builds for TUI/Pager/Desktop.
+/// option list the shell builds for TUI/Pager.
 /// Returns the response receiver for the injected permission.
 fn enqueue_permission_with_enable_always_approve(
     app: &mut AppView,

@@ -115,7 +115,6 @@ impl acp::Agent for MvpAgent {
                 Some("grow-web") => client_type = ClientType::GrowWeb,
                 Some("nebula") => client_type = ClientType::Nebula,
                 Some("grow-code-extension") => client_type = ClientType::Extension,
-                Some("grow-desktop") => client_type = ClientType::Desktop,
                 _ => {}
             }
         }
@@ -130,10 +129,6 @@ impl acp::Agent for MvpAgent {
             "code-nav capability initialized from initialize request; \
              index will start lazily on first grow/code/* request if eligible"
         );
-        let interactive_trust_client = Self::parse_interactive_trust_capability(
-            &arguments,
-        );
-        self.interactive_trust_client.set(interactive_trust_client);
         let client_supports_mcp_apps = arguments
             .meta
             .as_ref()
@@ -1070,11 +1065,6 @@ impl acp::Agent for MvpAgent {
         };
         spawn_res?;
         tracing::debug!(session_id = %session_id.0, "new_session: spawn_session_actor");
-        self.maybe_spawn_interactive_trust_prompt(
-            &session_id,
-            cwd.as_path(),
-            remote_settings.as_ref(),
-        );
         {
             let sid = session_id.0.to_string();
             let ci = client_identifier.clone();
@@ -1632,11 +1622,6 @@ impl acp::Agent for MvpAgent {
                     });
             }
         }
-        self.maybe_spawn_interactive_trust_prompt(
-            &session_id,
-            cwd.as_path(),
-            remote_settings.as_ref(),
-        );
         let orphan_parent = {
             let sessions = self.sessions.borrow();
             sessions

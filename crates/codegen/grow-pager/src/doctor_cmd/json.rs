@@ -330,7 +330,6 @@ pub(super) fn terminal_name(name: TerminalName) -> &'static str {
         TerminalName::Rio => "rio",
         TerminalName::Foot => "foot",
         TerminalName::JetBrains => "jetbrains",
-        TerminalName::GrowDesktop => "grow_desktop",
         TerminalName::Vte => "vte",
         TerminalName::Terminator => "terminator",
         TerminalName::WindowsTerminal => "windows_terminal",

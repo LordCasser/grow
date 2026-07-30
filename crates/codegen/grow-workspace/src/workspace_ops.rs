@@ -232,7 +232,7 @@ fn session_tracker(
     Ok(session.hunk_tracker().clone())
 }
 /// Resolve the directory a git op runs in: the explicit `git_root` when the
-/// caller provides one (the per-session repo, which the desktop sends per
+/// caller provides one (the per-session repo, which an ACP client sends per
 /// window), else the workspace root. Without this, every session's git
 /// queries/mutations would target the workspace launch directory's repo.
 fn git_op_cwd(

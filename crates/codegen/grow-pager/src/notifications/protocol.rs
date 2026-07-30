@@ -45,7 +45,6 @@ pub fn select_protocol(ctx: &TerminalContext) -> NotificationProtocol {
         | TerminalName::Vte
         | TerminalName::Terminator
         | TerminalName::Foot => NotificationProtocol::Osc777,
-        TerminalName::GrowDesktop => NotificationProtocol::None,
         TerminalName::AppleTerminal
         | TerminalName::Alacritty
         | TerminalName::Rio
@@ -175,14 +174,6 @@ mod tests {
     }
 
     #[test]
-    fn select_grow_desktop_uses_none() {
-        assert_eq!(
-            select_protocol(&ctx_with_brand(TerminalName::GrowDesktop)),
-            NotificationProtocol::None
-        );
-    }
-
-    #[test]
     fn select_apple_terminal_uses_bel() {
         assert_eq!(
             select_protocol(&ctx_with_brand(TerminalName::AppleTerminal)),
@@ -302,7 +293,7 @@ mod tests {
 
     #[test]
     fn emit_none_is_noop() {
-        let ctx = ctx_with_brand(TerminalName::GrowDesktop);
+        let ctx = ctx_with_brand(TerminalName::Unknown);
         // Should return immediately without writing anything.
         emit_notification(NotificationProtocol::None, "title", "body", &ctx);
     }
@@ -343,7 +334,6 @@ mod tests {
             (TerminalName::Ghostty, NotificationProtocol::Osc777),
             (TerminalName::Vte, NotificationProtocol::Osc777),
             (TerminalName::Foot, NotificationProtocol::Osc777),
-            (TerminalName::GrowDesktop, NotificationProtocol::None),
             (TerminalName::AppleTerminal, NotificationProtocol::Bel),
             (TerminalName::Alacritty, NotificationProtocol::Bel),
             (TerminalName::VsCode, NotificationProtocol::Bel),

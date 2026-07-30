@@ -14,7 +14,7 @@ use agent_client_protocol as acp;
 ///
 /// Contract: set only for actual HTTP 429 responses from the sampling client.
 /// Clients derive user-facing text via [`format_rate_limited_user_message`].
-/// The desktop path is unchanged: `prompt_complete_fields` still reports the
+/// The ACP path is unchanged: `prompt_complete_fields` still reports the
 /// stop reason with no detail.
 pub const RATE_LIMITED_ERROR_CODE: i32 = -32003;
 
@@ -423,7 +423,7 @@ mod tests {
     /// The cli-chat-proxy returns 403 for policy denials that are unrelated to
     /// the caller's credentials (content-safety blocks like
     /// SAFETY_CHECK_TYPE_DATA_LEAKAGE, ZDR-gated operations, remote settings
-    /// blocks). Mapping these to auth_required causes the desktop app to
+    /// blocks). Mapping these to auth_required causes embedding clients to
     /// tear down the session and kick off silent re-auth on -32000, and
     /// can race with invalid_grant_threshold to wipe auth.json.
     #[test]

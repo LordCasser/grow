@@ -1,6 +1,6 @@
 //! Dedicated-thread reader for the ACP stdio transport's standard input.
 //!
-//! Every ACP client (VS Code extension, grow-desktop, the leader bridge) drives
+//! Every persistent ACP client (such as an IDE extension or leader bridge) drives
 //! the agent over a **persistent, bidirectional** newline-delimited JSON-RPC
 //! stream on stdio: it writes requests on the child's stdin and reads responses
 //! on stdout, keeping **stdin open for the whole session**.

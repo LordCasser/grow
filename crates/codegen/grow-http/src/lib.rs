@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn origin_client_info_from_meta_extracts_identifier_and_version() {
         let meta = serde_json::json!({
-            "clientIdentifier": "grow-desktop",
+            "clientIdentifier": "grow-code-extension",
             "clientVersion": "1.2.3",
         })
         .as_object()
@@ -567,7 +567,7 @@ mod tests {
         assert_eq!(
             origin_client_info_from_meta(Some(&meta)),
             Some(OriginClientInfo {
-                product: "grow-desktop".to_string(),
+                product: "grow-code-extension".to_string(),
                 version: Some("1.2.3".to_string()),
             })
         );
@@ -599,7 +599,7 @@ mod tests {
                 version: None,
             }),
             Some(OriginClientInfo {
-                product: "grow-desktop".to_string(),
+                product: "grow-code-extension".to_string(),
                 version: Some("1.2.3".to_string()),
             }),
         );
@@ -615,10 +615,10 @@ mod tests {
     #[test]
     fn session_user_agent_string_renders_expected_variants() {
         let with_version = session_user_agent_string(&OriginClientInfo {
-            product: "grow-desktop".to_string(),
+            product: "grow-code-extension".to_string(),
             version: Some("1.2.3".to_string()),
         });
-        assert!(with_version.starts_with("grow-desktop/1.2.3 grow-shell/"));
+        assert!(with_version.starts_with("grow-code-extension/1.2.3 grow-shell/"));
         assert!(with_version.contains(" ("));
 
         let without_version = session_user_agent_string(&OriginClientInfo {

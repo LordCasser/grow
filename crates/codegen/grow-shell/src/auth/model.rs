@@ -8,7 +8,7 @@ const DEFAULT_EARLY_INVALIDATION_SECS: u64 = 300; // 5 minutes
 /// Legacy auth.json scope key. Fallback for old devbox auth files.
 pub(super) const LEGACY_SCOPE: &str = "grow::service";
 
-/// auth.json scope key for plain API key auth (desktop login, `grow login --api-key`).
+/// auth.json scope key for plain API key auth (`grow login --api-key`).
 pub const API_KEY_SCOPE: &str = "grow::api_key";
 
 const BLOCKED_REASON_NO_LOGS: &str = "BLOCKED_REASON_NO_LOGS";
@@ -26,7 +26,7 @@ pub enum AuthMode {
     Oidc,
     /// External auth provider binary
     External,
-    /// Plain API key (e.g. from grow-desktop login or `grow login --api-key`)
+    /// Plain API key (e.g. from an embedding client or `grow login --api-key`)
     ApiKey,
 }
 

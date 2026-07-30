@@ -1,6 +1,6 @@
 //! Wire types for the `grow/exit_plan_mode` ACP ext_method.
 //!
-//! Shared between the shell (serializer) and the pager/desktop/VS Code
+//! Shared between the shell (serializer) and pager/ACP embedding clients
 //! (deserializer) so both sides stay in sync.
 
 /// ACP `ext_method` request payload (shell coordinator sends to client/pager).

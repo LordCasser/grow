@@ -458,7 +458,6 @@ items = ["action-required", "spinner", "activity", "session-name", "grow"]
 | VS Code | BEL | Yes | No |
 | Apple Terminal | BEL | No | No |
 | VTE (GNOME Terminal) | OSC 777 | Yes | No |
-| Grow Desktop | None (native) | N/A | N/A |
 | Unknown | BEL | No | No |
 
 With `method = "auto"`, Grow detects the terminal brand and picks the best protocol. Set `method` explicitly to override that.

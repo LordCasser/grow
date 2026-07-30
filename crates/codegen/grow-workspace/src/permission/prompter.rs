@@ -25,7 +25,7 @@ const REJECT_ONCE_LABEL: &str = "No, and tell Grow what to do differently";
 pub const ALLOW_EDITS_SESSION_OPTION_ID: &str = "allow-edits-session";
 
 /// Stable option id for the "enable always-approve mode" option that is
-/// prepended to every permission prompt for TUI / Pager / Desktop clients.
+/// prepended to every permission prompt for TUI and Pager clients.
 ///
 /// Semantics (split between shell and client by design):
 ///
@@ -62,7 +62,7 @@ const ENABLE_ALWAYS_APPROVE_LABEL: &str =
     "Yes, and don't ask again for anything (always-approve mode)";
 
 /// Build the "enable always-approve mode" option that is prepended to
-/// every TUI/Pager/Desktop permission prompt. See
+/// every TUI/Pager permission prompt. See
 /// [`ENABLE_ALWAYS_APPROVE_OPTION_ID`] for the wire-level semantics.
 ///
 /// `kind` is `AllowOnce` (not `AllowAlways`) so that:
@@ -96,7 +96,7 @@ fn enable_always_approve_option() -> acp::PermissionOption {
 }
 
 /// Returns whether the given option is the special "enable always-approve mode"
-/// (global yolo) option that is prepended for GrowTUI / GrowPager / Desktop.
+/// (global yolo) option that is prepended for GrowTUI / GrowPager.
 ///
 /// This is the canonical way to identify the option instead of matching on
 /// its human-facing label or assuming position 0. Callers that need to
@@ -107,14 +107,11 @@ pub fn is_enable_always_approve_option(opt: &acp::PermissionOption) -> bool {
 }
 
 /// Returns `true` if the given client type should see the prepended
-/// "enable always-approve mode" option. Limited to the three clients
-/// (`GrowTUI`, `GrowPager`, `Desktop`) that wire the option id through
+/// "enable always-approve mode" option. Limited to the two clients
+/// (`GrowTUI`, `GrowPager`) that wire the option id through
 /// to their YOLO toggle. Other clients keep their existing option set.
 fn client_supports_enable_always_approve(client_type: ClientType) -> bool {
-    matches!(
-        client_type,
-        ClientType::GrowTUI | ClientType::GrowPager | ClientType::Desktop
-    )
+    matches!(client_type, ClientType::GrowTUI | ClientType::GrowPager)
 }
 
 /// Wrap the per-access-kind option map with the "enable always-approve
@@ -520,7 +517,7 @@ impl AcpPrompter {
                 if self.remember_tool_approvals
                     && matches!(
                         self.client_type,
-                        ClientType::GrowTUI | ClientType::GrowPager | ClientType::Desktop
+                        ClientType::GrowTUI | ClientType::GrowPager
                     ) =>
             {
                 serde_json::to_value(primary_command_from_script(bash_command))
@@ -562,7 +559,7 @@ impl AcpPrompter {
                 // For generic clients (web, etc.), use simpler options that work without
                 // special UI handling
                 match self.client_type {
-                    ClientType::GrowTUI | ClientType::GrowPager | ClientType::Desktop => {
+                    ClientType::GrowTUI | ClientType::GrowPager => {
                         let mut bash_commands: IndexMap<
                             acp::PermissionOptionId,
                             acp::PermissionOption,
@@ -639,15 +636,15 @@ impl AcpPrompter {
             AccessKind::MCPTool {
                 name: tool_name, ..
             } => {
-                // Toggle-aware clients (pager + TUI + Desktop) get the
+                // Toggle-aware clients (pager + TUI) get the
                 // `allow-always-mcp` option carrying `McpToolPermission`
-                // meta. Pager renders the scope toggle; TUI/Desktop submit
+                // meta. Pager renders the scope toggle; TUI submits
                 // without `McpScopeSelection` meta and the response mapper
                 // defaults to tool-scope. Fallback clients use the legacy
                 // `fallback_options` (`always-allow`) and the manager's
                 // plain `AllowAlways` arm persists tool-scope.
                 match self.client_type {
-                    ClientType::GrowTUI | ClientType::GrowPager | ClientType::Desktop => {
+                    ClientType::GrowTUI | ClientType::GrowPager => {
                         let mut options: IndexMap<acp::PermissionOptionId, acp::PermissionOption> =
                             IndexMap::new();
                         let server_prefix = parse_mcp_qualified_name(tool_name)
@@ -793,7 +790,7 @@ fn map_selected_outcome(
                             }
                         }
                     } else if let AccessKind::MCPTool { name, .. } = access {
-                        // No scope meta. TUI / Desktop case: the renderer
+                        // No scope meta. TUI case: the renderer
                         // shows the option but does not build the toggle
                         // response. Default to tool-scope using the
                         // access-kind name.
@@ -823,7 +820,7 @@ fn map_selected_outcome(
                             bash_selected_commands.command_parts.join(" "),
                         )
                     } else if let AccessKind::Bash(cmd) = access {
-                        // No interactive selection meta (e.g. desktop client).
+                        // No interactive selection metadata.
                         // Compute the primary command from the script.
                         if let Some(primary) = primary_command_from_script(cmd) {
                             PromptOutcome::AllowAlwaysBashCommand(
@@ -1170,7 +1167,7 @@ mod tests {
 
     #[test]
     fn mcp_response_no_meta_falls_back_to_tool() {
-        // TUI / Desktop case: option id is `allow-always-mcp` but the renderer
+        // TUI case: option id is `allow-always-mcp` but the renderer
         // does not build the toggle meta. The prompter must default to
         // tool-scope using the access-kind name.
         let p = prompter(ClientType::GrowTUI);
@@ -1262,7 +1259,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // "Enable always-approve mode" option (prepended for TUI/Pager/Desktop)
+    // "Enable always-approve mode" option (prepended for TUI/Pager)
     // ------------------------------------------------------------------
 
     fn enable_always_approve_id() -> acp::PermissionOptionId {
@@ -1270,7 +1267,7 @@ mod tests {
     }
 
     /// The new option must be the FIRST entry of the option list for
-    /// every TUI/Pager/Desktop access kind. Order matters because the
+    /// every TUI/Pager access kind. Order matters because the
     /// option's `index + 1` keyboard shortcut and visual prominence
     /// hinge on position 0. A regression that moves it later silently
     /// makes the "always approve" affordance harder to discover —
@@ -1309,21 +1306,16 @@ mod tests {
         }
     }
 
-    /// Same pin as above for `GrowTUI` and `Desktop` — both client types
-    /// route the option id through to the YOLO toggle, so both must
-    /// see it. A copy-paste regression that limits the prepend to one
-    /// client only would be caught here.
+    /// Same pin as above for `GrowTUI`.
     #[test]
-    fn enable_always_approve_is_first_for_tui_and_desktop() {
-        for ct in [ClientType::GrowTUI, ClientType::Desktop] {
-            let p = prompter(ct);
-            let opts = p.build_options(&AccessKind::Edit("write".to_owned()));
-            assert_eq!(
-                opts.keys().next().map(|k| k.0.as_ref()),
-                Some(ENABLE_ALWAYS_APPROVE_OPTION_ID),
-                "client {ct:?}: enable-always-approve must be position 0 for edits",
-            );
-        }
+    fn enable_always_approve_is_first_for_tui() {
+        let p = prompter(ClientType::GrowTUI);
+        let opts = p.build_options(&AccessKind::Edit("write".to_owned()));
+        assert_eq!(
+            opts.keys().next().map(|k| k.0.as_ref()),
+            Some(ENABLE_ALWAYS_APPROVE_OPTION_ID),
+            "enable-always-approve must be position 0 for TUI edits",
+        );
     }
 
     /// non-TUI clients (Generic / web / Extension / …) clients do NOT recognise the
@@ -1400,7 +1392,7 @@ mod tests {
         );
     }
 
-    /// Bash on TUI/Pager/Desktop builds a custom option set with
+    /// Bash on TUI/Pager builds a custom option set with
     /// `allow-always-command` at position 0 by default. After the
     /// prepend, the new option must STILL be first — i.e. the prepend
     /// runs AFTER the bash-specific assembly, not before. This pins

@@ -3072,7 +3072,7 @@ mod tests {
     /// Spawn a manager whose prompter is wired to a live gateway receiver backed
     /// by `client`, so prompting performs a real `request_permission` round-trip.
     /// `client_type` selects the option set the prompter builds (e.g. the
-    /// always-approve option is only offered for `GrowTUI | GrowPager | Desktop`).
+    /// always-approve option is only offered for `GrowTUI | GrowPager`).
     fn manager_with_recording_client(
         cwd: &AbsPathBuf,
         config: Option<crate::permission::types::PermissionConfig>,

@@ -65,11 +65,6 @@
     "breaking_change": false
   },
   {
-    "category": "features",
-    "description": "Chat conversations listed in the unified sidebar can now be renamed or deleted from the desktop app.",
-    "breaking_change": false
-  },
-  {
     "category": "fixes",
     "description": "The free-usage paywall no longer offers a Try Again button.",
     "breaking_change": false

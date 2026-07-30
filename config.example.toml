@@ -94,7 +94,7 @@ ceiling_ms = 16
 min_hz = 55
 max_hz = 165
 
-# 终端原生通知。Grow Desktop 使用自己的本地通知，不需要这些协议。
+# 终端原生通知。
 [ui.notifications]
 method = "auto"                    # auto | osc9 | osc99 | osc777 | bel | none
 condition = "unfocused"            # unfocused | always | never

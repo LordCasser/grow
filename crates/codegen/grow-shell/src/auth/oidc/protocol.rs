@@ -858,7 +858,7 @@ mod tests {
             scopes: vec!["offline_access".into(), "grow-cli:access".into()],
             principal_type: None,
             principal_id: None,
-            referrer: Some("grow-desktop".into()),
+            referrer: Some("grow-code-extension".into()),
         };
         let discovery = Discovery {
             authorization_endpoint: "https://login.example.com/authorize".into(),
@@ -879,7 +879,7 @@ mod tests {
             "state123",
             "nonce123",
         );
-        assert!(url.contains("referrer=grow-desktop"));
+        assert!(url.contains("referrer=grow-code-extension"));
         assert!(!url.contains("referrer=grow-build"));
         assert_eq!(
             url.matches("referrer=").count(),

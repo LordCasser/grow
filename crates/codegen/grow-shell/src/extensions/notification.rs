@@ -508,7 +508,7 @@ pub enum SessionUpdate {
         plugins: Vec<xai_hooks_plugins_types::PluginInfo>,
     },
     /// Marketplace plugin updates were auto-installed on session start.
-    /// Sent so desktop/pager can show a notification to the user.
+    /// Sent so the pager or another ACP client can notify the user.
     PluginUpdatesInstalled {
         /// List of (plugin_name, old_version, new_version).
         updates: Vec<(String, String, String)>,

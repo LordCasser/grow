@@ -294,7 +294,7 @@ pub async fn run_stdio_agent(
     // are identifiable by version in diagnostic logs.
     grow_diagnostics::unified_log::set_version(grow_version::VERSION);
 
-    // Log the client that launched us (set by grow-desktop when spawning `grow agent stdio`).
+    // Log the embedding client that launched `grow agent stdio`, when provided.
     // This appears early in unified.jsonl and is extremely useful for auth diagnostics.
     if let Ok(version) = std::env::var("GROW_CLIENT_VERSION") {
         crate::unified_log::info(
@@ -362,7 +362,7 @@ pub async fn run_stdio_agent(
             // Pause refreshes across system sleep so an OIDC refresh can't straddle a
             // suspend (which can revoke the refresh token and force re-login).
             // `grow agent stdio` is a local/interactive entrypoint (spawned by
-            // grow-desktop), so it needs the gate like the leader and pager paths;
+            // an embedding client), so it needs the gate like the leader and pager paths;
             // no-op where the OS listener is unavailable.
             auth_manager.start_system_power_listener();
 

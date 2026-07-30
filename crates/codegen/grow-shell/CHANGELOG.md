@@ -558,7 +558,6 @@
 - **Session titles** from /rename now appear on the prompt box border after resume.
 - **grok models** banner now correctly reports per-model API keys and deployment keys.
 - MCP tool output size limit is now configurable via environment variable, config.toml, or remote settings (default unchanged).
-- Chat conversations listed in the unified sidebar can now be renamed or deleted from the desktop app.
 - You can now add a local directory as a plugin marketplace source with `grok plugin marketplace add`.
 - **Auto permission mode** now prompts far less often on routine development commands.
 - Short media paths the model prints (images/1.jpg) are now clickable and open the file.
@@ -903,7 +902,7 @@
 
 - **Session recaps** (/recap and return-from-away) now show the full summary instead of being cut off mid-sentence.
 - **Vim mode** now focuses the prompt when you press / on a brand-new empty session.
-- **Fixed `grok agent stdio` startup hangs** on Windows when used with persistent clients such as VS Code or grok-desktop.
+- **Fixed `grok agent stdio` startup hangs** on Windows when used with persistent ACP clients such as VS Code.
 - **`/mcps` list** no longer shows stale disabled entries when managed gateway tools are enabled.
 - **Mermaid diagrams opened via [Open Image]** now render at higher resolution instead of terminal size.
 - **Pressing `r` in scrollback** no longer accidentally rewinds the session.
@@ -1034,7 +1033,7 @@
 
 - **Hosts can now register hooks** over the agent connection instead of only on-disk files.
 - **Prompt and /usage warnings** now correctly reflect prepaid credits and auto top-up status.
-- **Desktop clients can now detect** when a terminal is busy running a foreground process.
+- **ACP clients can now detect** when a terminal is busy running a foreground process.
 - **TODO list** remains visible to the model after compaction so it can continue working on pending items.
 - **/recap** is now available by default — it generates a quick summary of your current session so you can catch up on what's happened so far.
 

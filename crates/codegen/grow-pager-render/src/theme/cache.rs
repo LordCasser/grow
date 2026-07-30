@@ -169,7 +169,7 @@ pub fn invalidate_auto_theme_config() {
 /// 3. Default: `GrowNight`
 #[must_use]
 pub fn resolve_initial_theme() -> ThemeKind {
-    // 1. Environment variable (for desktop app integration)
+    // 1. Environment variable (for embedding client integration)
 
     // 2. Config file + 3. Default
     resolve_from_config(load_from_disk(), true)

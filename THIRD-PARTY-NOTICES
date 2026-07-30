@@ -16591,9 +16591,8 @@ License text: see Part II — MIT
 Additional requirements / notices:
   UI palette for theme `oscura-midnight` in
   grow-pager-render/src/theme/oscura.rs.
-  Ported from the desktop app design tokens in
-  frontend/apps/grow-desktop/src/themes/oscura-midnight.json (OKLCH→sRGB),
-  which implement the Oscura Midnight aesthetic from narative/oscura (MIT).
+  Derived from the Oscura Midnight aesthetic from narative/oscura (MIT),
+  with its OKLCH palette converted to sRGB.
   Some TUI semantic/accent role colors are first-party choices on top of that
   base.
 

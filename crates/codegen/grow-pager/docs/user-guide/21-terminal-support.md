@@ -59,7 +59,6 @@ Grow detects these terminal emulators from environment variables:
 - **foot** (Wayland-native, Linux)
 - **VS Code**, **Cursor**, **Windsurf**, and **Zed** integrated terminals
 - **JetBrains** IDE terminals
-- **Grow Desktop**
 - **VTE**-based terminals such as GNOME Terminal, GNOME Console, and Tilix
 - **Windows Terminal**
 

@@ -1,6 +1,6 @@
 //! Centralized unified log for cross-component session observability.
 //!
-//! Shell writes directly via [`emit()`]. Pager and desktop forward entries
+//! Shell writes directly via [`emit()`]. Pager forwards entries
 //! over ACP (`grow/log` notifications); shell receives them in
 //! [`ingest_client_entries()`] and writes on their behalf.
 
@@ -55,9 +55,6 @@ pub enum LogSource {
     #[strum(serialize = "grow-pager")]
     #[serde(rename = "grow-pager")]
     GrowPager,
-    #[strum(serialize = "grow-desktop")]
-    #[serde(rename = "grow-desktop")]
-    GrowDesktop,
 }
 
 /// A single unified log entry, written as one JSONL line.
@@ -68,12 +65,12 @@ pub struct LogEntry {
     /// Component that produced the entry.
     pub src: LogSource,
     /// OS process id of the producer. Critical for cross-process trace
-    /// reconstruction because shell/pager/desktop all append to the same
+    /// reconstruction because shell and pager append to the same
     /// `unified.jsonl`, so multiple shell processes' lines interleave
     /// indistinguishably without it.
     ///
-    /// `Option<u32>` is for wire compatibility only -- shell, pager, and
-    /// desktop all stamp `Some(std::process::id())` at emit time. A
+    /// `Option<u32>` is for wire compatibility only -- shell and pager
+    /// both stamp `Some(std::process::id())` at emit time. A
     /// `None` here means the entry came from an older client/server that
     /// predates this field; current code never emits one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -252,7 +249,7 @@ pub fn emit(lvl: LogLevel, msg: &str, sid: Option<&str>, ctx: Option<serde_json:
     write_entry(&entry);
 }
 
-/// Ingest a batch of log entries from a client (pager or desktop).
+/// Ingest a batch of log entries from a pager client.
 ///
 /// Called by the `grow/log` notification handler. Entries from
 /// [`LogSource::Shell`] are rejected to prevent spoofing.
