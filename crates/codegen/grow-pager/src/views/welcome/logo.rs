@@ -1,4 +1,4 @@
-//! Logo component — renders the ASCII world tree.
+//! Logo component — renders the Braille world tree.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
@@ -15,7 +15,7 @@ const LOGO_SMALL: &str = include_str!("../../../assets/logo/world-tree-small.txt
 /// Height at or above which the small logo is shown (below it, no logo).
 const SMALL_LOGO_MIN_HEIGHT: u16 = 22;
 /// Height at or above which the full logo is shown.
-const FULL_LOGO_MIN_HEIGHT: u16 = 26;
+const FULL_LOGO_MIN_HEIGHT: u16 = 31;
 
 fn pick_logo(window_height: u16) -> Option<&'static str> {
     if window_height < SMALL_LOGO_MIN_HEIGHT {
@@ -214,22 +214,20 @@ mod tests {
     }
 
     #[test]
-    fn logo_assets_are_compact_ascii_world_tree_emblems() {
+    fn logo_assets_are_braille_world_tree_emblems() {
         for logo in [LOGO, LOGO_SMALL] {
-            assert!(logo.is_ascii());
-            assert!(logo.contains("<>"), "missing the emblem's diamond motif");
-            assert!(logo.contains("||"), "missing the world tree trunk");
-            assert!(logo.lines().all(|line| !line.ends_with(' ')));
+            assert!(
+                logo.lines()
+                    .flat_map(str::chars)
+                    .all(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch))
+            );
         }
 
-        assert!(LOGO.contains("**"), "missing the living half of the crown");
-        assert!(
-            LOGO.contains("/\\"),
-            "missing the branching half of the crown"
-        );
-        assert_eq!(LOGO.matches("<>").count(), 2, "missing an emblem ornament");
-        assert!(full_logo_visual_width() <= 44);
-        assert!(full_logo_line_count() <= 10);
+        assert!(LOGO.contains("⣹⣷⣶⣼⣿⣿⣷"));
+        assert_eq!(full_logo_visual_width(), 30);
+        assert_eq!(full_logo_line_count(), 15);
+        assert_eq!(visual_width(LOGO_SMALL), 10);
+        assert_eq!(compact_logo_line_count(), 5);
     }
 
     #[test]

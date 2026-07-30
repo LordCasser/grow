@@ -3179,9 +3179,8 @@ mod tests {
 
     #[test]
     fn hero_box_inactive_on_short_terminal() {
-        // 16 rows is one short of the 17 the box needs (11 box + 1 flex gap +
-        // 5 fixed-below), so it falls back to the stacked layout.
-        let area = Rect::new(0, 0, 90, 16);
+        let min_height = hero_box::min_content_height(0, 4, 0, 0);
+        let area = Rect::new(0, 0, 90, min_height - 1);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             menu_height: 4,
@@ -3189,17 +3188,16 @@ mod tests {
         });
         assert!(
             !layout.has_hero_box(),
-            "hero box should be inactive at 90x16 (needs 17 rows)"
+            "hero box should be inactive one row below its minimum height"
         );
     }
 
     #[test]
     fn hero_box_inactive_when_warning_would_overflow() {
-        // Regression: the box is forced to the full 7-row logo, so even a
-        // 3-item menu needs 11 box rows. A startup warning (error_height = 2)
-        // pushes the total past height 19, so the gate must fall back to the
-        // stacked layout instead of overflowing by a row.
-        let area = Rect::new(0, 0, 90, 19);
+        // A terminal at the no-warning boundary must fall back to stacked when
+        // a startup warning consumes additional rows.
+        let min_height = hero_box::min_content_height(0, 3, 0, 0);
+        let area = Rect::new(0, 0, 90, min_height);
         let with_warning = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             error_height: 2,
@@ -3253,9 +3251,9 @@ mod tests {
         // A 6-item menu makes the box 2 rows taller than the default-4 box, so
         // the centering pad (derived from the default box) must be clamped or
         // the box gets pushed down and the version row clips at exactly
-        // min_content_height. 19 == min_content_height(0, 6, 0, 0): a 13-row box
-        // + 1 flex gap + 5 fixed-below.
-        let area = Rect::new(0, 0, 100, 19);
+        // min_content_height.
+        let min_height = hero_box::min_content_height(0, 6, 0, 0);
+        let area = Rect::new(0, 0, 100, min_height);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             menu_height: 6,
@@ -3352,10 +3350,10 @@ mod tests {
     }
 
     #[test]
-    fn hero_box_keeps_one_bottom_pad_below_actions() {
+    fn hero_box_keeps_bottom_pad_below_actions() {
         // With a changelog/announcement the subtitle is hidden, but there's
-        // still exactly one padding row between the actions and the bottom
-        // border. (menu=4 + info=3 fills the inner, so the menu reaches the pad.)
+        // still at least one padding row between the actions and the bottom
+        // border. A taller logo may add more unused rows to the right column.
         let area = Rect::new(0, 0, 100, 50);
         let a = long_ann();
         let no_info = WelcomeLayout::compute(WelcomeLayoutInput {
@@ -3373,10 +3371,9 @@ mod tests {
         assert_eq!(with_info.hero_subtitle.height, 0);
         let menu_bottom = with_info.hero_menu.y + with_info.hero_menu.height;
         let border_bottom = with_info.hero_box.y + with_info.hero_box.height - 1;
-        assert_eq!(
-            border_bottom - menu_bottom,
-            1,
-            "one pad row below the actions"
+        assert!(
+            border_bottom - menu_bottom >= 1,
+            "missing pad row below the actions"
         );
     }
 

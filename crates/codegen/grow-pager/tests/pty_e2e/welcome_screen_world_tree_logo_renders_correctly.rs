@@ -4,9 +4,8 @@ use super::common::*;
 
 /// 1b. **Welcome screen renders the Grow world-tree emblem correctly.**
 ///
-/// The full logo is selected on a tall terminal. Its tree trunk, living crown,
-/// bare branches, roots, circular frame, and diamond ornament are all rendered
-/// from the embedded ASCII asset.
+/// The full logo is selected on a tall terminal. Its canopy, trunk, and roots
+/// are all rendered from the embedded Braille asset.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn welcome_screen_world_tree_logo_renders_correctly() {
@@ -22,7 +21,7 @@ async fn welcome_screen_world_tree_logo_renders_correctly() {
         .expect("welcome text");
 
     let screen = harness.screen_contents();
-    for motif in ["<>", "========||========", "***"] {
+    for motif in ["⣹⣷⣶⣼⣿⣿⣷", "⢻⣿⣿⣿⡟", "⣿⣿⣿⣿⣿"] {
         assert!(
             screen.contains(motif),
             "world-tree motif {motif:?} not found in welcome screen\n\
