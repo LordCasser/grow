@@ -1,0 +1,162 @@
+---
+# Copy this file to one of the following locations and rename it to <agent-id>.md:
+#   Project: .grow/agents/<agent-id>.md
+#   User:    ~/.config/.grow/agents/<agent-id>.md
+#   Fallback: ~/.agent/agents/<agent-id>.md
+#
+# The file path is the stable Agent ID. `name` is compatibility metadata only.
+# Top-level keys use camelCase. Fields inside `toolConfig.tools` use snake_case.
+# Unknown keys fail parsing. `model`, `mode`, `permission`, `permissions`,
+# `permissionMode`, `variant`, and `request` are not Agent settings: Grow keeps
+# model and permission selection in session state and ignores compatible foreign
+# frontmatter fields.
+
+name: example-agent
+description: >-
+  A complete Grow Agent definition showing every supported frontmatter feature.
+
+# How the Markdown body below contributes to the system prompt:
+#   extend (default): append it to Grow's built-in prompt.
+#   full:             use it as the complete MiniJinja system prompt.
+promptMode: extend
+
+# Optional subagent defaults. They do not select a provider/model.
+# capabilityMode: read-only | read-write | execute | all
+capabilityMode: read-write
+# effort: low | medium | high | xhigh | max
+effort: high
+# maxTurns must be greater than zero. A parent session may impose a lower limit.
+maxTurns: 40
+# isolation: none | worktree
+isolation: worktree
+# Default to a background launch when this definition is spawned as a subagent.
+background: false
+
+# Presentation/interoperability metadata.
+# color: red | blue | green | yellow | purple | orange | pink | cyan
+color: green
+initialPrompt: Inspect the task, state assumptions, then begin.
+
+# Preload named Skills, discover the remaining Skills for the workspace, and
+# optionally inherit the parent session's discovered Skills in a subagent.
+skills:
+  - coding
+discoverSkills: true
+inheritSkills: true
+
+# Discover and inject applicable AGENTS.md files.
+agentsMd: true
+
+# When true, Grow may add session capabilities such as memory, web_fetch, LSP,
+# OpenCode write fallback, and plan-mode tools. Set false for an exact toolset.
+injectDefaultTools: true
+
+# Final Agent-authored filters. Omit/empty `tools` to allow every assembled
+# tool. The denylist takes priority. `Agent(name)` entries also control which
+# agent types may be spawned.
+tools:
+  - read_file
+  - grep
+  - list_dir
+  - run_terminal_cmd
+  - Agent(explore, general-purpose)
+disallowedTools:
+  - deploy_app
+
+# Advanced tool assembly. Declaring `toolConfig` replaces the built-in core
+# tool list, so include every core tool this Agent needs. Per-tool record keys
+# deliberately use snake_case because they are the grow-tools wire contract.
+toolConfig:
+  behavior_preset: current
+  tools:
+    - id: Grow:read_file
+      params: {}
+      name_override: inspect_file
+      params_name_overrides:
+        target_file: path
+      description_override: Read a UTF-8 text file or a supported document.
+      behavior_version: current
+      # kind is used by capabilityMode filtering.
+      kind: read
+    - id: Grow:grep
+      params: null
+      name_override: null
+      params_name_overrides: null
+      description_override: null
+      behavior_version: null
+      kind: search
+
+# When this definition is spawned as a subagent, Agent-owned MCP servers are
+# available to trusted, non-plugin Agent files. A string references a server
+# already configured by the parent session. An object declares an inline ACP
+# MCP server. Plugin Agents may only inherit MCPs.
+mcpServers:
+  - project-search
+  - local-tools:
+      type: stdio
+      command: /absolute/path/to/local-mcp-server
+      args:
+        - --stdio
+      env:
+        - name: EXAMPLE_MODE
+          value: local
+
+# Parent MCP inheritance accepts `all`, `none`, `{ named: [...] }`, or
+# `{ except: [...] }`.
+mcpInheritance:
+  except:
+    - private-parent-server
+
+# Inline hooks use the same schema as Grow hook files. Project Agent hooks only
+# run after the folder is trusted; plugin Agent hooks are ignored for security.
+hooks:
+  PreToolUse:
+    - matcher: Bash
+      hooks:
+        - type: command
+          command: ./scripts/check-command.sh
+          timeout: 10
+  PostToolUse:
+    - matcher: Edit|Write
+      hooks:
+        - type: command
+          command: ./scripts/format-changed-files.sh
+
+# Persistent memory scope used when this definition is spawned as a subagent:
+#   user    -> ~/.grow/agent-memory/<agent-id>/
+#   project -> <project>/.grow/agent-memory/<agent-id>/
+#   local   -> <project>/.grow/agent-memory-local/<agent-id>/
+memory: project
+
+# Require a tool call before a turn may finish. `recovery` is a harness policy
+# hint; all delay values are milliseconds.
+completionRequirement:
+  tool: complete_task
+  reminder: Finish the task and call complete_task before ending the turn.
+  recovery:
+    maxRetries: 3
+    baseDelayMs: 1000
+    maxDelayMs: 10000
+
+# First-user-message prefix. Use `default`, a bare template string, or the
+# explicit `{ custom: ... }` form shown here. Supported variables include
+# workspace_path, os_family, shell, vcs_root, vcs_status, today_local,
+# terminals_folder, workspace_rules, user_rules, skill_listing,
+# read_tool_name, mcp_servers, mcps_root, and `tools.by_kind.*`.
+userMessageTemplate:
+  custom: |-
+    <user_info>
+    Workspace: ${{ workspace_path }}
+    OS: ${{ os_family }}
+    Shell: ${{ shell }}
+    ${%- if today_local %}
+    Date: ${{ today_local }}
+    ${%- endif %}
+    </user_info>
+---
+
+You are a focused software engineering Agent.
+
+Understand the existing architecture before changing it. Make the smallest
+coherent change that satisfies the task, verify the affected behavior, and
+report unresolved risks clearly.

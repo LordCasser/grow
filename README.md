@@ -198,6 +198,7 @@ path = "~/projects/plugins"
 
 项目级 Agent 可以放在 `.grow/agents/`。Agent 使用 Markdown + YAML frontmatter；权限模式、
 provider 和 model 都属于 session，不属于 Agent 定义。格式见
+[agent.md.example](agent.md.example)；字段语义和发现优先级见
 [grow-agent README](crates/codegen/grow-agent/README.md)。
 
 ## 从源码构建

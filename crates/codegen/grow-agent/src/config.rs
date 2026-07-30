@@ -1844,6 +1844,57 @@ You are a test agent.
         );
     }
     #[test]
+    fn root_agent_markdown_example_parses_all_supported_features() {
+        let def = AgentDefinition::parse(include_str!("../../../../agent.md.example"))
+            .expect("repository-root agent.md.example must remain a valid Agent definition");
+
+        assert_eq!(def.name, "example-agent");
+        assert_eq!(def.prompt_mode, PromptMode::Extend);
+        assert_eq!(
+            def.capability_mode,
+            Some(xai_tool_types::SubagentCapabilityMode::ReadWrite)
+        );
+        assert_eq!(def.effort, Some(Effort::High));
+        assert_eq!(def.max_turns, Some(40));
+        assert_eq!(def.isolation, Some(IsolationMode::Worktree));
+        assert_eq!(def.background, Some(false));
+        assert_eq!(def.color, Some(AgentColor::Green));
+        assert!(def.initial_prompt.is_some());
+        assert_eq!(def.skills, ["coding"]);
+        assert!(def.discover_skills);
+        assert!(def.inherit_skills);
+        assert!(def.agents_md);
+        assert!(def.inject_default_tools);
+        assert!(!def.tools.is_empty());
+        assert_eq!(def.disallowed_tools, ["deploy_app"]);
+        assert_eq!(def.tool_config.behavior_preset.as_deref(), Some("current"));
+        assert_eq!(def.tool_config.tools.len(), 2);
+        assert_eq!(def.mcp_servers.len(), 2);
+        assert_eq!(
+            def.mcp_inheritance,
+            McpInheritance::Except(vec!["private-parent-server".into()])
+        );
+        let hooks = def.hooks.as_ref().expect("example must cover inline hooks");
+        let (hook_specs, hook_errors) =
+            grow_hooks::config::parse_hooks_from_value(&hooks.as_value(), "agent.md.example");
+        assert!(
+            hook_errors.is_empty(),
+            "invalid example hooks: {hook_errors:?}"
+        );
+        assert_eq!(hook_specs.len(), 2);
+        assert_eq!(def.memory, Some(MemoryScope::Project));
+        assert!(def.completion_requirement.is_some());
+        assert!(matches!(
+            def.user_message_template,
+            UserMessageTemplate::Custom(_)
+        ));
+        assert_eq!(
+            def.permission_mode,
+            PermissionMode::Default,
+            "Agent files must not override session permission state"
+        );
+    }
+    #[test]
     fn test_parse_tools_and_disallowed_together() {
         let content = r#"---
 name: mixed-tools

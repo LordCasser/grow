@@ -150,12 +150,6 @@ completionRequirement:
     maxRetries: 5
     baseDelayMs: 5000
     maxDelayMs: 60000
-toolConfig:
-  wait_for_instruction:
-    retry:
-      maxRetries: 1440
-      baseDelayMs: 5000
-      maxDelayMs: 30000
 ---
 
 You are a worker agent in an orchestrated multi-agent workflow.
@@ -164,32 +158,17 @@ You MUST call `complete_task` before ending your response.
 
 ## Frontmatter Schema Reference
 
-All frontmatter keys use **camelCase**.
+The repository-root [`agent.md.example`](../../../agent.md.example) is the
+authoritative, copy-ready schema example. It exercises every supported field
+in a parser regression test, including prompt assembly, exact tool
+configuration, Skill and AGENTS.md discovery, subagent defaults, MCP
+inheritance and owned servers, hooks, memory, completion requirements, and the
+first-user-message template.
 
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `name` | `string` | No | path-derived | Compatibility metadata; file path remains authoritative |
-| `description` | `string` | **Yes** | — | When/why to use this agent |
-| `promptMode` | `string` | No | `"extend"` | `"extend"` or `"full"` |
-| `tools` | `string[]` | No | inherit all | Tool allowlist. Omit = all tools. `[]` = none |
-| `disallowedTools` | `string[]` | No | `[]` | Denylist (takes priority over `tools`) |
-| `skills` | `string[]` | No | `[]` | Skill names to pre-load |
-| `agentsMd` | `bool` | No | `true` | Discover and inject AGENTS.md files |
-| `outputFormat` | `string` | No | `"default"` | `"default"` or `"concise"` |
-| `bash` | `object` | No | defaults | Bash tool config overrides |
-| `bash.timeoutSecs` | `float` | No | `120.0` | Bash command timeout |
-| `bash.outputByteLimit` | `int` | No | `200000` | Max output bytes |
-| `bash.cmdPrefix` | `string` | No | `null` | Command prefix |
-| `toolNameOverrides` | `map<string,string>` | No | `{}` | Canonical → model-facing name map |
-| `paramNameOverrides` | `map<string,map>` | No | `{}` | Per-tool param name map |
-| `completionRequirement` | `object` | No | `null` | Tool that must be called before turn ends |
-| `completionRequirement.tool` | `string` | Yes* | — | Canonical tool name |
-| `completionRequirement.reminder` | `string` | Yes* | — | Reminder text when not called |
-| `completionRequirement.recovery` | `object` | No | `null` | Recovery policy for the harness |
-| `toolConfig` | `map<string,object>` | No | `{}` | Per-tool execution config |
-| `toolConfig.*.retry` | `object` | No | `null` | Retry config for a tool |
-
-*Required only when `completionRequirement` is set.
+Top-level frontmatter keys use **camelCase**. The records nested below
+`toolConfig.tools` use the `grow-tools` wire names in **snake_case**. Declaring
+`toolConfig` replaces the built-in core tool list; `tools` and
+`disallowedTools` then filter the assembled result.
 
 ### Harness and OpenCode compatibility
 
@@ -311,9 +290,9 @@ user-level definition with the same ID. Within user roots,
 | `IoError` | File read error during AGENTS.md/skills discovery |
 | `MiniJinjaError` | Template rendering failure |
 
-Unknown frontmatter fields are **silently ignored** for forward
-compatibility — definitions written for newer versions work on older
-ones.
+Unknown frontmatter fields are rejected so misspellings cannot silently change
+Agent behavior. Only the explicitly documented Harness/OpenCode compatibility
+fields are accepted and ignored.
 
 ## Development
 
