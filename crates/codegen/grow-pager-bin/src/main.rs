@@ -61,9 +61,6 @@ fn apply_agent_endpoint_args(agent_args: &grow_pager::app::AgentArgs, config: &m
     if let Some(v) = &agent_args.cli_chat_proxy_base_url {
         config.endpoints.cli_chat_proxy_base_url = Some(v.clone());
     }
-    if let Some(v) = &agent_args.inference_base_url {
-        config.endpoints.inference_base_url = v.clone();
-    }
 }
 /// Resolve --agent-profile path: canonicalize and verify the file exists.
 fn resolve_agent_profile_path(path: &std::path::Path) -> std::path::PathBuf {
