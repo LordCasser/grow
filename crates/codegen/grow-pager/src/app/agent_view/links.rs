@@ -883,12 +883,9 @@ mod link_click_tests {
         assert!(agent.hit_promo_cta.rect.is_none());
     }
     /// In-session header promo CTA: a promo owning the slot arms
-    /// `hit_promo_cta` (clickable → `AnnouncementsOpenCta`), and the draw caches
-    /// `pinned_promo_cta_live` so the `Ctrl+O` arm can override
-    /// YOLO — but ONLY for a pinned (non-dismissible) promo.
+    /// `hit_promo_cta` (clickable → `AnnouncementsOpenCta`).
     #[test]
-    fn header_promo_cta_rect_and_ctrl_o_override() {
-        use crate::actions::ActionId;
+    fn header_promo_cta_rect_is_clickable() {
         let reg = ActionRegistry::defaults();
         let cta = || {
             Some(grow_announcements::AnnouncementCta {
@@ -929,13 +926,6 @@ mod link_click_tests {
             matches!(outcome, InputOutcome::Action(Action::AnnouncementsOpenCta)),
             "header CTA click opens with the Header surface"
         );
-        assert!(
-            matches!(
-                agent.handle_agent_action(ActionId::ToggleYolo),
-                InputOutcome::Action(Action::AnnouncementsOpenCta)
-            ),
-            "Ctrl+O opens the pinned CTA (Keyboard surface) instead of YOLO"
-        );
         let mut agent = make_agent();
         agent.last_terminal_size = (120, 30);
         let dismissible = [grow_announcements::Announcement {
@@ -954,13 +944,6 @@ mod link_click_tests {
             agent.hit_promo_cta.rect.is_some(),
             "dismissible promo still shows the clickable header CTA"
         );
-        assert!(
-            matches!(
-                agent.handle_agent_action(ActionId::ToggleYolo),
-                InputOutcome::Action(Action::SetYoloMode(_))
-            ),
-            "Ctrl+O keeps toggling YOLO for a dismissible promo"
-        );
         let mut agent = make_agent();
         agent.last_terminal_size = (120, 30);
         draw_frame_sized(&mut agent, &reg, &[], 0, 120);
@@ -969,10 +952,6 @@ mod link_click_tests {
             "no promo → no header CTA"
         );
         assert!(!agent.pinned_promo_cta_live);
-        assert!(matches!(
-            agent.handle_agent_action(ActionId::ToggleYolo),
-            InputOutcome::Action(Action::SetYoloMode(_))
-        ));
     }
     /// A non-dismissible promo draws with the CTA armed but NO [hide] click
     /// target (`BannerHits.hide` is None, so the mouse hide path is dead).
@@ -1207,7 +1186,7 @@ mod link_click_tests {
     fn plan_feedback_drag_routes_to_prompt_not_line_viewer() {
         let mut agent = make_agent();
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+        let request = crate::views::plan_approval_view::PlanApprovalExtRequest {
             session_id: "test-session".into(),
             tool_call_id: "call-1".into(),
             plan_content: "# Plan\n\nStep one\nStep two".into(),
@@ -1695,10 +1674,7 @@ mod link_click_tests {
         agent
             .scrollback
             .push_block(crate::scrollback::block::RenderBlock::ToolCall(
-                ToolCallBlock::Other(OtherToolCallBlock::new(
-                    "enter_plan_mode",
-                    "enter plan mode",
-                )),
+                ToolCallBlock::Other(OtherToolCallBlock::new("plan_control", "submit plan")),
             ));
         for i in 0..5 {
             agent

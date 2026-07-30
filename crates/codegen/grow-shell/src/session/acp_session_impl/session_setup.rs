@@ -304,13 +304,6 @@ impl SessionActor {
         }
     }
     pub(super) async fn flush_pending_skill_reminders(&self) {
-        let activation = self.plan_mode.lock().take_pending_activation();
-        if let Some(text) = activation {
-            self.chat_state_handle
-                .push_user_message(ConversationItem::system_reminder(text));
-            self.plan_mode.lock().record_reminder_injected();
-            self.persist_plan_mode_state();
-        }
         let items: Vec<ConversationItem> =
             std::mem::take(&mut *self.pending_skill_reminders.lock());
         if items.is_empty() {
@@ -321,160 +314,17 @@ impl SessionActor {
         }
         self.persist_announcement_state().await;
     }
-    /// Idle threshold for proactive model metadata refresh on session resume.
-    /// If the session has been idle longer than this, we fetch fresh model config
-    /// from cli-chat-proxy before the next API request to catch context_window changes.
-    pub(super) const IDLE_REFRESH_THRESHOLD_SECS: i64 = 600;
     /// Record the current time as the last API request timestamp.
     pub(super) fn record_api_request_time(&self) {
         let now_ms = chrono::Utc::now().timestamp_millis();
         self.last_api_request_at
             .store(now_ms, std::sync::atomic::Ordering::Relaxed);
     }
-    /// Check if the session has been idle and proactively refresh model metadata.
-    ///
-    /// Called at the start of each turn. If idle > `IDLE_REFRESH_THRESHOLD_SECS`,
-    /// fetches `/models-v2` from cli-chat-proxy and updates the cached
-    /// context_window / output_limit if remote settings changed them.
-    ///
-    /// Skipped for BYOK users (no remote settings, no `/models-v2`).
-    pub(super) async fn maybe_refresh_model_metadata_on_resume(&self) {
-        if !self.is_session_based_auth() {
-            return;
-        }
-        let last_request_ms = self
-            .last_api_request_at
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if last_request_ms == 0 {
-            return;
-        }
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let idle_secs = (now_ms - last_request_ms) / 1000;
-        if idle_secs < Self::IDLE_REFRESH_THRESHOLD_SECS {
-            return;
-        }
-        let Some(current_config) = self.chat_state_handle.get_sampling_config().await else {
-            return;
-        };
-        let current_model = &current_config.model;
-        let base_url = &current_config.base_url;
-        if !crate::util::is_cli_chat_proxy_url(base_url) {
-            return;
-        }
-        tracing::info!(
-            idle_secs,
-            threshold_secs = Self::IDLE_REFRESH_THRESHOLD_SECS,
-            "Session resumed after idle — refreshing model metadata from cli-chat-proxy"
-        );
-        let creds = self.chat_state_handle.get_credentials().await;
-        let Some(ref am) = self.auth_manager else {
-            tracing::debug!("No auth manager available for model metadata refresh");
-            return;
-        };
-        let _ = am.auth().await;
-        let provider: Arc<dyn grow_auth::AuthCredentialProvider> = Arc::new(
-            crate::auth::credential_provider::ShellAuthCredentialProvider::new(
-                am.clone(),
-                None,
-                None,
-            ),
-        );
-        let middleware_client =
-            crate::http::with_auth_retry(crate::http::shared_client(), provider);
-        let url = format!("{}/models-v2", base_url);
-        let parse_models_response =
-            |json: serde_json::Value| -> Option<(std::num::NonZeroU64, Option<u32>)> {
-                let data = json.get("data")?.as_array()?;
-                for entry in data {
-                    let parsed = crate::remote::client::parse_remote_model_value(entry, base_url)?;
-                    if parsed.model == *current_model {
-                        return Some((parsed.context_window, parsed.output_limit));
-                    }
-                }
-                None
-            };
-        #[allow(unused_mut)]
-        let mut request = middleware_client
-            .get(&url)
-            .header("X-Grow-Token-Auth", "grow-cli")
-            .header("x-grow-client-version", grow_version::VERSION)
-            .header(
-                crate::http::CLIENT_MODE_HEADER,
-                crate::http::process_client_mode(),
-            )
-            .timeout(std::time::Duration::from_secs(5));
-        let response = match request.send().await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to fetch models for idle refresh");
-                return;
-            }
-        };
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            crate::auth::attribution::record_consumer_401(
-                am,
-                None,
-                crate::auth::attribution::ConsumerKind::IdleResumeModelRefresh,
-                "",
-                creds.api_key.as_deref(),
-            );
-        }
-        let result = if !response.status().is_success() {
-            tracing::warn!(
-                status = response.status().as_u16(),
-                "Failed to fetch models for idle refresh"
-            );
-            None
-        } else {
-            response
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(parse_models_response)
-        };
-        let Some((new_context_window, new_output_limit)) = result else {
-            tracing::debug!("Model metadata refresh: no update or fetch failed");
-            return;
-        };
-        let mut config_changed = false;
-        let mut updated_config = current_config.clone();
-        if current_config.context_window != new_context_window
-            && self.compaction.context_window_override.is_none()
-        {
-            tracing::info!(
-                old_context_window = current_config.context_window.get(),
-                new_context_window = new_context_window.get(),
-                "Context window updated on session resume"
-            );
-            updated_config.context_window = new_context_window;
-            config_changed = true;
-        }
-        // Local configuration is authoritative. Provider metadata may fill an
-        // unspecified limit, but it must never replace a model- or global-level
-        // `output_limit` already resolved into the sampling config.
-        if current_config.output_limit.is_none()
-            && let Some(new_limit) = new_output_limit
-        {
-            tracing::info!(
-                new_output_limit = new_limit,
-                "Output limit discovered on session resume"
-            );
-            updated_config.output_limit = Some(new_limit);
-            config_changed = true;
-        }
-        if config_changed {
-            self.chat_state_handle
-                .update_sampling_config(updated_config);
-        }
-    }
     /// Update cached sampling config if model metadata changed (from response headers).
     pub(super) async fn handle_model_metadata_update(
         &self,
         metadata: crate::sampling::ResponseModelMetadata,
     ) {
-        if let Some(ref etag) = metadata.models_etag {
-            self.models_manager.refresh_if_new_etag(etag.clone()).await;
-        }
         let current_config = match self.chat_state_handle.get_sampling_config().await {
             Some(cfg) => cfg,
             None => return,

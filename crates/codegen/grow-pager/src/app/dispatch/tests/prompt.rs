@@ -2995,7 +2995,7 @@ fn local_slash_in_non_project_dir_does_not_create_session() {
     let mut app = project_picker_app();
     dispatch(Action::NewSession, &mut app);
 
-    let effects = dispatch_send_prompt_inner(&mut app, "/dashboard".into(), true, false, false);
+    let effects = dispatch_send_prompt_inner(&mut app, "/agents".into(), true, false, false);
 
     assert!(
         !effects
@@ -3013,7 +3013,7 @@ fn slash_and_exit_input_does_not_trigger_project_picker() {
     // Slash commands (e.g. /models, /help) must pass through untouched.
     assert!(!input_can_trigger_project_picker("/models"));
     assert!(!input_can_trigger_project_picker("/help"));
-    assert!(!input_can_trigger_project_picker("  /dashboard  "));
+    assert!(!input_can_trigger_project_picker("  /agents  "));
     // Exit aliases and empty input never send a prompt.
     assert!(!input_can_trigger_project_picker("exit"));
     assert!(!input_can_trigger_project_picker("quit"));

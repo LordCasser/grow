@@ -2,11 +2,11 @@
     use super::*;
 
     #[test]
-    fn exit_plan_mode_opens_submitted_plan_preview() {
+    fn plan_approval_opens_submitted_plan_preview() {
         let mut app = make_app_with_agent("sess-1");
         let (ext, _rx) = make_exit_plan_ext(Some("# Submitted Plan"));
 
-        assert!(handle_exit_plan_mode(ext, &mut app));
+        assert!(handle_plan_approval(ext, &mut app));
         let agent = app.agents.get(&AgentId(0)).unwrap();
 
         assert!(agent.plan_approval_view.is_some());
@@ -24,7 +24,7 @@
         let mut app = make_app_with_agent("sess-1");
         let (ext, _rx) = make_exit_plan_ext(Some("# First Plan"));
 
-        assert!(handle_exit_plan_mode(ext, &mut app));
+        assert!(handle_plan_approval(ext, &mut app));
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.line_viewer = None;
@@ -45,7 +45,7 @@
         let (ext, _rx) =
             make_exit_plan_ext_with_tool_call_id("untracked-call", Some("# Request Plan"));
 
-        assert!(handle_exit_plan_mode(ext, &mut app));
+        assert!(handle_plan_approval(ext, &mut app));
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         assert_eq!(
             agent
@@ -57,20 +57,20 @@
     }
 
     #[test]
-    fn exit_plan_mode_missing_content_is_rejected() {
+    fn plan_approval_missing_content_is_rejected() {
         let mut app = make_app_with_agent("sess-1");
         let (ext, mut rx) = make_exit_plan_ext(None);
 
-        assert!(!handle_exit_plan_mode(ext, &mut app));
+        assert!(!handle_plan_approval(ext, &mut app));
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(agent.plan_approval_view.is_none());
         assert!(matches!(rx.try_recv(), Ok(Err(_))));
     }
 
     #[test]
-    fn exit_plan_mode_dismisses_open_modal() {
+    fn plan_approval_dismisses_open_modal() {
         // Regression: if the user has Ctrl+P command palette open when the
-        // agent calls exit_plan_mode, the modal must be dismissed so the
+        // A Plan approval must dismiss the modal so the
         // plan preview is visible and input routes correctly. Otherwise the
         // modal hides the line viewer in draw order while input gets
         // routed to the invisible line viewer, leaving the user stuck.
@@ -87,21 +87,21 @@
         }
 
         let (ext, _rx) = make_exit_plan_ext(Some("# Submitted Plan"));
-        assert!(handle_exit_plan_mode(ext, &mut app));
+        assert!(handle_plan_approval(ext, &mut app));
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(
             agent.active_modal.is_none(),
-            "exit_plan_mode must dismiss the open modal so the plan preview is visible"
+            "Plan approval must dismiss the open modal so the plan preview is visible"
         );
         assert!(agent.plan_approval_view.is_some());
         assert!(agent.line_viewer.is_some());
     }
 
     #[test]
-    fn exit_plan_mode_dismisses_open_block_viewer() {
+    fn plan_approval_dismisses_open_block_viewer() {
         // Regression: if the user has an Edit/tool block_viewer open when
-        // exit_plan_mode opens, dismiss it so wheel scroll reaches the plan
+        // Plan approval opens; dismiss it so wheel scroll reaches the plan
         // line_viewer. Draw returns on line_viewer (plan visible) but
         // handle_scroll prefers block_viewer while it remains in state.
         let mut app = make_app_with_agent("sess-1");
@@ -114,12 +114,12 @@
         }
 
         let (ext, _rx) = make_exit_plan_ext(Some("# Submitted Plan"));
-        assert!(handle_exit_plan_mode(ext, &mut app));
+        assert!(handle_plan_approval(ext, &mut app));
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(
             agent.block_viewer.is_none(),
-            "exit_plan_mode must dismiss open block_viewer so the plan can scroll"
+            "Plan approval must dismiss open block_viewer so the plan can scroll"
         );
         assert!(agent.plan_approval_view.is_some());
         assert!(agent.line_viewer.is_some());
@@ -131,8 +131,8 @@
         let (first, _first_rx) = make_exit_plan_ext(Some("# First Plan"));
         let (second, _second_rx) = make_exit_plan_ext(None);
 
-        assert!(handle_exit_plan_mode(first, &mut app));
-        assert!(!handle_exit_plan_mode(second, &mut app));
+        assert!(handle_plan_approval(first, &mut app));
+        assert!(!handle_plan_approval(second, &mut app));
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         assert_eq!(
             agent
@@ -151,19 +151,19 @@
     }
 
     #[test]
-    fn exit_plan_mode_shows_overlay() {
+    fn plan_approval_shows_overlay() {
         let mut app = make_app_with_agent("sess-A");
         assert!(!app.agents.get(&AgentId(0)).unwrap().session.is_yolo());
 
         let (tx, mut rx) = tokio::sync::oneshot::channel();
-        let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+        let ext_req = crate::views::plan_approval_view::PlanApprovalExtRequest {
             session_id: "sess-A".into(),
             tool_call_id: "tc-normal".into(),
             plan_content: "# Plan\nDo stuff".into(),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         let msg = AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
-            request: acp::ExtRequest::new("grow/exit_plan_mode", raw.into()),
+            request: acp::ExtRequest::new("grow/plan_approval", raw.into()),
             response_tx: tx,
         });
 
@@ -182,19 +182,19 @@
     }
 
     #[test]
-    fn exit_plan_mode_shows_overlay_even_in_yolo() {
+    fn plan_approval_shows_overlay_even_in_yolo() {
         let mut app = make_app_with_agent("sess-A");
         app.agents.get_mut(&AgentId(0)).unwrap().session.yolo_mode = true;
 
         let (tx, mut rx) = tokio::sync::oneshot::channel();
-        let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+        let ext_req = crate::views::plan_approval_view::PlanApprovalExtRequest {
             session_id: "sess-A".into(),
             tool_call_id: "tc-yolo".into(),
             plan_content: "# Plan\nDo stuff".into(),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         let msg = AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
-            request: acp::ExtRequest::new("grow/exit_plan_mode", raw.into()),
+            request: acp::ExtRequest::new("grow/plan_approval", raw.into()),
             response_tx: tx,
         });
 
@@ -213,19 +213,19 @@
     }
 
     #[test]
-    fn exit_plan_mode_routes_to_background_session_not_active_view() {
+    fn plan_approval_routes_to_background_session_not_active_view() {
         let mut app = make_app_with_agent("sess-A");
         insert_agent(&mut app, AgentId(1), Some("sess-B"));
 
         let (tx, mut rx) = tokio::sync::oneshot::channel();
-        let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+        let ext_req = crate::views::plan_approval_view::PlanApprovalExtRequest {
             session_id: "sess-B".into(),
             tool_call_id: "tc-bg-plan".into(),
             plan_content: "# Plan".into(),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         let msg = AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
-            request: acp::ExtRequest::new("grow/exit_plan_mode", raw.into()),
+            request: acp::ExtRequest::new("grow/plan_approval", raw.into()),
             response_tx: tx,
         });
 
@@ -254,21 +254,17 @@
         assert!(rx.try_recv().is_err(), "response must NOT be sent yet");
     }
 
-    /// Regression: tool-call titles containing `"enter_plan_mode"` must not
-    /// flip plan mode (the substring matcher used to brick sessions on any
-    /// tool mentioning the phrase, e.g. a Grep with that pattern).
+    /// Tool-call titles never select a Behavior; only CurrentModeUpdate does.
     #[test]
-    fn tool_call_with_enter_plan_mode_substring_does_not_activate_plan_mode() {
+    fn tool_call_title_does_not_activate_plan_behavior() {
         let mut agent = make_agent(Some("s1"));
         assert!(!agent.plan_mode_active);
 
         let updates = [
-            make_tool_call("enter_plan_mode"),
-            make_tool_call_update("enter_plan_mode"),
-            make_tool_call("Execute `rg enter_plan_mode`"),
-            make_tool_call_update("Execute `rg enter_plan_mode`"),
-            make_tool_call_update("Plan mode entered"),
-            make_tool_call("mcp__foo__enter_plan_mode"),
+            make_tool_call("plan_control"),
+            make_tool_call_update("plan_control"),
+            make_tool_call("submit a plan"),
+            make_tool_call_update("Plan selected"),
         ];
         for update in &updates {
             let refresh_needed = detect_plan_mode_change(update, &mut agent);
@@ -283,18 +279,16 @@
         }
     }
 
-    /// Symmetric: tool-call titles containing `"exit_plan_mode"` must not
-    /// deactivate plan mode either. Exit is signaled by `CurrentModeUpdate`.
+    /// Tool completion cannot deactivate Plan either.
     #[test]
-    fn tool_call_with_exit_plan_mode_substring_does_not_deactivate_plan_mode() {
+    fn tool_call_title_does_not_deactivate_plan_behavior() {
         let mut agent = make_agent(Some("s1"));
         agent.plan_mode_active = true;
 
         let updates = [
-            make_tool_call("exit_plan_mode"),
-            make_tool_call_update("exit_plan_mode"),
-            make_tool_call_update("Plan mode exited"),
-            make_tool_call("Execute `rg exit_plan_mode`"),
+            make_tool_call("plan_control"),
+            make_tool_call_update("plan_control"),
+            make_tool_call_update("Plan completed"),
         ];
         for update in &updates {
             let refresh_needed = detect_plan_mode_change(update, &mut agent);

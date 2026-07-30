@@ -41,10 +41,10 @@ pub use row::{
     classify_top_level, sort_rows,
 };
 pub use state::{
-    DashboardDispatchMode, DashboardRowId, DashboardState, Filter, FilterValue, Focusable,
-    Grouping, LocationCandidate, LocationPickerState, PendingDispatchModel, PersistedDashboard,
-    PersistedRowId, RowState, SectionKey, SessionIdResolver, ShortcutsModalState, load_persisted,
-    parse_filter, parse_row_state_token,
+    DashboardRowId, DashboardState, Filter, FilterValue, Focusable, Grouping, LocationCandidate,
+    LocationPickerState, PendingDispatchModel, PersistedDashboard, PersistedRowId, RowState,
+    SectionKey, SessionIdResolver, ShortcutsModalState, load_persisted, parse_filter,
+    parse_row_state_token,
 };
 
 /// Top-level agents visible in the dashboard's row list, in the
@@ -98,17 +98,17 @@ pub fn dashboard_enabled() -> bool {
 /// Command to name in the "use /X to switch between sessions" session
 /// banners (the `/new` session-created banner and the fork marker).
 ///
-/// Minimal mode has no dashboard — `/dashboard` is refused there — but the
+/// Minimal mode has no dashboard — `/agents` is refused there — but the
 /// `/resume` session picker still works, so point at it instead (regardless
 /// of the dashboard flag, which gates a surface minimal doesn't have).
-/// Outside minimal, `/dashboard` when the feature is enabled; `None` when it
+/// Outside minimal, `/agents` when the feature is enabled; `None` when it
 /// is off — the tip would point at a refused command, so callers fall back
 /// to a plain session-id banner.
 pub(crate) fn session_switch_hint_command(minimal: bool) -> Option<&'static str> {
     if minimal {
         Some("/resume")
     } else if dashboard_enabled() {
-        Some("/dashboard")
+        Some("/agents")
     } else {
         None
     }
@@ -147,7 +147,7 @@ mod tests {
         unsafe { std::env::remove_var("GROW_AGENT_DASHBOARD") };
         assert_eq!(
             session_switch_hint_command(false),
-            dashboard_enabled().then_some("/dashboard")
+            dashboard_enabled().then_some("/agents")
         );
     }
 }

@@ -114,7 +114,7 @@ fn all_system_texts(app: &AppView, id: AgentId) -> Vec<String> {
         .collect()
 }
 /// In minimal mode the `/new` session banner must advertise `/resume`, not
-/// `/dashboard` — the dashboard command is refused there, while the
+/// `/agents` — the dashboard command is refused there, while the
 /// `/resume` session picker works. Deterministic regardless of the
 /// dashboard feature flag: the minimal branch of
 /// `session_switch_hint_command` never consults it.
@@ -147,8 +147,8 @@ fn session_created_banner_advertises_resume_in_minimal_mode() {
         "minimal mode must advertise /resume: {banner}"
     );
     assert!(
-        !texts.iter().any(|t| t.contains("/dashboard")),
-        "minimal mode must NOT advertise /dashboard: {texts:?}"
+        !texts.iter().any(|t| t.contains("/agents")),
+        "minimal mode must NOT advertise /agents: {texts:?}"
     );
 }
 #[test]
@@ -1636,186 +1636,37 @@ fn set_yolo_on_clears_session_auto_mode() {
         app.agents[&AgentId(0)].session.is_auto(),
         "precondition: active agent is in auto"
     );
-    dispatch(Action::SetYoloMode(true), &mut app);
+    dispatch(
+        Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),
+        &mut app,
+    );
     assert!(app.agents[&AgentId(0)].session.is_yolo());
     assert!(
         !app.agents[&AgentId(0)].session.is_auto(),
         "enabling always-approve must clear the per-session auto flag (yolo wins)"
     );
 }
-/// Gate OFF + policy pin: Plan exit lands on Normal (ask) but MUST still
-/// push `SetSessionMode(Default)` so the agent leaves Plan — otherwise the
-/// session stays in Plan while the UI reads Normal.
+/// Selecting a Behavior from the welcome placeholder starts a session and
+/// defers the Behavior until the connection is ready.
 #[test]
-fn cycle_mode_plan_exit_under_gate_off_pin_emits_set_session_mode() {
-    let mut app = test_app_with_agent();
-    app.auto_mode_gate = false;
-    app.yolo_policy_block = Some(POLICY_WARNING);
-    app.agents.get_mut(&AgentId(0)).unwrap().plan_mode_pending = Some(true);
-    let effects = dispatch(Action::CycleMode, &mut app);
-    assert!(
-        !app.agents[&AgentId(0)].session.is_yolo(),
-        "the pin must keep yolo off when exiting Plan"
-    );
-    assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
-    assert_eq!(app.agents[&AgentId(0)].plan_mode_pending, Some(false));
-    assert_eq!(agent_toast(&app).as_deref(), Some(POLICY_WARNING));
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::SetSessionMode { .. })),
-        "Plan exit under the pin must still send SetSessionMode(Default), got {effects:?}"
-    );
-    assert!(
-        effects.iter().any(|e| matches!(
-            e,
-            Effect::PersistPermissionMode {
-                canonical: "ask",
-                ..
-            }
-        )),
-        "expected PersistPermissionMode(ask) under pin, got {effects:?}"
-    );
-}
-/// Pre-session cycle (no session id yet) under the pin: Plan → Auto does
-/// not stage yolo (auto is the next mode; pin applies on Auto → Always-Approve).
-#[test]
-fn cycle_mode_pre_session_blocked_by_policy_pin() {
-    let mut app = test_app_with_agent();
-    app.yolo_policy_block = Some(POLICY_WARNING);
-    {
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.session.session_id = None;
-        agent.plan_mode_pending = Some(true);
-        agent.deferred_session_mode = Some(grow_tools::types::SessionMode::Plan);
-    }
-    let _ = dispatch(Action::CycleMode, &mut app);
-    let agent = &app.agents[&AgentId(0)];
-    assert!(
-        !agent.session.is_yolo(),
-        "pre-session Plan→Auto must not stage yolo under the pin"
-    );
-    assert_eq!(app.current_ui.permission_mode.as_deref(), Some("auto"));
-    let _ = dispatch(Action::CycleMode, &mut app);
-    let agent = &app.agents[&AgentId(0)];
-    assert!(
-        !agent.session.is_yolo(),
-        "pre-session cycle must not stage yolo under the pin"
-    );
-    assert_eq!(agent.plan_mode_pending, Some(false));
-    assert_eq!(agent.deferred_session_mode, None);
-    assert_eq!(agent_toast(&app).as_deref(), Some(POLICY_WARNING));
-}
-/// Pre-session cycle from Plan with STALE `yolo_mode = true` (e.g. client
-/// state restored from before the pin landed): resets to Normal with yolo
-/// cleared (matching the with-session catch-all for the same Plan+yolo input)
-/// so always-approve is not left active behind another banner.
-#[test]
-fn cycle_mode_pre_session_clears_stale_yolo_under_pin() {
-    let mut app = test_app_with_agent();
-    app.yolo_policy_block = Some(POLICY_WARNING);
-    {
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.session.session_id = None;
-        agent.plan_mode_pending = Some(true);
-        agent.deferred_session_mode = Some(grow_tools::types::SessionMode::Plan);
-        agent.session.yolo_mode = true;
-    }
-    let _ = dispatch(Action::CycleMode, &mut app);
-    let agent = &app.agents[&AgentId(0)];
-    assert!(
-        !agent.session.is_yolo(),
-        "stale pre-session yolo must be cleared so Normal is enforced, not just displayed"
-    );
-    assert!(!app.default_yolo, "clamp must clear the global mirror too");
-    assert_eq!(agent.plan_mode_pending, Some(false));
-    assert_eq!(agent.deferred_session_mode, None);
-    assert_eq!(
-        app.current_ui.permission_mode.as_deref(),
-        Some("ask"),
-        "Plan+yolo resets to Normal (matches the with-session catch-all), not always-approve"
-    );
-}
-/// Pre-session (welcome screen / fresh tab): Ctrl+R must cycle the
-/// mode locally (optimistic pending + deferred ACP push) AND kick off
-/// session creation — without emitting duplicate CreateSession effects
-/// on repeated presses.
-#[test]
-fn dispatch_cycle_mode_pre_session_cycles_locally_and_creates_session() {
-    let mut app = test_app_with_agent();
-    app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = None;
-    let effects = dispatch(Action::CycleMode, &mut app);
-    let agent = &app.agents[&AgentId(0)];
-    assert_eq!(
-        agent.plan_mode_pending,
-        Some(true),
-        "pre-session Normal → Plan must set optimistic pending"
-    );
-    assert_eq!(
-        agent.deferred_session_mode,
-        Some(grow_tools::types::SessionMode::Plan),
-        "Plan must be deferred to SessionCreated"
-    );
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::CreateSession { .. })),
-        "first press must create the session, got {effects:?}"
-    );
-    let effects = dispatch(Action::CycleMode, &mut app);
-    let agent = &app.agents[&AgentId(0)];
-    assert!(!agent.session.is_yolo(), "Plan → Auto must not enable yolo");
-    assert_eq!(app.current_ui.permission_mode.as_deref(), Some("auto"));
-    assert_eq!(agent.plan_mode_pending, Some(false));
-    assert!(agent.deferred_session_mode.is_none());
-    assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e, Effect::CreateSession { .. })),
-        "no duplicate CreateSession, got {effects:?}"
-    );
-    assert!(
-        effects.iter().any(|e| matches!(
-            e,
-            Effect::PersistPermissionMode {
-                canonical: "auto",
-                session_id: None,
-                ..
-            }
-        )),
-        "pre-session Plan → Auto must persist the displayed mode, got {effects:?}"
-    );
-    let _ = dispatch(Action::CycleMode, &mut app);
-    let agent = &app.agents[&AgentId(0)];
-    assert!(agent.session.is_yolo(), "Auto → Always-Approve flips yolo");
-    let _ = dispatch(Action::CycleMode, &mut app);
-    let agent = &app.agents[&AgentId(0)];
-    assert!(!agent.session.is_yolo());
-    assert_eq!(agent.plan_mode_pending, Some(false));
-}
-/// No-session bail-out: when the active agent
-/// has no ACP session, the setter toasts "No active session" and
-/// returns empty effects. Pins the safety contract that we never
-/// dispatch a mode change to a non-existent session.
-#[test]
-fn set_plan_mode_no_session_toasts_and_bails() {
+fn set_plan_mode_no_session_starts_with_deferred_behavior() {
     let mut app = test_app_with_agent();
     app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = None;
     let effects = dispatch(
-        Action::SetPlanMode(crate::app::actions::PlanModeKind::On),
+        Action::SetBehaviorMode(grow_tools::types::SessionMode::Plan),
         &mut app,
     );
     assert!(
-        effects.is_empty(),
-        "no-session bail must NOT emit Effect (no live session to set mode on)"
-    );
-    let toast = read_toast(&app);
-    assert!(
-        toast.contains("No active session"),
-        "bail-out must surface the reason to the user: {toast}",
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CreateSession { .. }))
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
-    assert!(agent.plan_mode_pending.is_none());
+    assert_eq!(agent.plan_mode_pending, Some(true));
+    assert_eq!(
+        agent.deferred_session_mode,
+        Some(grow_tools::types::SessionMode::Plan)
+    );
     assert!(!agent.plan_mode_active);
 }
 /// Non-idempotent ON transition: emits
@@ -1825,7 +1676,7 @@ fn set_plan_mode_no_session_toasts_and_bails() {
 fn set_plan_mode_on_from_off_emits_set_session_mode() {
     let mut app = test_app_with_agent();
     let effects = dispatch(
-        Action::SetPlanMode(crate::app::actions::PlanModeKind::On),
+        Action::SetBehaviorMode(grow_tools::types::SessionMode::Plan),
         &mut app,
     );
     assert_eq!(effects.len(), 1);

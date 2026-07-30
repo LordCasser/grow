@@ -563,49 +563,6 @@ fn model_not_found_error() -> grow_sampler::SamplingErrorInfo {
         }
 }
 
-/// 404 model-not-found with a legacy WebLogin token appends a
-/// "Legacy auth detected" hint to the error message.
-#[tokio::test(flavor = "current_thread")]
-async fn legacy_auth_hint_on_404_model_not_found() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let am = Arc::new(AuthManager::new(dir.path(), ServiceAuthConfig::default()));
-            am.hot_swap(ProviderAuth {
-                key: "legacy-token".into(),
-                auth_mode: AuthMode::WebLogin,
-                ..ProviderAuth::test_default()
-            });
-
-            let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
-            let result = actor.handle_sampling_failure(model_not_found_error()).await;
-            let err = match result {
-                Err(e) => e,
-                Ok(_) => panic!("expected Err from handle_sampling_failure"),
-            };
-            let data = err.data.unwrap();
-            let msg = data.as_str().unwrap();
-            assert!(
-                msg.contains("deprecated authentication method"),
-                "404 with WebLogin must include deprecation message, got: {msg}"
-            );
-            assert!(
-                msg.contains("grow logout"),
-                "hint must mention `grow logout`, got: {msg}"
-            );
-            assert!(
-                msg.contains("grow login"),
-                "hint must mention `grow login`, got: {msg}"
-            );
-            assert!(
-                msg.contains("Version:"),
-                "must show client version, got: {msg}"
-            );
-        })
-        .await;
-}
-
 /// Build a 401-shaped error that bypasses step 4b's auth recovery.
 ///
 /// In production, 401s arrive as `SamplingErrorKind::Auth` with
@@ -630,50 +587,10 @@ fn unauthorized_401_error() -> grow_sampler::SamplingErrorInfo {
         }
 }
 
-/// 401 Unauthorized with a legacy WebLogin token appends a
-/// "Legacy auth detected" hint to the error message.
+/// A terminal 401 still reports the active OIDC identity when the selected
+/// inference method is explicitly non-refreshable.
 #[tokio::test(flavor = "current_thread")]
-async fn legacy_auth_hint_on_401_unauthorized() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let am = Arc::new(AuthManager::new(dir.path(), ServiceAuthConfig::default()));
-            am.hot_swap(ProviderAuth {
-                key: "legacy-token".into(),
-                auth_mode: AuthMode::WebLogin,
-                ..ProviderAuth::test_default()
-            });
-
-            let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
-            let result = actor
-                .handle_sampling_failure(unauthorized_401_error())
-                .await;
-            let err = match result {
-                Err(e) => e,
-                Ok(_) => panic!("expected Err from handle_sampling_failure"),
-            };
-            let data = err.data.unwrap();
-            let msg = data.as_str().unwrap();
-            assert!(
-                msg.contains("deprecated authentication method"),
-                "401 with WebLogin must include deprecation message, got: {msg}"
-            );
-            assert!(
-                msg.contains("grow logout"),
-                "hint must mention `grow logout`, got: {msg}"
-            );
-            assert!(
-                msg.contains("grow login"),
-                "hint must mention `grow login`, got: {msg}"
-            );
-        })
-        .await;
-}
-
-/// 401 with OIDC auth must NOT append the legacy hint.
-#[tokio::test(flavor = "current_thread")]
-async fn no_legacy_hint_on_401_for_oidc_auth() {
+async fn terminal_401_reports_oidc_auth_mode() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -687,7 +604,13 @@ async fn no_legacy_hint_on_401_for_oidc_auth() {
                 ..ProviderAuth::test_default()
             });
 
-            let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "provider.api_key",
+                xai_chat_state::AuthType::ApiKey,
+                "provider-key".to_owned(),
+            )
+            .await;
             let result = actor
                 .handle_sampling_failure(unauthorized_401_error())
                 .await;
@@ -702,10 +625,6 @@ async fn no_legacy_hint_on_401_for_oidc_auth() {
                 .or_else(|| data.as_str())
                 .unwrap();
             assert!(
-                !msg.contains("deprecated authentication method"),
-                "OIDC auth must NOT trigger WebLogin deprecation on 401, got: {msg}"
-            );
-            assert!(
                 msg.contains("Auth:      Oidc"),
                 "OIDC 401 must show auth mode in enriched message, got: {msg}"
             );
@@ -713,9 +632,9 @@ async fn no_legacy_hint_on_401_for_oidc_auth() {
         .await;
 }
 
-/// 404 model-not-found with OIDC auth must NOT append the legacy hint.
+/// 404 model-not-found with OIDC auth reports the provider error directly.
 #[tokio::test(flavor = "current_thread")]
-async fn no_legacy_hint_for_oidc_auth() {
+async fn oidc_404_reports_auth_mode_and_version() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -741,10 +660,6 @@ async fn no_legacy_hint_for_oidc_auth() {
                 .and_then(|v| v.as_str())
                 .or_else(|| data.as_str())
                 .unwrap();
-            assert!(
-                !msg.contains("deprecated authentication method"),
-                "OIDC auth must NOT trigger WebLogin deprecation, got: {msg}"
-            );
             assert!(
                 msg.contains("Auth:      Oidc"),
                 "OIDC 404 must show auth mode in enriched message, got: {msg}"

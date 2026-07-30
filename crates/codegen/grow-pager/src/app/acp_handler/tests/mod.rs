@@ -345,7 +345,7 @@ pub(super) fn make_exit_plan_ext_with_tool_call_id(
         }),
         )
         .unwrap();
-    let request = acp::ExtRequest::new("grow/exit_plan_mode", raw.into());
+    let request = acp::ExtRequest::new("grow/plan_approval", raw.into());
     let (tx, rx) = tokio::sync::oneshot::channel();
     (
         xai_acp_lib::AcpArgs {

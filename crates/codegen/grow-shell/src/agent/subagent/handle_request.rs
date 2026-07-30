@@ -46,13 +46,13 @@ pub(super) fn task_model_override_error(
     provenance: ModelOverrideProvenance,
     is_resume: bool,
     available: &indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
-    is_session_auth: bool,
+    _is_session_auth: bool,
 ) -> Option<String> {
     if provenance != ModelOverrideProvenance::Tool || is_resume {
         return None;
     }
     let requested = requested?;
-    crate::agent::models::task_model_error_for_catalog(requested, available, is_session_auth)
+    crate::agent::models::task_model_error_for_catalog(requested, available)
 }
 /// Runtime adapter for one shell child. Shared lifecycle state is owned by the
 /// `grow-tools` coordinator actor and reached only through `reporter`.
@@ -398,7 +398,7 @@ pub(crate) async fn run_shell_child(
         definition.tool_config.tools.retain(|tool| {
             !matches!(
                 tool.id.rsplit(':').next(),
-                Some("scheduler_create" | "scheduler_list" | "scheduler_delete")
+                Some("workflow" | "scheduler_create" | "scheduler_list" | "scheduler_delete")
             )
         });
     }
@@ -985,7 +985,7 @@ pub(crate) async fn run_shell_child(
         ctx.app_builder_deployer_config.clone(),
         ctx.write_file_enabled,
         ctx.goal_enabled,
-        ctx.background_workflows_enabled,
+        ctx.background_workflows_enabled && !request.owner.is_workflow(),
         true,
         ctx.subagents_max_depth,
         ctx.ask_user_question_enabled,
@@ -1087,11 +1087,9 @@ pub(crate) async fn run_shell_child(
     let _ = child_handle.cmd_tx.send(SessionCommand::Prompt {
         prompt_id: child_prompt_id.clone(),
         prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(prompt_text))],
-        prompt_mode: match request.runtime_overrides.behavior {
-            Some(xai_tool_types::BehaviorId::Clarify) => crate::session::plan_mode::PromptMode::Ask,
-            Some(xai_tool_types::BehaviorId::Plan) => crate::session::plan_mode::PromptMode::Plan,
-            None => crate::session::plan_mode::PromptMode::Agent,
-        },
+        // Behaviors belong to the user-facing primary Agent. Delegated Agents
+        // receive an explicit role/task and never inherit the parent's mode.
+        prompt_mode: crate::session::behavior::PromptMode::Agent,
         client_identifier: None,
         screen_mode: None,
         verbatim: true,

@@ -49,9 +49,9 @@ pub enum UpdateGoalAck {
     Accepted { summary: String },
     /// Classifier judged the goal achieved.
     ClassifierAchieved { details_path: String },
-    /// Classifier could not produce a verdict (infra failure); the
-    /// harness fails open and treats the goal as achieved.
-    ClassifierFailOpenAchieved { reason: &'static str },
+    /// Independent verification could not produce a trustworthy verdict.
+    /// The Goal remains selected and is paused fail-closed.
+    VerificationUnavailable { reason: String },
     /// Classifier rejected the completion; `attempt < max_runs` so
     /// another attempt is still available.
     ClassifierNotAchieved {
@@ -70,8 +70,6 @@ pub enum UpdateGoalAck {
     /// contradiction or environment-unverifiable blocker); the goal
     /// paused for a user decision.
     ClassifierBlocked { details_path: String },
-    /// Classifier disabled by policy; goal marked complete directly.
-    CompletedWithoutClassifier,
     /// Second `update_goal(completed: true)` arrived while a
     /// classifier was already verifying the previous attempt; routed
     /// through the synthetic-NotAchieved accounting.
@@ -312,23 +310,18 @@ pub fn render_ack_into_output(
             success: true,
             summary,
         }),
-        UpdateGoalAck::CompletedWithoutClassifier => Ok(UpdateGoalOutput {
-            success: true,
-            summary: "Goal marked complete.".to_string(),
-        }),
         UpdateGoalAck::ClassifierAchieved { details_path } => Ok(UpdateGoalOutput {
             success: true,
             summary: format!(
                 "Goal classifier verdict: Achieved. Goal complete. See {details_path}"
             ),
         }),
-        UpdateGoalAck::ClassifierFailOpenAchieved { reason } => Ok(UpdateGoalOutput {
-            success: true,
-            summary: format!(
-                "Goal marked complete via fail-open (reason: {reason}). No classifier verdict \
-                 was produced."
-            ),
-        }),
+        UpdateGoalAck::VerificationUnavailable { reason } => {
+            Err(xai_tool_runtime::ToolError::custom(
+                "goal_verification_unavailable",
+                format!("Goal paused because independent verification is unavailable: {reason}"),
+            ))
+        }
         UpdateGoalAck::ClassifierNotAchieved {
             details_path,
             attempt,

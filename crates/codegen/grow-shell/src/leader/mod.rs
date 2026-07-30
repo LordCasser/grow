@@ -1,7 +1,7 @@
 //! Leader-follower IPC architecture for grow-shell.
 //!
 //! This module implements a single-leader-per-machine architecture where one leader
-//! process manages the agent state while multiple clients (TUI, IDE extensions, headless)
+//! process manages the agent state while multiple local clients (TUI, IDE extensions, scripts)
 //! communicate via Unix domain sockets.
 //!
 //! # Architecture
@@ -27,8 +27,8 @@
 //!         ┌───────────────────┼───────────────────┐
 //!         ▼                   ▼                   ▼
 //! ┌───────────────┐   ┌───────────────┐   ┌───────────────┐
-//! │   TUI Client  │   │  IDE Extension │   │ Headless CLI  │
-//! │   (stdio)     │   │   (stdio)      │   │  (websocket)  │
+//! │   TUI Client  │   │  IDE Extension │   │  Script/SDK   │
+//! │   (local IPC) │   │   (local IPC)  │   │  (local IPC)  │
 //! └───────────────┘   └───────────────┘   └───────────────┘
 //! ```
 //!
@@ -42,7 +42,7 @@
 //!     yolo_mode: true,
 //!     default_model: Some("grow-3-fast".to_string()),
 //! };
-//! let conn = connect_or_spawn("my-client", ClientMode::Stdio, &env_urls, caps).await?;
+//! let conn = connect_or_spawn("my-client", ClientMode::Stdio, caps).await?;
 //!
 //! // Send/receive ACP messages
 //! conn.send(r#"{"jsonrpc":"2.0","method":"test","id":1}"#.to_string())?;
@@ -57,12 +57,9 @@ mod server;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod transport;
-use crate::env::GrowEnvironment;
 pub use client::{ClientError, DisconnectReason, LeaderClient, LeaderRegistration};
 pub use lock::{
-    LEADER_SOCKET_ENV, LeaderLock, LockError, compute_ws_url_suffix, lock_path_for_ws_url,
-    lock_path_for_ws_url_in, socket_path_for_ws_url, socket_path_for_ws_url_in,
-    ws_url_suffix_from_paths,
+    LEADER_SOCKET_ENV, LeaderLock, LockError, lock_path, lock_path_in, socket_path, socket_path_in,
 };
 pub use protocol::{
     ClientCapabilities, ClientId, ClientMode, ControlCommand, ControlPayload,
@@ -114,13 +111,6 @@ const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 /// Maximum reconnection attempts for bounded mode (headless/`grow -p`).
 /// TUI mode uses unlimited retries controlled by a cancellation token.
 const RECONNECT_MAX_ATTEMPTS_BOUNDED: u32 = 5;
-/// Environment URLs to pass to the leader subprocess.
-/// These are resolved from the environment (--dev flag) before spawning.
-#[derive(Debug, Clone)]
-pub struct LeaderEnvUrls {
-    pub service_ws_url: String,
-    pub service_ws_origin: String,
-}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LeaderDiscoveryState {
@@ -170,7 +160,6 @@ pub struct LiveLeaderInfo {
     pub pid: u32,
     pub socket_path: PathBuf,
     pub lock_path: PathBuf,
-    pub ws_url_suffix: String,
     pub leader_protocol_version: u32,
     pub leader_binary_version: String,
 }
@@ -179,9 +168,7 @@ pub struct LeaderDescriptor {
     pub pid_from_lock: Option<u32>,
     pub lock_path: Option<PathBuf>,
     pub socket_path: Option<PathBuf>,
-    pub ws_url_suffix: String,
     pub classification: LeaderDiscoveryState,
-    pub environment: Option<GrowEnvironment>,
     pub live_info: Option<LiveLeaderInfo>,
     pub target_error: Option<LeaderTargetErrorCode>,
 }
@@ -196,41 +183,14 @@ impl LeaderTargetSelection {
     pub fn lock_path(&self) -> Option<&Path> {
         self.descriptor.lock_path.as_deref()
     }
-    pub fn ws_url_suffix(&self) -> &str {
-        &self.descriptor.ws_url_suffix
-    }
     pub fn live_info(&self) -> Option<&LiveLeaderInfo> {
         self.descriptor.live_info.as_ref()
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaderTarget {
-    Environment(GrowEnvironment),
-    WsUrl(String),
+    Local,
     Pid(u32),
-}
-fn known_environment_for_ws_url(ws_url: &str) -> Option<GrowEnvironment> {
-    let environments: &[GrowEnvironment] = &[GrowEnvironment::Production];
-    environments
-        .iter()
-        .copied()
-        .find(|environment| environment.relay_ws_url() == ws_url)
-}
-fn environment_target_matches_descriptor(
-    environment: GrowEnvironment,
-    descriptor: &LeaderDescriptor,
-) -> bool {
-    descriptor.environment == Some(environment)
-}
-fn ws_url_target_matches_descriptor(ws_url: &str, descriptor: &LeaderDescriptor) -> bool {
-    descriptor.ws_url_suffix == compute_ws_url_suffix(ws_url)
-}
-fn known_environment_for_suffix(ws_url_suffix: &str) -> Option<GrowEnvironment> {
-    let environments: &[GrowEnvironment] = &[GrowEnvironment::Production];
-    environments
-        .iter()
-        .copied()
-        .find(|environment| compute_ws_url_suffix(&environment.relay_ws_url()) == ws_url_suffix)
 }
 fn build_live_leader_info(payload: ControlPayload) -> Result<LiveLeaderInfo, LeaderTargetError> {
     match payload {
@@ -238,7 +198,6 @@ fn build_live_leader_info(payload: ControlPayload) -> Result<LiveLeaderInfo, Lea
             pid,
             socket_path,
             lock_path,
-            ws_url_suffix,
             leader_protocol_version,
             leader_binary_version,
             ..
@@ -246,7 +205,6 @@ fn build_live_leader_info(payload: ControlPayload) -> Result<LiveLeaderInfo, Lea
             pid,
             socket_path,
             lock_path,
-            ws_url_suffix,
             leader_protocol_version,
             leader_binary_version,
         }),
@@ -345,72 +303,25 @@ fn descriptor_from_paths(
     classification: LeaderDiscoveryState,
     target_error: Option<LeaderTargetErrorCode>,
 ) -> LeaderDescriptor {
-    let ws_url_suffix =
-        live_info
-            .as_ref()
-            .map(|info| info.ws_url_suffix.clone())
-            .or_else(|| {
-                lock_path.as_deref().zip(socket_path.as_deref()).and_then(
-                    |(lock_path, socket_path)| ws_url_suffix_from_paths(lock_path, socket_path),
-                )
-            })
-            .or_else(|| {
-                lock_path
-                    .as_deref()
-                    .and_then(|path| path.file_name()?.to_str())
-                    .and_then(|name| name.strip_prefix("leader"))
-                    .and_then(|name| name.strip_suffix(".lock"))
-                    .map(str::to_string)
-            })
-            .or_else(|| {
-                socket_path
-                    .as_deref()
-                    .and_then(|path| path.file_name()?.to_str())
-                    .and_then(|name| name.strip_prefix("leader"))
-                    .and_then(|name| name.strip_suffix(".sock"))
-                    .map(str::to_string)
-            })
-            .unwrap_or_default();
-    let environment = known_environment_for_suffix(&ws_url_suffix);
     LeaderDescriptor {
         pid_from_lock,
         lock_path,
         socket_path,
-        ws_url_suffix,
         classification,
-        environment,
         live_info,
         target_error,
     }
 }
 async fn discover_leaders_in(root: &Path) -> Vec<LeaderDescriptor> {
-    let mut candidates: std::collections::BTreeMap<String, (Option<PathBuf>, Option<PathBuf>)> =
-        std::collections::BTreeMap::new();
-    let Ok(read_dir) = fs::read_dir(root) else {
+    let lock_path = root.join("leader.lock");
+    let socket_path = root.join("leader.sock");
+    let lock_path = lock_path.exists().then_some(lock_path);
+    let socket_path = socket_path.exists().then_some(socket_path);
+    if lock_path.is_none() && socket_path.is_none() {
         return Vec::new();
-    };
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let file_name = file_name.to_string();
-        if let Some(suffix) = file_name
-            .strip_prefix("leader")
-            .and_then(|name| name.strip_suffix(".lock"))
-        {
-            candidates.entry(suffix.to_string()).or_default().0 = Some(path);
-            continue;
-        }
-        if let Some(suffix) = file_name
-            .strip_prefix("leader")
-            .and_then(|name| name.strip_suffix(".sock"))
-        {
-            candidates.entry(suffix.to_string()).or_default().1 = Some(path);
-        }
     }
     let mut entries = Vec::new();
-    for (_suffix, (lock_path, socket_path)) in candidates {
+    {
         let pid_from_lock = lock_path
             .as_deref()
             .and_then(LeaderLock::read_pid_from_path);
@@ -504,12 +415,6 @@ async fn discover_leaders_in(root: &Path) -> Vec<LeaderDescriptor> {
             (None, None) => {}
         }
     }
-    entries.sort_by(|left, right| {
-        left.ws_url_suffix
-            .cmp(&right.ws_url_suffix)
-            .then_with(|| left.lock_path.cmp(&right.lock_path))
-            .then_with(|| left.socket_path.cmp(&right.socket_path))
-    });
     entries
 }
 pub async fn discover_leaders() -> Vec<LeaderDescriptor> {
@@ -593,117 +498,24 @@ fn resolve_target_from_descriptors(
     leaders: Vec<LeaderDescriptor>,
 ) -> Result<LeaderTargetSelection, LeaderTargetError> {
     match target {
-        LeaderTarget::Environment(environment) => {
-            let ws_url = environment.relay_ws_url();
-            let environment_note = environment
-                .indicator()
-                .map(str::to_string)
-                .unwrap_or_else(|| ws_url.clone());
-            let matching: Vec<_> = leaders
+        LeaderTarget::Local => {
+            let reachable: Vec<_> = leaders
                 .into_iter()
-                .filter(|descriptor| environment_target_matches_descriptor(environment, descriptor))
-                .collect();
-            let reachable: Vec<_> = matching
-                .iter()
                 .filter(|descriptor| descriptor.classification == LeaderDiscoveryState::Reachable)
-                .cloned()
                 .collect();
-            if reachable.len() == 1 {
-                let Some(descriptor) = reachable.into_iter().next() else {
-                    return Err(LeaderTargetError::new(
-                        LeaderTargetErrorCode::LeaderNotFound,
-                        format!("no reachable leader found for target {}", environment_note),
-                    ));
-                };
-                return Ok(LeaderTargetSelection { descriptor });
-            }
-            if reachable.len() > 1 {
-                return Err(LeaderTargetError::new(
+            match reachable.len() {
+                1 => Ok(LeaderTargetSelection {
+                    descriptor: reachable.into_iter().next().expect("length checked"),
+                }),
+                0 => Err(LeaderTargetError::new(
+                    LeaderTargetErrorCode::LeaderNotFound,
+                    "no reachable local leader found",
+                )),
+                _ => Err(LeaderTargetError::new(
                     LeaderTargetErrorCode::AmbiguousTarget,
-                    format!(
-                        "multiple leader candidates matched target {}",
-                        environment_note
-                    ),
-                ));
+                    "multiple reachable local leaders found",
+                )),
             }
-            if matching.iter().any(|descriptor| {
-                descriptor.target_error == Some(LeaderTargetErrorCode::UnsupportedProtocol)
-            }) {
-                return Err(LeaderTargetError::new(
-                    LeaderTargetErrorCode::UnsupportedProtocol,
-                    format!(
-                        "leader target for {} exists but does not support control_v1",
-                        ws_url
-                    ),
-                ));
-            }
-            if matching.iter().any(|descriptor| {
-                descriptor.target_error == Some(LeaderTargetErrorCode::SocketUnreachable)
-            }) {
-                return Err(LeaderTargetError::new(
-                    LeaderTargetErrorCode::SocketUnreachable,
-                    format!("leader target for {} has an unreachable socket", ws_url),
-                ));
-            }
-            Err(LeaderTargetError::new(
-                LeaderTargetErrorCode::LeaderNotFound,
-                format!("no reachable leader found for target {}", environment_note),
-            ))
-        }
-        LeaderTarget::WsUrl(ws_url) => {
-            let environment_note = known_environment_for_ws_url(&ws_url)
-                .and_then(|environment| environment.indicator().map(str::to_string))
-                .unwrap_or_else(|| ws_url.clone());
-            let matching: Vec<_> = leaders
-                .into_iter()
-                .filter(|descriptor| ws_url_target_matches_descriptor(&ws_url, descriptor))
-                .collect();
-            let reachable: Vec<_> = matching
-                .iter()
-                .filter(|descriptor| descriptor.classification == LeaderDiscoveryState::Reachable)
-                .cloned()
-                .collect();
-            if reachable.len() == 1 {
-                let Some(descriptor) = reachable.into_iter().next() else {
-                    return Err(LeaderTargetError::new(
-                        LeaderTargetErrorCode::LeaderNotFound,
-                        format!("no reachable leader found for target {}", environment_note),
-                    ));
-                };
-                return Ok(LeaderTargetSelection { descriptor });
-            }
-            if reachable.len() > 1 {
-                return Err(LeaderTargetError::new(
-                    LeaderTargetErrorCode::AmbiguousTarget,
-                    format!(
-                        "multiple leader candidates matched target {}",
-                        environment_note
-                    ),
-                ));
-            }
-            if matching.iter().any(|descriptor| {
-                descriptor.target_error == Some(LeaderTargetErrorCode::UnsupportedProtocol)
-            }) {
-                return Err(LeaderTargetError::new(
-                    LeaderTargetErrorCode::UnsupportedProtocol,
-                    format!(
-                        "leader target for {} exists but does not support control_v1",
-                        ws_url
-                    ),
-                ));
-            }
-            if matching.iter().any(|descriptor| {
-                descriptor.target_error == Some(LeaderTargetErrorCode::SocketUnreachable)
-            }) {
-                return Err(LeaderTargetError::new(
-                    LeaderTargetErrorCode::SocketUnreachable,
-                    format!("leader target for {} has an unreachable socket", ws_url),
-                ));
-            }
-            Err(LeaderTargetError::new(
-                LeaderTargetErrorCode::LeaderNotFound,
-                format!("no reachable leader found for target {}", environment_note),
-            ))
         }
         LeaderTarget::Pid(pid) => {
             let matching: Vec<_> = leaders
@@ -764,14 +576,6 @@ pub async fn resolve_leader_target(
 ) -> Result<LeaderTargetSelection, LeaderTargetError> {
     let leaders = discover_leaders().await;
     resolve_target_from_descriptors(target, leaders)
-}
-impl From<&crate::auth::ServiceAuthConfig> for LeaderEnvUrls {
-    fn from(c: &crate::auth::ServiceAuthConfig) -> Self {
-        Self {
-            service_ws_url: c.service_ws_url.clone(),
-            service_ws_origin: c.service_ws_origin.clone(),
-        }
-    }
 }
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectionError {
@@ -924,7 +728,7 @@ impl ReconnectPolicy {
 /// ```ignore
 /// let (status_tx, status_rx) = LeaderReconnector::status_channel();
 /// let reconnector = LeaderReconnector::new(
-///     "grow-tui", ClientMode::Stdio, env_urls, caps, status_tx,
+///     "grow-tui", ClientMode::Stdio, caps, status_tx,
 /// );
 ///
 /// // When connection dies:
@@ -937,7 +741,6 @@ impl ReconnectPolicy {
 pub struct LeaderReconnector {
     client_type: String,
     mode: ClientMode,
-    env_urls: LeaderEnvUrls,
     capabilities: ClientCapabilities,
     status_tx: watch::Sender<ConnectionStatus>,
     /// Generation [`notify_connected`](Self::notify_connected) publishes next.
@@ -954,14 +757,12 @@ impl LeaderReconnector {
     pub fn new(
         client_type: impl Into<String>,
         mode: ClientMode,
-        env_urls: LeaderEnvUrls,
         capabilities: ClientCapabilities,
         status_tx: watch::Sender<ConnectionStatus>,
     ) -> Self {
         Self {
             client_type: client_type.into(),
             mode,
-            env_urls,
             capabilities,
             status_tx,
             next_generation: std::sync::atomic::AtomicU64::new(1),
@@ -1011,12 +812,7 @@ impl LeaderReconnector {
         ConnectionError,
     > {
         self.reconnect_with(policy, cancel, || {
-            connect_or_spawn(
-                &self.client_type,
-                self.mode,
-                &self.env_urls,
-                self.capabilities.clone(),
-            )
+            connect_or_spawn(&self.client_type, self.mode, self.capabilities.clone())
         })
         .await
     }
@@ -1429,26 +1225,21 @@ async fn evict_zombie_leader(pid: u32, sock_path: &Path, waited: Duration) {
 /// 3. If lock acquired, we are responsible for spawning the leader
 /// 4. If lock not acquired, another process is leader/spawning - wait and retry
 ///
-/// The `env_urls.service_ws_url` determines which leader instance to connect to.
-/// Different WS URLs get different leader processes (via hashed socket paths).
-///
 /// # Arguments
 ///
 /// * `client_type` - Identifier for the client type (e.g., "grow-tui", "vscode")
 /// * `mode` - Communication mode (Stdio or Headless)
-/// * `env_urls` - Environment URLs for the leader subprocess
 /// * `capabilities` - Client capabilities (e.g., yolo_mode) to register with the leader
 pub async fn connect_or_spawn(
     client_type: &str,
     mode: ClientMode,
-    env_urls: &LeaderEnvUrls,
     capabilities: ClientCapabilities,
 ) -> Result<LeaderConnection, ConnectionError> {
     if let Some(profile) = grow_sandbox::requested_confinement_profile() {
         return Err(ConnectionError::SandboxConfinement(profile));
     }
     let start = std::time::Instant::now();
-    let mut lock = LeaderLock::new(&env_urls.service_ws_url);
+    let mut lock = LeaderLock::new();
     let sock_path = lock.socket_path().clone();
     let mut replacing_stale = false;
     if crate::leader::transport::listener_is_ready(&sock_path) {
@@ -1525,7 +1316,7 @@ pub async fn connect_or_spawn(
                 if let Err(e) = lock.release() {
                     warn!(error = %e, "Failed to release lock before spawning leader");
                 }
-                spawn_leader_subprocess(env_urls)?;
+                spawn_leader_subprocess()?;
                 let conn = match wait_for_socket_connectable(
                     &sock_path,
                     client_type,
@@ -1680,14 +1471,11 @@ fn path_is_under(path: &Path, dir: &Path) -> bool {
     let dir = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     path.starts_with(&dir)
 }
-fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionError> {
+fn spawn_leader_subprocess() -> Result<u32, ConnectionError> {
     let exe = resolve_exe_for_spawn()?;
     let mut cmd = Command::new(exe);
     cmd.arg("agent").arg("leader");
     cmd.arg("--no-exit-on-disconnect");
-    cmd.arg("--relay-on-demand");
-    cmd.arg("--grow-ws-url").arg(&env_urls.service_ws_url);
-    cmd.arg("--grow-ws-origin").arg(&env_urls.service_ws_origin);
     if let Some(socket) = std::env::var_os(crate::leader::LEADER_SOCKET_ENV) {
         cmd.env(crate::leader::LEADER_SOCKET_ENV, socket);
     }
@@ -1963,14 +1751,11 @@ mod tests {
             pid_from_lock: Some(111),
             lock_path: None,
             socket_path: None,
-            ws_url_suffix: String::new(),
             classification: LeaderDiscoveryState::Reachable,
-            environment: None,
             live_info: Some(LiveLeaderInfo {
                 pid: 222,
                 socket_path: PathBuf::new(),
                 lock_path: PathBuf::new(),
-                ws_url_suffix: String::new(),
                 leader_protocol_version: 0,
                 leader_binary_version: "0.2.52".to_string(),
             }),
@@ -1980,9 +1765,7 @@ mod tests {
             pid_from_lock: Some(333),
             lock_path: None,
             socket_path: None,
-            ws_url_suffix: String::new(),
             classification: LeaderDiscoveryState::Stale,
-            environment: None,
             live_info: None,
             target_error: None,
         };
@@ -2076,15 +1859,10 @@ mod tests {
         let sock_path = temp.path().join("hung.sock");
         let fake =
             spawn_fake_leader(sock_path.clone(), FakeLeaderBehavior::SilentAfterAccept).await;
-        let env_urls = LeaderEnvUrls {
-            service_ws_url: "wss://test.invalid".into(),
-            service_ws_origin: "https://test.invalid".into(),
-        };
         let (status_tx, mut status_rx) = LeaderReconnector::status_channel();
         let reconnector = LeaderReconnector::new(
             "test",
             ClientMode::Stdio,
-            env_urls,
             ClientCapabilities::default(),
             status_tx,
         );
@@ -2260,15 +2038,10 @@ mod tests {
     /// reconnect (including a coalesced `Reconnecting -> Connected` flip).
     #[test]
     fn notify_connected_increments_generation() {
-        let env_urls = LeaderEnvUrls {
-            service_ws_url: "wss://test.invalid".into(),
-            service_ws_origin: "https://test.invalid".into(),
-        };
         let (status_tx, status_rx) = LeaderReconnector::status_channel();
         let reconnector = LeaderReconnector::new(
             "test",
             ClientMode::Stdio,
-            env_urls,
             ClientCapabilities::default(),
             status_tx,
         );
@@ -2293,15 +2066,10 @@ mod tests {
         let sock_path = temp.path().join("test.sock");
         let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let env_urls = LeaderEnvUrls {
-            service_ws_url: "wss://test.invalid".into(),
-            service_ws_origin: "https://test.invalid".into(),
-        };
         let (status_tx, mut status_rx) = LeaderReconnector::status_channel();
         let reconnector = LeaderReconnector::new(
             "test",
             ClientMode::Stdio,
-            env_urls,
             ClientCapabilities::default(),
             status_tx,
         );
@@ -2336,15 +2104,10 @@ mod tests {
     }
     #[tokio::test]
     async fn reconnector_bounded_fails_after_max_attempts() {
-        let env_urls = LeaderEnvUrls {
-            service_ws_url: "wss://test.invalid".into(),
-            service_ws_origin: "https://test.invalid".into(),
-        };
         let (status_tx, mut status_rx) = LeaderReconnector::status_channel();
         let reconnector = LeaderReconnector::new(
             "test",
             ClientMode::Stdio,
-            env_urls,
             ClientCapabilities::default(),
             status_tx,
         );
@@ -2371,15 +2134,10 @@ mod tests {
     }
     #[tokio::test]
     async fn reconnector_cancelled_returns_error() {
-        let env_urls = LeaderEnvUrls {
-            service_ws_url: "wss://test.invalid".into(),
-            service_ws_origin: "https://test.invalid".into(),
-        };
         let (status_tx, _status_rx) = LeaderReconnector::status_channel();
         let reconnector = LeaderReconnector::new(
             "test",
             ClientMode::Stdio,
-            env_urls,
             ClientCapabilities::default(),
             status_tx,
         );

@@ -73,7 +73,6 @@ tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 wildmatch = { workspace = true }
-grow-env = { workspace = true }
 serde_yaml = { workspace = true }
 shellexpand = "3.1"
 tempfile = { workspace = true }

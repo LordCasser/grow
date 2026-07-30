@@ -144,7 +144,7 @@ pub enum Action {
     /// `contextual_hints.undo` gate.
     ShowUndoTip,
     /// The user typed a planning keyword into the prompt: show the seen-gated
-    /// "Planning? Check out plan mode via ctrl+r" ephemeral tip on the active
+    /// "Planning? Check out plan mode via ctrl+x b" ephemeral tip on the active
     /// agent. Gated by the per-tip `contextual_hints.plan_mode` gate.
     ShowPlanNudge,
     /// The user double-clicked scrollback while Text selection is fold/nav:
@@ -258,8 +258,8 @@ pub enum Action {
     ToggleRaw,
     /// Toggle terminal mouse reporting (mouse capture). Disabling it lets
     /// the terminal handle native click-drag text selection / copy-paste;
-    /// re-enabling restores in-app mouse handling. Bound to Ctrl+R while the
-    /// scrollback pane is focused.
+    /// re-enabling restores in-app mouse handling. Invoked explicitly through
+    /// `/toggle-mouse-reporting`; there is no configuration shortcut.
     ToggleMouseCapture,
     /// Toggle the scroll-diagnostics HUD (hidden `/scroll-debug` command,
     /// also `/debug scroll`; `GROW_SCROLL_DEBUG=1` enables it from startup).
@@ -353,8 +353,6 @@ pub enum Action {
     },
     /// Cycle to next model.
     NextModel,
-    /// Cycle through the active model's declared reasoning-effort options.
-    CycleReasoningEffort,
     /// Switch active model.
     SwitchModel {
         model_id: acp::ModelId,
@@ -363,6 +361,12 @@ pub enum Action {
     /// Switch the active prompt profile without changing model or permissions.
     SwitchAgent {
         agent_name: String,
+        behavior: Option<grow_tools::types::SessionMode>,
+    },
+    /// Open a slash command's compact argument picker without mutating the draft.
+    OpenCommandPicker {
+        command: String,
+        args_query: String,
     },
     /// Cancel the currently running turn.
     CancelTurn,
@@ -390,18 +394,11 @@ pub enum Action {
     /// time, mirroring how `AnnouncementsHide` resolves its target). The
     /// payload records which surface activated it, for diagnostics.
     AnnouncementsOpenCta,
-    /// Cycle session mode (Ctrl+R): Normal → Plan → Always-Approve → Normal.
-    /// Plan mode sends a signal to the shell; always-approve is local.
-    CycleMode,
-    /// Toggle YOLO mode (auto-approve all permissions). Ctrl+O.
-    ToggleYolo,
-    /// Set YOLO (auto-approve / `always-approve`) mode.
-    SetYoloMode(bool),
     /// Set the permission mode by canonical kind (`always-approve` /
-    /// `ask` / `default`). Typed wrapper over [`Action::SetYoloMode`]
-    /// that preserves the `default` canonical (the `bool` variant
-    /// collapses `default` to `ask`).
+    /// `ask` / `default`).
     SetPermissionMode(PermissionModeKind),
+    /// Persist the default permission for future sessions only.
+    SetDefaultPermissionMode(PermissionModeKind),
     /// Toggle multiline input mode (swap Enter and Shift+Enter behavior).
     ToggleMultiline,
     /// Set multiline input mode (swap Enter and Shift+Enter behavior).
@@ -610,8 +607,6 @@ pub enum Action {
     TrustFolder,
     /// A spawned task completed.
     TaskComplete(TaskResult),
-    /// Share the current session via URL.
-    ShareSession,
     /// Show session info (auth, ID, cwd, model, context usage) instantly.
     ShowSessionInfo,
     /// Show release notes in a modal.
@@ -636,15 +631,16 @@ pub enum Action {
     ShowTasks,
     /// Show the current plan: preview popover if exists, toast if not.
     ShowPlan,
-    /// Enter plan mode. If a description is provided, also start a turn
-    /// with that text as the prompt.
-    EnterPlanMode {
-        description: Option<String>,
+    /// Select a Behavior and, only after the shell applies the transition,
+    /// optionally start a turn in that Behavior.
+    SetBehaviorThenPrompt {
+        mode: grow_tools::types::SessionMode,
+        prompt: Option<String>,
     },
-    /// Set plan mode on/off. Per-session, ACP-mediated (not persisted
-    /// to config.toml). `/plan <desc>` uses `EnterPlanMode` instead
-    /// because it also starts a turn.
-    SetPlanMode(PlanModeKind),
+    /// Select the primary Agent Behavior from the Ctrl+X, B picker.
+    SetBehaviorMode(grow_tools::types::SessionMode),
+    /// Dismiss an interrupt warning and clear the shell's ephemeral guard.
+    DismissBehaviorSwitchWarning,
     /// Enter remember mode (visual prompt change, not a send).
     EnterRememberMode,
     /// Send a remember note from # mode. Routes through LLM rewrite when a
@@ -719,7 +715,7 @@ pub enum Action {
     },
     /// Persist the memory modal fullscreen preference to config.toml.
     PersistMemoryFullscreen(bool),
-    /// Open the Agent Dashboard view (`/dashboard`, `Ctrl+\`, `grow dashboard`).
+    /// Open the Agent Dashboard view (`/agents`, `Ctrl+\`, `grow dashboard`).
     OpenDashboard,
     /// Close the dashboard, returning to the previous `ActiveView`.
     ExitDashboard,
@@ -736,7 +732,7 @@ pub enum Action {
     /// Submit a slash command from the dashboard's dispatch input.
     /// The text starts with `/`. The dispatcher resolves it through
     /// the slash registry (builtin / ACP / unknown) without a
-    /// per-agent session context — commands like `/dashboard`,
+    /// per-Agent session context — commands like `/agents`,
     /// `/exit`, `/theme`, `/settings`, `/help` work without a
     /// session; commands that need one return a friendly toast.
     DashboardDispatchSlash {
@@ -753,15 +749,6 @@ pub enum Action {
     /// Stop / kill the selected row (top-level: cancel turn → close;
     /// subagent: kill). Double-press protected for top-level rows.
     DashboardStop,
-    /// Cycle the dispatch input's mode for the next spawned agent
-    /// (Normal → Plan → Always-Approve → Normal). Bound to Shift+Tab.
-    DashboardCycleMode,
-    /// Cycle the PEEKED agent's live mode (Normal → Plan → Always-Approve
-    /// → Normal) — the peek-panel counterpart to [`Self::DashboardCycleMode`].
-    /// Unlike that staged dispatch mode, this changes the existing agent
-    /// directly (same effect as Ctrl+R inside the agent's chat view).
-    /// Emitted when Shift+Tab fires while the peek panel is open.
-    DashboardPeekCycleMode,
     /// Toggle grouping (State ↔ Directory).
     DashboardToggleGrouping,
     /// Set the live filter (typically driven by the dispatch input).
@@ -792,11 +779,6 @@ pub enum Action {
     /// close the attached session and return to the dashboard. State
     /// machine documented at `dispatch_dashboard_overlay_stop`.
     DashboardOverlayStop,
-    /// Toggle auto-approve (YOLO mode) on the selected row's
-    /// owning agent. Mirrors `Action::ToggleYolo` but targets
-    /// the dashboard's selected row instead of the active-view
-    /// agent.
-    DashboardToggleAutoApprove,
     /// Toggle worktree-dispatch mode: when on, the next agent dispatched
     /// from the dashboard spawns in a fresh git worktree (and the `[+ New
     /// Agent]` button reads `[+ New Worktree]`). Bound to Ctrl+W. Gated on
@@ -993,6 +975,14 @@ impl PermissionModeKind {
     pub fn is_auto(self) -> bool {
         matches!(self, Self::Auto)
     }
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Ask => "Ask",
+            Self::Auto => "Auto",
+            Self::AlwaysApprove => "Always Approve",
+        }
+    }
     /// Construct from a canonical string. Returns `None` for unknown
     /// strings. Used by `apply_setting_rollback("permission_mode", _)`
     /// to recover the typed kind from the `SettingValue::Enum(canonical)`
@@ -1033,44 +1023,6 @@ mod permission_mode_kind_tests {
                 "catalog canonical {c} must parse"
             );
         }
-    }
-}
-/// Canonical on/off state for `plan_mode`. Binary today (single bit
-/// on `agent.plan_mode_active`); typed enum so a future third state
-/// can be added without churning dispatcher arms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlanModeKind {
-    /// Agent in `SessionMode::Plan` — no tool writes, plan-first.
-    On,
-    /// Agent in `SessionMode::Default`.
-    Off,
-}
-impl PlanModeKind {
-    /// Canonical persisted/wire string for the kind. Matches the
-    /// `EnumChoice.canonical` values in
-    /// `settings/defs.rs::PLAN_MODE_CHOICES`.
-    pub fn as_canonical(self) -> &'static str {
-        match self {
-            Self::On => "on",
-            Self::Off => "off",
-        }
-    }
-    /// Display label used in the toast and the picker. Mirrors
-    /// `EnumChoice.display`.
-    pub fn as_display(self) -> &'static str {
-        match self {
-            Self::On => "On",
-            Self::Off => "Off",
-        }
-    }
-    /// Bool projection — `On → true`, `Off → false`. Used by the
-    /// dispatcher's idempotency check against `plan_mode_active`.
-    pub fn to_bool(self) -> bool {
-        matches!(self, Self::On)
-    }
-    /// Construct from a bool (the inverse of [`Self::to_bool`]).
-    pub fn from_bool(b: bool) -> Self {
-        if b { Self::On } else { Self::Off }
     }
 }
 /// Async side effect produced by [`super::dispatch::dispatch`].
@@ -1483,6 +1435,14 @@ pub enum Effect {
         session_id: acp::SessionId,
         agent_name: String,
     },
+    /// Apply a Behavior transition and switch Agent only when the shell reports
+    /// that the transition was applied.
+    SetModeThenAgent {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        mode_id: acp::SessionModeId,
+        agent_name: String,
+    },
     /// Fetch changelog from CDN (both markdown + structured JSON).
     /// Runs off the render path via `spawn_blocking`. Result is cached
     /// on `AppView` so `/release-notes` and the welcome screen share it.
@@ -1520,6 +1480,12 @@ pub enum Effect {
         canonical: &'static str,
         session_id: Option<acp::SessionId>,
         persist: PermissionModePersist,
+    },
+    /// Notify the active session of a permission change without persisting the
+    /// default used by future sessions.
+    NotifySessionPermissionMode {
+        canonical: &'static str,
+        session_id: acp::SessionId,
     },
     /// Persist a typed setting to `~/.grow/config.toml`. On failure,
     /// rolls the in-memory cache back to `rollback_value`.
@@ -1786,11 +1752,6 @@ pub enum Effect {
         server_name: String,
         tool_name: String,
         enabled: bool,
-    },
-    /// Share the current session via URL.
-    ShareSession {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
     },
     /// Fetch and display session info via grow/session/info.
     /// Auth lines are derived in the effect from SessionFlags + env (not Effect fields).
@@ -2400,11 +2361,6 @@ pub enum TaskResult {
         agent_id: AgentId,
         result: Result<(), String>,
     },
-    /// Share session failed.
-    ShareSessionFailed {
-        agent_id: AgentId,
-        error: String,
-    },
     /// Session info fetched successfully.
     SessionInfoComplete {
         agent_id: AgentId,
@@ -2654,81 +2610,4 @@ pub enum TaskResult {
         target: DoctorFixTarget,
         result: Result<crate::diagnostics::FixOutcome, String>,
     },
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    /// `as_canonical` must return the wire strings that the settings
-    /// picker and dispatcher pattern-match against.
-    #[test]
-    fn plan_mode_kind_as_canonical() {
-        assert_eq!(PlanModeKind::On.as_canonical(), "on");
-        assert_eq!(PlanModeKind::Off.as_canonical(), "off");
-    }
-    /// `as_display` must return user-visible picker labels.
-    #[test]
-    fn plan_mode_kind_as_display() {
-        assert_eq!(PlanModeKind::On.as_display(), "On");
-        assert_eq!(PlanModeKind::Off.as_display(), "Off");
-    }
-    /// `to_bool` must project `On → true`, `Off → false`.
-    #[test]
-    fn plan_mode_kind_to_bool() {
-        assert!(PlanModeKind::On.to_bool());
-        assert!(!PlanModeKind::Off.to_bool());
-    }
-    /// `from_bool` must be the inverse of `to_bool`.
-    #[test]
-    fn plan_mode_kind_from_bool_round_trip() {
-        assert_eq!(PlanModeKind::from_bool(true), PlanModeKind::On);
-        assert_eq!(PlanModeKind::from_bool(false), PlanModeKind::Off);
-        for b in [true, false] {
-            assert_eq!(
-                PlanModeKind::from_bool(b).to_bool(),
-                b,
-                "from_bool ∘ to_bool round-trip must be identity",
-            );
-        }
-        for k in [PlanModeKind::On, PlanModeKind::Off] {
-            assert_eq!(
-                PlanModeKind::from_bool(k.to_bool()),
-                k,
-                "to_bool ∘ from_bool round-trip must be identity",
-            );
-        }
-    }
-    /// Drift-guard: `PLAN_MODE_CHOICES` canonicals must match
-    /// `PlanModeKind::as_canonical`.
-    #[test]
-    fn plan_mode_kind_canonical_strings_match_choices_catalog() {
-        let catalog_canonicals: std::collections::HashSet<&str> =
-            crate::settings::defs::default_settings()
-                .iter()
-                .find(|m| m.key == "plan_mode")
-                .map(|m| match &m.kind {
-                    crate::settings::SettingKind::Enum { choices, .. } => {
-                        choices.iter().map(|c| c.canonical).collect()
-                    }
-                    _ => panic!("plan_mode must be Enum"),
-                })
-                .expect("plan_mode must be registered");
-        assert!(
-            catalog_canonicals.contains(PlanModeKind::On.as_canonical()),
-            "catalog must contain `{}` (from PlanModeKind::On)",
-            PlanModeKind::On.as_canonical(),
-        );
-        assert!(
-            catalog_canonicals.contains(PlanModeKind::Off.as_canonical()),
-            "catalog must contain `{}` (from PlanModeKind::Off)",
-            PlanModeKind::Off.as_canonical(),
-        );
-        assert_eq!(
-            catalog_canonicals.len(),
-            2,
-            "catalog must be exactly {{on, off}} — adding a third \
-             choice requires adding a PlanModeKind variant AND \
-             updating the action_for_enum_commit + action_for_reset \
-             dispatcher arms",
-        );
-    }
 }

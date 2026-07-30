@@ -199,10 +199,22 @@ impl McpErrorType {
 
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
-pub enum PlanModeState {
-    Inactive,
-    Pending,
-    Active,
+pub enum BehaviorKind {
+    Normal,
+    Clarify,
+    Plan,
+    Workflow,
+    DeepResearch,
+    Goal,
+}
+
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanPhase {
+    Drafting,
+    AwaitingApproval,
+    Executing,
+    Amending,
 }
 
 #[derive(Serialize, Clone, Copy)]
@@ -832,7 +844,9 @@ pub struct SessionLoad {
     pub compaction_count: u64,
     pub turn_count: u64,
     pub tool_call_count: u64,
-    pub plan_mode_state: PlanModeState,
+    pub behavior: BehaviorKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_phase: Option<PlanPhase>,
     pub permission_mode: PermissionMode,
     pub model_id: String,
     pub restored_from_disk: bool,
@@ -1333,8 +1347,6 @@ pub enum ManualAuthReason {
 pub enum ManualAuthSurface {
     /// A chat/inference turn (the yellow `ReAuthRequired` banner).
     Turn,
-    /// The relay / leader connection handshake.
-    Relay,
 }
 
 /// The kind of bearer that was rejected. Mirrors shell's `TokenType` as a
@@ -1588,7 +1600,7 @@ mod tests {
         // reachable fixture (API-key sessions never emit this event).
         let no_principal = serde_json::to_value(ManualAuth {
             reason: ManualAuthReason::NoRefreshAuthority,
-            trigger: ManualAuthSurface::Relay,
+            trigger: ManualAuthSurface::Turn,
             token_kind: AuthTokenKind::LegacySession,
             principal: None,
         })

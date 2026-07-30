@@ -557,8 +557,14 @@ async fn fetch_for_principal(
     // Resolve from the merged config (managed_config_url > cli_chat_proxy_base_url,
     // including the enterprise single-endpoint derivation) so endpoint overrides
     // are honored and the bearer isn't sent to the public default.
-    let url =
-        crate::agent::config::EndpointsConfig::from_effective_config().resolve_managed_config_url();
+    let url = crate::agent::config::EndpointsConfig::from_effective_config()
+        .resolve_managed_config_url()
+        .ok_or_else(|| {
+            ManagedConfigError::RequestFailed(
+                "managed configuration requires endpoints.managed_config_url or endpoints.cli_chat_proxy_base_url"
+                    .to_owned(),
+            )
+        })?;
 
     let team_auth = team_override.or_else(read_active_team_auth);
 

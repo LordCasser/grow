@@ -23,11 +23,11 @@ mod builtin_tests {
 
     #[test]
     fn deep_research_binds_shards_and_renders_verified_claims() {
-        let script = super::registry::BUILTIN_WORKFLOWS
-            .iter()
-            .find(|builtin| builtin.name == "deep-research")
-            .map(|builtin| builtin.script)
-            .expect("deep-research builtin registered");
+        let resolved = super::registry::resolve_deep_research()
+            .expect("private deep-research definition must validate");
+        let script = resolved.script;
+        assert_eq!(resolved.meta.name, "deep-research");
+        assert!(super::registry::BUILTIN_WORKFLOWS.is_empty());
         assert!(script.contains("expected_ids[shard_idx]"));
         assert!(script.contains("verification_results[assigned_shard]"));
         assert!(script.contains("verified_claim_ids"));

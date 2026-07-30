@@ -297,7 +297,7 @@ pub(crate) async fn run_goal_strategist(
         Ok(text) => text,
         Err(SpawnError::Transport(detail)) => {
             tracing::warn!(error = %detail, "goal strategist: transport error; failing open");
-            return record_fail_open(
+            return record_verification_unavailable(
                 GoalStrategistFailReason::Transport,
                 inputs.attempt,
                 inputs.consecutive_failures,
@@ -315,7 +315,12 @@ pub(crate) async fn run_goal_strategist(
                 cancelled,
                 "goal strategist: subagent runtime error; failing open",
             );
-            return record_fail_open(reason, inputs.attempt, inputs.consecutive_failures, started);
+            return record_verification_unavailable(
+                reason,
+                inputs.attempt,
+                inputs.consecutive_failures,
+                started,
+            );
         }
     };
 
@@ -327,7 +332,7 @@ pub(crate) async fn run_goal_strategist(
                 terminal_token_ok = parse_terminal_response(&response),
                 "goal strategist: strategy note missing or empty; failing open",
             );
-            return record_fail_open(
+            return record_verification_unavailable(
                 GoalStrategistFailReason::MissingStrategy,
                 inputs.attempt,
                 inputs.consecutive_failures,
@@ -494,7 +499,7 @@ impl Drop for PlanGuard<'_> {
     }
 }
 
-fn record_fail_open(
+fn record_verification_unavailable(
     reason: GoalStrategistFailReason,
     attempt: u32,
     consecutive_failures: u32,

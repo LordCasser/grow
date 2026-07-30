@@ -48,8 +48,8 @@ mod turn_completion;
 mod xt_filter;
 pub(crate) use crate::terminal::kitty_flags_pushed;
 pub use cli::{
-    AgentArgs, AgentCmd, Command, HeadlessArgs, LeaderArgs, LeaderMgmtArgs, LeaderMgmtCommand,
-    LeaderTargetArgs, OutputFormat, PagerArgs, ServeArgs, WrapArgs,
+    AgentArgs, AgentCmd, Command, LeaderArgs, LeaderMgmtArgs, LeaderMgmtCommand, LeaderTargetArgs,
+    OutputFormat, PagerArgs, ServeArgs, WrapArgs,
 };
 use crossterm::cursor::{self, SetCursorStyle};
 use crossterm::event;
@@ -159,23 +159,15 @@ pub(crate) fn esc_cancels_turn(is_minimal: bool, vim_mode: bool) -> bool {
 }
 /// Whether the opt-in mouse-reporting toggle feature is enabled
 /// (`[ui] mouse_reporting_toggle` / `GROW_MOUSE_REPORTING_TOGGLE`). Seeded once
-/// at startup; gates both the `Ctrl+R` shortcut registration and the
-/// `/toggle-mouse-reporting` slash command's visibility/execution.
+/// at startup; gates the explicit `/toggle-mouse-reporting` command.
 pub(crate) static MOUSE_REPORTING_TOGGLE_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Read the cached opt-in mouse-reporting toggle flag (see
 /// [`MOUSE_REPORTING_TOGGLE_ENABLED`]). Set once at startup from layered config.
 pub(crate) fn mouse_reporting_toggle_enabled() -> bool {
     MOUSE_REPORTING_TOGGLE_ENABLED.load(Ordering::Acquire)
 }
-/// Sticky banner shown while mouse reporting is off, telling the user how to
-/// turn it back on. The advertised invocation depends on focus: `Ctrl+R` only
-/// works from scrollback, so the prompt-focused variant points at the
-/// `/toggle-mouse-reporting` command (which toggles from any pane). The banner
-/// is stored in the scrollback form; `AgentView::active_toast_message` swaps to
-/// the prompt form at render time when the prompt is focused.
-pub(crate) const MOUSE_OFF_HINT_SCROLLBACK: &str =
-    "Ctrl+r to enable mouse reporting and restore TUI features";
-pub(crate) const MOUSE_OFF_HINT_PROMPT: &str =
+/// Sticky banner shown while mouse reporting is off.
+pub(crate) const MOUSE_OFF_HINT: &str =
     "/toggle-mouse-reporting to enable mouse reporting and restore TUI features";
 /// Terminal type for the pager.
 ///
@@ -400,29 +392,6 @@ fn print_leader_disabled_by_sandbox(profile: &str, w: &mut impl Write) {
          managed requirement) to use the leader."
     );
 }
-/// Join early prefetch to get remote settings (with timeout).
-///
-/// Remote settings come from the product settings API and contain `leader_mode`,
-/// announcements, etc.  Waits up to 2 s for the background thread.
-pub fn join_early_prefetch(
-    handle: Option<grow_shell::agent::models::EarlyPrefetchHandle>,
-) -> Option<grow_shell::util::config::RemoteSettings> {
-    let handle = handle?;
-    if handle.is_finished() {
-        return match handle.join() {
-            Ok(r) => r.settings,
-            Err(_) => None,
-        };
-    }
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(handle.join());
-    });
-    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-        Ok(Ok(r)) => r.settings,
-        _ => None,
-    }
-}
 /// First non-blank of CLI > env > config (precedence + blank-skip). `None` →
 /// nothing set; `acp::initialize` canonicalizes and applies the default.
 fn resolve_hunk_tracker_mode(
@@ -541,35 +510,12 @@ pub async fn run(
     // Keep the configuration prompt on the user's real terminal. Native stderr
     // is redirected only after the fail-fast BYOK gate has passed.
     xai_tty_utils::redirect_native_stderr();
-    let auth = match grow_shell::agent::config::Config::new_from_toml_cfg(&raw_config) {
-        Ok(c) => c.auth,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to parse config for auth refresh, using defaults");
-            grow_shell::auth::ServiceAuthConfig::default()
-        }
-    };
-    let refreshed_auth = tokio::time::timeout(
-        grow_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-        grow_shell::auth::try_ensure_fresh_auth(&auth),
-    )
-    .await
-    .unwrap_or(None);
-    let early_prefetch = match refreshed_auth {
-        Some(auth) => grow_shell::agent::models::start_early_prefetch_with_auth(Some(auth)),
-        None => grow_shell::agent::models::start_early_prefetch(Some(auth.clone())),
-    };
     grow_shell::agent::mvp_agent::warm_async_http_client();
     tokio::task::spawn_blocking(|| {});
     if let Ok(cwd) = std::env::current_dir() {
         crate::git_info::populate_from_cwd_async(cwd);
     }
-    let remote_settings = join_early_prefetch(early_prefetch);
-    grow_shell::util::config::cache_remote_auto_mode(
-        remote_settings.as_ref().and_then(|s| s.auto_mode.clone()),
-    );
-    grow_shell::util::config::set_remote_campaigns_from_settings(remote_settings.as_ref());
-    let raw_config = grow_shell::config::load_effective_config()
-        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    let remote_settings = None;
     let prefetch_elapsed = startup_start.elapsed();
     let requested_confinement = grow_sandbox::requested_confinement_profile();
     let LeaderMode {

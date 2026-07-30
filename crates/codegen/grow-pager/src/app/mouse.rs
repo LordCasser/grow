@@ -525,7 +525,7 @@ impl AgentView {
                                     TaskEntryId::Workflow(name) => {
                                         return InputOutcome::Action(
                                             Action::SendSlashCommandPreservingDraft(format!(
-                                                "/workflow stop {name}"
+                                                "/workflow-run stop {name}"
                                             )),
                                         );
                                     }

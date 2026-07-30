@@ -22,12 +22,12 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 /// The mode in which the agent is running.
-/// Determines behavior like relay sync enablement.
+/// Identifies the local product surface that owns the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentMode {
-    /// TUI interactive mode - full UI with relay sync support
+    /// TUI interactive mode.
     Tui,
-    /// Headless mode - no UI, connected to relay WebSocket
+    /// One-shot non-interactive mode.
     Headless,
     /// Stdio mode - JSON-RPC over stdin/stdout
     Stdio,
@@ -156,13 +156,6 @@ pub struct EndpointsConfig {
     /// non-production feature, and only for matching first-party hosts).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alpha_test_key: Option<String>,
-    /// Env: `GROW_MODELS_BASE_URL`. Enables custom endpoint mode.
-    /// List URL defaults to `{models_base_url}/models`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub models_base_url: Option<String>,
-    /// Env: `GROW_MODELS_LIST_URL`. Overrides the default `{base}/models` list URL.
-    #[serde(alias = "models_endpoint", skip_serializing_if = "Option::is_none")]
-    pub models_list_url: Option<String>,
     /// Env: `GROW_DEPLOYMENT_KEY`. Management API key for enterprise deployments.
     /// Sent on managed service requests for deployment-level attribution.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -190,9 +183,6 @@ fn blank_as_unset(opt: &Option<String>) -> Option<String> {
         .map(str::to_owned)
 }
 impl EndpointsConfig {
-    pub fn has_custom_endpoint(&self) -> bool {
-        self.models_base_url.is_some() || self.models_list_url.is_some()
-    }
     /// `default()` plus merged managed/requirements endpoint overrides, so
     /// startup fetches use the configured (not public) endpoints. Only merges
     /// layers — never derives one endpoint from another. Falls back to
@@ -222,32 +212,14 @@ impl EndpointsConfig {
         blank_as_unset(&self.cli_chat_proxy_base_url)
             .unwrap_or_else(|| CLI_CHAT_PROXY_BASE_URL_DEFAULT.to_owned())
     }
-    pub fn resolve_inference_base_url(&self) -> String {
-        self.models_base_url
-            .clone()
-            .unwrap_or_else(|| self.proxy_url())
-    }
     /// Managed deployment-config URL (`grow setup`): explicit `managed_config_url`,
     /// else `proxy_url` + `/deployment/config`. Never `inference_base_url`, so the
     /// deployment key reaches the proxy, not the inference host.
-    pub fn resolve_managed_config_url(&self) -> String {
-        blank_as_unset(&self.managed_config_url).unwrap_or_else(|| {
-            format!(
-                "{}/deployment/config",
-                self.proxy_url().trim_end_matches('/')
-            )
+    pub fn resolve_managed_config_url(&self) -> Option<String> {
+        blank_as_unset(&self.managed_config_url).or_else(|| {
+            blank_as_unset(&self.cli_chat_proxy_base_url)
+                .map(|proxy| format!("{}/deployment/config", proxy.trim_end_matches('/')))
         })
-    }
-    /// `models_list_url` > `{models_base_url}/models` > `{proxy_base_url}/models`.
-    pub fn resolve_models_list_url(&self) -> String {
-        if let Some(ref url) = self.models_list_url {
-            return url.clone();
-        }
-        let base = self
-            .models_base_url
-            .clone()
-            .unwrap_or_else(|| self.proxy_url());
-        format!("{}/models", base)
     }
 }
 impl Default for EndpointsConfig {
@@ -257,8 +229,6 @@ impl Default for EndpointsConfig {
             inference_base_url: std::env::var("GROW_INFERENCE_BASE_URL")
                 .unwrap_or_else(|_| INFERENCE_BASE_URL_DEFAULT.to_owned()),
             alpha_test_key: None,
-            models_base_url: env_string("GROW_MODELS_BASE_URL"),
-            models_list_url: env_string("GROW_MODELS_LIST_URL"),
             deployment_key: env_string("GROW_DEPLOYMENT_KEY"),
             managed_config_url: env_string("GROW_MANAGED_CONFIG_URL"),
             asset_server_url: default_asset_server_url(),
@@ -305,7 +275,6 @@ pub struct Requirements {
     pub sandbox_auto_allow_bash: Constrained<bool>,
     pub sandbox_profile: Constrained<String>,
     pub respect_gitignore: Constrained<bool>,
-    pub remote_fetch: Constrained<bool>,
 }
 /// Inputs for resolving `#[serde(skip)]` runtime fields after `new_from_toml_cfg()`.
 ///
@@ -1091,7 +1060,7 @@ pub struct Config {
     #[serde(skip)]
     pub client_version: Option<String>,
     /// The mode in which the agent is running.
-    /// Determines behavior like relay sync enablement (only enabled in TUI mode).
+    /// Identifies the local product surface that owns the agent.
     #[serde(skip)]
     pub mode: AgentMode,
     /// Remote settings fetched from cli-chat-proxy at startup.
@@ -1178,11 +1147,10 @@ pub struct Config {
     /// Enforced requirement pins from `requirements.toml`.
     #[serde(skip)]
     pub requirements: Requirements,
-    /// Session title model. Resolved to the compiled default
-    /// (`default_session_summary_model`) when unset; see `ModelOverrideConfig::resolve`.
+    /// Session title model. `None` means use the active model.
     #[serde(skip)]
     pub session_summary_model: Option<String>,
-    /// Image describe model (`grow-build` default via `ModelOverrideConfig::resolve`).
+    /// Image description model. `None` means use the active model.
     #[serde(skip)]
     pub image_description_model: Option<String>,
     /// Next-prompt suggestion model pin (`env > [models] prompt_suggestion >
@@ -1428,10 +1396,7 @@ impl Default for Config {
 }
 /// Config paths read by raw-layer resolvers, not [`Config`] serde fields, so
 /// `serde_ignored` must not report them as unrecognized keys.
-const NON_SERDE_CONFIG_PATHS: &[&str] = &[
-    crate::util::config::REMOTE_FETCH_CONFIG_PATH,
-    crate::util::config::SLASH_COMMAND_TAGS_CONFIG_PATH,
-];
+const NON_SERDE_CONFIG_PATHS: &[&str] = &[crate::util::config::SLASH_COMMAND_TAGS_CONFIG_PATH];
 /// Parse `[auth_provider.<name>]` tables leniently: a malformed entry warns
 /// (surfaced by `grow inspect`) and is skipped, so it fails closed for the
 /// models referencing it instead of failing the whole config.
@@ -1723,7 +1688,7 @@ impl Config {
                 "global default model `{default}` does not exist; expected a configured provider/model id"
             ));
         }
-        for (id, model) in resolve_model_list(self, None) {
+        for (id, model) in resolve_model_list(self) {
             if model.info.base_url.trim().is_empty() {
                 return Err(format!(
                     "model `{id}` has no base_url; set it under [provider.{}.options]",
@@ -1966,10 +1931,8 @@ impl Config {
             .default(true)
             .resolve()
     }
-    /// Goal mode (`/goal`) master switch. Default ON: deployments that can't
-    /// reach cli-chat-proxy `/v1/settings` (custom `models_base_url`, external
-    /// `auth_provider_command`, air-gapped proxies) never receive the
-    /// remote settings `goal_enabled` flag, so the default must not carve them out.
+    /// Goal mode (`/goal`) master switch. Default ON; an explicitly supplied
+    /// remote setting may still disable it for a managed deployment.
     pub(crate) fn resolve_goal(&self) -> Resolved<bool> {
         let ff = self.remote_settings.as_ref().and_then(|s| s.goal_enabled);
         if ff == Some(false) {
@@ -2498,12 +2461,9 @@ pub(crate) fn read_requirements_toml() -> Option<toml::Value> {
 /// re-apply.
 pub fn apply_remote_settings_side_effects(settings: Option<&crate::util::config::RemoteSettings>) {
     if let Some(s) = settings {
-        let origin_trusted = crate::util::is_prod_cli_chat_proxy_url(
-            &EndpointsConfig::from_effective_config().proxy_url(),
-        );
         grow_config::signed_policy::apply_remote_managed_config_signature_verification(
             s.managed_config_signature_verification,
-            origin_trusted,
+            false,
         );
     }
     crate::util::config::cache_remote_mcp_startup_timeout_secs(
@@ -2535,22 +2495,18 @@ fn managed_settings_env_flag(key: &str) -> Option<bool> {
 }
 /// Assemble the final model map from the configured provider hierarchy.
 /// Remote catalogs and compiled presets are intentionally not model sources.
-pub fn resolve_model_list(
-    cfg: &Config,
-    _prefetched: Option<IndexMap<String, ModelEntry>>,
-) -> IndexMap<String, ModelEntry> {
+pub fn resolve_model_list(cfg: &Config) -> IndexMap<String, ModelEntry> {
     let mut resolved: IndexMap<String, ModelEntry> = IndexMap::new();
     for (key, model_override) in &cfg.config_models {
         let had_base = resolved.contains_key(key);
         let base = resolved.shift_remove(key);
         if !had_base {
-            tracing::debug!(model_key = %key, "config model adding new entry (not in defaults/prefetched)");
+            tracing::debug!(model_key = %key, "adding configured provider model");
             if model_override.context_window.is_none() {
                 tracing::debug!(
                     model_key = %key,
                     default = 200_000,
-                    "new model missing context_window, defaulting to 200000 — set context_window in [model.{}] to override",
-                    key,
+                    "model missing context_window, defaulting to 200000 — set context_window in [provider.<id>.models.<model>]",
                 );
             }
         }
@@ -2561,7 +2517,7 @@ pub fn resolve_model_list(
             }
         });
         let effective = with_provider.as_ref().unwrap_or(model_override);
-        let mut entry = effective.apply(key, base, &cfg.endpoints);
+        let mut entry = effective.apply(key, base);
         tracing::debug!(
             model_key = %key,
             base_url = %entry.info.base_url,
@@ -2697,13 +2653,6 @@ fn apply_global_scalar_defaults(
         }
     }
 }
-/// Built-in default models. Prefer `resolve_model_list()`.
-pub fn default_model_entries(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntry> {
-    default_models(endpoints)
-        .into_iter()
-        .map(|(key, entry)| (key, ModelEntry::from_config_entry(&entry)))
-        .collect()
-}
 /// Resolve a model against the available model map.
 /// Checks the map key (id) first, then falls back to a slug scan.
 pub fn find_model_by_id<'a>(
@@ -2727,104 +2676,6 @@ pub fn effective_classifier_supports_re(
     find_model_by_id(models, aux_model.unwrap_or(session_model))
         .map(|e| e.info().supports_reasoning_effort)
         .unwrap_or(false)
-}
-/// JSON-only subset of `ModelEntryConfig`.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct DefaultModelJson {
-    id: Option<String>,
-    model: String,
-    name: Option<String>,
-    description: Option<String>,
-    context_window: Option<NonZeroU64>,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
-    output_limit: Option<u32>,
-    api_backend: ApiBackend,
-    #[serde(default = "default_agent_type")]
-    agent_type: String,
-    inference_idle_timeout_secs: Option<u64>,
-    hidden: bool,
-    reasoning_effort: Option<ReasoningEffort>,
-    #[serde(default)]
-    supports_reasoning_effort: bool,
-    #[serde(default)]
-    reasoning_efforts: Vec<ReasoningEffortOption>,
-    /// When false, only OAuth users see this in the picker.
-    #[serde(default = "default_true")]
-    supported_in_api: bool,
-    #[serde(default)]
-    compactions_remaining: Option<CompactionsRemaining>,
-    #[serde(default)]
-    compaction_at_tokens: Option<CompactionAtTokens>,
-    #[serde(default)]
-    show_model_fingerprint: bool,
-    #[serde(default)]
-    auto_compact_threshold_percent: Option<u8>,
-    #[serde(default)]
-    system_prompt_label: Option<String>,
-}
-fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryConfig> {
-    let root: serde_json::Value = serde_json::from_str(crate::models::DEFAULT_MODELS_JSON)
-        .expect("default_models.json: invalid JSON");
-    let entries: Vec<DefaultModelJson> = serde_json::from_value(
-        root.get("models")
-            .expect("default_models.json: missing 'models' array")
-            .clone(),
-    )
-    .expect("default_models.json: invalid 'models' array");
-    tracing::debug!(
-        count = entries.len(),
-        "loaded default models from embedded JSON"
-    );
-    entries
-        .into_iter()
-        .map(|m| {
-            assert!(
-                !m.model.is_empty(),
-                "default_models.json: entry id={:?} has empty `model` field",
-                m.id
-            );
-            let key = m.id.clone().unwrap_or_else(|| m.model.clone());
-            let context_window = m
-                .context_window
-                .unwrap_or_else(|| NonZeroU64::new(200_000).expect("200000 is non-zero"));
-            let config = ModelEntryConfig {
-                id: m.id,
-                model: m.model,
-                base_url: endpoints.resolve_inference_base_url(),
-                api_base_url: Some(endpoints.inference_base_url.clone()),
-                name: m.name,
-                description: m.description,
-                context_window,
-                auto_compact_threshold_percent: m.auto_compact_threshold_percent,
-                system_prompt_label: m.system_prompt_label,
-                temperature: m.temperature,
-                top_p: m.top_p,
-                output_limit: m.output_limit,
-                api_backend: m.api_backend,
-                auth_scheme: None,
-                agent_type: m.agent_type,
-                inference_idle_timeout_secs: m.inference_idle_timeout_secs,
-                max_retries: None,
-                api_key: None,
-                env_key: None,
-                extra_headers: IndexMap::new(),
-                use_concise: false,
-                hidden: m.hidden,
-                supported_in_api: m.supported_in_api,
-                reasoning_effort: m.reasoning_effort,
-                supports_reasoning_effort: m.supports_reasoning_effort,
-                reasoning_efforts: m.reasoning_efforts,
-                compactions_remaining: m.compactions_remaining,
-                compaction_at_tokens: m.compaction_at_tokens,
-                show_model_fingerprint: m.show_model_fingerprint,
-                stream_tool_calls: None,
-                laziness_detector: LazinessDetectorPerModelConfig::default(),
-            };
-            (key, config)
-        })
-        .collect()
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEntryConfig {
@@ -3010,13 +2861,8 @@ pub struct ConfigModelOverride {
     pub stream_tool_calls: Option<bool>,
 }
 impl ConfigModelOverride {
-    pub(crate) fn apply(
-        &self,
-        key: &str,
-        base: Option<ModelEntry>,
-        endpoints: &EndpointsConfig,
-    ) -> ModelEntry {
-        let mut entry = base.unwrap_or_else(|| ModelEntry::fallback(key, endpoints));
+    pub(crate) fn apply(&self, key: &str, base: Option<ModelEntry>) -> ModelEntry {
+        let mut entry = base.unwrap_or_else(|| ModelEntry::fallback(key));
         if let Some(ref v) = self.model {
             entry.info.model = v.clone();
         }
@@ -3312,7 +3158,7 @@ pub struct ModelEntry {
 }
 impl ModelEntry {
     /// Minimal fallback entry for an unknown model slug.
-    pub fn fallback(slug: &str, _endpoints: &EndpointsConfig) -> Self {
+    pub fn fallback(slug: &str) -> Self {
         let mut info = ModelInfo::fallback(slug);
         info.base_url.clear();
         Self {
@@ -3792,7 +3638,7 @@ pub fn try_resolve_model_credentials(
     let cfg = Config::new_from_toml_cfg(&raw)
         .map_err(|e| tracing::warn!(error = %e, "config parse failed for credential resolution"))
         .ok()?;
-    let models = resolve_model_list(&cfg, None);
+    let models = resolve_model_list(&cfg);
     let entry = find_model_by_id(&models, model_id)?;
     let mut credentials = resolve_credentials(entry, session_key);
     enforce_disable_api_key_auth(
@@ -3873,7 +3719,7 @@ fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T
     else {
         return f(ModelLookup::ConfigUnavailable);
     };
-    let models = resolve_model_list(&cfg, None);
+    let models = resolve_model_list(&cfg);
     f(ModelLookup::Loaded(find_model_by_id(&models, model_id)))
 }
 /// Resolve a standalone `SamplerConfig` for an auxiliary model slug (image
@@ -3917,9 +3763,8 @@ pub fn resolve_aux_model_sampling_config(
 /// helper model keeps the session's auth/attribution. Shared by image-describe
 /// and the auto-mode classifier so the two can't drift.
 ///
-/// The resolver gate is host-based, stricter than `session_token_auth_gate`:
-/// a session-token deployment on a custom `models_base_url` loses aux-sampler
-/// refresh, rather than risk the session bearer on a third-party endpoint.
+/// The resolver gate is host-based so an auxiliary sampler cannot leak a
+/// managed-service bearer to an arbitrary provider endpoint.
 pub fn stamp_session_local_sampler_fields(
     cfg: &mut SamplerConfig,
     active_session_config: &SamplerConfig,
@@ -4285,19 +4130,6 @@ reasoning_effort = "low"
         }
     }
     #[test]
-    fn inject_url_derived_headers_adds_proxy_headers_for_cli_chat_proxy_url() {
-        let mut headers = IndexMap::new();
-        inject_url_derived_headers(&mut headers, None, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL);
-        assert_eq!(
-            headers.get("X-Grow-Token-Auth").map(String::as_str),
-            Some("grow-cli")
-        );
-        assert_eq!(
-            headers.get("x-authenticateresponse").map(String::as_str),
-            Some("authenticate-response")
-        );
-    }
-    #[test]
     fn inject_url_derived_headers_skips_proxy_headers_for_external_url() {
         let mut headers = IndexMap::new();
         inject_url_derived_headers(&mut headers, None, "https://api.example.com/v1");
@@ -4305,24 +4137,10 @@ reasoning_effort = "low"
         assert!(headers.get("x-authenticateresponse").is_none());
     }
     #[test]
-    fn inject_url_derived_headers_preserves_caller_extra_headers() {
-        let mut headers = IndexMap::new();
-        headers.insert("x-custom-byok".to_string(), "value".to_string());
-        inject_url_derived_headers(&mut headers, None, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL);
-        assert_eq!(
-            headers.get("x-custom-byok").map(String::as_str),
-            Some("value")
-        );
-        assert_eq!(
-            headers.get("X-Grow-Token-Auth").map(String::as_str),
-            Some("grow-cli")
-        );
-    }
-    #[test]
     fn inject_url_derived_headers_does_not_overwrite_existing_entries() {
         let mut headers = IndexMap::new();
         headers.insert("X-Grow-Token-Auth".to_string(), "caller-set".to_string());
-        inject_url_derived_headers(&mut headers, None, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL);
+        inject_url_derived_headers(&mut headers, None, "https://external.example/v1");
         assert_eq!(
             headers.get("X-Grow-Token-Auth").map(String::as_str),
             Some("caller-set"),
@@ -4357,38 +4175,6 @@ reasoning_effort = "low"
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
         assert_eq!(cfg.toolset.bash.timeout_secs, Some(30.5));
-    }
-    #[test]
-    fn new_from_toml_cfg_restores_auxiliary_models() {
-        let empty: toml::Value = toml::Value::Table(toml::map::Map::new());
-        let cfg = Config::new_from_toml_cfg(&empty).expect("empty config should parse");
-        assert_eq!(
-            cfg.session_summary_model,
-            Some(crate::models::default_session_summary_model().to_owned()),
-            "empty config should produce compiled default session_summary model"
-        );
-        assert_eq!(
-            cfg.image_description_model,
-            Some(crate::models::default_image_description_model().to_owned()),
-            "empty config should produce compiled default image_description model"
-        );
-        let with_overrides: toml::Value = toml::from_str(
-            r#"
-            [models]
-            session_summary = "custom-ss-model"
-            image_description = "custom-id-model"
-            "#,
-        )
-        .unwrap();
-        let cfg2 = Config::new_from_toml_cfg(&with_overrides).expect("config should parse");
-        assert_eq!(
-            cfg2.session_summary_model,
-            Some("custom-ss-model".to_owned())
-        );
-        assert_eq!(
-            cfg2.image_description_model,
-            Some("custom-id-model".to_owned())
-        );
     }
     #[test]
     fn finalize_image_describe_sampler_none_uses_active_session_model_not_forced_helper() {
@@ -4487,41 +4273,6 @@ reasoning_effort = "low"
         .expect("warm cache resolves");
         assert_eq!(resolved.base_url, "https://litellm.example/v1");
         assert_eq!(resolved.api_key.as_deref(), Some("aux-token"));
-    }
-    /// The session bearer resolver must never be stamped onto a third-party
-    /// sampler: the sampler substitutes the resolver's bearer at request
-    /// time.
-    #[test]
-    fn session_resolver_is_not_stamped_onto_third_party_samplers() {
-        #[derive(Debug)]
-        struct SessionResolver;
-        impl grow_sampler::BearerResolver for SessionResolver {
-            fn current_bearer(&self) -> Option<String> {
-                Some("session-jwt".into())
-            }
-        }
-        let session_cfg = SamplerConfig {
-            bearer_resolver: Some(std::sync::Arc::new(SessionResolver)),
-            ..SamplerConfig::default()
-        };
-        let mut third_party = SamplerConfig {
-            base_url: "https://litellm.corp.example/v1".into(),
-            ..SamplerConfig::default()
-        };
-        stamp_session_local_sampler_fields(&mut third_party, &session_cfg, None);
-        assert!(
-            third_party.bearer_resolver.is_none(),
-            "a third-party endpoint must keep its resolved credential"
-        );
-        let mut first_party = SamplerConfig {
-            base_url: EndpointsConfig::default().resolve_inference_base_url(),
-            ..SamplerConfig::default()
-        };
-        stamp_session_local_sampler_fields(&mut first_party, &session_cfg, None);
-        assert!(
-            first_party.bearer_resolver.is_some(),
-            "first-party aux samplers keep the session refresh behavior"
-        );
     }
     #[test]
     fn invalid_mcp_server_stub_does_not_fail_config_load() {
@@ -4717,25 +4468,6 @@ reasoning_effort = "low"
             include_only: _,
         } = ShellEnvironmentPolicyKnownKeys::default();
     }
-    #[test]
-    fn parses_model_api_key() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.my-custom-model]
-            model = "grow-4.5"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            api_key = "sk-test-key-12345"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get("my-custom-model").expect("model should exist");
-        assert_eq!(model.info.model, "grow-4.5");
-        assert_eq!(model.info.base_url, "https://api.example.com/v1");
-        assert_eq!(model.api_key, Some("sk-test-key-12345".to_string()));
-    }
 
     #[test]
     fn provider_model_output_limit_overrides_global_default() {
@@ -4758,7 +4490,7 @@ reasoning_effort = "low"
         )
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
+        let resolved = resolve_model_list(&cfg);
         let model = resolved
             .get("deepseek/deepseek-v4-pro")
             .expect("provider model should exist");
@@ -4789,7 +4521,7 @@ reasoning_effort = "low"
         )
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
+        let resolved = resolve_model_list(&cfg);
         assert_eq!(
             resolved
                 .get("local/qwen")
@@ -4825,7 +4557,7 @@ reasoning_effort = "low"
         assert_eq!(configured.args, Some(vec!["--scope".into(), "corp".into()]));
         assert_eq!(configured.token_ttl_secs, Some(3600));
         assert_eq!(configured.timeout_secs, Some(10));
-        let resolved = resolve_model_list(&cfg, None);
+        let resolved = resolve_model_list(&cfg);
         let model = resolved
             .get("corp/claude-sonnet-4-5")
             .expect("model should exist");
@@ -4845,41 +4577,6 @@ reasoning_effort = "low"
             "declaring an auth provider implies supported_in_api"
         );
     }
-    /// A static key shadows a fully defined provider through the real
-    /// `resolve_model_list` + `attach_trusted_config` pipeline (not a
-    /// hand-built ref): the static key wins even with the provider cache warm.
-    #[tokio::test]
-    async fn static_key_shadows_defined_provider_through_pipeline() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [auth_provider.understudy]
-            command = "printf provider-token"
-            token_ttl_secs = 3600
-
-            [model.dual-auth]
-            model = "m"
-            base_url = "https://switchboard.example/v1"
-            context_window = 200000
-            api_key = "sk-house-key"
-            auth_provider = "understudy"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get("dual-auth").expect("model should exist");
-        assert_eq!(
-            model.effective_auth_provider().map(|p| p.name.as_str()),
-            None,
-            "a static key shadows the provider after real resolution"
-        );
-        let provider = model.auth_provider.as_ref().unwrap().clone();
-        let _ = provider.ensure_fresh_token(None).await;
-        let creds = resolve_credentials(model, Some("session-jwt"));
-        assert_eq!(creds.api_key.as_deref(), Some("sk-house-key"));
-        assert_eq!(creds.auth_type, xai_chat_state::AuthType::ApiKey);
-        assert_eq!(creds.base_url, "https://switchboard.example/v1");
-    }
     #[test]
     fn undefined_auth_provider_fails_closed() {
         let raw_config: toml::Value = toml::from_str(
@@ -4894,7 +4591,7 @@ reasoning_effort = "low"
         )
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
+        let resolved = resolve_model_list(&cfg);
         let model = resolved.get("orphan/m").expect("model should exist");
         let provider = model.auth_provider.as_ref().unwrap();
         assert_eq!(provider.name, "nope");
@@ -4961,68 +4658,6 @@ reasoning_effort = "low"
             creds.api_key.as_deref(),
             Some("env-token"),
             "a set env_key must win over a warm provider cache"
-        );
-    }
-    /// A catalog deserialized from bytes cannot smuggle a runnable command.
-    #[test]
-    fn prefetched_entry_provider_config_comes_from_trusted_tables_only() {
-        let mut entry = test_model_entry("m", "https://cache.example/v1", None, None, None);
-        let smuggled: crate::auth::AuthProviderRef = serde_json::from_str(
-            r#"{"name": "cache-smuggle-test", "config": {"command": "evil"}}"#,
-        )
-        .unwrap();
-        entry.auth_provider = Some(smuggled);
-        let mut prefetched = IndexMap::new();
-        prefetched.insert("cached-model".to_string(), entry);
-        let cfg = Config::default();
-        let resolved = resolve_model_list(&cfg, Some(prefetched.clone()));
-        let provider = resolved["cached-model"].auth_provider.as_ref().unwrap();
-        assert_eq!(
-            resolve_credentials(&resolved["cached-model"], Some("session-jwt")).api_key,
-            None,
-            "an unusable provider fails closed"
-        );
-        assert_eq!(provider.config, crate::auth::AuthProviderConfig::default());
-        let mut cfg = Config::default();
-        cfg.auth_providers.insert(
-            "cache-smuggle-test".to_string(),
-            crate::auth::AuthProviderConfig {
-                command: "printf local".to_string(),
-                args: None,
-                token_ttl_secs: None,
-                timeout_secs: None,
-                cwd: None,
-                ..Default::default()
-            },
-        );
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let provider = resolved["cached-model"].auth_provider.as_ref().unwrap();
-        assert_eq!(provider.config.command, "printf local");
-    }
-    #[test]
-    fn provider_model_fails_closed_on_prefetched_custom_base_url() {
-        let mut cfg = Config::default();
-        cfg.model_providers.insert(
-            "gw".to_string(),
-            crate::agent::model_providers::ModelProviderConfig::default(),
-        );
-        cfg.config_models.insert(
-            "m".to_string(),
-            ConfigModelOverride {
-                model_provider: Some("gw".to_string()),
-                ..Default::default()
-            },
-        );
-        let mut prefetched = IndexMap::new();
-        prefetched.insert(
-            "m".to_string(),
-            test_model_entry("m", "https://evil.example/v1", None, None, None),
-        );
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        assert_eq!(
-            resolve_credentials(&resolved["m"], Some("session-jwt")).api_key,
-            None,
-            "a prefetched custom base_url must fail closed, not leak the session token",
         );
     }
     fn test_model_entry(
@@ -5128,34 +4763,6 @@ reasoning_effort = "low"
             None,
         );
         assert_eq!(sampling_config.api_key, Some("fallback-key".to_string()));
-    }
-    #[test]
-    fn default_models_dual_endpoint_routing() {
-        let endpoints = EndpointsConfig::default();
-        for (model_id, entry) in default_model_entries(&endpoints) {
-            if entry.api_base_url.is_none() {
-                continue;
-            }
-            let session_creds = resolve_credentials(&entry, Some("tok"));
-            assert_eq!(
-                session_creds.base_url,
-                endpoints.proxy_url(),
-                "{model_id}: SessionToken must route to cli-chat-proxy"
-            );
-            let api_key_creds = ResolvedCredentials {
-                api_key: Some("key".into()),
-                base_url: entry
-                    .api_base_url
-                    .clone()
-                    .unwrap_or(entry.info().base_url.clone()),
-                auth_type: xai_chat_state::AuthType::ApiKey,
-                auth_scheme: AuthScheme::Bearer,
-            };
-            assert_eq!(
-                api_key_creds.base_url, endpoints.inference_base_url,
-                "{model_id}: ExternalApiKey must route to api.example.com"
-            );
-        }
     }
     #[test]
     fn env_keys_deser_string_or_array() {
@@ -5281,81 +4888,6 @@ reasoning_effort = "low"
             std::env::remove_var(alias);
         }
     }
-    #[test]
-    #[serial]
-    fn resolve_credentials_empty_env_key_falls_through_to_session() {
-        use grow_test_support::EnvGuard;
-        use xai_chat_state::AuthType;
-        let primary = "GROW_TEST_EMPTY_ENV_PRIMARY";
-        let alias = "GROW_TEST_EMPTY_ENV_LC_ALIAS";
-        let _primary = EnvGuard::set(primary, "");
-        let _alias = EnvGuard::set(alias, "");
-        let mut model = test_model_entry("m", "https://inference.example/v1", None, None, None);
-        model.env_key = Some(EnvKeys::new([primary, alias]));
-        assert!(!model.has_own_credentials());
-        let creds = resolve_credentials(&model, Some("session-jwt"));
-        assert_eq!(creds.auth_type, AuthType::SessionToken);
-        assert_eq!(creds.api_key.as_deref(), Some("session-jwt"));
-    }
-    #[test]
-    #[serial]
-    fn resolve_credentials_empty_env_key_falls_through_to_global_key() {
-        use crate::agent::auth_method::GROW_API_KEY_ENV_VAR;
-        use grow_test_support::EnvGuard;
-        use xai_chat_state::AuthType;
-        let sentinel = "provider-global-sentinel-key";
-        let primary = "GROW_TEST_EMPTY_ENV_GLOBAL_PRIMARY";
-        let alias = "GROW_TEST_EMPTY_ENV_GLOBAL_ALIAS";
-        let _primary = EnvGuard::set(primary, "");
-        let _alias = EnvGuard::set(alias, "");
-        let _global = EnvGuard::set(GROW_API_KEY_ENV_VAR, sentinel);
-        let mut model = test_model_entry("m", "https://inference.example/v1", None, None, None);
-        model.env_key = Some(EnvKeys::new([primary, alias]));
-        assert!(!model.has_own_credentials());
-        let creds = resolve_credentials(&model, None);
-        assert_eq!(creds.auth_type, AuthType::ApiKey);
-        assert_eq!(creds.api_key.as_deref(), Some(sentinel));
-    }
-    #[test]
-    fn resolve_credentials_empty_api_key_falls_through_to_session() {
-        use xai_chat_state::AuthType;
-        let model = test_model_entry("m", "https://inference.example/v1", Some(""), None, None);
-        assert!(!model.has_own_credentials());
-        let creds = resolve_credentials(&model, Some("session-jwt"));
-        assert_eq!(creds.auth_type, AuthType::SessionToken);
-        assert_eq!(creds.api_key.as_deref(), Some("session-jwt"));
-    }
-    #[test]
-    #[serial]
-    fn config_toml_env_key_array_parses() {
-        let dm = crate::models::default_model();
-        let (_, models) = resolve_models_from_toml(
-            &format!(
-                r#"
-            [model."{dm}"]
-            model = "{dm}"
-            base_url = "https://inference.example.com/v1"
-            env_key = ["ANTHROPIC_AUTH_TOKEN", "LC_ANTHROPIC_AUTH_TOKEN"]
-            "#,
-            ),
-            None,
-        );
-        let model = models.get(dm).expect("model should exist");
-        assert_eq!(
-            model.env_key.as_ref().map(|k| k.names()),
-            Some(vec!["ANTHROPIC_AUTH_TOKEN", "LC_ANTHROPIC_AUTH_TOKEN"])
-        );
-    }
-    #[test]
-    fn resolve_credentials_sets_auth_type() {
-        use xai_chat_state::AuthType;
-        let model = test_model_entry("m", "https://example.com/v1", None, None, None);
-        let creds = resolve_credentials(&model, Some("tok"));
-        assert_eq!(creds.auth_type, AuthType::SessionToken);
-        let byok = test_model_entry("m", "https://example.com/v1", Some("key"), None, None);
-        let creds = resolve_credentials(&byok, Some("tok"));
-        assert_eq!(creds.auth_type, AuthType::ApiKey);
-    }
     /// Regression: BYOK env-var auth must stay ApiKey even when signed in,
     /// otherwise the bearer resolver overwrites the BYOK key with a session JWT.
     #[test]
@@ -5389,30 +4921,6 @@ reasoning_effort = "low"
             std::env::remove_var(env_var);
         }
     }
-    #[test]
-    fn proxy_messages_models_use_bearer_auth_scheme() {
-        let mut model = test_model_entry(
-            "grow-4.5",
-            crate::env::PROD_CLI_CHAT_PROXY_BASE_URL,
-            None,
-            None,
-            None,
-        );
-        model.info.api_backend = ApiBackend::Messages;
-        let config =
-            sampling_config_for_model(&model, resolve_credentials(&model, Some("tok")), None);
-        assert_eq!(config.api_backend, ApiBackend::Messages);
-        assert_eq!(config.auth_scheme, AuthScheme::Bearer);
-        assert_eq!(config.api_key, Some("tok".to_string()));
-        assert_eq!(config.base_url, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL);
-        assert_eq!(
-            config
-                .extra_headers
-                .get("X-Grow-Token-Auth")
-                .map(String::as_str),
-            Some("grow-cli")
-        );
-    }
     /// Regression: without a session key, `resolve_credentials` falls through
     /// to ApiKey. Session-based callers must override auth_type to SessionToken
     /// when their auth manager has only a buffered/expired token.
@@ -5429,75 +4937,6 @@ reasoning_effort = "low"
             auth_type: xai_chat_state::AuthType::ApiKey,
             auth_scheme: Default::default(),
         }
-    }
-    /// `disable_api_key_auth` kill switch (Claude `forceLoginMethod` parity).
-    #[test]
-    fn enforce_disable_api_key_auth_blocks_first_party_only() {
-        use xai_chat_state::AuthType;
-        let mut creds = api_key_creds("https://api.example.com/v1");
-        enforce_disable_api_key_auth(&mut creds, false, Some("session-jwt"));
-        assert_eq!(creds.auth_type, AuthType::ApiKey);
-        assert_eq!(creds.api_key.as_deref(), Some("provider-secret"));
-        let mut creds = api_key_creds("https://api.example.com/v1");
-        enforce_disable_api_key_auth(&mut creds, true, Some("session-jwt"));
-        assert_eq!(creds.auth_type, AuthType::SessionToken);
-        assert_eq!(creds.api_key.as_deref(), Some("session-jwt"));
-        let mut creds = api_key_creds("https://api.example.com/v1");
-        enforce_disable_api_key_auth(&mut creds, true, None);
-        assert_eq!(creds.auth_type, AuthType::SessionToken);
-        assert_eq!(creds.api_key, None);
-        let mut creds = api_key_creds("https://api.example.com/v1");
-        enforce_disable_api_key_auth(&mut creds, true, Some("session-jwt"));
-        assert_eq!(creds.auth_type, AuthType::ApiKey);
-        assert_eq!(creds.api_key.as_deref(), Some("provider-secret"));
-        let mut creds = ResolvedCredentials {
-            auth_type: AuthType::SessionToken,
-            ..api_key_creds("https://api.example.com/v1")
-        };
-        enforce_disable_api_key_auth(&mut creds, true, Some("session-jwt"));
-        assert_eq!(creds.auth_type, AuthType::SessionToken);
-    }
-    /// Regression for the override-model kill-switch bypass: a managed model
-    /// with its own api_key resolves to `ApiKey` (priority 1, beating the
-    /// session), and the kill switch — now applied inside
-    /// `try_resolve_model_credentials` — swaps it for the session token. BYOK
-    /// BYOK credentials are preserved. (`try_resolve_model_credentials`
-    /// loads global config, so this exercises its resolve + enforce core.)
-    #[test]
-    fn try_resolve_model_credentials_swaps_first_party_own_key_under_kill_switch() {
-        use xai_chat_state::AuthType;
-        let entry = test_model_entry(
-            "m",
-            "https://api.example.com/v1",
-            Some("provider-model-key"),
-            None,
-            None,
-        );
-        let mut creds = resolve_credentials(&entry, Some("session-jwt"));
-        assert_eq!(
-            creds.auth_type,
-            AuthType::ApiKey,
-            "own key wins over session"
-        );
-        assert_eq!(creds.api_key.as_deref(), Some("provider-model-key"));
-        enforce_disable_api_key_auth(&mut creds, true, Some("session-jwt"));
-        assert_eq!(
-            creds.auth_type,
-            AuthType::SessionToken,
-            "swapped under switch"
-        );
-        assert_eq!(creds.api_key.as_deref(), Some("session-jwt"));
-        let byok = test_model_entry(
-            "b",
-            "https://api.example.com/v1",
-            Some("sk-byok"),
-            None,
-            None,
-        );
-        let mut byok_creds = resolve_credentials(&byok, Some("session-jwt"));
-        enforce_disable_api_key_auth(&mut byok_creds, true, Some("session-jwt"));
-        assert_eq!(byok_creds.auth_type, AuthType::ApiKey);
-        assert_eq!(byok_creds.api_key.as_deref(), Some("sk-byok"));
     }
     #[test]
     fn x_api_key_auth_scheme_flows_from_config_to_sampler() {
@@ -5541,13 +4980,6 @@ reasoning_effort = "low"
     }
     #[test]
     fn has_own_credentials_guards_session_vs_external_key() {
-        let endpoints = EndpointsConfig::default();
-        for (model_id, entry) in default_model_entries(&endpoints) {
-            assert!(
-                !entry.has_own_credentials(),
-                "{model_id}: Default model must not claim own credentials"
-            );
-        }
         let config_model = test_model_entry(
             "my-model",
             "https://api.example.com/v1",
@@ -5557,36 +4989,6 @@ reasoning_effort = "low"
         );
         assert!(config_model.has_own_credentials());
     }
-    /// The `ConfigUnavailable → Unknown` arm matters for safety: a transient
-    /// config failure must not read as a definite `NotByok`, which would drive
-    /// the live resolver and could overwrite a per-model BYOK key.
-    #[test]
-    fn byok_from_lookup_classifies_all_states() {
-        assert_eq!(
-            byok_from_lookup(&ModelLookup::ConfigUnavailable),
-            ModelByok::Unknown,
-        );
-        assert_eq!(
-            byok_from_lookup(&ModelLookup::Loaded(None)),
-            ModelByok::NotByok,
-        );
-        let byok = test_model_entry(
-            "m",
-            "https://api.example.com/v1",
-            Some("sk-ext"),
-            None,
-            None,
-        );
-        assert_eq!(
-            byok_from_lookup(&ModelLookup::Loaded(Some(&byok))),
-            ModelByok::Byok,
-        );
-        let session = test_model_entry("m", "https://api.example.com/v1", None, None, None);
-        assert_eq!(
-            byok_from_lookup(&ModelLookup::Loaded(Some(&session))),
-            ModelByok::NotByok,
-        );
-    }
     #[test]
     fn resolve_model_auth_facts_empty_model_id_is_unknown() {
         assert_eq!(
@@ -5595,145 +4997,34 @@ reasoning_effort = "low"
         );
     }
     #[test]
-    fn user_override_adds_api_key_to_default_model() {
-        let dm = crate::models::default_model();
-        let raw_config: toml::Value = toml::from_str(&format!(
-            r#"
-            [model."{dm}"]
-            api_key = "user-custom-api-key"
-            "#,
-        ))
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get(dm).expect("model should exist");
-        assert_eq!(model.api_key, Some("user-custom-api-key".to_string()));
-        assert_eq!(model.info.model, dm);
-        assert_eq!(
-            model.info.base_url, "https://service.example.com/v1",
-            "base_url should inherit from default, not be stale"
-        );
-    }
-    #[test]
     fn config_override_applies_show_model_fingerprint() {
-        let endpoints = EndpointsConfig::default();
         let override_on = ConfigModelOverride {
             show_model_fingerprint: Some(true),
             ..Default::default()
         };
-        let entry = override_on.apply("some-model", None, &endpoints);
+        let entry = override_on.apply("some-model", None);
         assert!(
             entry.info.show_model_fingerprint,
             "Some(true) override should enable show_model_fingerprint"
         );
-        let mut base = ModelEntry::fallback("some-model", &endpoints);
+        let mut base = ModelEntry::fallback("some-model");
         base.info.show_model_fingerprint = true;
         let override_absent = ConfigModelOverride::default();
-        let entry = override_absent.apply("some-model", Some(base), &endpoints);
+        let entry = override_absent.apply("some-model", Some(base));
         assert!(
             entry.info.show_model_fingerprint,
             "None override should preserve the base entry's show_model_fingerprint"
         );
-        let mut base = ModelEntry::fallback("some-model", &endpoints);
+        let mut base = ModelEntry::fallback("some-model");
         base.info.show_model_fingerprint = true;
         let override_off = ConfigModelOverride {
             show_model_fingerprint: Some(false),
             ..Default::default()
         };
-        let entry = override_off.apply("some-model", Some(base), &endpoints);
+        let entry = override_off.apply("some-model", Some(base));
         assert!(
             !entry.info.show_model_fingerprint,
             "Some(false) override should disable show_model_fingerprint over a true base"
-        );
-    }
-    #[test]
-    fn user_override_parses_compaction_at_tokens_from_toml() {
-        use grow_sampling_types::CompactionAtTokens;
-        let dm = crate::models::default_model();
-        let raw_config: toml::Value = toml::from_str(&format!(
-            r#"
-            [model."{dm}"]
-            compaction_at_tokens = true
-            "#,
-        ))
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let model = resolve_model_list(&cfg, None)
-            .get(dm)
-            .expect("model should exist")
-            .clone();
-        assert_eq!(
-            model.info.compaction_at_tokens,
-            Some(CompactionAtTokens::Enabled(true)),
-        );
-        let raw_config: toml::Value = toml::from_str(&format!(
-            r#"
-            [model."{dm}"]
-            compaction_at_tokens = 367000
-            "#,
-        ))
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let model = resolve_model_list(&cfg, None)
-            .get(dm)
-            .expect("model should exist")
-            .clone();
-        assert_eq!(
-            model.info.compaction_at_tokens,
-            Some(CompactionAtTokens::Fixed(367_000)),
-        );
-    }
-    #[test]
-    fn user_override_parses_compactions_remaining_from_toml() {
-        use grow_sampling_types::CompactionsRemaining;
-        let dm = crate::models::default_model();
-        let raw_config: toml::Value = toml::from_str(&format!(
-            r#"
-            [model."{dm}"]
-            compactions_remaining = true
-            "#,
-        ))
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let model = resolve_model_list(&cfg, None)
-            .get(dm)
-            .expect("model should exist")
-            .clone();
-        assert_eq!(
-            model.info.compactions_remaining,
-            Some(CompactionsRemaining::Dynamic(true)),
-        );
-        let raw_config: toml::Value = toml::from_str(&format!(
-            r#"
-            [model."{dm}"]
-            compactions_remaining = 1
-            "#,
-        ))
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let model = resolve_model_list(&cfg, None)
-            .get(dm)
-            .expect("model should exist")
-            .clone();
-        assert_eq!(
-            model.info.compactions_remaining,
-            Some(CompactionsRemaining::Fixed(1)),
-        );
-        let raw_config: toml::Value = toml::from_str(&format!(
-            r#"
-            [model."{dm}"]
-            send_compactions_remaining = true
-            "#,
-        ))
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let model = resolve_model_list(&cfg, None)
-            .get(dm)
-            .expect("model should exist")
-            .clone();
-        assert_eq!(
-            model.info.compactions_remaining,
-            Some(CompactionsRemaining::Dynamic(true)),
         );
     }
     #[test]
@@ -5830,22 +5121,6 @@ reasoning_effort = "low"
         assert_eq!(dedup.untracked_exclude_globs, vec!["*.zip", "tmp/**"]);
     }
     #[test]
-    fn parses_model_context_window() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.my-custom-model]
-            model = "custom-llm"
-            base_url = "https://api.example.com/v1"
-            context_window = 256000
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get("my-custom-model").expect("model should exist");
-        assert_eq!(model.info.context_window, NonZeroU64::new(256_000).unwrap());
-    }
-    #[test]
     fn sampling_config_context_window_from_entry_or_default() {
         let model = test_model_entry("any-model", "https://api.example.com/v1", None, None, None);
         let config = sampling_config_for_model(&model, resolve_credentials(&model, None), None);
@@ -5857,126 +5132,6 @@ reasoning_effort = "low"
         assert_eq!(config.context_window, 256_000);
     }
     #[test]
-    fn parses_model_api_backend_responses() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.my-responses-model]
-            model = "grow-4.5"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            api_backend = "responses"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved
-            .get("my-responses-model")
-            .expect("model should exist");
-        assert_eq!(model.info.api_backend, ApiBackend::Responses);
-    }
-    #[test]
-    fn parses_model_api_backend_chat_completions() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.my-chat-model]
-            model = "grow-4.5"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            api_backend = "chat_completions"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get("my-chat-model").expect("model should exist");
-        assert_eq!(model.info.api_backend, ApiBackend::ChatCompletions);
-    }
-    /// Messages backend (Anthropic) auto-defaults supports_reasoning_effort=true.
-    /// Without this, `--reasoning-effort` is silently dropped in
-    /// grow-shell/src/agent/models.rs:857 for any BYOK Claude config.
-    #[test]
-    fn model_messages_backend_auto_defaults_supports_reasoning_effort() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.my-claude]
-            model = "grow-4.5"
-            base_url = "https://messages.example.com"
-            context_window = 200000
-            api_backend = "messages"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get("my-claude").expect("model should exist");
-        assert!(
-            model.info.supports_reasoning_effort,
-            "Messages backend should auto-default supports_reasoning_effort=true",
-        );
-    }
-    /// An explicit `supports_reasoning_effort = false` in config must override
-    /// the Messages auto-default — config wins.
-    #[test]
-    fn model_messages_backend_respects_explicit_supports_reasoning_effort_false() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.my-claude]
-            model = "grow-4.5"
-            base_url = "https://messages.example.com"
-            context_window = 200000
-            api_backend = "messages"
-            supports_reasoning_effort = false
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get("my-claude").expect("model should exist");
-        assert!(
-            !model.info.supports_reasoning_effort,
-            "explicit supports_reasoning_effort=false in config must override the Messages auto-default",
-        );
-    }
-    /// Non-Messages backends keep their existing default (false) since adaptive
-    /// thinking is Anthropic-specific and other providers vary per upstream model.
-    #[test]
-    fn model_chat_completions_backend_does_not_auto_default_supports_reasoning_effort() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.my-openai]
-            model = "grow-4.5"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            api_backend = "chat_completions"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get("my-openai").expect("model should exist");
-        assert!(
-            !model.info.supports_reasoning_effort,
-            "ChatCompletions backend must not auto-default supports_reasoning_effort=true",
-        );
-    }
-    #[test]
-    fn model_api_backend_defaults_to_chat_completions() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.my-model]
-            model = "grow-4.5"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get("my-model").expect("model should exist");
-        assert_eq!(model.info.api_backend, ApiBackend::ChatCompletions);
-    }
-    #[test]
     fn sampling_config_uses_model_api_backend() {
         let mut model =
             test_model_entry("test-model", "https://api.example.com/v1", None, None, None);
@@ -5984,41 +5139,6 @@ reasoning_effort = "low"
         let sampling_config =
             sampling_config_for_model(&model, resolve_credentials(&model, None), None);
         assert_eq!(sampling_config.api_backend, ApiBackend::Responses);
-    }
-    #[test]
-    fn parses_model_use_concise_true() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.my-concise-model]
-            model = "my-concise-model"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            use_concise = true
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved
-            .get("my-concise-model")
-            .expect("model should exist");
-        assert!(model.info.use_concise);
-    }
-    #[test]
-    fn model_use_concise_defaults_to_false() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.my-model]
-            model = "my-model"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get("my-model").expect("model should exist");
-        assert!(!model.info.use_concise);
     }
     #[test]
     fn model_info_from_config_propagates_use_concise() {
@@ -6057,28 +5177,6 @@ reasoning_effort = "low"
         };
         let info = ModelInfo::from_config(&entry);
         assert!(info.use_concise);
-    }
-    #[test]
-    fn deprecated_toolset_use_concise_is_ignored_in_model_config() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [toolset]
-            use_concise = true
-
-            [model.my-model]
-            model = "my-model"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get("my-model").expect("model should exist");
-        assert!(
-            !model.info.use_concise,
-            "old [toolset] use_concise should not affect per-model use_concise"
-        );
     }
     #[test]
     fn agent_selection_config_defaults_to_none() {
@@ -6144,39 +5242,6 @@ reasoning_effort = "low"
         let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
         assert!(cfg.agent.name.is_none());
         assert!(cfg.agent.definition.is_none());
-    }
-    #[test]
-    fn parses_model_with_agent_type() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.my-agent-model]
-            model = "my-agent-model"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            agent_type = "codex"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get("my-agent-model").expect("model should exist");
-        assert_eq!(model.info.agent_type, "codex");
-    }
-    #[test]
-    fn model_agent_type_defaults_to_grow_build() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.my-model]
-            model = "my-model"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get("my-model").expect("model should exist");
-        assert_eq!(model.info.agent_type, DEFAULT_AGENT_TYPE);
     }
     #[test]
     fn model_info_from_config_propagates_agent_type() {
@@ -6415,44 +5480,6 @@ reasoning_effort = "low"
         assert_eq!(meta["totalContextTokens"], 200_000);
     }
     #[test]
-    fn hidden_model_excluded_from_acp_but_kept_in_catalog() {
-        use crate::agent::models::{available_models, resolve_model_catalog};
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.visible-model]
-            model = "visible-model"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-
-            [model.hidden-model]
-            model = "hidden-model"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            hidden = true
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).unwrap();
-        let catalog = resolve_model_catalog(&cfg, None);
-        let available = available_models(&catalog, true);
-        assert!(
-            catalog.contains_key("visible-model"),
-            "visible model missing from catalog"
-        );
-        assert!(
-            catalog.contains_key("hidden-model"),
-            "hidden model missing from catalog"
-        );
-        assert!(
-            available.values().any(|m| m.name == "visible-model"),
-            "visible model missing from ACP"
-        );
-        assert!(
-            !available.values().any(|m| m.name == "hidden-model"),
-            "hidden model should NOT appear in ACP"
-        );
-    }
-    #[test]
     fn disabled_models_removed_from_catalog() {
         use crate::agent::models::resolve_model_catalog;
         let raw: toml::Value = toml::from_str(
@@ -6466,81 +5493,8 @@ reasoning_effort = "low"
             "#,
         )
         .unwrap();
-        let catalog = resolve_model_catalog(&Config::new_from_toml_cfg(&raw).unwrap(), None);
+        let catalog = resolve_model_catalog(&Config::new_from_toml_cfg(&raw).unwrap());
         assert!(!catalog.contains_key("to-disable"));
-    }
-    #[test]
-    fn hidden_models_kept_in_catalog_but_not_in_acp() {
-        use crate::agent::models::{available_models, resolve_model_catalog};
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [models]
-            hidden_models = ["to-hide"]
-            [model.to-hide]
-            model = "to-hide"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            "#,
-        )
-        .unwrap();
-        let catalog = resolve_model_catalog(&Config::new_from_toml_cfg(&raw).unwrap(), None);
-        let available = available_models(&catalog, true);
-        assert!(catalog.contains_key("to-hide"));
-        assert!(catalog["to-hide"].info.hidden);
-        assert!(!available.values().any(|m| m.name == "to-hide"));
-    }
-    #[test]
-    fn allowed_models_marks_selectable_by_wildcard_key_or_model() {
-        use crate::agent::models::resolve_model_catalog;
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [models]
-            allowed_models = ["keep-*", "explicit-key", "explicit-model-id"]
-            [model.to-drop]
-            model = "to-drop"
-            base_url = "https://api.example.com/v1"
-            context_window = 256000
-            [model.keep-one]
-            model = "keep-one"
-            base_url = "https://api.example.com/v1"
-            context_window = 256000
-            [model.explicit-key]
-            model = "explicit-model-id"
-            base_url = "https://api.example.com/v1"
-            context_window = 256000
-            "#,
-        )
-        .unwrap();
-        let catalog = resolve_model_catalog(&Config::new_from_toml_cfg(&raw).unwrap(), None);
-        assert!(catalog["keep-one"].info.user_selectable, "wildcard match");
-        assert!(
-            catalog["explicit-key"].info.user_selectable,
-            "matched by catalog key or model id"
-        );
-        assert!(
-            !catalog["to-drop"].info.user_selectable,
-            "kept but not selectable"
-        );
-    }
-    #[test]
-    fn allowed_models_empty_is_unrestricted() {
-        use crate::agent::models::resolve_model_catalog;
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [models]
-            allowed_models = []
-            [model.foo]
-            model = "foo"
-            base_url = "https://api.example.com/v1"
-            context_window = 256000
-            "#,
-        )
-        .unwrap();
-        let catalog = resolve_model_catalog(&Config::new_from_toml_cfg(&raw).unwrap(), None);
-        assert!(
-            catalog["foo"].info.user_selectable,
-            "empty allowed_models must not restrict"
-        );
     }
     #[test]
     fn invalid_glob_is_rejected_by_validation() {
@@ -6561,72 +5515,6 @@ reasoning_effort = "low"
             err.contains("allowed_models"),
             "error should name the offending field: {err}"
         );
-    }
-    #[test]
-    fn supported_in_api_false_hides_from_api_key_users() {
-        use crate::agent::models::{available_models, resolve_model_catalog};
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [model.oauth-only-model]
-            model = "oauth-only-model"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            supported_in_api = false
-
-            [model.public-model]
-            model = "public-model"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).unwrap();
-        let catalog = resolve_model_catalog(&cfg, None);
-        assert!(catalog.contains_key("oauth-only-model"));
-        assert!(catalog.contains_key("public-model"));
-        let api_available = available_models(&catalog, false);
-        assert!(!api_available.values().any(|m| m.name == "oauth-only-model"));
-        assert!(api_available.values().any(|m| m.name == "public-model"));
-        let oauth_available = available_models(&catalog, true);
-        assert!(
-            oauth_available
-                .values()
-                .any(|m| m.name == "oauth-only-model")
-        );
-        assert!(oauth_available.values().any(|m| m.name == "public-model"));
-    }
-    #[test]
-    fn inference_idle_timeout_secs_round_trip() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.slow-model]
-            model = "grow-4.5"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            inference_idle_timeout_secs = 600
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get("slow-model").expect("model should exist");
-        assert_eq!(model.info.inference_idle_timeout_secs, Some(600));
-    }
-    #[test]
-    fn inference_idle_timeout_secs_absent_defaults_to_none() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.default-model]
-            model = "grow-fast"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let model = resolved.get("default-model").expect("model should exist");
-        assert_eq!(model.info.inference_idle_timeout_secs, None);
     }
     #[test]
     fn inference_idle_timeout_propagates_to_model_info() {
@@ -6786,106 +5674,9 @@ reasoning_effort = "low"
             .api_key_auth_disabled()
         );
     }
-    fn resolve_models_from_toml(
-        toml_str: &str,
-        prefetched: Option<IndexMap<String, ModelEntry>>,
-    ) -> (Config, IndexMap<String, ModelEntry>) {
-        let raw: toml::Value = toml::from_str(toml_str).expect("test TOML should parse");
-        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, prefetched);
-        (cfg, resolved)
-    }
     fn resolve_sampling(model: &ModelEntry, session_key: Option<&str>) -> SamplerConfig {
         let credentials = resolve_credentials(model, session_key);
         sampling_config_for_model(model, credentials, None)
-    }
-    #[test]
-    #[serial]
-    fn e2e_user_overrides_default_model_key_with_custom_endpoint() {
-        let dm = crate::models::default_model();
-        let (_, models) = resolve_models_from_toml(
-            &format!(
-                r#"
-            [model."{dm}"]
-            model = "{dm}"
-            base_url = "https://inference.example.com/v1"
-            context_window = 200000
-            env_key = "ENTERPRISE_AUTH_TOKEN"
-            "#,
-            ),
-            None,
-        );
-        let model = models.get(dm).expect("model should exist");
-        assert_eq!(model.info.base_url, "https://inference.example.com/v1");
-        assert_eq!(
-            model.env_key.as_ref().and_then(|k| k.primary()),
-            Some("ENTERPRISE_AUTH_TOKEN")
-        );
-        unsafe { std::env::set_var("ENTERPRISE_AUTH_TOKEN", "enterprise-secret-key") };
-        let sampling = resolve_sampling(model, None);
-        assert_eq!(
-            sampling.api_key.as_deref(),
-            Some("enterprise-secret-key"),
-            "should use the user's env_key, not fall through to session/external"
-        );
-        assert_eq!(
-            sampling.base_url, "https://inference.example.com/v1",
-            "should route to the user's custom endpoint, not api.example.com"
-        );
-        unsafe { std::env::remove_var("ENTERPRISE_AUTH_TOKEN") };
-    }
-    #[test]
-    #[serial]
-    fn e2e_config_toml_model_overrides_default() {
-        let dm = crate::models::default_model();
-        let (_, models) = resolve_models_from_toml(
-            &format!(
-                r#"
-            [model."{dm}"]
-            base_url = "https://inference.example.com/v1"
-            "#,
-            ),
-            None,
-        );
-        let model = models.get(dm).expect("model should exist");
-        let sampling = resolve_sampling(model, Some("session-tok"));
-        assert_eq!(sampling.base_url, "https://inference.example.com/v1");
-        unsafe { std::env::set_var("GROW_API_KEY", "provider-key") };
-        let sampling = resolve_sampling(model, None);
-        assert_eq!(sampling.base_url, "https://inference.example.com/v1");
-        unsafe { std::env::remove_var("GROW_API_KEY") };
-        let sampling = resolve_sampling(model, None);
-        assert_eq!(sampling.base_url, "https://inference.example.com/v1");
-    }
-    #[test]
-    fn e2e_user_overrides_default_model_with_api_key() {
-        let dm = crate::models::default_model();
-        let (_, models) = resolve_models_from_toml(
-            &format!(
-                r#"
-            [model."{dm}"]
-            model = "{dm}"
-            base_url = "https://my-proxy.example.com/v1"
-            context_window = 200000
-            api_key = "my-custom-api-key"
-            "#,
-            ),
-            None,
-        );
-        let model = models.get(dm).expect("model should exist");
-        assert_eq!(model.info.base_url, "https://my-proxy.example.com/v1");
-        assert_eq!(model.api_key.as_deref(), Some("my-custom-api-key"));
-        assert!(model.env_key.is_none());
-        let sampling = resolve_sampling(model, Some("session-token"));
-        assert_eq!(
-            sampling.api_key.as_deref(),
-            Some("my-custom-api-key"),
-            "model's own api_key must beat session token"
-        );
-        assert_eq!(
-            sampling.base_url, "https://my-proxy.example.com/v1",
-            "should route to user's custom endpoint"
-        );
     }
     #[test]
     fn parsed_config_has_models_config() {
@@ -6902,7 +5693,7 @@ reasoning_effort = "low"
         assert_eq!(cfg.models.session_summary.as_deref(), Some("title-model"));
     }
     #[test]
-    fn config_models_default_is_not_overwritten_by_default_models_json() {
+    fn config_models_default_beats_optional_remote_setting() {
         let config_default = Some("custom-byok-model");
         let remote_settings_default = Some("remote-settings-model");
         let resolved = resolve_string_flag(
@@ -6916,213 +5707,7 @@ reasoning_effort = "low"
         assert_eq!(
             resolved.source,
             ConfigSource::Config,
-            "[models] default from config.toml must beat remote settings and compiled-in defaults"
-        );
-    }
-    #[test]
-    fn config_models_default_custom_model_is_in_resolved_model_list() {
-        let (_, models) = resolve_models_from_toml(
-            r#"
-            [model.acme-grow]
-            model = "grow-4.5"
-            base_url = "https://inference.example.com/v1"
-            context_window = 256000
-            env_key = "ENTERPRISE_AUTH_TOKEN"
-            "#,
-            None,
-        );
-        assert!(
-            models.contains_key("acme-grow"),
-            "user-defined model must be in the resolved model list"
-        );
-        let model = models.get("acme-grow").unwrap();
-        assert_eq!(model.info.model, "grow-4.5");
-        assert_eq!(model.info.base_url, "https://inference.example.com/v1");
-    }
-    #[test]
-    fn e2e_default_model_with_session_routes_to_proxy() {
-        let (_, models) = resolve_models_from_toml("", None);
-        let model = models
-            .get(crate::models::default_model())
-            .expect("default model should exist");
-        let sampling = resolve_sampling(model, Some("session-token-123"));
-        assert_eq!(sampling.api_key.as_deref(), Some("session-token-123"));
-        assert_eq!(
-            sampling.base_url, "https://service.example.com/v1",
-            "session auth should route to cli-chat-proxy, not api.example.com"
-        );
-    }
-    #[test]
-    #[serial]
-    fn e2e_default_model_with_external_api_key_routes_to_api_xai() {
-        let (_, models) = resolve_models_from_toml("", None);
-        let model = models
-            .get(crate::models::default_model())
-            .expect("default model should exist");
-        unsafe { std::env::set_var("GROW_API_KEY", "provider-external-key") };
-        let sampling = resolve_sampling(model, None);
-        assert_eq!(sampling.api_key.as_deref(), Some("provider-external-key"));
-        assert_eq!(
-            sampling.base_url, "https://api.example.com/v1",
-            "external API key should route to api.example.com via api_base_url"
-        );
-        unsafe { std::env::remove_var("GROW_API_KEY") };
-    }
-    #[test]
-    fn e2e_user_config_overrides_prefetched_model() {
-        let dm = crate::models::default_model();
-        let mut prefetched = IndexMap::new();
-        prefetched.insert(
-            dm.to_string(),
-            test_model_entry(dm, "https://service.example.com/v1", None, None, None),
-        );
-        let (_, models) = resolve_models_from_toml(
-            &format!(
-                r#"
-            [model."{dm}"]
-            model = "{dm}"
-            base_url = "https://my-proxy.example.com/v1"
-            context_window = 200000
-            api_key = "my-api-key"
-            "#,
-            ),
-            Some(prefetched),
-        );
-        let model = models.get(dm).unwrap();
-        assert_eq!(
-            model.info.base_url, "https://my-proxy.example.com/v1",
-            "user TOML should override prefetched model"
-        );
-        let sampling = resolve_sampling(model, Some("session-token"));
-        assert_eq!(
-            sampling.api_key.as_deref(),
-            Some("my-api-key"),
-            "model's own api_key should win over session token"
-        );
-        assert_eq!(sampling.base_url, "https://my-proxy.example.com/v1");
-    }
-    #[test]
-    #[serial]
-    fn e2e_credential_priority_model_key_beats_session_beats_env() {
-        let model_with_key = test_model_entry(
-            "test",
-            "https://custom.api/v1",
-            Some("model-key"),
-            None,
-            None,
-        );
-        unsafe { std::env::set_var("GROW_API_KEY", "env-key") };
-        let sampling = resolve_sampling(&model_with_key, Some("session-key"));
-        assert_eq!(
-            sampling.api_key.as_deref(),
-            Some("model-key"),
-            "model's own api_key must beat session and env key"
-        );
-        assert_eq!(
-            sampling.base_url, "https://custom.api/v1",
-            "model's own base_url must be used"
-        );
-        let model_no_key = test_model_entry(
-            "test",
-            "https://proxy.api/v1",
-            None,
-            None,
-            Some("https://api.example.com/v1"),
-        );
-        let sampling = resolve_sampling(&model_no_key, Some("session-key"));
-        assert_eq!(
-            sampling.api_key.as_deref(),
-            Some("session-key"),
-            "session token should beat env key when model has no own credentials"
-        );
-        assert_eq!(
-            sampling.base_url, "https://proxy.api/v1",
-            "session auth should use base_url, not api_base_url"
-        );
-        let sampling = resolve_sampling(&model_no_key, None);
-        assert_eq!(
-            sampling.api_key.as_deref(),
-            Some("env-key"),
-            "env key should be used when no session and no model credentials"
-        );
-        assert_eq!(
-            sampling.base_url, "https://api.example.com/v1",
-            "env key should route to api_base_url"
-        );
-        unsafe { std::env::remove_var("GROW_API_KEY") };
-        let sampling = resolve_sampling(&model_no_key, None);
-        assert!(
-            sampling.api_key.is_none(),
-            "no credentials available → api_key should be None"
-        );
-    }
-    #[test]
-    fn e2e_duplicate_model_field_both_entries_survive() {
-        let dm = crate::models::default_model();
-        let (_, models) = resolve_models_from_toml(
-            &format!(
-                r#"
-            [model.acme-grow]
-            model = "{dm}"
-            base_url = "https://inference.example.com/v1"
-            context_window = 200000
-            api_key = "enterprise-key"
-            "#,
-            ),
-            None,
-        );
-        assert!(models.contains_key(dm), "default entry should still exist");
-        assert!(
-            models.contains_key("acme-grow"),
-            "user entry with different key should also exist"
-        );
-        let default = models.get(dm).unwrap();
-        let user = models.get("acme-grow").unwrap();
-        assert_eq!(default.info.model, user.info.model, "same model field");
-        assert_ne!(
-            default.info.base_url, user.info.base_url,
-            "different base_urls"
-        );
-        let sampling = resolve_sampling(user, None);
-        assert_eq!(sampling.api_key.as_deref(), Some("enterprise-key"));
-        assert_eq!(sampling.base_url, "https://inference.example.com/v1");
-        let sampling = resolve_sampling(default, Some("session-key"));
-        assert_eq!(sampling.api_key.as_deref(), Some("session-key"));
-        assert_eq!(sampling.base_url, "https://service.example.com/v1",);
-    }
-    #[test]
-    fn e2e_enterprise_custom_endpoint_skips_xai_defaults() {
-        let mut cfg = Config::default();
-        cfg.endpoints.models_base_url = Some("https://enterprise.acme.com/v1".to_owned());
-        let mut prefetched = IndexMap::new();
-        prefetched.insert(
-            "acme-model".to_string(),
-            test_model_entry(
-                "acme-model",
-                "https://enterprise.acme.com/v1",
-                None,
-                None,
-                None,
-            ),
-        );
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        assert!(
-            resolved.contains_key("acme-model"),
-            "enterprise model should be present"
-        );
-        assert!(
-            !resolved.contains_key(crate::models::default_model()),
-            "Grow default must not leak into enterprise model list"
-        );
-        assert_eq!(resolved.len(), 1, "only the prefetched enterprise model");
-    }
-    #[test]
-    fn e2e_default_endpoint_still_injects_defaults() {
-        let cfg = Config::default();
-        let resolved = resolve_model_list(&cfg, None);
-        assert!(
-            resolved.contains_key(crate::models::default_model()),
-            "default model should be present when using default endpoint"
+            "[models] default from config.toml must beat remote settings"
         );
     }
     #[test]
@@ -7131,7 +5716,7 @@ reasoning_effort = "low"
         models.insert(
             "default-grow".to_string(),
             test_model_entry(
-                crate::models::default_model(),
+                "same-upstream-model",
                 "https://service.example.com/v1",
                 None,
                 None,
@@ -7141,7 +5726,7 @@ reasoning_effort = "low"
         models.insert(
             "acme-grow".to_string(),
             test_model_entry(
-                crate::models::default_model(),
+                "same-upstream-model",
                 "https://inference.example.com/v1",
                 Some("enterprise-key"),
                 None,
@@ -7163,66 +5748,6 @@ reasoning_effort = "low"
             "user entry should be addressable by map key"
         );
     }
-    #[test]
-    fn e2e_enterprise_endpoints_plus_partial_model_override() {
-        let dm = crate::models::default_model();
-        let (_, models) = resolve_models_from_toml(
-            &format!(
-                r#"
-            [endpoints]
-            cli_chat_proxy_base_url = "https://enterprise-proxy.acme.com/v1"
-            inference_base_url = "https://enterprise-api.acme.com/v1"
-
-            [model."{dm}"]
-            api_key = "acme-api-key"
-            "#,
-            ),
-            None,
-        );
-        let model = models.get(dm).expect("model should exist");
-        assert_eq!(
-            model.info.base_url, "https://enterprise-proxy.acme.com/v1",
-            "base_url must inherit from [endpoints], not stale default"
-        );
-        assert_eq!(model.api_key.as_deref(), Some("acme-api-key"));
-        assert_eq!(
-            model.api_base_url.as_deref(),
-            Some("https://enterprise-api.acme.com/v1"),
-        );
-        let sampling = resolve_sampling(model, Some("session-token"));
-        assert_eq!(
-            sampling.api_key.as_deref(),
-            Some("acme-api-key"),
-            "model's own api_key must beat session token"
-        );
-        assert_eq!(
-            sampling.base_url, "https://enterprise-proxy.acme.com/v1",
-            "sampling must route to enterprise proxy"
-        );
-    }
-    #[test]
-    fn e2e_enterprise_endpoints_only_no_model_override() {
-        let (_, models) = resolve_models_from_toml(
-            r#"
-            [endpoints]
-            cli_chat_proxy_base_url = "https://enterprise-proxy.acme.com/v1"
-            inference_base_url = "https://enterprise-api.acme.com/v1"
-            "#,
-            None,
-        );
-        let model = models
-            .get(crate::models::default_model())
-            .expect("model should exist");
-        assert_eq!(
-            model.info.base_url, "https://enterprise-proxy.acme.com/v1",
-            "default model should use enterprise cli_chat_proxy_base_url"
-        );
-        assert_eq!(
-            model.api_base_url.as_deref(),
-            Some("https://enterprise-api.acme.com/v1"),
-            "default model should use enterprise inference_base_url"
-        );
-    }
     /// Unset every env var that `EndpointsConfig::default()` reads for endpoints,
     /// so the cli-chat-proxy resolver tests below are deterministic regardless of
     /// the ambient environment. Gated behind `#[serial]`.
@@ -7231,8 +5756,6 @@ reasoning_effort = "low"
             "GROW_CLI_CHAT_PROXY_BASE_URL",
             "GROW_INFERENCE_BASE_URL",
             "GROW_MANAGED_CONFIG_URL",
-            "GROW_MODELS_BASE_URL",
-            "GROW_MODELS_LIST_URL",
         ] {
             unsafe { std::env::remove_var(k) };
         }
@@ -7250,14 +5773,8 @@ reasoning_effort = "low"
             cli_chat_proxy_base_url: None,
             ..Default::default()
         };
-        let proxy = CLI_CHAT_PROXY_BASE_URL_DEFAULT;
-        assert_eq!(cfg.proxy_url(), proxy);
-        assert_eq!(cfg.resolve_inference_base_url(), proxy);
-        assert_eq!(cfg.resolve_models_list_url(), format!("{proxy}/models"));
-        assert_eq!(
-            cfg.resolve_managed_config_url(),
-            format!("{proxy}/deployment/config")
-        );
+        assert_eq!(cfg.proxy_url(), CLI_CHAT_PROXY_BASE_URL_DEFAULT);
+        assert_eq!(cfg.resolve_managed_config_url(), None);
         assert_eq!(cfg.inference_base_url, inference);
         let overridden = EndpointsConfig {
             cli_chat_proxy_base_url: Some("https://proxy.enterprise.example/v1".to_string()),
@@ -7271,8 +5788,8 @@ reasoning_effort = "low"
             "https://proxy.enterprise.example/v1"
         );
         assert_eq!(
-            overridden.resolve_managed_config_url(),
-            "https://control.enterprise.example/deployment/config"
+            overridden.resolve_managed_config_url().as_deref(),
+            Some("https://control.enterprise.example/deployment/config")
         );
     }
     /// REGRESSION: the managed-config URL never follows `inference_base_url`
@@ -7292,74 +5809,7 @@ reasoning_effort = "low"
         )
         .expect("config should parse");
         assert!(cfg.endpoints.cli_chat_proxy_base_url.is_none());
-        assert_eq!(
-            cfg.endpoints.resolve_managed_config_url(),
-            format!("{CLI_CHAT_PROXY_BASE_URL_DEFAULT}/deployment/config")
-        );
-        assert!(
-            !cfg.endpoints
-                .resolve_managed_config_url()
-                .contains("inference.acme-corp.example"),
-            "deployment key would be sent to the inference host"
-        );
-    }
-    #[test]
-    fn e2e_user_override_explicit_base_url_wins_over_endpoints() {
-        let dm = crate::models::default_model();
-        let (_, models) = resolve_models_from_toml(
-            &format!(
-                r#"
-            [endpoints]
-            cli_chat_proxy_base_url = "https://enterprise-proxy.acme.com/v1"
-
-            [model."{dm}"]
-            base_url = "https://my-special-proxy.example.com/v1"
-            "#,
-            ),
-            None,
-        );
-        let model = models.get(dm).expect("model should exist");
-        assert_eq!(
-            model.info.base_url, "https://my-special-proxy.example.com/v1",
-            "explicit base_url in [model.*] must win over [endpoints]"
-        );
-    }
-    #[test]
-    fn e2e_models_endpoint_serde_alias_parses_as_models_list_url() {
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [endpoints]
-            models_endpoint = "https://old-style.acme.com/v1/models"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
-        assert_eq!(
-            cfg.endpoints.models_list_url.as_deref(),
-            Some("https://old-style.acme.com/v1/models"),
-            "models_endpoint alias should parse into models_list_url"
-        );
-        assert!(cfg.endpoints.has_custom_endpoint());
-    }
-    #[test]
-    fn e2e_config_models_parsed_directly_not_via_deep_merge() {
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [model.custom-model]
-            model = "my-custom-llm"
-            api_key = "custom-key"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
-        assert!(cfg.config_models.contains_key("custom-model"));
-        let model_override = cfg.config_models.get("custom-model").unwrap();
-        assert_eq!(model_override.model.as_deref(), Some("my-custom-llm"));
-        assert_eq!(model_override.api_key.as_deref(), Some("custom-key"));
-        assert!(
-            model_override.base_url.is_none(),
-            "base_url should be None when user didn't set it"
-        );
+        assert_eq!(cfg.endpoints.resolve_managed_config_url(), None);
     }
     #[test]
     #[serial]
@@ -8601,8 +7051,8 @@ agent_type = "cursor"
         "#,
         );
         assert!(
-            !unused.iter().any(|k| k == "features.remote_fetch"),
-            "features.remote_fetch must not be treated as a typo: {unused:?}"
+            unused.iter().any(|k| k == "features.remote_fetch"),
+            "removed remote_fetch must be reported as an unknown key: {unused:?}"
         );
         assert!(
             !unused.iter().any(|k| k == "slash_command_tags"),
@@ -8633,84 +7083,6 @@ agent_type = "cursor"
         assert!(
             unused.iter().any(|k| k == "features.telmetry"),
             "got: {unused:?}"
-        );
-    }
-    #[test]
-    fn config_accepts_all_known_sections() {
-        let unused = unused_keys_from_toml(
-            r#"
-            disabled_mcp_servers = ["old-server"]
-            [cli]
-            auto_update = false
-            [features]
-            feedback = true
-            [endpoints]
-            deployment_key = "test"
-            management_api_key = "mgmt-key"
-            [models]
-            default = "grow-3"
-            [ui]
-            yolo = true
-            theme = "dark"
-            approval_mode = "ask"
-            [session]
-            auto_compact_threshold_percent = 85
-            [diagnostics]
-            crash_handler = true
-            [agent]
-            name = "custom"
-            [skills]
-            paths = ["~/skills"]
-            [plugins]
-            paths = ["~/plugins"]
-            [subagents]
-            enabled = true
-            [memory]
-            enabled = true
-            [compaction]
-            [compaction.pruning]
-            enabled = true
-            [feedback.user]
-            name = ["os_user"]
-            email = ["git_email", "team@example.com"]
-            email_domain = "example.com"
-            command = "/opt/bin/grow-identity"
-            [repo_changes_dedup]
-            enabled = false
-            [remote]
-            secret = "value"
-            [worktree_pool]
-            pool_size = 4
-            [managed_mcps]
-            enabled = true
-            [mcp_servers.test]
-            url = "https://mcp.test.com"
-            [toolset.bash]
-            timeout_secs = 120
-            login_shell_capture = true
-            [shortcuts]
-            ctrl_k = "search"
-            [auth]
-            token_header = "test"
-            [auth.oidc]
-            issuer = "https://sso.corp.com"
-            client_id = "abc123"
-            [storage]
-            cleanup_ttl_days = 7
-            [[marketplace.sources]]
-            name = "Local Dev"
-            path = "/tmp/plugins"
-            [permission]
-            [[permission.rules]]
-            action = "allow"
-            tool = "bash"
-            [tools]
-            respect_gitignore = false
-        "#,
-        );
-        assert!(
-            unused.is_empty(),
-            "false positive on valid config: {unused:?}"
         );
     }
     #[test]
@@ -9126,34 +7498,6 @@ hooks = true
     }
     #[test]
     #[serial]
-    fn resolve_runtime_fields_interactive_defaults() {
-        clear_runtime_env_vars();
-        clear_managed_mcp_env_vars();
-        let raw = empty_config();
-        let mut cfg = Config::new_from_toml_cfg(&raw).unwrap();
-        cfg.resolve_runtime_fields(&RuntimeResolutionContext {
-            raw_config: &raw,
-            remote_settings: None,
-            is_headless: false,
-            cli_subagents: None,
-            cli_session_summary_model: None,
-            cli_experimental_memory: false,
-            cli_no_memory: false,
-            todo_gate: false,
-            laziness_debug_log: None,
-        });
-        assert!(cfg.subagents_enabled);
-        assert!(!cfg.respect_gitignore);
-        assert!(cfg.managed_mcps_enabled);
-        assert!(!cfg.managed_mcp_gateway_tools_enabled);
-        assert_eq!(
-            cfg.session_summary_model,
-            Some(crate::models::default_session_summary_model().to_owned())
-        );
-        assert!(!cfg.path_not_found_hints);
-    }
-    #[test]
-    #[serial]
     fn resolve_runtime_fields_headless_defaults() {
         clear_runtime_env_vars();
         clear_managed_mcp_env_vars();
@@ -9347,140 +7691,6 @@ default = "grow-4.5"
         let cfg = Config::new_from_toml_cfg(&value).unwrap();
         assert_eq!(cfg.models.default.as_deref(), Some("grow-4.5"));
     }
-    /// Reproduce the enterprise managed config bug: [model.grow-build] sets
-    /// context_window=500k for model="grow-4.5", but
-    /// [models].default="grow-4.5" resolves to the bare
-    /// prefetched entry (256k) because Layer 3 only overrides key
-    /// "grow-build", not key "grow-4.5".
-    ///
-    /// After the Layer 4 slug propagation fix, both keys should have 500k.
-    #[test]
-    fn slug_propagation_enterprise_managed_config_key_mismatch() {
-        let default_cw = DEFAULT_CONTEXT_WINDOW;
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [models]
-            default = "grow-4.5"
-
-            [model.grow-build]
-            model = "grow-4.5"
-            context_window = 500000
-            base_url = "https://inference.example.com/v1"
-            api_backend = "responses"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
-        let mut prefetched = IndexMap::new();
-        let mut entry = test_model_entry(
-            "grow-4.5",
-            "https://inference.example.com/v1",
-            None,
-            None,
-            None,
-        );
-        entry.info.context_window = NonZeroU64::new(default_cw).unwrap();
-        prefetched.insert("grow-4.5".to_owned(), entry);
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let by_key = resolved
-            .get("grow-build")
-            .expect("grow-build key must exist");
-        assert_eq!(by_key.info.context_window.get(), 500_000);
-        assert_eq!(by_key.info.model, "grow-4.5");
-        let by_latest = resolved.get("grow-4.5").expect("grow-4.5 key must exist");
-        assert_eq!(
-            by_latest.info.context_window.get(),
-            500_000,
-            "BUG: prefetched 'grow-4.5' should inherit 500k from \
-             sibling 'grow-build' (same model slug), not stay at {default_cw}"
-        );
-    }
-    /// Slug propagation should carry over api_backend but NOT agent_type.
-    #[test]
-    fn slug_propagation_inherits_api_backend_but_not_agent_type() {
-        let default_cw = DEFAULT_CONTEXT_WINDOW;
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [model.grow-build]
-            model = "grow-4.5"
-            context_window = 500000
-            base_url = "https://test.example.com/v1"
-            api_backend = "responses"
-            agent_type = "grow-build"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
-        let mut prefetched = IndexMap::new();
-        let mut entry =
-            test_model_entry("grow-4.5", "https://test.example.com/v1", None, None, None);
-        entry.info.context_window = NonZeroU64::new(default_cw).unwrap();
-        entry.info.agent_type = default_agent_type();
-        entry.info.api_backend = ApiBackend::default();
-        prefetched.insert("grow-4.5".to_owned(), entry);
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let latest = resolved.get("grow-4.5").unwrap();
-        assert_eq!(
-            latest.info.agent_type,
-            default_agent_type(),
-            "agent_type must NOT be inherited from sibling — each entry owns its own harness"
-        );
-        assert_eq!(
-            latest.info.api_backend,
-            ApiBackend::Responses,
-            "api_backend should be inherited from sibling"
-        );
-    }
-    /// When the prefetched entry has an explicitly-set context_window
-    /// (not the 256k default), slug propagation must NOT overwrite it.
-    #[test]
-    fn slug_propagation_does_not_overwrite_explicit_context_window() {
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [model.grow-build]
-            model = "grow-4.5"
-            context_window = 500000
-            base_url = "https://test.example.com/v1"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
-        let mut prefetched = IndexMap::new();
-        let mut entry =
-            test_model_entry("grow-4.5", "https://test.example.com/v1", None, None, None);
-        entry.info.context_window = NonZeroU64::new(65_536).unwrap();
-        prefetched.insert("grow-4.5".to_owned(), entry);
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let latest = resolved.get("grow-4.5").unwrap();
-        assert_eq!(
-            latest.info.context_window.get(),
-            65_536,
-            "explicitly-set context_window must not be overwritten by slug propagation"
-        );
-    }
-    /// When no sibling has a real context_window, slug propagation is a no-op.
-    #[test]
-    fn slug_propagation_noop_when_no_donor() {
-        let default_cw = DEFAULT_CONTEXT_WINDOW;
-        let cfg = Config::default();
-        let mut prefetched = IndexMap::new();
-        let mut entry = test_model_entry(
-            "some-unknown-model",
-            "https://test.example.com/v1",
-            None,
-            None,
-            None,
-        );
-        entry.info.context_window = NonZeroU64::new(default_cw).unwrap();
-        prefetched.insert("some-unknown-model".to_owned(), entry);
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let model = resolved.get("some-unknown-model").unwrap();
-        assert_eq!(
-            model.info.context_window.get(),
-            default_cw,
-            "no donor exists, context_window should stay at parser default"
-        );
-    }
     /// Build a minimal `ModelEntry` for testing resolve_model_list.
     fn prefetch_model_entry(
         slug: &str,
@@ -9528,115 +7738,6 @@ default = "grow-4.5"
         }
     }
     #[test]
-    fn global_extra_headers_apply_to_model_without_override() {
-        let dm = crate::models::default_model();
-        let (_, models) = resolve_models_from_toml(
-            r#"
-            [models]
-            extra_headers = { "X-Request-Tags" = "team=example,env=prod" }
-            "#,
-            None,
-        );
-        let model = models.get(dm).expect("default model should exist");
-        assert_eq!(
-            model
-                .info
-                .extra_headers
-                .get("X-Request-Tags")
-                .map(String::as_str),
-            Some("team=example,env=prod"),
-            "global [models].extra_headers must apply to a model with no per-model override"
-        );
-    }
-    #[test]
-    fn per_model_extra_headers_override_global_per_key() {
-        let dm = crate::models::default_model();
-        let (_, models) = resolve_models_from_toml(
-            &format!(
-                r#"
-                [models]
-                extra_headers = {{ "X-Request-Tags" = "team=example,env=staging", "X-Team" = "platform" }}
-
-                [model."{dm}"]
-                extra_headers = {{ "X-Request-Tags" = "team=example,env=prod" }}
-                "#,
-            ),
-            None,
-        );
-        let model = models.get(dm).expect("default model should exist");
-        assert_eq!(
-            model
-                .info
-                .extra_headers
-                .get("X-Request-Tags")
-                .map(String::as_str),
-            Some("team=example,env=prod"),
-            "per-model extra_headers must override the global value for that key"
-        );
-        assert_eq!(
-            model.info.extra_headers.get("X-Team").map(String::as_str),
-            Some("platform"),
-            "a global-only key must still be inherited when a model overrides a different key"
-        );
-    }
-    #[test]
-    fn per_model_extra_headers_override_global_case_insensitively() {
-        let dm = crate::models::default_model();
-        let (_, models) = resolve_models_from_toml(
-            &format!(
-                r#"
-                [models]
-                extra_headers = {{ "X-Request-Tags" = "global" }}
-
-                [model."{dm}"]
-                extra_headers = {{ "x-request-tags" = "permodel" }}
-                "#,
-            ),
-            None,
-        );
-        let model = models.get(dm).expect("default model should exist");
-        let cost_tags: Vec<&str> = model
-            .info
-            .extra_headers
-            .iter()
-            .filter(|(k, _)| k.eq_ignore_ascii_case("x-request-tags"))
-            .map(|(_, v)| v.as_str())
-            .collect();
-        assert_eq!(
-            cost_tags,
-            vec!["permodel"],
-            "per-model value must win case-insensitively, with no global case-variant duplicate"
-        );
-        assert!(
-            !model.info.extra_headers.contains_key("X-Request-Tags"),
-            "global \"X-Request-Tags\" must not co-exist with per-model \"x-request-tags\""
-        );
-    }
-    #[test]
-    fn global_extra_headers_apply_to_prefetched_model() {
-        let mut cfg = Config::default();
-        cfg.models.extra_headers.insert(
-            "X-Request-Tags".to_owned(),
-            "team=example,env=prod".to_owned(),
-        );
-        let entry = prefetch_model_entry("remote-only-model", 200_000, ApiBackend::default());
-        let mut prefetched = IndexMap::new();
-        prefetched.insert("remote-only-model".to_owned(), entry);
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let model = resolved
-            .get("remote-only-model")
-            .expect("prefetched model should exist");
-        assert_eq!(
-            model
-                .info
-                .extra_headers
-                .get("X-Request-Tags")
-                .map(String::as_str),
-            Some("team=example,env=prod"),
-            "global [models].extra_headers must cover models from /v1/models"
-        );
-    }
-    #[test]
     fn per_model_value_overrides_global_model_default() {
         let mut cfg = Config::default();
         cfg.models.max_retries = Some(9);
@@ -9649,10 +7750,7 @@ default = "grow-4.5"
                 ..Default::default()
             },
         );
-        let entry = prefetch_model_entry("remote-only-model", 200_000, ApiBackend::default());
-        let mut prefetched = IndexMap::new();
-        prefetched.insert("remote-only-model".to_owned(), entry);
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
+        let resolved = resolve_model_list(&cfg);
         let model = resolved
             .get("remote-only-model")
             .expect("model should exist");
@@ -9668,254 +7766,10 @@ default = "grow-4.5"
         );
     }
     #[test]
-    fn config_model_reasoning_efforts_parses_inline_tables_and_bare_strings() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.custom]
-            model = "custom"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            reasoning_efforts = [
-                { value = "high", label = "High", default = true },
-                { id = "deep", value = "xhigh", label = "Deep", description = "Max" },
-            ]
-
-            [model.shorthand]
-            model = "shorthand"
-            base_url = "https://api.example.com/v1"
-            context_window = 200000
-            reasoning_efforts = ["low", "high"]
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let custom = &resolved.get("custom").expect("custom model").info;
-        assert_eq!(custom.reasoning_efforts.len(), 2);
-        assert_eq!(custom.reasoning_efforts[0].label, "High");
-        assert!(custom.reasoning_efforts[0].default);
-        assert_eq!(custom.reasoning_efforts[1].id, "deep");
-        assert_eq!(custom.reasoning_efforts[1].value, ReasoningEffort::Xhigh);
-        let shorthand = &resolved.get("shorthand").expect("shorthand model").info;
-        let ids: Vec<_> = shorthand
-            .reasoning_efforts
-            .iter()
-            .map(|o| o.id.as_str())
-            .collect();
-        assert_eq!(ids, ["low", "high"]);
-        assert_eq!(shorthand.reasoning_efforts[0].label, "Low");
-    }
-    #[test]
-    fn resolve_model_list_config_reasoning_efforts_beats_remote() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [model.grow-x]
-            reasoning_efforts = ["low"]
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let mut entry = prefetch_model_entry("grow-x", 200_000, ApiBackend::default());
-        entry.info.reasoning_efforts = vec![ReasoningEffortOption {
-            id: "high".to_string(),
-            value: ReasoningEffort::High,
-            label: "High".to_string(),
-            description: None,
-            default: false,
-        }];
-        let mut prefetched = IndexMap::new();
-        prefetched.insert("grow-x".to_owned(), entry);
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let efforts = &resolved
-            .get("grow-x")
-            .expect("grow-x")
-            .info
-            .reasoning_efforts;
-        assert_eq!(efforts.len(), 1);
-        assert_eq!(
-            efforts[0].id, "low",
-            "config.toml list must override remote"
-        );
-    }
-    #[test]
-    fn resolve_model_list_inherits_context_window_from_default_when_prefetched_has_fallback() {
+    fn resolve_model_list_empty_config_yields_empty_catalog() {
         let cfg = Config::default();
-        let dm = crate::models::default_model();
-        let default_cw = DEFAULT_CONTEXT_WINDOW;
-        let entry = prefetch_model_entry(dm, default_cw, ApiBackend::default());
-        let mut prefetched = IndexMap::new();
-        prefetched.insert(dm.to_owned(), entry);
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let entry = resolved.get(dm).expect("model must exist");
-        assert_ne!(
-            entry.info.context_window.get(),
-            default_cw,
-            "context_window should have been inherited from hardcoded default, not left at DEFAULT_CONTEXT_WINDOW"
-        );
-    }
-    #[test]
-    fn resolve_model_list_does_not_override_explicitly_set_context_window() {
-        let cfg = Config::default();
-        let dm = crate::models::default_model();
-        let explicit_cw = 65_536;
-        let entry = prefetch_model_entry(dm, explicit_cw, ApiBackend::default());
-        let mut prefetched = IndexMap::new();
-        prefetched.insert(dm.to_owned(), entry);
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let entry = resolved.get(dm).expect("model must exist");
-        assert_eq!(
-            entry.info.context_window.get(),
-            explicit_cw,
-            "explicitly-set context_window must not be overwritten by default"
-        );
-    }
-    #[test]
-    fn resolve_model_list_inherits_agent_type_and_api_backend() {
-        let cfg = Config::default();
-        let dm = crate::models::default_model();
-        let default_cw = DEFAULT_CONTEXT_WINDOW;
-        let entry = prefetch_model_entry(dm, default_cw, ApiBackend::default());
-        let mut prefetched = IndexMap::new();
-        prefetched.insert(dm.to_owned(), entry);
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let entry = resolved.get(dm).expect("model must exist");
-        let defaults = default_model_entries(&EndpointsConfig::default());
-        if let Some(default) = defaults.get(dm) {
-            if default.info.agent_type != DEFAULT_AGENT_TYPE {
-                assert_eq!(
-                    entry.info.agent_type, default.info.agent_type,
-                    "agent_type should be inherited from default"
-                );
-            }
-            if default.info.api_backend != ApiBackend::default() {
-                assert_eq!(
-                    entry.info.api_backend, default.info.api_backend,
-                    "api_backend should be inherited from default"
-                );
-            }
-        }
-    }
-    #[test]
-    fn resolve_model_list_prunes_bundled_entries_not_in_prefetch() {
-        let cfg = Config::default();
-        let dm = crate::models::default_model();
-        let mut defs = default_model_entries(&EndpointsConfig::default());
-        let mut p = IndexMap::new();
-        if let Some(e) = defs.shift_remove(dm) {
-            p.insert(dm.to_string(), e);
-        }
-        let resolved = resolve_model_list(&cfg, Some(p));
-        assert!(resolved.contains_key(dm));
-        let no_p = resolve_model_list(&cfg, None);
-        assert!(no_p.contains_key(dm));
-    }
-    #[test]
-    fn resolve_model_list_prefetch_visibility_matches_auth_and_server_list() {
-        let cfg = Config::default();
-        let dm = crate::models::default_model();
-        let mut defs = default_model_entries(&EndpointsConfig::default());
-        let mut p = IndexMap::new();
-        if let Some(e) = defs.shift_remove(dm) {
-            p.insert(dm.to_string(), e);
-        }
-        let resolved = resolve_model_list(&cfg, Some(p));
-        let sess: Vec<_> = resolved
-            .values()
-            .filter(|e| e.visible_for_auth(true))
-            .collect();
-        let api: Vec<_> = resolved
-            .values()
-            .filter(|e| e.visible_for_auth(false))
-            .collect();
-        assert_eq!(sess.len(), 1);
-        assert_eq!(api.len(), 1);
-    }
-    #[test]
-    fn resolve_model_list_keeps_prefetch_only_entries_and_prunes_defaults() {
-        let cfg = Config::default();
-        let dm = crate::models::default_model();
-        let mut p = IndexMap::new();
-        let e = prefetch_model_entry("secret-xyz", 200000, ApiBackend::default());
-        p.insert("secret-xyz".to_string(), e);
-        let resolved = resolve_model_list(&cfg, Some(p));
-        assert!(resolved.contains_key("secret-xyz"));
-        assert!(!resolved.contains_key(dm));
-    }
-    #[test]
-    fn resolve_model_list_prefetch_replaces_bundled_entirely() {
-        let cfg = Config::default();
-        let dm = crate::models::default_model();
-        let mut p = IndexMap::new();
-        let e = prefetch_model_entry("other-model", 500_000, ApiBackend::Responses);
-        p.insert("other-model".to_string(), e);
-        let resolved = resolve_model_list(&cfg, Some(p));
-        assert!(resolved.contains_key("other-model"));
-        assert!(!resolved.contains_key(dm));
-    }
-    #[test]
-    fn resolve_model_list_empty_prefetch_yields_empty_base() {
-        let cfg = Config::default();
-        let resolved = resolve_model_list(&cfg, Some(IndexMap::new()));
+        let resolved = resolve_model_list(&cfg);
         assert!(resolved.is_empty());
-    }
-    /// Regression: enterprise managed config overlays env_key on an oauth-only
-    /// catalog entry. BYOK must force visibility for API-key users so a
-    /// base `supported_in_api: false` does not leak into the overlay.
-    #[test]
-    fn byok_config_overlay_visible_to_api_key_users() {
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [model.enterprise-alias]
-            model = "grow-4.5"
-            base_url = "https://inference.company.com/v1"
-            env_key = "COMPANY_TOKEN"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
-        let mut base = prefetch_model_entry("enterprise-alias", 200_000, ApiBackend::default());
-        base.info.supported_in_api = false;
-        let mut prefetched = IndexMap::new();
-        prefetched.insert("enterprise-alias".to_owned(), base);
-        let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let entry = resolved
-            .get("enterprise-alias")
-            .expect("enterprise-alias must exist");
-        assert!(
-            entry.visible_for_auth(false),
-            "BYOK config entry must be visible to API-key users — \
-             env_key must override base supported_in_api=false"
-        );
-    }
-    /// Guard: config overlay WITHOUT credentials must NOT flip the
-    /// bundled supported_in_api flag. Only BYOK triggers that override.
-    #[test]
-    fn plain_config_overlay_preserves_bundled_visibility() {
-        let dm = crate::models::default_model();
-        let bundled = default_model_entries(&EndpointsConfig::default())
-            .get(dm)
-            .expect("bundled default must exist")
-            .clone();
-        let raw: toml::Value = toml::from_str(&format!(
-            r#"
-            [model."{dm}"]
-            context_window = 300000
-            "#
-        ))
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
-        let resolved = resolve_model_list(&cfg, None);
-        let entry = resolved.get(dm).expect("bundled default must exist");
-        assert_eq!(
-            entry.visible_for_auth(false),
-            bundled.visible_for_auth(false),
-            "non-BYOK config overlay must preserve bundled supported_in_api"
-        );
-        assert_eq!(
-            entry.visible_for_auth(true),
-            bundled.visible_for_auth(true),
-            "non-BYOK config overlay must preserve bundled OAuth visibility"
-        );
     }
     #[test]
     #[serial]
@@ -10151,82 +8005,5 @@ default = "grow-4.5"
         let r = resolve_mcp_recursive_config_watch(None, None, None, None, Some(false));
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Remote);
-    }
-    #[test]
-    #[serial_test::serial(remote_sig_disarm)]
-    fn remote_settings_disarm_managed_config_signatures() {
-        grow_config::signed_policy::apply_remote_managed_config_signature_verification(
-            Some(true),
-            true,
-        );
-        assert!(grow_config::signed_policy::verification_active());
-        let settings = crate::util::config::RemoteSettings {
-            managed_config_signature_verification: Some(false),
-            ..Default::default()
-        };
-        apply_remote_settings_side_effects(Some(&settings));
-        assert!(!grow_config::signed_policy::verification_active());
-        let settings = crate::util::config::RemoteSettings {
-            managed_config_signature_verification: Some(true),
-            ..Default::default()
-        };
-        apply_remote_settings_side_effects(Some(&settings));
-        assert!(grow_config::signed_policy::verification_active());
-        grow_config::signed_policy::apply_remote_managed_config_signature_verification(
-            Some(false),
-            true,
-        );
-        apply_remote_settings_side_effects(None);
-        assert!(!grow_config::signed_policy::verification_active());
-        grow_config::signed_policy::apply_remote_managed_config_signature_verification(
-            Some(true),
-            true,
-        );
-        assert!(grow_config::signed_policy::verification_active());
-    }
-    /// Keyed path: prod proxy origin can disarm; env override cannot.
-    #[test]
-    #[serial_test::serial(remote_sig_disarm)]
-    fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
-        grow_config::signed_policy::apply_remote_managed_config_signature_verification(
-            Some(true),
-            true,
-        );
-        assert!(grow_config::signed_policy::verification_active());
-        let settings = crate::util::config::RemoteSettings {
-            managed_config_signature_verification: Some(false),
-            ..Default::default()
-        };
-        unsafe {
-            std::env::remove_var("GROW_CLI_CHAT_PROXY_BASE_URL");
-        }
-        apply_remote_settings_side_effects(Some(&settings));
-        assert!(
-            !grow_config::signed_policy::verification_active(),
-            "prod proxy origin must allow disarm when keys are embedded"
-        );
-        grow_config::signed_policy::apply_remote_managed_config_signature_verification(
-            Some(true),
-            true,
-        );
-        assert!(grow_config::signed_policy::verification_active());
-        unsafe {
-            std::env::set_var(
-                "GROW_CLI_CHAT_PROXY_BASE_URL",
-                "https://attacker.example/v1",
-            );
-        }
-        apply_remote_settings_side_effects(Some(&settings));
-        assert!(
-            grow_config::signed_policy::verification_active(),
-            "env-overridden proxy must not be able to disarm keyed verification"
-        );
-        unsafe {
-            std::env::remove_var("GROW_CLI_CHAT_PROXY_BASE_URL");
-        }
-        grow_config::signed_policy::apply_remote_managed_config_signature_verification(
-            Some(true),
-            true,
-        );
     }
 }

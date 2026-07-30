@@ -12,10 +12,8 @@ pub(crate) struct BuiltinWorkflow {
     pub script: &'static str,
 }
 
-pub(crate) const BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[BuiltinWorkflow {
-    name: "deep-research",
-    script: include_str!("../workflows/deep_research.rhai"),
-}];
+pub(crate) const BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[];
+const DEEP_RESEARCH_SCRIPT: &str = include_str!("../workflows/deep_research.rhai");
 
 pub(crate) struct ResolvedWorkflow {
     pub meta: WorkflowMeta,
@@ -251,6 +249,18 @@ pub(crate) fn resolve_by_name(
     session_cwd: Option<&Path>,
 ) -> Result<ResolvedWorkflow, ResolveError> {
     WorkflowRegistry::scan(session_cwd).resolve_by_name(name)
+}
+
+/// Resolve the private workflow backing Deep Research Behavior. It is not
+/// inserted into the public registry, so `/workflow-run deep-research` cannot
+/// bypass the Behavior lifecycle or its report contract.
+pub(crate) fn resolve_deep_research() -> Result<ResolvedWorkflow, ResolveError> {
+    let meta = parse_workflow(DEEP_RESEARCH_SCRIPT, None)?;
+    Ok(ResolvedWorkflow {
+        meta,
+        script: DEEP_RESEARCH_SCRIPT.to_string(),
+        source: WorkflowSource::Builtin,
+    })
 }
 
 pub(crate) fn resolve_by_path(
@@ -848,7 +858,7 @@ mod tests {
         let path = save_project_workflow(&linked, "safe", &script("safe")).unwrap();
         assert_eq!(
             dunce::canonicalize(path).unwrap(),
-            project.join(".grow/workflows/safe.rhai")
+            dunce::canonicalize(project.join(".grow/workflows/safe.rhai")).unwrap()
         );
     }
 

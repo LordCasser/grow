@@ -12,7 +12,6 @@
 //! - `grow/internal/reload_project_mcp_servers` config hot-reload, cwd-scoped
 //! - `grow/internal/reload_skills`          skills file watcher fan-out
 //! - `grow/internal/reload_models`          model list hot-reload from config.toml
-//! - `grow/internal/reload_models_cache`    model catalog hot-reload from disk cache
 //! - `grow/internal/reload_announcements`   local announcement hot-reload
 //! - `grow/internal/auth_cleared`           auth hot-clear cleanup
 //! - `grow/plugins/reload`                  rebuild shared plugin registry
@@ -46,7 +45,6 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "grow/internal/reload_skills" => handle_reload_skills(agent),
         "grow/internal/reload_workflows" => handle_reload_workflows(agent),
         "grow/internal/reload_models" => handle_reload_models(agent),
-        "grow/internal/reload_models_cache" => handle_reload_models_cache(agent),
         "grow/internal/reload_announcements" => handle_reload_announcements(agent, args),
         "grow/internal/auth_cleared" => handle_auth_cleared(agent),
         "grow/plugins/reload" => handle_plugins_reload(agent).await,
@@ -450,26 +448,6 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     let count = agent.models_manager.models().len();
     tracing::info!(count, "model list reloaded from config.toml");
     ExtMethodResult::success(serde_json::json!({ "models": count }))
-        .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
-}
-
-// internal/reload_models_cache
-
-/// Hot-reload the model catalog from `~/.grow/models_cache.json` after an
-/// external write detected by the config watcher.
-///
-/// Routed through the agent's ACP stream (injected by the
-/// `ConfigUpdate::ModelsCacheChanged` arm in `agent/app.rs`) instead of being
-/// applied directly on the manager from the config-update task: stream
-/// requests are processed in order, so when `config.toml` and
-/// `models_cache.json` change in the same watcher batch this runs strictly
-/// after `reload_models`' `apply_config` accepted or rejected the new config,
-/// rather than rebuilding the catalog and notifying clients mid-flight.
-fn handle_reload_models_cache(agent: &MvpAgent) -> ExtResult {
-    agent.models_manager.reload_from_disk_cache();
-    agent.sync_process_static_api_key(None);
-    ExtMethodResult::success(serde_json::json!({ "reloaded": true }))
         .to_ext_response()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }

@@ -673,7 +673,7 @@ fn dispatch_fork_stores_full_parent_session_id_in_banner() {
 
 #[test]
 fn build_child_fork_marker_worktree_format() {
-    let banner = build_child_fork_marker("child-sid", "parent-sid", true, Some("/dashboard"));
+    let banner = build_child_fork_marker("child-sid", "parent-sid", true, Some("/agents"));
     assert!(
         banner.contains("Session child-sid"),
         "must contain child session id: {banner}"
@@ -683,8 +683,8 @@ fn build_child_fork_marker_worktree_format() {
         "must contain full parent session id: {banner}"
     );
     assert!(
-        banner.contains("/dashboard"),
-        "must advertise /dashboard: {banner}"
+        banner.contains("/agents"),
+        "must advertise /agents: {banner}"
     );
     assert!(
         !banner.contains("share cwd"),
@@ -694,7 +694,7 @@ fn build_child_fork_marker_worktree_format() {
 
 #[test]
 fn build_child_fork_marker_no_worktree_format() {
-    let banner = build_child_fork_marker("child-sid", "parent-sid", false, Some("/dashboard"));
+    let banner = build_child_fork_marker("child-sid", "parent-sid", false, Some("/agents"));
     let lines: Vec<&str> = banner.split('\n').collect();
     assert_eq!(lines.len(), 2, "expected 2-line banner, got: {banner}");
     assert!(
@@ -706,8 +706,8 @@ fn build_child_fork_marker_no_worktree_format() {
         "first line must contain full parent session id: {banner}"
     );
     assert!(
-        lines[0].contains("/dashboard"),
-        "first line must advertise /dashboard: {banner}"
+        lines[0].contains("/agents"),
+        "first line must advertise /agents: {banner}"
     );
     assert!(
         lines[1].contains("both agents share cwd"),
@@ -716,14 +716,14 @@ fn build_child_fork_marker_no_worktree_format() {
 }
 
 /// With the dashboard feature flag off, the banner must not advertise
-/// `/dashboard` (the command is refused when disabled) but still carry
+/// `/agents` (the command is refused when disabled) but still carry
 /// the session ids and the shared-cwd caveat.
 #[test]
 fn build_child_fork_marker_omits_dashboard_tip_when_disabled() {
     let banner = build_child_fork_marker("child-sid", "parent-sid", false, None);
     assert!(
-        !banner.contains("/dashboard"),
-        "must NOT advertise /dashboard when the flag is off: {banner}"
+        !banner.contains("/agents"),
+        "must NOT advertise /agents when the flag is off: {banner}"
     );
     assert!(
         banner.contains("Session child-sid"),
@@ -741,7 +741,7 @@ fn build_child_fork_marker_omits_dashboard_tip_when_disabled() {
 
 /// In minimal mode the caller passes `/resume` (the dashboard is refused
 /// there but the session picker works) — the banner must advertise it and
-/// never mention `/dashboard`.
+/// never mention `/agents`.
 #[test]
 fn build_child_fork_marker_minimal_mode_advertises_resume() {
     let banner = build_child_fork_marker("child-sid", "parent-sid", false, Some("/resume"));
@@ -750,8 +750,8 @@ fn build_child_fork_marker_minimal_mode_advertises_resume() {
         "must advertise /resume in minimal mode: {banner}"
     );
     assert!(
-        !banner.contains("/dashboard"),
-        "must NOT advertise /dashboard in minimal mode: {banner}"
+        !banner.contains("/agents"),
+        "must NOT advertise /agents in minimal mode: {banner}"
     );
 }
 
@@ -785,14 +785,7 @@ fn dispatch_fork_inherits_appearance_and_plugin_visibility() {
     app.appearance.disable_plugins = true;
     dispatch(Action::Fork(fork_args(Some(false), None)), &mut app);
     let new_agent = app.agents.get(&AgentId(1)).unwrap();
-    assert!(
-        new_agent
-            .prompt
-            .slash_controller
-            .registry()
-            .get("share")
-            .is_some()
-    );
+    assert!(new_agent.prompt.compact());
     assert!(
         new_agent
             .prompt

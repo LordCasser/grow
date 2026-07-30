@@ -62,7 +62,6 @@ chrono = { workspace = true }
 tree-sitter = "0.25.10"
 tree-sitter-bash = "0.25"
 url = { workspace = true }
-grow-env = { workspace = true }
 prometheus = { workspace = true }
 glob = "0.3"
 grow-sandbox = { path = "../grow-sandbox", default-features = false }

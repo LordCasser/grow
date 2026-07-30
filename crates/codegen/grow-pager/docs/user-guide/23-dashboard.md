@@ -13,8 +13,7 @@ which already shows when work is in flight.
 Three entry points, all opening the same view:
 
 - **`grow dashboard`** — launches the TUI directly into the dashboard.
-- **`/dashboard`** (aliases **`/agents-dashboard`**, **`/sessions`**) — open
-  from inside an active session.
+- **`/agents`** — the only Slash command for opening it from an active session.
 - **Ctrl+\\** — same as the slash command, two keystrokes. Configurable
   in `~/.grow/config.toml` under `[keybindings]` like every other shortcut.
 
@@ -136,12 +135,6 @@ downgrades the confirmed press to a cancel instead of closing. The
 shortcuts cheatsheet remains available through `/shortcuts` inside the details
 view.
 
-For the full behavioural specification (including the registry-lookup
-rules and the mouse-event intercept matrix) see plan
-[§3.10](../../plan/agent-dashboard.md) "Keybindings (v1)" — the user
-guide here is intentionally short and cross-references the plan as
-the source of truth.
-
 All shortcuts are registered under `When::DashboardFocused` and can be
 rebound via `~/.grow/config.toml`.
 
@@ -216,19 +209,18 @@ the left, **time** on the far right), the most recent response
 (**word-wrapped** to fit, up to ~3 rows), and a live `❯ reply` input. A
 `…` marker appears on the last row only when there's more than fits.
 
-The selected agent's **model** and, when it's in always-approve (yolo)
-mode, an **`always-approve`** flag are shown on the panel's **bottom
-border** (bottom-right) — the same config-badge slot the new-session
-dispatch box uses. This holds in the question / approval modes too, so
-the model and approval mode are always in view while you answer. (The
+The selected agent's **model**, **Behavior**, and **Permission** are shown on
+the panel's **bottom border** (bottom-right), in the same
+`model | behavior | permission` order as the session prompt. This holds in
+question / approval modes too, so the execution protocol and approval policy
+remain visible while you answer. (The
 dashboard list rows no longer repeat the model or an always-approve badge,
 keeping the list compact.)
 
-**`Shift+Tab` cycles the peeked agent's mode** (Normal → Plan →
-Always-approve → Normal) — the same cycle as Ctrl+R inside that agent's
-chat view, applied to the **live** agent (the badge updates to match).
-This differs from the new-session dispatch box, where Shift+Tab only
-stages the mode for the *next* agent.
+The Dashboard has no separate configuration-cycle shortcuts. Open an existing
+Agent and use the normal `Ctrl+X` leader or Slash selectors. In the new-session
+dispatch input, `/model`, `/effort`, `/permission`, and `/behavior` stage
+independent values for the next Agent without changing persistent defaults.
 
 Unlike the dispatch box (which only ever spawns new sessions), the
 peek's reply **talks to the selected agent**:

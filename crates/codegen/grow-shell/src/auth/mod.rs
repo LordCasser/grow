@@ -24,7 +24,7 @@ pub(crate) use auth_provider::{
 };
 #[cfg(test)]
 pub(crate) use auth_provider::{test_backdate_provider_mint, test_counting_provider};
-pub(crate) use config::LEGACY_AUTH_SCOPE;
+pub(crate) use config::SERVICE_AUTH_SCOPE;
 pub use config::{
     ForceLoginTeam, OAuth2ProviderConfig, OidcAuthConfig, PreferredAuthMethod, ServiceAuthConfig,
     TEST_OAUTH2_ISSUER,

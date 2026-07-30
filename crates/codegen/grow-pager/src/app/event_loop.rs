@@ -136,7 +136,7 @@ fn plan_reconnect_load(
     // Set BOTH yoloMode and autoMode explicitly. The leader's capability injection
     // only fills ABSENT keys, so omitting autoMode here lets a stale launch-time
     // `ClientCapabilities.auto_mode` re-enable Auto after the user left it (e.g.
-    // Ctrl+R to Ask). Auto is per-agent (symmetric with yolo) — derive it from
+    // switching to Ask). Auto is per-agent (symmetric with yolo) — derive it from
     // this agent's own `auto_mode` so a background tab reconnects with ITS mode,
     // not the active tab's global `current_ui` mirror.
     let auto = super::dispatch::effective_auto(yolo, agent.session.is_auto());
@@ -1259,26 +1259,16 @@ pub(crate) async fn run(
     );
     app.apply_contextual_hints(resolved_hints);
 
-    // Opt-in mouse-reporting toggle shortcut (Ctrl+R on scrollback). Off unless
-    // explicitly enabled. Resolved in shell config (env override > effective
-    // config > the parsed `UiConfig` field) so a partial `UiConfig` deserialize
-    // failure cannot silently drop it.
+    // Resolve visibility of the explicit `/toggle-mouse-reporting` command.
     let mouse_toggle = grow_shell::util::config::resolve_mouse_reporting_toggle(
         effective_config.as_ref(),
         &app.current_ui,
     );
-    app.registry = crate::actions::ActionRegistry::defaults_with_config_for(
-        term_state.screen_mode,
-        mouse_toggle.value,
-    );
+    app.registry = crate::actions::ActionRegistry::defaults_for(term_state.screen_mode);
     // Cache the resolved flag so the `/toggle-mouse-reporting` slash command can
     // gate its visibility/execution without re-reading config on every keystroke.
     crate::app::MOUSE_REPORTING_TOGGLE_ENABLED
         .store(mouse_toggle.value, std::sync::atomic::Ordering::Release);
-    let action_registered = app
-        .registry
-        .find(crate::actions::ActionId::ToggleMouseCapture)
-        .is_some();
     crate::unified_log::info(
         "mouse_reporting_toggle.startup",
         None,
@@ -1286,11 +1276,8 @@ pub(crate) async fn run(
             "enabled": mouse_toggle.value,
             "source": mouse_toggle.source.to_string(),
             "ui_config_field": app.current_ui.mouse_reporting_toggle,
-            "action_registered": action_registered,
-            "shortcut": "Ctrl+R",
-            "context": "scrollback_focused_only",
             "slash_command": "/toggle-mouse-reporting",
-            "note": "the toggle chord is scrollback-only; press Tab to focus scrollback first, or use /toggle-mouse-reporting from anywhere",
+            "note": "mouse reporting has no configuration shortcut; use the explicit command",
         })),
     );
     let config_session_bools = load_initial_config_session_bools();

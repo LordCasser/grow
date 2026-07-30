@@ -618,7 +618,7 @@ impl ManagedMcpsConfig {
 pub struct ModelOverrideConfig {
     /// `None` = current model.
     pub session_summary: Option<String>,
-    /// Compiled default (`grow-build`) when unset locally, remotely, and via env.
+    /// `None` means use the active model.
     pub image_description: Option<String>,
     /// Next-prompt suggestion model pin. Unlike the other overrides this does
     /// NOT fill a compiled default — see [`PromptSuggestModelPin`].
@@ -640,8 +640,8 @@ impl Default for ModelOverrideConfig {
 ///
 /// Unlike the other auxiliary overrides this does not collapse to a plain
 /// model string: the consumer (`handle_suggest_prompt`) must distinguish
-/// an explicit pin from "unpinned" (where the client hint and the built-in
-/// `grow-build-0.1` default apply), and whether the pin came from the env
+/// an explicit pin from "unpinned" (where the client hint may apply), and
+/// whether the pin came from the env
 /// escape hatch. Every effective model except an env pin is catalog-guarded —
 /// when the model is not in the shell's catalog (e.g. `grow-build-0.1` for
 /// OAuth users, whose catalogs exclude it) the per-turn suggestion request is
@@ -657,8 +657,7 @@ pub enum PromptSuggestModelPin {
     /// `[models] prompt_suggestion` in config.toml, or the remote
     /// `prompt_suggestion_model` (remote settings) — catalog-guarded.
     Pinned(String),
-    /// No explicit pin: the client hint, then the built-in default apply
-    /// (both catalog-guarded).
+    /// No explicit pin: the client hint may apply and remains catalog-guarded.
     #[default]
     Unpinned,
 }
@@ -674,9 +673,8 @@ fn non_empty_model_override(value: Option<&str>) -> Option<String> {
     })
 }
 impl ModelOverrideConfig {
-    /// CLI flag > env var > config.toml > remote settings > compiled default.
-    /// `image_description` and `session_summary` always resolve to `Some(_)`
-    /// (default `grow-build`), never the session model.
+    /// CLI flag > env var > config.toml > remote settings. An absent auxiliary
+    /// model means the active model is used.
     /// `prompt_suggestion` resolves to a [`PromptSuggestModelPin`] instead of
     /// a model string (no CLI flag; the default and the catalog guard live at
     /// the consumer, `handle_suggest_prompt`).
@@ -975,20 +973,11 @@ fn apply_requirements_inner(
             }
         };
     }
-    macro_rules! pin_requirement_only {
-        ($name:ident) => {
-            if let Some(val) = req_bool(req, "features", stringify!($name)) {
-                config.requirements.$name.pin(val, source.clone());
-                push(concat!("features.", stringify!($name)), format!("{val}"));
-            }
-        };
-    }
     pin_feature!(lsp_tools);
     pin_feature!(tool_search);
     pin_feature!(web_fetch);
     pin_feature!(ask_user_question);
     pin_feature!(write_file);
-    pin_requirement_only!(remote_fetch);
     enforce_opt!("cli", "auto_update", config.cli.auto_update);
     enforce_opt!("cli", "use_leader", config.cli.use_leader);
     enforce_opt!("cli", "show_tips", config.cli.show_tips);
@@ -1056,16 +1045,6 @@ fn apply_requirements_inner(
         config.endpoints.cli_chat_proxy_base_url = Some(val.to_owned());
         push("endpoints.cli_chat_proxy_base_url", val.to_owned());
     }
-    enforce_str!(
-        "endpoints",
-        "models_base_url",
-        config.endpoints.models_base_url
-    );
-    enforce_str!(
-        "endpoints",
-        "models_list_url",
-        config.endpoints.models_list_url
-    );
     if let Some(val) = req_str(req, "sandbox", "profile") {
         config
             .requirements

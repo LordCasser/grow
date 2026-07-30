@@ -5,21 +5,30 @@
 //! out of, so plan-mode state is driven by the closed set of variants
 //! instead of by ad-hoc string matching at each boundary.
 
-/// Wire representation is the snake-cased variant name (`default`, `plan`,
-/// `ask`) via [`strum`]. Unknown ids parse back to [`SessionMode::Default`]
-/// so newer modes added on the agent side don't brick older pagers.
-#[derive(Debug, Clone, PartialEq, Eq, strum::EnumString, strum::IntoStaticStr)]
+/// Wire representation is the snake-cased variant name (`default`, `ask`,
+/// `plan`, `workflow`, `deep_research`, `goal`) via [`strum`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum SessionMode {
     Default,
     Plan,
     Ask,
+    Workflow,
+    DeepResearch,
+    Goal,
 }
 
 impl SessionMode {
+    /// Parse a Behavior wire id without conflating an unknown id with Normal.
+    pub fn try_from_id(id: &str) -> Option<Self> {
+        id.parse().ok()
+    }
+
     /// Parse from the wire id. Unknown ids fall back to [`SessionMode::Default`].
+    /// UI display code may use this for stale remote state; transition gateways
+    /// must use [`Self::try_from_id`] and reject unknown ids.
     pub fn from_id(id: &str) -> Self {
-        id.parse().unwrap_or(Self::Default)
+        Self::try_from_id(id).unwrap_or(Self::Default)
     }
 
     /// The canonical wire id for this mode (snake_case).
@@ -30,6 +39,17 @@ impl SessionMode {
     pub fn is_plan(&self) -> bool {
         matches!(self, Self::Plan)
     }
+
+    pub fn behavior(&self) -> Option<xai_tool_types::BehaviorId> {
+        match self {
+            Self::Default => None,
+            Self::Ask => Some(xai_tool_types::BehaviorId::Clarify),
+            Self::Plan => Some(xai_tool_types::BehaviorId::Plan),
+            Self::Workflow => Some(xai_tool_types::BehaviorId::Workflow),
+            Self::DeepResearch => Some(xai_tool_types::BehaviorId::DeepResearch),
+            Self::Goal => Some(xai_tool_types::BehaviorId::Goal),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -38,7 +58,14 @@ mod tests {
 
     #[test]
     fn round_trip_known_ids() {
-        for &id in &["default", "plan", "ask"] {
+        for &id in &[
+            "default",
+            "plan",
+            "ask",
+            "workflow",
+            "deep_research",
+            "goal",
+        ] {
             let mode = SessionMode::from_id(id);
             assert_eq!(mode.as_id(), id, "round-trip failed for {id}");
         }
@@ -52,9 +79,18 @@ mod tests {
     }
 
     #[test]
+    fn transition_parser_rejects_unknown_ids() {
+        assert_eq!(SessionMode::try_from_id("goal"), Some(SessionMode::Goal));
+        assert_eq!(SessionMode::try_from_id("browser_use"), None);
+    }
+
+    #[test]
     fn is_plan_only_for_plan_variant() {
         assert!(SessionMode::Plan.is_plan());
         assert!(!SessionMode::Default.is_plan());
         assert!(!SessionMode::Ask.is_plan());
+        assert!(!SessionMode::Workflow.is_plan());
+        assert!(!SessionMode::DeepResearch.is_plan());
+        assert!(!SessionMode::Goal.is_plan());
     }
 }

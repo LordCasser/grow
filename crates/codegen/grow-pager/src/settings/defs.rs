@@ -87,8 +87,8 @@ const THEME_CHOICES: &[EnumChoice] = &[
 //
 // Adding new modes requires: (1) `PermissionModeKind` variant,
 // (2) `EnumChoice` here, (3) `set_yolo_mode_inner` update,
-// (4) `load_permission_mode` arm, (5) tests. `Plan` is excluded —
-// it lives on its own `plan_mode` setting.
+// (4) `load_permission_mode` arm, and (5) tests. Active-session Permission
+// and Behavior are selected outside Settings through Slash/Ctrl+X.
 // ---------------------------------------------------------------------------
 
 // Choice order: safe → classifier → unsafe (Default → Ask → Auto → Always approve).
@@ -125,14 +125,6 @@ const PERMISSION_MODE_CHOICES: &[EnumChoice] = &[
 // PAGER-owned, per-session, ACP-mediated via `session/set_mode`.
 // NOT persisted to config.toml — resets every session start.
 //
-// Uses `on`/`off` canonical strings (not the shell's `plan`/`default`
-// wire ids). `Ask` mode is intentionally not exposed here — it's
-// only reachable via Ctrl+R.
-//
-// `supports_preview: false` — toggling fires an ACP request that
-// gates tool dispatch. Commit on Enter only.
-// ---------------------------------------------------------------------------
-
 // ---------------------------------------------------------------------------
 // Default-selected-permission catalog.
 //
@@ -175,19 +167,6 @@ const DEFAULT_SELECTED_PERMISSION_CHOICES: &[EnumChoice] = &[
         canonical: DefaultSelectedPermission::Reject.as_canonical(),
         display: DefaultSelectedPermission::Reject.display(),
         description: "",
-    },
-];
-
-const PLAN_MODE_CHOICES: &[EnumChoice] = &[
-    EnumChoice {
-        canonical: "off",
-        display: "Off",
-        description: "Agent runs tools and edits files directly (default).",
-    },
-    EnumChoice {
-        canonical: "on",
-        display: "On",
-        description: "Agent summarises a plan and asks for approval before running tools.",
     },
 ];
 
@@ -586,15 +565,15 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
-        // Security-relevant: "always-approve" bypasses all permission prompts.
-        // Modal reads live state from `PagerLocalSnapshot.yolo_mode`
-        // (not `ui.permission_mode`) to reflect Ctrl+O toggles immediately.
+        // Security-relevant future-session default. Active-session permission
+        // changes belong to `/permission` and the Ctrl+X P picker.
         SettingMeta {
             key: "permission_mode",
             category: SettingCategory::Agent,
             owner: SettingOwner::Shell,
-            label: "Permission mode",
-            description: "Default uses the agent's built-in behavior; \
+            label: "Default permission mode",
+            description: "Permission policy used when creating future sessions. \
+                          Default uses the agent's built-in behavior; \
                           Ask prompts for each tool action; \
                           Auto uses an LLM classifier for risky tools; \
                           Always approve grants all permissions automatically.",
@@ -649,18 +628,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: true,
             hidden_in_minimal: false,
         },
-        // PAGER-owned; default pinned by `defaults_match_pager_state`.
-        SettingMeta {
-            key: "multiline_mode",
-            category: SettingCategory::Editor,
-            owner: SettingOwner::Pager,
-            label: "Multiline",
-            description: "When on, Enter inserts a newline and Shift+Enter sends. Resets each session.",
-            keywords: &["multiline", "newline", "input", "editor", "enter"],
-            kind: SettingKind::Bool { default: false },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
         // SHELL-owned. Reads `pager.current_model_id` (not
         // `cfg.models.default`) so the modal reflects `/model` switches while
         // displaying the same canonical value it persists.
@@ -670,7 +637,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             category: SettingCategory::Models,
             owner: SettingOwner::Shell,
             label: "Default model",
-            description: "Model used for new sessions. Changing this also switches the active session. Pick `(no override)` to clear.",
+            description: "Model used for new sessions. Pick `(no override)` to clear.",
             keywords: &["model", "default", "agent", "llm", "grow", "switch"],
             kind: SettingKind::DynamicEnum {
                 default: "",
@@ -967,8 +934,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "default_selected_permission",
             category: SettingCategory::Agent,
             owner: SettingOwner::Shell,
-            label: "Default selected permission",
-            description: "Which row the cursor preselects on permission prompts.",
+            label: "Initial approval selection",
+            description: "Which row the cursor preselects on the first permission prompt.",
             keywords: &[
                 "permission",
                 "approval",
@@ -1018,26 +985,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 default: ask_user_question::DEFAULT_ASK_USER_QUESTION_TIMEOUT_ENABLED,
             },
             restart_required: true,
-            hidden_in_minimal: false,
-        },
-        // PAGER-owned, ACP-mediated. Reads from
-        // `PagerLocalSnapshot.plan_mode_active`. Default "off" matches
-        // `AgentView::new`'s `plan_mode_active = false`.
-        SettingMeta {
-            key: "plan_mode",
-            category: SettingCategory::Agent,
-            owner: SettingOwner::Pager,
-            label: "Plan mode",
-            description: "When on, the agent summarises a plan before running tools or making edits.",
-            keywords: &[
-                "plan", "mode", "agent", "summary", "approval", "review", "session",
-            ],
-            kind: SettingKind::Enum {
-                default: "off",
-                choices: PLAN_MODE_CHOICES,
-                supports_preview: false,
-            },
-            restart_required: false,
             hidden_in_minimal: false,
         },
         // SHELL-owned startup-time settings (restart_required: true).
@@ -1158,9 +1105,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
             label: "Plan mode",
-            description: "Suggest plan mode (Ctrl+R) when your prompt looks like a \
+            description: "Suggest Plan Behavior (Ctrl+X, B) when your prompt looks like a \
                           planning request.",
-            keywords: &["plan", "mode", "nudge", "ctrl+r", "hint"],
+            keywords: &["plan", "behavior", "nudge", "ctrl+x", "hint"],
             kind: SettingKind::Bool {
                 default: ui_default.contextual_hints.plan_mode.unwrap_or(true),
             },

@@ -111,9 +111,6 @@ impl AgentView {
             self.open_scrollback_search(None);
             return InputOutcome::Changed;
         }
-        if registry.lookup(key, When::ScrollbackFocused) == Some(ActionId::ToggleMouseCapture) {
-            return InputOutcome::Action(Action::ToggleMouseCapture);
-        }
         if let Some(outcome) =
             resolve_action(registry.lookup_with_mode(key, When::ScrollbackFocused, self.vim_mode))
         {
@@ -410,7 +407,7 @@ impl AgentView {
                 }) => {
                     if *stoppable {
                         return InputOutcome::Action(Action::SendSlashCommandPreservingDraft(
-                            format!("/workflow stop {name}"),
+                            format!("/workflow-run stop {name}"),
                         ));
                     }
                 }
@@ -788,45 +785,6 @@ mod scroll_granularity_tests {
             before,
             "wheel must not leak through the goal detail overlay"
         );
-    }
-}
-#[cfg(test)]
-mod mouse_reporting_registry_tests {
-    use super::super::{AgentPane, test_fixtures::make_agent};
-    use crate::actions::ActionRegistry;
-    use crate::app::actions::Action;
-    use crate::app::app_view::InputOutcome;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    fn ctrl_r() -> Event {
-        Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
-    }
-    #[test]
-    fn mouse_toggle_chord_follows_live_mode_registry() {
-        for mode in [
-            crate::app::ScreenMode::Fullscreen,
-            crate::app::ScreenMode::Inline,
-        ] {
-            let mut agent = make_agent();
-            agent.set_active_pane(AgentPane::Scrollback, true);
-            let registry = ActionRegistry::defaults_with_config_for(mode, true);
-            assert!(matches!(
-                agent.handle_input(&ctrl_r(), &registry),
-                InputOutcome::Action(Action::ToggleMouseCapture)
-            ));
-        }
-        let mut agent = make_agent();
-        agent.set_active_pane(AgentPane::Scrollback, true);
-        let registry =
-            ActionRegistry::defaults_with_config_for(crate::app::ScreenMode::Minimal, true);
-        assert!(
-            registry
-                .find(crate::actions::ActionId::ToggleMouseCapture)
-                .is_none()
-        );
-        assert!(!matches!(
-            agent.handle_input(&ctrl_r(), &registry),
-            InputOutcome::Action(Action::ToggleMouseCapture)
-        ));
     }
 }
 #[cfg(test)]

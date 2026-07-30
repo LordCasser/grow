@@ -62,7 +62,7 @@ struct Request {
     /// Tail by user-message-turn count instead of raw update count.
     #[serde(default)]
     turn_index: Option<usize>,
-    /// Routing metadata — forwarded to chunk notifications for leader/relay.
+    /// Routing metadata forwarded to chunk notifications for ACP clients.
     #[serde(default, rename = "_meta")]
     meta: Option<crate::extensions::routing::RequestMeta>,
 }

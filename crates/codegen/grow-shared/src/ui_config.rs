@@ -8,7 +8,7 @@ pub struct UiConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
     /// Model ID to use for the secondary agent when forking.
-    /// Defaults to the main default model (from default_models.json).
+    /// Empty means inherit the configured default model.
     pub fork_secondary_model: String,
     /// YOLO mode. Read by `util::config`, declared here for `serde_ignored`.
     #[serde(default)]

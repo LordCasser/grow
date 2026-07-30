@@ -34,18 +34,12 @@ pub(crate) async fn test_grow_build_agent_with_todo() -> grow_agent::Agent {
     use grow_tools::registry::types::ToolConfig;
     test_agent_with_tools(vec![ToolConfig::for_tool::<TodoWriteTool>()]).await
 }
-/// Agent with the real `enter_plan_mode` + `exit_plan_mode` tools registered so
-/// `prepare_tool_call` can parse both control transitions.
+/// Agent with the real Plan lifecycle tool registered.
 #[cfg(test)]
 pub(crate) async fn test_agent_with_plan_tools() -> grow_agent::Agent {
-    use grow_tools::implementations::grow_build::enter_plan_mode::EnterPlanModeTool;
-    use grow_tools::implementations::grow_build::exit_plan_mode::ExitPlanModeTool;
+    use grow_tools::implementations::grow_build::plan_control::PlanControlTool;
     use grow_tools::registry::types::ToolConfig;
-    test_agent_with_tools(vec![
-        ToolConfig::for_tool::<EnterPlanModeTool>(),
-        ToolConfig::for_tool::<ExitPlanModeTool>(),
-    ])
-    .await
+    test_agent_with_tools(vec![ToolConfig::for_tool::<PlanControlTool>()]).await
 }
 #[cfg(test)]
 pub(crate) async fn test_agent_with_tools(
@@ -287,13 +281,12 @@ pub(crate) async fn create_test_actor_ex(
         models_manager: Default::default(),
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
-        queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
         current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
         turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
-        plan_mode: Arc::new(parking_lot::Mutex::new(
-            crate::session::plan_mode::BehaviorController::new(std::path::PathBuf::from(
+        behavior: Arc::new(parking_lot::Mutex::new(
+            crate::session::behavior::BehaviorController::new(std::path::PathBuf::from(
                 "/tmp/test-session",
             )),
         )),

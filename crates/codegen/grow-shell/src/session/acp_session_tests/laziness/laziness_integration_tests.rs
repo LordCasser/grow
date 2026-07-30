@@ -60,7 +60,7 @@ async fn make_laziness_actor(
     let (persistence_tx, _persistence_rx) =
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-    actor.events = crate::session::events::EventTracker::new(tmp.path());
+    actor.events = crate::session::events::EventTracker::local(tmp.path());
     // Install the test model into the catalog and point the
     // current id at it. `insert_test_entry` is gated on
     // `#[cfg(test)]` so it does NOT leak into release builds.
@@ -329,7 +329,7 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
                     .push_back(InputItem {
                         prompt_id: "user-real-prompt".to_string(),
                         prompt_blocks: vec![],
-                        prompt_mode: crate::session::plan_mode::PromptMode::Agent,
+                        prompt_mode: crate::session::behavior::PromptMode::Agent,
                         client_identifier: None,
                         screen_mode: None,
                         verbatim: true,
@@ -545,7 +545,7 @@ async fn make_debug_actor(
     let (persistence_tx, _persistence_rx) =
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-    actor.events = crate::session::events::EventTracker::new(tmp.path());
+    actor.events = crate::session::events::EventTracker::local(tmp.path());
     let mut entry = detector_entry(false, 0, None);
     entry.info.laziness_detector = detector;
     actor

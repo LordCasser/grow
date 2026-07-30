@@ -1699,16 +1699,10 @@ async fn test_error_response_routing() {
 
 // ── Session cleanup on disconnect ─────────────────────────────────────
 
-/// Test that when a client disconnects, notifications for its sessions are
-/// still delivered to the next active client via fallback routing.
-///
-/// Session ownership entries are intentionally *not* removed on disconnect so
-/// the server can distinguish IPC-originated sessions (present in
-/// `session_owners`) from relay-originated ones (absent). The session-based
-/// routing path naturally falls through (the dead client is gone from
-/// `clients`), and the fallback picks up the notification for the new client.
+/// Notifications for a detached session are dropped instead of leaking to the
+/// next active client through fallback routing.
 #[tokio::test]
-async fn test_session_ownership_cleanup_on_disconnect() {
+async fn test_detached_session_notifications_do_not_fallback() {
     use grow_shell::leader::run_leader_server;
 
     let temp = TempDir::new().unwrap();
@@ -1732,7 +1726,6 @@ async fn test_session_ownership_cleanup_on_disconnect() {
             pid: std::process::id(),
             socket_path: sock_clone.clone(),
             lock_path: sock_clone.with_extension("lock"),
-            ws_url_suffix: String::new(),
             leader_binary_version: env!("CARGO_PKG_VERSION").to_string(),
         });
         let _ = run_leader_server(
@@ -1745,7 +1738,6 @@ async fn test_session_ownership_cleanup_on_disconnect() {
             agent_busy,
             grow_shell::agent::activity::AgentActivity::default(),
             ready_rx,
-            tokio::sync::watch::channel(false).0,
             shutdown_tx,
             None,
             control_state,
@@ -1815,10 +1807,9 @@ async fn test_session_ownership_cleanup_on_disconnect() {
     let _ = acp_rx.recv().await.unwrap();
 
     // Send a notification for the old session — it should be DROPPED, not
-    // forwarded to client2. The dead client's session entry is still in
-    // session_owners (for relay detection), and tier-2 routing sees the
-    // owner is dead → drops the notification to prevent cross-session leaks.
-    // The reconnecting client will replay via session/load instead.
+    // forwarded to client2. The leader tombstones detached ownership to
+    // prevent cross-session leaks; a reconnect establishes ownership again
+    // with session/load before replaying updates.
     let old_notif = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-temp","data":"orphan"}}"#;
     response_tx.send(old_notif.to_string()).unwrap();
 
@@ -2096,7 +2087,6 @@ async fn test_raw_registration_handshake_not_ready_then_ready() {
             pid: std::process::id(),
             socket_path: sock_clone.clone(),
             lock_path: sock_clone.with_extension("lock"),
-            ws_url_suffix: String::new(),
             leader_binary_version: env!("CARGO_PKG_VERSION").to_string(),
         });
         let _ = run_leader_server(
@@ -2109,7 +2099,6 @@ async fn test_raw_registration_handshake_not_ready_then_ready() {
             Arc::new(AtomicBool::new(false)),
             grow_shell::agent::activity::AgentActivity::default(),
             ready_rx,
-            watch::channel(false).0,
             watch::channel(grow_shell::leader::ShutdownReason::Manual).0,
             None,
             control_state,
@@ -2251,7 +2240,6 @@ async fn test_connect_waits_for_leader_ready() {
             pid: std::process::id(),
             socket_path: sock_clone.clone(),
             lock_path: sock_clone.with_extension("lock"),
-            ws_url_suffix: String::new(),
             leader_binary_version: env!("CARGO_PKG_VERSION").to_string(),
         });
         let _ = run_leader_server(
@@ -2264,7 +2252,6 @@ async fn test_connect_waits_for_leader_ready() {
             Arc::new(AtomicBool::new(false)),
             grow_shell::agent::activity::AgentActivity::default(),
             ready_rx,
-            watch::channel(false).0,
             watch::channel(grow_shell::leader::ShutdownReason::Manual).0,
             None,
             control_state,
@@ -2367,7 +2354,6 @@ async fn test_version_mismatch_notification_sent_to_client() {
             pid: std::process::id(),
             socket_path: sock_clone.clone(),
             lock_path: sock_clone.with_extension("lock"),
-            ws_url_suffix: String::new(),
             leader_binary_version: env!("CARGO_PKG_VERSION").to_string(),
         });
         let _ = run_leader_server(
@@ -2380,7 +2366,6 @@ async fn test_version_mismatch_notification_sent_to_client() {
             Arc::new(AtomicBool::new(false)),
             grow_shell::agent::activity::AgentActivity::default(),
             watch::channel(true).1,
-            watch::channel(false).0,
             watch::channel(grow_shell::leader::ShutdownReason::Manual).0,
             Some("test-leader-0.1.150"), // override so detection is enabled in test builds
             control_state,
@@ -2441,7 +2426,6 @@ async fn test_no_version_mismatch_notification_when_versions_match() {
             pid: std::process::id(),
             socket_path: sock_clone.clone(),
             lock_path: sock_clone.with_extension("lock"),
-            ws_url_suffix: String::new(),
             leader_binary_version: env!("CARGO_PKG_VERSION").to_string(),
         });
         let _ = run_leader_server(
@@ -2454,7 +2438,6 @@ async fn test_no_version_mismatch_notification_when_versions_match() {
             Arc::new(AtomicBool::new(false)),
             grow_shell::agent::activity::AgentActivity::default(),
             watch::channel(true).1,
-            watch::channel(false).0,
             watch::channel(grow_shell::leader::ShutdownReason::Manual).0,
             Some("same-version-0.1.150"),
             control_state,
@@ -2887,7 +2870,6 @@ async fn test_lock_released_before_connect_prevents_deadlock() {
             pid: std::process::id(),
             socket_path: sock_clone.clone(),
             lock_path: sock_clone.with_extension("lock"),
-            ws_url_suffix: String::new(),
             leader_binary_version: env!("CARGO_PKG_VERSION").to_string(),
         });
         let _ = run_leader_server(
@@ -2900,7 +2882,6 @@ async fn test_lock_released_before_connect_prevents_deadlock() {
             Arc::new(AtomicBool::new(false)),
             grow_shell::agent::activity::AgentActivity::default(),
             ready_rx,
-            watch::channel(false).0,
             watch::channel(grow_shell::leader::ShutdownReason::Manual).0,
             None,
             control_state,
@@ -2974,7 +2955,6 @@ async fn setup_persistent_test_server(
             pid: std::process::id(),
             socket_path: sock_clone.clone(),
             lock_path: sock_clone.with_extension("lock"),
-            ws_url_suffix: String::new(),
             leader_binary_version: env!("CARGO_PKG_VERSION").to_string(),
         });
         let _ = run_leader_server(
@@ -2987,7 +2967,6 @@ async fn setup_persistent_test_server(
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             grow_shell::agent::activity::AgentActivity::default(),
             tokio::sync::watch::channel(true).1,
-            tokio::sync::watch::channel(false).0,
             tokio::sync::watch::channel(grow_shell::leader::ShutdownReason::Manual).0,
             None,
             control_state,

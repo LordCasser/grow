@@ -834,6 +834,7 @@ mod workflow_reminder_tests {
             phases: Vec::new(),
             current_phase: None,
             agent_budget: None,
+            max_concurrency: 3,
             agents_used: 0,
             token_leases: Vec::new(),
             agent_usage_incomplete: false,

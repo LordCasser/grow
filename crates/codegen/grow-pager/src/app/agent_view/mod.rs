@@ -18,7 +18,7 @@
 //!         Space/i → FocusPrompt
 //!         registry.lookup(key, ScrollbackFocused) → navigation, view, etc.
 //!   → 2. agent level (if pane returned Unchanged):
-//!       registry.lookup(key, AgentScreen) → CancelTurn (Ctrl+C), ToggleYolo, NextModel
+//!       registry.lookup(key, AgentScreen) → CancelTurn (Ctrl+C), NextModel
 //!       CancelTurn has runtime guards (Running→cancel, Cancelling→quit on Ctrl+C).
 //!       From the prompt pane, Ctrl+C CancelTurn is a two-step gesture:
 //!       a non-empty prompt skips the AgentScreen promotion so the key
@@ -381,7 +381,7 @@ const CLIPBOARD_TOAST_DEBOUNCE_MS: u128 = 500;
 pub(super) const CONTEXT_CLICK_DEBOUNCE_MS: u128 = 300;
 /// Default highlight TTL when `keep_text_selection` is `flash`.
 const DEFAULT_SELECTION_HIGHLIGHT_DURATION_MS: u64 = 150;
-/// Duration of the transient mode-switch banner (shown above prompt on Ctrl+R).
+/// Duration of the transient Behavior-switch banner shown above the prompt.
 /// 2 s full visibility + 0.3 s fade out @ 30 fps.
 const MODE_BANNER_TOTAL_TICKS: u8 = 69;
 /// Final portion of the banner lifetime spent fading out (full → invisible).
@@ -1116,10 +1116,12 @@ pub struct AgentView {
     /// toasts, keypress dismissal, and subagent open/close when propagated
     /// via [`Self::set_sticky_toast_recursive`].
     pub(crate) sticky_toast: Option<String>,
-    /// Transient "Switched to mode: X" banner shown above the prompt after
-    /// Ctrl+R. (message, remaining_ticks). Full brightness for 2 s, then
+    /// Transient "Switched to mode: X" banner shown above the prompt after a
+    /// Behavior transition. Full brightness for 2 s, then
     /// fades out over the final 0.3 s.
     pub(crate) mode_switch_banner: Option<(String, u8)>,
+    /// An interrupting Behavior change is awaiting a repeated selection.
+    pub(crate) behavior_switch_warning_pending: bool,
     /// Session announcement banner (critical or promo) is showing (set at
     /// start of `draw`). Ephemeral-tip occluder — unlike short-lived
     /// mode-switch, an announcement can last the session, so tips must not
@@ -1161,15 +1163,19 @@ pub struct AgentView {
     /// Y-range of the scrollable options area (set during render).
     /// Scroll events outside this range are ignored.
     pub(crate) question_scroll_region: Option<(u16, u16)>,
-    /// Whether plan mode is currently active. Set when `enter_plan_mode`
-    /// tool completes, cleared when `exit_plan_mode` tool completes.
-    /// Controls prompt accent color and shortcut bar hints.
+    /// Whether the confirmed Behavior is Plan. Derived only from
+    /// `CurrentModeUpdate`; tool titles never change it.
     pub(crate) plan_mode_active: bool,
-    /// Optimistic plan-mode state set immediately on Ctrl+R.
+    /// Confirmed user-facing Behavior. Permission policy is tracked separately.
+    pub(crate) behavior_mode: grow_tools::types::SessionMode,
+    /// Optimistic Plan projection set immediately by a Behavior selection.
     /// Cleared to `None` when `detect_plan_mode_change()` confirms real state.
-    /// The cycle logic uses `plan_mode_pending.unwrap_or(plan_mode_active)`
-    /// so rapid Ctrl+R presses advance correctly without waiting for ACP.
+    /// Selectors use `plan_mode_pending.unwrap_or(plan_mode_active)` so the UI
+    /// remains responsive while waiting for ACP confirmation.
     pub(crate) plan_mode_pending: Option<bool>,
+    /// Optimistic Behavior selection awaiting `CurrentModeUpdate`.
+    pub(crate) behavior_mode_pending: Option<grow_tools::types::SessionMode>,
+    pub(crate) plan_phase: Option<String>,
     /// Session mode to apply once this agent's ACP session exists. Set when
     /// the agent is spawned from the dashboard with `/plan` active (the
     /// session does not exist yet, so the mode can't be sent immediately).
@@ -1207,7 +1213,7 @@ pub struct AgentView {
     pub permission_stashed_prompt: Option<StashedPrompt>,
     /// Scrollback focus stolen for a permission prompt; restored when the queue empties.
     pub permission_stashed_pane: Option<AgentPane>,
-    /// Active plan approval view (from `exit_plan_mode` ext_method). When `Some`,
+    /// Active Plan approval view (from `grow/plan_approval`). When `Some`,
     /// the prompt area shows the plan approval overlay and input is modal.
     pub(crate) plan_approval_view: Option<PlanApprovalViewState>,
     pub(crate) plan_comments: Vec<PlanComment>,
@@ -1292,8 +1298,8 @@ pub struct AgentView {
     /// Cleared on any non-`d` key press, after 500ms expiry, or once
     /// `try_handle_esc_policy` consumes the Esc. `pub(crate)` for policy tests.
     pub(crate) esc_pressed_at: Option<std::time::Instant>,
-    /// Ctrl+X command-prefix deadline state. The next bare `m` or `a` opens
-    /// the corresponding session picker; any other key consumes the prefix.
+    /// Ctrl+X command-prefix deadline state. The next bare `m`, `a`, `e`, `p`,
+    /// or `b` opens the corresponding session picker; any other key consumes it.
     pub(crate) leader_key_started_at: Option<std::time::Instant>,
     /// Post-cancel grace deadline: while `now` is before it, the Esc policy
     /// holds the idle rewind ARM so Esc-mashing past a cancel cannot
@@ -1886,17 +1892,6 @@ fn remember_mode_enabled() -> bool {
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
 }
-/// Mouse reporting toggle chord (Ctrl+R on scrollback), for unified-log diagnostics.
-fn is_mouse_reporting_toggle_chord(key: &KeyEvent) -> bool {
-    crate::key!('r', CONTROL).matches(key)
-}
-fn format_key_for_log(key: &KeyEvent) -> serde_json::Value {
-    serde_json::json!({
-        "code": format!("{:?}", key.code),
-        "modifiers": format!("{:?}", key.modifiers),
-        "kind": format!("{:?}", key.kind),
-    })
-}
 fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
     let action = match action_id? {
         ActionId::SendPrompt => return None,
@@ -1920,7 +1915,6 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::ToggleExpandAll => Action::ToggleExpandAll,
         ActionId::ExpandAllThinking => Action::ExpandAllThinking,
         ActionId::ToggleRaw => Action::ToggleRaw,
-        ActionId::ToggleMouseCapture => Action::ToggleMouseCapture,
         ActionId::CopyBlockContent => Action::CopyBlockContent,
         ActionId::CopyBlockMeta => Action::CopyBlockMeta,
         ActionId::OpenBlockViewer => Action::OpenBlockViewer,
@@ -1929,8 +1923,6 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::FocusPrompt => Action::FocusPrompt,
         ActionId::FocusScrollback => Action::FocusScrollback,
         ActionId::NextModel => Action::NextModel,
-        ActionId::CycleReasoningEffort => Action::CycleReasoningEffort,
-        ActionId::CycleMode => Action::CycleMode,
         ActionId::CancelTurn
         | ActionId::Quit
         | ActionId::ExitSession
@@ -1938,9 +1930,11 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         | ActionId::NewSessionInWorktree
         | ActionId::CommandPalette
         | ActionId::ModelPicker
-        | ActionId::AgentPicker => return None,
+        | ActionId::AgentPicker
+        | ActionId::EffortPicker
+        | ActionId::PermissionPicker
+        | ActionId::BehaviorPicker => return None,
         ActionId::DumpInputLog => return None,
-        ActionId::ToggleYolo => return None,
         ActionId::ToggleMultiline => return None,
         ActionId::InterjectPrompt => return None,
         ActionId::OpenSettings => return None,
@@ -1960,7 +1954,6 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         | ActionId::DashboardTogglePin
         | ActionId::DashboardBeginRename
         | ActionId::DashboardStop
-        | ActionId::DashboardCycleMode
         | ActionId::DashboardToggleGrouping
         | ActionId::DashboardReorderUp
         | ActionId::DashboardReorderDown
@@ -1969,7 +1962,6 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         | ActionId::DashboardOverlayPrev
         | ActionId::DashboardOverlayNext
         | ActionId::DashboardOverlayStop
-        | ActionId::DashboardToggleAutoApprove
         | ActionId::DashboardOpenLocationPicker
         | ActionId::DashboardToggleWorktree => return None,
     };

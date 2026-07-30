@@ -4,24 +4,14 @@
 //! Own binary: `set_configured_profile` writes a process-global `OnceLock` that
 //! other unit tests in this crate also set.
 
-use grow_shell::leader::{
-    ClientCapabilities, ClientMode, ConnectionError, LeaderEnvUrls, connect_or_spawn,
-};
+use grow_shell::leader::{ClientCapabilities, ClientMode, ConnectionError, connect_or_spawn};
 
 #[tokio::test]
 async fn connect_or_spawn_refuses_when_sandbox_confinement_requested() {
     grow_sandbox::set_configured_profile("strict");
-
-    let env_urls = LeaderEnvUrls {
-        // Guard returns before LeaderLock / socket paths touch the filesystem.
-        service_ws_url: "wss://test.invalid/sandbox-confinement".into(),
-        service_ws_origin: "https://test.invalid".into(),
-    };
-
     let err = match connect_or_spawn(
         "test-sandbox-confinement",
         ClientMode::Stdio,
-        &env_urls,
         ClientCapabilities::default(),
     )
     .await

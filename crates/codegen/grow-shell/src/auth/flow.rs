@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::io::AsyncBufReadExt as _;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::auth::config::LEGACY_AUTH_SCOPE;
+use crate::auth::config::SERVICE_AUTH_SCOPE;
 use crate::auth::{AuthManager, ProviderAuth, ServiceAuthConfig, parse_output};
 use crate::util::grow_home;
 
@@ -16,6 +16,9 @@ pub type StderrCallback = Box<dyn Fn(&str)>;
 /// pin — so interactive login starts fresh instead of reusing a stale/wrong-team
 /// session.
 fn is_cached_credential_compatible(credential: &ProviderAuth, config: &ServiceAuthConfig) -> bool {
+    if credential.auth_mode == crate::auth::AuthMode::External && credential.oidc_issuer.is_none() {
+        return false;
+    }
     let expected_issuer = config
         .oidc
         .as_ref()
@@ -468,9 +471,7 @@ async fn run_auth_flow_inner(
 
     if reauth {
         auth_manager.clear()?;
-        // Also remove the legacy login.example.com scope so stale tokens
-        // don't linger alongside the fresh OIDC credential.
-        let _ = auth_manager.remove_scope(LEGACY_AUTH_SCOPE);
+        let _ = auth_manager.remove_scope(SERVICE_AUTH_SCOPE);
     }
 
     if !force_interactive && let Some(cached) = auth_manager.current() {
@@ -487,13 +488,6 @@ async fn run_auth_flow_inner(
             auth_mode = ?cached.auth_mode,
             "auth: cached credential incompatible with requested flow, proceeding to interactive login"
         );
-        // Remove the stale legacy credential from disk so it doesn't
-        // linger alongside the new OIDC entry after re-authentication.
-        if cached.auth_mode == super::AuthMode::WebLogin
-            && let Err(e) = auth_manager.remove_scope(LEGACY_AUTH_SCOPE)
-        {
-            tracing::warn!(error = ?e, "auth: failed to remove legacy scope entry (non-fatal)");
-        }
     }
 
     if !force_interactive && !reauth && auth_manager.is_expired() {
@@ -592,7 +586,7 @@ async fn run_auth_flow_inner(
         match crate::auth::devbox_login::mint_devbox_auth(auth_manager).await {
             Ok(new_auth) => match auth_manager.save_without_enrichment(new_auth).await {
                 Ok(auth) => {
-                    let _ = auth_manager.remove_scope(LEGACY_AUTH_SCOPE);
+                    let _ = auth_manager.remove_scope(SERVICE_AUTH_SCOPE);
                     grow_diagnostics::unified_log::info(
                         "auth: devbox migration in auth flow succeeded",
                         None,
@@ -785,7 +779,7 @@ pub(crate) async fn mint_session_noninteractive(
 async fn persist_or_use_minted(auth_manager: &AuthManager, new_auth: ProviderAuth) -> ProviderAuth {
     match auth_manager.save_without_enrichment(new_auth.clone()).await {
         Ok(auth) => {
-            let _ = auth_manager.remove_scope(LEGACY_AUTH_SCOPE);
+            let _ = auth_manager.remove_scope(SERVICE_AUTH_SCOPE);
             auth
         }
         Err(e) => {
@@ -825,15 +819,9 @@ pub async fn ensure_authenticated_with_override(
     let grow_home = grow_home::grow_home();
     let auth_manager = Arc::new(AuthManager::new(&grow_home, auth.clone()));
 
-    // If not re-authing, accept any valid non-WebLogin credential.
-    // WebLogin tokens are always skipped — they must be migrated to OIDC.
+    // If not re-authing, accept the current valid credential.
     if !reauth && let Some(auth) = auth_manager.current() {
-        if auth.auth_mode != super::AuthMode::WebLogin {
-            return Ok(auth);
-        }
-        tracing::info!("auth: skipping cached WebLogin credential, will migrate to OIDC");
-        auth_manager.clear_in_memory();
-        let _ = auth_manager.remove_scope(LEGACY_AUTH_SCOPE);
+        return Ok(auth);
     }
 
     // Context only — the flow below prints the "Signing in…" line itself.
@@ -1171,7 +1159,7 @@ mod tests {
         let mgr = AuthManager::new(dir.path(), ServiceAuthConfig::default());
 
         // Expired but refreshable → returned. Guards a `current_or_expired()` ->
-        // `current()` regression that would disable the relay on a transient blip.
+        // `current()` regression that would disable automatic recovery on a transient blip.
         mgr.hot_swap(ProviderAuth {
             expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
             ..oidc_session("expired-but-refreshable", Some("rt"))
@@ -1185,7 +1173,7 @@ mod tests {
             Some("expired-but-refreshable".to_string())
         );
 
-        // No refresh token → rejected: never hand the relay a token it can't
+        // No refresh token → rejected: never hand a caller a token it can't
         // recover on 401 (the gate `for_session` doesn't check this).
         mgr.hot_swap(oidc_session("no-rt", None));
         assert!(expired_refreshable_session(&mgr).is_none());
@@ -1659,10 +1647,10 @@ mod tests {
         });
     }
 
-    fn legacy_auth() -> ProviderAuth {
+    fn base_auth() -> ProviderAuth {
         ProviderAuth {
             key: "k".into(),
-            auth_mode: AuthMode::WebLogin,
+            auth_mode: AuthMode::Oidc,
             create_time: Utc::now(),
             user_id: "u".into(),
             email: None,
@@ -1690,14 +1678,8 @@ mod tests {
         ProviderAuth {
             oidc_issuer: Some(issuer.into()),
             auth_mode: AuthMode::Oidc,
-            ..legacy_auth()
+            ..base_auth()
         }
-    }
-
-    #[test]
-    fn weblogin_cred_is_never_compatible() {
-        let cfg = ServiceAuthConfig::default();
-        assert!(!is_cached_credential_compatible(&legacy_auth(), &cfg));
     }
 
     #[test]
@@ -1730,7 +1712,7 @@ mod tests {
             &ProviderAuth {
                 auth_mode: AuthMode::External,
                 oidc_issuer: None,
-                ..legacy_auth()
+                ..base_auth()
             },
             &cfg,
         ));
@@ -1927,14 +1909,22 @@ mod tests {
         // Point the OAuth2 issuer at a non-routable address so the OIDC
         // discovery fails immediately without opening a browser window.
         let mut cfg = ServiceAuthConfig::default();
+        cfg.oauth2 = Some(crate::auth::OAuth2ProviderConfig {
+            issuer: "http://127.0.0.1:1".into(),
+            client_id: "test-client".into(),
+            scopes: vec!["openid".into()],
+            principal_type: None,
+            principal_id: None,
+            referrer: None,
+        });
         cfg.oauth2.as_mut().unwrap().issuer = "http://127.0.0.1:1".into();
 
         let writer = Arc::new(
             AuthManager::new(dir.path(), cfg.clone()).with_proxy_base_url("http://127.0.0.1:1"),
         );
         let expired_no_rt = ProviderAuth {
-            key: "expired-legacy".into(),
-            auth_mode: AuthMode::WebLogin,
+            key: "expired-oidc".into(),
+            auth_mode: AuthMode::Oidc,
             expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
             refresh_token: None,
             ..ProviderAuth::test_default()
@@ -2149,9 +2139,10 @@ mod tests {
             elapsed < crate::http::STARTUP_AUTH_TIMEOUT,
             "no-mint readiness auth must not engage the 60s cold-mint cap              (elapsed {elapsed:?}); readiness would block on a provider command"
         );
-        assert!(
-            result.is_none(),
-            "an expired session without a completed refresh cannot be used, and no mint              runs on this path, so no auth is produced"
+        assert_eq!(
+            result.as_ref().map(|auth| auth.key.as_str()),
+            Some("expired"),
+            "readiness keeps an expired-but-refreshable session so the first 401 can self-heal"
         );
 
         server.abort();

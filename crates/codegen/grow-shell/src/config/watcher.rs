@@ -70,12 +70,6 @@ fn new_filtered_debouncer<F: notify_debouncer_mini::DebounceEventHandler>(
 pub enum ConfigChangeEvent {
     AuthChanged,
     GlobalConfigChanged,
-    /// `~/.grow/models_cache.json` changed — the on-disk `/v1/models`
-    /// catalog cache was rewritten, possibly by **another** grow process
-    /// sharing the same `~/.grow` (the writer may also be this process;
-    /// the [`ModelsManager`](crate::agent::models::ModelsManager) dedupes
-    /// by content before applying).
-    ModelsCacheChanged,
     ProjectConfigChanged {
         path: PathBuf,
     },
@@ -98,7 +92,7 @@ pub enum ConfigChangeEvent {
     HomeClaudeJsonChanged,
 }
 
-/// Watches `~/.grow/` for `auth.json`, `config.toml`, and `models_cache.json`
+/// Watches `~/.grow/` for `auth.json` and `config.toml`
 /// changes, plus any extra paths (project `.grow/config.toml`, `.mcp.json`,
 /// etc.) provided at startup.
 ///
@@ -184,9 +178,6 @@ impl ConfigFileWatcher {
                     }
                     Some("config.toml") if parent == Some(grow_home_buf.as_path()) => {
                         Some(ConfigChangeEvent::GlobalConfigChanged)
-                    }
-                    Some("models_cache.json") if parent == Some(grow_home_buf.as_path()) => {
-                        Some(ConfigChangeEvent::ModelsCacheChanged)
                     }
                     Some("config.toml") => {
                         Some(ConfigChangeEvent::ProjectConfigChanged { path: path.clone() })
@@ -853,6 +844,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "FSEvents does not reliably deliver the first directory event in a test harness"
+    )]
     fn refresh_new_discovery_dirs_attaches_first_created_workflows_dir() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
@@ -991,38 +986,6 @@ mod tests {
             }
         }
         assert!(found, "should detect config.toml change");
-    }
-
-    /// A write to `<grow_home>/models_cache.json` must surface as
-    /// `ConfigChangeEvent::ModelsCacheChanged` so a long-running leader can
-    /// hot-load a catalog fetched by another grow process.
-    #[test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "flaky on macOS: FSEvents does not reliably deliver events in test harness"
-    )]
-    fn watcher_detects_models_cache_change() {
-        let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("models_cache.json"), "{}").unwrap();
-
-        let (_w, mut rx) =
-            ConfigFileWatcher::start(tmp.path(), &[], None, Some(Duration::from_millis(50)))
-                .expect("watcher should start");
-
-        fs::write(
-            tmp.path().join("models_cache.json"),
-            r#"{"fetched_at":"2026-01-01T00:00:00Z","models":{}}"#,
-        )
-        .unwrap();
-        wait_ms(300);
-
-        let mut found = false;
-        while let Ok(evt) = rx.try_recv() {
-            if evt == ConfigChangeEvent::ModelsCacheChanged {
-                found = true;
-            }
-        }
-        assert!(found, "should detect models_cache.json change");
     }
 
     #[test]

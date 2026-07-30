@@ -1,6 +1,7 @@
 //! Turn-execution concern for `SessionActor` (`handle_prompt`, turn-end,
 //! sampling loop).
 use super::*;
+use crate::session::behavior::BehaviorChangeOutcome;
 use grow_tools::implementations::grow_build::LoopFireMode;
 /// Synthetic tool the model calls to return its schema-constrained final answer
 /// on backends that can't constrain output natively (Messages API). Intercepted
@@ -277,10 +278,21 @@ impl SessionActor {
         if !origin.is_synthetic() {
             self.cancel_pending_recap_for_new_prompt();
         }
+        let behavior_outcome = self
+            .request_behavior_change(acp::SessionModeId::new(
+                session_mode_from_prompt_mode(prompt_mode).as_id(),
+            ))
+            .await;
+        if !matches!(behavior_outcome, BehaviorChangeOutcome::Applied) {
+            return Err(acp::Error::invalid_params().data(
+                serde_json::to_value(behavior_outcome.response_meta())
+                    .unwrap_or_else(|_| serde_json::json!({})),
+            ));
+        }
         *self.turn_start_prompt_mode.lock() = prompt_mode;
         *self.turn_prompt_mode.lock() = prompt_mode;
         self.signals_handle().increment_turn();
-        self.reconcile_plan_mode_with_prompt(prompt_mode).await;
+        self.sync_active_behavior_prompt().await;
         let _turn_active_guard =
             TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());
         let _session_turn_active_guard = TurnActiveGuard::activate(Some(&self.session_turn_active));
@@ -305,6 +317,53 @@ impl SessionActor {
                 self.signals_handle().record_edit_and_retry();
             }
         }
+        let original_prompt_text = prompt_blocks.iter().fold(String::new(), |mut acc, b| {
+            if let acp::ContentBlock::Text(t) = b {
+                acc.push_str(&t.text);
+            }
+            acc
+        });
+        let prompt_blocks = if self.behavior.lock().behavior()
+            == Some(xai_tool_types::BehaviorId::Goal)
+            && self.goal_tracker.lock().snapshot().is_none()
+            && !original_prompt_text.trim_start().starts_with('/')
+            && !original_prompt_text.trim().is_empty()
+        {
+            let reminder = self.setup_goal(original_prompt_text.trim(), None).await;
+            vec![acp::ContentBlock::Text(acp::TextContent::new(reminder))]
+        } else {
+            prompt_blocks
+        };
+        if self.behavior.lock().behavior() == Some(xai_tool_types::BehaviorId::DeepResearch)
+            && !original_prompt_text.trim_start().starts_with('/')
+        {
+            self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+            if let Some(run_id) = self
+                .behavior
+                .lock()
+                .deep_research_run_id()
+                .map(str::to_owned)
+            {
+                self.send_host_turn_slash_command_output(&format!(
+                    "Deep Research is already running ({run_id}). Use /workflow to inspect, pause, resume, or stop it, or switch Behavior explicitly."
+                ))
+                .await;
+                return ok_end_turn(0, None);
+            }
+            match self
+                .launch_deep_research(original_prompt_text.trim().to_string())
+                .await
+            {
+                Ok(run_id) => {
+                    self.send_host_turn_slash_command_output(&format!(
+                        "Deep Research started in the background ({run_id}). A terminal report will be delivered here."
+                    ))
+                    .await;
+                }
+                Err(message) => self.send_host_turn_slash_command_output(&message).await,
+            }
+            return ok_end_turn(0, None);
+        }
         if let Some(bash_command) = Self::extract_bash_command(&prompt_blocks) {
             return self
                 .handle_direct_bash_command(prompt_id, bash_command, &prompt_blocks)
@@ -327,12 +386,6 @@ impl SessionActor {
         let availability = self.command_availability().await;
         let mut pending_skill_information: Option<String> = None;
         let (workflow_registry, named_workflows) = self.named_workflow_snapshot();
-        let original_prompt_text = prompt_blocks.iter().fold(String::new(), |mut acc, b| {
-            if let acp::ContentBlock::Text(t) = b {
-                acc.push_str(&t.text);
-            }
-            acc
-        });
         let loop_fire_mode = if self.rebuild_spec.scheduler_background_loops {
             LoopFireMode::Detached
         } else {
@@ -365,11 +418,81 @@ impl SessionActor {
                         token_budget,
                     } => {
                         grow_diagnostics::session_ctx::log_event(slash_used);
+                        use crate::session::behavior::BehaviorChangeOutcome;
+                        match self
+                            .request_behavior_change(acp::SessionModeId::new("goal"))
+                            .await
+                        {
+                            BehaviorChangeOutcome::Applied => {}
+                            BehaviorChangeOutcome::ConfirmationRequired { message, .. }
+                            | BehaviorChangeOutcome::Rejected { message } => {
+                                self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                                self.send_host_turn_slash_command_output(&message).await;
+                                return ok_end_turn(0, None);
+                            }
+                        }
                         let reminder = self.setup_goal(&objective, token_budget).await;
                         vec![text_block(reminder)]
                     }
+                    BuiltinAction::GoalEnter => {
+                        grow_diagnostics::session_ctx::log_event(slash_used);
+                        use crate::session::behavior::BehaviorChangeOutcome;
+                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                        let outcome = self
+                            .request_behavior_change(acp::SessionModeId::new("goal"))
+                            .await;
+                        if matches!(&outcome, BehaviorChangeOutcome::Applied)
+                            && self.goal_tracker.lock().status().is_some_and(|status| {
+                                status.is_paused()
+                                    && status
+                                        != crate::session::goal_tracker::GoalStatus::BudgetLimited
+                            })
+                        {
+                            match self.resume_goal().await {
+                                GoalResumeOutcome::Inference { reminder, user_msg } => {
+                                    self.send_slash_command_output(&user_msg).await;
+                                    vec![text_block(reminder)]
+                                }
+                                GoalResumeOutcome::Message(message) => {
+                                    self.send_host_turn_slash_command_output(&message).await;
+                                    return ok_end_turn(0, None);
+                                }
+                            }
+                        } else {
+                            let message = match outcome {
+                                BehaviorChangeOutcome::Applied => if self
+                                    .goal_tracker
+                                    .lock()
+                                    .snapshot()
+                                    .is_some()
+                                {
+                                    "Goal behavior selected. The existing goal is ready to continue."
+                                } else {
+                                    "Goal behavior selected. Send a non-empty objective to start."
+                                }
+                                .to_string(),
+                                BehaviorChangeOutcome::ConfirmationRequired { message, .. }
+                                | BehaviorChangeOutcome::Rejected { message } => message,
+                            };
+                            self.send_host_turn_slash_command_output(&message).await;
+                            return ok_end_turn(0, None);
+                        }
+                    }
                     BuiltinAction::GoalResume => {
                         grow_diagnostics::session_ctx::log_event(slash_used);
+                        use crate::session::behavior::BehaviorChangeOutcome;
+                        match self
+                            .request_behavior_change(acp::SessionModeId::new("goal"))
+                            .await
+                        {
+                            BehaviorChangeOutcome::Applied => {}
+                            BehaviorChangeOutcome::ConfirmationRequired { message, .. }
+                            | BehaviorChangeOutcome::Rejected { message } => {
+                                self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                                self.send_host_turn_slash_command_output(&message).await;
+                                return ok_end_turn(0, None);
+                            }
+                        }
                         match self.resume_goal().await {
                             GoalResumeOutcome::Inference { reminder, user_msg } => {
                                 self.send_slash_command_output(&user_msg).await;
@@ -852,7 +975,7 @@ impl SessionActor {
                     let decision = if self.goal_runs_on_workflow_engine() {
                         self.run_goal_round_end().await
                     } else {
-                        self.run_goal_round_end_legacy().await
+                        self.run_goal_round_end_foreground().await
                     };
                     if let GoalRoundDecision::Continue(directive) = decision {
                         self.inject_goal_continuation_message(directive).await;
@@ -1793,7 +1916,6 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
     ) -> Result<TurnOutcome, acp::Error> {
         let conv_turn_start = std::time::Instant::now();
-        self.maybe_refresh_model_metadata_on_resume().await;
         self.maybe_compact_on_model_switch().await?;
         self.chat_state_handle
             .record_turn_start(chrono::Utc::now().timestamp_millis());

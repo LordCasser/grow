@@ -126,8 +126,7 @@ fn kill_task_tool_config() -> ToolConfig {
 pub fn workspace_grow_build_toolset() -> ToolServerConfig {
     let mut tools = default_grow_build_toolset().tools;
     tools.push((&opencode::OpenCodeWriteTool).into());
-    tools.push((&grow_build::EnterPlanModeTool).into());
-    tools.push((&grow_build::ExitPlanModeTool).into());
+    tools.push((&grow_build::PlanControlTool).into());
     tools.push((&grow_build::AskUserQuestionTool).into());
     tools.push((&grow_build::WebFetchTool).into());
     tools.push((&memory::search_tool::MemorySearchImpl).into());
@@ -345,8 +344,7 @@ fn orchestrator_toolset() -> ToolServerConfig {
             (&use_tool::UseTool).into(),
             // Planning and user interaction
             (&grow_build::TodoWriteTool).into(),
-            (&grow_build::EnterPlanModeTool).into(),
-            (&grow_build::ExitPlanModeTool).into(),
+            (&grow_build::PlanControlTool).into(),
             (&grow_build::AskUserQuestionTool).into(),
             (&grow_build::UpdateGoalTool).into(),
             (&grow_build::WorkflowTool).into(),
@@ -1530,8 +1528,7 @@ mod tests {
             gc.tools.iter().map(|t| t.id.as_str()).collect();
         for excluded in [
             ToolConfig::from(&grow_build::LspTool).id,
-            ToolConfig::from(&grow_build::EnterPlanModeTool).id,
-            ToolConfig::from(&grow_build::ExitPlanModeTool).id,
+            ToolConfig::from(&grow_build::PlanControlTool).id,
         ] {
             assert!(
                 !gc_ids.contains(excluded.as_str()),
@@ -1543,8 +1540,7 @@ mod tests {
             full.tools.iter().map(|t| t.id.as_str()).collect();
         for present in [
             ToolConfig::from(&grow_build::LspTool).id,
-            ToolConfig::from(&grow_build::EnterPlanModeTool).id,
-            ToolConfig::from(&grow_build::ExitPlanModeTool).id,
+            ToolConfig::from(&grow_build::PlanControlTool).id,
         ] {
             assert!(
                 full_ids.contains(present.as_str()),

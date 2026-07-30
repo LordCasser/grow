@@ -5,7 +5,7 @@
 use grow_tools::implementations::grow_build::ask_user_question::{
     AskUserQuestionExtRequest, AskUserQuestionMode,
 };
-use grow_tools::implementations::grow_build::exit_plan_mode::ExitPlanModeExtRequest;
+use grow_tools::implementations::grow_build::plan_control::PlanApprovalExtRequest;
 
 #[test]
 fn ask_user_question_request_carries_session_id() {
@@ -23,8 +23,8 @@ fn ask_user_question_request_carries_session_id() {
 }
 
 #[test]
-fn exit_plan_mode_request_carries_session_id() {
-    let req = ExitPlanModeExtRequest {
+fn plan_approval_request_carries_session_id() {
+    let req = PlanApprovalExtRequest {
         session_id: "sess-xyz".to_string(),
         tool_call_id: "call-2".to_string(),
         plan_content: "plan".to_string(),

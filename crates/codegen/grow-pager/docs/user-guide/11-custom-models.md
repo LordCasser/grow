@@ -145,7 +145,7 @@ and Messages uses its thinking/output-config fields.
 
 Provider APIs do not expose a common model-capability discovery mechanism. Declare the exact
 levels accepted by each configured model with `reasoning_efforts`; declaration order is also the
-`Shift+Tab` cycle order. A table entry can provide a display label and mark the initial session
+`Ctrl+X E` and `/effort` picker order. A table entry can provide a display label and mark the initial session
 default:
 
 ```toml
@@ -179,7 +179,7 @@ reasoning_efforts = ["none", "high", "max"]
 Prefer `reasoning_efforts` for BYOK models: it derives support, and `default = true` marks the
 model-specific default. That model default overrides `[models].default_reasoning_effort`. When no
 model default is marked, Grow uses the global default if the model lists it; otherwise it uses the
-lowest listed effort. `Shift+Tab`, `/effort`, and `/model` all use the same model-declared list. The
+lowest listed effort. `Ctrl+X E`, `/effort`, and `/model` all use the same model-declared list. The
 selected value is stored with the session, so reopening a session restores its last effort before
 any configured default is considered.
 

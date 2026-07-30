@@ -23,8 +23,6 @@ pub use types::LspServerReady;
 pub use types::LspServerRetrying;
 pub use types::LspServerStarting;
 pub use types::MonitorEvent;
-pub use types::PlanModeEntered;
-pub use types::PlanModeExited;
 pub use types::ScheduledTaskCreated;
 pub use types::ScheduledTaskFired;
 pub use types::ScheduledTaskRemoved;

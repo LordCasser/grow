@@ -20,7 +20,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 urlencoding = { workspace = true }
 grow-config-types = { workspace = true }
-grow-models = { workspace = true }
 grow-tools = { workspace = true }
 xai-tty-utils = { workspace = true }
 

@@ -50,16 +50,6 @@ pub struct TaskToolInput {
     #[serde(default)]
     pub capability_mode: Option<SubagentCapabilityMode>,
 
-    /// Optional behavior applied to this child session. Behaviors guide and
-    /// constrain how an existing role works; they do not grant tools or alter
-    /// the selected subagent type.
-    #[schemars(
-        description = "Optional behavior for this subagent: \"clarify\" or \"plan\". \
-            A behavior never grants tools and is independent of subagent_type."
-    )]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub behavior: Option<BehaviorId>,
-
     /// Isolation mode for the child's execution environment.
     #[schemars(
         description = "Isolation mode: \"none\" (default, shared workspace) or \"worktree\" \
@@ -122,14 +112,6 @@ pub struct TaskToolInput {
 /// Default `subagent_type` for [`TaskToolInput`] when the caller omits it.
 pub fn default_subagent_type() -> String {
     "general-purpose".to_string()
-}
-
-/// A session work behavior, orthogonal to the Agent role and tool capability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum BehaviorId {
-    Clarify,
-    Plan,
 }
 
 /// True when `s` is not a model-emitted placeholder (`""`, `"null"`, `"none"`,
@@ -1107,19 +1089,6 @@ mod tests {
     }
 
     #[test]
-    fn task_tool_input_behavior_is_independent_of_subagent_type() {
-        let input: TaskToolInput = serde_json::from_str(
-            r#"{"description":"d","prompt":"p","subagent_type":"explore","behavior":"plan"}"#,
-        )
-        .unwrap();
-        assert_eq!(input.subagent_type, "explore");
-        assert_eq!(input.behavior, Some(BehaviorId::Plan));
-
-        let value = serde_json::to_value(input).unwrap();
-        assert_eq!(value["behavior"], "plan");
-    }
-
-    #[test]
     fn task_tool_input_model_none_skips_serialize() {
         let input = TaskToolInput {
             prompt: "p".into(),
@@ -1127,7 +1096,6 @@ mod tests {
             subagent_type: default_subagent_type(),
             run_in_background: false,
             capability_mode: None,
-            behavior: None,
             isolation: None,
             resume_from: None,
             cwd: None,

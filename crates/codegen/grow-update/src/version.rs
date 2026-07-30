@@ -4,17 +4,12 @@ use anyhow::Result;
 use serde::Deserialize;
 use tokio::fs;
 
-use grow_shell::env::GrowEnvironment;
 use grow_shell::util::grow_home::grow_home;
 
 const TTL_SECONDS_BEFORE_AUTO_UPDATE: Duration = Duration::from_secs(60 * 30);
 pub const GH_RELEASE_REPO: &str = "LordCasser/grow";
 
-/// Minimal configuration the update system needs from the environment.
-///
-/// Constructed once from `GrowEnvironment` at startup and threaded through the
-/// update call chain so that `auto_update` and `version` never need to know
-/// about the `GrowEnvironment` enum directly.
+/// Minimal configuration threaded through the update call chain.
 #[derive(Debug, Clone)]
 pub struct UpdateConfig {
     /// Explicitly configured chat API proxy base URL.
@@ -29,10 +24,10 @@ pub struct UpdateConfig {
     pub channel: String,
 }
 
-impl UpdateConfig {
-    pub fn from_environment(env: &GrowEnvironment) -> Self {
+impl Default for UpdateConfig {
+    fn default() -> Self {
         Self {
-            proxy_base_url: env.cli_chat_proxy_base_url(),
+            proxy_base_url: String::new(),
             auth_scope: grow_shell::auth::ServiceAuthConfig::default().auth_scope(),
             deployment_key: None,
             alpha_test_key: None,
@@ -532,8 +527,7 @@ mod tests {
 
     #[test]
     fn test_update_config_default_channel_is_stable() {
-        use grow_shell::env::GrowEnvironment;
-        let cfg = UpdateConfig::from_environment(&GrowEnvironment::Production);
+        let cfg = UpdateConfig::default();
         assert_eq!(cfg.channel, "stable");
     }
 }

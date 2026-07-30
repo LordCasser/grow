@@ -1,8 +1,8 @@
 use agent_client_protocol as acp;
 use xai_acp_lib::AcpResult;
 
-pub use grow_tools::implementations::grow_build::exit_plan_mode::{
-    ExitPlanModeExtRequest, ExitPlanModeExtResponse,
+pub use grow_tools::implementations::grow_build::plan_control::{
+    PlanApprovalExtRequest, PlanApprovalExtResponse,
 };
 
 use crate::views::prompt_widget::StashedPrompt;
@@ -38,7 +38,7 @@ pub struct PlanApprovalViewState {
 
 impl PlanApprovalViewState {
     pub fn new(
-        request: ExitPlanModeExtRequest,
+        request: PlanApprovalExtRequest,
         stashed_prompt: StashedPrompt,
         response_tx: tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>,
     ) -> Self {
@@ -90,18 +90,18 @@ impl PlanApprovalViewState {
     }
 }
 
-pub fn send_exit_plan_response(
+pub fn send_plan_approval_response(
     tx: tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>,
     outcome: &str,
     feedback: Option<String>,
 ) {
     let feedback = feedback.filter(|f| !f.trim().is_empty());
-    let resp = ExitPlanModeExtResponse {
+    let resp = PlanApprovalExtResponse {
         outcome: outcome.into(),
         feedback,
     };
     let raw = serde_json::value::to_raw_value(&resp)
-        .expect("ExitPlanModeExtResponse serialization should not fail");
+        .expect("PlanApprovalExtResponse serialization should not fail");
     tx.send(Ok(acp::ExtResponse::new(raw.into()))).ok();
 }
 
@@ -113,7 +113,7 @@ fn send_ext_response(
     let Some(tx) = tx.take() else {
         return false;
     };
-    send_exit_plan_response(tx, outcome, feedback);
+    send_plan_approval_response(tx, outcome, feedback);
     true
 }
 
@@ -188,7 +188,7 @@ mod tests {
         tokio::sync::oneshot::Receiver<AcpResult<acp::ExtResponse>>,
     ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let request = ExitPlanModeExtRequest {
+        let request = PlanApprovalExtRequest {
             session_id: "test-session".into(),
             tool_call_id: "call_123".into(),
             plan_content: "# Plan\n\n## Step 1\nDo something".into(),

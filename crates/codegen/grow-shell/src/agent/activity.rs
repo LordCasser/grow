@@ -3,8 +3,8 @@
 //! that cannot read the `!Send` `MvpAgent` state on the `LocalSet`).
 //!
 //! The leader's `agent_busy` flag only counts IPC (Unix-socket) requests;
-//! relay (service.example.com WebSocket) traffic is bridged straight into the agent's
-//! ACP stdin and never sets it, so a relay-driven leader (devbox / remote)
+//! local IPC traffic is bridged straight into the agent's ACP input and never sets it, so
+//! a leader driven by a follower client
 //! always looked idle and got restarted mid-turn on every update —
 //! surfacing as "Subagent result channel dropped".
 //!
@@ -36,7 +36,7 @@ use crate::session::{SessionCommand, SessionHandle};
 const FLUSH_POLL: Duration = Duration::from_millis(50);
 
 /// Default bound on a process-exit session flush ([`AgentActivity::flush_all_sessions`]):
-/// leader auto-update shutdown and the in-process agent's `/exit` / headless-quit
+/// leader auto-update shutdown and the in-process agent's `/exit` / one-shot quit
 /// path both use it, so one wedged actor delays exit by the same amount everywhere.
 /// Sessions are normally idle by then and the flush completes in milliseconds.
 ///
@@ -51,7 +51,7 @@ pub const SESSION_FLUSH_GRACE: Duration = Duration::from_secs(10);
 struct SessionActivityEntry {
     id: String,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<SessionCommand>,
-    /// `Some` while a turn is running (relay- or IPC-driven alike).
+    /// `Some` while an IPC-driven turn is running.
     current_prompt_id: Arc<Mutex<Option<String>>>,
     /// Non-empty while a blocking reverse-request (permission / question /
     /// plan approval) is parked.
@@ -143,7 +143,7 @@ impl AgentActivity {
     /// `grace` bounds the **total** shutdown delay.
     ///
     /// Callers: the leader's auto-update / `RelaunchForUpdate` shutdown, and
-    /// the in-process agent worker on `/exit` / headless quit. In the leader
+    /// the in-process agent worker on `/exit` / one-shot quit. In the leader
     /// case, call **before** cancelling the root token; in the in-process case,
     /// **after** the cancel that ends the worker's run loop but before its
     /// `LocalSet` drops — either way, session state must be durable before the
@@ -381,7 +381,7 @@ mod tests {
         let (rx1, _p1, _i1) = register_raw(&activity, "s1");
         let actor1 = spawn_actor(rx1, Duration::from_millis(300));
 
-        // Actor 2 registers AFTER the flush has started (a relay-driven
+        // Actor 2 registers AFTER the flush has started (an IPC-driven
         // prompt racing the shutdown) — it must still receive Shutdown.
         let activity_late = activity.clone();
         let late = tokio::spawn(async move {

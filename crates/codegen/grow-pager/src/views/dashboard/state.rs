@@ -643,12 +643,14 @@ pub struct DashboardState {
     /// set by `/model <name> [effort]` (intercepted in
     /// `dispatch_dashboard_dispatch_slash`). `None` → spawn on the default
     /// model. Sticky across dispatches; reset to `None` on every
-    /// dashboard-open (alongside `pending_mode`).
+    /// dashboard-open (alongside the other per-spawn choices).
     pub pending_model: Option<PendingDispatchModel>,
-    /// Mode the next spawned agent starts in. Cycled with Shift+Tab and set
-    /// by `/plan`. Sticky across dispatches; re-seeded from
-    /// `app.default_yolo` on every dashboard-open (alongside `pending_model`).
-    pub pending_mode: DashboardDispatchMode,
+    /// Behavior the next spawned agent starts in. Set through the same Slash
+    /// selectors used in a live session; never persisted as a default.
+    pub pending_behavior: grow_tools::types::SessionMode,
+    /// Permission policy the next spawned agent starts with. Independent from
+    /// Behavior so Plan/Clarify and Ask/Auto/Always Approve can be composed.
+    pub pending_permission: crate::app::actions::PermissionModeKind,
     /// Snapshot of the app-wide model catalog, seeded at dashboard-open so
     /// the session-less slash dropdown can suggest real model names for
     /// `/model`. Without this the dropdown would fall back to an empty
@@ -706,27 +708,6 @@ pub struct DashboardState {
     /// Surface-local compose mode for dispatch + peek (not persisted; not
     /// shared with agent sessions). `/multiline` or Ctrl+M.
     pub multiline_mode: bool,
-}
-
-/// Mode staged for the next agent the dashboard spawns. Mirrors the agent
-/// view's Shift+Tab cycle (Normal → Plan → Always-Approve → Normal).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DashboardDispatchMode {
-    #[default]
-    Normal,
-    Plan,
-    AlwaysApprove,
-}
-
-impl DashboardDispatchMode {
-    /// Advance to the next mode in the Shift+Tab rotation.
-    pub fn cycle(self) -> Self {
-        match self {
-            Self::Normal => Self::Plan,
-            Self::Plan => Self::AlwaysApprove,
-            Self::AlwaysApprove => Self::Normal,
-        }
-    }
 }
 
 /// A model (and optional reasoning effort) staged for the next agent the
@@ -1371,7 +1352,8 @@ impl DashboardState {
             manual_scroll_active: false,
             shortcuts_modal: None,
             pending_model: None,
-            pending_mode: DashboardDispatchMode::Normal,
+            pending_behavior: grow_tools::types::SessionMode::Default,
+            pending_permission: crate::app::actions::PermissionModeKind::Ask,
             models: crate::acp::model_state::ModelState::default(),
             location_picker: None,
             location_hit: crate::app::agent_view::HitArea::default(),
@@ -2529,7 +2511,7 @@ impl DashboardState {
     ///
     /// `dashboard_owned` is whether the key resolved to a
     /// `When::DashboardFocused` registry binding (`Ctrl+X` stop,
-    /// `Shift+↑/↓` reorder, `Shift+Tab` mode, …) — those return `None`
+    /// `Shift+↑/↓` reorder, …) — those return `None`
     /// so the dashboard handler (and the remaining app-global
     /// shortcuts) still fire with the panel open.
     ///
@@ -2577,7 +2559,7 @@ impl DashboardState {
         }
 
         // Dashboard-owned chords fall through so the registry actions
-        // (Ctrl+X stop, Ctrl+T pin, Shift+↑/↓ reorder, Shift+Tab mode,
+        // (Ctrl+X stop, Ctrl+T pin, Shift+↑/↓ reorder,
         // …) and the hardcoded Ctrl+/ search toggle keep working with
         // the panel open. Keys the peek itself owns are exempt:
         //   - bare / Shift printable chars TYPE into the reply (vim's
@@ -3026,27 +3008,11 @@ impl DashboardState {
 
         // Keyboard override: Ctrl+O opens the pinned announcement CTA (when one is
         // live) instead of falling through to the dispatch input. Matched on the
-        // chord directly — `ToggleYolo` is `When::AgentScreen`-scoped and never
-        // resolves here. The dispatch re-resolves the slot gate, so a stale flag
+        // chord directly. The dispatch re-resolves the slot gate, so a stale flag
         // stays a safe no-op. Stamped `Keyboard` (like the agent/welcome Ctrl+O)
         // so "which surface" stays orthogonal to "was it keyboard".
         if self.pinned_promo_cta_live && key!('o', CONTROL).matches(key) {
             return InputOutcome::Action(Action::AnnouncementsOpenCta);
-        }
-
-        // Shift+Tab while the peek is open cycles the PEEKED agent's live
-        // mode, not the new-session staged mode. The registry resolves all
-        // Shift+Tab encodings to `DashboardCycleMode`; re-route that to the
-        // peek-scoped action here so the cycle acts on the agent under the
-        // cursor (and the bottom-border badge updates to match). Outside the
-        // peek it still cycles the dispatch box's staged mode.
-        if self.peek.is_some()
-            && matches!(
-                from_registry,
-                Some(crate::actions::ActionId::DashboardCycleMode)
-            )
-        {
-            return InputOutcome::Action(Action::DashboardPeekCycleMode);
         }
 
         // When the peek panel is open it owns the bare keys: the `❯ reply`
@@ -3438,11 +3404,6 @@ impl DashboardState {
                 return self.dispatch_send_action(false);
             }
         }
-
-        // Shift+Tab (DashboardCycleMode) is resolved through the registry
-        // `from_registry` path above — its `ActionDef` carries the three
-        // terminal encodings (`BackTab`, `BackTab`+SHIFT, `Tab`+SHIFT) as
-        // default/alt keys, so no hardcoded intercept is needed here.
 
         // Tab toggles focus between the dispatch input and the overview
         // list (the vim-style way to reach j/k navigation). When the
@@ -4341,10 +4302,6 @@ fn dashboard_action_for_id(id: crate::actions::ActionId) -> Option<InputOutcome>
         ActionId::DashboardTogglePin => Some(InputOutcome::Action(Action::DashboardTogglePin)),
         ActionId::DashboardBeginRename => Some(InputOutcome::Action(Action::DashboardBeginRename)),
         ActionId::DashboardStop => Some(InputOutcome::Action(Action::DashboardStop)),
-        ActionId::DashboardCycleMode => Some(InputOutcome::Action(Action::DashboardCycleMode)),
-        ActionId::DashboardToggleAutoApprove => {
-            Some(InputOutcome::Action(Action::DashboardToggleAutoApprove))
-        }
         ActionId::DashboardToggleWorktree => {
             Some(InputOutcome::Action(Action::DashboardToggleWorktree))
         }
@@ -4386,10 +4343,8 @@ fn dashboard_action_for_id(id: crate::actions::ActionId) -> Option<InputOutcome>
         | ActionId::ToggleExpandAll
         | ActionId::ExpandAllThinking
         | ActionId::ToggleRaw
-        | ActionId::ToggleMouseCapture
         | ActionId::NextModel
         | ActionId::CancelTurn
-        | ActionId::ToggleYolo
         | ActionId::ToggleMultiline
         | ActionId::FocusPrompt
         | ActionId::FocusScrollback
@@ -4398,7 +4353,6 @@ fn dashboard_action_for_id(id: crate::actions::ActionId) -> Option<InputOutcome>
         | ActionId::OpenBlockViewer
         | ActionId::OpenNextLink
         | ActionId::OpenPrevLink
-        | ActionId::CycleReasoningEffort
         | ActionId::ToggleTodos
         | ActionId::ToggleTasks
         | ActionId::EditPromptExternal
@@ -4406,7 +4360,6 @@ fn dashboard_action_for_id(id: crate::actions::ActionId) -> Option<InputOutcome>
         | ActionId::OpenSessions
         | ActionId::OpenExtensions
         | ActionId::SendToBackground
-        | ActionId::CycleMode
         | ActionId::BashMode
         | ActionId::Rewind
         | ActionId::KillBgTask
@@ -4418,6 +4371,9 @@ fn dashboard_action_for_id(id: crate::actions::ActionId) -> Option<InputOutcome>
         | ActionId::CommandPalette
         | ActionId::ModelPicker
         | ActionId::AgentPicker
+        | ActionId::EffortPicker
+        | ActionId::PermissionPicker
+        | ActionId::BehaviorPicker
         | ActionId::OpenSettings
         | ActionId::OpenDashboard
         // Overlay actions are intercepted at the AppView level
@@ -7517,31 +7473,10 @@ mod tests {
         assert!(!state.list_focused, "Tab again returns focus to the input");
     }
 
-    /// Shift+Tab emits `DashboardCycleMode` regardless of how the terminal
-    /// encodes it — `BackTab` (with or without a SHIFT modifier) or
-    /// `Tab`+SHIFT. Guards the regression where the registry's exact-modifier
-    /// `key!(BackTab)` lookup silently failed on `BackTab`+SHIFT.
+    /// Dashboard no longer owns configuration shortcuts. Shift+Tab must not
+    /// send or mutate a staged configuration, and it must preserve the draft.
     #[test]
-    fn shift_tab_emits_cycle_mode_for_all_encodings() {
-        let reg = crate::actions::ActionRegistry::defaults();
-        for key in [
-            KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
-            KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
-        ] {
-            let mut state = DashboardState::new();
-            let outcome = state.handle_key(&key, &reg);
-            assert!(
-                matches!(outcome, InputOutcome::Action(Action::DashboardCycleMode)),
-                "Shift+Tab ({key:?}) must emit DashboardCycleMode, got {outcome:?}",
-            );
-        }
-    }
-
-    /// Multiline must not treat Shift+Tab as the submit chord (is_mod_enter
-    /// requires KeyCode::Enter).
-    #[test]
-    fn multiline_shift_tab_cycles_mode_with_non_empty_draft() {
+    fn shift_tab_does_not_change_configuration_or_consume_the_draft() {
         let reg = crate::actions::ActionRegistry::defaults();
         for key in [
             KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
@@ -7553,8 +7488,8 @@ mod tests {
             state.dispatch.set_text("draft text");
             let outcome = state.handle_key(&key, &reg);
             assert!(
-                matches!(outcome, InputOutcome::Action(Action::DashboardCycleMode)),
-                "multiline + {key:?} must DashboardCycleMode, not send, got {outcome:?}",
+                !matches!(outcome, InputOutcome::Action(_)),
+                "Shift+Tab must not dispatch a configuration action: {outcome:?}",
             );
             assert_eq!(
                 state.dispatch.text(),
@@ -7586,40 +7521,6 @@ mod tests {
                 "Shift+{code:?} must emit {expected:?}, got {outcome:?}",
             );
         }
-    }
-
-    /// Shift+Tab cycles the PEEKED agent's live mode while the peek is
-    /// open (emitting `DashboardPeekCycleMode`), but the new-session
-    /// staged mode (`DashboardCycleMode`) when no peek is shown.
-    #[test]
-    fn shift_tab_cycles_peeked_agent_mode_when_peek_open() {
-        let reg = crate::actions::ActionRegistry::defaults();
-        for key in [
-            KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
-            KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
-        ] {
-            let mut state = make_state_with_selection();
-            state.peek = Some(super::super::peek::PeekPanelState::new(
-                DashboardRowId::TopLevel(AgentId(0)),
-                peek_fields_for_test("Idle"),
-            ));
-            let outcome = state.handle_key(&key, &reg);
-            assert!(
-                matches!(
-                    outcome,
-                    InputOutcome::Action(Action::DashboardPeekCycleMode)
-                ),
-                "Shift+Tab ({key:?}) with peek open must emit DashboardPeekCycleMode, got {outcome:?}",
-            );
-        }
-        // No peek → still the new-session staged-mode cycle.
-        let mut state = DashboardState::new();
-        let outcome = state.handle_key(&KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE), &reg);
-        assert!(
-            matches!(outcome, InputOutcome::Action(Action::DashboardCycleMode)),
-            "Shift+Tab without peek must emit DashboardCycleMode, got {outcome:?}",
-        );
     }
 
     /// Overview focused: Enter opens the focused row; Esc backs out of

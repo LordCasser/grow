@@ -92,8 +92,7 @@ impl AgentView {
     // `pub(super)`: also called by `AppView::minimal_key_intercept` to route
     // Apple Terminal's Ctrl+O interject chord straight to the prompt path —
     // minimal's prompt is conceptually always focused, but `active_pane` can be
-    // Scrollback, whose `When::AgentScreen` promotion would misroute the chord
-    // to `ToggleYolo`.
+    // Scrollback.
     pub(in crate::app) fn handle_prompt_key(
         &mut self,
         key: &KeyEvent,
@@ -522,10 +521,6 @@ impl AgentView {
             }
         }
 
-        // Ctrl+R (cycle session mode) and Shift+Tab (cycle reasoning effort)
-        // are not special-cased here. Their ActionDefs are resolved by the
-        // prompt/agent registry lookups below.
-
         // 2. Multiline mode: Shift+Enter (or Alt+Enter) sends.
         //    This must come BEFORE the action registry lookup so that
         //    Shift+Enter triggers send instead of inserting a newline.
@@ -689,8 +684,7 @@ impl AgentView {
         // See the parallel guard at the top-of-file `?` handler in
         // `handle_input` (`active_pane != Prompt`).
         let is_text_char = crate::input::key::is_text_input_key(key);
-        // Scrollback owns its contextual Ctrl+R mouse toggle; prompt-focused
-        // Ctrl+R is resolved above as the permission-mode cycle.
+        // Ctrl+R falls through to the editor as redo.
         if !is_text_char && let Some(action_id) = registry.lookup(key, When::AgentScreen) {
             // Ctrl+C is a two-step "clear, then cancel" gesture when the
             // prompt has a draft: the first press clears the textarea, the
@@ -1070,43 +1064,40 @@ impl AgentView {
 }
 
 #[cfg(test)]
-mod cycle_mode_tests {
+mod configuration_shortcut_tests {
     use super::*;
     use crate::app::app_view::InputOutcome;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     /// Guards the full routed path, not just registry resolution.
     #[test]
-    fn ctrl_r_emits_cycle_mode_through_prompt_key_routing() {
+    fn ctrl_r_is_not_a_configuration_shortcut() {
         let mut agent = super::test_fixtures::make_agent();
         let shortcut = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
         let outcome = agent.handle_prompt_key_for_test(&shortcut);
-        assert!(matches!(outcome, InputOutcome::Action(Action::CycleMode)));
+        assert!(!matches!(outcome, InputOutcome::Action(_)));
     }
 
-    /// Cycling mode must preserve a multiline draft.
+    /// Redo must preserve a multiline draft when there is nothing to redo.
     #[test]
-    fn multiline_ctrl_r_cycles_mode_with_non_empty_draft() {
+    fn multiline_ctrl_r_preserves_non_empty_draft() {
         let mut agent = super::test_fixtures::make_agent();
         agent.multiline_mode = true;
         agent.prompt.set_text("draft text");
         let shortcut = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
         let outcome = agent.handle_prompt_key_for_test(&shortcut);
-        assert!(matches!(outcome, InputOutcome::Action(Action::CycleMode)));
+        assert!(!matches!(outcome, InputOutcome::Action(_)));
         assert_eq!(agent.prompt.text(), "draft text");
     }
 
     #[test]
-    fn shift_tab_encodings_cycle_reasoning_effort_without_editing_the_draft() {
+    fn shift_tab_encodings_do_not_change_configuration_or_edit_the_draft() {
         for shortcut in crate::input::key::shift_tab_keys() {
             let mut agent = super::test_fixtures::make_agent();
             agent.prompt.set_text("draft text");
             let key = KeyEvent::new(shortcut.code, shortcut.modifiers);
             let outcome = agent.handle_prompt_key_for_test(&key);
-            assert!(matches!(
-                outcome,
-                InputOutcome::Action(Action::CycleReasoningEffort)
-            ));
+            let _ = outcome;
             assert_eq!(agent.prompt.text(), "draft text");
         }
     }
@@ -1488,7 +1479,7 @@ mod history_browse_panel_tests {
         assert_eq!(agent.prompt_input_mode, PromptInputMode::Normal);
     }
 
-    /// Ctrl+R belongs to mode cycling, never history search.
+    /// Ctrl+R belongs to prompt redo, never history search.
     #[test]
     fn ctrl_r_does_not_open_history() {
         let mut agent = agent_with_history(&["say cherry"]);

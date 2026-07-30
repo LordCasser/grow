@@ -831,9 +831,10 @@ fn resume_open_session_does_not_rearm_stale_overlay() {
         Some(agent_0)
     );
 }
-/// Conversation resume must not focus a Build agent that shares the same id.
+/// Loading a session that is already open focuses the existing owner instead
+/// of creating a duplicate and invalidating its in-flight UI state.
 #[test]
-fn duplicate_load_unbind_invalidates_old_minimal_btw_response() {
+fn duplicate_load_focuses_existing_owner_without_unbinding() {
     let mut app = test_app();
     app.screen_mode = crate::app::ScreenMode::Minimal;
     dispatch(Action::NewSession, &mut app);
@@ -856,20 +857,18 @@ fn duplicate_load_unbind_invalidates_old_minimal_btw_response() {
         ] => *id,
         other => panic!("expected correlated minimal /btw effect, got {other:?}"),
     };
-    dispatch(Action::LoadSession("shared-id".into(), None), &mut app);
-    assert!(app.agents[&old_owner].session.session_id.is_none());
-    assert!(app.agents[&old_owner].btw_state.is_none());
-    assert!(app.agents[&old_owner].minimal_btw_lifecycle.is_none());
-    dispatch(
-        Action::TaskComplete(TaskResult::BtwResponse {
-            agent_id: old_owner,
-            result: Ok("old answer".into()),
-            minimal_request_id: Some(request_id),
-        }),
-        &mut app,
+    let effects = dispatch(Action::LoadSession("shared-id".into(), None), &mut app);
+    assert!(effects.is_empty());
+    assert_eq!(
+        app.agents[&old_owner]
+            .session
+            .session_id
+            .as_ref()
+            .map(|id| id.0.as_ref()),
+        Some("shared-id")
     );
-    assert!(app.agents[&old_owner].btw_state.is_none());
-    assert!(app.agents[&old_owner].minimal_btw_lifecycle.is_none());
+    assert!(app.agents[&old_owner].minimal_btw_lifecycle.is_some());
+    let _ = request_id;
 }
 /// Resuming the agent that `attached_agent` already points at must focus_row.
 #[test]

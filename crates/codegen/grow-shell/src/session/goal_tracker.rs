@@ -1,7 +1,7 @@
 //! Goal mode state machine.
 //!
 //! This module contains [`GoalTracker`], a pure state machine (no async I/O)
-//! modeled after [`BehaviorController`](super::plan_mode::BehaviorController).
+//! modeled after [`BehaviorController`](super::behavior::BehaviorController).
 //! The `SessionActor` owns one `GoalTracker` behind a `Mutex` and calls
 //! its methods at the appropriate orchestration points.
 //!
@@ -50,21 +50,11 @@ pub enum GoalPhase {
 /// `InfraPaused` when a turn finishes with an infrastructure error,
 /// and `Blocked` when the model determined the goal is not achievable
 /// in the current environment. Use [`GoalStatus::is_paused`] to test
-/// paused-ness uniformly across all six variants.
-///
-/// **Backwards-compat serde aliases:** older shells serialized this
-/// enum with the default PascalCase form (`"Active"`, `"Paused"`,
-/// `"BudgetLimited"`, `"Complete"`). The `#[serde(alias = ...)]`
-/// attributes preserve in-flight goal snapshots written by older shells
-/// — legacy `"Paused"` maps to `UserPaused` (matches the pager-side
-/// fallback). New
-/// snapshots emit snake_case per `rename_all`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+/// paused-ness uniformly across all variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalStatus {
-    #[serde(alias = "Active")]
     Active,
-    #[serde(alias = "Paused")]
     UserPaused,
     BackOffPaused,
     /// Verifier flagged the same gaps across consecutive attempts (no
@@ -77,43 +67,15 @@ pub enum GoalStatus {
     InfraPaused,
     /// stashed in [`GoalOrchestration::pause_message`].
     Blocked,
-    #[serde(alias = "BudgetLimited")]
+    /// Token budget was exhausted. This is a fail-closed, non-achieved pause;
+    /// it cannot resume without replacing or explicitly re-budgeting the goal.
     BudgetLimited,
-    #[serde(alias = "Complete")]
     Complete,
 }
 
-impl<'de> serde::Deserialize<'de> for GoalStatus {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Ok(Self::from_wire_str(&s))
-    }
-}
-
 impl GoalStatus {
-    /// Parse a persisted/wire status string. Unknown values map to
-    /// `UserPaused`: a status this shell cannot interpret must restore as
-    /// a resumable paused goal, never an Active self-driving one.
-    pub fn from_wire_str(s: &str) -> Self {
-        match s {
-            "active" | "Active" => Self::Active,
-            "user_paused" | "paused" | "Paused" => Self::UserPaused,
-            // Historical status from shells that had doom-loop auto-pause.
-            "doom_loop_paused" => Self::UserPaused,
-            "back_off_paused" => Self::BackOffPaused,
-            "no_progress_paused" => Self::NoProgressPaused,
-            "infra_paused" => Self::InfraPaused,
-            "blocked" => Self::Blocked,
-            "budget_limited" | "BudgetLimited" => Self::BudgetLimited,
-            "complete" | "Complete" => Self::Complete,
-            _ => Self::UserPaused,
-        }
-    }
     /// `true` for any paused variant (`UserPaused`, `BackOffPaused`,
-    /// `NoProgressPaused`, `InfraPaused`, `Blocked`).
+    /// `NoProgressPaused`, `InfraPaused`, `Blocked`, `BudgetLimited`).
     pub fn is_paused(&self) -> bool {
         matches!(
             self,
@@ -122,6 +84,7 @@ impl GoalStatus {
                 | Self::NoProgressPaused
                 | Self::InfraPaused
                 | Self::Blocked
+                | Self::BudgetLimited
         )
     }
 }
@@ -1054,7 +1017,8 @@ impl GoalTracker {
         applied
     }
 
-    /// Resume a paused goal (any paused variant, including `Blocked`). Sets
+    /// Resume a recoverable paused goal (including `Blocked`, but not a
+    /// budget-exhausted goal). Sets
     /// `active_since`, clears [`GoalOrchestration::pause_message`], and resets
     /// every per-attempt auto-pause counter — `classifier_runs_attempted`, the
     /// strategist streak/recommendation, and the gap-fingerprint stall streak —
@@ -1062,6 +1026,7 @@ impl GoalTracker {
     pub fn resume(&mut self) -> bool {
         if let Some(o) = &mut self.orchestration
             && o.status.is_paused()
+            && o.status != GoalStatus::BudgetLimited
         {
             o.status = GoalStatus::Active;
             o.pause_message = None;
@@ -1077,11 +1042,11 @@ impl GoalTracker {
         false
     }
 
-    /// Mark the goal as complete. Accepts `Active` or any paused variant.
-    /// Returns `true` if the transition was applied.
-    pub fn complete(&mut self) -> bool {
+    /// Apply the terminal transition after an independent verifier returned
+    /// `Achieved`. No self-reported completion path may call this method.
+    pub(crate) fn complete_verified(&mut self) -> bool {
         if let Some(o) = &mut self.orchestration
-            && (o.status == GoalStatus::Active || o.status.is_paused())
+            && o.status == GoalStatus::Active
         {
             if let Some(since) = self.active_since.take() {
                 o.elapsed_ms = o
@@ -1120,7 +1085,8 @@ impl GoalTracker {
     /// Returns `true` if the transition was applied.
     pub fn budget_limit(&mut self) -> bool {
         if let Some(o) = &mut self.orchestration
-            && (o.status == GoalStatus::Active || o.status.is_paused())
+            && (o.status == GoalStatus::Active
+                || (o.status.is_paused() && o.status != GoalStatus::BudgetLimited))
         {
             if let Some(since) = self.active_since.take() {
                 o.elapsed_ms = o
@@ -1484,7 +1450,7 @@ mod tests {
             Some(GoalEvent::GoalResumed)
         ));
 
-        assert!(t.complete());
+        assert!(t.complete_verified());
         let o = t.snapshot().unwrap();
         assert!(matches!(
             o.history.last().map(|e| &e.event),
@@ -1711,7 +1677,7 @@ mod tests {
         assert!(t.resume());
         assert_eq!(t.snapshot().unwrap().verifier_id, original);
 
-        assert!(t.complete());
+        assert!(t.complete_verified());
         assert_eq!(t.snapshot().unwrap().verifier_id, original);
     }
 
@@ -1948,7 +1914,7 @@ mod tests {
         t.set_current_subagent(Some("sub-1".into()), Some("worker".into()));
         assert_eq!(t.current_subagent_id(), Some("sub-1"));
 
-        assert!(t.complete());
+        assert!(t.complete_verified());
         assert_eq!(t.status(), Some(GoalStatus::Complete));
         assert_eq!(t.phase(), Some(GoalPhase::Idle));
         assert!(t.current_subagent_id().is_none());
@@ -1973,7 +1939,7 @@ mod tests {
     fn pause_from_complete_is_noop() {
         let mut t = make_tracker();
         activate_tracker(&mut t);
-        t.complete();
+        t.complete_verified();
 
         assert!(!t.pause(GoalPauseReason::User));
         assert_eq!(t.status(), Some(GoalStatus::Complete));
@@ -2171,7 +2137,7 @@ mod tests {
         let mut t = make_tracker();
         activate_tracker(&mut t);
         seed(&mut t);
-        assert!(t.complete());
+        assert!(t.complete_verified());
         assert_clean(&t);
 
         // budget_limit
@@ -2236,20 +2202,20 @@ mod tests {
         activate_tracker(&mut t);
         t.set_current_subagent(Some("sub-1".into()), Some("worker".into()));
 
-        assert!(t.complete());
+        assert!(t.complete_verified());
         assert_eq!(t.status(), Some(GoalStatus::Complete));
         assert!(t.current_subagent_id().is_none());
         assert!(t.snapshot().unwrap().current_subagent_role.is_none());
     }
 
     #[test]
-    fn complete_from_paused_succeeds() {
+    fn complete_from_paused_is_noop() {
         let mut t = make_tracker();
         activate_tracker(&mut t);
         t.pause(GoalPauseReason::User);
 
-        assert!(t.complete());
-        assert_eq!(t.status(), Some(GoalStatus::Complete));
+        assert!(!t.complete_verified());
+        assert_eq!(t.status(), Some(GoalStatus::UserPaused));
     }
 
     #[test]
@@ -2258,7 +2224,7 @@ mod tests {
         activate_tracker(&mut t);
         t.budget_limit();
 
-        assert!(!t.complete());
+        assert!(!t.complete_verified());
         assert_eq!(t.status(), Some(GoalStatus::BudgetLimited));
     }
 
@@ -2266,9 +2232,9 @@ mod tests {
     fn complete_from_complete_is_noop() {
         let mut t = make_tracker();
         activate_tracker(&mut t);
-        t.complete();
+        t.complete_verified();
 
-        assert!(!t.complete());
+        assert!(!t.complete_verified());
         assert_eq!(t.status(), Some(GoalStatus::Complete));
     }
 
@@ -2289,7 +2255,7 @@ mod tests {
     fn budget_limit_from_complete_is_noop() {
         let mut t = make_tracker();
         activate_tracker(&mut t);
-        t.complete();
+        t.complete_verified();
 
         assert!(!t.budget_limit());
         assert_eq!(t.status(), Some(GoalStatus::Complete));
@@ -2329,29 +2295,19 @@ mod tests {
         assert!(GoalStatus::NoProgressPaused.is_paused());
         assert!(GoalStatus::InfraPaused.is_paused());
         assert!(GoalStatus::Blocked.is_paused());
+        assert!(GoalStatus::BudgetLimited.is_paused());
         assert!(!GoalStatus::Active.is_paused());
         assert!(!GoalStatus::Complete.is_paused());
-        assert!(!GoalStatus::BudgetLimited.is_paused());
     }
 
-    /// `NoProgressPaused` round-trips through both serde wire forms (snake_case
-    /// `Serialize` + `from_wire_str`) and stays distinct from the cap pause's
-    /// `back_off_paused`.
+    /// `NoProgressPaused` round-trips in the current snake_case format and
+    /// stays distinct from the cap pause's `BackOffPaused`.
     #[test]
     fn no_progress_paused_round_trips_distinctly_from_back_off() {
-        assert_eq!(
-            GoalStatus::from_wire_str("no_progress_paused"),
-            GoalStatus::NoProgressPaused
-        );
         let json = serde_json::to_string(&GoalStatus::NoProgressPaused).unwrap();
         assert_eq!(json, "\"no_progress_paused\"");
         let back: GoalStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(back, GoalStatus::NoProgressPaused);
-        // The cap pause keeps its own wire form — the two must not collapse.
-        assert_eq!(
-            GoalStatus::from_wire_str("back_off_paused"),
-            GoalStatus::BackOffPaused
-        );
         assert_ne!(GoalStatus::NoProgressPaused, GoalStatus::BackOffPaused);
     }
 
@@ -2388,12 +2344,12 @@ mod tests {
     }
 
     #[test]
-    fn complete_from_back_off_paused() {
+    fn complete_from_back_off_paused_is_noop() {
         let mut t = make_tracker();
         activate_tracker(&mut t);
         t.pause(GoalPauseReason::BackOff);
-        assert!(t.complete());
-        assert_eq!(t.status(), Some(GoalStatus::Complete));
+        assert!(!t.complete_verified());
+        assert_eq!(t.status(), Some(GoalStatus::BackOffPaused));
     }
 
     #[test]
@@ -2492,12 +2448,12 @@ mod tests {
     }
 
     #[test]
-    fn complete_from_blocked_succeeds() {
+    fn complete_from_blocked_is_noop() {
         let mut t = make_tracker();
         activate_tracker(&mut t);
         t.pause(GoalPauseReason::Verification);
-        assert!(t.complete());
-        assert_eq!(t.status(), Some(GoalStatus::Complete));
+        assert!(!t.complete_verified());
+        assert_eq!(t.status(), Some(GoalStatus::Blocked));
     }
 
     #[test]
@@ -2518,15 +2474,15 @@ mod tests {
     }
 
     #[test]
-    fn complete_from_blocked_clears_pause_message() {
+    fn complete_from_blocked_preserves_pause_message() {
         let mut t = make_tracker();
         activate_tracker(&mut t);
         t.pause_with_message(GoalPauseReason::Verification, "X".into());
         assert_eq!(t.snapshot().unwrap().pause_message.as_deref(), Some("X"));
 
-        assert!(t.complete());
-        assert_eq!(t.status(), Some(GoalStatus::Complete));
-        assert!(t.snapshot().unwrap().pause_message.is_none());
+        assert!(!t.complete_verified());
+        assert_eq!(t.status(), Some(GoalStatus::Blocked));
+        assert_eq!(t.snapshot().unwrap().pause_message.as_deref(), Some("X"));
     }
 
     #[test]
@@ -2546,7 +2502,7 @@ mod tests {
         let mut t = make_tracker();
         activate_tracker(&mut t);
         let before = t.snapshot().unwrap().elapsed_ms;
-        t.complete();
+        t.complete_verified();
         assert!(t.snapshot().unwrap().elapsed_ms >= before);
         assert!(t.active_since.is_none());
     }
@@ -2617,48 +2573,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pascal_case_paused_deserializes_to_user_paused() {
-        let legacy = r#""Paused""#;
-        let parsed: GoalStatus = serde_json::from_str(legacy).unwrap();
-        assert_eq!(parsed, GoalStatus::UserPaused);
-    }
-
-    #[test]
-    fn legacy_pascal_case_other_variants_deserialize() {
-        for (legacy, expected) in [
-            (r#""Active""#, GoalStatus::Active),
-            (r#""BudgetLimited""#, GoalStatus::BudgetLimited),
-            (r#""Complete""#, GoalStatus::Complete),
-        ] {
-            let parsed: GoalStatus = serde_json::from_str(legacy).unwrap();
-            assert_eq!(parsed, expected, "legacy {legacy} must parse");
-        }
-    }
-
-    #[test]
-    fn legacy_infra_paused_deserializes() {
+    fn current_infra_paused_deserializes() {
         let parsed: GoalStatus = serde_json::from_str(r#""infra_paused""#).unwrap();
         assert_eq!(parsed, GoalStatus::InfraPaused);
-    }
-
-    #[test]
-    fn unknown_future_paused_status_deserializes_to_user_paused() {
-        let parsed: GoalStatus = serde_json::from_str(r#""error_paused""#).unwrap();
-        assert_eq!(parsed, GoalStatus::UserPaused);
-    }
-
-    /// Any unknown wire status — not just `*_paused` forms — must restore
-    /// as a resumable paused goal, never an Active self-driving one.
-    #[test]
-    fn unknown_non_paused_status_deserializes_to_user_paused_not_active() {
-        for wire in [r#""quarantined""#, r#""v9_super_active""#, r#""""#] {
-            let parsed: GoalStatus = serde_json::from_str(wire).unwrap();
-            assert_eq!(parsed, GoalStatus::UserPaused, "wire {wire}");
-        }
-        assert_eq!(
-            GoalStatus::from_wire_str("not-a-status"),
-            GoalStatus::UserPaused,
-        );
     }
 
     #[test]
@@ -2793,38 +2710,6 @@ mod tests {
         let t = GoalTracker::from_snapshot(PathBuf::from("/tmp"), orchestration);
         assert_eq!(t.snapshot().unwrap().verifier_id, original);
         let _ = std::fs::remove_dir_all(goal_scratch_root(&original));
-    }
-
-    /// Full raw-JSON snapshot path: an unknown wire status must come back
-    /// from `from_snapshot` as a resumable `UserPaused` goal, never Active.
-    #[test]
-    fn from_snapshot_raw_json_unknown_status_restores_user_paused() {
-        const FORWARD_VERSION: &str = r#"{
-            "goal_id": "g-forward",
-            "objective": "from a newer shell",
-            "status": "hyper_active_v9",
-            "phase": "Idle",
-            "token_budget": null,
-            "elapsed_ms": 0,
-            "created_at": "2026-01-01T00:00:00Z",
-            "current_subagent_id": null,
-            "current_subagent_role": null,
-            "total_worker_rounds": 0,
-            "total_verify_rounds": 0,
-            "token_baseline": 0,
-            "history": [],
-            "verifier_id": "abcdef012345"
-        }"#;
-        let snapshot: GoalOrchestration =
-            serde_json::from_str(FORWARD_VERSION).expect("forward-version snapshot must parse");
-        let t = GoalTracker::from_snapshot(PathBuf::from("/tmp"), snapshot);
-        assert_eq!(
-            t.status(),
-            Some(GoalStatus::UserPaused),
-            "unknown status must restore paused, not self-driving",
-        );
-        assert!(t.active_since.is_none());
-        let _ = std::fs::remove_dir_all(goal_scratch_root(&t.snapshot().unwrap().verifier_id));
     }
 
     /// Restoring the id would over-count a resumed skeptic-0's prior
@@ -3117,7 +3002,7 @@ mod tests {
             activate_tracker(&mut t);
             t.snapshot_mut().unwrap().skeptic0_session_id = Some("prior-child".to_string());
             let applied = match ending {
-                "complete" => t.complete(),
+                "complete" => t.complete_verified(),
                 _ => t.budget_limit(),
             };
             assert!(applied, "{ending} transition must apply");
@@ -3191,7 +3076,7 @@ mod tests {
                     agent_type: "general-purpose".to_string(),
                 }];
             let applied = match ending {
-                "complete" => t.complete(),
+                "complete" => t.complete_verified(),
                 _ => t.budget_limit(),
             };
             assert!(applied, "{ending} transition must apply");
@@ -3213,7 +3098,7 @@ mod tests {
             t.snapshot_mut().unwrap().plan_baseline_file =
                 Some(PathBuf::from("/tmp/sess/goal/plan.baseline.md"));
             let applied = match ending {
-                "complete" => t.complete(),
+                "complete" => t.complete_verified(),
                 _ => t.budget_limit(),
             };
             assert!(applied, "{ending} transition must apply");
@@ -3394,7 +3279,7 @@ mod tests {
                 Some(details.to_string_lossy().into_owned());
 
             match ending {
-                "complete" => assert!(t.complete()),
+                "complete" => assert!(t.complete_verified()),
                 "budget_limit" => assert!(t.budget_limit()),
                 _ => t.clear(),
             }
@@ -3473,7 +3358,7 @@ mod tests {
         std::fs::write(&outside, "not ours").unwrap();
         let outside_str = outside.to_string_lossy().into_owned();
         t.snapshot_mut().unwrap().last_classifier_details_path = Some(outside_str.clone());
-        assert!(t.complete());
+        assert!(t.complete_verified());
         assert!(outside.exists(), "non-scratch source must not be moved");
         assert_eq!(
             t.snapshot()
@@ -3496,7 +3381,7 @@ mod tests {
             .join(victim.file_name().unwrap());
         let traversal_str = traversal.to_string_lossy().into_owned();
         t.snapshot_mut().unwrap().last_classifier_details_path = Some(traversal_str.clone());
-        assert!(t.complete());
+        assert!(t.complete_verified());
         assert!(
             victim.exists(),
             "a `..`-escaping source must never be moved",
@@ -3534,7 +3419,7 @@ mod tests {
         let staged_str = staged.to_string_lossy().into_owned();
         t.snapshot_mut().unwrap().last_classifier_details_path = Some(staged_str.clone());
 
-        assert!(t.complete());
+        assert!(t.complete_verified());
         let _ = std::fs::remove_file(&root);
 
         assert!(
@@ -3647,7 +3532,7 @@ mod tests {
             );
             match ending {
                 "complete" => {
-                    assert!(t.complete());
+                    assert!(t.complete_verified());
                 }
                 "budget_limit" => {
                     assert!(t.budget_limit());

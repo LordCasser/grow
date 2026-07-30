@@ -573,7 +573,7 @@ impl SessionActor {
         state.pending_inputs.push_back(InputItem {
             prompt_id: merged_prompt_id,
             prompt_blocks: merged_blocks,
-            prompt_mode: crate::session::plan_mode::PromptMode::Agent,
+            prompt_mode: crate::session::behavior::PromptMode::Agent,
             client_identifier: None,
             screen_mode: None,
             verbatim: true,

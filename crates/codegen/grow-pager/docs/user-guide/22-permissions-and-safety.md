@@ -43,7 +43,7 @@ ACP clients can set `"_meta": { "yoloMode": true }` on `session/new`. See [Agent
 
 ### How to set the mode
 
-**Interactive TUI:** `Ctrl+R` / `Ctrl+O`, `/always-approve` or `/auto`, or `/settings` ([shortcuts](03-keyboard-shortcuts.md), [commands](04-slash-commands.md)).
+**Interactive TUI:** `Ctrl+X P` or `/permission` opens the current-session selector; `/ask`, `/auto`, and `/always-approve` select directly. `/settings` changes defaults for future sessions ([shortcuts](03-keyboard-shortcuts.md), [commands](04-slash-commands.md)).
 
 **CLI:**
 
@@ -70,7 +70,7 @@ Skips ordinary permission prompts so tools run without waiting for a click. `den
 | --------- | ------- |
 | CLI | `--always-approve` (alias `--yolo`), or `--permission-mode bypassPermissions` |
 | Config | `[ui] permission_mode = "always-approve"` |
-| Interactive | `/always-approve`, `Ctrl+O` |
+| Interactive | `/always-approve`, or select it through `/permission` / `Ctrl+X P` |
 | ACP | `_meta.yoloMode: true` on `session/new` |
 
 #### Always-approve with hard limits
@@ -525,7 +525,7 @@ Recommended combination for untrusted code:
 ## Managing Permissions in the TUI
 
 - Permission decisions appear in the transcript.
-- The `/always-approve` command toggles always-approve mode; other modes are set through `defaultMode` (see [How to set the mode](#how-to-set-the-mode)).
+- Use `/permission` to choose the current session policy; `/ask`, `/auto`, and `/always-approve` are idempotent direct selections. Persistent defaults remain separate (see [How to set the mode](#how-to-set-the-mode)).
 - With `[ui] remember_tool_approvals = true`, permission prompts include per-command "Always allow" options that persist for the current project only. See [Interactive Approvals](#interactive-approvals-and-where-they-persist).
 - To manage hooks and plugins, run `/hooks` or `/plugins` (on most terminals, **Ctrl+L** also opens the Extensions modal; on VS Code, Cursor, Windsurf, and Zed, `Ctrl+L` is mid-turn interject instead). See [10-hooks.md](10-hooks.md).
 

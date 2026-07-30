@@ -30,7 +30,6 @@ pub mod instrumentation;
 pub mod leader;
 pub mod managed_config;
 pub mod mcp_doctor;
-pub use grow_models as models;
 pub mod plugin;
 pub mod remote;
 pub mod sampling;

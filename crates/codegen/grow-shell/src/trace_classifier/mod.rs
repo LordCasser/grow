@@ -1030,50 +1030,6 @@ pub async fn resolve_api_key(explicit: Option<&str>, _grow_home: &Path) -> Resul
     Err(anyhow!("no API key: pass --api-key or set LLM_API_KEY"))
 }
 
-/// Build an `AuthManager` for `grow_home`, install the
-/// non-interactive refresher chain, and ask for a usable key. Mirrors
-/// the body of [`crate::auth::try_ensure_fresh_auth`] but accepts an
-/// explicit `grow_home` so `--grow-home` overrides work in test
-/// fixtures (the upstream helper hardcodes the global `grow_home()`
-/// path).
-///
-/// Returns:
-/// * `Ok(Some(key))` — non-empty key after trim.
-/// * `Ok(None)` — auth.json has no entry (`NotLoggedIn`) or the
-///   resolved key was empty/whitespace. The caller renders the
-///   unified "no API key" error naming all three sources.
-/// * `Err(_)` — refresh attempt failed in a way the operator needs to
-///   see (network error, refresh_token rejected by the IdP, etc.).
-async fn non_interactive_auth_key(grow_home: &Path) -> Result<Option<String>> {
-    use crate::auth::{AuthError, AuthManager, ServiceAuthConfig};
-
-    // Production's `try_ensure_fresh_auth` clones the whole config to
-    // pass into `AuthManager::new` AND clones `auth_provider_command`
-    // again for `configure_refresher`. We extract the single field we
-    // need first, then move the rest of `config` into `AuthManager`
-    // — one `Option<String>` clone instead of one full struct clone
-    // plus one Option clone.
-    let config = ServiceAuthConfig::default();
-    let auth_provider_command = config.auth_provider_command.clone();
-    let manager = std::sync::Arc::new(AuthManager::new(grow_home, config));
-    manager.configure_refresher(auth_provider_command);
-    match manager.auth().await {
-        Ok(auth) => {
-            let trimmed = auth.key.trim();
-            if trimmed.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(trimmed.to_owned()))
-            }
-        }
-        Err(AuthError::NotLoggedIn) => Ok(None),
-        Err(e) => Err(anyhow!(
-            "auth.json refresh failed: {e}. Run `grow login` to re-authenticate, \
-             or pass --api-key / set $GROW_API_KEY to bypass auth.json."
-        )),
-    }
-}
-
 /// Resolve the API key and build the sampler client. Crate-internal:
 /// the only caller is [`run`], which has already destructured
 /// `RunArgs` so the owned strings can move into `SamplerConfig`
@@ -2202,7 +2158,7 @@ mod tests {
             "from-flag",
         );
 
-        unsafe { std::env::set_var("GROW_API_KEY", "from-env") };
+        unsafe { std::env::set_var("LLM_API_KEY", "from-env") };
         assert_eq!(
             resolve_api_key(None, grow_home).await.expect("ok"),
             "from-env"
@@ -2225,7 +2181,7 @@ mod tests {
             "whitespace-only flag falls through to env",
         );
 
-        unsafe { std::env::set_var("GROW_API_KEY", "   ") };
+        unsafe { std::env::set_var("LLM_API_KEY", "   ") };
         assert!(
             resolve_api_key(None, grow_home).await.is_err(),
             "whitespace-only env is treated as absent",
@@ -2238,22 +2194,6 @@ mod tests {
                 None => unsafe { std::env::remove_var(k) },
             }
         }
-    }
-
-    /// Auth.json with an `auth_mode: api_key` entry under the
-    /// production OIDC scope: `AuthManager::auth()` returns it via
-    /// the fast path, no refresh fires, no network needed.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn resolve_api_key_falls_back_to_auth_json() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let grow_home = tmp.path();
-        write_auth_json(grow_home, "from-auth-json");
-        // `with_no_env` returns sync; we re-implement the clearing
-        // inline so we can `.await` the resolver.
-        let key =
-            with_env_isolated(async { resolve_api_key(None, grow_home).await.expect("ok") }).await;
-        assert_eq!(key, "from-auth-json", "auth.json is the third source");
     }
 
     #[tokio::test]
@@ -2278,9 +2218,9 @@ mod tests {
         let grow_home = tmp.path();
         write_auth_json(grow_home, "from-auth-json");
         let key = with_env_isolated(async {
-            unsafe { std::env::set_var("GROW_API_KEY", "from-env") };
+            unsafe { std::env::set_var("LLM_API_KEY", "from-env") };
             let resolved = resolve_api_key(None, grow_home).await.expect("ok");
-            unsafe { std::env::remove_var("GROW_API_KEY") };
+            unsafe { std::env::remove_var("LLM_API_KEY") };
             resolved
         })
         .await;
@@ -2304,11 +2244,8 @@ mod tests {
         })
         .await;
         assert!(
-            msg.contains("--api-key")
-                && msg.contains("GROW_API_KEY")
-                && msg.contains("grow login")
-                && msg.contains("auth.json"),
-            "error names all three sources: {msg}",
+            msg.contains("--api-key") && msg.contains("LLM_API_KEY"),
+            "error names both supported sources: {msg}",
         );
     }
 
@@ -2333,21 +2270,6 @@ mod tests {
             err2.is_err(),
             "whitespace-only auth.json entry is treated as absent",
         );
-    }
-
-    /// A non-expired OIDC entry returns via the AuthManager fast
-    /// path — refresh chain not invoked, no network call. Pins the
-    /// wiring between `non_interactive_auth_key` and
-    /// `AuthManager::auth()` for the common steady-state case.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn resolve_api_key_returns_refreshable_oidc_token() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let grow_home = tmp.path();
-        write_fresh_oidc_auth_json(grow_home, "fresh-oidc-key");
-        let key =
-            with_env_isolated(async { resolve_api_key(None, grow_home).await.expect("ok") }).await;
-        assert_eq!(key, "fresh-oidc-key");
     }
 
     /// An OIDC entry with `expires_at` in the past AND no
@@ -2396,7 +2318,7 @@ mod tests {
     /// Env vars cleared by [`with_env_isolated`] / inline test
     /// teardown. Each can short-circuit our `AuthManager` setup
     /// against the test's tempdir if left in place:
-    /// * `GROW_API_KEY` — would return early from `resolve_api_key`.
+    /// * `LLM_API_KEY` — would return early from `resolve_api_key`.
     /// * `GROW_AUTH` — inline-JSON credentials override that bypasses
     ///   the on-disk read entirely (`AuthManager::new`).
     /// * `GROW_AUTH_PATH` — overrides the auth.json path; if set to
@@ -2406,7 +2328,7 @@ mod tests {
     ///   refresher that could mint credentials independent of the
     ///   fixture.
     const ISOLATED_ENV_KEYS: &[&str] = &[
-        "GROW_API_KEY",
+        "LLM_API_KEY",
         "GROW_AUTH",
         "GROW_AUTH_PATH",
         "GROW_AUTH_PROVIDER_COMMAND",

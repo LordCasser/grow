@@ -40,8 +40,8 @@ use grow_shell::agent::config::Config as AgentConfig;
 use grow_shell::agent::mvp_agent::MvpAgent;
 use grow_shell::leader::{
     ClientCapabilities as LeaderClientCapabilities, ClientMode, ConnectionStatus,
-    LEADER_SOCKET_ENV, LeaderClient, LeaderEnvUrls, LeaderLock, LeaderReconnector,
-    LeaderServerControlState, LeaderServerMetadata, ReconnectPolicy, run_leader_server,
+    LEADER_SOCKET_ENV, LeaderClient, LeaderLock, LeaderReconnector, LeaderServerControlState,
+    LeaderServerMetadata, ReconnectPolicy, run_leader_server,
 };
 use grow_test_support::MockInferenceServer;
 use tempfile::TempDir;
@@ -321,7 +321,7 @@ impl PagerLeaderCluster {
         ];
 
         // Hold the flock for the cluster's lifetime (see field doc).
-        let mut flock = LeaderLock::new("");
+        let mut flock = LeaderLock::new();
         assert!(
             flock.try_acquire().expect("acquire cluster flock"),
             "cluster flock unexpectedly held"
@@ -358,7 +358,6 @@ impl PagerLeaderCluster {
             pid: std::process::id(),
             socket_path: self.sock_path.clone(),
             lock_path: self.sock_path.with_extension("lock"),
-            ws_url_suffix: String::new(),
             // MUST be the client-side comparison source (grow_version), not
             // this crate's version: a reconnecting client evicts strictly-older
             // leaders, and "evict" here would signal THIS test process.
@@ -379,7 +378,6 @@ impl PagerLeaderCluster {
                 Arc::new(AtomicBool::new(false)),
                 grow_shell::agent::activity::AgentActivity::default(),
                 tokio::sync::watch::channel(true).1,
-                tokio::sync::watch::channel(false).0,
                 tokio::sync::watch::channel(grow_shell::leader::ShutdownReason::Manual).0,
                 None,
                 control_state,
@@ -401,8 +399,8 @@ impl PagerLeaderCluster {
             let auth_manager = Arc::new(agent_config.create_auth_manager());
             let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
             let gateway = GatewaySender::new(gw_tx);
-            let agent = MvpAgent::new(gateway, &agent_config, auth_manager, None)
-                .expect("valid agent config");
+            let agent =
+                MvpAgent::new(gateway, &agent_config, auth_manager).expect("valid agent config");
             let incoming = LineBufferedRead::spawn_local(agent_in_read.compat());
             let (conn, handle_io) = acp::AgentSideConnection::new(
                 agent,
@@ -512,10 +510,6 @@ impl PagerLeaderCluster {
             let reconnector = LeaderReconnector::new(
                 name,
                 ClientMode::Stdio,
-                LeaderEnvUrls {
-                    service_ws_url: String::new(),
-                    service_ws_origin: String::new(),
-                },
                 LeaderClientCapabilities {
                     client_version: Some("0.0.0-test".to_string()),
                     ..Default::default()

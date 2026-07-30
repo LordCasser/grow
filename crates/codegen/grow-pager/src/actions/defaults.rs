@@ -45,13 +45,7 @@ fn mode_ctrl_g_action(screen_mode: crate::app::ScreenMode) -> ActionDef {
 }
 
 /// Build the default action definitions for a screen mode.
-///
-/// `mouse_reporting_toggle_enabled` gates the opt-in `ToggleMouseCapture`
-/// shortcut (see below); pass `false` for the standard set.
-pub(super) fn default_actions(
-    screen_mode: crate::app::ScreenMode,
-    mouse_reporting_toggle_enabled: bool,
-) -> Vec<ActionDef> {
+pub(super) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<ActionDef> {
     let ctx = terminal_context();
     // xterm.js embeds: no KKP; host often steals Ctrl+I. Share one family flag for
     // quit / half-page / interject so VS Code-family embeds match VS Code.
@@ -500,37 +494,6 @@ pub(super) fn default_actions(
                 "Interrupts the agent's current turn and stops generation, keeping the session open.\nEsc cancels immediately while a turn is running in minimal mode or when vim scrollback mode is off (prompt or scrollback focused, even with a draft).\nCtrl+C cancels when the prompt is empty; with a non-empty draft it clears the prompt first and leaves the turn running.\nIt stops the turn, not the app; use the quit shortcut to exit.",
             ),
         },
-        ActionDef {
-            id: ActionId::CycleMode,
-            label: "mode",
-            description: "Cycle mode (Normal / Plan / Always-approve)",
-            default_key: key!('r', CONTROL),
-            alt_keys: vec![],
-            category: Category::GettingStarted,
-            context: When::PromptFocused,
-            hint_priority: None,
-            hint_key_display: Some("Ctrl+R"),
-            requires_confirmation: false,
-            long_help: Some(
-                "Steps the session mode: Normal -> Plan -> Always-Approve -> Normal.\nPlan keeps the agent planning first and writes no files; Always-Approve runs every tool call without asking.\nCtrl+O toggles auto-approve directly.",
-            ),
-        },
-        ActionDef {
-            id: ActionId::CycleReasoningEffort,
-            label: "effort",
-            description: "Cycle reasoning effort",
-            // All Shift+Tab encodings — see `input::key::shift_tab_keys()`.
-            default_key: crate::input::key::shift_tab_keys()[0],
-            alt_keys: crate::input::key::shift_tab_keys()[1..].to_vec(),
-            category: Category::GettingStarted,
-            context: When::AgentScreen,
-            hint_priority: None,
-            hint_key_display: Some("Shift+Tab"),
-            requires_confirmation: false,
-            long_help: Some(
-                "Cycles through the active model's configured reasoning-effort levels in declaration order.\nThe new level is persisted with this session and sent through the selected API backend.\nModels without configured effort support leave the current setting unchanged.",
-            ),
-        },
         // ── Panes (agent-level — toggle side panes) ─────────────────
         mode_ctrl_g_action(screen_mode),
         ActionDef {
@@ -692,21 +655,6 @@ pub(super) fn default_actions(
         },
         // ── Agent ────────────────────────────────────────────────────
         ActionDef {
-            id: ActionId::ToggleYolo,
-            label: "yolo",
-            description: "Toggle always-approve",
-            default_key: key!('o', CONTROL),
-            alt_keys: vec![],
-            category: Category::Session,
-            context: When::AgentScreen,
-            hint_priority: None,
-            hint_key_display: None,
-            requires_confirmation: false,
-            long_help: Some(
-                "Turns auto-approve (YOLO) on or off for this session.\nWhile on, the agent runs every tool call (edits, shell, deletes) with no per-action confirmation.\nSame state as the Ctrl+R cycle's Always-Approve; use with care.",
-            ),
-        },
-        ActionDef {
             id: ActionId::NewSession,
             label: "new",
             description: "New session",
@@ -790,6 +738,51 @@ pub(super) fn default_actions(
             ),
         },
         ActionDef {
+            id: ActionId::EffortPicker,
+            label: "effort",
+            description: "Pick reasoning effort",
+            default_key: key!(Null),
+            alt_keys: vec![],
+            category: Category::Session,
+            context: When::AgentScreen,
+            hint_priority: None,
+            hint_key_display: None,
+            requires_confirmation: false,
+            long_help: Some(
+                "Opens the reasoning-effort picker for the current session.\nPress Ctrl+X, then E, or use /effort.",
+            ),
+        },
+        ActionDef {
+            id: ActionId::PermissionPicker,
+            label: "permission",
+            description: "Pick permission mode",
+            default_key: key!(Null),
+            alt_keys: vec![],
+            category: Category::Session,
+            context: When::AgentScreen,
+            hint_priority: None,
+            hint_key_display: None,
+            requires_confirmation: false,
+            long_help: Some(
+                "Opens the permission picker for the current session.\nPress Ctrl+X, then P, or use /permission.",
+            ),
+        },
+        ActionDef {
+            id: ActionId::BehaviorPicker,
+            label: "behavior",
+            description: "Pick behavior",
+            default_key: key!(Null),
+            alt_keys: vec![],
+            category: Category::Session,
+            context: When::AgentScreen,
+            hint_priority: None,
+            hint_key_display: None,
+            requires_confirmation: false,
+            long_help: Some(
+                "Opens the Behavior picker for Normal, Clarify, Plan, Workflow, Deep Research, or Goal.\nPress Ctrl+X, then B.",
+            ),
+        },
+        ActionDef {
             id: ActionId::OpenSettings,
             label: "settings",
             description: "Open the settings modal",
@@ -803,31 +796,6 @@ pub(super) fn default_actions(
             long_help: None,
         },
     ];
-
-    // Toggle terminal mouse reporting (mouse capture). Opt-in via
-    // `[ui] mouse_reporting_toggle = true` in config.toml. Disabling capture
-    // hands mouse selection back to the terminal for native click-drag
-    // copy/paste; re-enabling restores in-app mouse support.
-    //
-    // Single binding: Ctrl+R on scrollback only (not prompt — Ctrl+R there
-    // remains prompt history search). Plain Ctrl+letter passes through Apple
-    // Terminal; avoids Ctrl+Shift+… chords that Terminal.app often swallows.
-    // Under Panels (not Essentials) — advanced/opt-in only.
-    if mouse_reporting_toggle_enabled {
-        actions.push(ActionDef {
-            id: ActionId::ToggleMouseCapture,
-            label: "mouse reporting",
-            description: "Toggle mouse reporting (native copy/paste)",
-            default_key: key!('r', CONTROL),
-            alt_keys: vec![],
-            category: Category::Panels,
-            context: When::ScrollbackFocused,
-            hint_priority: None,
-            hint_key_display: Some("Ctrl+r"),
-            requires_confirmation: false,
-            long_help: None,
-        });
-    }
 
     // Agent Dashboard ----------------------------------------------------
     //
@@ -930,24 +898,6 @@ pub(super) fn default_actions(
             ),
         },
         ActionDef {
-            id: ActionId::DashboardCycleMode,
-            label: "mode",
-            description: "Cycle dispatch mode",
-            // All Shift+Tab encodings — see `input::key::shift_tab_keys()`.
-            // Registry `matches` is exact-modifier, so the SHIFT-bearing
-            // forms must be alts.
-            default_key: crate::input::key::shift_tab_keys()[0],
-            alt_keys: crate::input::key::shift_tab_keys()[1..].to_vec(),
-            category: Category::Dashboard,
-            context: When::DashboardFocused,
-            hint_priority: None,
-            hint_key_display: Some("Shift+Tab"),
-            requires_confirmation: false,
-            long_help: Some(
-                "Cycles the dispatch mode for agents you launch from the dashboard: Normal, Plan, then Always-Approve.\nPlan has new agents plan before changing files; Always-Approve runs their tools without prompting.\nThe in-session equivalent is Ctrl+R.",
-            ),
-        },
-        ActionDef {
             id: ActionId::DashboardToggleGrouping,
             label: "group",
             description: "Toggle row grouping",
@@ -1018,25 +968,6 @@ pub(super) fn default_actions(
             requires_confirmation: false,
             long_help: Some(
                 "Closes the dashboard and returns to where you were.\nEsc is a cascade: it first dismisses an open peek or clears an active filter, and only exits once nothing else is pending.\nRebind this action to a different key to exit directly.",
-            ),
-        },
-        // Mirror of `ToggleYolo` (Ctrl+O) but scoped to the
-        // dashboard — flips the selected row's agent's
-        // always-approve / YOLO mode. Reachable from the dashboard
-        // view (and from inside the session overlay).
-        ActionDef {
-            id: ActionId::DashboardToggleAutoApprove,
-            label: "always-approve",
-            description: "Toggle always-approve",
-            default_key: key!('o', CONTROL),
-            alt_keys: vec![],
-            category: Category::Dashboard,
-            context: When::DashboardFocused,
-            hint_priority: None,
-            hint_key_display: Some("Ctrl+O"),
-            requires_confirmation: false,
-            long_help: Some(
-                "Toggles auto-approve (YOLO) for the selected agent right from the dashboard, without attaching to it.\nWhile on, that agent runs every tool call with no per-action confirmation.\nThe per-session equivalent is Ctrl+O inside a session.",
             ),
         },
         // Open the location picker — a floating modal to change the

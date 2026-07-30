@@ -119,26 +119,10 @@ pub enum Event {
     LazinessClassifierAborted {
         reason: &'static str,
     },
-    /// Goal-achievement classifier subagent was invoked. Fires once per
-    /// classifier attempt regardless of outcome; pairs with exactly one
-    /// of `GoalClassifierVerdict`, `GoalClassifierFailOpen`, or
-    /// `GoalClassifierFailClosed` once the run terminates.
-    GoalClassifierFired {
-        attempt: u32,
-        max_runs: u32,
-        model_id: String,
-    },
-    /// Goal-achievement classifier returned a parsed verdict (Achieved or
-    /// NotAchieved). `latency_ms` is the spawn-to-parse wall clock.
-    GoalClassifierVerdict {
-        verdict: GoalClassifierVerdictDiagnostic,
-        attempt: u32,
-        latency_ms: u64,
-    },
     /// Goal-achievement classifier could not produce a usable verdict due
     /// to an INFRA-class failure (timeout, sampler error, abort, file IO).
-    /// Caller fails OPEN — treats as Achieved — and records the reason.
-    GoalClassifierFailOpen {
+    /// Caller pauses the Goal fail-closed and records the reason.
+    GoalVerificationUnavailable {
         reason: &'static str,
         attempt: u32,
         latency_ms: u64,
@@ -239,7 +223,7 @@ pub enum Event {
         attempt: u32,
     },
     /// Goal summarizer subagent was invoked ONCE after the goal was
-    /// verified-achieved (real `Achieved`, not the infra fail-open), to
+    /// verified-achieved by a real `Achieved` verdict, to
     /// generate the closing user-facing summary. Pairs with exactly one of
     /// `GoalSummarizerCompleted` or `GoalSummarizerFailOpen`. Fail-OPEN — a
     /// failure never blocks completion. `attempt` is the achieving verifier
@@ -504,16 +488,6 @@ pub struct McpConfigServer {
     pub name: String,
     pub transport: String,
     pub source: String,
-}
-
-/// Diagnostic mirror of `grow-shell`'s `GoalClassifierVerdict`. Two
-/// crates due to the orphan rule; the conversion lives in
-/// `grow-shell/src/session/events.rs`.
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GoalClassifierVerdictDiagnostic {
-    Achieved,
-    NotAchieved,
 }
 
 /// Diagnostic mirror of `grow-shell`'s `GoalPauseReason`. The two types

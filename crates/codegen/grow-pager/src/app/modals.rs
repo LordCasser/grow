@@ -55,20 +55,15 @@ impl AgentView {
         else {
             return false;
         };
-        if args_query.is_empty() || !matches!(command.as_str(), "model" | "m") {
+        if args_query.is_empty() || !matches!(command.as_str(), "model" | "m" | "agent") {
             return false;
         }
         let command = command.clone();
         let Some(cmd) = slash_controller.registry().get(&command) else {
             return false;
         };
-        let ctx = crate::slash::command::AppCtx {
-            models,
-            cwd,
-            has_session_announcements: slash_controller.has_session_announcements(),
-            workflows_available: slash_controller.workflows_available(),
-            screen_mode: slash_controller.screen_mode(),
-        };
+        let _ = cwd;
+        let ctx = slash_controller.app_ctx(models);
         let Some(model_items) = cmd.suggest_args(&ctx, "") else {
             return false;
         };
@@ -629,20 +624,15 @@ impl AgentView {
                 InputOutcome::Changed
             }
             ArgPickerStep::Selected(item) => {
-                if command_clone == "__agent" {
-                    self.active_modal = None;
-                    return InputOutcome::Action(Action::SwitchAgent {
-                        agent_name: item.insert_text,
-                    });
-                }
-                let chains_to_effort = matches!(command_clone.as_str(), "model" | "m")
-                    && item.insert_text.ends_with(char::is_whitespace);
-                if chains_to_effort {
+                let chains_to_next_phase =
+                    matches!(command_clone.as_str(), "model" | "m" | "agent")
+                        && item.insert_text.ends_with(char::is_whitespace);
+                if chains_to_next_phase {
                     let next_query = item.insert_text.clone();
                     if let Some(cmd) = self.prompt.slash_controller.registry().get(&command_clone) {
                         let ctx = self.prompt.slash_controller.app_ctx(&self.session.models);
-                        if let Some(effort_items) = cmd.suggest_args(&ctx, &next_query)
-                            && Self::arg_items_look_like_effort_phase(&effort_items)
+                        if let Some(next_items) = cmd.suggest_args(&ctx, &next_query)
+                            && Self::arg_items_look_like_effort_phase(&next_items)
                         {
                             if let Some(ActiveModal::ArgPicker {
                                 args_query,
@@ -653,8 +643,8 @@ impl AgentView {
                             }) = self.active_modal.as_mut()
                             {
                                 *args_query = next_query;
-                                *items = effort_items.clone();
-                                *original_items = effort_items;
+                                *items = next_items.clone();
+                                *original_items = next_items;
                                 // Effort sub-step is part of the type-to-find /model picker: open input-focused (cursor + type-to-filter), matching the rest of the flow.
                                 *state = crate::views::picker::PickerState::input_active();
                             }
@@ -1739,8 +1729,12 @@ impl AgentView {
                 let title = match command.as_str() {
                     "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
                     "model" | "m" => "Pick model",
+                    "agent" if !args_query.is_empty() => "Pick Behavior",
+                    "agent" => "Pick Agent",
+                    "effort" => "Pick reasoning effort",
+                    "permission" => "Pick Permission",
+                    "behavior" => "Pick Behavior",
                     "theme" | "t" => "Pick theme",
-                    "__agent" => "Pick Agent",
                     _ => "Pick option",
                 };
                 let picker_entries: Vec<PickerEntry> = items
@@ -1773,10 +1767,10 @@ impl AgentView {
                     tabs: None,
                     shortcuts: &picker_shortcuts,
                     sizing: ModalSizing {
-                        width_pct: 0.50,
-                        max_width: 80,
-                        min_width: 44,
-                        v_margin: 4,
+                        width_pct: 0.42,
+                        max_width: 56,
+                        min_width: 36,
+                        v_margin: 0,
                         h_pad: 2,
                         v_pad: 1,
                         footer_lines: 2,
@@ -1784,7 +1778,23 @@ impl AgentView {
                     .with_compact(compact),
                     fold_info: None,
                 };
-                if let Some(mca) = mw::render_modal_window(buf, area, window, &modal_config, &theme)
+                let selector_area = if mw::embedded() {
+                    area
+                } else {
+                    // Eight visible options keeps this selector temporary and
+                    // quick; larger catalogs scroll inside the same surface.
+                    let height = (items.len().min(8) as u16)
+                        .saturating_add(5)
+                        .min(area.height);
+                    Rect {
+                        x: area.x,
+                        y: area.y + area.height.saturating_sub(height) / 2,
+                        width: area.width,
+                        height,
+                    }
+                };
+                if let Some(mca) =
+                    mw::render_modal_window(buf, selector_area, window, &modal_config, &theme)
                 {
                     picker::render_picker_in_modal(
                         buf,

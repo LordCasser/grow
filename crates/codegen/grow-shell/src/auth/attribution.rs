@@ -17,7 +17,7 @@
 //!   "mint_age_seconds": <i64; current time minus auth.create_time, or -1>,
 //!   "expires_at_seconds_from_now": <i64; auth.expires_at minus now,
 //!                                 or 0 when no current token>,
-//!   "consumer": "OaiCompatClient.<endpoint>" | "IdleResumeModelRefresh",
+//!   "consumer": "OaiCompatClient.<endpoint>",
 //!   "is_stale_snapshot": <bool; true iff sent_prefix differs from a *known* current_prefix>
 //! }
 //! ```
@@ -136,19 +136,12 @@ impl Auth401AttributionCallback for ShellAttribution {
 
 /// Categories of 401-attribution emit sites. Each variant maps to a
 /// fixed prefix in the rendered `consumer` field; the per-site `op`
-/// string is appended after a `.` separator (omitted for variants that
-/// have no per-operation discriminator, e.g.
-/// [`ConsumerKind::IdleResumeModelRefresh`]).
+/// string is appended after a `.` separator.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ConsumerKind {
     /// Sampler-side OpenAI-compat / Anthropic Messages emit. The op
     /// string is the [`SamplingConsumer::as_endpoint`] return value.
     OaiCompatClient,
-    /// Idle-resume model-metadata refresh in
-    /// `session/acp_session.rs::maybe_refresh_model_metadata_on_resume`.
-    /// No per-op discriminator -- the consumer string is just
-    /// `"IdleResumeModelRefresh"`.
-    IdleResumeModelRefresh,
 }
 
 impl ConsumerKind {
@@ -156,26 +149,13 @@ impl ConsumerKind {
     fn prefix(self) -> &'static str {
         match self {
             Self::OaiCompatClient => "OaiCompatClient",
-            Self::IdleResumeModelRefresh => "IdleResumeModelRefresh",
         }
-    }
-
-    /// `true` for variants that take a per-operation discriminator
-    /// appended as `<prefix>.<op>`. `false` for variants whose
-    /// `consumer` string is just the prefix
-    /// (`IdleResumeModelRefresh`).
-    fn takes_op(self) -> bool {
-        !matches!(self, Self::IdleResumeModelRefresh)
     }
 }
 
 /// Format a `(kind, op)` pair into the design-doc `consumer` string.
 fn format_consumer(kind: ConsumerKind, op: &str) -> String {
-    if kind.takes_op() {
-        format!("{}.{}", kind.prefix(), op)
-    } else {
-        kind.prefix().to_string()
-    }
+    format!("{}.{}", kind.prefix(), op)
 }
 
 /// Emit a single `auth 401 attribution` event for a per-consumer 401.
@@ -218,8 +198,7 @@ pub(crate) fn record_consumer_401(
 /// the prefix becomes the empty string.
 ///
 /// `consumer` should be one of the canonical strings used by the
-/// per-client wrappers, e.g. `"OaiCompatClient.chat_completions_stream"`,
-/// `"IdleResumeModelRefresh"`. Most call
+/// per-client wrappers, e.g. `"OaiCompatClient.chat_completions_stream"`. Most call
 /// sites should go through [`record_consumer_401`] which formats the
 /// consumer string from a [`ConsumerKind`] for them.
 pub(crate) fn record_auth_401(
@@ -480,40 +459,7 @@ mod tests {
         );
     }
 
-    /// `format_consumer` matrix:
-    ///   - generic ops append "." + op (`OaiCompatClient.foo`)
-    ///   - IdleResumeModelRefresh drops the op.
-    #[test]
-    fn format_consumer_matrix() {
-        let cases: &[(ConsumerKind, &str, &str)] = &[
-            (
-                ConsumerKind::OaiCompatClient,
-                "chat_completions_stream",
-                "OaiCompatClient.chat_completions_stream",
-            ),
-            (
-                ConsumerKind::IdleResumeModelRefresh,
-                "",
-                "IdleResumeModelRefresh",
-            ),
-            (
-                ConsumerKind::IdleResumeModelRefresh,
-                "ignored",
-                "IdleResumeModelRefresh",
-            ),
-        ];
-        for (kind, op, expected) in cases {
-            assert_eq!(
-                format_consumer(*kind, op),
-                *expected,
-                "kind={kind:?} op={op:?}"
-            );
-        }
-    }
-
-    /// `format_consumer` formats `OaiCompatClient.<endpoint>`
-    /// correctly and omits the `.` separator for
-    /// `IdleResumeModelRefresh`.
+    /// `format_consumer` formats `OaiCompatClient.<endpoint>` correctly.
     #[test]
     fn format_consumer_with_op_appends_dot() {
         assert_eq!(

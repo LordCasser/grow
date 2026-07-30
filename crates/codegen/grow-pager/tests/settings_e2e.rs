@@ -43,7 +43,6 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "auto_dark_theme",
     "auto_light_theme",
     "render_mermaid",
-    "multiline_mode",
     "permission_mode",
     "default_model",
     "max_thoughts_width",
@@ -53,7 +52,6 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "invert_scroll",
     "display_refresh_auto_cadence",
     "default_selected_permission",
-    "plan_mode",
     "show_tips",
     "auto_update",
     "fork_secondary_model",
@@ -217,9 +215,6 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         }
         ("simple_mode", Action::SetSimpleMode(b)) => {
             assert_eq!(b, expected, "SetSimpleMode value differs from expected")
-        }
-        ("multiline_mode", Action::SetMultilineMode(b)) => {
-            assert_eq!(b, expected, "SetMultilineMode value differs from expected")
         }
         ("vim_mode", Action::SetVimMode(b)) => {
             assert_eq!(b, expected, "SetVimMode value differs from expected")
@@ -411,18 +406,11 @@ fn space_on_remember_tool_approvals_dispatches_typed_setter() {
     assert_set_bool_action(outcome, "remember_tool_approvals", true);
 }
 
-/// The Ask-Question timeout row renders in Agent & Approval directly above
-/// Plan Mode, reads the resolved default ON, and Space dispatches the typed
-/// setter toggling it off.
+/// The Ask-Question timeout row remains in Agent & Approval and dispatches
+/// the typed setter from its resolved default.
 #[test]
 fn space_on_ask_user_question_timeout_dispatches_typed_setter() {
     let mut s = make_state();
-    let row = row_idx_for(&s, "toolset.ask_user_question.timeout_enabled");
-    assert_eq!(
-        row_idx_for(&s, "plan_mode"),
-        row + 1,
-        "Ask-Question timeout must render directly above Plan Mode"
-    );
     navigate_to(&mut s, "toolset.ask_user_question.timeout_enabled");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
     // Default is true (timer armed), so toggling flips it off.
@@ -461,7 +449,7 @@ fn enter_on_contextual_hints_group_opens_sub_sheet_and_toggles_children() {
         ),
         "Space on undo must toggle it off, got {out:?}",
     );
-    // child 1: plan_mode.
+    // child 1: behavior.
     let _ = handle_settings_key(&mut s, &press(KeyCode::Char('j')));
     let out = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
     assert!(
@@ -469,7 +457,7 @@ fn enter_on_contextual_hints_group_opens_sub_sheet_and_toggles_children() {
             out,
             SettingsKeyOutcome::Action(Action::SetContextualHintPlanMode(false))
         ),
-        "Space on plan_mode must toggle it off, got {out:?}",
+        "Space on behavior must toggle it off, got {out:?}",
     );
     // child 2: image_input.
     let _ = handle_settings_key(&mut s, &press(KeyCode::Char('j')));
@@ -1774,7 +1762,6 @@ fn registry_kind_membership_through_pr_14() {
             "collapsed_edit_blocks",
             "invert_scroll",
             "display_refresh_auto_cadence",
-            "multiline_mode",
             "prompt_suggestions",
             "respect_manual_folds",
             "show_thinking_blocks",
@@ -1815,7 +1802,6 @@ fn registry_kind_membership_through_pr_14() {
             "hunk_tracker_mode",
             "keep_text_selection",
             "permission_mode",
-            "plan_mode",
             "render_mermaid",
             "screen_mode",
             "scroll_mode",
@@ -1881,7 +1867,6 @@ fn enum_settings_membership_through_pr_14() {
             "hunk_tracker_mode",
             "keep_text_selection",
             "permission_mode",
-            "plan_mode",
             "render_mermaid",
             "screen_mode",
             "scroll_mode",
@@ -1932,7 +1917,6 @@ fn defaults_round_trip_through_registry() {
             "auto_dark_theme" => SettingValue::Enum("grownight"),
             "auto_light_theme" => SettingValue::Enum("growday"),
             "render_mermaid" => SettingValue::Enum("auto"),
-            "multiline_mode" => SettingValue::Bool(false),
             "permission_mode" => SettingValue::Enum("ask"),
             "default_model" => SettingValue::String(String::new()),
             "max_thoughts_width" => SettingValue::Int(120),
@@ -1943,7 +1927,6 @@ fn defaults_round_trip_through_registry() {
             "display_refresh_auto_cadence" => SettingValue::Bool(false),
             "default_selected_permission" => SettingValue::Enum("always_allow_all_sessions"),
             "hunk_tracker_mode" => SettingValue::Enum("agent_only"),
-            "plan_mode" => SettingValue::Enum("off"),
             "show_tips" => SettingValue::Bool(false),
             "auto_update" => SettingValue::Bool(true),
             "fork_secondary_model" => SettingValue::String(String::new()),
@@ -2739,130 +2722,6 @@ fn pr4_mouse_click_in_theme_picker_is_no_op() {
 }
 
 // ---------------------------------------------------------------------------
-// `multiline_mode` (first PAGER-owned setting)
-//
-// Unlike the SHARED bools (which round-trip through
-// `Effect::PersistSetting` and the shell), `multiline_mode` is
-// PAGER-owned: state lives on `AgentView.multiline_mode`, the modal
-// reads from `PagerLocalSnapshot`, and the dispatcher's
-// `set_multiline_mode` is the single mutation owner. No disk persist,
-// no `Effect`, no toast on the no-op fast path.
-//
-// These tests mirror the keyboard + mouse coverage promised by
-// `ALL_SETTINGS_EXERCISED` — same rigor as `compact_mode` et al.
-// ---------------------------------------------------------------------------
-
-/// Keyboard Space on the multiline row dispatches the typed setter
-/// with the inverted snapshot value (default false → true). The modal
-/// builds the bool from `PagerLocalSnapshot.multiline_mode` via the
-/// `current_value_for` arm.
-#[test]
-fn pr5_space_on_multiline_mode_dispatches_typed_setter() {
-    let mut s = make_state();
-    navigate_to(&mut s, "multiline_mode");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "multiline_mode", true);
-}
-
-/// Enter on the multiline row also toggles (same Bool semantics as
-/// compact_mode / show_timestamps / simple_mode). Pins the contract
-/// that Bool row Enter and Space behave identically across both
-/// SHELL/SHARED and PAGER-owned settings.
-#[test]
-fn pr5_enter_on_multiline_mode_dispatches_typed_setter() {
-    let mut s = make_state();
-    navigate_to(&mut s, "multiline_mode");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert_set_bool_action(outcome, "multiline_mode", true);
-}
-
-/// Two-stage select-then-toggle for `multiline_mode` mouse path.
-#[test]
-fn pr5_mouse_click_on_multiline_mode_two_stage_toggles() {
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "multiline_mode") as u16;
-
-    // First click: select-only (initial focus is on compact_mode).
-    // Click at column=10 (outside the indicator hit-rect 0..5).
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "first click on a different row body should only select, got: {outcome:?}"
-    );
-    assert_eq!(
-        s.selected, row_y as usize,
-        "first click must move selection to multiline_mode row",
-    );
-
-    // Second click on the now-focused row: toggle.
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    assert_set_bool_action(outcome, "multiline_mode", true);
-}
-
-/// Value-column click on `multiline_mode` toggles in one click.
-#[test]
-fn pr5_mouse_click_on_multiline_indicator_toggles_in_one_click() {
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "multiline_mode") as u16;
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        72,
-        row_y,
-    );
-    assert_set_bool_action(outcome, "multiline_mode", true);
-}
-
-/// Snapshot `multiline_mode: true` → Space dispatches `SetMultilineMode(false)`.
-#[test]
-fn pr5_snapshot_when_on_dispatches_off() {
-    let snapshot = PagerLocalSnapshot {
-        multiline_mode: true,
-        yolo_mode: false,
-        ..PagerLocalSnapshot::default()
-    };
-    let mut s = SettingsModalState::new(
-        Arc::new(SettingsRegistry::defaults()),
-        UiConfig::default(),
-        snapshot,
-    );
-    navigate_to(&mut s, "multiline_mode");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "multiline_mode", false);
-}
-
-/// `multiline_mode` lives under Editor, not Appearance.
-#[test]
-fn pr5_multiline_mode_renders_under_editor_category() {
-    let reg = SettingsRegistry::defaults();
-    let meta = reg
-        .find("multiline_mode")
-        .expect("multiline_mode must be registered");
-    assert_eq!(
-        meta.category,
-        SettingCategory::Editor,
-        "multiline_mode must live under Editor"
-    );
-    assert_eq!(
-        meta.owner,
-        SettingOwner::Pager,
-        "multiline_mode must be PAGER-owned"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // permission_mode (security-relevant Enum, no preview)
 // ---------------------------------------------------------------------------
 
@@ -2908,46 +2767,34 @@ fn pr6_permission_mode_does_not_support_preview() {
     }
 }
 
-/// `permission_mode` reads from pager snapshot, not `ui` (live state).
+/// `permission_mode` reads the persistent default from `UiConfig`, not the
+/// active session snapshot.
 #[test]
-fn pr6_current_value_for_reads_pager_snapshot() {
+fn pr6_current_value_for_reads_ui_default() {
     use grow_pager::settings::current_value_for;
 
-    let ui = UiConfig::default();
-
-    let off_snap = PagerLocalSnapshot {
-        multiline_mode: false,
-        yolo_mode: false,
-        ..PagerLocalSnapshot::default()
-    };
-    let on_snap = PagerLocalSnapshot {
-        multiline_mode: false,
+    let mut ui = UiConfig::default();
+    ui.permission_mode = Some("auto".to_string());
+    let snapshot = PagerLocalSnapshot {
         yolo_mode: true,
         ..PagerLocalSnapshot::default()
     };
 
     assert_eq!(
-        current_value_for("permission_mode", &ui, &off_snap),
-        Some(SettingValue::Enum("ask")),
-        "yolo=false → 'ask'",
-    );
-    assert_eq!(
-        current_value_for("permission_mode", &ui, &on_snap),
-        Some(SettingValue::Enum("always-approve")),
-        "yolo=true → 'always-approve'",
+        current_value_for("permission_mode", &ui, &snapshot),
+        Some(SettingValue::Enum("auto")),
+        "active-session yolo must not override the persistent default",
     );
 
-    // Defensive: even when `ui.permission_mode` says one thing,
-    // the snapshot wins. Pins the LIVE-state-over-disk contract.
+    // A different persistent value still wins over active-session state.
     let conflicting_ui = UiConfig {
         permission_mode: Some("ask".into()),
         ..UiConfig::default()
     };
     assert_eq!(
-        current_value_for("permission_mode", &conflicting_ui, &on_snap),
-        Some(SettingValue::Enum("always-approve")),
-        "snapshot must win over `ui.permission_mode` when they disagree — \
-         the snapshot is the LIVE state, `ui` is the at-startup persisted state",
+        current_value_for("permission_mode", &conflicting_ui, &snapshot),
+        Some(SettingValue::Enum("ask")),
+        "Settings must display the persistent default",
     );
 }
 
@@ -3016,9 +2863,9 @@ fn pr6_permission_mode_picker_nav_does_not_dispatch_preview() {
     }
 }
 
-/// Enter on "always-approve" commits `SetPermissionMode(AlwaysApprove)`.
+/// Enter on "always-approve" updates the persistent default.
 #[test]
-fn pr6_permission_mode_picker_enter_dispatches_set_permission_mode_commit() {
+fn pr6_permission_mode_picker_enter_dispatches_set_default_permission_commit() {
     use grow_pager::app::actions::PermissionModeKind;
     let reg = SettingsRegistry::defaults();
     let meta = reg.find("permission_mode").unwrap();
@@ -3061,11 +2908,11 @@ fn pr6_permission_mode_picker_enter_dispatches_set_permission_mode_commit() {
     // Enter → commit.
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
     match outcome {
-        SettingsKeyOutcome::Action(Action::SetPermissionMode(
+        SettingsKeyOutcome::Action(Action::SetDefaultPermissionMode(
             PermissionModeKind::AlwaysApprove,
         )) => {}
         other => panic!(
-            "Enter on 'always-approve' must commit Action::SetPermissionMode(AlwaysApprove), \
+            "Enter on 'always-approve' must commit SetDefaultPermissionMode(AlwaysApprove), \
              got {other:?}"
         ),
     }
@@ -3097,20 +2944,18 @@ fn pr6_permission_mode_picker_esc_does_not_dispatch_action() {
     );
 }
 
-/// Picker seeds at "always-approve" when `yolo_mode: true`.
+/// Picker seeds from the persistent UiConfig default.
 #[test]
-fn pr6_picker_seeds_choices_idx_from_pager_snapshot_yolo_true() {
+fn pr6_picker_seeds_choices_idx_from_ui_default() {
     let snapshot = PagerLocalSnapshot {
-        multiline_mode: false,
-        yolo_mode: true,
         auto_mode_gate: true,
         ..PagerLocalSnapshot::default()
     };
-    let mut s = SettingsModalState::new(
-        Arc::new(SettingsRegistry::defaults()),
-        UiConfig::default(),
-        snapshot,
-    );
+    let ui = UiConfig {
+        permission_mode: Some("always-approve".into()),
+        ..UiConfig::default()
+    };
+    let mut s = SettingsModalState::new(Arc::new(SettingsRegistry::defaults()), ui, snapshot);
     navigate_to(&mut s, "permission_mode");
     let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
     let reg = SettingsRegistry::defaults();
@@ -3129,12 +2974,12 @@ fn pr6_picker_seeds_choices_idx_from_pager_snapshot_yolo_true() {
         } => {
             assert_eq!(
                 choices_idx, always_idx,
-                "picker must seed at the 'always-approve' index when snapshot says yolo=true"
+                "picker must seed at the persistent Always Approve default"
             );
             assert_eq!(
                 original_value,
                 &SettingValue::Enum("always-approve"),
-                "original_value must match the live snapshot"
+                "original_value must match UiConfig"
             );
         }
         ref other => panic!("expected PickingEnum mode, got {other:?}"),
@@ -3298,7 +3143,7 @@ fn pr6_mouse_click_on_permission_mode_indicator_opens_picker_in_one_click() {
 // permission_mode 3-state tests (default/ask/always-approve)
 // ---------------------------------------------------------------------------
 
-/// Picking "Default" dispatches `SetPermissionMode(Default)`.
+/// Picking "Default" updates the persistent default.
 #[test]
 fn pr11_picker_commit_for_default_dispatches_set_permission_mode_default() {
     use grow_pager::app::actions::PermissionModeKind;
@@ -3340,9 +3185,11 @@ fn pr11_picker_commit_for_default_dispatches_set_permission_mode_default() {
     }
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
     match outcome {
-        SettingsKeyOutcome::Action(Action::SetPermissionMode(PermissionModeKind::Default)) => {}
+        SettingsKeyOutcome::Action(Action::SetDefaultPermissionMode(
+            PermissionModeKind::Default,
+        )) => {}
         other => panic!(
-            "Enter on 'default' must commit Action::SetPermissionMode(Default), got {other:?}"
+            "Enter on 'default' must commit SetDefaultPermissionMode(Default), got {other:?}"
         ),
     }
     assert!(
@@ -3351,22 +3198,19 @@ fn pr11_picker_commit_for_default_dispatches_set_permission_mode_default() {
     );
 }
 
-/// Picking "Ask" dispatches `SetPermissionMode(Ask)`.
+/// Picking "Ask" updates the persistent default.
 #[test]
 fn pr11_picker_commit_for_ask_dispatches_set_permission_mode_ask() {
     use grow_pager::app::actions::PermissionModeKind;
-    // Set snapshot so the picker opens seeded at "always-approve",
-    // then navigate to "ask" to commit a non-default selection.
     let snapshot = PagerLocalSnapshot {
-        yolo_mode: true,
         auto_mode_gate: true,
         ..PagerLocalSnapshot::default()
     };
-    let mut s = SettingsModalState::new(
-        Arc::new(SettingsRegistry::defaults()),
-        UiConfig::default(),
-        snapshot,
-    );
+    let ui = UiConfig {
+        permission_mode: Some("always-approve".into()),
+        ..UiConfig::default()
+    };
+    let mut s = SettingsModalState::new(Arc::new(SettingsRegistry::defaults()), ui, snapshot);
     navigate_to(&mut s, "permission_mode");
     let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
     assert!(
@@ -3397,9 +3241,9 @@ fn pr11_picker_commit_for_ask_dispatches_set_permission_mode_ask() {
     }
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
     match outcome {
-        SettingsKeyOutcome::Action(Action::SetPermissionMode(PermissionModeKind::Ask)) => {}
+        SettingsKeyOutcome::Action(Action::SetDefaultPermissionMode(PermissionModeKind::Ask)) => {}
         other => {
-            panic!("Enter on 'ask' must commit Action::SetPermissionMode(Ask), got {other:?}")
+            panic!("Enter on 'ask' must commit SetDefaultPermissionMode(Ask), got {other:?}")
         }
     }
 }
@@ -3423,9 +3267,9 @@ fn pr11_current_value_for_returns_default_when_ui_says_default() {
     );
 }
 
-/// Live yolo_mode=true overrides ui.permission_mode → "always-approve".
+/// Active-session Permission never overrides the persistent default row.
 #[test]
-fn pr11_current_value_for_pager_yolo_overrides_default_canonical() {
+fn pr11_current_value_for_ignores_active_session_yolo() {
     use grow_pager::settings::current_value_for;
     let ui = UiConfig {
         permission_mode: Some("default".into()),
@@ -3437,14 +3281,15 @@ fn pr11_current_value_for_pager_yolo_overrides_default_canonical() {
     };
     assert_eq!(
         current_value_for("permission_mode", &ui, &pager),
-        Some(SettingValue::Enum("always-approve")),
-        "pager.yolo_mode=true wins over ui.permission_mode='default' — LIVE state precedence",
+        Some(SettingValue::Enum("default")),
+        "active-session Permission must not leak into Settings",
     );
 }
 
-/// yolo=true + ui=None → "always-approve" (--yolo startup baseline).
+/// Missing persistent value resolves to Ask even if the active session uses
+/// Always Approve.
 #[test]
-fn pr11_current_value_for_yolo_true_with_ui_none_returns_always_approve() {
+fn pr11_current_value_for_none_uses_ask_default() {
     use grow_pager::settings::current_value_for;
     let ui = UiConfig {
         permission_mode: None,
@@ -3456,13 +3301,12 @@ fn pr11_current_value_for_yolo_true_with_ui_none_returns_always_approve() {
     };
     assert_eq!(
         current_value_for("permission_mode", &ui, &pager),
-        Some(SettingValue::Enum("always-approve")),
-        "pager.yolo_mode=true + ui.permission_mode=None → 'always-approve' \
-         (LIVE-state baseline for `--yolo` startup with no config setting)"
+        Some(SettingValue::Enum("ask")),
+        "missing persistent default resolves to Ask"
     );
 }
 
-/// Non-"default" values with yolo=false fall through to "ask".
+/// Valid persistent canonical values are preserved; invalid values use Ask.
 #[test]
 fn pr11_current_value_for_falls_through_to_ask() {
     use grow_pager::settings::current_value_for;
@@ -3479,6 +3323,14 @@ fn pr11_current_value_for_falls_through_to_ask() {
         current_value_for("permission_mode", &ui_ask, &pager),
         Some(SettingValue::Enum("ask")),
         "explicit 'ask' → 'ask'"
+    );
+    let ui_auto = UiConfig {
+        permission_mode: Some("auto".into()),
+        ..UiConfig::default()
+    };
+    assert_eq!(
+        current_value_for("permission_mode", &ui_auto, &pager),
+        Some(SettingValue::Enum("auto")),
     );
     // None → "ask" (the registry default)
     let ui_none = UiConfig {
@@ -4844,382 +4696,9 @@ fn default_selected_permission_mouse_click_on_indicator_opens_picker_in_one_clic
 }
 
 // ---------------------------------------------------------------------------
-// `plan_mode` (Agent-category Enum, PAGER-owned + ACP-mediated,
-// supports_preview: false)
-//
-// Migrated from the per-Action `Action::EnterPlanMode` (no-description
-// case) to the typed `Action::SetPlanMode(PlanModeKind)` going through
-// the unified `set_plan_mode` dispatch path. The dispatcher is the
-// single source of truth for idempotency, optimistic mutation
-// (`plan_mode_pending`), modal-snapshot refresh, toast, and the
-// `Effect::SetSessionMode` ACP emit.
-//
-// **Why `supports_preview: false`**: toggling fires an ACP
-// `session/set_mode` request that mutates per-agent state and gates
-// tool dispatch. Per-keystroke preview would either fire N round-trips
-// per nav OR commit on every keystroke. Both are unacceptable.
-// ---------------------------------------------------------------------------
-
-/// `plan_mode` lives under the `Agent` section:
-/// pins the category against drift.
-#[test]
-fn pr10_plan_mode_renders_under_agent_category() {
-    let reg = SettingsRegistry::defaults();
-    let meta = reg.find("plan_mode").expect("plan_mode must be registered");
-    assert_eq!(
-        meta.category,
-        SettingCategory::Agent,
-        "plan_mode must live under Agent"
-    );
-    assert_eq!(
-        meta.owner,
-        SettingOwner::Pager,
-        "plan_mode is PAGER-owned (per-session, NOT persisted to config.toml; \
-         shell drives transitions via ACP CurrentModeUpdate)"
-    );
-}
-
-/// `plan_mode` is an Enum with `supports_preview: false`. Toggling
-/// fires an ACP `session/set_mode` request; per-keystroke preview
-/// would either fire N round-trips OR commit on every nav.
-#[test]
-fn pr10_plan_mode_does_not_support_preview() {
-    let reg = SettingsRegistry::defaults();
-    let meta = reg.find("plan_mode").expect("plan_mode must be registered");
-    match &meta.kind {
-        SettingKind::Enum {
-            supports_preview, ..
-        } => {
-            assert!(
-                !supports_preview,
-                "plan_mode MUST be supports_preview: false — preview would \
-                 fire an ACP round-trip per nav OR commit on every keystroke; \
-                 both are unacceptable for an agent-mode transition",
-            );
-        }
-        other => panic!("expected Enum kind for plan_mode, got {other:?}"),
-    }
-}
-
-/// `current_value_for("plan_mode", _, pager)` reads from the pager
-/// snapshot's `plan_mode_active` field (NOT from `UiConfig` — there
-/// is no such UiConfig field by design; plan mode is per-session
-/// only). Canonical mapping: `true → "on"`, `false → "off"`.
-#[test]
-fn pr10_current_value_for_reads_pager_snapshot() {
-    use grow_pager::settings::current_value_for;
-
-    let ui = UiConfig::default();
-
-    let off_snap = PagerLocalSnapshot {
-        plan_mode_active: false,
-        ..PagerLocalSnapshot::default()
-    };
-    let on_snap = PagerLocalSnapshot {
-        plan_mode_active: true,
-        ..PagerLocalSnapshot::default()
-    };
-
-    assert_eq!(
-        current_value_for("plan_mode", &ui, &off_snap),
-        Some(SettingValue::Enum("off")),
-        "plan_mode_active=false → canonical 'off' (default state)",
-    );
-    assert_eq!(
-        current_value_for("plan_mode", &ui, &on_snap),
-        Some(SettingValue::Enum("on")),
-        "plan_mode_active=true → canonical 'on'",
-    );
-}
-
-/// Enter on the `plan_mode` row → PickingEnum mode (mirroring the
-/// theme/permission_mode picker), seeded to the
-/// canonical of the current live state.
-#[test]
-fn pr10_enter_on_plan_mode_row_enters_picking_enum() {
-    let mut s = make_state();
-    navigate_to(&mut s, "plan_mode");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "Enter on plan_mode row must transition to PickingEnum, got {outcome:?}"
-    );
-    match &s.mode() {
-        SettingsModalMode::PickingEnum {
-            key,
-            original_value,
-            ..
-        } => {
-            assert_eq!(*key, "plan_mode");
-            assert_eq!(
-                original_value,
-                &SettingValue::Enum("off"),
-                "default snapshot plan_mode_active=false → original 'off'"
-            );
-        }
-        other => panic!("expected PickingEnum mode, got {other:?}"),
-    }
-}
-
-/// **Regression test.** Up/Down/j/k nav in the `plan_mode` picker
-/// MUST NOT dispatch a preview Action — that would fire an ACP
-/// round-trip per keystroke (the ACP path is eager). Mirror of
-/// `pr6_permission_mode_picker_nav_does_not_dispatch_preview` and
-/// other non-preview enum picker tests.
-#[test]
-fn pr10_plan_mode_picker_nav_does_not_dispatch_preview() {
-    for nav_key in &[
-        KeyCode::Down,
-        KeyCode::Char('j'),
-        KeyCode::Up,
-        KeyCode::Char('k'),
-    ] {
-        let mut s = make_state();
-        navigate_to(&mut s, "plan_mode");
-        let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
-        assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
-
-        if matches!(nav_key, KeyCode::Up | KeyCode::Char('k')) {
-            let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
-        }
-
-        let outcome = handle_settings_key(&mut s, &press(*nav_key));
-        assert!(
-            matches!(outcome, SettingsKeyOutcome::Changed),
-            "Nav key {nav_key:?} in plan_mode picker MUST NOT dispatch a preview \
-             Action — that would fire an ACP round-trip per keystroke. Got {outcome:?}",
-        );
-        assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
-    }
-}
-
-/// Enter on the focused picker choice commits via
-/// `Action::SetPlanMode(PlanModeKind)` — the typed setter, not a
-/// preview variant. Pins the canonical-to-PlanModeKind mapping
-/// (on→On, off→Off).
-#[test]
-fn pr10_plan_mode_picker_enter_dispatches_set_commit() {
-    use grow_pager::app::actions::PlanModeKind;
-
-    let mut s = make_state();
-    navigate_to(&mut s, "plan_mode");
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    // Default snapshot has plan_mode_active=false → picker seeds at
-    // "off". Down nav moves to "on".
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
-    // Enter → commit.
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    match outcome {
-        SettingsKeyOutcome::Action(Action::SetPlanMode(kind)) => {
-            assert_eq!(
-                kind,
-                PlanModeKind::On,
-                "Enter must commit `on` → SetPlanMode(PlanModeKind::On)"
-            );
-        }
-        other => panic!("expected Action::SetPlanMode commit, got {other:?}"),
-    }
-    assert!(
-        matches!(s.mode(), SettingsModalMode::Browse),
-        "Enter commit must return to Browse"
-    );
-}
-
-/// Esc inside the picker for a non-preview Enum returns to Browse
-/// without dispatching any Action. Mirror of
-/// the other non-preview enum picker tests.
-/// Since `plan_mode` has no preview, Esc must NOT re-persist.
-#[test]
-fn pr10_plan_mode_picker_esc_does_not_dispatch_action() {
-    let mut s = make_state();
-    navigate_to(&mut s, "plan_mode");
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
-
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Esc));
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "Esc on non-preview Enum picker must NOT emit an Action — \
-         doing so would fire an ACP round-trip on every Esc. Got {outcome:?}"
-    );
-    assert!(
-        matches!(s.mode(), SettingsModalMode::Browse),
-        "Esc must return to Browse"
-    );
-}
-
-/// Snapshot-driven seeding: `PagerLocalSnapshot { plan_mode_active:
-/// true }` makes Enter on the row open the picker seeded at the
-/// "on" choice.
-#[test]
-fn pr10_picker_seeds_choices_idx_from_pager_snapshot_plan_mode_active() {
-    let snapshot = PagerLocalSnapshot {
-        plan_mode_active: true,
-        ..PagerLocalSnapshot::default()
-    };
-    let mut s = SettingsModalState::new(
-        Arc::new(SettingsRegistry::defaults()),
-        UiConfig::default(),
-        snapshot,
-    );
-    navigate_to(&mut s, "plan_mode");
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    let reg = SettingsRegistry::defaults();
-    let on_idx = match &reg.find("plan_mode").unwrap().kind {
-        SettingKind::Enum { choices, .. } => choices
-            .iter()
-            .position(|c| c.canonical == "on")
-            .expect("plan_mode must have 'on' choice"),
-        _ => panic!("plan_mode must be Enum"),
-    };
-    match s.mode() {
-        SettingsModalMode::PickingEnum {
-            choices_idx,
-            ref original_value,
-            ..
-        } => {
-            assert_eq!(
-                choices_idx, on_idx,
-                "picker must seed at the 'on' index when snapshot says plan_mode_active=true"
-            );
-            assert_eq!(
-                original_value,
-                &SettingValue::Enum("on"),
-                "original_value must match the live snapshot"
-            );
-        }
-        ref other => panic!("expected PickingEnum mode, got {other:?}"),
-    }
-}
-
-/// The choices catalog includes EXACTLY "off" and "on" with canonical
-/// strings matching the dispatcher contract. Pins the canonical
-/// contract — anything else here breaks the `action_for_enum_commit`
-/// arm in `views/settings_modal.rs`.
-#[test]
-fn pr10_plan_mode_choices_use_canonical_strings() {
-    let reg = SettingsRegistry::defaults();
-    let meta = reg.find("plan_mode").unwrap();
-    let canonicals: Vec<&str> = match &meta.kind {
-        SettingKind::Enum { choices, .. } => choices.iter().map(|c| c.canonical).collect(),
-        _ => panic!("plan_mode must be Enum"),
-    };
-    assert_eq!(
-        canonicals.len(),
-        2,
-        "plan_mode catalog must be exactly {{off, on}} — adding a choice requires \
-         updating the action_for_enum_commit arm in views/settings_modal.rs AND \
-         the action_for_reset arm in dispatch.rs AND PlanModeKind in actions.rs",
-    );
-    assert!(
-        canonicals.contains(&"off"),
-        "plan_mode must include 'off' canonical"
-    );
-    assert!(
-        canonicals.contains(&"on"),
-        "plan_mode must include 'on' canonical"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Mouse path tests for plan_mode (keyboard ↔ mouse parity).
-//
-// Mirrors the permission_mode mouse tests. Every
-// keyboard interaction has a mouse equivalent.
-// ---------------------------------------------------------------------------
-
-/// First mouse-click on a DIFFERENT (non-selected) `plan_mode` row
-/// only SELECTS the row (no picker entry, no Action). Mirrors the
-/// two-stage Bool-row select-then-toggle UX.
-#[test]
-fn pr10_mouse_click_on_unselected_plan_mode_row_only_selects() {
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "plan_mode") as u16;
-
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "first body-click on unselected plan_mode row should only select, got: {outcome:?}",
-    );
-    assert_eq!(s.selected, row_y as usize);
-    assert!(matches!(s.mode(), SettingsModalMode::Browse));
-}
-
-/// Second mouse-click on the selected row opens the picker for the
-/// Enum row — mirroring the keyboard Enter path.
-#[test]
-fn pr10_mouse_click_on_selected_plan_mode_row_opens_picker() {
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "plan_mode") as u16;
-
-    // First click: select.
-    let _ = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    assert_eq!(s.selected, row_y as usize);
-
-    // Second click on the focused row: open the picker.
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "second click on focused Enum row must open picker, got: {outcome:?}",
-    );
-    match &s.mode() {
-        SettingsModalMode::PickingEnum { key, .. } => {
-            assert_eq!(*key, "plan_mode");
-        }
-        _ => panic!("second click on focused plan_mode row must enter PickingEnum"),
-    }
-}
-
-/// **Value-column layout.** Value-column click on the
-/// plan_mode row opens the picker in ONE click — replaces the
-/// previous left-edge indicator hit-rect.
-#[test]
-fn pr10_mouse_click_on_plan_mode_indicator_opens_picker_in_one_click() {
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "plan_mode") as u16;
-
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        72,
-        row_y,
-    );
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "value click must open picker in one click, got: {outcome:?}",
-    );
-    match &s.mode() {
-        SettingsModalMode::PickingEnum { key, .. } => {
-            assert_eq!(*key, "plan_mode");
-        }
-        _ => {
-            panic!("value click on plan_mode must enter PickingEnum")
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // `render_mermaid` (SHELL-owned Enum, Appearance).
 //
-// Unlike `plan_mode` (PAGER-owned, snapshot-seeded), `render_mermaid` is
+// Unlike `behavior` (PAGER-owned, snapshot-seeded), `render_mermaid` is
 // SHELL-owned: the live value comes from the process-wide cache mirror
 // (`appearance::cache::load_render_mermaid`, default `auto`), mirroring how
 // `vim_mode` reads its cache. The picker commits the typed
@@ -5228,7 +4707,7 @@ fn pr10_mouse_click_on_plan_mode_indicator_opens_picker_in_one_click() {
 // and Esc must never dispatch an Action.
 //
 // These tests honor the `ALL_SETTINGS_EXERCISED` contract — keyboard AND
-// mouse coverage, with the same rigor as `plan_mode`.
+// mouse coverage, with the same rigor as `behavior`.
 // ---------------------------------------------------------------------------
 
 /// `render_mermaid` lives under `Appearance` and is SHELL-owned (persisted to
@@ -5302,7 +4781,7 @@ fn enter_on_render_mermaid_row_enters_picking_enum() {
 
 /// **Regression test.** Up/Down/j/k nav in the `render_mermaid` picker MUST
 /// NOT dispatch a preview Action — `supports_preview: false`. Mirror of
-/// `pr10_plan_mode_picker_nav_does_not_dispatch_preview`.
+/// `pr10_behavior_picker_nav_does_not_dispatch_preview`.
 #[test]
 fn render_mermaid_picker_nav_does_not_dispatch_preview() {
     for nav_key in &[
@@ -5362,7 +4841,7 @@ fn render_mermaid_picker_enter_dispatches_set_commit() {
 
 /// Esc inside the picker for a non-preview Enum returns to Browse without
 /// dispatching any Action. Mirror of
-/// `pr10_plan_mode_picker_esc_does_not_dispatch_action`.
+/// `pr10_behavior_picker_esc_does_not_dispatch_action`.
 #[test]
 fn render_mermaid_picker_esc_does_not_dispatch_action() {
     let mut s = make_state();
@@ -5403,7 +4882,7 @@ fn render_mermaid_choices_use_canonical_strings() {
 
 // ---------------------------------------------------------------------------
 // Mouse path tests for render_mermaid (keyboard ↔ mouse
-// parity). Mirrors the plan_mode mouse tests.
+// parity). Mirrors the behavior mouse tests.
 // ---------------------------------------------------------------------------
 
 /// First mouse-click on a DIFFERENT (non-selected) `render_mermaid` row only
@@ -6911,27 +6390,6 @@ fn prompt_suggestions_renders_under_editor_category_shell_owned() {
         SettingKind::Bool { default } => assert!(*default, "default must be true"),
         other => panic!("expected Bool kind for prompt_suggestions, got {other:?}"),
     }
-    // Must sit immediately below multiline_mode in the registry order.
-    let keys: Vec<&str> = reg
-        .all()
-        .iter()
-        .filter(|m| m.category == SettingCategory::Editor)
-        .map(|m| m.key)
-        .collect();
-    let multiline_idx = keys
-        .iter()
-        .position(|k| *k == "multiline_mode")
-        .expect("multiline_mode in Editor");
-    let prompt_idx = keys
-        .iter()
-        .position(|k| *k == "prompt_suggestions")
-        .expect("prompt_suggestions in Editor");
-    assert_eq!(
-        multiline_idx + 1,
-        prompt_idx,
-        "prompt_suggestions must be immediately below multiline_mode; \
-         Editor order: {keys:?}"
-    );
 }
 
 // ---------------------------------------------------------------------------

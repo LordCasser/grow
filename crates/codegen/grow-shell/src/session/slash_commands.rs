@@ -63,16 +63,11 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
     BuiltinCommand {
         name: "always-approve",
-        description: "Toggle always-approve mode (skip all permission prompts)",
-        argument_hint: Some("on|off"),
-        aliases: &["yolo"],
+        description: "[permission] Switch to Always Approve",
+        argument_hint: None,
+        aliases: &[],
         gate: BuiltinGate::AlwaysOn,
-        resolve: |args| BuiltinAction::SetYolo {
-            enabled: !matches!(
-                args.to_lowercase().as_str(),
-                "off" | "false" | "0" | "no" | "disable"
-            ),
-        },
+        resolve: |_args| BuiltinAction::SetYolo { enabled: true },
     },
     BuiltinCommand {
         name: "flush",
@@ -226,7 +221,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
     BuiltinCommand {
         name: "deep-research",
-        description: "Research with bounded parallel agents, cross-check evidence, and write a cited report",
+        description: "[behavior] Research with bounded parallel agents and deliver a cited report",
         argument_hint: Some("<query>"),
         aliases: &[],
         gate: BuiltinGate::WorkflowLaunches,
@@ -235,7 +230,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         },
     },
     BuiltinCommand {
-        name: "workflow",
+        name: "workflow-run",
         description: "Launch a saved workflow, or manage a run (pause, resume, stop, save)",
         argument_hint: Some("<name> [args] | pause|resume|stop|save [name]"),
         aliases: &[],
@@ -271,14 +266,15 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
     BuiltinCommand {
         name: "goal",
-        description: "Set, manage, or check an autonomous goal",
+        description: "[behavior] Set, manage, or check an autonomous goal",
         argument_hint: Some("<objective> [--budget <tokens>] | status | pause | resume | clear"),
         aliases: &[],
         gate: BuiltinGate::Goal,
         resolve: |args| {
             let trimmed = args.trim();
             match trimmed.to_lowercase().as_str() {
-                "" | "status" => BuiltinAction::GoalStatus,
+                "" => BuiltinAction::GoalEnter,
+                "status" => BuiltinAction::GoalStatus,
                 "pause" => BuiltinAction::GoalPause,
                 "resume" => BuiltinAction::GoalResume,
                 "clear" => BuiltinAction::GoalClear,
@@ -439,17 +435,20 @@ impl<'a> EffectiveCommandCatalog<'a> {
             .filter(|builtin| availability.allows(builtin.gate))
             .collect();
         const PAGER_COMMAND_KEYS: &[&str] = &[
+            "agent",
             "agents",
-            "agents-dashboard",
             "always-approve",
             "announcements",
+            "ask",
             "auto",
+            "behavior",
             "btw",
             "cd",
             "changelog",
             "chat",
             "clear",
             "cloud",
+            "clarify",
             "compact",
             "compact-mode",
             "config",
@@ -457,7 +456,6 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "context",
             "copy",
             "cost",
-            "dashboard",
             "debug",
             "docs",
             "doctor",
@@ -491,8 +489,10 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "model",
             "multiline",
             "new",
+            "normal",
             "onboarding",
             "personas",
+            "permission",
             "plan",
             "plan-view",
             "plugins",
@@ -509,9 +509,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "rewind",
             "scroll-debug",
             "session-info",
-            "sessions",
             "settings",
-            "share",
             "show-plan",
             "shortcuts",
             "skills",
@@ -532,8 +530,8 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "view-plan",
             "vim-mode",
             "welcome",
+            "workflow",
             "workflows",
-            "yolo",
             "?",
         ];
         let mut taken: HashSet<String> = builtins
@@ -840,6 +838,7 @@ pub(super) enum BuiltinAction {
         objective: String,
         token_budget: Option<i64>,
     },
+    GoalEnter,
     GoalStatus,
     GoalPause,
     GoalResume,
@@ -882,13 +881,14 @@ impl BuiltinAction {
             BuiltinAction::MemoryBrowse => "memory",
             BuiltinAction::MemoryToggle { .. } => "memory",
             BuiltinAction::GoalSet { .. }
+            | BuiltinAction::GoalEnter
             | BuiltinAction::GoalStatus
             | BuiltinAction::GoalPause
             | BuiltinAction::GoalResume
             | BuiltinAction::GoalClear => "goal",
             BuiltinAction::DeepResearch { .. } => "deep-research",
-            BuiltinAction::WorkflowManage { .. } => "workflow",
-            BuiltinAction::WorkflowLaunch { .. } => "workflow",
+            BuiltinAction::WorkflowManage { .. } => "workflow-run",
+            BuiltinAction::WorkflowLaunch { .. } => "workflow-run",
         }
     }
 
@@ -916,7 +916,8 @@ impl BuiltinAction {
             BuiltinAction::MemoryBrowse => false,
             BuiltinAction::MemoryToggle { .. } => true,
             BuiltinAction::GoalSet { .. } => true,
-            BuiltinAction::GoalStatus
+            BuiltinAction::GoalEnter
+            | BuiltinAction::GoalStatus
             | BuiltinAction::GoalPause
             | BuiltinAction::GoalResume
             | BuiltinAction::GoalClear => false,
@@ -1339,8 +1340,8 @@ mod tests {
             Some(("compact", "keep auth")),
         );
         assert_eq!(
-            parse_slash_prefix(&[text_block("/yolo")]),
-            Some(("yolo", "")),
+            parse_slash_prefix(&[text_block("/always-approve")]),
+            Some(("always-approve", "")),
         );
     }
 
@@ -1385,8 +1386,8 @@ mod tests {
     }
 
     #[test]
-    fn always_approve_parses_on_off() {
-        for arg in ["", "on", "true", "1", "yes", "enable"] {
+    fn always_approve_is_an_idempotent_selection() {
+        for arg in ["", "on", "off", "false", "anything"] {
             assert!(
                 matches!(
                     resolve_builtin("always-approve", arg),
@@ -1395,27 +1396,6 @@ mod tests {
                 "expected on for {arg:?}",
             );
         }
-        for arg in ["off", "false", "0", "no", "disable"] {
-            assert!(
-                matches!(
-                    resolve_builtin("always-approve", arg),
-                    Some(BuiltinAction::SetYolo { enabled: false })
-                ),
-                "expected off for {arg:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn yolo_alias_resolves_to_always_approve() {
-        // /yolo should resolve via alias to the always-approve command
-        let blocks = vec![text_block("/yolo on")];
-        let outcome =
-            resolve(blocks, &[], all_gated(), SkillSlashRewrite::default(), &[]).unwrap_err();
-        assert!(matches!(
-            outcome,
-            SlashCommandOutcome::Builtin(BuiltinAction::SetYolo { enabled: true })
-        ));
     }
 
     // ── resolve ─────────────────────────────────────────────────────
@@ -1721,9 +1701,8 @@ mod tests {
                 "plugins",
                 "reload-plugins",
                 "session-info",
-                "feedback",
                 "deep-research",
-                "workflow",
+                "workflow-run",
                 "goal",
                 "loop",
                 "commit",
@@ -1783,7 +1762,7 @@ mod tests {
             workflow_management: false,
             ..CommandAvailability::all_enabled()
         });
-        assert!(!names.iter().any(|n| n == "workflow"), "got: {names:?}");
+        assert!(!names.iter().any(|n| n == "workflow-run"), "got: {names:?}");
         assert!(names.iter().any(|n| n == "goal"), "got: {names:?}");
 
         let names2 = advertised_names(CommandAvailability {
@@ -1791,7 +1770,10 @@ mod tests {
             ..CommandAvailability::all_enabled()
         });
         assert!(!names2.iter().any(|n| n == "goal"), "got: {names2:?}");
-        assert!(names2.iter().any(|n| n == "workflow"), "got: {names2:?}");
+        assert!(
+            names2.iter().any(|n| n == "workflow-run"),
+            "got: {names2:?}"
+        );
     }
 
     #[test]
@@ -2554,8 +2536,8 @@ mod tests {
     }
 
     #[test]
-    fn goal_empty_resolves_to_status() {
-        assert!(matches!(resolve_goal(""), BuiltinAction::GoalStatus));
+    fn goal_empty_enters_goal_behavior() {
+        assert!(matches!(resolve_goal(""), BuiltinAction::GoalEnter));
     }
 
     fn listing(name: &str) -> crate::session::workflow::registry::WorkflowListing {
@@ -2621,8 +2603,8 @@ mod tests {
         ];
         let workflows = vec![
             listing("status"),
-            listing("yolo"),
-            listing("sessions"),
+            listing("mem"),
+            listing("agent"),
             listing("commit"),
             listing("review"),
         ];
@@ -2631,8 +2613,8 @@ mod tests {
             .map(|command| command.name)
             .collect();
         assert!(!names.iter().any(|name| name == "status"));
-        assert!(!names.iter().any(|name| name == "yolo"));
-        assert!(!names.iter().any(|name| name == "sessions"));
+        assert!(!names.iter().any(|name| name == "mem"));
+        assert!(!names.iter().any(|name| name == "agent"));
         assert!(!names.iter().any(|name| name == "commit"));
         assert!(names.iter().any(|name| name == "local:commit"));
         assert!(names.iter().any(|name| name == "user:commit"));
@@ -2649,7 +2631,7 @@ mod tests {
             .unwrap_err(),
             SlashCommandOutcome::Builtin(BuiltinAction::SessionInfo)
         ));
-        for unavailable in ["sessions", "commit"] {
+        for unavailable in ["agent", "commit"] {
             assert!(
                 resolve(
                     vec![text_block(&format!("/{unavailable}"))],
@@ -2699,12 +2681,12 @@ mod tests {
             .into_iter()
             .map(|command| command.name)
             .collect();
-        assert!(names.iter().any(|name| name == "workflow"));
+        assert!(names.iter().any(|name| name == "workflow-run"));
         assert!(!names.iter().any(|name| name == "review"));
         assert!(!names.iter().any(|name| name == "deep-research"));
         assert!(matches!(
             resolve(
-                vec![text_block("/workflow stop old-run")],
+                vec![text_block("/workflow-run stop old-run")],
                 &[],
                 availability,
                 SkillSlashRewrite::default(),
@@ -2715,7 +2697,7 @@ mod tests {
         ));
         assert!(
             resolve(
-                vec![text_block("/workflow review")],
+                vec![text_block("/workflow-run review")],
                 &[],
                 availability,
                 SkillSlashRewrite::default(),
@@ -2728,7 +2710,7 @@ mod tests {
     #[test]
     fn workflow_manage_parses_both_orders_and_optional_id() {
         let resolve_workflow = |args: &str| -> BuiltinAction {
-            let blocks = vec![text_block(&format!("/workflow {args}"))];
+            let blocks = vec![text_block(&format!("/workflow-run {args}"))];
             match resolve(blocks, &[], all_gated(), SkillSlashRewrite::default(), &[]).unwrap_err()
             {
                 SlashCommandOutcome::Builtin(action) => action,
@@ -2760,11 +2742,6 @@ mod tests {
                 r#"{"pr": 243776}"#,
             ),
             ("pr-review", "pr-review", ""),
-            (
-                "deep-research rust pitfalls",
-                "deep-research",
-                "rust pitfalls",
-            ),
             (
                 "triage resume the failed jobs",
                 "triage",

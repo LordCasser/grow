@@ -5,9 +5,6 @@ use std::collections::BTreeMap;
 pub(crate) const TOKEN_TTL: Duration = Duration::days(30);
 const DEFAULT_EARLY_INVALIDATION_SECS: u64 = 300; // 5 minutes
 
-/// Legacy auth.json scope key. Fallback for old devbox auth files.
-pub(super) const LEGACY_SCOPE: &str = "grow::service";
-
 /// auth.json scope key for plain API key auth (`grow login --api-key`).
 pub const API_KEY_SCOPE: &str = "grow::api_key";
 
@@ -18,9 +15,6 @@ const BLOCKED_REASON_NO_LOGS_MODERATED: &str = "BLOCKED_REASON_NO_LOGS_MODERATED
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMode {
-    /// Deprecated. Kept for deserializing old auth.json files.
-    #[serde(alias = "grow")]
-    WebLogin,
     /// OIDC or OAuth2 interactive login via customer IdP
     #[serde(alias = "oidc")]
     Oidc,
@@ -121,17 +115,16 @@ impl ProviderAuth {
 
     /// `true` when this auth can access explicitly configured managed services.
     pub fn is_managed_mcp_eligible(&self) -> bool {
-        self.is_service_auth() || self.auth_mode == AuthMode::WebLogin
+        self.is_service_auth()
     }
 
     /// Whether this credential can access `supported_in_api: false` models.
     ///
-    /// Session logins (WebLogin, OIDC — including enterprise issuers) always
-    /// qualify; external-provider credentials qualify when explicitly configured.
+    /// OIDC sessions always qualify; external-provider credentials qualify when explicitly configured.
     /// Plain API keys never do.
     pub fn is_session_auth(&self) -> bool {
         match self.auth_mode {
-            AuthMode::WebLogin | AuthMode::Oidc => true,
+            AuthMode::Oidc => true,
             AuthMode::External => self.is_service_auth(),
             AuthMode::ApiKey => false,
         }
@@ -257,25 +250,9 @@ pub(crate) fn token_suffix(t: &str) -> &str {
     if len > 12 { &t[len - 12..] } else { t }
 }
 
-/// Look up auth from the store by scope key.
-///
-/// Legacy `WebLogin` tokens (from the pre-OIDC `grow login --legacy`
-/// flow) are skipped — they are validated via a per-request DB lookup
-/// server-side which fails at high volume.  Skipping them here forces
-/// affected users to re-authenticate via OIDC on next launch.
+/// Look up auth from the store by its exact scope key.
 pub fn lookup_auth(map: &AuthStore, scope: &str) -> Option<ProviderAuth> {
-    let auth = map.get(scope).cloned().or_else(|| {
-        if scope == LEGACY_SCOPE {
-            None
-        } else {
-            map.get(LEGACY_SCOPE).cloned()
-        }
-    })?;
-    if auth.auth_mode == AuthMode::WebLogin {
-        tracing::info!("auth: ignoring legacy WebLogin token — re-authentication required");
-        return None;
-    }
-    Some(auth)
+    map.get(scope).cloned()
 }
 
 /// Early-invalidation buffer. Override with `GROW_AUTH_EARLY_INVALIDATION_SECS`
@@ -353,9 +330,8 @@ mod tests {
             with_issuer(AuthMode::External, Some("https://idp.acme.example")).is_service_auth()
         );
 
-        // API key and legacy WebLogin stay outside configured service auth.
+        // API keys stay outside configured service auth.
         assert!(!with_issuer(AuthMode::ApiKey, Some(TEST_OAUTH2_ISSUER)).is_service_auth());
-        assert!(!with_issuer(AuthMode::WebLogin, Some(TEST_OAUTH2_ISSUER)).is_service_auth());
     }
 
     #[test]
@@ -367,7 +343,6 @@ mod tests {
         };
 
         // Session logins qualify regardless of issuer (incl. enterprise OIDC).
-        assert!(with_issuer(AuthMode::WebLogin, None).is_session_auth());
         assert!(with_issuer(AuthMode::Oidc, None).is_session_auth());
         assert!(with_issuer(AuthMode::Oidc, Some("https://idp.acme.example")).is_session_auth());
 
@@ -380,20 +355,6 @@ mod tests {
 
         // Plain API keys never do.
         assert!(!with_issuer(AuthMode::ApiKey, Some(TEST_OAUTH2_ISSUER)).is_session_auth());
-    }
-
-    #[test]
-    fn lookup_auth_skips_weblogin_on_primary_scope() {
-        let mut map = AuthStore::new();
-        map.insert("scope".into(), make_auth(AuthMode::WebLogin));
-        assert!(lookup_auth(&map, "scope").is_none());
-    }
-
-    #[test]
-    fn lookup_auth_skips_weblogin_on_legacy_fallback() {
-        let mut map = AuthStore::new();
-        map.insert(LEGACY_SCOPE.into(), make_auth(AuthMode::WebLogin));
-        assert!(lookup_auth(&map, "other-scope").is_none());
     }
 
     #[test]

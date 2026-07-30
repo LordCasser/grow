@@ -11,10 +11,6 @@ impl SlashCommand for ConfigAgentsCommand {
         "config-agents"
     }
 
-    fn aliases(&self) -> &[&str] {
-        &["agents"]
-    }
-
     fn description(&self) -> &str {
         "Manage agent definitions"
     }

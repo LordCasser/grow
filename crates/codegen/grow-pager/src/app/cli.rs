@@ -46,9 +46,6 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Share a session and print the share URL
-    #[command(hide = true)]
-    Share(crate::share_cmd::ShareArgs),
     /// Run any command with local clipboard support (OSC 52 → system clipboard).
     #[cfg_attr(not(any(unix, windows)), command(hide = true))]
     #[command(long_about = "\
@@ -168,13 +165,6 @@ pub enum LeaderMgmtCommand {
 /// Arguments for the `agent` subcommand.
 #[derive(Debug, clap::Args, Clone)]
 pub struct AgentArgs {
-    /// Run authentication before starting the agent
-    #[arg(
-        long = "reauth",
-        visible_alias = "--reauthenticate",
-        default_value = "false"
-    )]
-    pub reauthenticate: bool,
     /// Model ID to use
     #[arg(short = 'm', long = "model", value_name = "MODEL")]
     pub model: Option<String>,
@@ -206,8 +196,6 @@ pub struct AgentArgs {
     /// Start a new agent even when config enables leader mode.
     #[arg(long, conflicts_with = "leader")]
     pub no_leader: bool,
-    #[command(flatten)]
-    pub headless: HeadlessArgs,
     /// Override the CLI chat proxy base URL.
     #[arg(long = "cli-chat-proxy-base-url")]
     pub cli_chat_proxy_base_url: Option<String>,
@@ -244,20 +232,10 @@ impl AgentArgs {
 pub enum AgentCmd {
     /// Run the agent over stdio
     Stdio,
-    /// Run the agent headlessly over the Grow WebSocket relay
-    Headless(HeadlessArgs),
     /// Run the agent as a WebSocket server
     Serve(ServeArgs),
     /// Run as the shared leader process for other clients
     Leader(LeaderArgs),
-}
-/// WebSocket URL override arguments, used by headless / leader / serve modes.
-#[derive(Debug, clap::Args, Clone, Default)]
-pub struct HeadlessArgs {
-    #[arg(long = "grow-ws-origin")]
-    pub service_ws_origin: Option<String>,
-    #[arg(long = "grow-ws-url")]
-    pub service_ws_url: Option<String>,
 }
 /// Arguments for the `agent serve` subcommand.
 #[derive(Debug, clap::Args, Clone)]
@@ -268,12 +246,6 @@ pub struct ServeArgs {
     /// Secret token for client authentication (auto-generated if not provided)
     #[arg(long, env = "GROW_AGENT_SECRET")]
     pub secret: Option<String>,
-    /// Remote agent URL for proxy mode
-    #[arg(long)]
-    pub remote: Option<String>,
-    /// Authentication and WebSocket URL overrides
-    #[command(flatten)]
-    pub headless: HeadlessArgs,
 }
 impl ServeArgs {
     /// Get the secret, generating a random one if not provided.
@@ -294,20 +266,9 @@ pub struct LeaderArgs {
     /// Keep the leader running after the last client disconnects.
     #[arg(long)]
     pub no_exit_on_disconnect: bool,
-    /// Defer the service.example.com relay WebSocket until the first headless IPC client
-    /// registers. Without this flag the leader connects the relay eagerly at
-    /// startup — required for bare leaders (headless remote env / systemd) that
-    /// receive remote prompts *through* the relay. Passed by leaders auto-spawned
-    /// from interactive clients (TUI/IDE), which only need the relay if a
-    /// headless client appears.
-    #[arg(long)]
-    pub relay_on_demand: bool,
     /// Disable periodic auto-update checks for the leader.
     #[arg(long)]
     pub no_auto_update: bool,
-    /// All environment URL overrides (passed from follower process)
-    #[command(flatten)]
-    pub headless: HeadlessArgs,
 }
 #[derive(Debug, Clone, Parser)]
 #[command(

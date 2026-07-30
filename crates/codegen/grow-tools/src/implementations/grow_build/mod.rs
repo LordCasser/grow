@@ -12,13 +12,12 @@ pub mod ask_user_question;
 pub mod bash;
 #[path = "deploy_app_stub.rs"]
 pub mod deploy_app;
-pub mod enter_plan_mode;
-pub mod exit_plan_mode;
 pub mod grep;
 pub mod kill_task;
 pub mod list_dir;
 pub mod lsp;
 pub mod monitor;
+pub mod plan_control;
 pub mod read_file;
 pub mod scheduler;
 pub mod search_replace;
@@ -32,13 +31,12 @@ pub mod workflow;
 pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
 pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};
-pub use enter_plan_mode::EnterPlanModeTool;
-pub use exit_plan_mode::ExitPlanModeTool;
 pub use grep::GrepTool;
 pub use kill_task::{KillTaskTool, KillTerminalCommandTool};
 pub use list_dir::ListDirTool;
 pub use lsp::LspTool;
 pub use monitor::tool::MonitorTool;
+pub use plan_control::PlanControlTool;
 pub use read_file::ReadFileTool;
 pub use scheduler::create::{
     LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction,

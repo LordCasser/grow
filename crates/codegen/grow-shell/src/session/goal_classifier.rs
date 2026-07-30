@@ -14,7 +14,7 @@
 
 pub(crate) mod evidence;
 
-use crate::session::events::GoalClassifierFailOpenReason;
+use crate::session::events::GoalVerificationUnavailableReason;
 use crate::session::goal_planner::{
     GOAL_ROLE_AWAIT_BUDGET_EXCEEDED, GOAL_ROLE_SUBAGENT_TYPE, RoleRenderedPrompt,
     RoleSpawnOverride, spawn_with_fail_open_retry,
@@ -162,9 +162,9 @@ pub(crate) const GOAL_VERIFIER_DETAILS_PATH_TEMPLATE: &str =
 
 /// Result of one classifier attempt. `Achieved` / `NotAchieved` are
 /// PARSE-class outcomes: the subagent produced a usable verdict.
-/// `FailOpenAchieved` is INFRA-class: the harness could not extract
-/// a verdict and treats the goal as achieved so an internal failure
-/// never blocks user progress. PARSE-class fail-closed outcomes
+/// `VerificationUnavailable` is INFRA-class: the harness could not extract
+/// a trustworthy verdict, so the Goal pauses and remains incomplete.
+/// PARSE-class fail-closed outcomes
 /// (malformed terminal token, missing details file) map onto
 /// `NotAchieved`; diagnostics distinguishes them via
 /// `Event::GoalClassifierFailClosed`.
@@ -199,8 +199,8 @@ pub(crate) enum GoalClassifierOutcome {
         /// user-facing pause message.
         pause_summary: String,
     },
-    FailOpenAchieved {
-        reason: GoalClassifierFailOpenReason,
+    VerificationUnavailable {
+        reason: GoalVerificationUnavailableReason,
         /// Empty when the failure happened before path resolution
         /// (e.g. an unsafe path was rejected by the validator).
         details_path: String,
@@ -235,8 +235,8 @@ pub(crate) enum SpawnError {
     /// `subagent_event_tx` plumbed). Maps to `SamplerError`.
     Transport(String),
     /// Subagent ran but reported failure. `cancelled: true` maps to
-    /// [`GoalClassifierFailOpenReason::Aborted`]; `cancelled: false`
-    /// maps to [`GoalClassifierFailOpenReason::SamplerError`].
+    /// [`GoalVerificationUnavailableReason::Aborted`]; `cancelled: false`
+    /// maps to [`GoalVerificationUnavailableReason::SamplerError`].
     Runtime { message: String, cancelled: bool },
 }
 
@@ -552,13 +552,13 @@ impl ChannelSpawner {
     }
 }
 
-// Fail-open helper (shared by verification stage)
+// Verification-infrastructure failure helper (shared by verification stage)
 
-/// Record a fail-open outcome: emit diagnostics, write a placeholder
+/// Record an unavailable-verification outcome: emit diagnostics, write a placeholder
 /// details file (when the path is resolved), and return the
-/// `FailOpenAchieved` value. Empty `details_raw` skips the write.
-async fn record_fail_open(
-    reason: GoalClassifierFailOpenReason,
+/// `VerificationUnavailable` value. Empty `details_raw` skips the write.
+async fn record_verification_unavailable(
+    reason: GoalVerificationUnavailableReason,
     attempt: u32,
     started: std::time::Instant,
     details_path: Option<&Path>,
@@ -568,10 +568,10 @@ async fn record_fail_open(
     let resolved_path = match details_path {
         // Surface the path only when the placeholder is on disk — a failed
         // write would point the user at a missing file (empty = no details).
-        Some(p) if maybe_write_fail_open_placeholder(p, reason).await => details_raw,
+        Some(p) if maybe_write_verification_unavailable_placeholder(p, reason).await => details_raw,
         _ => String::new(),
     };
-    GoalClassifierOutcome::FailOpenAchieved {
+    GoalClassifierOutcome::VerificationUnavailable {
         reason,
         details_path: resolved_path,
     }
@@ -628,20 +628,20 @@ async fn maybe_write_classifier_placeholder(path: &Path, headline: &str, body: &
 
 /// Returns `true` iff the placeholder is on disk afterward (see
 /// [`maybe_write_classifier_placeholder`]).
-async fn maybe_write_fail_open_placeholder(
+async fn maybe_write_verification_unavailable_placeholder(
     path: &Path,
-    reason: GoalClassifierFailOpenReason,
+    reason: GoalVerificationUnavailableReason,
 ) -> bool {
     let reason_str = reason.as_const_str();
     let body = format!(
         "The verification stage did not produce a verdict (infra-class \
-         failure). The harness treated the goal as Achieved as a \
-         fail-open fallback. No skeptic analysis was captured.\n\n\
+         failure). Completion was rejected and the goal was paused \
+         fail-closed. No skeptic analysis was captured.\n\n\
          ## Reason\n\n{reason_str}"
     );
     maybe_write_classifier_placeholder(
         path,
-        &format!("Verification fail-open: {reason_str}"),
+        &format!("Verification unavailable: {reason_str}"),
         &body,
     )
     .await
@@ -1774,9 +1774,6 @@ pub(crate) struct VerificationStageInputs<'a> {
     /// orchestration), so the verifier prompt only claims it exists when true.
     pub scratch_dir_ready: bool,
     pub skeptic_count: u32,
-    /// Effective per-goal classifier cap (resolved env > remote > default), so
-    /// `GoalClassifierFired` reports the real cap, not the default constant.
-    pub max_runs: u32,
     /// Child session id of skeptic 0 from the goal's previous attempt, if
     /// any. When present and N > 1 the stage resumes it (delta re-check)
     /// — including the first attempt after a user pause/resume, which
@@ -1803,20 +1800,20 @@ pub(crate) struct VerificationStageInputs<'a> {
 
 /// Outcome of [`run_verification_stage`] plus skeptic 0's child session
 /// id when an N > 1 panel ran, so the next attempt can resume it. `None`
-/// for the N == 1 sole-judge panel and the fail-open early-exits —
+/// for the N == 1 sole-judge panel and verification-unavailable exits —
 /// neither resumes.
 pub(crate) struct VerificationStageResult {
     pub outcome: GoalClassifierOutcome,
     pub skeptic0_session_id: Option<String>,
     /// `true` only when the skeptic panel actually ran: the apply path
     /// keys the stored `skeptic0_session_id` overwrite on this so a
-    /// fail-open early-exit cannot sever the gatekeeper resume chain
+    /// verification-unavailable exit cannot sever the gatekeeper resume chain
     /// (an N == 1 run still clears the id deliberately).
     pub panel_ran: bool,
 }
 
 impl From<GoalClassifierOutcome> for VerificationStageResult {
-    /// Fail-open / early-exit conversion: no panel ran.
+    /// Fail-closed early-exit conversion: no panel ran and the caller pauses.
     fn from(outcome: GoalClassifierOutcome) -> Self {
         Self {
             outcome,
@@ -1831,12 +1828,9 @@ impl From<GoalClassifierOutcome> for VerificationStageResult {
 /// attempts when N > 1); approval needs the cold-panel quorum (see
 /// [`aggregate_skeptic_verdicts`]).
 ///
-/// Always emits a `GoalClassifierFired` for dashboard symmetry with the
-/// legacy single classifier, then `GoalVerifierSkepticVerdict` per skeptic
-/// plus an aggregate `GoalVerifierAggregateVerdict` and a final
-/// `GoalClassifierVerdict`. The terminal outcome is one of `Achieved`,
-/// `NotAchieved`, `Blocked`, `FailOpenAchieved` — same enum the drain
-/// path already consumes.
+/// The terminal outcome is one of `Achieved`, `NotAchieved`, `Blocked`, or
+/// `VerificationUnavailable`. The caller treats the last outcome as
+/// fail-closed and pauses the Goal.
 ///
 /// ## Cancellation
 ///
@@ -1866,10 +1860,10 @@ pub(crate) async fn run_verification_stage(
         tracing::warn!(
             details_path = %details_raw,
             error = %err,
-            "verification stage: rejecting unsafe details path; failing open",
+            "verification stage: rejecting unsafe details path; failing closed",
         );
-        return record_fail_open(
-            GoalClassifierFailOpenReason::FileWriteFailed,
+        return record_verification_unavailable(
+            GoalVerificationUnavailableReason::FileWriteFailed,
             inputs.attempt,
             started,
             None,
@@ -1879,15 +1873,15 @@ pub(crate) async fn run_verification_stage(
         .into();
     }
     // Re-ensure the scratch root (it can be missing after a restart),
-    // BEFORE the changes-path validation: that arm's fail-open writes a
+    // BEFORE the changes-path validation: that arm's unavailable outcome writes a
     // placeholder, which must never happen under an unverified root.
     if let Err(err) = super::goal_tracker::ensure_goal_scratch_root(inputs.verifier_id) {
         tracing::warn!(
             error = %err,
-            "verification stage: failed to ensure scratch root; failing open",
+            "verification stage: failed to ensure scratch root; failing closed",
         );
-        return record_fail_open(
-            GoalClassifierFailOpenReason::FileWriteFailed,
+        return record_verification_unavailable(
+            GoalVerificationUnavailableReason::FileWriteFailed,
             inputs.attempt,
             started,
             None,
@@ -1900,10 +1894,10 @@ pub(crate) async fn run_verification_stage(
         tracing::warn!(
             changes_path = %changes_raw,
             error = %err,
-            "verification stage: rejecting unsafe changes path; failing open",
+            "verification stage: rejecting unsafe changes path; failing closed",
         );
-        return record_fail_open(
-            GoalClassifierFailOpenReason::FileWriteFailed,
+        return record_verification_unavailable(
+            GoalVerificationUnavailableReason::FileWriteFailed,
             inputs.attempt,
             started,
             Some(&details_path),
@@ -1933,10 +1927,10 @@ pub(crate) async fn run_verification_stage(
                     tracing::warn!(
                         changes_path = %changes_raw,
                         error = %err,
-                        "verification stage: failed to write patch file; failing open",
+                        "verification stage: failed to write patch file; failing closed",
                     );
-                    return record_fail_open(
-                        GoalClassifierFailOpenReason::FileWriteFailed,
+                    return record_verification_unavailable(
+                        GoalVerificationUnavailableReason::FileWriteFailed,
                         inputs.attempt,
                         started,
                         Some(&details_path),
@@ -4591,7 +4585,6 @@ mod tests {
             implementer_scratch_dir: Path::new("/tmp/grow-goal-test/implementer"),
             scratch_dir_ready: true,
             skeptic_count,
-            max_runs: GOAL_CLASSIFIER_MAX_RUNS_DEFAULT,
             prior_skeptic0_session_id,
             prior_gaps: None,
             // Empty ⇒ every skeptic falls back to `inherit_defaults()` (the
@@ -4607,32 +4600,6 @@ mod tests {
         use std::sync::OnceLock;
         static TN: OnceLock<RoleToolNames> = OnceLock::new();
         TN.get_or_init(RoleToolNames::inherit_defaults)
-    }
-
-    /// Regression: `GoalClassifierFired` reports the effective cap, not the
-    /// default constant. 4 ≠ default 10, so a hardcoded regression fails loudly.
-    #[tokio::test]
-    async fn fired_event_reports_effective_cap_not_default() {
-        use std::sync::Mutex as StdMutex;
-        let spawner: Arc<dyn GoalClassifierSpawner> =
-            Arc::new(MockSpawner::new([MockResponse::not_refuted()]));
-        let captured: Arc<StdMutex<Option<u32>>> = Arc::new(StdMutex::new(None));
-        let cap_clone = captured.clone();
-        let emit = move |e: Event| {
-            if let Event::GoalClassifierFired { max_runs, .. } = e {
-                *cap_clone.lock().unwrap() = Some(max_runs);
-            }
-        };
-        let wsp = tempfile::tempdir().unwrap();
-        let vid = unique_verifier_id();
-        let mut inputs = stage_inputs("obj", "claim", wsp.path(), &vid, 1, 1);
-        inputs.max_runs = 4;
-        let _ = run_verification_stage(spawner, inputs).await;
-        assert_eq!(
-            *captured.lock().unwrap(),
-            Some(4),
-            "GoalClassifierFired.max_runs must report inputs.max_runs (effective cap), not the default constant",
-        );
     }
 
     #[tokio::test]
@@ -5336,9 +5303,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verification_stage_unsafe_verifier_id_fails_open() {
+    async fn verification_stage_unsafe_verifier_id_is_unavailable() {
         // Embed traversal in verifier_id ⇒ details path is unsafe ⇒
-        // stage short-circuits to fail-open Achieved.
+        // stage short-circuits to VerificationUnavailable.
         let spawner = Arc::new(MockSpawner::new(std::iter::empty::<MockResponse>()));
         let _wsp = tempfile::tempdir().unwrap();
         let result = run_verification_stage(
@@ -5348,14 +5315,14 @@ mod tests {
         .await;
         assert!(matches!(
             result.outcome,
-            GoalClassifierOutcome::FailOpenAchieved {
-                reason: GoalClassifierFailOpenReason::FileWriteFailed,
+            GoalClassifierOutcome::VerificationUnavailable {
+                reason: GoalVerificationUnavailableReason::FileWriteFailed,
                 ..
             }
         ));
         assert!(
             !result.panel_ran,
-            "a fail-open early-exit never ran the panel — the apply path \
+            "a verification-unavailable exit never ran the panel — the apply path \
              must not overwrite the stored skeptic0_session_id from it",
         );
     }
@@ -5949,11 +5916,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_fail_open_writes_placeholder_details_file() {
+    async fn record_verification_unavailable_writes_placeholder_details_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("goal-classifier-foo-1.md");
-        let outcome = record_fail_open(
-            GoalClassifierFailOpenReason::Timeout,
+        let outcome = record_verification_unavailable(
+            GoalVerificationUnavailableReason::Timeout,
             1,
             std::time::Instant::now(),
             Some(&path),
@@ -5961,28 +5928,28 @@ mod tests {
         )
         .await;
         match outcome {
-            GoalClassifierOutcome::FailOpenAchieved {
-                reason: GoalClassifierFailOpenReason::Timeout,
+            GoalClassifierOutcome::VerificationUnavailable {
+                reason: GoalVerificationUnavailableReason::Timeout,
                 ref details_path,
             } => {
                 assert_eq!(details_path, &path.display().to_string());
             }
-            other => panic!("expected FailOpenAchieved{{Timeout}}; got {other:?}"),
+            other => panic!("expected VerificationUnavailable{{Timeout}}; got {other:?}"),
         }
         let body = tokio::fs::read_to_string(&path).await.unwrap();
-        assert!(body.contains("Verification fail-open: timeout"));
-        assert!(body.contains("treated the goal as Achieved as a fail-open"));
+        assert!(body.contains("Verification unavailable: timeout"));
+        assert!(body.contains("goal was paused fail-closed"));
     }
 
     #[tokio::test]
-    async fn record_fail_open_skips_write_when_details_already_present() {
+    async fn record_verification_unavailable_skips_write_when_details_already_present() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("goal-classifier-foo-1.md");
         tokio::fs::write(&path, b"# Real subagent analysis\n")
             .await
             .unwrap();
-        let _ = record_fail_open(
-            GoalClassifierFailOpenReason::Timeout,
+        let _ = record_verification_unavailable(
+            GoalVerificationUnavailableReason::Timeout,
             1,
             std::time::Instant::now(),
             Some(&path),
@@ -5994,9 +5961,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_fail_open_with_no_path_returns_empty_details_path() {
-        let outcome = record_fail_open(
-            GoalClassifierFailOpenReason::FileWriteFailed,
+    async fn record_verification_unavailable_with_no_path_returns_empty_details_path() {
+        let outcome = record_verification_unavailable(
+            GoalVerificationUnavailableReason::FileWriteFailed,
             1,
             std::time::Instant::now(),
             None,
@@ -6004,22 +5971,22 @@ mod tests {
         )
         .await;
         match outcome {
-            GoalClassifierOutcome::FailOpenAchieved {
-                reason: GoalClassifierFailOpenReason::FileWriteFailed,
+            GoalClassifierOutcome::VerificationUnavailable {
+                reason: GoalVerificationUnavailableReason::FileWriteFailed,
                 details_path,
             } => assert!(details_path.is_empty()),
-            other => panic!("expected FailOpenAchieved with empty path; got {other:?}"),
+            other => panic!("expected VerificationUnavailable with empty path; got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn record_fail_open_returns_empty_when_placeholder_write_fails() {
+    async fn record_verification_unavailable_returns_empty_when_placeholder_write_fails() {
         // A failed placeholder write must surface no path (empty sentinel),
         // never a dangling pointer to a nonexistent file.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("missing-subdir").join("details.md");
-        let outcome = record_fail_open(
-            GoalClassifierFailOpenReason::Timeout,
+        let outcome = record_verification_unavailable(
+            GoalVerificationUnavailableReason::Timeout,
             1,
             std::time::Instant::now(),
             Some(&path),
@@ -6027,11 +5994,11 @@ mod tests {
         )
         .await;
         match outcome {
-            GoalClassifierOutcome::FailOpenAchieved { details_path, .. } => assert!(
+            GoalClassifierOutcome::VerificationUnavailable { details_path, .. } => assert!(
                 details_path.is_empty(),
                 "a failed placeholder write must surface no details path, got {details_path:?}",
             ),
-            other => panic!("expected FailOpenAchieved; got {other:?}"),
+            other => panic!("expected VerificationUnavailable; got {other:?}"),
         }
         assert!(!path.exists(), "no file should have been created");
     }
@@ -6053,10 +6020,10 @@ mod tests {
         }
     }
 
-    /// A squatted root fails the verification stage OPEN: no panel, no
-    /// spawn, nothing written under the unverified root.
+    /// A squatted root fails the verification stage closed: no panel, no
+    /// spawn, nothing written under the unverified root, and no achievement.
     #[tokio::test]
-    async fn verification_stage_fails_open_when_scratch_root_squatted() {
+    async fn verification_stage_fails_closed_when_scratch_root_squatted() {
         let spawner = Arc::new(MockSpawner::new([]));
         let observed = spawner.clone();
         let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
@@ -6072,14 +6039,14 @@ mod tests {
 
         assert!(!result.panel_ran, "no panel may run under a squatted root");
         match result.outcome {
-            GoalClassifierOutcome::FailOpenAchieved {
-                reason: GoalClassifierFailOpenReason::FileWriteFailed,
+            GoalClassifierOutcome::VerificationUnavailable {
+                reason: GoalVerificationUnavailableReason::FileWriteFailed,
                 details_path,
             } => assert!(
                 details_path.is_empty(),
                 "no details path may be surfaced — nothing was written",
             ),
-            other => panic!("expected FailOpenAchieved{{FileWriteFailed}}; got {other:?}"),
+            other => panic!("expected VerificationUnavailable{{FileWriteFailed}}; got {other:?}"),
         }
         assert_eq!(
             observed
@@ -6151,7 +6118,7 @@ mod tests {
     /// and the symlink's victim file stays untouched.
     #[cfg(unix)]
     #[tokio::test]
-    async fn fail_open_placeholder_does_not_follow_preplanted_tmp_symlink() {
+    async fn unavailable_placeholder_does_not_follow_preplanted_tmp_symlink() {
         /// Removes the planted symlink + scratch root on drop.
         struct CleanupOnDrop {
             symlink: PathBuf,
@@ -6183,8 +6150,8 @@ mod tests {
             "classifier artifacts must not resolve to the bare-/tmp name",
         );
         super::super::goal_tracker::ensure_goal_scratch_root(&vid).unwrap();
-        let _ = record_fail_open(
-            GoalClassifierFailOpenReason::SamplerError,
+        let _ = record_verification_unavailable(
+            GoalVerificationUnavailableReason::SamplerError,
             1,
             std::time::Instant::now(),
             Some(Path::new(&resolved)),
@@ -6194,7 +6161,7 @@ mod tests {
 
         // The placeholder landed in the scratch root, not through the symlink.
         let body = tokio::fs::read_to_string(&resolved).await.unwrap();
-        assert!(body.contains("fail-open"), "placeholder written: {body}");
+        assert!(body.contains("fail-closed"), "placeholder written: {body}");
         assert_eq!(
             tokio::fs::read_to_string(&victim).await.unwrap(),
             "precious",

@@ -96,8 +96,8 @@ pub enum PersistenceMsg {
         reasoning_effort: Option<Option<ReasoningEffort>>,
     },
     PlanState(TodoState),
-    /// Plan mode lifecycle state to persist
-    PlanModeState(crate::session::plan_mode::BehaviorSnapshot),
+    /// Primary Behavior and Plan-phase lifecycle state to persist.
+    BehaviorState(crate::session::behavior::BehaviorSnapshot),
     /// A rewind point to persist
     RewindPoint(RewindPoint),
     /// Truncate rewind points from a specific prompt index (inclusive).
@@ -1512,9 +1512,9 @@ impl SessionPersistence {
                         tracing::warn!(?e, "failed to write plan state");
                     }
                 }
-                PersistenceMsg::PlanModeState(state) => {
-                    if let Err(e) = self.storage.write_plan_mode_state(&self.info, &state).await {
-                        tracing::warn!(?e, "failed to write plan mode state");
+                PersistenceMsg::BehaviorState(state) => {
+                    if let Err(e) = self.storage.write_behavior_state(&self.info, &state).await {
+                        tracing::warn!(?e, "failed to write behavior state");
                     }
                 }
                 PersistenceMsg::GoalModeState(state) => {
@@ -1845,8 +1845,6 @@ pub(crate) async fn new(
 /// Unlike [`new()`], this:
 /// - Uses `JsonlStorageAdapter::with_explicit_session_dir()` to bypass
 ///   the standard `{root}/sessions/{cwd}/{id}/` path computation.
-/// - Skips remote sync (subagent sessions are not synced to cloud).
-/// - Skips relay sync (subagent sessions are not shared).
 /// - Skips gateway (lifecycle notifications are handled by the coordinator).
 pub async fn new_with_explicit_dir(
     info: &Info,
@@ -1921,7 +1919,7 @@ pub struct PersistedInfoLight {
     pub summary: Summary,
     pub chat_history: Vec<ConversationItem>,
     pub plan_state: Option<TodoState>,
-    pub plan_mode_state: Option<crate::session::plan_mode::BehaviorSnapshot>,
+    pub behavior_state: Option<crate::session::behavior::BehaviorSnapshot>,
     /// Path to updates file for streaming reads
     pub updates_file_path: Option<std::path::PathBuf>,
     /// Adapter-owned path to `rewind_points.jsonl` for the session's
@@ -2021,7 +2019,7 @@ pub(crate) async fn load_light(
         summary: persisted.summary,
         chat_history: persisted.chat_history,
         plan_state: persisted.plan_state,
-        plan_mode_state: persisted.plan_mode_state,
+        behavior_state: persisted.behavior_state,
         updates_file_path,
         rewind_points_file_path,
         signals: persisted.signals,

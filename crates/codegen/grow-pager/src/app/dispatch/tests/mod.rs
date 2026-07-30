@@ -28,13 +28,10 @@ use super::dashboard::{
     dispatch_dashboard_overlay_exit, dispatch_dashboard_overlay_stop,
     dispatch_dashboard_peek_reply, dispatch_dashboard_permission_followup,
     dispatch_dashboard_permission_select, dispatch_dashboard_question_answer,
-    dispatch_dashboard_stop, dispatch_dashboard_toggle_auto_approve, dispatch_exit_dashboard,
-    dispatch_open_dashboard, ensure_dashboard_state, resolve_location_input,
+    dispatch_dashboard_stop, dispatch_exit_dashboard, dispatch_open_dashboard,
+    ensure_dashboard_state, resolve_location_input,
 };
-use super::modes::{
-    YOLO_ON_UNDER_PLAN_TOAST, active_agent_plan_nudge_state, dispatch_cycle_mode_and_sync,
-    permission_mode_toast,
-};
+use super::modes::{YOLO_ON_UNDER_PLAN_TOAST, permission_mode_toast};
 use super::permissions::drain_permission_queue;
 use super::prompt::{
     dispatch_doctor, dispatch_send_prompt, dispatch_send_prompt_inner,
@@ -50,7 +47,7 @@ use super::task_result::dispatch_task_result;
 use super::*;
 use crate::acp::model_state::ModelState;
 use crate::acp::tracker::AcpUpdateTracker;
-use crate::app::actions::{Action, Effect, SubagentKillOutcome, TaskResult};
+use crate::app::actions::{Action, Effect, PermissionModeKind, SubagentKillOutcome, TaskResult};
 use crate::app::agent::{AgentId, AgentSession, AgentState};
 use crate::app::agent_view::{ActivePane, AgentView, PromptMode};
 use crate::app::app_view::{
@@ -931,7 +928,7 @@ fn push_synthetic_permission(
     agent.permission_queue.push_back(state);
     rx
 }
-const MOUSE_OFF_STICKY: &str = crate::app::MOUSE_OFF_HINT_SCROLLBACK;
+const MOUSE_OFF_STICKY: &str = crate::app::MOUSE_OFF_HINT;
 fn reset_mouse_capture_enabled(on: bool) {
     crate::app::MOUSE_CAPTURE_ENABLED.store(on, std::sync::atomic::Ordering::Release);
 }

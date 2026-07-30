@@ -1,3 +1,4 @@
+use super::support::build_actor;
 use super::*;
 #[test]
 fn prompt_mode_from_session_mode_id_uses_acp_session_mode() {
@@ -10,6 +11,10 @@ fn prompt_mode_from_session_mode_id_uses_acp_session_mode() {
         prompt_mode_from_session_mode_id(&acp::SessionModeId::new("plan"))
     );
     assert_eq!(
+        PromptMode::Workflow,
+        prompt_mode_from_session_mode_id(&acp::SessionModeId::new("workflow"))
+    );
+    assert_eq!(
         PromptMode::Agent,
         prompt_mode_from_session_mode_id(&acp::SessionModeId::new("default"))
     );
@@ -17,6 +22,33 @@ fn prompt_mode_from_session_mode_id_uses_acp_session_mode() {
         PromptMode::Agent,
         prompt_mode_from_session_mode_id(&acp::SessionModeId::new("browser_use"))
     );
+}
+
+#[tokio::test]
+async fn behavior_gateway_rejects_agent_role_ids_instead_of_switching_to_normal() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _gateway_rx) = build_actor().await;
+            actor
+                .behavior
+                .lock()
+                .select_behavior(Some(xai_tool_types::BehaviorId::Clarify));
+
+            let outcome = actor
+                .request_behavior_change(acp::SessionModeId::new("browser_use"))
+                .await;
+
+            assert!(matches!(
+                outcome,
+                crate::session::behavior::BehaviorChangeOutcome::Rejected { .. }
+            ));
+            assert_eq!(
+                actor.behavior.lock().behavior(),
+                Some(xai_tool_types::BehaviorId::Clarify)
+            );
+        })
+        .await;
 }
 fn fn_def(name: &str) -> ToolDefinition {
     ToolDefinition::function(name, None::<&str>, serde_json::json!({"type": "object"}))
@@ -52,42 +84,39 @@ fn cursor_filter_is_noop_for_non_cursor_tools() {
         fn_def("search_replace"),
         fn_def("write"),
         fn_def("ask_user_question"),
-        fn_def("enter_plan_mode"),
-        fn_def("exit_plan_mode"),
+        fn_def("plan_control"),
     ];
     let in_plan = filter_cursor_tools_by_plan_mode(defs.clone(), true);
     let out_of_plan = filter_cursor_tools_by_plan_mode(defs.clone(), false);
     assert_eq!(names(&in_plan).len(), defs.len());
     assert_eq!(names(&out_of_plan).len(), defs.len());
 }
-/// Pins the `reconcile_plan_mode_with_prompt` transitions:
-/// Plan → Pending, idempotent, non-plan modes exit cleanly.
 #[test]
-fn prompt_mode_plan_drives_tracker_into_pending_when_inactive() {
-    use crate::session::plan_mode::{BehaviorController, PlanModeState};
+fn plan_hides_workflow_launcher_but_default_keeps_it() {
+    let defs = vec![fn_def("read_file"), fn_def("workflow")];
+    let in_plan = filter_cursor_tools_by_plan_mode(defs.clone(), true);
+    let out_of_plan = filter_cursor_tools_by_plan_mode(defs, false);
+    assert_eq!(names(&in_plan), vec!["read_file"]);
+    assert_eq!(names(&out_of_plan), vec!["read_file", "workflow"]);
+}
+/// Pins the direct mapping from prompt metadata to mutually exclusive Behavior.
+#[test]
+fn prompt_mode_selects_exactly_one_behavior() {
+    use crate::session::behavior::{BehaviorController, BehaviorState, PlanPhase};
     use std::path::PathBuf;
     fn reconcile(tracker: &mut BehaviorController, mode: PromptMode) {
-        match mode {
-            PromptMode::Plan => {
-                tracker.enter_pending();
-            }
-            PromptMode::Agent | PromptMode::Ask => {
-                if tracker.state() != PlanModeState::Inactive {
-                    tracker.user_exit(false);
-                }
-            }
-        }
+        tracker.select_behavior(mode.behavior());
     }
     let mut tracker = BehaviorController::new(PathBuf::from("/tmp/test"));
-    assert_eq!(tracker.state(), PlanModeState::Inactive);
+    assert_eq!(tracker.state(), BehaviorState::Normal);
     reconcile(&mut tracker, PromptMode::Plan);
-    assert_eq!(tracker.state(), PlanModeState::Pending);
+    assert_eq!(tracker.state(), BehaviorState::Plan(PlanPhase::Drafting));
     reconcile(&mut tracker, PromptMode::Plan);
-    assert_eq!(tracker.state(), PlanModeState::Pending);
+    assert_eq!(tracker.state(), BehaviorState::Plan(PlanPhase::Drafting));
     reconcile(&mut tracker, PromptMode::Agent);
-    assert_eq!(tracker.state(), PlanModeState::Inactive);
+    assert_eq!(tracker.state(), BehaviorState::Normal);
     reconcile(&mut tracker, PromptMode::Plan);
-    assert_eq!(tracker.state(), PlanModeState::Pending);
+    assert_eq!(tracker.state(), BehaviorState::Plan(PlanPhase::Drafting));
     reconcile(&mut tracker, PromptMode::Ask);
-    assert_eq!(tracker.state(), PlanModeState::Inactive);
+    assert_eq!(tracker.state(), BehaviorState::Clarify);
 }

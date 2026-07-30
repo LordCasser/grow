@@ -1169,12 +1169,12 @@ auto_update = true
         fn apply_does_not_merge_auto_compact_threshold_percent_into_model_info() {
             use crate::agent::config::{EndpointsConfig, ModelEntry};
             let endpoints = EndpointsConfig::default();
-            let base = ModelEntry::fallback(TEST_MODEL, &endpoints);
+            let base = ModelEntry::fallback(TEST_MODEL);
             let over = ConfigModelOverride {
                 auto_compact_threshold_percent: Some(42),
                 ..ConfigModelOverride::default()
             };
-            let merged = over.apply(TEST_MODEL, Some(base), &endpoints);
+            let merged = over.apply(TEST_MODEL, Some(base));
             assert_eq!(
                 merged.info.auto_compact_threshold_percent, None,
                 "ConfigModelOverride::apply must NOT merge `auto_compact_threshold_percent` \

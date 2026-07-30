@@ -232,6 +232,7 @@ impl AgentView {
             last_word_select_probe: None,
             sticky_toast: None,
             mode_switch_banner: None,
+            behavior_switch_warning_pending: false,
             session_banner_active: false,
             pinned_promo_cta_live: false,
             block_viewer: None,
@@ -248,7 +249,10 @@ impl AgentView {
             hovered_question_button: None,
             question_scroll_region: None,
             plan_mode_active: false,
+            behavior_mode: grow_tools::types::SessionMode::Default,
             plan_mode_pending: None,
+            behavior_mode_pending: None,
+            plan_phase: None,
             deferred_session_mode: None,
             pending_extensions_fetch: false,
             in_dashboard_overlay: false,
@@ -858,7 +862,7 @@ impl AgentView {
             textarea_changed: delta.textarea_changed,
         });
     }
-    /// Show or hide the `/dashboard` slash command in this agent's registry.
+    /// Show or hide the `/agents` slash command in this agent's registry.
     /// Driven by the dashboard feature flag
     /// (`crate::views::dashboard::dashboard_enabled()`) at agent-creation
     /// time — independent of leader mode.

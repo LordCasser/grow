@@ -77,7 +77,7 @@ This opens a session picker that lists recent sessions for the current workspace
 
 Typing in the picker filters the list by title and also searches your conversation content as you type; content matches appear under an "Extended search results" heading. Press `Ctrl+/` to search immediately without the brief pause.
 
-To switch between, rename, or close the sessions that are currently active (the parent session and any forks), use `/dashboard` (or its alias `/sessions`) instead.
+To switch between, rename, or close the sessions that are currently active (the parent session and any forks), use `/agents`.
 
 ### From the Command Line
 

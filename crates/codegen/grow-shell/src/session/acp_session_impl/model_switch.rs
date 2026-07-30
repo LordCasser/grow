@@ -174,10 +174,6 @@ impl SessionActor {
         self.compaction.prefire.clear();
         *self.agent.borrow_mut() = new_agent;
         *self.active_agent_type.lock() = Some(new_agent_name.clone());
-        self.queue_exit_reminder_on_approved_exit.store(
-            self.is_cursor_harness(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
         if let Err(e) = self.workspace_ops.bind_local_session(
             &self.session_id_string(),
             self.tool_context.cwd.as_path().to_path_buf(),
@@ -199,10 +195,6 @@ impl SessionActor {
             if let Some(client) = self.rebuild_spec.managed_gateway_tool_client.clone() {
                 bridge.update_resource(client).await;
             }
-            let plan_path = self.plan_mode.lock().plan_file_path().to_path_buf();
-            bridge
-                .update_resource(grow_tools::types::resources::PlanFilePath(plan_path))
-                .await;
             if let Some(display_cwd) = self.display_cwd.get() {
                 bridge
                     .set_display_cwd(std::path::PathBuf::from(display_cwd))

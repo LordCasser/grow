@@ -1933,20 +1933,17 @@ mod tests {
     }
 
     #[test]
-    fn plan_install_bare_name_official_priority_selects_official_and_sets_note() {
+    fn plan_install_bare_name_duplicate_sources_is_ambiguous_even_for_featured_name() {
         let sources = [
             git_source("Third Party", "https://github.com/acme/x.git"),
             git_source("Featured Marketplace", OFFICIAL_URL),
         ];
-        let plan = plan_install(&sources, "sentry", None, |_| Ok(vec![mp_entry("sentry")]))
-            .expect("official source wins the tie");
-        assert_eq!(plan.source_index, 1);
-        assert_eq!(plan.entry.name, "sentry");
-        let note = plan
-            .other_copies_note
-            .expect("note set when other copies exist");
-        assert!(note.contains("also available from 1 other"), "{note}");
-        assert!(note.contains("sentry@<qualifier>"), "{note}");
+        let err = plan_install(&sources, "sentry", None, |_| Ok(vec![mp_entry("sentry")]))
+            .expect_err("configured sources have equal priority");
+        assert!(
+            matches!(err, MarketplaceInstallError::NameAmbiguous { .. }),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1993,22 +1990,29 @@ mod tests {
     }
 
     #[test]
-    fn plan_install_bare_name_official_match_proceeds_despite_skip() {
+    fn plan_install_bare_name_featured_match_does_not_bypass_partial_scan() {
         let sources = [
             git_source("Featured Marketplace", OFFICIAL_URL),
             git_source("Flaky Remote", "https://github.com/acme/a.git"),
         ];
-        let plan = plan_install(&sources, "sentry", None, |source| {
+        let err = plan_install(&sources, "sentry", None, |source| {
             if source.name == "Featured Marketplace" {
                 Ok(vec![mp_entry("sentry")])
             } else {
                 Err("sync failed".to_string())
             }
         })
-        .expect("official match is decisive even when another source is skipped");
-        assert_eq!(plan.source_index, 0);
-        assert_eq!(plan.entry.name, "sentry");
-        assert_eq!(plan.skipped_sources, vec!["Flaky Remote".to_string()]);
+        .expect_err("a skipped source makes any unqualified selection incomplete");
+        match err {
+            MarketplaceInstallError::PartialScan {
+                name,
+                skipped_sources,
+            } => {
+                assert_eq!(name, "sentry");
+                assert_eq!(skipped_sources, vec!["Flaky Remote".to_string()]);
+            }
+            other => panic!("expected PartialScan, got: {other}"),
+        }
     }
 
     #[test]

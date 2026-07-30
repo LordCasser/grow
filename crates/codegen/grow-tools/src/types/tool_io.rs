@@ -16,10 +16,9 @@ use crate::implementations::codex::grep_files::tool::CodexGrepFilesInput;
 use crate::implementations::codex::list_dir::tool::CodexListDirInput;
 use crate::implementations::codex::read_file::tool::CodexReadFileInput;
 use crate::implementations::grow_build::ask_user_question::AskUserQuestionInput;
-use crate::implementations::grow_build::enter_plan_mode::EnterPlanModeInput;
-use crate::implementations::grow_build::exit_plan_mode::ExitPlanModeInput;
 use crate::implementations::grow_build::grep::GrepSearchInput;
 use crate::implementations::grow_build::list_dir::ListDirInput;
+use crate::implementations::grow_build::plan_control::PlanControlInput;
 use crate::implementations::grow_build::read_file::ReadFileInput;
 use crate::implementations::grow_build::search_replace::SearchReplaceInput;
 use crate::implementations::grow_build::todo::TodoWriteInput;
@@ -77,8 +76,7 @@ pub enum ToolInput {
     MemoryGet(MemoryGetInput),
     SearchTool(SearchToolInput),
     UseTool(UseToolInput),
-    EnterPlanMode(EnterPlanModeInput),
-    ExitPlanMode(ExitPlanModeInput),
+    PlanControl(PlanControlInput),
     AskUserQuestion(AskUserQuestionInput),
     Lsp(LspToolInput),
     Monitor(crate::implementations::grow_build::monitor::types::MonitorInput),

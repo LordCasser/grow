@@ -38,15 +38,15 @@ pub enum PendingKind {
     Permission,
     /// `grow/ask_user_question`.
     Question,
-    /// `grow/exit_plan_mode` plan approval.
+    /// `grow/plan_approval`.
     PlanApproval,
 }
 
 /// Whether a blocking plan-approval reverse-request is parked in `pending`.
 ///
-/// The resume re-park issues `grow/exit_plan_mode` from a detached task
+/// The resume re-park issues `grow/plan_approval` from a detached task
 /// with no running turn, making it the one parked interaction that also carries a
-/// persisted gate (`awaiting_plan_approval`). `session_has_live_work` consults
+/// persisted transport gate (`approval_pending`). `session_has_live_work` consults
 /// this to keep such a session resident until the decision is answered or a real
 /// disconnect `Err`s the reverse-request — otherwise an idle-unload drops the
 /// parked future and its guard clears the on-disk gate. Permission/question parks

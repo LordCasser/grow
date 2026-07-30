@@ -18,7 +18,6 @@ pub use self::persistence::{
     resolve_local_session, resolve_local_session_any_cwd, session_exists_for_cwd,
 };
 pub use self::result::{Empty, ExtMethodResult};
-pub use self::share::ShareSessionRequest;
 pub use xai_fsnotify::{FsConfig, FsEvent, FsEventKind, FsEventSource, FsNotifyError, GitMetaKind};
 /// `false` twin: this template is not compiled into this build, so no
 /// template matches. Keeps ungated call sites compiling in both
@@ -84,7 +83,7 @@ pub enum PromptOrigin {
     /// Scheduled task (`/loop`) prompt fired by the scheduler via the pager.
     SchedulerFired,
     /// Turn injected after a resumed plan-approval decision: the
-    /// shell re-parked `exit_plan_mode` on resume, the user approved/revised,
+    /// shell re-parked Plan approval on resume, the user approved/revised,
     /// and the shell injects the follow-up turn. Synthetic so the user never
     /// typed it — kept out of prompt history — but it still runs a real turn.
     PlanResume,
@@ -276,14 +275,6 @@ pub struct ClientFsConfig {
     pub fs: FsConfig,
     pub mode: ClientFsMode,
 }
-/// Request type for preparing a local session snapshot for sharing.
-pub mod share {
-    /// Request to prepare a session for a separately configured share service.
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct ShareSessionRequest {
-        pub session_id: String,
-    }
-}
 pub mod acp_conversion;
 pub mod acp_mcp;
 pub(crate) mod acp_session;
@@ -293,7 +284,6 @@ pub(crate) mod event_tracker;
 pub(crate) mod event_types;
 pub(crate) mod event_writer;
 pub(crate) mod events;
-pub mod export;
 pub mod file_system;
 pub mod fork;
 pub(crate) mod fs_watch;
@@ -323,8 +313,8 @@ pub mod memory;
 pub(crate) mod normalize_cache;
 pub mod persistence;
 pub use grow_shared::placeholder_images;
+pub mod behavior;
 pub(crate) mod diagnostics;
-pub mod plan_mode;
 pub mod prompt_history;
 pub mod prompt_parser;
 pub(crate) mod prompt_timing;

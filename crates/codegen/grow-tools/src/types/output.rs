@@ -559,8 +559,7 @@ pub enum ToolOutput {
     CodexGrepFiles(CodexGrepFilesOutput),
     SearchTool(SearchToolOutput),
     SubagentCompleted(SubagentCompletedOutput),
-    EnterPlanMode(EnterPlanModeOutput),
-    ExitPlanMode(ExitPlanModeOutput),
+    PlanControl(PlanControlOutput),
     AskUserQuestion(AskUserQuestionOutput),
     Monitor(crate::implementations::grow_build::monitor::types::MonitorOutput),
     SchedulerCreate(crate::implementations::grow_build::scheduler::create::SchedulerCreateOutput),
@@ -773,34 +772,7 @@ impl ToolOutput {
                 text.push_str(&sub.resume_footer());
                 text
             }
-            ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
-                message,
-                tool_hints,
-            }) => {
-                let ask = &tool_hints.ask_user;
-                let exit = &tool_hints.exit_plan;
-                format!(
-                    "{message}\n\n\
-                     In plan mode, you should:\n\
-                     1. Investigate discoverable facts with the tools already available to you\n\
-                     2. Use {ask} only for consequential questions that cannot be answered locally\n\
-                     3. Define a decision-complete plan with interfaces, failure handling, and tests\n\
-                     4. Do not make ordinary file edits\n\
-                     5. When ready, call {exit} with the complete plan in its `plan` argument."
-                )
-            }
-            ToolOutput::ExitPlanMode(exit) => match exit {
-                ExitPlanModeOutput::PlanReady {
-                    message,
-                    plan_content,
-                    plan_file_path,
-                } => {
-                    format!(
-                        "{message}\n\nYour plan has been saved at: {plan_file_path}\n\n\
-                         ## Plan:\n{plan_content}"
-                    )
-                }
-            },
+            ToolOutput::PlanControl(output) => output.message.clone(),
             ToolOutput::AskUserQuestion(
                 AskUserQuestionOutput::QuestionsSent { message, .. }
                 | AskUserQuestionOutput::UserAnswered { message },
@@ -868,57 +840,6 @@ pub enum TodoWriteOutput {
     /// line, instead of the framework's wrapper around a `ToolError`.
     InvalidArgument(String),
 }
-/// Output from the `EnterPlanMode` tool.
-///
-/// Confirms plan behavior entry without mutating storage.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub enum EnterPlanModeOutput {
-    /// Successfully signaled plan mode entry.
-    Entered {
-        /// Confirmation message for the model, nudging it into
-        /// exploration/planning behavior.
-        message: String,
-        /// Pre-resolved tool name hints for `to_prompt_format()`.
-        /// Resolved at runtime via `TemplateRenderer` so no tool names
-        /// are hardcoded. Falls back to canonical names when the
-        /// renderer is unavailable.
-        #[serde(default)]
-        tool_hints: EnterPlanModeToolHints,
-    },
-}
-/// Pre-resolved tool name hints embedded in `EnterPlanModeOutput`.
-///
-/// Resolved at runtime so `to_prompt_format()` never hardcodes tool names.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct EnterPlanModeToolHints {
-    /// Client-facing name for `ask_user_question` (ToolKind::AskUser).
-    #[serde(default = "EnterPlanModeToolHints::default_ask_user")]
-    pub ask_user: String,
-    /// Client-facing name for `exit_plan_mode` (ToolKind::ExitPlan).
-    #[serde(default = "EnterPlanModeToolHints::default_exit_plan")]
-    pub exit_plan: String,
-    /// Client-facing name for the subagent `task` tool (ToolKind::Task).
-    /// Empty when the task tool is not registered.
-    #[serde(default)]
-    pub task: String,
-}
-impl Default for EnterPlanModeToolHints {
-    fn default() -> Self {
-        Self {
-            ask_user: "ask_user_question".to_owned(),
-            exit_plan: "exit_plan_mode".to_owned(),
-            task: String::new(),
-        }
-    }
-}
-impl EnterPlanModeToolHints {
-    fn default_ask_user() -> String {
-        "ask_user_question".to_owned()
-    }
-    fn default_exit_plan() -> String {
-        "exit_plan_mode".to_owned()
-    }
-}
 /// Output from the `AskUserQuestion` tool.
 ///
 /// This is a thin signal — the tool sends the questions to the client via
@@ -950,20 +871,9 @@ pub enum AskUserQuestionOutput {
         message: String,
     },
 }
-/// Output from the `ExitPlanMode` tool.
-///
-/// The tool persists the submitted plan and surfaces it for approval.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub enum ExitPlanModeOutput {
-    /// Submitted plan persisted and surfaced for approval.
-    PlanReady {
-        /// Confirmation message for the model.
-        message: String,
-        /// The submitted plan content.
-        plan_content: String,
-        /// Path to the plan file (for the model to reference later).
-        plan_file_path: String,
-    },
+pub struct PlanControlOutput {
+    pub message: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MCPOutputDetails {
@@ -1072,8 +982,7 @@ impl xai_tool_runtime::ToolOutput for SkillOutput {}
 impl xai_tool_runtime::ToolOutput for ApplyPatchOutput {}
 impl xai_tool_runtime::ToolOutput for CodexGrepFilesOutput {}
 impl xai_tool_runtime::ToolOutput for SearchToolOutput {}
-impl xai_tool_runtime::ToolOutput for EnterPlanModeOutput {}
-impl xai_tool_runtime::ToolOutput for ExitPlanModeOutput {}
+impl xai_tool_runtime::ToolOutput for PlanControlOutput {}
 impl xai_tool_runtime::ToolOutput for AskUserQuestionOutput {}
 impl xai_tool_runtime::ToolOutput for MCPOutput {}
 #[cfg(test)]
@@ -1692,60 +1601,11 @@ mod tests {
         assert_eq!(json["subagent_id"], json["resume_from_hint"]);
     }
     #[test]
-    fn enter_plan_mode_tool_hints_default() {
-        let hints = EnterPlanModeToolHints::default();
-        assert_eq!(hints.ask_user, "ask_user_question");
-        assert_eq!(hints.exit_plan, "exit_plan_mode");
-        assert!(hints.task.is_empty());
-    }
-    #[test]
-    fn enter_plan_mode_tool_hints_serde_round_trip() {
-        let hints = EnterPlanModeToolHints {
-            ask_user: "AskUser".into(),
-            exit_plan: "FinishPlan".into(),
-            task: "task".into(),
-        };
-        let json = serde_json::to_value(&hints).unwrap();
-        assert_eq!(json["ask_user"], "AskUser");
-        assert_eq!(json["exit_plan"], "FinishPlan");
-        assert_eq!(json["task"], "task");
-        let deserialized: EnterPlanModeToolHints = serde_json::from_value(json).unwrap();
-        assert_eq!(deserialized.ask_user, "AskUser");
-        assert_eq!(deserialized.exit_plan, "FinishPlan");
-        assert_eq!(deserialized.task, "task");
-    }
-    #[test]
-    fn enter_plan_mode_tool_hints_defaults_on_missing_fields() {
-        let json = json!({});
-        let hints: EnterPlanModeToolHints = serde_json::from_value(json).unwrap();
-        assert_eq!(hints.ask_user, "ask_user_question");
-        assert_eq!(hints.exit_plan, "exit_plan_mode");
-        assert!(hints.task.is_empty());
-    }
-    #[test]
-    fn enter_plan_mode_prompt_format_submits_inline_plan() {
-        let output = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
-            message: "Entered plan behavior.".into(),
-            tool_hints: EnterPlanModeToolHints::default(),
+    fn plan_control_prompt_format_is_the_shell_validated_result() {
+        let output = ToolOutput::PlanControl(PlanControlOutput {
+            message: "approved".into(),
         });
-        let prompt = output.to_prompt_format();
-        assert!(prompt.contains("Entered plan behavior."));
-        assert!(prompt.contains("exit_plan_mode"));
-        assert!(prompt.contains("plan"));
-        assert!(!prompt.contains("plan.md"));
-        assert!(!prompt.contains("Edit"));
-    }
-
-    #[test]
-    fn enter_plan_mode_output_serde_contains_no_artifact_fields() {
-        let output = EnterPlanModeOutput::Entered {
-            message: "m".into(),
-            tool_hints: EnterPlanModeToolHints::default(),
-        };
-        let json = serde_json::to_value(output).unwrap();
-        let text = json.to_string();
-        assert!(!text.contains("plan_file_path"));
-        assert!(!text.contains("plan_file_seed"));
+        assert_eq!(output.to_prompt_format(), "approved");
     }
     #[test]
     fn subagent_completed_hints_absent_when_no_persona() {

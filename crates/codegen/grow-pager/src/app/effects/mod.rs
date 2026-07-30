@@ -1272,8 +1272,25 @@ pub(crate) fn execute(
                         session_id.clone(),
                         mode_id,
                     );
-                    if let Err(e) = acp_send(mode_req, &tx).await {
-                        tracing::warn!("Failed to set session mode: {e}");
+                    let mode_response = match acp_send(mode_req, &tx).await {
+                        Ok(response) => response,
+                        Err(error) => {
+                            tracing::warn!("Failed to set session mode: {error}");
+                            return TaskResult::PromptResponse {
+                                agent_id,
+                                result: Err(format!("Behavior change failed: {error}")),
+                                http_status: None,
+                                prompt_id: Some(prompt_id),
+                            };
+                        }
+                    };
+                    if let Err(message) = behavior_change_applied(mode_response.meta.as_ref()) {
+                        return TaskResult::PromptResponse {
+                            agent_id,
+                            result: Err(message),
+                            http_status: None,
+                            prompt_id: Some(prompt_id),
+                        };
                     }
                     ulog::info(
                         "prompt submitted",
@@ -1520,6 +1537,53 @@ pub(crate) fn execute(
         } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {
+                #[derive(serde::Serialize)]
+                #[serde(rename_all = "camelCase")]
+                struct SetAgentRequest<'a> {
+                    session_id: &'a str,
+                    agent_name: &'a str,
+                }
+                let request = acp::ExtRequest::new(
+                    "grow/session/set_agent",
+                    serde_json::value::to_raw_value(&SetAgentRequest {
+                        session_id: session_id.0.as_ref(),
+                        agent_name: &agent_name,
+                    })
+                    .expect("serialize set-agent params")
+                    .into(),
+                );
+                let result = acp_send(request, &tx)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| sanitize_user_error(&error.to_string()));
+                TaskResult::SwitchAgentComplete {
+                    agent_id,
+                    agent_name,
+                    result,
+                }
+            });
+        }
+        Effect::SetModeThenAgent {
+            agent_id,
+            session_id,
+            mode_id,
+            agent_name,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let mode_request = acp::SetSessionModeRequest::new(session_id.clone(), mode_id);
+                let result = match acp_send(mode_request, &tx).await {
+                    Ok(response) => behavior_change_applied(response.meta.as_ref())
+                        .map_err(|error| sanitize_user_error(&error)),
+                    Err(error) => Err(sanitize_user_error(&error.to_string())),
+                };
+                if let Err(error) = result {
+                    return TaskResult::SwitchAgentComplete {
+                        agent_id,
+                        agent_name,
+                        result: Err(error),
+                    };
+                }
                 #[derive(serde::Serialize)]
                 #[serde(rename_all = "camelCase")]
                 struct SetAgentRequest<'a> {
@@ -1808,6 +1872,26 @@ pub(crate) fn execute(
                         tx,
                     ),
                 );
+        }
+        Effect::NotifySessionPermissionMode { canonical, session_id: _ } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "yolo_mode": canonical == "always-approve",
+                    "auto_mode": canonical == "auto",
+                    "permission_mode": canonical,
+                });
+                let notification = acp::ExtNotification::new(
+                    "grow/yolo_mode_changed",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize session permission mode")
+                        .into(),
+                );
+                if let Err(error) = acp_send(notification, &tx).await {
+                    tracing::warn!("Failed to set session permission mode: {error}");
+                }
+                TaskResult::CancelComplete
+            });
         }
         Effect::PersistSetting { key, value, rollback_value } => {
             tasks
@@ -2880,51 +2964,6 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::ShareSession { agent_id, session_id } => {
-            use grow_shell::session::ShareSessionRequest;
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    let request = acp::ExtRequest::new(
-                        "grow/share_session",
-                        serde_json::value::to_raw_value(
-                                &ShareSessionRequest {
-                                    session_id: session_id.0.to_string(),
-                                },
-                            )
-                            .expect("serialize share session params")
-                            .into(),
-                    );
-                    match acp_send(request, &tx).await {
-                        Ok(resp) => {
-                            let wrapper: serde_json::Value = serde_json::from_str(
-                                    resp.0.get(),
-                                )
-                                .unwrap_or_default();
-                            if let Some(err) = wrapper.get("error") {
-                                let msg = err
-                                    .as_str()
-                                    .map(String::from)
-                                    .unwrap_or_else(|| "unknown error".to_string());
-                                return TaskResult::ShareSessionFailed {
-                                    agent_id,
-                                    error: msg,
-                                };
-                            }
-                            TaskResult::ShareSessionFailed {
-                                agent_id,
-                                error: "Share service is not configured".to_string(),
-                            }
-                        }
-                        Err(e) => {
-                            TaskResult::ShareSessionFailed {
-                                agent_id,
-                                error: sanitize_user_error(&e.to_string()),
-                            }
-                        }
-                    }
-                });
-        }
         Effect::FetchSessionAgentName { agent_id, session_id } => {
             let tx = acp_tx.clone();
             tasks
@@ -3931,6 +3970,22 @@ pub(crate) fn execute(
         }
     }
     (false, meta)
+}
+
+fn behavior_change_applied(meta: Option<&acp::Meta>) -> Result<(), String> {
+    let change = meta.and_then(|meta| meta.get("grow/behaviorChange"));
+    if change
+        .and_then(|value| value.get("status"))
+        .and_then(serde_json::Value::as_str)
+        == Some("applied")
+    {
+        return Ok(());
+    }
+    Err(change
+        .and_then(|value| value.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Behavior change was not applied; the prompt was not sent.")
+        .to_string())
 }
 /// Fetch session info from ACP via `grow/session/info`.
 async fn fetch_session_info(

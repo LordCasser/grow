@@ -124,7 +124,6 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
                 pid: std::process::id(),
                 socket_path: sock_path.clone(),
                 lock_path: sock_path.with_extension("lock"),
-                ws_url_suffix: String::new(),
                 leader_binary_version: env!("CARGO_PKG_VERSION").to_string(),
             });
             let cancel_for_server = cancel.clone();
@@ -141,7 +140,6 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
                     Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     grow_shell::agent::activity::AgentActivity::default(),
                     tokio::sync::watch::channel(true).1,
-                    tokio::sync::watch::channel(false).0,
                     tokio::sync::watch::channel(grow_shell::leader::ShutdownReason::Manual).0,
                     None,
                     control_state,
@@ -164,7 +162,7 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
                 let auth_manager = Arc::new(agent_config.create_auth_manager());
                 let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
                 let gateway = GatewaySender::new(gw_tx);
-                let agent = MvpAgent::new(gateway, &agent_config, auth_manager, None)
+                let agent = MvpAgent::new(gateway, &agent_config, auth_manager)
                     .expect("valid agent config");
                 let incoming = LineBufferedRead::spawn_local(agent_in_read.compat());
                 let (conn, handle_io) = acp::AgentSideConnection::new(

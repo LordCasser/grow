@@ -39,19 +39,18 @@ use xai_acp_lib::{
     AcpClientMessage, LineBufferedRead,
 };
 
-use crate::agent::config::{Config as AgentConfig, ModelEntry};
-use crate::agent::models::{ModelFetchAuth, prefetch_models_blocking};
+use crate::agent::config::Config as AgentConfig;
 use crate::agent::mvp_agent::MvpAgent;
 
 use indexmap::IndexMap;
 
-/// Swappable destination for the relay task.
+/// Swappable destination for persistent agent notifications.
 ///
 /// Points at the current ACP connection's gateway sender. When no client is
 /// connected, the value is `None` and outbound messages are silently dropped
 /// (matching the old behaviour where the gateway channel's receiver was simply
 /// gone).
-type RelayDest = Rc<RefCell<Option<mpsc::UnboundedSender<AcpClientMessage>>>>;
+type ConnectionDest = Rc<RefCell<Option<mpsc::UnboundedSender<AcpClientMessage>>>>;
 
 const MAX_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 const KEEPALIVE_INTERVAL_SECS: u64 = 15;
@@ -164,21 +163,6 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
             let _agent_thread = thread::Builder::new()
                 .name("agent-persistent".to_string())
                 .spawn(move || {
-                    // Prefetch models before creating the runtime (blocking is OK here)
-                    let auth = agent_config.create_auth_manager().current();
-                    let fetch_auth =
-                        ModelFetchAuth::resolve(&agent_config.endpoints, auth.is_some());
-                    let prefetched_models = if auth.is_some()
-                        || agent_config.endpoints.has_custom_endpoint()
-                        || fetch_auth != ModelFetchAuth::Session
-                    {
-                        prefetch_models_blocking(&agent_config.endpoints, auth.as_ref(), fetch_auth)
-                    } else {
-                        None
-                    };
-
-                    info!("Prefetched models: {:?}", prefetched_models);
-
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -186,7 +170,7 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
 
                     let local_set = tokio::task::LocalSet::new();
                     local_set.block_on(&rt, async move {
-                        run_persistent_agent(agent_config, conn_rx, prefetched_models).await
+                        run_persistent_agent(agent_config, conn_rx).await
                     });
 
                     warn!("Persistent agent thread exiting");
@@ -287,13 +271,12 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
 ///
 /// The MvpAgent is created **once** and reused across WebSocket reconnections.
 /// A persistent gateway channel ensures that session actors (which hold cloned
-/// `GatewaySender` handles) can always send notifications. A relay task forwards
+/// `GatewaySender` handles) can always send notifications. A forwarding task sends
 /// messages from the persistent channel to the *current* ACP connection's channel,
 /// so notifications reach whichever client is currently connected.
 async fn run_persistent_agent(
     agent_config: AgentConfig,
     mut connection_rx: mpsc::UnboundedReceiver<NewConnectionChannels>,
-    prefetched_models: Option<IndexMap<String, ModelEntry>>,
 ) {
     // Persistent gateway channel — the MvpAgent and all session actors hold
     // clones of `gw_tx`. This channel survives across reconnections.
@@ -308,23 +291,23 @@ async fn run_persistent_agent(
     // so an earlier restore could go stale before the gate.
     crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
     let agent = Rc::new(
-        MvpAgent::new(gateway, &agent_config, auth_manager, prefetched_models)
+        MvpAgent::new(gateway, &agent_config, auth_manager)
             .unwrap_or_else(crate::agent::init::exit_on_config_error),
     );
 
-    let relay_dest: RelayDest = Rc::new(RefCell::new(None));
+    let connection_dest: ConnectionDest = Rc::new(RefCell::new(None));
 
-    // Relay task: reads from the persistent gateway channel and forwards to
+    // Read from the persistent gateway channel and forward to
     // whichever ACP connection is currently active.
-    let relay_dest_for_task = relay_dest.clone();
+    let connection_dest_for_task = connection_dest.clone();
     tokio::task::spawn_local(async move {
         while let Some(msg) = gw_rx.recv().await {
-            let maybe_tx = relay_dest_for_task.borrow().clone();
+            let maybe_tx = connection_dest_for_task.borrow().clone();
             if let Some(tx) = maybe_tx
                 && tx.send(msg).is_err()
             {
                 // Connection's gateway receiver was dropped — clear it.
-                *relay_dest_for_task.borrow_mut() = None;
+                *connection_dest_for_task.borrow_mut() = None;
             }
             // If no connection, the message (and its response_tx) is dropped.
             // The caller (session actor) gets a send error which is already
@@ -335,19 +318,19 @@ async fn run_persistent_agent(
     // Accept new connections in a loop
     while let Some(channels) = connection_rx.recv().await {
         info!("Agent thread: setting up new ACP connection (reconnect)");
-        setup_acp_connection(agent.clone(), channels, relay_dest.clone());
+        setup_acp_connection(agent.clone(), channels, connection_dest.clone());
     }
 
     info!("Agent thread: connection channel closed, exiting");
 }
 
 /// Set up a new ACP connection for a WebSocket connection, reusing the existing
-/// MvpAgent. The relay destination is updated so that session actor notifications
+/// MvpAgent. The connection destination is updated so that session actor notifications
 /// flow to the new client.
 fn setup_acp_connection(
     agent: Rc<MvpAgent>,
     channels: NewConnectionChannels,
-    relay_dest: RelayDest,
+    connection_dest: ConnectionDest,
 ) {
     let NewConnectionChannels {
         mut from_ws_rx,
@@ -362,11 +345,11 @@ fn setup_acp_connection(
     let outgoing = agent_write_tx.compat_write();
 
     // Create a per-connection gateway channel for the GatewayReceiver.
-    // The relay task will forward persistent-channel messages here.
+    // The forwarding task sends persistent-channel messages here.
     let (conn_gw_tx, conn_gw_rx) = tokio::sync::mpsc::unbounded_channel::<AcpClientMessage>();
 
-    // Point the relay at this new connection's channel
-    *relay_dest.borrow_mut() = Some(conn_gw_tx);
+    // Point persistent notifications at this new connection's channel.
+    *connection_dest.borrow_mut() = Some(conn_gw_tx);
 
     // Create new ACP connection reusing the same MvpAgent (via Rc clone).
     // `Agent` is implemented for `Rc<T: Agent>` so this works.

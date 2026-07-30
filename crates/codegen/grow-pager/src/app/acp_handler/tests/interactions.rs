@@ -43,7 +43,7 @@
     fn interaction_resolved_dismisses_matching_plan_approval() {
         let mut app = make_app_with_agent("sess-1");
         let (ext, _rx) = make_exit_plan_ext_with_tool_call_id("call-plan", Some("# Plan"));
-        assert!(handle_exit_plan_mode(ext, &mut app));
+        assert!(handle_plan_approval(ext, &mut app));
         assert!(app.agents[&AgentId(0)].plan_approval_view.is_some());
 
         let changed =
@@ -262,7 +262,7 @@
         let mut app = make_app_with_agent("sess-A");
 
         let (tx, mut rx) = tokio::sync::oneshot::channel();
-        let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+        let ext_req = crate::views::plan_approval_view::PlanApprovalExtRequest {
             session_id: "sess-A".into(),
             tool_call_id: "tc-persist".into(),
             plan_content: "# Plan\nDo stuff".into(),
@@ -270,7 +270,7 @@
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         handle(
             AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
-                request: acp::ExtRequest::new("grow/exit_plan_mode", raw.into()),
+                request: acp::ExtRequest::new("grow/plan_approval", raw.into()),
                 response_tx: tx,
             }),
             &mut app,
@@ -302,7 +302,7 @@
     fn reopen_viewer_restores_approval_buttons() {
         let mut app = make_app_with_agent("sess-A");
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+        let ext_req = crate::views::plan_approval_view::PlanApprovalExtRequest {
             session_id: "sess-A".into(),
             tool_call_id: "tc-reopen".into(),
             plan_content: "# Plan\nStep 1".into(),
@@ -310,7 +310,7 @@
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         handle(
             AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
-                request: acp::ExtRequest::new("grow/exit_plan_mode", raw.into()),
+                request: acp::ExtRequest::new("grow/plan_approval", raw.into()),
                 response_tx: tx,
             }),
             &mut app,
@@ -335,7 +335,7 @@
     fn approve_after_reopen_does_not_overwrite_prompt() {
         let mut app = make_app_with_agent("sess-A");
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let ext_req = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+        let ext_req = crate::views::plan_approval_view::PlanApprovalExtRequest {
             session_id: "sess-A".into(),
             tool_call_id: "tc-prompt".into(),
             plan_content: "# Plan\nDo things".into(),
@@ -343,7 +343,7 @@
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         handle(
             AcpClientMessage::ExtMethod(xai_acp_lib::AcpArgs {
-                request: acp::ExtRequest::new("grow/exit_plan_mode", raw.into()),
+                request: acp::ExtRequest::new("grow/plan_approval", raw.into()),
                 response_tx: tx,
             }),
             &mut app,

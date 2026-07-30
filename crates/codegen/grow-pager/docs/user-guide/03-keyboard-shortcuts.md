@@ -126,11 +126,9 @@ Actions that affect the agent session, available from the agent screen.
 | `?` (Shift+/) | Agent screen | Open the command palette (alt binding) |
 | `Ctrl+M` | Prompt focused | Toggle multiline input mode |
 | `Ctrl+C` | Agent screen | Cancel the current turn (or clear non-empty draft first; see Escape table) |
-| `Ctrl+O` | Agent screen | Toggle always-approve (YOLO) mode |
 | `Ctrl+S` | Agent screen | Open the session picker (resume a previous session) |
 | `Ctrl+;` (alt: `Ctrl+'`) | Agent screen | Toggle the prompt queue pane (when non-empty). **Local macOS** VS Code family only: primary **`Ctrl+4`** (`;` / `'` still alts). SSH and non-Mac keep **`Ctrl+;`** / **`Ctrl+'`**. |
-| `Ctrl+R` | Prompt focused | Cycle mode (Normal → Plan → Auto → Always-approve, subject to feature policy) |
-| `Shift+Tab` | Agent screen | Cycle through the active model's configured reasoning-effort levels |
+| `Ctrl+R` | Prompt focused | Redo (alternate to `Ctrl+Shift+Z`) |
 | `Ctrl+B` | Agent screen | Send the running foreground command to the background |
 | `Ctrl+T` | Agent screen | Toggle the todos pane |
 | `Ctrl+G` | Agent screen (full TUI) | Toggle the tasks pane |
@@ -140,13 +138,12 @@ Actions that affect the agent session, available from the agent screen.
 | `!` | Prompt focused | Enter shell mode (type `!` on an empty prompt) |
 | `Ctrl+X`, then `M` | Agent screen | Open the configured-model picker |
 | `Ctrl+X`, then `A` | Agent screen | Open the enabled-Agent picker |
+| `Ctrl+X`, then `E` | Agent screen | Open the reasoning-effort picker |
+| `Ctrl+X`, then `P` | Agent screen | Open the Permission picker |
+| `Ctrl+X`, then `B` | Agent screen | Open the Behavior picker (Normal / Clarify / Plan / Workflow / Deep Research / Goal) |
 | `F2` (alt: `Ctrl+,` / `Cmd+,`) | Agent screen | Open the settings modal |
 
-**Note:** `Ctrl+X` is a two-key leader with a two-second timeout. An unknown continuation cancels the leader and is consumed. `/model` and `/agents` remain available.
-
-**Note:** `Shift+Tab` follows the model's `reasoning_efforts` declaration order and persists the
-new value with the current session. If the model has no configured effort support, Grow leaves the
-session unchanged and shows a short explanation. `/effort` remains available for direct selection.
+**Note:** `Ctrl+X` is a two-key leader with a two-second timeout. While active, the draft is preserved and dimmed, the cursor is hidden, and the available continuation keys appear above the input. Esc, Backspace, an unknown continuation, or timeout cancels the leader without editing the draft. The five pickers share their catalogs and execution paths with `/model`, `/agent`, `/effort`, `/permission`, and `/behavior`.
 
 **Note:** Minimal-mode external editing resolves `$VISUAL`, then `$EDITOR`, then `vi`. Values may include quoted arguments. Saving replaces only the draft; an empty file clears it. Drafts with pasted/file/image chips must be edited in the composer so attachments are not flattened.
 
@@ -310,7 +307,7 @@ Selected text:    Middle click or Shift+Insert (Linux X11/XWayland PRIMARY)
 Paste image:      Alt+V (Windows only — for screenshots / "Copy Image")
 Select all:       Cmd+A (macOS, Ghostty only — see note below)
 Leave:            Tab (back to scrollback)
-Cycle mode:       Ctrl+R
+Undo / redo:      Ctrl+Z / Ctrl+R (also Ctrl+Shift+Z)
 Cancel (running): Ctrl+C (empty prompt; non-empty draft clears first)
 Clear (idle):     Esc Esc within 800ms (non-empty prompt)
 Rewind (idle):    Esc Esc within 800ms (empty prompt + messages)
@@ -343,7 +340,8 @@ Command palette:  Ctrl+P or ?
 Model picker:     Ctrl+X, then M
 Agent picker:     Ctrl+X, then A
 Cancel:           Ctrl+C (see Escape table)
-Always-approve:   Ctrl+O (toggle YOLO)
+Permission:       Ctrl+X, then P
+Behavior:         Ctrl+X, then B
 New session:      Ctrl+N (press again, then choose normal/worktree)
 Quit:             Ctrl+Q (or Ctrl+D in VSCode)
 ```

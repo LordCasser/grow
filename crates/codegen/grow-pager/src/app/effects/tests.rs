@@ -1,5 +1,33 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
+
+#[test]
+fn set_mode_then_prompt_only_accepts_an_applied_behavior_change() {
+    let applied = serde_json::json!({
+        "grow/behaviorChange": { "status": "applied" }
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    assert!(behavior_change_applied(Some(&applied)).is_ok());
+
+    for status in ["confirmation_required", "rejected"] {
+        let meta = serde_json::json!({
+            "grow/behaviorChange": {
+                "status": status,
+                "message": "do not send"
+            }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        assert_eq!(
+            behavior_change_applied(Some(&meta)).unwrap_err(),
+            "do not send"
+        );
+    }
+    assert!(behavior_change_applied(None).is_err());
+}
 /// The invalid-params server detail survives `attach_prompt_usage`
 /// wrapping `error.data` as `{message, promptUsage}`.
 #[test]

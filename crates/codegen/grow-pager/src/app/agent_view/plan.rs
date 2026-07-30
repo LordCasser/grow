@@ -46,10 +46,10 @@ impl AgentView {
     }
     /// Whether the prompt "auto" (LLM classifier mode) flag should render.
     /// Extracted for unit testing the precedence: auto shows only when the
-    /// session is in auto mode and neither yolo (always-approve wins) nor plan
-    /// is active.
-    pub(super) fn auto_flag_visible(&self, effective_plan: bool) -> bool {
-        self.session.is_auto() && !self.session.is_yolo() && !effective_plan
+    /// session is in auto mode and yolo is not active. Behavior and permission
+    /// policy are independent, so Plan does not hide the permission indicator.
+    pub(super) fn auto_flag_visible(&self, _effective_plan: bool) -> bool {
+        self.session.is_auto() && !self.session.is_yolo()
     }
     /// Whether plan content is available for preview.
     fn plan_preview_available(&self) -> bool {
@@ -642,15 +642,15 @@ impl AgentView {
 #[cfg(test)]
 mod prompt_flag_tests {
     use super::test_fixtures::make_agent;
-    /// The prompt "auto" (classifier) mode flag shows only when the session is
-    /// in Auto and neither yolo (always-approve wins) nor plan is active.
+    /// The prompt "auto" flag is independent of Behavior; only the stronger
+    /// always-approve permission policy suppresses it.
     #[test]
     fn auto_flag_visible_precedence() {
         let mut agent = make_agent();
         assert!(!agent.auto_flag_visible(false));
         agent.session.auto_mode = true;
         assert!(agent.auto_flag_visible(false));
-        assert!(!agent.auto_flag_visible(true));
+        assert!(agent.auto_flag_visible(true));
         agent.session.yolo_mode = true;
         assert!(!agent.auto_flag_visible(false));
         agent.session.yolo_mode = false;

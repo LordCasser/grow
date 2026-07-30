@@ -219,13 +219,12 @@ async fn create_test_actor_with_memory(
         models_manager: Default::default(),
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
-        queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
         current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
         turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
-        plan_mode: Arc::new(parking_lot::Mutex::new(
-            crate::session::plan_mode::BehaviorController::new(std::path::PathBuf::from(
+        behavior: Arc::new(parking_lot::Mutex::new(
+            crate::session::behavior::BehaviorController::new(std::path::PathBuf::from(
                 "/tmp/test-session",
             )),
         )),

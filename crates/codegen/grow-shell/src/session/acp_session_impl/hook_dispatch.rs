@@ -173,11 +173,10 @@ impl SessionActor {
         )
     }
 
-    /// The session's current permission mode (`plan` / `bypassPermissions` / `auto` / `default`).
+    /// The session's current permission mode. Behavior is intentionally
+    /// independent and never masquerades as an approval policy.
     pub(super) fn permission_mode_label(&self) -> &'static str {
-        if self.plan_mode.lock().is_active() {
-            "plan"
-        } else if self.permissions.is_yolo_mode() {
+        if self.permissions.is_yolo_mode() {
             "bypassPermissions"
         } else if self.permissions.is_auto_mode() {
             "auto"

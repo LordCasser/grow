@@ -49,11 +49,10 @@ pub(crate) fn is_campaign_only_flip(
 pub(crate) fn resolve_default_model(
     cfg: &config::Config,
     catalog: &IndexMap<String, ModelEntry>,
-    is_session_auth: bool,
 ) -> (String, ModelEntry, config::ConfigSource) {
     let visible: IndexMap<String, ModelEntry> = catalog
         .iter()
-        .filter(|(_, e)| e.info.visible_for_auth(is_session_auth) && e.info.user_selectable)
+        .filter(|(_, e)| !e.info.hidden && e.info.user_selectable)
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -133,11 +132,10 @@ pub(crate) fn resolve_default_model(
 /// Filter hidden and auth-gated entries out of `catalog` and convert to ACP wire format.
 pub fn available_models(
     catalog: &IndexMap<String, ModelEntry>,
-    is_session_auth: bool,
 ) -> IndexMap<acp::ModelId, acp::ModelInfo> {
     let visible: IndexMap<String, ModelEntry> = catalog
         .iter()
-        .filter(|(_, e)| e.info.visible_for_auth(is_session_auth))
+        .filter(|(_, e)| !e.info.hidden)
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     config::to_acp_model_info(&visible)
@@ -178,11 +176,8 @@ impl ModelGlobSet {
 }
 
 /// Single source of truth for the catalog. Applies, in order: `disabled_models`
-pub fn resolve_model_catalog(
-    cfg: &config::Config,
-    prefetched: Option<IndexMap<String, ModelEntry>>,
-) -> IndexMap<String, ModelEntry> {
-    let mut catalog: IndexMap<String, ModelEntry> = config::resolve_model_list(cfg, prefetched);
+pub fn resolve_model_catalog(cfg: &config::Config) -> IndexMap<String, ModelEntry> {
+    let mut catalog: IndexMap<String, ModelEntry> = config::resolve_model_list(cfg);
 
     if let Ok(Some(disabled)) = ModelGlobSet::compile(cfg.models.disabled_models.as_ref()) {
         let before = catalog.len();

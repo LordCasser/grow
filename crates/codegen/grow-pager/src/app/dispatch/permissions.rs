@@ -1,6 +1,6 @@
 //! Permission request selection, follow-up, cancellation, and queue draining.
 
-use super::modes::set_yolo_mode;
+use super::modes::set_permission_mode;
 use crate::app::actions::Effect;
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
@@ -18,14 +18,11 @@ use agent_client_protocol as acp;
 /// Special case for [`grow_workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID`]:
 /// when the user picks the prepended "Yes, and don't ask again for anything"
 /// option, this dispatcher (a) sends the standard `Selected` response so the
-/// in-flight request is allowed once (the shell's `map_selected_outcome`
-/// resolves the id to `PromptOutcome::AllowOnce`), then (b) reuses the
-/// existing `set_yolo_mode(true)` flow to flip the local YOLO state, drain
-/// any remaining queued permissions, persist `[ui] permission_mode =
-/// "always-approve"` to `~/.grow/config.toml`, and fire the
-/// `grow/yolo_mode_changed` ACP notification. See the option-id constant
-/// doc-comment for the full client/shell split. Under a managed-policy
-/// pin step (b) is refused with a toast — the request is still allowed once.
+/// in-flight request is allowed once, then (b) selects Always Approve for this
+/// session, drains any remaining queued permissions, and notifies the shell.
+/// It never changes the default permission for future sessions. Under a
+/// managed-policy pin step (b) is refused with a toast — the request is still
+/// allowed once.
 pub(super) fn dispatch_permission_select(
     app: &mut AppView,
     option_id: acp::PermissionOptionId,
@@ -124,16 +121,14 @@ pub(super) fn dispatch_permission_select(
     // Queue transition: restore prompt if queue is now empty, clear if next-front.
     resolve_permission_queue_transition(agent);
 
-    // "Enable always-approve" side effect: flip YOLO + persist + notify.
-    // Reuses the existing `set_yolo_mode` pipeline so diagnostics, queue
-    // drain, toast, modal refresh, config persistence, and ACP
-    // notification all flow through one well-tested code path.
+    // "Enable always-approve" side effect: change only this session, drain
+    // the permission queue, and notify the shell.
     //
     // Idempotency: if YOLO is already on, the pager auto-approves in
     // `handle_permission_request` before the panel is shown, so the
     // user couldn't have selected this option. The `is_yolo()` guard
-    // is defensive — a redundant call would re-emit the toast and a
-    // duplicate `PersistPermissionMode` effect, but is otherwise safe.
+    // is defensive — a redundant call would re-emit the toast and session
+    // notification, but is otherwise safe.
     if enable_always_approve {
         let already_on = app
             .agents
@@ -141,7 +136,10 @@ pub(super) fn dispatch_permission_select(
             .map(|a| a.session.is_yolo())
             .unwrap_or(false);
         if !already_on {
-            return set_yolo_mode(app, true);
+            return set_permission_mode(
+                app,
+                crate::app::actions::PermissionModeKind::AlwaysApprove,
+            );
         }
     }
 

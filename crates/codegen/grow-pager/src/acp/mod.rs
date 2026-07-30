@@ -265,7 +265,6 @@ pub async fn connect_via_leader(
         .client_identifier
         .as_deref()
         .unwrap_or(HEADLESS_CLIENT_TYPE);
-    let env_urls = grow_shell::leader::LeaderEnvUrls::from(&agent_config.auth);
     let capabilities = ClientCapabilities {
         // Leader agent is pre-running; seed modes via capabilities → session meta.
         yolo_mode: flags.default_yolo_mode,
@@ -278,22 +277,11 @@ pub async fn connect_via_leader(
         fs_write: flags.fs_write,
     };
 
-    let conn = connect_or_spawn(
-        client_type,
-        ClientMode::Stdio,
-        &env_urls,
-        capabilities.clone(),
-    )
-    .await?;
+    let conn = connect_or_spawn(client_type, ClientMode::Stdio, capabilities.clone()).await?;
 
     let (status_tx, status_rx) = LeaderReconnector::status_channel();
-    let reconnector = LeaderReconnector::new(
-        client_type,
-        ClientMode::Stdio,
-        env_urls,
-        capabilities,
-        status_tx,
-    );
+    let reconnector =
+        LeaderReconnector::new(client_type, ClientMode::Stdio, capabilities, status_tx);
     let bridge = leader_bridge::bridge_leader_connection(
         conn,
         cancel.clone(),
@@ -1028,10 +1016,9 @@ mod tests {
             ..Default::default()
         };
         let detected = unsupported_leader_flags(&flags);
-        assert_eq!(detected.len(), 4);
+        assert_eq!(detected.len(), 3);
         assert!(detected.contains(&"--experimental-memory"));
         assert!(detected.contains(&"--no-memory"));
-        assert!(detected.contains(&"--storage-mode"));
         assert!(detected.contains(&"--subagents"));
     }
 

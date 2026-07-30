@@ -575,7 +575,7 @@ pub struct AppView {
     /// `GROW_PLUGIN_CTA` environment variable; defaults to `false`.
     pub plugin_cta_enabled: bool,
     /// Whether the pager is connected via a leader (leader mode). The Agent
-    /// Dashboard entry points (`/dashboard`, `Ctrl+\`, `grow dashboard`, the
+    /// Dashboard entry points (`/agents`, `Ctrl+\`, `grow dashboard`, the
     /// startup hook) are only meaningful when a leader is coordinating a
     /// fleet of sessions, so they are gated on this flag. Set in
     /// `event_loop::run` from `connection.leader_status_rx.is_some()`;
@@ -783,12 +783,12 @@ pub struct AppView {
     /// Default YOLO for new sessions, seeded at startup from `effective_yolo_for_launch`.
     pub default_yolo: bool,
     /// Soft-default still owns the mode: settings/update may rewrite UI +
-    /// `default_yolo`. Cleared on user Ctrl+R / settings / CLI claim.
+    /// `default_yolo`. Cleared when a session selector or CLI claims the mode.
     /// Not inferred from the rendered permission string.
     pub permission_mode_from_soft_default: bool,
     /// Whether the **auto** permission-mode feature gate is enabled (resolved at
     /// startup from env / `[auto_mode] enabled` / remote settings, default OFF). When
-    /// `false`, the Ctrl+R cycle skips Auto. See
+    /// `false`, permission selectors omit Auto. See
     /// `grow_shell::util::config::resolve_auto_permission_mode_enabled`.
     pub auto_mode_gate: bool,
     /// Managed-policy pin (set at startup); gates every runtime always-approve enable.
@@ -801,8 +801,8 @@ pub struct AppView {
     /// always-approve (YOLO) mode. Loaded from `[ui] require_plan_approval`
     /// in config.toml at startup.
     pub require_plan_approval: bool,
-    /// Enable plan mode for new sessions (`--plan`).
-    /// Adds `enter_plan_mode`, `exit_plan_mode` tools; implies `ask_user`.
+    /// Enable Plan Behavior for new sessions (`--plan`).
+    /// Adds `plan_control`; implies `ask_user`.
     pub plan_mode: bool,
     /// Enable subagent spawning for new sessions (`--subagents`).
     /// Adds the `TaskTool` for spawning subagents.
@@ -1213,7 +1213,7 @@ impl AppView {
     }
     /// Sync the auto permission-mode feature gate into every slash surface.
     /// `/auto` is hard-hidden when `self.auto_mode_gate` is off; otherwise both
-    /// `/always-approve` and `/auto` stay offered as true toggles. Call after
+    /// `/always-approve` and `/auto` stay offered as idempotent selections. Call after
     /// gate flips, startup,
     /// reconnect, and session create/switch (so new agents inherit the gate).
     pub fn sync_permission_mode_slash_gate(&mut self) {
@@ -5091,7 +5091,7 @@ pub(crate) mod tests {
     /// Build a registry pinned to the non-VSCode bindings so tests are
     /// deterministic regardless of the host terminal.
     fn pin_non_vscode_registry(app: &mut AppView) {
-        let mut actions = crate::actions::default_actions(ScreenMode::Fullscreen, false);
+        let mut actions = crate::actions::default_actions(ScreenMode::Fullscreen);
         for def in actions.iter_mut() {
             if def.id == ActionId::Quit {
                 def.default_key = key!('q', CONTROL);
@@ -6780,7 +6780,7 @@ pub(crate) mod tests {
     #[test]
     fn ctrl_d_in_vscode_quits_from_scrollback() {
         let mut app = test_app_with_agent();
-        let mut actions = crate::actions::default_actions(ScreenMode::Fullscreen, false);
+        let mut actions = crate::actions::default_actions(ScreenMode::Fullscreen);
         for def in actions.iter_mut() {
             if def.id == ActionId::Quit {
                 def.default_key = key!('d', CONTROL);
@@ -9230,7 +9230,7 @@ pub(crate) mod tests {
                 });
             },
             |a| {
-                let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+                let request = crate::views::plan_approval_view::PlanApprovalExtRequest {
                     session_id: "s".into(),
                     tool_call_id: "c".into(),
                     plan_content: "p".into(),
@@ -9552,7 +9552,7 @@ pub(crate) mod tests {
         let a = app.agents.get_mut(&id).unwrap();
         a.in_dashboard_overlay = true;
         a.active_pane = crate::app::agent_view::AgentPane::Prompt;
-        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+        let request = crate::views::plan_approval_view::PlanApprovalExtRequest {
             session_id: "s".into(),
             tool_call_id: "c".into(),
             plan_content: "p".into(),
@@ -9790,7 +9790,7 @@ pub(crate) mod tests {
     /// user reported as stuck: `Esc` / `Left` are dead no-ops in the
     /// plan line viewer.
     fn install_plan_preview_overlay(app: &mut AppView, id: super::super::agent::AgentId) {
-        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+        let request = crate::views::plan_approval_view::PlanApprovalExtRequest {
             session_id: "s".into(),
             tool_call_id: "c".into(),
             plan_content: "# Plan\n- step one\n- step two".into(),

@@ -184,9 +184,37 @@ impl SessionActor {
     /// silent text loss on a mid-stream plan-mode toggle. Persist + broadcast
     /// happen when the actor loop drains the event through `emit_buffered`.
     pub(super) fn enqueue_current_mode_update(&self, current_mode_id: acp::SessionModeId) {
+        self.enqueue_current_mode_update_inner(current_mode_id, None);
+    }
+    pub(super) fn enqueue_current_mode_update_with_behavior_change(
+        &self,
+        current_mode_id: acp::SessionModeId,
+        behavior_change: serde_json::Value,
+    ) {
+        self.enqueue_current_mode_update_inner(current_mode_id, Some(behavior_change));
+    }
+    fn enqueue_current_mode_update_inner(
+        &self,
+        current_mode_id: acp::SessionModeId,
+        behavior_change: Option<serde_json::Value>,
+    ) {
+        let behavior_meta = serde_json::json!({
+            "grow/behavior": self.behavior.lock().behavior().map(|behavior| match behavior {
+                xai_tool_types::BehaviorId::Clarify => "clarify",
+                xai_tool_types::BehaviorId::Plan => "plan",
+                xai_tool_types::BehaviorId::Workflow => "workflow",
+                xai_tool_types::BehaviorId::DeepResearch => "deep_research",
+                xai_tool_types::BehaviorId::Goal => "goal",
+            }),
+            "grow/planPhase": self.behavior.lock().plan_phase_label(),
+            "grow/behaviorChange": behavior_change,
+        });
         let notification = acp::SessionNotification::new(
             self.session_info.id.clone(),
-            acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(current_mode_id)),
+            acp::SessionUpdate::CurrentModeUpdate(
+                acp::CurrentModeUpdate::new(current_mode_id)
+                    .meta(behavior_meta.as_object().cloned()),
+            ),
         )
         .meta(self.build_notification_meta().as_object().cloned());
         let _ = self
@@ -390,13 +418,13 @@ impl SessionActor {
             _ => (None, None),
         }
     }
-    /// Generates a unique event ID for correlation across agent/relay/client
+    /// Generates a unique event ID for correlation across agent and client
     fn generate_event_id(&self) -> String {
         crate::util::event_id::generate_event_id(&self.session_info.id.0)
     }
     /// Builds notification meta with event ID and timestamp.
     /// Use this for all notifications (including user message chunks) to ensure
-    /// consistent event ID format for deduplication in the relay.
+    /// consistent event ID format for client-side deduplication.
     pub(super) fn build_notification_meta(&self) -> serde_json::Value {
         let event_id = self.generate_event_id();
         let agent_timestamp_ms = chrono::Utc::now().timestamp_millis();
@@ -831,12 +859,12 @@ mod grow_event_id_stamping_tests {
     /// deliver/persist first, and the client's in-order ACP dedup would then
     /// drop the queued chunks as stale (silent text loss).
     ///
-    /// Pins the enter AND exit legs of `handle_session_mode` (each must emit —
+    /// Pins the enter AND exit legs of `request_behavior_change` (each must emit —
     /// dropping either `enqueue_current_mode_update` call loses the client's
     /// mode confirmation). The abandoned site shares the same helper but needs
     /// an `ext_method` round-trip harness to drive, so it is not pinned here.
     #[tokio::test]
-    async fn plan_mode_current_mode_update_rides_event_pipeline_in_id_order() {
+    async fn behavior_current_mode_update_rides_event_pipeline_in_id_order() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -862,7 +890,7 @@ mod grow_event_id_stamping_tests {
                     )
                     .await;
                 actor
-                    .handle_session_mode(acp::SessionModeId::new("plan"))
+                    .request_behavior_change(acp::SessionModeId::new("plan"))
                     .await;
                 while let Ok(msg) = prx.try_recv() {
                     assert!(
@@ -942,7 +970,10 @@ mod grow_event_id_stamping_tests {
                     )
                     .await;
                 actor
-                    .handle_session_mode(acp::SessionModeId::new("default"))
+                    .request_behavior_change(acp::SessionModeId::new("default"))
+                    .await;
+                actor
+                    .request_behavior_change(acp::SessionModeId::new("default"))
                     .await;
                 while let Ok(msg) = prx.try_recv() {
                     assert!(
@@ -959,8 +990,12 @@ mod grow_event_id_stamping_tests {
                         }
                     }
                 }
-                assert_eq!(queued.len(), 2, "chunk + exit mode update must be queued");
-                match &queued[1] {
+                assert_eq!(
+                    queued.len(),
+                    3,
+                    "chunk + confirmation + applied mode update must be queued"
+                );
+                match &queued[2] {
                     SessionNotification::Acp(n) => match &n.update {
                         acp::SessionUpdate::CurrentModeUpdate(cmu) => {
                             assert_eq!(
@@ -995,15 +1030,20 @@ mod grow_event_id_stamping_tests {
                         persisted.push(*n);
                     }
                 }
-                assert_eq!(persisted.len(), 2, "exit leg must persist both lines");
+                assert_eq!(
+                    persisted.len(),
+                    3,
+                    "exit leg must persist the chunk, confirmation, and applied update"
+                );
                 assert!(matches!(
-                    persisted[1].update,
+                    persisted[2].update,
                     acp::SessionUpdate::CurrentModeUpdate(_)
                 ));
                 assert!(
                     numeric_seq(&persisted[0]) < numeric_seq(&persisted[1]),
                     "exit-leg delivery order must match id order too"
                 );
+                assert!(numeric_seq(&persisted[1]) < numeric_seq(&persisted[2]));
             })
             .await;
     }

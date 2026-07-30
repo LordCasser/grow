@@ -330,20 +330,20 @@ explore = "grow-build"               # route to different models
 
 To pin the model a subagent uses, set its entry under `[subagents.models]`.
 
-### Goal mode and background workflows
+### Goal Behavior and Workflow runtime
 
-`/goal` has two drivers, chosen by the background-workflows setting. With workflows enabled, the host-owned workflow engine evaluates rounds and drives completion verification; with them disabled, `/goal` falls back to the legacy model-facing `update_goal` tool. Whether `/goal` is available at all is a separate switch (the goal feature setting).
+Goal is exposed only when goal orchestration and the independent verifier are configured. An agent's `update_goal(completed: true)` call requests verification; only an `Achieved` verdict from that verifier completes the goal. Missing, failed, timed-out, or exhausted verification pauses the Goal Behavior instead of accepting self-reported completion.
 
-Background workflows — the `workflow` tool, named `.grow/workflows/*.rhai` scripts, `/deep-research`, and `/workflow` launches — are **on by default**. Disable with config, env, or remote settings.
+The Workflow runtime powers the `workflow` tool, named `.grow/workflows/*.rhai` scripts, `/workflow-run` launches, and the private Deep Research runner. It is **on by default**. Disable it with config, environment, or remote settings; Workflow and Deep Research then disappear from the Behavior picker.
 
 ```toml
 [workflows]
 enabled = false                       # disable background workflows (or GROW_WORKFLOWS=0)
 ```
 
-Project workflows are discovered from `<repo-root>/.grow/workflows/`; user workflows from `~/.grow/workflows/`. Discovery and invocation key off the script's `meta.name`, so keep each filename aligned with its `meta.name`. Built-ins win over project names, and project names win over user names, so keep names unique across scopes.
+Project workflows are discovered from `<repo-root>/.grow/workflows/`; user workflows from `~/.grow/workflows/`. Discovery and invocation key off the script's `meta.name`, so keep each filename aligned with its `meta.name` and names unique across scopes. Deep Research uses a private definition and is never added to this public registry.
 
-Each launch gets a session-unique display handle such as `deep-research-2`. That handle is what you see in the `/workflows` run dashboard and pass to `/workflow pause`, `resume`, or `stop` — the internal run IDs never surface in commands. A numbered handle isn't a reusable definition name, so the dashboard disables **save** until you pick a new unique `meta.name` and save the edited script yourself. See [Slash Commands](04-slash-commands.md) for examples.
+Each launch gets a session-unique display handle. That handle is what you see in the `/workflows` run dashboard and pass to `/workflow-run pause`, `resume`, or `stop` — the internal run IDs never surface in commands. A numbered handle isn't a reusable definition name, so the dashboard disables **save** until you pick a new unique `meta.name` and save the edited script yourself. See [Slash Commands](04-slash-commands.md) for examples.
 
 ### Skills
 

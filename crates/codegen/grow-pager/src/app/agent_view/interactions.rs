@@ -94,9 +94,6 @@ impl AgentView {
                     }
                     return InputOutcome::Changed;
                 }
-                if key!('o', CONTROL).matches(key) {
-                    return InputOutcome::Action(Action::SetYoloMode(!self.session.is_yolo()));
-                }
                 let is_right = key.code == KeyCode::Right || key.code == KeyCode::Char('>');
                 let is_left = key.code == KeyCode::Left || key.code == KeyCode::Char('<');
                 if (is_right || is_left) && perm.has_adjustable_scope() {

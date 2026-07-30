@@ -1,7 +1,4 @@
-//! `/auto` -- toggle auto permission mode (LLM classifier).
-//!
-//! - Off (or always-approve) → `SetPermissionMode(Auto)`
-//! - Already auto → `SetPermissionMode(Ask)` (toggle off)
+//! `/auto` -- select auto permission mode (LLM classifier).
 //!
 //! The dispatcher owns state mutation, persistence (with rollback), and toast.
 //! Visibility is gated by
@@ -11,7 +8,7 @@
 use crate::app::actions::{Action, PermissionModeKind};
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 
-/// Toggle auto permission mode (LLM classifier).
+/// Select auto permission mode (LLM classifier).
 pub struct AutoCommand;
 
 impl SlashCommand for AutoCommand {
@@ -20,23 +17,23 @@ impl SlashCommand for AutoCommand {
     }
 
     fn description(&self) -> &str {
-        "Toggle auto mode (classifier approves safe tools)"
+        "[permission] Switch to Auto"
     }
 
     fn usage(&self) -> &str {
         "/auto"
     }
 
-    fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        // Yolo wins over auto: if always-approve is on, treat auto as off so
-        // `/auto` switches into auto rather than "toggling off" to ask.
-        let currently_auto = ctx.pager_state.auto_mode && !ctx.pager_state.yolo_mode;
-        let kind = if currently_auto {
-            PermissionModeKind::Ask
-        } else {
-            PermissionModeKind::Auto
-        };
-        CommandResult::Action(Action::SetPermissionMode(kind))
+    fn session_scoped(&self) -> bool {
+        true
+    }
+
+    fn offered_when_session_less(&self) -> bool {
+        true
+    }
+
+    fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
+        CommandResult::Action(Action::SetPermissionMode(PermissionModeKind::Auto))
     }
 }
 
@@ -79,13 +76,13 @@ mod tests {
     }
 
     #[test]
-    fn on_turns_auto_off() {
+    fn on_selects_auto_idempotently() {
         let models = ModelState::default();
         let bundle = BundleState::default();
         let mut ctx = make_ctx(&models, &bundle, false, true);
         assert!(matches!(
             AutoCommand.run(&mut ctx, ""),
-            CommandResult::Action(Action::SetPermissionMode(PermissionModeKind::Ask))
+            CommandResult::Action(Action::SetPermissionMode(PermissionModeKind::Auto))
         ));
     }
 

@@ -26,7 +26,7 @@ pub(crate) mod summary_write;
 /// the storage adapter and the session/state and session/import extensions.
 pub(crate) const SUMMARY_FILE: &str = "summary.json";
 pub(crate) const PLAN_FILE: &str = "plan.json";
-pub(crate) const PLAN_MODE_FILE: &str = "plan_mode.json";
+pub(crate) const BEHAVIOR_STATE_FILE: &str = "behavior.json";
 pub(crate) const SIGNALS_FILE: &str = "signals.json";
 pub(crate) const GOAL_STATE_FILE: &str = "goal/state.json";
 pub(crate) const ANNOUNCEMENT_STATE_FILE: &str = "announcement_state.json";
@@ -693,8 +693,8 @@ pub struct PersistedData {
     /// All session updates (ACP updates and Grow extension updates) in chronological order
     pub updates: Vec<SessionUpdate>,
     pub plan_state: Option<TodoState>,
-    /// Persisted plan mode lifecycle state (None for sessions created before plan mode)
-    pub plan_mode_state: Option<crate::session::plan_mode::BehaviorSnapshot>,
+    /// Persisted mutually-exclusive Behavior state.
+    pub behavior_state: Option<crate::session::behavior::BehaviorSnapshot>,
     /// Rewind points for session rewind functionality
     pub rewind_points: Vec<RewindPoint>,
     /// Persisted session signals (None for sessions created before signals persistence)
@@ -712,7 +712,7 @@ pub struct PersistedDataLight {
     pub summary: Summary,
     pub chat_history: Vec<ConversationItem>,
     pub plan_state: Option<TodoState>,
-    pub plan_mode_state: Option<crate::session::plan_mode::BehaviorSnapshot>,
+    pub behavior_state: Option<crate::session::behavior::BehaviorSnapshot>,
     // No `rewind_points` field: the resume path defers them (loaded lazily by
     // `FileStateTracker`). Use `load_session` for the eager set.
     /// Persisted session signals (None for sessions created before signals persistence)
@@ -730,8 +730,8 @@ pub struct CopySessionResult {
     pub chat_messages_copied: usize,
     pub updates_copied: usize,
     pub plan_state_copied: bool,
-    /// Whether `plan_mode.json` (plan mode lifecycle state) was copied.
-    pub plan_mode_state_copied: bool,
+    /// Whether `behavior.json` was copied.
+    pub behavior_state_copied: bool,
     pub signals_copied: bool,
     /// Whether `tool_state.json` (persisted tool state, e.g. TodoState) was copied.
     pub tool_state_copied: bool,
@@ -777,7 +777,7 @@ pub struct CopySessionOptions {
     /// Whether to copy the plan state file. Defaults to `true`.
     pub copy_plan_state: bool,
     /// Whether to copy the plan mode state file. Defaults to `true`.
-    pub copy_plan_mode_state: bool,
+    pub copy_behavior_state: bool,
     /// Whether to copy the signals file. Defaults to `true`.
     pub copy_signals: bool,
     /// Whether to copy `tool_state.json` (persisted tool state). Defaults to `true`.
@@ -821,7 +821,7 @@ impl Default for CopySessionOptions {
             fork_context_source: None,
             fork_parent_prompt_id: None,
             copy_plan_state: true,
-            copy_plan_mode_state: true,
+            copy_behavior_state: true,
             copy_signals: true,
             copy_tool_state: true,
             copy_announcement_state: true,
@@ -1086,10 +1086,10 @@ pub trait StorageAdapter: Send + Sync {
     async fn write_plan_state(&self, info: &Info, state: &TodoState) -> io::Result<()>;
 
     /// Write/update plan mode lifecycle state
-    async fn write_plan_mode_state(
+    async fn write_behavior_state(
         &self,
         info: &Info,
-        state: &crate::session::plan_mode::BehaviorSnapshot,
+        state: &crate::session::behavior::BehaviorSnapshot,
     ) -> io::Result<()>;
 
     /// Write/update the session signals snapshot

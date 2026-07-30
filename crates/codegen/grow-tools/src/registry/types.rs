@@ -654,8 +654,7 @@ impl ToolRegistryBuilder {
         b.register::<grow_build::TaskTool>();
         b.register_with_params::<grow_build::WebFetchTool, grow_build::web_fetch::WebFetchParams>();
         b.register::<grow_build::LspTool>();
-        b.register::<grow_build::EnterPlanModeTool>();
-        b.register::<grow_build::ExitPlanModeTool>();
+        b.register::<grow_build::PlanControlTool>();
         b.register_with_params::<
                 grow_build::AskUserQuestionTool,
                 grow_build::ask_user_question::AskUserQuestionParams,
@@ -1947,15 +1946,6 @@ fn explain_requirement_failure(
                 .with_bad_value(serde_json::Value::Bool(false))
                 .with_category("requirements")
         }
-        "Grow:enter_plan_mode" => {
-            RequirementError::new(
-                    fq_tool_id,
-                    "enter_plan_mode requires Grow:exit_plan_mode so plan mode can always be exited",
-                )
-                .with_field_path("tools")
-                .with_expected("include Grow:exit_plan_mode")
-                .with_category("requirements")
-        }
         _ => {
             RequirementError::new(fq_tool_id, "unsatisfied requirements")
                 .with_category("requirements")
@@ -2194,8 +2184,7 @@ mod tests {
                 "grep",
                 "list_dir",
                 "ask_user_question",
-                "enter_plan_mode",
-                "exit_plan_mode",
+                "plan_control",
                 "todo_write",
                 "task",
                 "web_fetch",
@@ -4034,64 +4023,49 @@ mod tests {
             "mixed file-toolset should be rejected: {errors:?}"
         );
     }
-    /// Plan control tools expose the input contract used by each transition.
+    /// Plan control exposes one explicit lifecycle action contract.
     #[tokio::test]
     async fn plan_tool_schemas_match_transition_inputs() {
         let tmp = TempDir::new().unwrap();
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
-            tools: vec![
-                ToolConfig::for_tool::<grow_build::EnterPlanModeTool>(),
-                ToolConfig::for_tool::<grow_build::ExitPlanModeTool>(),
-            ],
+            tools: vec![ToolConfig::for_tool::<grow_build::PlanControlTool>()],
             behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let toolset = builder
             .finalize(config, ctx)
-            .expect("finalize should succeed with plan mode tools");
+            .expect("finalize should succeed with plan control");
         let defs = toolset.tool_definitions();
-        let enter = defs
+        let control = defs
             .iter()
-            .find(|definition| definition.function.name == "enter_plan_mode")
-            .expect("enter_plan_mode definition not found");
+            .find(|definition| definition.function.name == "plan_control")
+            .expect("plan_control definition not found");
+        assert!(control.function.parameters["properties"]["action"].is_object());
+        assert!(control.function.parameters["properties"]["plan"].is_object());
         assert_eq!(
-            enter.function.parameters.get("properties"),
-            Some(&serde_json::json!({}))
-        );
-        assert_eq!(
-            enter.function.parameters.get("required"),
-            Some(&serde_json::json!([]))
-        );
-
-        let exit = defs
-            .iter()
-            .find(|definition| definition.function.name == "exit_plan_mode")
-            .expect("exit_plan_mode definition not found");
-        assert!(exit.function.parameters["properties"]["plan"].is_object());
-        assert_eq!(
-            exit.function.parameters.get("required"),
-            Some(&serde_json::json!(["plan"]))
+            control.function.parameters.get("required"),
+            Some(&serde_json::json!(["action"]))
         );
     }
 
     #[tokio::test]
-    async fn exit_plan_finalizes_without_enter_plan() {
+    async fn plan_control_finalizes_independently() {
         let tmp = TempDir::new().unwrap();
         let toolset = ToolRegistryBuilder::new()
             .finalize(
                 ToolServerConfig {
-                    tools: vec![ToolConfig::for_tool::<grow_build::ExitPlanModeTool>()],
+                    tools: vec![ToolConfig::for_tool::<grow_build::PlanControlTool>()],
                     behavior_preset: None,
                 },
                 test_session_context(&tmp),
             )
-            .expect("ACP-selected Plan only requires ExitPlan");
+            .expect("ACP-selected Plan requires only PlanControl");
         assert!(
             toolset
                 .tool_definitions()
                 .iter()
-                .any(|definition| definition.function.name == "exit_plan_mode")
+                .any(|definition| definition.function.name == "plan_control")
         );
     }
     /// End-to-end: construct a hashline ToolServerConfig with custom

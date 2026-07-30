@@ -524,7 +524,7 @@ fn dashboard_confirm_worktree_applies_pending_model_and_plan() {
             effort: Some(grow_shell::sampling::types::ReasoningEffort::High),
             display: "Grow 4.5".to_string(),
         });
-        d.pending_mode = crate::views::dashboard::DashboardDispatchMode::Plan;
+        d.pending_behavior = grow_tools::types::SessionMode::Plan;
         d.dispatch.set_text("do the thing");
         d.pending_worktree_prompt = Some(d.dispatch.stash());
     }
@@ -885,13 +885,13 @@ fn dashboard_second_stash_does_not_overwrite_first() {
 /// identity without one.
 #[test]
 fn apply_pending_dispatch_config_always_approve_blocked_by_policy_pin() {
-    use crate::views::dashboard::DashboardDispatchMode;
     let mut app = test_app_with_agent();
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     apply_pending_dispatch_config(
         agent,
         None,
-        DashboardDispatchMode::AlwaysApprove,
+        grow_tools::types::SessionMode::Default,
+        crate::app::actions::PermissionModeKind::AlwaysApprove,
         Some(POLICY_WARNING),
     );
     assert!(
@@ -902,116 +902,19 @@ fn apply_pending_dispatch_config_always_approve_blocked_by_policy_pin() {
         agent.toast.as_ref().map(|(s, _)| s.as_str()),
         Some(POLICY_WARNING),
     );
-    apply_pending_dispatch_config(agent, None, DashboardDispatchMode::AlwaysApprove, None);
+    apply_pending_dispatch_config(
+        agent,
+        None,
+        grow_tools::types::SessionMode::Default,
+        crate::app::actions::PermissionModeKind::AlwaysApprove,
+        None,
+    );
     assert!(agent.session.is_yolo());
-}
-/// Dashboard per-agent toggle under the pin: refused, warning lands on
-/// the dashboard's OWN error slot (the user is looking at the
-/// dashboard, not the agent). OFF stays allowed.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_toggle_auto_approve_blocked_by_policy_pin() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    app.yolo_policy_block = Some(POLICY_WARNING);
-    app.active_view = ActiveView::Welcome;
-    open_dashboard(&mut app);
-    if let Some(d) = app.dashboard.as_mut() {
-        d.focus_row(crate::views::dashboard::DashboardRowId::TopLevel(id));
-    }
-    let effects = dispatch_dashboard_toggle_auto_approve(&mut app);
-    assert!(effects.is_empty(), "blocked toggle must not emit effects");
-    assert!(
-        !app.agents.get(&id).unwrap().session.is_yolo(),
-        "toggle ON must be refused under the pin"
-    );
-    assert_eq!(
-        app.dashboard.as_ref().unwrap().error_toast.as_deref(),
-        Some(format!("{} {POLICY_WARNING}", crate::glyphs::ballot_x()).as_str()),
-        "warning must land on the dashboard error slot",
-    );
-    app.agents.get_mut(&id).unwrap().session.yolo_mode = true;
-    let _ = dispatch_dashboard_toggle_auto_approve(&mut app);
-    assert!(
-        !app.agents.get(&id).unwrap().session.is_yolo(),
-        "toggle OFF must still work under the pin"
-    );
-}
-/// Shift+Tab in the peek cycles the PEEKED agent's live mode
-/// (Normal → Plan) and leaves the dashboard foregrounded — the same
-/// effect as Ctrl+R inside that agent's chat view.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_peek_cycle_mode_cycles_peeked_agent() {
-    let mut app = test_app_with_agent();
-    open_dashboard(&mut app);
-    let row = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
-    let fields = crate::views::dashboard::peek::compute_peek_fields(&row, &app.agents)
-        .expect("agent must be peekable");
-    if let Some(d) = app.dashboard.as_mut() {
-        d.focus_row(row.clone());
-        d.peek = Some(crate::views::dashboard::peek::PeekPanelState::new(
-            row.clone(),
-            fields,
-        ));
-    }
-    assert_eq!(app.agents.get(&AgentId(0)).unwrap().plan_mode_pending, None);
-    assert!(!app.agents.get(&AgentId(0)).unwrap().session.yolo_mode);
-    let _ = dispatch(Action::DashboardPeekCycleMode, &mut app);
-    assert_eq!(
-        app.agents.get(&AgentId(0)).unwrap().plan_mode_pending,
-        Some(true),
-        "peek cycle must put the peeked agent into plan mode",
-    );
-    assert!(
-        matches!(app.active_view, ActiveView::AgentDashboard),
-        "peek cycle must not switch away from the dashboard, got {:?}",
-        app.active_view,
-    );
-}
-/// A dashboard-peek Shift+Tab cycles the peeked agent into plan mode but must
-/// NOT attribute a plan-nudge acceptance: the user is on the dashboard, not
-/// that agent's prompt, so the nudge (still within TTL) is left intact. This
-/// pins that the peek routes through the diagnostics-free cycle body.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_peek_cycle_does_not_retire_the_nudge() {
-    let mut app = test_app_with_agent();
-    open_dashboard(&mut app);
-    let row = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
-    let fields = crate::views::dashboard::peek::compute_peek_fields(&row, &app.agents)
-        .expect("agent must be peekable");
-    if let Some(d) = app.dashboard.as_mut() {
-        d.focus_row(row.clone());
-        d.peek = Some(crate::views::dashboard::peek::PeekPanelState::new(
-            row.clone(),
-            fields,
-        ));
-    }
-    let _ = app.agents.get_mut(&AgentId(0)).unwrap().ephemeral_tip.show(
-        crate::tips::plan_nudge::plan_nudge_tip(),
-        &mut std::collections::HashMap::new(),
-    );
-    let _ = dispatch(Action::DashboardPeekCycleMode, &mut app);
-    assert_eq!(
-        app.agents.get(&AgentId(0)).unwrap().plan_mode_pending,
-        Some(true),
-        "peek cycle must still put the peeked agent into plan mode",
-    );
-    assert_eq!(
-        app.agents
-            .get(&AgentId(0))
-            .unwrap()
-            .ephemeral_tip
-            .current_key(),
-        Some(crate::tips::plan_nudge::PLAN_NUDGE_KEY),
-        "the dashboard peek must not retire (or attribute) the nudge",
-    );
 }
 /// Leader-mode independence: opening the dashboard works even when NOT in
 /// leader mode. The dashboard renders local sessions regardless; leader
 /// mode only adds the roster poll. Every entry point funnels through
-/// `Action::OpenDashboard`, so this covers `/dashboard`, `Ctrl+\`,
+/// `Action::OpenDashboard`, so this covers `/agents`, `Ctrl+\`,
 /// `grow dashboard`, and the startup hook.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
@@ -1216,25 +1119,63 @@ fn dashboard_slash_command_error_gets_error_glyph_prefix() {
         "the command's own message must be preserved, got: {toast:?}",
     );
 }
-/// `/plan` on the dashboard toggles plan mode on/off.
+/// `/plan` on the dashboard idempotently stages Plan Behavior.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_slash_plan_toggles_pending_plan_mode() {
-    use crate::views::dashboard::DashboardDispatchMode;
+fn dashboard_slash_plan_selects_pending_plan_behavior() {
     let mut app = test_app();
     open_dashboard(&mut app);
     let _ = dispatch_dashboard_dispatch_slash(&mut app, "/plan".into());
     assert_eq!(
-        app.dashboard.as_ref().unwrap().pending_mode,
-        DashboardDispatchMode::Plan,
-        "first /plan must turn plan mode on"
+        app.dashboard.as_ref().unwrap().pending_behavior,
+        grow_tools::types::SessionMode::Plan,
+        "first /plan must select Plan"
     );
     let _ = dispatch_dashboard_dispatch_slash(&mut app, "/plan".into());
     assert_eq!(
-        app.dashboard.as_ref().unwrap().pending_mode,
-        DashboardDispatchMode::Normal,
-        "second /plan must toggle plan mode off"
+        app.dashboard.as_ref().unwrap().pending_behavior,
+        grow_tools::types::SessionMode::Plan,
+        "second /plan must remain idempotently on Plan"
     );
+}
+
+#[serial_test::serial(GROW_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_behavior_and_permission_are_staged_independently() {
+    let mut app = test_app();
+    open_dashboard(&mut app);
+
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/clarify".into());
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/always-approve".into());
+    let d = app.dashboard.as_ref().unwrap();
+    assert_eq!(d.pending_behavior, grow_tools::types::SessionMode::Ask);
+    assert_eq!(
+        d.pending_permission,
+        crate::app::actions::PermissionModeKind::AlwaysApprove
+    );
+
+    let _ = dispatch_dashboard_dispatch(&mut app, "clarify this".into(), false);
+    let spawned = app.agents.values().next().unwrap();
+    assert_eq!(
+        spawned.deferred_session_mode,
+        Some(grow_tools::types::SessionMode::Ask)
+    );
+    assert!(spawned.session.is_yolo());
+}
+
+#[serial_test::serial(GROW_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_bare_selector_enters_shared_slash_args_phase() {
+    let mut app = test_app();
+    open_dashboard(&mut app);
+
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/permission".into());
+    let d = app.dashboard.as_ref().unwrap();
+    assert_eq!(d.dispatch.text(), "/permission ");
+    let slash = d.dispatch.slash_state.snapshot();
+    assert!(slash.open);
+    assert!(!slash.cursor_in_command);
+    assert!(!slash.matches.is_empty());
 }
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
@@ -1278,30 +1219,15 @@ fn dashboard_plan_description_transforms_snapshot_and_chip_ranges() {
         Some(grow_tools::types::SessionMode::Plan)
     );
 }
-/// The sessions picker modal was removed; `/sessions` survives as an alias
-/// of `/dashboard`. It must resolve to the dashboard command and inherit
-/// the dashboard feature-flag gate (hidden by canonical name, fail-closed).
+/// Removed dashboard aliases are not retained in the command registry.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_slash_sessions_aliases_dashboard() {
+fn dashboard_slash_sessions_alias_is_removed() {
     let mut app = three_agent_app();
     open_dashboard(&mut app);
     let dashboard = app.dashboard.as_mut().unwrap();
     let registry = dashboard.dispatch.slash_controller.registry_mut();
-    registry.set_dashboard_visible(false);
-    assert!(
-        registry.get_for_dispatch("sessions").is_none(),
-        "/sessions must inherit the dashboard feature-flag gate"
-    );
-    registry.set_dashboard_visible(true);
-    let cmd = registry
-        .get("sessions")
-        .expect("/sessions must resolve as an alias of /dashboard");
-    assert_eq!(
-        cmd.name(),
-        "dashboard",
-        "/sessions must be an alias of the dashboard command"
-    );
+    assert!(registry.get("sessions").is_none());
 }
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
@@ -1382,67 +1308,12 @@ fn dashboard_slash_compact_does_not_spawn() {
         "unexpected toast: {toast}"
     );
 }
-/// Shift+Tab (`DashboardCycleMode`) rotates Normal → Plan →
-/// Always-Approve → Normal.
+/// Opening the dashboard re-seeds staged dispatch state: a model and Behavior
+/// from a previous visit are cleared, while Permission follows its persistent
+/// default for the newly spawned Agent.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_cycle_mode_rotates_through_modes() {
-    use crate::views::dashboard::DashboardDispatchMode;
-    let mut app = test_app();
-    open_dashboard(&mut app);
-    assert_eq!(
-        app.dashboard.as_ref().unwrap().pending_mode,
-        DashboardDispatchMode::Normal
-    );
-    let _ = dispatch(Action::DashboardCycleMode, &mut app);
-    assert_eq!(
-        app.dashboard.as_ref().unwrap().pending_mode,
-        DashboardDispatchMode::Plan
-    );
-    let _ = dispatch(Action::DashboardCycleMode, &mut app);
-    assert_eq!(
-        app.dashboard.as_ref().unwrap().pending_mode,
-        DashboardDispatchMode::AlwaysApprove
-    );
-    let _ = dispatch(Action::DashboardCycleMode, &mut app);
-    assert_eq!(
-        app.dashboard.as_ref().unwrap().pending_mode,
-        DashboardDispatchMode::Normal
-    );
-}
-/// Under the managed-policy pin the staged-mode cycle skips
-/// Always-Approve (Normal → Plan → Normal) and explains why.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_cycle_mode_skips_always_approve_under_policy_pin() {
-    use crate::views::dashboard::DashboardDispatchMode;
-    let mut app = test_app();
-    open_dashboard(&mut app);
-    app.yolo_policy_block = Some(POLICY_WARNING);
-    let _ = dispatch(Action::DashboardCycleMode, &mut app);
-    assert_eq!(
-        app.dashboard.as_ref().unwrap().pending_mode,
-        DashboardDispatchMode::Plan
-    );
-    let _ = dispatch(Action::DashboardCycleMode, &mut app);
-    let d = app.dashboard.as_ref().unwrap();
-    assert_eq!(
-        d.pending_mode,
-        DashboardDispatchMode::Normal,
-        "Always-Approve must be skipped under the pin"
-    );
-    assert_eq!(
-        d.error_toast.as_deref(),
-        Some(format!("{} {POLICY_WARNING}", crate::glyphs::ballot_x()).as_str()),
-    );
-}
-/// Opening the dashboard re-seeds BOTH staged dispatch fields: a model
-/// staged in a previous session is cleared and the mode is reset from
-/// `app.default_yolo`, so a fresh open never inherits stale staging.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_open_reseeds_pending_model_and_mode() {
-    use crate::views::dashboard::DashboardDispatchMode;
+fn dashboard_open_reseeds_pending_dispatch_config() {
     let mut app = test_app();
     seed_model(&mut app, "grow-4.5", "Grow 4.5");
     open_dashboard(&mut app);
@@ -1452,7 +1323,8 @@ fn dashboard_open_reseeds_pending_model_and_mode() {
             effort: None,
             display: "Grow 4.5".to_string(),
         });
-        d.pending_mode = DashboardDispatchMode::Plan;
+        d.pending_behavior = grow_tools::types::SessionMode::Plan;
+        d.pending_permission = crate::app::actions::PermissionModeKind::AlwaysApprove;
     }
     app.active_view = ActiveView::Welcome;
     open_dashboard(&mut app);
@@ -1462,9 +1334,14 @@ fn dashboard_open_reseeds_pending_model_and_mode() {
         "re-open must clear a previously staged model",
     );
     assert_eq!(
-        d.pending_mode,
-        DashboardDispatchMode::Normal,
-        "re-open must reset the mode from default_yolo (off → Normal)",
+        d.pending_behavior,
+        grow_tools::types::SessionMode::Default,
+        "re-open must reset Behavior to Normal",
+    );
+    assert_eq!(
+        d.pending_permission,
+        crate::app::actions::PermissionModeKind::Ask,
+        "re-open must seed Permission from the default",
     );
 }
 /// Peek status follows the LIVE turn activity while running: a turn that's
@@ -1548,11 +1425,10 @@ fn extract_response_type_tool_running_overrides_stale_response() {
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_dispatch_always_approve_sets_yolo() {
-    use crate::views::dashboard::DashboardDispatchMode;
     let mut app = test_app();
     open_dashboard(&mut app);
     if let Some(d) = app.dashboard.as_mut() {
-        d.pending_mode = DashboardDispatchMode::AlwaysApprove;
+        d.pending_permission = crate::app::actions::PermissionModeKind::AlwaysApprove;
     }
     let _ = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
     let new_id = *app.agents.keys().next().unwrap();
@@ -1567,12 +1443,11 @@ fn dashboard_dispatch_always_approve_sets_yolo() {
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_dispatch_always_approve_blocked_warns_on_dashboard() {
-    use crate::views::dashboard::DashboardDispatchMode;
     let mut app = test_app();
     app.yolo_policy_block = Some(POLICY_WARNING);
     open_dashboard(&mut app);
     if let Some(d) = app.dashboard.as_mut() {
-        d.pending_mode = DashboardDispatchMode::AlwaysApprove;
+        d.pending_permission = crate::app::actions::PermissionModeKind::AlwaysApprove;
     }
     let _ = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
     let new_id = *app.agents.keys().next().unwrap();
@@ -1636,7 +1511,7 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
             effort: Some(grow_shell::sampling::types::ReasoningEffort::High),
             display: "Grow 4.5".to_string(),
         });
-        d.pending_mode = crate::views::dashboard::DashboardDispatchMode::Plan;
+        d.pending_behavior = grow_tools::types::SessionMode::Plan;
     }
     let effects = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
     assert_eq!(app.agents.len(), 1);
@@ -1677,7 +1552,7 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
             effort: Some(grow_shell::sampling::types::ReasoningEffort::High),
             display: "Grow 4.5".to_string(),
         });
-        d.pending_mode = crate::views::dashboard::DashboardDispatchMode::Plan;
+        d.pending_behavior = grow_tools::types::SessionMode::Plan;
     }
     let effects = dispatch(Action::DashboardCreateNewAgentWithDetail, &mut app);
     assert_eq!(app.agents.len(), 1);
@@ -2192,7 +2067,7 @@ fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
     );
     crate::app::subagent::set_replay_grow_home_for_tests(None);
 }
-/// `/dashboard` opens to the dashboard view ONLY.
+/// `/agents` opens to the dashboard view ONLY.
 /// No auto-attached popup. The user reaches an agent's view by
 /// pressing Enter on its row.
 ///
@@ -2372,7 +2247,7 @@ fn dashboard_select_without_dashboard_is_noop() {
     assert!(app.dashboard.is_none());
 }
 /// Ctrl+\ from the dashboard exits back to
-/// whichever agent view was active before. Since `/dashboard`
+/// whichever agent view was active before. Since `/agents`
 /// no longer auto-attaches a popup, the previous "close popup,
 /// stay in dashboard" intermediate step is gone.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
@@ -3047,11 +2922,11 @@ fn dashboard_overlay_cycle_from_unopened_dashboard_configures_state() {
     );
     assert!(
         matches!(
-            d.pending_mode,
-            crate::views::dashboard::DashboardDispatchMode::AlwaysApprove
+            d.pending_permission,
+            crate::app::actions::PermissionModeKind::AlwaysApprove
         ),
-        "pending_mode must reflect default_yolo (configure_dashboard_state ran), got {:?}",
-        d.pending_mode,
+        "pending_permission must reflect default_yolo, got {:?}",
+        d.pending_permission,
     );
 }
 /// Cycling from a never-opened dashboard honors the auth gate, mirroring
@@ -3196,46 +3071,6 @@ fn dashboard_overlay_cycle_non_overlay_noop_when_current_agent_hidden() {
         app.dashboard.as_ref().and_then(|d| d.attached_agent),
         None,
         "a filtered-out current agent must not attach overlay chrome",
-    );
-}
-/// `DashboardToggleAutoApprove` flips `yolo_mode` on
-/// the selected row's owning agent. Reuses `set_yolo_mode` by
-/// temporarily switching `active_view`, so the existing toast
-/// / persist / queue-drain logic all apply.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_toggle_auto_approve_flips_yolo_on_selected_agent() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    app.agents.get_mut(&id).unwrap().session.yolo_mode = false;
-    app.active_view = ActiveView::Welcome;
-    open_dashboard(&mut app);
-    if let Some(d) = app.dashboard.as_mut() {
-        d.focus_row(crate::views::dashboard::DashboardRowId::TopLevel(id));
-    }
-    let _ = dispatch_dashboard_toggle_auto_approve(&mut app);
-    assert!(
-        app.agents.get(&id).unwrap().session.yolo_mode,
-        "first toggle must turn YOLO on",
-    );
-    let _ = dispatch_dashboard_toggle_auto_approve(&mut app);
-    assert!(
-        !app.agents.get(&id).unwrap().session.yolo_mode,
-        "second toggle must turn YOLO off",
-    );
-    assert!(matches!(app.active_view, ActiveView::AgentDashboard));
-}
-/// No selection → toggle is a no-op + toast.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_toggle_auto_approve_with_no_selection_toasts() {
-    let mut app = test_app();
-    open_dashboard(&mut app);
-    let effects = dispatch_dashboard_toggle_auto_approve(&mut app);
-    assert!(effects.is_empty());
-    assert!(
-        app.dashboard.as_ref().unwrap().error_toast.is_some(),
-        "missing selection must surface a toast",
     );
 }
 /// End-to-end rename flow: begin rename ->

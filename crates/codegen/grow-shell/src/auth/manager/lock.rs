@@ -358,7 +358,7 @@ fn blocking_acquire(lock_path: &Path) -> io::Result<File> {
 // ── Public API ───────────────────────────────────────────────────────
 
 /// Best-effort **non-blocking** acquire for advisory cleanup call sites
-/// (`AuthManager::new` WebLogin cleanup, `remove_scope`).
+/// (`AuthManager::remove_scope` and other auth.json writers).
 ///
 /// Unlike [`try_lock_auth_file_async`] this never waits and never breaks a
 /// stale lock: it takes the flock iff it is free right now, otherwise

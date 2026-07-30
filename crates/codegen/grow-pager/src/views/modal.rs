@@ -385,8 +385,8 @@ pub(crate) fn default_palette_entries(screen_mode: crate::app::ScreenMode) -> Ve
         },
         PaletteEntry {
             label: "Agent Dashboard".into(),
-            shortcut: "/dashboard".into(),
-            command: PaletteCommand::SlashCommand("/dashboard".into()),
+            shortcut: "/agents".into(),
+            command: PaletteCommand::SlashCommand("/agents".into()),
         },
         PaletteEntry {
             label: "Back to Home".into(),
@@ -397,11 +397,6 @@ pub(crate) fn default_palette_entries(screen_mode: crate::app::ScreenMode) -> Ve
             label: "Resume Session".into(),
             shortcut: "/resume".into(),
             command: PaletteCommand::SlashCommand("/resume".into()),
-        },
-        PaletteEntry {
-            label: "Share Session".into(),
-            shortcut: "/share".into(),
-            command: PaletteCommand::SlashCommand("/share".into()),
         },
         PaletteEntry {
             label: "Rename Session".into(),
@@ -637,6 +632,11 @@ impl ActiveModal {
             } => match command.as_str() {
                 "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
                 "model" | "m" => "Pick model",
+                "agent" if !args_query.is_empty() => "Pick Behavior",
+                "agent" => "Pick Agent",
+                "effort" => "Pick reasoning effort",
+                "permission" => "Pick Permission",
+                "behavior" => "Pick Behavior",
                 "theme" | "t" => "Pick theme",
                 _ => "Pick option",
             },
@@ -1274,25 +1274,15 @@ mod doc_viewer_scroll_tests {
 #[cfg(test)]
 mod palette_tests {
     use super::*;
-    fn has_share(entries: &[PaletteEntry]) -> bool {
-        entries
-            .iter()
-            .any(|e| matches!(&e.command, PaletteCommand::SlashCommand(s) if s.trim() == "/share"))
-    }
-    #[test]
-    fn default_palette_includes_share() {
-        let entries = default_palette_entries(crate::app::ScreenMode::Fullscreen);
-        assert!(has_share(&entries), "/share should always be present");
-    }
     #[test]
     fn default_palette_includes_dashboard() {
         let entries = default_palette_entries(crate::app::ScreenMode::Fullscreen);
         let has_dashboard = entries.iter().any(
-            |e| matches!(&e.command, PaletteCommand::SlashCommand(s) if s.trim() == "/dashboard"),
+            |e| matches!(&e.command, PaletteCommand::SlashCommand(s) if s.trim() == "/agents"),
         );
         assert!(
             has_dashboard,
-            "/dashboard entry must be present in the palette so users can switch between agents"
+            "/agents entry must be present in the palette so users can switch between Agents"
         );
         let labelled = entries.iter().any(|e| e.label == "Agent Dashboard");
         assert!(
@@ -1314,11 +1304,6 @@ mod palette_tests {
                 .iter()
                 .any(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
         );
-    }
-    #[test]
-    fn filter_palette_matches_share() {
-        let entries = filter_palette_entries("share", crate::app::ScreenMode::Fullscreen);
-        assert!(has_share(&entries), "/share should match a 'share' query");
     }
     #[test]
     fn palette_tools_section_routes_each_tab_to_itself() {

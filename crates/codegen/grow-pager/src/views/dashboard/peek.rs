@@ -151,8 +151,7 @@ pub struct PeekPanelState {
     /// `auto` flag (mutually exclusive with `always-approve` — yolo wins).
     pub auto: bool,
     /// Whether the peeked agent is in plan mode. Shown as a `plan` flag on
-    /// the bottom border (so the Shift+Tab mode cycle's three states are
-    /// all visible). Set live by the render-time refresh.
+    /// the bottom border. Set live by the render-time refresh.
     pub plan_mode: bool,
 }
 
@@ -388,8 +387,8 @@ pub struct PeekModeBadge {
 }
 
 /// The peeked row's current config-badge state. Sourced live (not via
-/// [`PeekFields`]) so it always reflects a `/model` switch or a Shift+Tab mode
-/// change. A subagent shows its own model when its view is loaded, else the
+/// [`PeekFields`]) so it always reflects session configuration changes. A
+/// subagent shows its own model when its view is loaded, else the
 /// parent's; always-approve and auto follow the parent (subagents run under the
 /// parent's permission mode) and subagents have no plan mode of their own.
 /// All-default for a vanished agent or a roster-only row.

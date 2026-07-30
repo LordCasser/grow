@@ -719,7 +719,7 @@ pub struct AgentSession {
     pub current_prompt_id: Option<String>,
     /// Whether this session was created via the `/new` slash command.
     /// Checked in the `SessionCreated` handler to decide whether to show
-    /// the `/dashboard` discoverability tip. `false` for sessions created
+    /// the `/agents` discoverability tip. `false` for sessions created
     /// by `/resume`, welcome-screen picker, `/fork`, or worktree flows.
     pub created_via_new: bool,
 }

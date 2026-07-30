@@ -75,7 +75,7 @@ fn contextual_hints_group_sub_sheet_flow() {
 }
 
 /// The permission_mode picker hides the "Auto" choice when the auto feature
-/// gate is off (matching the Ctrl+R cycle, which skips Auto when gated),
+/// gate is off (matching the session selector, which omits Auto when gated),
 /// and shows it when the gate is on. Other choices are unaffected.
 #[test]
 fn effective_enum_choices_hides_auto_for_permission_mode_when_gated_off() {
@@ -129,8 +129,14 @@ fn effective_enum_choices_hides_auto_for_permission_mode_when_gated_off() {
 /// Permission mode's `auto` choice follows the runtime feature gate.
 #[test]
 fn enum_choice_gated_off_covers_permission_mode() {
-    assert!(enum_choice_gated_off("permission_mode", "auto", false));
-    assert!(!enum_choice_gated_off("permission_mode", "auto", true));
+    let gated_off = PagerLocalSnapshot::default();
+    assert!(enum_choice_gated_off("permission_mode", "auto", &gated_off));
+    let enabled = PagerLocalSnapshot {
+        auto_mode_gate: true,
+        workflows_available: true,
+        ..PagerLocalSnapshot::default()
+    };
+    assert!(!enum_choice_gated_off("permission_mode", "auto", &enabled));
 }
 
 /// Look up a setting's registered metadata by key (test helper).
@@ -451,12 +457,8 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
     );
 }
 
-/// The default registry contains Appearance settings
-/// (3 bools + 3 enums + 1 int = 7 entries), the Editor entry
-/// `multiline_mode`, the Agent entries `permission_mode` and
-/// `plan_mode`, the Models entry `default_model`, and the Advanced entries
-/// `show_tips` and `auto_update`. `default_reasoning_effort` and
-/// `auto_compact_threshold_percent` are not exposed in the modal.
+/// The default registry contains only persistent preferences. Session
+/// Behavior and compose state are intentionally absent.
 #[test]
 fn rows_contain_categories_and_settings_through_pr_14() {
     let s = make_state();
@@ -541,11 +543,8 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "invert_scroll",
             "keep_text_selection",
             // SHARED-owned combine_queued_prompts (Editor category; read by
-            // both the pager drain and the shell promote. Registered before
-            // multiline_mode, so it renders first).
+            // both the pager drain and the shell promote).
             "combine_queued_prompts",
-            // PAGER-owned multiline (Editor category).
-            "multiline_mode",
             // SHELL-owned prompt_suggestions (Editor; tab autocomplete
             // ghost text, live cache).
             "prompt_suggestions",
@@ -557,11 +556,8 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // SHELL-owned default_selected_permission (Agent category,
             // colocated with permission_mode / plan_mode).
             "default_selected_permission",
-            // SHELL-owned ask_user_question timeout (Agent category,
-            // registered directly above plan_mode).
+            // SHELL-owned ask_user_question timeout (Agent category).
             "toolset.ask_user_question.timeout_enabled",
-            // PAGER-owned plan_mode (Agent category).
-            "plan_mode",
             // SHELL-owned default_model (Models category).
             "default_model",
             // Models category. `default_reasoning_effort` and `session_summary_model` are
@@ -4474,8 +4470,8 @@ fn group_row_renders_expanded_description() {
 /// fits picks `OneLine`; one cell narrower picks `TwoLine`.
 #[test]
 fn row_layout_threshold_is_exact() {
-    let label = "Coding data sharing"; // 19 cells
-    let value = "Opt out"; // 7 cells
+    let label = "Session preferences"; // 19 cells
+    let value = "Default"; // 7 cells
     // chrome (triangle + gap + chevron + right pad) = 2 + 1 + 2 + 1 = 6
     // total = 19 + 7 + 6 = 32 cells (chevron-enabled).
     assert_eq!(row_layout(32, label, value, false), RowLayout::OneLine);
@@ -5256,15 +5252,14 @@ fn chevron_column_is_at_constant_right_offset() {
 #[test]
 fn chevron_column_aligns_across_one_and_two_line_layouts() {
     let theme = Theme::current();
-    // `synthetic_enum_chevron_meta` has label "Coding data
-    // sharing" (19 chars) + value "choice_a" (8 chars). At
-    // width=25 the one-line total (2 + 19 + 1 + 8 + 2 + 1 =
-    // 33) exceeds the width, so the layout flips to TwoLine.
+    // `synthetic_enum_chevron_meta` has label "Test enum"
+    // plus value "choice_a". At width=20 the combined row exceeds
+    // the width, so the layout flips to TwoLine.
     // At width=60 the same row fits one-line.
     let area_two = Rect {
         x: 0,
         y: 0,
-        width: 25,
+        width: 20,
         height: 2,
     };
     let mut buf_two = Buffer::empty(area_two);

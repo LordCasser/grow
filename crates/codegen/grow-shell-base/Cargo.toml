@@ -3,12 +3,12 @@ license = "Apache-2.0"
 name = "grow-shell-base"
 version.workspace = true
 edition.workspace = true
-description = "Foundation modules for the grow shell crate family: environment presets, CPU profiling, and process/filesystem utilities."
+description = "Foundation modules for the grow shell crate family: CPU profiling and process/filesystem utilities."
 
 [features]
 # Exposes `#[cfg(test)]`-only helpers (`env::EnvVarGuard`,
 # `cpu_profile` test seams) to downstream crates' test targets. Enabled by
-test-support = ["grow-env/test-support"]
+test-support = []
 default-bazel = ["test-support"]
 
 [dependencies]
@@ -22,7 +22,6 @@ tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 url = { workspace = true }
 grow-config = { workspace = true }
-grow-env = { workspace = true }
 grow-shared = { workspace = true }
 grow-version = { workspace = true }
 xai-tty-utils = { workspace = true }
@@ -40,9 +39,6 @@ windows = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-# `cfg(test)` in this crate does not enable features on dependencies, so the
-# tests' `EnvVarGuard` re-export needs the feature turned on explicitly.
-grow-env = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

@@ -37,18 +37,8 @@ pub struct NotificationBridgeConfig {
     /// in bash streaming updates. The client must opt in via the
     /// `grow/incrementalBashOutput` capability.
     pub incremental_bash_output: bool,
-    /// Plan mode tracker shared with the session actor.
-    /// Used to transition state on `PlanModeEntered` / `PlanModeExited`
-    /// tool notifications.
-    pub plan_mode: Arc<parking_lot::Mutex<crate::session::plan_mode::BehaviorController>>,
-    /// Session-level prompt mode shared with the session actor.
-    /// Updated on `PlanModeEntered` / `PlanModeExited` and `session/set_mode`
-    /// so the next turn starts in the correct mode.
-    pub current_prompt_mode: Arc<parking_lot::Mutex<crate::session::plan_mode::PromptMode>>,
-    /// Turn-level prompt mode. Set at turn start, then updated only by
-    /// agent tool calls (`EnterPlanMode` / `ExitPlanMode`). NOT affected
-    /// by `session/set_mode`. Read at turn end for `end_prompt_mode`.
-    pub turn_prompt_mode: Arc<parking_lot::Mutex<crate::session::plan_mode::PromptMode>>,
+    /// Read-only Behavior state used to annotate tool notifications.
+    pub behavior: Arc<parking_lot::Mutex<crate::session::behavior::BehaviorController>>,
     /// Session command channel for monitor events and task-completed injections.
     pub session_cmd_tx: mpsc::UnboundedSender<SessionCommand>,
     pub task_completion_reservations:
@@ -68,13 +58,6 @@ pub struct NotificationBridgeConfig {
     /// When `false`, bash task completions fall back to the idle-gated
     /// `InjectNotification` path instead of immediate synthetic prompts.
     pub auto_wake_enabled: bool,
-    /// When `true`, an approved `PlanModeExited` also arms the tracker's
-    /// next-turn exit reminder. Grow-build leaves this `false` — its
-    /// exit-plan tool result already informs the model, and a deferred
-    /// reminder would arrive stale. Shared with the session actor (the
-    /// `gateway_enabled` pattern) and refreshed on zero-turn rebuilds so the
-    /// bridge always agrees with the live session gate.
-    pub queue_exit_reminder_on_approved_exit: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// When `true`, suppress the bash auto-wake synthetic prompt. Shared `Arc`
     /// written at one chokepoint — see
     /// `SessionActor::set_goal_loop_active_resource` for the rationale.
@@ -208,9 +191,22 @@ async fn emit_current_mode_update(
 ) {
     let mut notification = acp::SessionNotification::new(
         config.session_id.clone(),
-        acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
-            acp::SessionModeId::new(mode.as_id()),
-        )),
+        acp::SessionUpdate::CurrentModeUpdate(
+            acp::CurrentModeUpdate::new(acp::SessionModeId::new(mode.as_id())).meta(
+                serde_json::json!({
+                    "grow/behavior": config.behavior.lock().behavior().map(|behavior| match behavior {
+                        xai_tool_types::BehaviorId::Clarify => "clarify",
+                        xai_tool_types::BehaviorId::Plan => "plan",
+                        xai_tool_types::BehaviorId::Workflow => "workflow",
+                        xai_tool_types::BehaviorId::DeepResearch => "deep_research",
+                        xai_tool_types::BehaviorId::Goal => "goal",
+                    }),
+                    "grow/planPhase": config.behavior.lock().plan_phase_label(),
+                })
+                .as_object()
+                .cloned(),
+            ),
+        ),
     );
     stamp_event_id(config, &mut notification.meta);
     let _ = config.persistence.tx.send(PersistenceMsg::Update(
@@ -411,7 +407,7 @@ async fn handle_notification(
                     .send(SessionCommand::Prompt {
                         prompt_id: prompt_id.clone(),
                         prompt_blocks,
-                        prompt_mode: crate::session::plan_mode::PromptMode::Agent,
+                        prompt_mode: crate::session::behavior::PromptMode::Agent,
                         client_identifier: None,
                         screen_mode: None,
                         verbatim: true,
@@ -549,54 +545,6 @@ async fn handle_notification(
                     title: None,
                     level: Some("info".into()),
                 });
-        }
-        ToolNotification::PlanModeEntered(entered) => {
-            let activated = config.plan_mode.lock().activate_from_tool();
-            if activated {
-                *config.current_prompt_mode.lock() = crate::session::plan_mode::PromptMode::Plan;
-                *config.turn_prompt_mode.lock() = crate::session::plan_mode::PromptMode::Plan;
-                let snapshot = config.plan_mode.lock().snapshot();
-                let _ = config
-                    .persistence
-                    .tx
-                    .send(PersistenceMsg::PlanModeState(snapshot));
-                emit_current_mode_update(config, grow_tools::types::SessionMode::Plan).await;
-            }
-            tracing::info!(
-                tool_call_id = %entered.tool_call_id,
-                activated,
-                "Plan mode entered via EnterPlanMode tool"
-            );
-        }
-        ToolNotification::PlanModeExited(exited) => {
-            let deactivated = {
-                let mut tracker = config.plan_mode.lock();
-                let deactivated = tracker.deactivate_approved();
-                if deactivated
-                    && config
-                        .queue_exit_reminder_on_approved_exit
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    tracker.queue_exit_reminder();
-                }
-                deactivated
-            };
-            if deactivated {
-                *config.current_prompt_mode.lock() = crate::session::plan_mode::PromptMode::Agent;
-                *config.turn_prompt_mode.lock() = crate::session::plan_mode::PromptMode::Agent;
-                let snapshot = config.plan_mode.lock().snapshot();
-                let _ = config
-                    .persistence
-                    .tx
-                    .send(PersistenceMsg::PlanModeState(snapshot));
-                emit_current_mode_update(config, grow_tools::types::SessionMode::Default).await;
-            }
-            tracing::info!(
-                tool_call_id = %exited.tool_call_id,
-                deactivated,
-                has_plan = exited.plan_content.is_some(),
-                "Plan mode exited via ExitPlanMode tool"
-            );
         }
         ToolNotification::UserQuestionAsked(asked) => {
             tracing::info!(
@@ -841,16 +789,10 @@ mod tests {
             gateway_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             persistence: PersistenceHandle::from_sender_for_test(persistence_tx),
             incremental_bash_output: false,
-            plan_mode: Arc::new(parking_lot::Mutex::new(
-                crate::session::plan_mode::BehaviorController::new(PathBuf::from(
+            behavior: Arc::new(parking_lot::Mutex::new(
+                crate::session::behavior::BehaviorController::new(PathBuf::from(
                     "/tmp/test-session",
                 )),
-            )),
-            current_prompt_mode: Arc::new(parking_lot::Mutex::new(
-                crate::session::plan_mode::PromptMode::Agent,
-            )),
-            turn_prompt_mode: Arc::new(parking_lot::Mutex::new(
-                crate::session::plan_mode::PromptMode::Agent,
             )),
             session_cmd_tx,
             task_completion_reservations:
@@ -860,9 +802,6 @@ mod tests {
             task_output_tool_name: Arc::new(std::sync::OnceLock::new()),
             read_tool_name: Arc::new(std::sync::OnceLock::new()),
             auto_wake_enabled: true,
-            queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(
-                false,
-            )),
             goal_loop_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         (config, gateway_rx, persistence_rx, session_cmd_rx)
@@ -1963,169 +1902,6 @@ mod tests {
         } else {
             panic!("expected Prompt");
         }
-    }
-    fn extract_current_mode_id(notification: &acp::SessionNotification) -> Option<&str> {
-        match &notification.update {
-            acp::SessionUpdate::CurrentModeUpdate(cmu) => Some(cmu.current_mode_id.0.as_ref()),
-            _ => None,
-        }
-    }
-    /// Regression: `PlanModeExited` must emit `CurrentModeUpdate("default")`
-    /// onto both the gateway and the persistence stream. Without this,
-    /// agent-driven plan approvals leave the TUI stuck in plan mode.
-    #[tokio::test]
-    async fn plan_mode_exited_emits_current_mode_update_default() {
-        let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
-        {
-            let mut tracker = config.plan_mode.lock();
-            assert!(tracker.activate_from_tool());
-        }
-        *config.current_prompt_mode.lock() = crate::session::plan_mode::PromptMode::Plan;
-        *config.turn_prompt_mode.lock() = crate::session::plan_mode::PromptMode::Plan;
-        let notification =
-            ToolNotification::PlanModeExited(grow_tools::notification::types::PlanModeExited {
-                tool_call_id: "tc-exit-1".into(),
-                plan_content: Some("- step 1".into()),
-                plan_file_path: "/tmp/test-session/plan.md".into(),
-            });
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
-        let mut gateway_modes = Vec::new();
-        while let Ok(msg) = gateway_rx.try_recv() {
-            if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = msg
-                && let Some(id) = extract_current_mode_id(&args.request)
-            {
-                gateway_modes.push(id.to_string());
-            }
-        }
-        assert_eq!(
-            gateway_modes,
-            vec!["default".to_string()],
-            "PlanModeExited should emit exactly one CurrentModeUpdate(default) to the gateway"
-        );
-        let mut persisted_modes = Vec::new();
-        while let Ok(msg) = persistence_rx.try_recv() {
-            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(notif)) = msg
-                && let Some(id) = extract_current_mode_id(&notif)
-            {
-                persisted_modes.push(id.to_string());
-            }
-        }
-        assert_eq!(
-            persisted_modes,
-            vec!["default".to_string()],
-            "PlanModeExited should persist exactly one CurrentModeUpdate(default)"
-        );
-        assert!(matches!(
-            *config.current_prompt_mode.lock(),
-            crate::session::plan_mode::PromptMode::Agent
-        ));
-    }
-    /// Default (grow) polarity: the exit_plan_mode tool result is the model's
-    /// only exit signal, so an approved `PlanModeExited` must NOT arm the
-    /// deferred exit reminder — in memory or in the persisted snapshot.
-    /// Sibling of `plan_mode_exited_arms_exit_reminder_when_gated`.
-    #[tokio::test]
-    async fn plan_mode_exited_does_not_arm_exit_reminder_by_default() {
-        let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
-        {
-            let mut tracker = config.plan_mode.lock();
-            assert!(tracker.activate_from_tool());
-        }
-        let notification =
-            ToolNotification::PlanModeExited(grow_tools::notification::types::PlanModeExited {
-                tool_call_id: "tc-exit-grow".into(),
-                plan_content: Some("- step 1".into()),
-                plan_file_path: "/tmp/test-session/plan.md".into(),
-            });
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
-        assert!(
-            !config.plan_mode.lock().has_pending_exit_reminder(),
-            "approved exit must not arm the deferred exit reminder"
-        );
-        let mut persisted_plan_snapshots = Vec::new();
-        while let Ok(msg) = persistence_rx.try_recv() {
-            if let PersistenceMsg::PlanModeState(snapshot) = msg {
-                persisted_plan_snapshots.push(snapshot);
-            }
-        }
-        assert!(
-            !persisted_plan_snapshots.is_empty()
-                && persisted_plan_snapshots
-                    .iter()
-                    .all(|s| !s.pending_exit_reminder),
-            "persisted plan-mode snapshot must not carry the exit reminder"
-        );
-    }
-    /// Gated counterpart: when `queue_exit_reminder_on_approved_exit` is
-    /// set, an approved `PlanModeExited` must arm the next-turn exit
-    /// reminder and persist it.
-    #[tokio::test]
-    async fn plan_mode_exited_arms_exit_reminder_when_gated() {
-        let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
-        config
-            .queue_exit_reminder_on_approved_exit
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        {
-            let mut tracker = config.plan_mode.lock();
-            assert!(tracker.activate_from_tool());
-        }
-        let notification =
-            ToolNotification::PlanModeExited(grow_tools::notification::types::PlanModeExited {
-                tool_call_id: "tc-exit-gated".into(),
-                plan_content: Some("- step 1".into()),
-                plan_file_path: "/tmp/test-session/plan.md".into(),
-            });
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
-        assert!(
-            config.plan_mode.lock().has_pending_exit_reminder(),
-            "gated approved exit must arm the next-turn exit reminder"
-        );
-        let mut persisted_plan_snapshots = Vec::new();
-        while let Ok(msg) = persistence_rx.try_recv() {
-            if let PersistenceMsg::PlanModeState(snapshot) = msg {
-                persisted_plan_snapshots.push(snapshot);
-            }
-        }
-        assert!(
-            !persisted_plan_snapshots.is_empty()
-                && persisted_plan_snapshots
-                    .iter()
-                    .all(|s| s.pending_exit_reminder),
-            "persisted plan-mode snapshot must carry the armed exit reminder"
-        );
-    }
-    /// Symmetric to the exit test: `PlanModeEntered` emits
-    /// `CurrentModeUpdate("plan")`.
-    #[tokio::test]
-    async fn plan_mode_entered_emits_current_mode_update_plan() {
-        let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
-        let notification =
-            ToolNotification::PlanModeEntered(grow_tools::notification::types::PlanModeEntered {
-                tool_call_id: "tc-enter-1".into(),
-            });
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
-        let mut gateway_modes = Vec::new();
-        while let Ok(msg) = gateway_rx.try_recv() {
-            if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = msg
-                && let Some(id) = extract_current_mode_id(&args.request)
-            {
-                gateway_modes.push(id.to_string());
-            }
-        }
-        assert_eq!(gateway_modes, vec!["plan".to_string()]);
-        let mut persisted_modes = Vec::new();
-        while let Ok(msg) = persistence_rx.try_recv() {
-            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(notif)) = msg
-                && let Some(id) = extract_current_mode_id(&notif)
-            {
-                persisted_modes.push(id.to_string());
-            }
-        }
-        assert_eq!(persisted_modes, vec!["plan".to_string()]);
     }
     /// Build a completed-bash `TaskSnapshot` whose `output` is large enough
     /// to trip the inline-completion truncation cap, with a concrete

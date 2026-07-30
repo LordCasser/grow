@@ -340,7 +340,7 @@ mod tests {
         let cfg = Config::new_from_toml_cfg(&raw).expect("provider config should parse");
         cfg.validate_llm_configuration()
             .expect("provider config should be complete");
-        let models = resolve_model_list(&cfg, None);
+        let models = resolve_model_list(&cfg);
         let model = models
             .get("zuozuo/claude-opus-5")
             .expect("canonical provider/model id should exist");
@@ -378,7 +378,7 @@ mod tests {
         let cfg = Config::new_from_toml_cfg(&raw).unwrap();
         cfg.validate_llm_configuration()
             .expect("keyless local providers are valid BYOK");
-        let models = resolve_model_list(&cfg, None);
+        let models = resolve_model_list(&cfg);
         let model = models.get("local/model").unwrap();
         assert_eq!(
             resolve_credentials(model, Some("product-session-token")).api_key,

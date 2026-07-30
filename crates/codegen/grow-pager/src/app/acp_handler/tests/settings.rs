@@ -330,7 +330,7 @@
     #[test]
     fn auto_gate_killswitch_clears_all_agents_regardless_of_active_mirror() {
         // Two agents both in auto; the active tab's global mirror reads "ask"
-        // (a tab switch / Ctrl+R re-anchored it away from auto). A
+        // (a tab switch or session selector re-anchored it away from auto). A
         // mid-session gate kill-switch (`auto_permission_mode_enabled=false`)
         // must clear the per-session auto flag on BOTH agents. The old code
         // gated this fan-out on `current_ui.permission_mode == "auto"`, so it

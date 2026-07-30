@@ -26,6 +26,7 @@ use crate::sampling::{
     SyntheticReason, ToolSpec, conversation_truncate_for_prompt,
 };
 use crate::session::ClientFsConfig;
+use crate::session::behavior::PromptMode;
 use crate::session::fs_watch::{self, git_head_dedup_key};
 use crate::session::info::Info as SessionInfo;
 use crate::session::mcp_servers::McpInitStrategy;
@@ -40,7 +41,6 @@ use crate::session::mcp_servers::parse_mcp_tool_name;
 use crate::session::persistence::{
     PersistenceContentChunk, PersistenceHandle, PersistenceMsg, get_prompt_file_path,
 };
-use crate::session::plan_mode::PromptMode;
 use crate::session::prompt_parser::parse_prompt_with_skills;
 use crate::session::replay_events::{SessionEvent, SessionNotification};
 use crate::session::result::ExtMethodResult;
@@ -236,9 +236,10 @@ struct GoalToolNames {
 pub(super) const GOAL_TASK_DISCIPLINE_TEMPLATE: &str =
     include_str!("templates/goal_task_discipline.md");
 pub(super) const GOAL_RULES_TEMPLATE: &str = include_str!("templates/goal_rules.md");
-pub(super) const GOAL_RULES_TEMPLATE_LEGACY: &str = include_str!("templates/goal_rules_legacy.md");
+pub(super) const GOAL_RULES_TEMPLATE_FOREGROUND: &str =
+    include_str!("templates/goal_rules_foreground.md");
 /// Plan-aware preamble folded into the goal-rules block when the planner
-/// is enabled and a plan exists. Empty on the legacy path.
+/// is enabled and a plan exists.
 const GOAL_PLAN_BLOCK_TEMPLATE: &str = include_str!("templates/goal_plan_block.md");
 /// Body of the per-turn directive continuation nudge injected when an
 /// active goal is still running. Loaded once at compile time. Carries
@@ -255,8 +256,8 @@ const GOAL_PLAN_BLOCK_TEMPLATE: &str = include_str!("templates/goal_plan_block.m
 /// line is not rendered into this nudge.
 pub(super) const GOAL_CONTINUATION_DIRECTIVE_TEMPLATE: &str =
     include_str!("templates/goal_continuation_directive.md");
-pub(super) const GOAL_CONTINUATION_DIRECTIVE_TEMPLATE_LEGACY: &str =
-    include_str!("templates/goal_continuation_directive_legacy.md");
+pub(super) const GOAL_CONTINUATION_DIRECTIVE_TEMPLATE_FOREGROUND: &str =
+    include_str!("templates/goal_continuation_directive_foreground.md");
 /// Built continuation directive plus the optional premature-stop pattern that
 /// the caller emits when it actually continues. Produced by
 /// [`SessionActor::prepare_goal_continuation`].
@@ -677,8 +678,7 @@ pub(crate) struct SessionActor {
     pub(crate) pending_interjections: InterjectionBuffer<acp::ImageContent>,
     /// Skill-announcement reminders that arrived while a turn was running,
     /// flushed at the same safe points as `pending_interjections` plus on
-    /// cancel/idle. The flush also delivers the plan tracker's buffered
-    /// mid-turn activation reminder (see `activate_plan_mode_mid_turn`).
+    /// cancel/idle.
     pub(crate) pending_skill_reminders: Mutex<Vec<ConversationItem>>,
     /// Idle flush timeout: `None` = disabled, `Some(duration)` = flush after inactivity.
     pub(crate) idle_flush_timeout: Option<std::time::Duration>,
@@ -724,16 +724,10 @@ pub(crate) struct SessionActor {
     pub(crate) display_cwd: std::sync::OnceLock<String>,
     /// The active agent type for this session. Initialized from the
     /// `AgentDefinition` at spawn, updated when the session mode changes
-    /// via `handle_session_mode()`. Used by the model-switch guard to
+    /// via `request_behavior_change()`. Used by the model-switch guard to
     /// determine whether a model's `agent_type` is compatible with the
     /// current session.
     pub(crate) active_agent_type: parking_lot::Mutex<Option<String>>,
-    /// Live gate shared with the notification bridge (see
-    /// `NotificationBridgeConfig::queue_exit_reminder_on_approved_exit`).
-    /// Seeded at spawn from the agent definition's harness; refreshed by
-    /// `handle_rebuild_agent_for_definition` so the bridge always agrees
-    /// with the live harness gate.
-    pub(crate) queue_exit_reminder_on_approved_exit: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// First skill the current prompt activated via its slash-skill path,
     /// recorded as `skill.name` on the turn span. Reset at the start of each
     /// prompt (`handle_prompt`), so it never leaks across turns.
@@ -746,25 +740,19 @@ pub(crate) struct SessionActor {
     /// `handle_prompt` and never modified during the turn. Used for
     /// `start_prompt_mode` diagnostics.
     pub(crate) turn_start_prompt_mode: parking_lot::Mutex<PromptMode>,
-    /// Effective mode of the currently running turn. Set at turn start from
-    /// the prompt mode parameter, then updated only by agent-initiated tool
-    /// calls (`EnterPlanMode` / `ExitPlanMode`). NOT affected by
-    /// `session/set_mode` (which only changes the next turn's start mode).
-    /// Read at turn end for `end_prompt_mode` diagnostics.
+    /// Effective Behavior of the currently running turn, captured for
+    /// diagnostics. Behavior transitions go through `request_behavior_change`.
     pub(crate) turn_prompt_mode: Arc<parking_lot::Mutex<PromptMode>>,
-    /// Plan mode lifecycle tracker. Session-scoped dynamic state (not part
-    /// of `AgentDefinition`). All plan mode logic lives in `plan_mode.rs`;
-    /// the session actor just calls into the tracker at the appropriate points.
-    /// `Arc`-shared with the notification bridge so `PlanModeEntered` /
-    /// `PlanModeExited` tool notifications can transition state directly.
-    pub(crate) plan_mode: Arc<parking_lot::Mutex<crate::session::plan_mode::BehaviorController>>,
+    /// Session-scoped primary-Agent Behavior controller. It owns the selected
+    /// collaboration protocol and Plan phase, not permissions or runtimes.
+    pub(crate) behavior: Arc<parking_lot::Mutex<crate::session::behavior::BehaviorController>>,
     /// Whether goal mode (`/goal`) is enabled for this session (feature flag).
     pub(crate) goal_enabled: bool,
     pub(crate) background_workflows_enabled: bool,
     goal_harness_enabled: std::sync::atomic::AtomicBool,
     goal_harness_availability_reconciled: std::sync::atomic::AtomicBool,
     /// Goal mode orchestration tracker. Session-scoped state for the
-    /// Design-Execute-Verify loop. Modeled after `plan_mode` above.
+    /// Design-Execute-Verify loop. Runtime state is independent of Behavior.
     pub(crate) goal_tracker: Arc<parking_lot::Mutex<crate::session::goal_tracker::GoalTracker>>,
     /// `task_id`s of background tasks (and monitors) that originated during
     /// the goal turn — either spawned by the goal model itself or reparented
@@ -1543,22 +1531,6 @@ mod interjection_actor_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/permission_auto_mode_tests.rs"]
 mod permission_auto_mode_tests;
-/// Resume re-park of the parked `exit_plan_mode` approval.
-#[cfg(test)]
-#[path = "acp_session_tests/plan_approval_resume_tests.rs"]
-mod plan_approval_resume_tests;
-/// Mixed-batch plan.md write + exit_plan_mode snapshot.
-#[cfg(test)]
-#[path = "acp_session_tests/plan_exit_batch_barrier_tests.rs"]
-mod plan_exit_batch_barrier_tests;
-/// Plan Behavior gate: ordinary file edits are rejected even under allow-all.
-#[cfg(test)]
-#[path = "acp_session_tests/plan_mode_edit_gate_tests.rs"]
-mod plan_mode_edit_gate_tests;
-/// Mid-turn plan-mode toggle: immediate activation + buffered reminder.
-#[cfg(test)]
-#[path = "acp_session_tests/plan_mode_midturn_tests.rs"]
-mod plan_mode_midturn_tests;
 /// Tests for [`conversation_has_project_instructions`], the idempotence
 /// helper that gates the spawn-time AGENTS.md / CLAUDE.md injector.
 ///
@@ -1662,7 +1634,7 @@ mod tool_meta_stamp_tests {
                 let t = tool_meta(early.as_ref()).expect("early ToolCall carries grow/tool");
                 assert_eq!(t["name"], "read_file");
                 assert_eq!(t["kind"], "read");
-                assert_eq!(t["namespace"], "grow_build");
+                assert_eq!(t["namespace"], "grow");
                 assert!(t.get("input").is_none(), "identity-only before parse");
                 let refined = refined.expect("refinement ToolCallUpdate emitted");
                 let t = tool_meta(refined.as_ref()).expect("refinement carries grow/tool");
@@ -1774,8 +1746,6 @@ mod build_tool_parse_error_message_tests;
 #[path = "acp_session_tests/cancel_running_task_tests.rs"]
 mod cancel_running_task_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/idle_resume_tests.rs"]
-mod idle_resume_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/inline_auto_compact_flow_tests.rs"]
 mod inline_auto_compact_flow_tests;

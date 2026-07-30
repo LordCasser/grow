@@ -59,7 +59,7 @@ invert_scroll = false
 scroll_lines = 3                    # 1..10；删除本行则采用终端配置
 render_mermaid = "auto"             # auto | on | off
 hunk_tracker_mode = "agent_only"    # agent_only | all_dirty | off
-mouse_reporting_toggle = false      # scrollback 聚焦时允许切换终端鼠标捕获
+mouse_reporting_toggle = false      # 是否暴露 /toggle-mouse-reporting 命令
 cancel_subagents_on_turn_cancel = "ask" # ask | always_stop | always_continue
 remember_tool_approvals = false
 keep_text_selection = "flash"       # flash | hold | word_select
@@ -188,7 +188,7 @@ stream_tool_calls = true
 # query_params = { api-version = "2026-07-22" }
 # env_http_headers = { "X-Tenant" = "TENANT_TOKEN_ENV" }
 
-# Shift+Tab 按声明顺序循环；default=true 是模型级默认，并覆盖全局默认。
+# Ctrl+X E 和 /effort 按声明顺序展示；default=true 是模型级默认，并覆盖全局默认。
 [[provider.deepseek.models.deepseek-chat.reasoning_efforts]]
 value = "high"                     # none|minimal|low|medium|high|xhigh|max
 label = "High"
@@ -316,7 +316,6 @@ support_permission = true
 codebase_indexing = true             # 也可为 ["src/**", "!vendor/**"]
 non_git_warning = false
 managed_config = false               # 本地个人使用通常关闭受管理配置获取
-remote_fetch = false                 # 关闭可选远程 catalog/settings；不影响 BYOK Provider
 lsp_tools = false
 tool_search = true                   # MCP tool search/discovery
 web_fetch = true

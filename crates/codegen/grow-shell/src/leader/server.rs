@@ -125,7 +125,6 @@ pub struct LeaderServerMetadata {
     pub pid: u32,
     pub socket_path: PathBuf,
     pub lock_path: PathBuf,
-    pub ws_url_suffix: String,
     pub leader_binary_version: String,
 }
 #[derive(Debug, Clone)]
@@ -318,7 +317,7 @@ fn is_machine_wide_broadcast_notification(json: &serde_json::Value) -> bool {
 ///   - wrapped: `{"method":"_grow/foo","params":{"method":"grow/foo",...}}`  -> `grow/foo`
 ///
 /// Gateway-forwarded ext methods/notifications (`ext_method` / `ext_notification`
-/// — e.g. `ask_user_question`, `exit_plan_mode`, `scheduled_task_inject_prompt`,
+/// — e.g. `ask_user_question`, `plan_approval`, `scheduled_task_inject_prompt`,
 /// `session_notification`) arrive WRAPPED: a top-level `_`-prefixed method with
 /// the real method + params nested one level under `params`. Plain methods
 /// (`session/request_permission`, `session/update`, …) arrive direct. Anything
@@ -371,13 +370,13 @@ fn is_scheduled_task_inject_prompt(json: &serde_json::Value) -> bool {
 fn is_interaction_request(json: &serde_json::Value) -> bool {
     matches!(
         method_of(json),
-        Some("session/request_permission" | "grow/ask_user_question" | "grow/exit_plan_mode")
+        Some("session/request_permission" | "grow/ask_user_question" | "grow/plan_approval")
     )
 }
 /// Extract the `tool_call_id` an interaction reverse-request carries, so the
 /// leader can cache it (keyed by id) for replay-on-attach and evict it on
 /// `InteractionResolved`. The ext-methods (`ask_user_question` /
-/// `exit_plan_mode`) carry it directly under (inner) `params`;
+/// `plan_approval`) carry it directly under (inner) `params`;
 /// `request_permission` nests it under `toolCall`. Tolerant of the gateway
 /// wrapper (via `interaction_inner_params`) and camel/snake spelling.
 fn extract_interaction_tool_call_id(json: &serde_json::Value) -> Option<String> {
@@ -471,7 +470,9 @@ fn prune_child_route(
     session_subscribers: &mut HashMap<String, HashSet<ClientId>>,
     session_driver: &mut HashMap<String, ClientId>,
     child_sessions: &mut HashMap<String, HashSet<String>>,
+    retired_sessions: &mut HashSet<String>,
 ) {
+    retired_sessions.insert(child_sid.to_owned());
     session_subscribers.remove(child_sid);
     session_driver.remove(child_sid);
     let parent = child_sessions
@@ -508,6 +509,7 @@ fn backfill_child_routes(
     child_sessions: &HashMap<String, HashSet<String>>,
     session_subscribers: &mut HashMap<String, HashSet<ClientId>>,
     session_driver: &mut HashMap<String, ClientId>,
+    retired_sessions: &mut HashSet<String>,
 ) {
     let parent_driver = session_driver.get(parent).copied();
     let mut stack: Vec<&str> = vec![parent];
@@ -524,6 +526,7 @@ fn backfill_child_routes(
                 .entry(child.clone())
                 .or_default()
                 .insert(client);
+            retired_sessions.remove(child);
             if let Some(driver) = parent_driver {
                 session_driver.entry(child.clone()).or_insert(driver);
             }
@@ -859,7 +862,6 @@ fn leader_info_payload(control_state: &LeaderServerControlState) -> ControlPaylo
         pid: control_state.metadata.pid,
         socket_path: control_state.metadata.socket_path.clone(),
         lock_path: control_state.metadata.lock_path.clone(),
-        ws_url_suffix: control_state.metadata.ws_url_suffix.clone(),
         leader_protocol_version: LEADER_PROTOCOL_VERSION,
         leader_binary_version: control_state.metadata.leader_binary_version.clone(),
         profiling_supported: manager.runtime_cpu_profile(),
@@ -1055,7 +1057,7 @@ fn decide_relaunch_for_update(
 }
 /// Arm the bounded-grace drain for an accepted relaunch: wait up to
 /// [`RELAUNCH_GRACE`] for the agent to go idle (`agent_busy` for IPC traffic
-/// AND [`AgentActivity::is_busy`] for relay-driven turns / subagents), flush
+/// AND [`AgentActivity::is_busy`] for running turns / subagents), flush
 /// every session actor, then set [`ShutdownReason::AutoUpdate`] and cancel —
 /// the same exit path the auto-update checker uses. Must be called *after*
 /// the `Relaunching` ack has been sent so the ack is delivered before
@@ -1155,18 +1157,11 @@ fn make_version_mismatch_notification(
 /// * `cancel` - Cancellation token for graceful shutdown
 /// * `no_exit_on_disconnect` - If true, don't exit when all clients disconnect
 /// * `client_count` - Atomic counter tracking the number of connected clients
-/// * `agent_busy` - Atomic flag set while the agent has in-flight **IPC**
-///   requests; relay-driven traffic never sets it
+/// * `agent_busy` - Atomic flag set while the agent has in-flight requests
 /// * `agent_activity` - Agent-derived activity view (running turns, parked
 ///   interactions, live subagents) consulted by the `RelaunchForUpdate` drain
 ///   alongside `agent_busy`, plus the pre-shutdown session flush
 /// * `ready_rx` - Watch receiver; ACP forwarding is gated until this is `true`
-/// * `relay_demand_tx` - Watch sender flipped to `true` when the first
-///   [`ClientMode::Headless`] client registers. `run_leader` defers starting the
-///   service.example.com WebSocket relay until this fires, so a leader serving only
-///   interactive clients (TUI dashboard, IDE) never duplicates its ACP stream
-///   onto the relay. Headless registration is the devbox-flow marker: those
-///   clients are driven remotely *through* the relay.
 /// * `shutdown_tx` - Watch sender for the shutdown reason. The server subscribes
 ///   its own receiver and reads it once when `cancel` fires (defaults to
 ///   [`ShutdownReason::Manual`]). The auto-update checker and the
@@ -1188,7 +1183,6 @@ pub async fn run_leader_server(
     agent_busy: Arc<AtomicBool>,
     agent_activity: AgentActivity,
     ready_rx: watch::Receiver<bool>,
-    relay_demand_tx: watch::Sender<bool>,
     shutdown_tx: watch::Sender<super::protocol::ShutdownReason>,
     leader_version_override: Option<&'static str>,
     control_state: LeaderServerControlState,
@@ -1203,6 +1197,10 @@ pub async fn run_leader_server(
     let mut session_subscribers: HashMap<String, std::collections::HashSet<ClientId>> =
         HashMap::new();
     let mut child_sessions: HashMap<String, HashSet<String>> = HashMap::new();
+    // Never route late updates from an explicitly detached or finished
+    // session through the unknown-session fallback. A later attach removes
+    // the tombstone when it establishes ownership again.
+    let mut retired_sessions: HashSet<String> = HashSet::new();
     let mut pending_load_by_req: HashMap<String, (ClientId, String)> = HashMap::new();
     let mut load_live_buffer: HashMap<(ClientId, String), Vec<BufferedLive>> = HashMap::new();
     let mut orphan_replay_warned: HashSet<ClientId> = HashSet::new();
@@ -1279,19 +1277,6 @@ pub async fn run_leader_server(
                                 "client_type": client.client_type,
                             })),
                         );
-                        if mode == ClientMode::Headless {
-                            let newly_demanded = relay_demand_tx.send_if_modified(|demanded| {
-                                let changed = !*demanded;
-                                *demanded = true;
-                                changed
-                            });
-                            if newly_demanded {
-                                info!(
-                                    client_id = id.0,
-                                    "First headless client registered; signalling relay demand"
-                                );
-                            }
-                        }
                         let effective_leader_version =
                             leader_version_override.unwrap_or(LEADER_VERSION);
                         if let Some(ref cv) = client.capabilities.client_version
@@ -1340,6 +1325,7 @@ pub async fn run_leader_server(
                         if now_empty {
                             session_subscribers.remove(&sid);
                             session_driver.remove(&sid);
+                            retired_sessions.insert(sid.clone());
                             detached_sessions.push(sid);
                         } else if session_driver.get(&sid) == Some(&id) {
                             if let Some(&next) =
@@ -1457,6 +1443,7 @@ pub async fn run_leader_server(
                         last_active_client = Some(id);
                     }
                     if let Some(session_id) = json.as_ref().and_then(extract_session_id) {
+                        retired_sessions.remove(&session_id);
                         session_subscribers
                             .entry(session_id.clone())
                             .or_default()
@@ -1468,6 +1455,7 @@ pub async fn run_leader_server(
                             &child_sessions,
                             &mut session_subscribers,
                             &mut session_driver,
+                            &mut retired_sessions,
                         );
                     }
                     if let (Some(json), Some(client)) = (json.as_ref(), clients.get_mut(&id)) {
@@ -1562,6 +1550,7 @@ pub async fn run_leader_server(
                     && let Some(json) = json.as_mut()
                 {
                     if let Some(session_id) = extract_session_id_from_result(json) {
+                        retired_sessions.remove(&session_id);
                         session_subscribers
                             .entry(session_id.clone())
                             .or_default()
@@ -1575,6 +1564,7 @@ pub async fn run_leader_server(
                             &child_sessions,
                             &mut session_subscribers,
                             &mut session_driver,
+                            &mut retired_sessions,
                         );
                         trace!(
                             client_id = client_id.0,
@@ -1689,6 +1679,7 @@ pub async fn run_leader_server(
                     if let Some(client) = clients.get(&target) {
                         match json.as_ref().and_then(extract_child_session_event) {
                             Some(ChildSessionEvent::Spawned(child_sid)) => {
+                                retired_sessions.remove(&child_sid);
                                 if let Some(parent) = json.as_ref().and_then(extract_session_id) {
                                     child_sessions
                                         .entry(parent)
@@ -1713,6 +1704,7 @@ pub async fn run_leader_server(
                                         &mut session_subscribers,
                                         &mut session_driver,
                                         &mut child_sessions,
+                                        &mut retired_sessions,
                                     );
                                 }
                             }
@@ -1756,6 +1748,7 @@ pub async fn run_leader_server(
                                 &mut session_subscribers,
                                 &mut session_driver,
                                 &mut child_sessions,
+                                &mut retired_sessions,
                             );
                         }
                         if orphan_replay_warned.insert(target) {
@@ -1801,6 +1794,25 @@ pub async fn run_leader_server(
                         .entry(sid.clone())
                         .or_default()
                         .insert(tcid, payload.clone());
+                }
+                // A live finish is a global lifecycle fact even when the
+                // parent currently has no attached client. Prune before the
+                // routing branch so a later parent reattach cannot backfill a
+                // child that completed while the parent was detached.
+                if let Some(ChildSessionEvent::Finished(child_sid)) =
+                    json.as_ref().and_then(extract_child_session_event)
+                    && session_id
+                        .as_ref()
+                        .is_none_or(|sid| !session_subscribers.contains_key(sid))
+                {
+                    prune_child_route(
+                        &child_sid,
+                        &mut session_subscribers,
+                        &mut session_driver,
+                        &mut child_sessions,
+                        &mut retired_sessions,
+                    );
+                    continue;
                 }
                 if let Some(ref sid) = session_id
                     && session_subscribers.contains_key(sid.as_str())
@@ -1871,6 +1883,7 @@ pub async fn run_leader_server(
                     }
                     match child_event {
                         Some(ChildSessionEvent::Spawned(child_sid)) => {
+                            retired_sessions.remove(&child_sid);
                             let parent_subs = session_subscribers
                                 .get(sid.as_str())
                                 .cloned()
@@ -1892,6 +1905,7 @@ pub async fn run_leader_server(
                                 &mut session_subscribers,
                                 &mut session_driver,
                                 &mut child_sessions,
+                                &mut retired_sessions,
                             );
                         }
                         None => {}
@@ -1899,28 +1913,15 @@ pub async fn run_leader_server(
                     continue;
                 }
                 let is_notification = json.as_ref().is_some_and(|j| j.get("id").is_none());
-                let is_relay_session_notification = is_notification
-                    && session_id
-                        .as_ref()
-                        .is_some_and(|s| !session_subscribers.contains_key(s.as_str()));
                 if !is_notification {
-                    trace!("Dropping non-routable response (likely relay-originated)");
-                } else if is_relay_session_notification {
-                    if let Some(ChildSessionEvent::Finished(child_sid)) =
-                        json.as_ref().and_then(extract_child_session_event)
-                        && session_subscribers
-                            .get(&child_sid)
-                            .is_none_or(|subs| subs.is_empty())
-                    {
-                        prune_child_route(
-                            &child_sid,
-                            &mut session_subscribers,
-                            &mut session_driver,
-                            &mut child_sessions,
-                        );
-                    }
-                    trace!(
-                        "Dropping notification for relay-owned session (already delivered via WS)"
+                    trace!("Dropping non-routable response");
+                } else if session_id
+                    .as_ref()
+                    .is_some_and(|sid| retired_sessions.contains(sid))
+                {
+                    debug!(
+                        session_id = session_id.as_deref().unwrap_or_default(),
+                        "Dropping notification for retired session"
                     );
                 } else if let Some(client_id) = last_active_client
                     && let Some(client) = clients.get(&client_id)
@@ -2220,9 +2221,6 @@ pub struct ServerHandle {
     /// reason. The default value is [`ShutdownReason::Manual`]; send
     /// [`ShutdownReason::AutoUpdate`] before cancelling for auto-update shutdowns.
     pub shutdown_tx: watch::Sender<super::protocol::ShutdownReason>,
-    /// Observe relay demand: flips to `true` when the first headless client
-    /// registers (see `relay_demand_tx` on [`run_leader_server`]).
-    pub relay_demand_rx: watch::Receiver<bool>,
     /// Leader-local control metadata and CPU profiling state, exposed for tests.
     pub control_state: LeaderServerControlState,
 }
@@ -2231,7 +2229,6 @@ fn default_test_control_state(socket_path: &Path) -> LeaderServerControlState {
         pid: std::process::id(),
         socket_path: socket_path.to_path_buf(),
         lock_path: socket_path.with_extension("lock"),
-        ws_url_suffix: String::new(),
         leader_binary_version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
@@ -2244,7 +2241,6 @@ pub async fn spawn_leader_server(socket_path: PathBuf) -> Result<ServerHandle, S
     let (ready_tx, ready_rx) = watch::channel(true);
     let (shutdown_tx, _shutdown_reason_rx) =
         watch::channel(super::protocol::ShutdownReason::Manual);
-    let (relay_demand_tx, relay_demand_rx) = watch::channel(false);
     let control_state = default_test_control_state(&socket_path);
     let cancel_clone = cancel.clone();
     let socket_path_clone = socket_path.clone();
@@ -2263,7 +2259,6 @@ pub async fn spawn_leader_server(socket_path: PathBuf) -> Result<ServerHandle, S
             agent_busy_clone,
             AgentActivity::default(),
             ready_rx,
-            relay_demand_tx,
             shutdown_tx_for_server,
             None,
             control_state_for_server,
@@ -2281,7 +2276,6 @@ pub async fn spawn_leader_server(socket_path: PathBuf) -> Result<ServerHandle, S
         agent_busy,
         ready_tx,
         shutdown_tx,
-        relay_demand_rx,
         control_state,
     })
 }
@@ -2297,7 +2291,7 @@ mod tests {
         serde_json::from_str(payload).expect("test payload must be valid JSON")
     }
     /// The relaunch drain must wait on the agent-derived activity signal —
-    /// not just the IPC `agent_busy` flag, which relay-driven turns never set
+    /// not just the IPC `agent_busy` flag, which does not cover work after dispatch
     /// — and must flush registered session actors before cancelling.
     #[tokio::test]
     async fn relaunch_drain_waits_for_agent_activity_and_flushes_sessions() {
@@ -2324,7 +2318,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(
             !cancel.is_cancelled(),
-            "drain must not cancel while a relay-driven turn is running"
+            "drain must not cancel while an actor-owned turn is running"
         );
         *prompt_id.lock().unwrap() = None;
         tokio::time::timeout(Duration::from_secs(5), cancel.cancelled())
@@ -2400,7 +2394,6 @@ mod tests {
             pid: std::process::id(),
             socket_path: sock.clone(),
             lock_path: sock.with_extension("lock"),
-            ws_url_suffix: String::new(),
             leader_binary_version: "0.1.100".to_string(),
         });
         let relaunching = AtomicBool::new(false);
@@ -2492,7 +2485,6 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
                 AgentActivity::default(),
                 ready_rx,
-                watch::channel(false).0,
                 shutdown_tx,
                 None,
                 control_state,
@@ -2539,8 +2531,7 @@ mod tests {
     ) {
         connect_and_register_with_mode(sock_path, client_type, ClientMode::Stdio).await
     }
-    /// Like [`connect_and_register`] but with an explicit [`ClientMode`], for
-    /// tests that exercise mode-dependent server behavior (relay demand).
+    /// Like [`connect_and_register`] but with an explicit [`ClientMode`].
     async fn connect_and_register_with_mode(
         sock_path: &std::path::Path,
         client_type: &str,
@@ -2563,33 +2554,6 @@ mod tests {
         .unwrap();
         let _: ServerMessage = read_message(&mut reader).await.unwrap();
         (reader, writer)
-    }
-    /// Relay demand gate (relay-on-demand): Stdio registrations must NOT
-    /// signal relay demand — a leader serving only interactive clients (TUI
-    /// dashboard, IDE) keeps the service.example.com relay off. The first Headless
-    /// registration (devbox / `grow agent headless` flow) flips the watch so
-    /// `run_leader` starts the deferred relay connection.
-    #[tokio::test]
-    async fn relay_demand_signals_only_on_headless_registration() {
-        let temp = TempDir::new().unwrap();
-        let sock_path = temp.path().join("relay-demand.sock");
-        let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
-        let mut relay_demand_rx = handle.relay_demand_rx.clone();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let _stdio =
-            connect_and_register_with_mode(&sock_path, "grow-tui", ClientMode::Stdio).await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(
-            !*relay_demand_rx.borrow(),
-            "stdio registration must not signal relay demand"
-        );
-        let _headless =
-            connect_and_register_with_mode(&sock_path, "grow-headless", ClientMode::Headless).await;
-        tokio::time::timeout(Duration::from_secs(5), relay_demand_rx.wait_for(|d| *d))
-            .await
-            .expect("relay demand must flip after headless registration")
-            .expect("relay demand channel must stay open");
-        handle.cancel.cancel();
     }
     #[tokio::test]
     async fn client_registration_flow() {
@@ -2966,7 +2930,7 @@ mod tests {
         for m in [
             "session/request_permission",
             "grow/ask_user_question",
-            "grow/exit_plan_mode",
+            "grow/plan_approval",
         ] {
             let payload = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{m}","params":{{}}}}"#);
             assert!(
@@ -2974,7 +2938,7 @@ mod tests {
                 "{m} (direct) must be an interaction"
             );
         }
-        for m in ["grow/ask_user_question", "grow/exit_plan_mode"] {
+        for m in ["grow/ask_user_question", "grow/plan_approval"] {
             let payload = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"_{m}","params":{{"method":"{m}","params":{{}}}}}}"#
             );
@@ -4137,7 +4101,6 @@ mod tests {
                 busy_clone,
                 AgentActivity::default(),
                 watch::channel(true).1,
-                watch::channel(false).0,
                 watch::channel(super::super::protocol::ShutdownReason::Manual).0,
                 None,
                 control_state,
@@ -4198,7 +4161,6 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
                 AgentActivity::default(),
                 watch::channel(true).1,
-                watch::channel(false).0,
                 watch::channel(super::super::protocol::ShutdownReason::Manual).0,
                 None,
                 control_state,
@@ -4249,17 +4211,16 @@ mod tests {
                 let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
                 assert_eq!(
                     json["method"], "agent/progress",
-                    "Should receive the notification, not the relay response"
+                    "Should receive the notification, not the unroutable response"
                 );
             }
             other => panic!("Expected Acp message, got {:?}", other),
         }
         server_cancel.cancel();
     }
-    /// Relay-originated session notifications must be dropped, not forwarded
-    /// to the last active IPC client.
+    /// A notification for an unclaimed session falls back to the last active client.
     #[tokio::test]
-    async fn relay_session_notification_not_forwarded_to_ipc_client() {
+    async fn unclaimed_session_notification_uses_last_active_client() {
         let temp = TempDir::new().unwrap();
         let (sock_path, cancel, response_tx) = setup_persistent_server(&temp).await;
         let (mut reader, mut writer) = connect_and_register(&sock_path, "test").await;
@@ -4274,7 +4235,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         response_tx
             .send(
-                r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"relay-sess-xyz","data":"from-relay"}}"#
+                r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"unclaimed-sess-xyz","data":"background"}}"#
                     .into(),
             )
             .unwrap();
@@ -4293,8 +4254,8 @@ mod tests {
         match msg {
             ServerMessage::Acp { payload } => {
                 let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
-                assert_eq!(json["method"], "agent/progress");
-                assert!(json["params"].get("sessionId").is_none());
+                assert_eq!(json["method"], "session/update");
+                assert_eq!(json["params"]["sessionId"], "unclaimed-sess-xyz");
             }
             other => panic!("Expected Acp message, got {:?}", other),
         }
@@ -4433,7 +4394,6 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
                 AgentActivity::default(),
                 watch::channel(true).1,
-                watch::channel(false).0,
                 watch::channel(super::super::protocol::ShutdownReason::Manual).0,
                 None,
                 control_state,
@@ -4653,7 +4613,6 @@ mod tests {
                 busy_clone,
                 AgentActivity::default(),
                 watch::channel(true).1,
-                watch::channel(false).0,
                 watch::channel(super::super::protocol::ShutdownReason::Manual).0,
                 None,
                 control_state,
@@ -4790,7 +4749,6 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
                 AgentActivity::default(),
                 watch::channel(true).1,
-                watch::channel(false).0,
                 watch::channel(super::super::protocol::ShutdownReason::Manual).0,
                 None,
                 control_state,
@@ -4857,7 +4815,6 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
                 AgentActivity::default(),
                 watch::channel(true).1,
-                watch::channel(false).0,
                 watch::channel(super::super::protocol::ShutdownReason::Manual).0,
                 None,
                 control_state,
@@ -5427,7 +5384,7 @@ mod tests {
     /// Symmetric twin of `live_finished_prunes_index_so_reattach_skips_dead_child`
     /// for the no-subscribers case: the parent goes fully detached (every
     /// client disconnects, the index edge survives), THEN a live
-    /// `subagent_finished` arrives. It is relay-classified (no subscribers) and
+    /// `subagent_finished` arrives. It has no subscribers and
     /// dropped — but it must still prune the index edge, so a reattaching
     /// client's `session/load` backfill does not resurrect the dead child.
     #[tokio::test]
@@ -5792,7 +5749,6 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
                 AgentActivity::default(),
                 watch::channel(true).1,
-                watch::channel(false).0,
                 watch::channel(super::super::protocol::ShutdownReason::Manual).0,
                 None,
                 control_state,
@@ -5854,7 +5810,7 @@ mod tests {
     }
     /// `grow/models/update` is a machine-wide catalog notification with no
     /// sessionId; it must broadcast to every registered client so every model
-    /// picker refreshes after a config.toml / models_cache.json hot-reload —
+    /// picker refreshes after a config.toml hot-reload —
     /// not just the last-active client. Uses the production wire form: agent
     /// ext notifications arrive `_`-prefixed (`_grow/models/update`).
     #[tokio::test]

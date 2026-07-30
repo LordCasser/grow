@@ -172,10 +172,8 @@ async fn actor_with_proxy(
         ..Default::default()
     };
     actor.models_manager = crate::agent::models::ModelsManager::new(
-        None,
         Default::default(),
         acp::ModelId::new("default"),
-        auth_manager.clone(),
         cfg,
     );
     actor.auth_manager = Some(auth_manager);

@@ -176,7 +176,6 @@ impl AgentView {
                             };
                             hints.push(HintItem::new(key!('f', CONTROL), label));
                         }
-                        hints.push(HintItem::new(key!('o', CONTROL), "always-approve"));
                         hints.push(HintItem::new(key!('c', CONTROL), "cancel"));
                         hints
                     }
@@ -768,6 +767,13 @@ impl AgentView {
             .current_model_name()
             .unwrap_or_else(|| "unknown".to_string());
         let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
+        let effective_behavior = self.behavior_mode_pending.unwrap_or(self.behavior_mode);
+        let leader_active = self
+            .leader_key_started_at
+            .is_some_and(|started| started.elapsed() <= super::input::LEADER_KEY_TIMEOUT);
+        if self.leader_key_started_at.is_some() && !leader_active {
+            self.leader_key_started_at = None;
+        }
         let casual_commenting = self.is_casual_commenting();
         let prompt_focused = if self.plan_approval_view.is_some() {
             self.plan_approval_view
@@ -776,7 +782,7 @@ impl AgentView {
         } else if casual_commenting {
             true
         } else {
-            self.active_pane == AgentPane::Prompt && !overlay_focused
+            self.active_pane == AgentPane::Prompt && !overlay_focused && !leader_active
         };
         let prompt_style = PromptStyle {
             focused: prompt_focused,
@@ -1002,8 +1008,9 @@ impl AgentView {
         } else {
             base_prompt_height
         };
-        let prompt_height =
-            prompt_height.max(prompt_style.vpad_top + 1 + prompt_style.info_block(true));
+        let prompt_height = prompt_height
+            .max(prompt_style.vpad_top + 1 + prompt_style.info_block(true))
+            .saturating_add(u16::from(leader_active));
         let prompt_height = if self.is_subagent_view {
             0
         } else {
@@ -2124,14 +2131,40 @@ impl AgentView {
             }
         };
         let editing_label;
-        let commenting_label;
         let theme = Theme::current();
         let mut mode_flags_vec: Vec<PromptFlag> = Vec::new();
         let approval_is_commenting = self
             .plan_approval_view
             .as_ref()
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
-        if effective_plan || casual_commenting {
+        let behavior_label = if effective_behavior == grow_tools::types::SessionMode::Plan {
+            match self.plan_phase.as_deref() {
+                Some("awaiting_approval") => "plan · awaiting approval",
+                Some("executing") => "plan · executing",
+                Some("amending") => "plan · amending",
+                _ => "plan · drafting",
+            }
+        } else if effective_behavior == grow_tools::types::SessionMode::Ask {
+            "clarify"
+        } else if effective_behavior == grow_tools::types::SessionMode::Workflow {
+            "workflow"
+        } else if effective_behavior == grow_tools::types::SessionMode::DeepResearch {
+            "deep-research"
+        } else if effective_behavior == grow_tools::types::SessionMode::Goal {
+            "goal"
+        } else {
+            "normal"
+        };
+        mode_flags_vec.push(PromptFlag {
+            text: behavior_label,
+            color: if effective_plan {
+                Some(theme.accent_plan)
+            } else {
+                Some(theme.accent_system)
+            },
+            bold: false,
+        });
+        let interaction_label = if approval_is_commenting || casual_commenting {
             let commenting_range: Option<&std::ops::Range<usize>> = if approval_is_commenting {
                 self.plan_approval_view
                     .as_ref()
@@ -2141,25 +2174,38 @@ impl AgentView {
             } else {
                 None
             };
-            let plan_label: &str = if approval_is_commenting || casual_commenting {
-                commenting_label = match commenting_range {
-                    Some(r) if r.len() == 1 => format!("commenting L{}", r.start),
-                    Some(r) => format!("commenting L{}-{}", r.start, r.end - 1),
-                    None => "commenting".to_string(),
-                };
-                commenting_label.as_str()
-            } else if self.plan_approval_view.is_some() {
-                "plan approval"
-            } else {
-                "plan"
-            };
+            Some(match commenting_range {
+                Some(r) if r.len() == 1 => format!("commenting L{}", r.start),
+                Some(r) => format!("commenting L{}-{}", r.start, r.end - 1),
+                None => "commenting".to_string(),
+            })
+        } else if self.plan_approval_view.is_some() {
+            Some("plan approval".to_owned())
+        } else {
+            None
+        };
+        if let Some(label) = interaction_label.as_deref() {
             mode_flags_vec.push(PromptFlag {
-                text: plan_label,
+                text: label,
                 color: Some(theme.accent_plan),
                 bold: false,
             });
         }
-        if self.session.is_yolo() && !effective_plan {
+        let active_workflow_runs = self
+            .workflow_runs
+            .iter()
+            .filter(|run| !run.is_terminal())
+            .count();
+        let active_workflow_runs_label =
+            (active_workflow_runs > 0).then(|| format!("runs: {active_workflow_runs}"));
+        if let Some(label) = active_workflow_runs_label.as_deref() {
+            mode_flags_vec.push(PromptFlag {
+                text: label,
+                color: Some(theme.accent_system),
+                bold: false,
+            });
+        }
+        if self.session.is_yolo() {
             mode_flags_vec.push(PromptFlag {
                 text: "always-approve",
                 color: None,
@@ -2626,7 +2672,8 @@ impl AgentView {
                 buttons.clear();
             }
         } else {
-            let collapsed = !prompt_focused && appearance.prompt.collapse_unfocused;
+            let collapsed =
+                !prompt_focused && !leader_active && appearance.prompt.collapse_unfocused;
             let saved_scroll = if collapsed {
                 let s = self.prompt.scroll();
                 let ovr = self.prompt.textarea.scroll_override();
@@ -2635,9 +2682,44 @@ impl AgentView {
             } else {
                 None
             };
+            let prompt_area = if leader_active && layout.prompt.height > 1 {
+                let mut labels = Vec::new();
+                if !self.session.models.is_empty() {
+                    labels.push("M Model");
+                }
+                labels.push("A Agent");
+                if !self.session.models.reasoning_effort_options().is_empty() {
+                    labels.push("E Effort");
+                }
+                labels.push("P Permission");
+                labels.push("B Behavior");
+                let hint = labels.join("  ·  ");
+                let hint_area = Rect {
+                    x: layout.prompt.x,
+                    y: layout.prompt.y,
+                    width: layout.prompt.width,
+                    height: 1,
+                };
+                buf.set_style(hint_area, Style::default().bg(theme.bg_base));
+                buf.set_stringn(
+                    hint_area.x.saturating_add(2),
+                    hint_area.y,
+                    hint,
+                    hint_area.width.saturating_sub(4) as usize,
+                    Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+                );
+                Rect {
+                    x: layout.prompt.x,
+                    y: layout.prompt.y.saturating_add(1),
+                    width: layout.prompt.width,
+                    height: layout.prompt.height.saturating_sub(1),
+                }
+            } else {
+                layout.prompt
+            };
             let prompt_result_inner = self.prompt.draw(
                 buf,
-                layout.prompt,
+                prompt_area,
                 Some(layout.scrollback),
                 &prompt_style,
                 Some(&info),
@@ -2647,6 +2729,9 @@ impl AgentView {
                 self.prompt.set_scroll(s);
             }
             prompt_cursor_pos = prompt_result_inner.cursor_pos;
+            if leader_active {
+                prompt_cursor_pos = None;
+            }
             if let Some(escapes) = prompt_result_inner.post_flush_escapes {
                 prompt_post_flush = Some(escapes.into());
             }
@@ -3050,7 +3135,6 @@ impl AgentView {
                             };
                             hints.push(HintItem::new(key!('f', CONTROL), label));
                         }
-                        hints.push(HintItem::new(key!('o', CONTROL), "always-approve"));
                         hints.push(HintItem::new(key!('c', CONTROL), "cancel"));
                         hints
                     }
@@ -4123,6 +4207,73 @@ mod toast_fit_tests {
     fn zero_width_slot_yields_none() {
         assert_eq!(fit_toast_text("Copied!", 4), None);
         assert_eq!(fit_toast_text("Copied!", 0), None);
+    }
+}
+#[cfg(test)]
+mod behavior_status_tests {
+    use super::super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    fn draw_text(agent: &mut super::AgentView) -> String {
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn prompt_status_always_shows_normal_behavior() {
+        let text = draw_text(&mut make_agent());
+        assert!(text.contains("normal"), "rendered prompt status: {text}");
+    }
+
+    #[test]
+    fn prompt_status_places_behavior_before_permission() {
+        let mut agent = make_agent();
+        agent.behavior_mode = grow_tools::types::SessionMode::Workflow;
+        agent.session.yolo_mode = true;
+        let text = draw_text(&mut agent);
+        let behavior = text.find("workflow").expect("workflow Behavior status");
+        let permission = text
+            .find("always-approve")
+            .expect("always-approve permission status");
+        assert!(behavior < permission, "rendered prompt status: {text}");
+    }
+
+    #[test]
+    fn prompt_status_shows_the_active_plan_phase() {
+        let mut agent = make_agent();
+        agent.behavior_mode = grow_tools::types::SessionMode::Plan;
+        agent.plan_phase = Some("executing".into());
+        let text = draw_text(&mut agent);
+        assert!(
+            text.contains("plan · executing"),
+            "rendered prompt status: {text}"
+        );
     }
 }
 #[cfg(test)]

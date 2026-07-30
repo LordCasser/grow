@@ -135,7 +135,7 @@ impl CommandRegistry {
         let sources = vec![CommandSource::Builtin; n];
         // Fail-closed until the matching `set_*_visible` call reveals them.
         let mut hidden = HashSet::new();
-        hidden.insert("dashboard".to_string());
+        hidden.insert("agents".to_string());
         hidden.insert("recap".to_string());
         // `/auto` is fail-closed: hidden until `set_auto_mode_available(true)`.
         hidden.insert("auto".to_string());
@@ -178,7 +178,7 @@ impl CommandRegistry {
     /// typed invocation, ignoring the menu-only gate (`menu_hidden`).
     ///
     /// Still returns `None` for hard-hidden commands (feature gates like
-    /// `/dashboard`, or `/auto` when the auto permission-mode
+    /// `/agents`, or `/auto` when the auto permission-mode
     /// feature is unavailable — those must stay fail-closed), and commands
     /// whose `required_tools()` are not all in the advertised toolset.
     ///
@@ -281,13 +281,13 @@ impl CommandRegistry {
         self.available_tools = Some(tools);
     }
 
-    /// Show or hide the `/dashboard` command (feature-flag gating).
+    /// Show or hide the `/agents` command (feature-flag gating).
     ///
     /// The command is hidden by default (see [`Self::new`]) and revealed here
     /// when the dashboard feature flag (`dashboard_enabled()`) is on. When
     /// hidden it won't appear in the dropdown or be executable.
     pub fn set_dashboard_visible(&mut self, visible: bool) {
-        self.set_command_visible("dashboard", visible);
+        self.set_command_visible("agents", visible);
     }
 
     /// Show or hide the `/recap` command (shell `sessionRecap` gate).
@@ -615,9 +615,9 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_command_hidden_by_default_and_toggleable() {
+    fn agents_command_hidden_by_default_and_toggleable() {
         let dashboard: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "dashboard",
+            name: "agents",
             aliases: &[],
         });
         let other: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
@@ -627,29 +627,19 @@ mod tests {
         let mut registry = CommandRegistry::new(vec![dashboard, other]);
 
         // Fail-closed: hidden by default (until the feature flag reveals it).
-        assert!(registry.get("dashboard").is_none());
-        assert!(
-            !registry
-                .triggers()
-                .iter()
-                .any(|t| t.canonical == "dashboard")
-        );
+        assert!(registry.get("agents").is_none());
+        assert!(!registry.triggers().iter().any(|t| t.canonical == "agents"));
         // Unrelated commands are unaffected.
         assert!(registry.get("exit").is_some());
 
         // Enabling the feature reveals it.
         registry.set_dashboard_visible(true);
-        assert!(registry.get("dashboard").is_some());
-        assert!(
-            registry
-                .triggers()
-                .iter()
-                .any(|t| t.canonical == "dashboard")
-        );
+        assert!(registry.get("agents").is_some());
+        assert!(registry.triggers().iter().any(|t| t.canonical == "agents"));
 
         // Hiding again removes it.
         registry.set_dashboard_visible(false);
-        assert!(registry.get("dashboard").is_none());
+        assert!(registry.get("agents").is_none());
     }
 
     #[test]
@@ -857,12 +847,12 @@ mod tests {
         assert!(reg.get("multi").is_some());
     }
 
-    /// Builds a registry with `always-approve` (+ a `yolo` alias to cover
-    /// alias key handling), `auto`, and a bystander `exit`.
+    /// Builds a registry with `always-approve` (+ a synthetic alias to cover
+    /// generic alias key handling), `auto`, and a bystander `exit`.
     fn permission_mode_registry() -> CommandRegistry {
         let always_approve: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
             name: "always-approve",
-            aliases: &["yolo"],
+            aliases: &["approve-all-test-alias"],
         });
         let auto: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
             name: "auto",
@@ -899,7 +889,7 @@ mod tests {
             "typed invocation must still resolve for dispatch"
         );
         assert!(
-            reg.get_for_dispatch("yolo").is_some(),
+            reg.get_for_dispatch("approve-all-test-alias").is_some(),
             "aliases of a menu-hidden command must still resolve for dispatch"
         );
         // Bystanders unaffected.
@@ -946,9 +936,9 @@ mod tests {
     /// tool-gated commands stay unresolvable for dispatch, exactly like `get()`.
     #[test]
     fn get_for_dispatch_respects_hard_gates() {
-        // Hard-hidden by name (e.g. /dashboard default).
+        // Hard-hidden by name (e.g. /agents default).
         let dashboard: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "dashboard",
+            name: "agents",
             aliases: &[],
         });
         // Tool-gated (toolset unknown → fail-closed).
@@ -960,7 +950,7 @@ mod tests {
         reg.set_dashboard_visible(false);
 
         assert!(
-            reg.get_for_dispatch("dashboard").is_none(),
+            reg.get_for_dispatch("agents").is_none(),
             "hidden stays hard"
         );
         assert!(

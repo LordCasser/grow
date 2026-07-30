@@ -42,7 +42,7 @@ Automate, script, and integrate Grow with other systems.
 | # | Document | Description |
 |---|----------|-------------|
 | 14 | [Headless Mode and Scripting](14-headless-mode.md) | `grow -p`, output formats, CI/CD integration, and piping |
-| 15 | [Agent Mode and IDE Integration](15-agent-mode.md) | ACP stdio transport, WebSocket relay, and SDK integration |
+| 15 | [Agent Mode and IDE Integration](15-agent-mode.md) | ACP stdio/WebSocket server transports and SDK integration |
 | 16 | [Subagents and Personas](16-subagents.md) | Parallel child sessions, agent types, personas, and capability modes |
 | 17 | [Session Management](17-sessions.md) | Save, load, resume, rewind, compact, and the session persistence format |
 | 18 | [Sandbox Mode](18-sandbox.md) | OS-level filesystem and network isolation profiles |

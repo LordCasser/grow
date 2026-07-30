@@ -254,7 +254,7 @@ use grow_workspace::permission::resolution::yolo_disabled_by_policy;
 /// Load `[ui] require_plan_approval` from config.toml.
 ///
 /// When `true`, the plan viewer always opens for explicit user approval
-/// when the agent calls `exit_plan_mode`, even in always-approve (YOLO)
+/// when PlanControl submits a plan, even in always-approve (YOLO)
 /// mode. Defaults to `false`.
 pub fn load_require_plan_approval() -> bool {
     let root: TomlValue = match crate::config::load_effective_config() {

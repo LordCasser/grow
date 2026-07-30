@@ -126,25 +126,18 @@ pub struct AgentBuilder {
     /// `list_skills_with_plugins()`.
     preloaded_skills: Option<Vec<grow_tools::implementations::skills::types::SkillInfo>>,
 }
-/// Ensure plan mode tools (`enter_plan_mode`, `exit_plan_mode`,
-/// `ask_user_question`) are present in the tool config.
-fn ensure_plan_mode_tools(tool_config: &mut grow_tools::registry::types::ToolServerConfig) {
+/// Ensure the Plan control plane and clarification tool are available.
+fn ensure_plan_tools(tool_config: &mut grow_tools::registry::types::ToolServerConfig) {
     use grow_tools::implementations::grow_build;
     let existing: std::collections::HashSet<&str> =
         tool_config.tools.iter().map(|tc| tc.id.as_str()).collect();
-    let missing_enter = !existing.contains("Grow:enter_plan_mode");
-    let missing_exit = !existing.contains("Grow:exit_plan_mode");
+    let missing_control = !existing.contains("Grow:plan_control");
     let missing_ask = !existing.contains("Grow:ask_user_question");
     drop(existing);
-    if missing_enter {
+    if missing_control {
         tool_config
             .tools
-            .push((&grow_build::EnterPlanModeTool).into());
-    }
-    if missing_exit {
-        tool_config
-            .tools
-            .push((&grow_build::ExitPlanModeTool).into());
+            .push((&grow_build::PlanControlTool).into());
     }
     if missing_ask {
         tool_config
@@ -652,7 +645,7 @@ impl AgentBuilder {
                     .tools
                     .push((&grow_tools::implementations::opencode::OpenCodeWriteTool).into());
             }
-            ensure_plan_mode_tools(&mut tool_config);
+            ensure_plan_tools(&mut tool_config);
         }
         if self.memory_backend.is_none() {
             let grow_build_ns = grow_tools::types::tool::ToolNamespace::Grow.to_string();
@@ -973,6 +966,7 @@ impl AgentBuilder {
             prompt_composition: definition.prompt_composition.clone(),
             audience: self.prompt_audience,
             prompt_body: definition.prompt_body.clone(),
+            behavior_instructions: None,
             system_prompt: definition.system_prompt.clone(),
             agents_md_files,
             persona_summaries: self.persona_summaries,
@@ -1451,12 +1445,8 @@ mod tests {
                 "[{label}] spawn_subagent presence should match subagents_enabled={subagents}; got tools: {names:?}"
             );
             assert!(
-                names.contains(&"enter_plan_mode"),
-                "[{label}] enter_plan_mode must always be present (TUI plan-mode keybind needs it); got tools: {names:?}"
-            );
-            assert!(
-                names.contains(&"exit_plan_mode"),
-                "[{label}] exit_plan_mode must always be present (TUI plan-mode keybind needs it); got tools: {names:?}"
+                names.contains(&"plan_control"),
+                "[{label}] plan_control must always be present; got tools: {names:?}"
             );
         }
     }
@@ -1754,8 +1744,7 @@ mod tests {
             assert_eq!(claude_tool_kind(name), Some(ToolKind::BackgroundTaskAction));
         }
         assert_eq!(claude_tool_kind("TaskStop"), Some(ToolKind::KillTaskAction));
-        assert_eq!(claude_tool_kind("EnterPlanMode"), None);
-        assert_eq!(claude_tool_kind("ExitPlanMode"), None);
+        assert_eq!(claude_tool_kind("PlanControl"), None);
     }
     /// `[Read, Edit, AskUserQuestion]` builds end-to-end: the allowlist is
     /// honored (no full-toolset fallback) and `ask_user_question` stands
@@ -1773,7 +1762,7 @@ mod tests {
         for kept in ["read_file", "search_replace", "ask_user_question"] {
             assert!(names.contains(&kept.to_string()), "got: {names:?}");
         }
-        for dropped in ["enter_plan_mode", "exit_plan_mode", "run_terminal_command"] {
+        for dropped in ["plan_control", "run_terminal_command"] {
             assert!(!names.contains(&dropped.to_string()), "got: {names:?}");
         }
     }

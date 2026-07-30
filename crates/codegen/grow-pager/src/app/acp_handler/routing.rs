@@ -169,7 +169,7 @@ pub(super) fn is_matched_agent_active(app: &AppView, matched_agent: AgentId) -> 
 }
 
 /// Resolve the `AgentId` that should own an interactive modal
-/// (`ask_user_question` / `exit_plan_mode`) for `session_id`.
+/// (`ask_user_question` / Plan approval) for `session_id`.
 ///
 /// Routes by the request's session id via [`find_session_match`] — exactly like
 /// `session/update` notifications — so a modal raised by a **background**

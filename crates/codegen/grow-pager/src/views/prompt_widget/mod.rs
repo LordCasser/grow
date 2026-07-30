@@ -535,6 +535,18 @@ impl PromptWidget {
             .fg(theme.selection_border)
             .bg(theme.bg_base);
         textarea.scrollbar_padding = 1;
+        let mut slash_controller = crate::slash::SlashController::with_builtins(cwd.to_path_buf());
+        let toggle = crate::views::agents_modal::load_agent_toggle();
+        slash_controller.set_agent_catalog(
+            crate::views::agents_modal::build_agent_list(cwd, &toggle)
+                .into_iter()
+                .filter(|entry| entry.enabled)
+                .map(|entry| crate::slash::command::AgentArg {
+                    name: entry.name,
+                    description: entry.description,
+                })
+                .collect(),
+        );
         Self {
             textarea,
             textarea_state: TextAreaState::default(),
@@ -542,7 +554,7 @@ impl PromptWidget {
             file_search: FileSearchState::new(cwd),
             pending_viewer_request: None,
             history_search: HistorySearchState::new(),
-            slash_controller: crate::slash::SlashController::with_builtins(cwd.to_path_buf()),
+            slash_controller,
             slash_state: crate::slash::SlashState::default(),
             slash_hovered: None,
             last_input_delta: crate::input_log::LastInputDelta::default(),
@@ -1715,7 +1727,14 @@ impl PromptWidget {
         let old_text = self.textarea.text().to_owned();
         let old_cursor = self.textarea.cursor();
         let old_has_selection = self.textarea.selection_range().is_some();
-        self.textarea.input(*key);
+        // Ctrl+R is the readline-style redo chord exposed by Grow. Call the
+        // editor operation directly: synthesizing Ctrl+Shift+Z is subtly
+        // platform-dependent because terminal key events retain kind/state.
+        if key!('r', CONTROL).matches(key) {
+            self.textarea.redo();
+        } else {
+            self.textarea.input(*key);
+        }
         let new_cursor = self.textarea.cursor();
         let changed = self.textarea.text() != old_text || new_cursor != old_cursor;
         self.last_input_delta = crate::input_log::LastInputDelta {

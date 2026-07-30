@@ -1527,32 +1527,6 @@ mod tests {
         }
     }
 
-    /// `DashboardCycleMode` carries Shift+Tab three times (the terminal
-    /// encoding variants `BackTab` / `BackTab`+SHIFT / `Tab`+SHIFT).
-    /// The cheatsheet must collapse identically-rendered keys instead
-    /// of showing "Shift+Tab / Shift+Tab / Shift+Tab".
-    #[test]
-    fn build_entries_dedupes_identically_rendered_alt_keys() {
-        let registry = crate::actions::ActionRegistry::defaults();
-        let entries = build_entries(&[When::DashboardFocused], &registry, false);
-        let item = entries
-            .iter()
-            .find_map(|e| match e {
-                ShortcutsHelpEntry::Hint { item, .. }
-                    if item.description.as_deref() == Some("Cycle dispatch mode") =>
-                {
-                    Some(item)
-                }
-                _ => None,
-            })
-            .expect("DashboardCycleMode must be listed");
-        assert_eq!(
-            hint_key_pretty(item),
-            "Shift+Tab",
-            "encoding-variant alt keys must collapse to one display",
-        );
-    }
-
     #[test]
     fn filter_empty_query_returns_all_indices() {
         let entries = vec![
@@ -1681,77 +1655,6 @@ mod tests {
         assert!(headers.contains(&"Essentials"));
         assert!(headers.contains(&"Conversation Navigation"));
         assert!(headers.contains(&"Panels"));
-    }
-
-    #[test]
-    fn mouse_reporting_shortcut_absent_by_default() {
-        // Opt-in via config.toml; default registry must not advertise it.
-        let registry = ActionRegistry::defaults();
-        assert!(registry.find(ActionId::ToggleMouseCapture).is_none());
-        let entries = build_entries(&all_contexts(), &registry, true);
-        let has_row = entries.iter().any(|e| {
-            matches!(
-                e,
-                ShortcutsHelpEntry::Hint { item, .. } if item.label == "mouse reporting"
-            )
-        });
-        assert!(
-            !has_row,
-            "mouse reporting must not appear when config-disabled"
-        );
-    }
-
-    #[test]
-    fn mouse_reporting_shortcut_is_under_panels_when_enabled() {
-        let registry = ActionRegistry::defaults_with_config(true);
-        let def = registry
-            .find(ActionId::ToggleMouseCapture)
-            .expect("ToggleMouseCapture action must be registered when config-enabled");
-        assert_eq!(def.category, Category::Panels);
-        assert_eq!(def.label, "mouse reporting");
-        assert_eq!(
-            def.description,
-            "Toggle mouse reporting (native copy/paste)",
-        );
-
-        let entries = build_entries(&all_contexts(), &registry, true);
-        let mut in_panels = false;
-        let mut in_essentials = false;
-        let mut seen = false;
-        for entry in &entries {
-            match entry {
-                ShortcutsHelpEntry::SectionHeader { label, .. } => {
-                    in_panels = *label == "Panels";
-                    in_essentials = *label == "Essentials";
-                }
-                ShortcutsHelpEntry::Hint { item, .. } => {
-                    if item.label == "mouse reporting" {
-                        assert!(
-                            in_panels,
-                            "mouse reporting row must be in Panels, not Essentials"
-                        );
-                        assert!(
-                            !in_essentials,
-                            "mouse reporting must not appear under Essentials"
-                        );
-                        assert_eq!(
-                            item.description.as_deref(),
-                            Some("Toggle mouse reporting (native copy/paste)"),
-                        );
-                        let key_text = hint_key_pretty(item);
-                        assert!(
-                            key_text.contains("Ctrl+r") || key_text.contains("Ctrl+R"),
-                            "expected Ctrl+r in key display, got {key_text:?}"
-                        );
-                        seen = true;
-                    }
-                }
-            }
-        }
-        assert!(
-            seen,
-            "mouse reporting row must be present in shortcuts help when enabled"
-        );
     }
 
     #[test]

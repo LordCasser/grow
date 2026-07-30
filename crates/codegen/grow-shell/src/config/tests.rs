@@ -1532,32 +1532,26 @@ fn model_overrides_local_image_description_wins_over_remote() {
     );
 }
 #[test]
-fn model_overrides_default_image_description_is_grow_build() {
+fn model_overrides_default_image_description_uses_active_model() {
     with_model_overrides_env(
         None,
         None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let cfg = ModelOverrideConfig::resolve(None, &empty, None);
-            assert_eq!(
-                cfg.image_description,
-                Some(crate::models::default_image_description_model().to_owned())
-            );
+            assert_eq!(cfg.image_description, None);
         },
     );
 }
 #[test]
-fn model_overrides_default_session_summary_is_grow_build() {
+fn model_overrides_default_session_summary_uses_active_model() {
     with_model_overrides_env(
         None,
         None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let cfg = ModelOverrideConfig::resolve(None, &empty, None);
-            assert_eq!(
-                cfg.session_summary,
-                Some(crate::models::default_session_summary_model().to_owned())
-            );
+            assert_eq!(cfg.session_summary, None);
         },
     );
 }
@@ -1618,7 +1612,7 @@ fn model_overrides_env_session_summary_overrides_local() {
     );
 }
 #[test]
-fn model_overrides_empty_session_summary_toml_uses_default() {
+fn model_overrides_empty_session_summary_toml_uses_active_model() {
     with_model_overrides_env(
         None,
         None,
@@ -1631,15 +1625,12 @@ fn model_overrides_empty_session_summary_toml_uses_default() {
                 )
                 .unwrap();
             let cfg = ModelOverrideConfig::resolve(None, &config, None);
-            assert_eq!(
-                cfg.session_summary,
-                Some(crate::models::default_session_summary_model().to_owned())
-            );
+            assert_eq!(cfg.session_summary, None);
         },
     );
 }
 #[test]
-fn model_overrides_empty_session_summary_remote_uses_default() {
+fn model_overrides_empty_session_summary_remote_uses_active_model() {
     with_model_overrides_env(
         None,
         None,
@@ -1650,10 +1641,7 @@ fn model_overrides_empty_session_summary_remote_uses_default() {
                 ..Default::default()
             };
             let cfg = ModelOverrideConfig::resolve(None, &empty, Some(&remote));
-            assert_eq!(
-                cfg.session_summary,
-                Some(crate::models::default_session_summary_model().to_owned())
-            );
+            assert_eq!(cfg.session_summary, None);
         },
     );
 }
@@ -1684,17 +1672,14 @@ fn model_overrides_cli_session_summary_overrides_everything() {
     );
 }
 #[test]
-fn model_overrides_empty_cli_session_summary_uses_default() {
+fn model_overrides_empty_cli_session_summary_uses_active_model() {
     with_model_overrides_env(
         None,
         None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let cfg = ModelOverrideConfig::resolve(Some(""), &empty, None);
-            assert_eq!(
-                cfg.session_summary,
-                Some(crate::models::default_session_summary_model().to_owned())
-            );
+            assert_eq!(cfg.session_summary, None);
         },
     );
 }
@@ -1733,7 +1718,7 @@ fn model_overrides_env_image_description_overrides_local() {
     );
 }
 #[test]
-fn model_overrides_empty_image_description_toml_uses_default() {
+fn model_overrides_empty_image_description_toml_uses_active_model() {
     with_model_overrides_env(
         None,
         None,
@@ -1746,15 +1731,12 @@ fn model_overrides_empty_image_description_toml_uses_default() {
                 )
                 .unwrap();
             let cfg = ModelOverrideConfig::resolve(None, &config, None);
-            assert_eq!(
-                cfg.image_description,
-                Some(crate::models::default_image_description_model().to_owned())
-            );
+            assert_eq!(cfg.image_description, None);
         },
     );
 }
 #[test]
-fn model_overrides_empty_image_description_remote_uses_default() {
+fn model_overrides_empty_image_description_remote_uses_active_model() {
     with_model_overrides_env(
         None,
         None,
@@ -1765,10 +1747,7 @@ fn model_overrides_empty_image_description_remote_uses_default() {
                 ..Default::default()
             };
             let cfg = ModelOverrideConfig::resolve(None, &empty, Some(&remote));
-            assert_eq!(
-                cfg.image_description,
-                Some(crate::models::default_image_description_model().to_owned())
-            );
+            assert_eq!(cfg.image_description, None);
         },
     );
 }
@@ -2724,8 +2703,10 @@ fn auth_provider_honored_only_from_trusted_disk_layers() {
 fn model_provider_honored_only_from_trusted_disk_layers() {
     let layers = ConfigLayers {
         managed: toml::from_str(
-                "[model_providers.gateway]\nbase_url = \"https://gateway.example/v1\"\n\
-                 [model_providers.gateway.auth]\ncommand = \"/usr/local/bin/gw-token\"\n",
+                "[provider.gateway]\napi_backend = \"responses\"\n\
+                 [provider.gateway.options]\nbase_url = \"https://gateway.example/v1\"\n\
+                 [provider.gateway.options.auth]\ntype = \"command\"\ncommand = \"/usr/local/bin/gw-token\"\n\
+                 [provider.gateway.models.gateway-model]\nname = \"Gateway Model\"\n",
             )
             .unwrap(),
         ..Default::default()
@@ -2798,13 +2779,13 @@ inference_base_url = "https://inference.acme-corp.example/provider/v1"
         )
         .unwrap();
     assert_eq!(
-            cfg.endpoints.resolve_managed_config_url(),
-            "https://service.example.com/v1/deployment/config"
+            cfg.endpoints.resolve_managed_config_url().as_deref(),
+            Some("https://service.example.com/v1/deployment/config")
         );
     assert!(
             !cfg.endpoints
                 .resolve_managed_config_url()
-                .contains("acme-corp")
+                .is_some_and(|url| url.contains("acme-corp"))
         );
     assert!(cfg.endpoints.deployment_key.is_some());
 }
@@ -2859,13 +2840,13 @@ fn config_layers_system_managed_lowest_priority() {
 #[test]
 fn apply_requirements_value_overrides_user_settings() {
     let raw_config: toml::Value = toml::from_str(
-            "[cli]\nauto_update = true\nchannel = \"beta\"\n\n[features]\nlsp_tools = true\nweb_fetch = true\nwrite_file = true\n\n[ui]\nyolo = true\n\n[models]\ndefault = \"user-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://user-proxy.example/v1\"\ninference_base_url = \"https://user-api.example/v1\"\nmodels_base_url = \"https://user-models.example/v1\"\nmodels_list_url = \"https://user-models.example/v1/models\"\n",
+            "[cli]\nauto_update = true\nchannel = \"beta\"\n\n[features]\nlsp_tools = true\nweb_fetch = true\nwrite_file = true\n\n[ui]\nyolo = true\n\n[models]\ndefault = \"user-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://user-proxy.example/v1\"\ninference_base_url = \"https://user-api.example/v1\"\n",
         )
         .unwrap();
     let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw_config).unwrap();
     cfg.default_yolo_mode = true;
     let requirements: toml::Value = toml::from_str(
-            "[cli]\nauto_update = false\nchannel = \"stable\"\n\n[features]\nlsp_tools = false\nweb_fetch = false\nwrite_file = false\nremote_fetch = false\n\n[ui]\nyolo = false\n\n[models]\ndefault = \"managed-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://managed-proxy.example/v1\"\ninference_base_url = \"https://managed-api.example/v1\"\nmodels_base_url = \"https://managed-models.example/v1\"\nmodels_list_url = \"https://managed-models.example/v1/models\"\ndeployment_key = \"enterprise-deploy-key-should-not-log\"\n",
+            "[cli]\nauto_update = false\nchannel = \"stable\"\n\n[features]\nlsp_tools = false\nweb_fetch = false\nwrite_file = false\n\n[ui]\nyolo = false\n\n[models]\ndefault = \"managed-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://managed-proxy.example/v1\"\ninference_base_url = \"https://managed-api.example/v1\"\ndeployment_key = \"enterprise-deploy-key-should-not-log\"\n",
         )
         .unwrap();
     let source = RequirementSource::Requirements {
@@ -2875,12 +2856,6 @@ fn apply_requirements_value_overrides_user_settings() {
     assert_eq!(Some(false), cfg.features.lsp_tools);
     assert_eq!(Some(false), cfg.features.web_fetch);
     assert_eq!(Some(false), cfg.features.write_file);
-    assert_eq!(Some(false), cfg.requirements.remote_fetch.pinned());
-    assert!(
-            enforced
-                .iter()
-                .any(|e| e.path == "features.remote_fetch" && e.value == "false")
-        );
     assert_eq!(Some(false), cfg.cli.auto_update);
     assert!(!cfg.ui.yolo);
     assert!(!cfg.default_yolo_mode);
@@ -2893,14 +2868,6 @@ fn apply_requirements_value_overrides_user_settings() {
     assert_eq!(
             "https://managed-api.example/v1",
             cfg.endpoints.inference_base_url
-        );
-    assert_eq!(
-            Some("https://managed-models.example/v1"),
-            cfg.endpoints.models_base_url.as_deref()
-        );
-    assert_eq!(
-            Some("https://managed-models.example/v1/models"),
-            cfg.endpoints.models_list_url.as_deref()
         );
     assert!(
             enforced

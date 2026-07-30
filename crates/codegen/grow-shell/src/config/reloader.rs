@@ -63,13 +63,6 @@ pub enum ConfigUpdate {
     /// The `[provider.*.models.*]` entries changed. Agent should re-resolve
     /// its model list (BYOK models added/removed, default or surprise changed).
     ModelsChanged,
-    /// `~/.grow/models_cache.json` was rewritten on disk (possibly by another
-    /// via `ModelsManager::reload_from_disk_cache`, which content-dedupes
-    /// self-writes (`persist` / `renew_ttl`) before applying. No payload —
-    /// validation (TTL, version, auth method) requires `ModelsManager` state
-    /// drop redundant `ProjectMcpServersChanged` dispatches on
-    /// the reloader doesn't have.
-    ModelsCacheChanged,
     /// Final local announcement snapshot changed. The receiver forwards it to
     /// connected clients through `grow/announcements/update`.
     Announcements(Vec<grow_announcements::Announcement>),
@@ -88,8 +81,7 @@ pub struct ConfigReloader {
     last_auth_key_hash: u64,
     last_global_config: toml::Value,
     last_announcements: Vec<grow_announcements::Announcement>,
-    /// Per-cwd content hash of the project MCP config files, used to
-    /// to diff (the dedup lives in `ModelsManager::reload_from_disk_cache`),
+    /// Per-cwd content hash of the project MCP config files, used to ignore
     /// mtime-only touches (see `hash_project_mcp_config`).
     last_project_mcp_hashes: HashMap<PathBuf, u64>,
     grow_home: PathBuf,
@@ -167,9 +159,6 @@ impl ConfigReloader {
             let has_home_claude_json = batch
                 .iter()
                 .any(|e| matches!(e, ConfigChangeEvent::HomeClaudeJsonChanged));
-            let has_models_cache = batch
-                .iter()
-                .any(|e| matches!(e, ConfigChangeEvent::ModelsCacheChanged));
             let has_config = has_global_config || has_project_config;
 
             // Collect the unique cwds whose project
@@ -235,14 +224,6 @@ impl ConfigReloader {
             if has_home_claude_json {
                 info!("~/.claude.json change detected — broadcasting MCP reload");
                 let _ = self.config_update_tx.send(ConfigUpdate::McpServersChanged);
-            }
-
-            // Pass-through (no toml diff possible here): the
-            // content-vs-in-memory dedup happens in
-            // `ModelsManager::reload_from_disk_cache`.
-            if has_models_cache {
-                debug!("models_cache.json change detected — forwarding to agent");
-                let _ = self.config_update_tx.send(ConfigUpdate::ModelsCacheChanged);
             }
 
             // Fan out one
@@ -706,44 +687,6 @@ mod tests {
             rx.try_recv().is_err(),
             "should not send update on missing file"
         );
-    }
-
-    /// `ModelsCacheChanged` is a pure pass-through: the reloader has no toml
-    /// so the event must surface as `ConfigUpdate::ModelsCacheChanged`
-    /// (walked to the git root by the loaders), not just files directly
-    /// without touching auth or config state.
-    #[tokio::test]
-    async fn reloader_forwards_models_cache_changed() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let empty_config = toml::Value::Table(toml::map::Map::new());
-        let reloader = ConfigReloader::new(
-            tmp.path().to_path_buf(),
-            0,
-            empty_config,
-            "https://test.example.com".to_string(),
-            None,
-            tx,
-            false,
-            false,
-        );
-
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let cancel = CancellationToken::new();
-        let handle = tokio::spawn(reloader.run(event_rx, cancel.clone()));
-
-        event_tx
-            .send(ConfigChangeEvent::ModelsCacheChanged)
-            .unwrap();
-
-        let update = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("should receive an update within 2s")
-            .expect("update channel should remain open");
-        assert!(matches!(update, ConfigUpdate::ModelsCacheChanged));
-
-        cancel.cancel();
-        let _ = handle.await;
     }
 
     /// A project event with unchanged bytes must not re-dispatch a

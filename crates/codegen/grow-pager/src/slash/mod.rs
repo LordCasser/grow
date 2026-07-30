@@ -264,6 +264,13 @@ pub struct SlashController {
     /// Offer `/announcements` when session announcements (critical or promo) exist.
     has_session_announcements: bool,
     workflows_available: bool,
+    agent_catalog: Vec<command::AgentArg>,
+    current_agent: Option<String>,
+    behavior_mode: grow_tools::types::SessionMode,
+    deep_research_available: bool,
+    goal_available: bool,
+    auto_permission_available: bool,
+    current_permission: String,
     /// Effective render mode of this process (immutable after startup — it only
     /// changes via a full `/minimal`-`/fullscreen` re-exec). Injected via
     /// [`Self::set_screen_mode`] wherever prompts are created; gates the
@@ -305,6 +312,13 @@ impl SlashController {
             hide_session_scoped: false,
             has_session_announcements: false,
             workflows_available: false,
+            agent_catalog: Vec::new(),
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask".to_string(),
             screen_mode: crate::app::ScreenMode::Fullscreen,
             mru,
             command_tags: std::rc::Rc::new(std::cell::RefCell::new(
@@ -346,6 +360,27 @@ impl SlashController {
         self.workflows_available
     }
 
+    pub fn set_agent_catalog(&mut self, agents: Vec<command::AgentArg>) {
+        self.agent_catalog = agents;
+    }
+
+    pub fn set_selection_context(
+        &mut self,
+        current_agent: Option<String>,
+        behavior_mode: grow_tools::types::SessionMode,
+        deep_research_available: bool,
+        goal_available: bool,
+        auto_permission_available: bool,
+        current_permission: impl Into<String>,
+    ) {
+        self.current_agent = current_agent;
+        self.behavior_mode = behavior_mode;
+        self.deep_research_available = deep_research_available;
+        self.goal_available = goal_available;
+        self.auto_permission_available = auto_permission_available;
+        self.current_permission = current_permission.into();
+    }
+
     /// Record the process's effective screen mode (see the field doc).
     pub(crate) fn set_screen_mode(&mut self, mode: crate::app::ScreenMode) {
         self.screen_mode = mode;
@@ -358,6 +393,13 @@ impl SlashController {
     pub(crate) fn app_ctx<'a>(&'a self, models: &'a ModelState) -> AppCtx<'a> {
         AppCtx {
             models,
+            agents: &self.agent_catalog,
+            current_agent: self.current_agent.as_deref(),
+            behavior_mode: self.behavior_mode,
+            deep_research_available: self.deep_research_available,
+            goal_available: self.goal_available,
+            auto_permission_available: self.auto_permission_available,
+            current_permission: &self.current_permission,
             cwd: &self.cwd,
             has_session_announcements: self.has_session_announcements,
             workflows_available: self.workflows_available,
@@ -422,6 +464,7 @@ impl SlashController {
     /// `/auto` is hard-hidden. `/always-approve` is always offered; both
     /// commands are true toggles (re-running the active mode turns it off).
     pub fn set_auto_mode_available(&mut self, available: bool) {
+        self.auto_permission_available = available;
         self.registry.set_auto_mode_available(available);
     }
 
@@ -1489,11 +1532,10 @@ mod tests {
     }
 
     #[test]
-    fn required_arg_command_blocks_without_args() {
+    fn selector_command_is_complete_without_args() {
         let reg = test_registry();
-        // /model has takes_args=true, args_required=true.
-        assert!(!is_command_complete("/model", &reg));
-        assert!(!is_command_complete("/model ", &reg));
+        assert!(is_command_complete("/model", &reg));
+        assert!(is_command_complete("/model ", &reg));
         assert!(is_command_complete("/model grow-4", &reg));
     }
 
@@ -1715,31 +1757,18 @@ mod tests {
         assert!(first.insert_text.starts_with("/m"));
     }
 
-    /// `/sessions` survives the sessions-modal removal as an alias of
-    /// `/dashboard`: typing it must complete with the alias spelling and the
-    /// dashboard command's description.
+    /// Removed dashboard aliases must stay removed rather than silently
+    /// redirecting to `/agents`.
     #[test]
-    fn controller_suggests_sessions_alias_for_dashboard() {
+    fn controller_does_not_suggest_removed_sessions_alias() {
         let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
-        // `/dashboard` is feature-flag gated (hidden by default); the alias
-        // is only offered once the flag reveals the canonical command.
         ctrl.registry_mut().set_dashboard_visible(true);
         let state = SlashState::default();
         let models = ModelState::default();
 
         ctrl.refresh(&state, "/sessions", 9, &models);
         let snapshot = state.snapshot();
-        assert!(snapshot.open);
-        let row = snapshot
-            .matches
-            .iter()
-            .find(|r| r.display == "/sessions")
-            .expect("/sessions must be offered in completion");
-        assert_eq!(
-            row.description,
-            crate::slash::commands::dashboard::DashboardCommand.description(),
-            "alias must carry the dashboard command's description"
-        );
+        assert!(!snapshot.open);
     }
 
     #[test]
@@ -1884,7 +1913,7 @@ mod tests {
     fn hide_session_scoped_filters_session_commands_from_dropdown() {
         let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
         ctrl.set_hide_session_scoped(true);
-        // `/dashboard` is feature-flag gated (hidden by default in the
+        // `/agents` is feature-flag gated (hidden by default in the
         // registry); the session-less surface under test is the dashboard's
         // own dispatch input, so the flag is necessarily on there.
         ctrl.registry_mut().set_dashboard_visible(true);
@@ -1908,7 +1937,7 @@ mod tests {
             "/new",
             "/theme",
             "/settings",
-            "/dashboard",
+            "/agents",
             "/resume",
             "/model",
             "/plan",
@@ -1924,7 +1953,6 @@ mod tests {
             "/compact",
             "/fork",
             "/rewind",
-            "/share",
             "/context",
             "/copy",
             "/export",

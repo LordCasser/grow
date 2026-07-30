@@ -393,7 +393,7 @@ pub const AUTH_ERROR_SESSION_EXPIRED: &str =
 pub const AUTH_ERROR_API_KEY: &str = "Authentication failed. Run `grow login`, set GROW_API_KEY, or add api_key to ~/.grow/config.toml.";
 
 /// Next ACP method id when `cached_token` cannot proceed (missing / expired /
-/// legacy WebLogin), or `None` when fallthrough is forbidden.
+/// an expired session), or `None` when fallthrough is forbidden.
 ///
 /// Unpinned: prefer non-interactive `provider.api_key` when advertiseable, else
 /// interactive `provider.oauth`.
@@ -798,7 +798,7 @@ mod tests {
         )
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&toml).expect("config should parse");
-        let models = resolve_model_list(&cfg, None);
+        let models = resolve_model_list(&cfg);
         let model = models
             .get("enterprise/model")
             .expect("enterprise-style model should exist");
@@ -862,7 +862,7 @@ mod tests {
     fn global_external_api_key_advertises_provider_api_key_first() {
         let _set = EnvGuard::set(GROW_API_KEY_ENV_VAR, "provider-external-key");
         let cfg = Config::default();
-        let models = resolve_model_list(&cfg, None);
+        let models = resolve_model_list(&cfg);
         let has_external_api_key = should_advertise_provider_api_key(false, models.values());
         assert!(has_external_api_key);
         let built = build_auth_methods(AuthMethodsBuildInputs {
@@ -884,7 +884,7 @@ mod tests {
     fn disable_api_key_auth_suppresses_provider_api_key_method() {
         let _set = EnvGuard::set(GROW_API_KEY_ENV_VAR, "provider-external-key");
         let cfg = Config::default();
-        let models = resolve_model_list(&cfg, None);
+        let models = resolve_model_list(&cfg);
 
         // Flag off: today's behavior (advertised first).
         assert!(should_advertise_provider_api_key(false, models.values()));
@@ -912,114 +912,13 @@ mod tests {
         assert!(built.default_auth_method_id.is_none());
     }
 
-    // -- grow login --legacy regression coverage ------------------------
-    //
-    // `grow login --legacy` produces a ProviderAuth with `auth_mode: WebLogin`,
-    // `oidc_issuer: None`, and no `expires_at` (30-day hardcoded TTL).
-    // When this token is present via the `GROW_AUTH` env var (or via legacy
-    // scope fallback in auth.json), `AuthManager::new` returns it from
-    // `current()`, feeding `has_cached_token = true` into `build_auth_methods`.
-    // This puts `cached_token` first so `startup_auth_metadata()` returns
-    // `needs_login = false` -- legacy users get frictionless auth, no login
-    // screen.
-    //
-    // This test pins the env-var path (highest priority in AuthManager) end-
-    // to-end. A regression in GROW_AUTH JSON parsing or in auth method
-    // ordering would send legacy-token users to the login screen.
-
-    /// END-TO-END REGRESSION TEST: a legacy auth token (WebLogin, no
-    /// expires_at) present in the `GROW_AUTH` env var, with no other auth
-    /// available, MUST be loaded by `AuthManager` and cause `build_auth_methods`
-    /// to advertise `cached_token` first. The pager therefore skips the login
-    /// screen (frictionless legacy auth). This behavior works; the test
-    /// prevents regressions.
-    #[test]
-    #[serial]
-    fn grow_login_legacy_token_does_not_require_login() {
-        use crate::auth::{AuthManager, AuthMode, ProviderAuth, ServiceAuthConfig};
-
-        // Ensure clean slate for "no other auth available".
-        let _g1 = EnvGuard::unset("GROW_AUTH_PATH");
-        let _g2 = EnvGuard::unset(GROW_API_KEY_ENV_VAR);
-
-        // Construct a legacy-style token exactly as `grow login --legacy`
-        // produces: WebLogin mode, no OIDC fields, no refresh_token, no
-        // expires_at (is_expired falls back to 30-day age check).
-        let legacy_token = ProviderAuth {
-            key: "legacy-relay-token".into(),
-            auth_mode: AuthMode::WebLogin,
-            create_time: chrono::Utc::now(),
-            user_id: "legacy-user".into(),
-            email: Some("legacy@example.com".into()),
-            oidc_issuer: None,
-            oidc_client_id: None,
-            refresh_token: None,
-            expires_at: None,
-            ..ProviderAuth::test_default()
-        };
-
-        // Provide it via GROW_AUTH env var (highest priority code path in
-        // AuthManager::new). This is the "legacy auth token exists in the env"
-        // case with no other auth.
-        let legacy_json = serde_json::to_string(&legacy_token).expect("serialize legacy token");
-        let _g = EnvGuard::set("GROW_AUTH", &legacy_json);
-
-        // AuthManager picks it up from the env var directly (no file needed).
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = ServiceAuthConfig::default();
-        let mgr = AuthManager::new(dir.path(), cfg);
-        let current = mgr.current();
-        assert!(
-            current.is_some(),
-            "legacy token in GROW_AUTH env MUST be loaded directly -- if this fails, \
-             users with legacy auth in env would be sent to the login screen",
-        );
-        assert_eq!(
-            current.as_ref().unwrap().key,
-            "legacy-relay-token",
-            "loaded token must match the one injected via env",
-        );
-
-        // derive has_cached_token exactly as initialize() does.
-        let has_cached_token = mgr.current().is_some();
-        assert!(has_cached_token);
-
-        // With only this legacy token (no provider API key), first method must be
-        // cached_token so pager skips login screen.
-        let built = build_auth_methods(AuthMethodsBuildInputs {
-            has_external_api_key: false,
-            has_cached_token,
-            ..default_inputs()
-        });
-
-        assert_eq!(
-            first_kind(&built.methods),
-            Some(AuthMethodKind::CachedToken),
-            "legacy token in env: cached_token MUST be auth_methods.first() \
-             (pager startup_auth_metadata returns needs_login=false)",
-        );
-        assert!(
-            !AuthMethodKind::from_id(built.methods[0].id()).needs_interactive_login(),
-            "auth_methods.first() MUST NOT need interactive login when legacy token \
-             is in env -- prevents login screen regression",
-        );
-        assert_eq!(
-            built
-                .default_auth_method_id
-                .as_ref()
-                .map(|id| id.0.as_ref()),
-            Some(CACHED_TOKEN_AUTH_METHOD_ID),
-        );
-    }
-
-    /// Negative case for the legacy flow: when auth.json does NOT contain a
-    /// legacy-scope entry, AuthManager::current() is None,
+    /// When auth.json does not contain the configured scope, AuthManager::current() is None,
     /// has_cached_token is false, and build_auth_methods advertises only
     /// the login method. This pins the predicate's "no" answer so the test
     /// above isn't trivially passing.
     #[test]
     #[serial]
-    fn no_legacy_token_means_no_cached_token_advertised() {
+    fn no_token_means_no_cached_token_advertised() {
         use crate::auth::{AuthManager, ServiceAuthConfig};
 
         let _g1 = EnvGuard::unset("GROW_AUTH");

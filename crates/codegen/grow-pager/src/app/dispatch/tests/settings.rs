@@ -235,10 +235,9 @@ fn cancel_before_first_activity_resets_state_and_discards_orphan_response() {
     assert!(app.agents[&id].session.state.is_idle());
     assert_eq!(app.agents[&id].scrollback.len(), 0);
 }
-/// `/model <name>` dispatches `SetDefaultModel` which routes
-/// through both `PersistSetting` and `SwitchModel`.
+/// `/model <name>` switches only the active session.
 #[test]
-fn slash_model_valid_dispatches_set_default_model_with_switch_and_persist() {
+fn slash_model_valid_switches_session_without_persisting_default() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
@@ -255,25 +254,17 @@ fn slash_model_valid_dispatches_set_default_model_with_switch_and_persist() {
     let effects = dispatch(Action::SendPrompt("/model Grow 4.5".into()), &mut app);
     assert_eq!(
         effects.len(),
-        2,
-        "expected PersistSetting + SwitchModel effects, got {effects:?}",
+        1,
+        "expected one session switch, got {effects:?}"
     );
-    assert!(
-        matches!(
-            &effects[0],
-            Effect::PersistSetting {
-                key: "default_model",
-                ..
-            }
-        ),
-        "first effect must be PersistSetting(default_model), got {:?}",
-        effects[0],
-    );
-    assert!(
-        matches!(&effects[1], Effect::SwitchModel { model_id: mid, .. } if mid == &model_id),
-        "second effect must be SwitchModel(<resolved id>), got {:?}",
-        effects[1],
-    );
+    assert!(matches!(&effects[0], Effect::SwitchModel { model_id: mid, .. } if mid == &model_id));
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Effect::PersistSetting {
+            key: "default_model",
+            ..
+        }
+    )));
     assert!(app.agents[&id].session.model_switch_pending);
 }
 #[test]
@@ -751,33 +742,6 @@ fn dispatch_confirm_reset_setting_cancel_preserves_modal_state() {
         _ => panic!("expected Settings modal after Cancel"),
     }
 }
-/// `ConfirmResetSetting { Reset }` on a
-/// PAGER-owned setting (`multiline_mode`) flips the agent's flag
-/// back to default WITHOUT emitting any `Effect` (PAGER setters
-/// short-circuit on no-disk-write). Pins the cross-owner
-/// behavioral parity.
-#[test]
-fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_pager_bool() {
-    use crate::views::modal::ResetSettingsResult;
-    let mut app = test_app_with_agent();
-    let _ = dispatch(Action::SetMultilineMode(true), &mut app);
-    assert!(app.agents[&AgentId(0)].multiline_mode);
-    setup_reset_confirm_open(&mut app, "multiline_mode");
-    let effects = dispatch(
-        Action::ConfirmResetSetting {
-            choice: ResetSettingsResult::Reset,
-        },
-        &mut app,
-    );
-    assert!(
-        effects.is_empty(),
-        "PAGER reset must NOT emit Effects (in-memory only), got {effects:?}",
-    );
-    assert!(
-        !app.agents[&AgentId(0)].multiline_mode,
-        "agent.multiline_mode must be reset to default",
-    );
-}
 /// Idempotent Reset is gated. When
 /// the focused row is already at its registered default, the
 /// Reset branch emits a short "already at default" toast and
@@ -1014,12 +978,8 @@ fn clear_default_model_persists_but_keeps_live_current() {
         "clear_default_model must NOT mutate live agent.session.models.current",
     );
 }
-/// `Action::SetDefaultModel(<known id>)` resolves the
-/// id against the live catalog, mutates current, and emits both
-/// PersistSetting + SwitchModel effects. This is the
-/// dispatch-level analog of the slash-command's
-/// `slash_model_valid_dispatches_set_default_model_with_switch_and_persist`
-/// test.
+/// Settings update the future-session model template without touching the
+/// active session.
 #[test]
 fn set_default_model_resolves_known_name() {
     use agent_client_protocol as acp;
@@ -1028,15 +988,10 @@ fn set_default_model_resolves_known_name() {
     let id = acp::ModelId::new(Arc::from("grow-4.5"));
     let info = acp::ModelInfo::new(id.clone(), "Grow 4.5".to_string());
     let agent_id = AgentId(0);
-    app.agents
-        .get_mut(&agent_id)
-        .unwrap()
-        .session
-        .models
-        .available
-        .insert(id.clone(), info);
+    app.models.available.insert(id.clone(), info);
+    let active_before = app.agents[&agent_id].session.models.current.clone();
     let effects = dispatch(Action::SetDefaultModel(id.clone()), &mut app);
-    assert_eq!(effects.len(), 2);
+    assert_eq!(effects.len(), 1);
     assert!(matches!(
         &effects[0],
         Effect::PersistSetting {
@@ -1044,11 +999,8 @@ fn set_default_model_resolves_known_name() {
             value: crate::settings::SettingValue::String(s),
             .. } if s == "grow-4.5"
     ));
-    assert!(matches!(
-        &effects[1],
-        Effect::SwitchModel { model_id: mid, .. } if mid == &id
-    ));
-    assert_eq!(app.agents[&agent_id].session.models.current, Some(id));
+    assert_eq!(app.models.current, Some(id));
+    assert_eq!(app.agents[&agent_id].session.models.current, active_before);
 }
 /// Re-dispatching the same model
 /// id is idempotent — no PersistSetting, no SwitchModel, no
@@ -1060,20 +1012,8 @@ fn set_default_model_idempotent_when_already_current() {
     let mut app = test_app_with_agent();
     let id = acp::ModelId::new(Arc::from("grow-already"));
     let info = acp::ModelInfo::new(id.clone(), "Grow Already".to_string());
-    let agent_id = AgentId(0);
-    app.agents
-        .get_mut(&agent_id)
-        .unwrap()
-        .session
-        .models
-        .available
-        .insert(id.clone(), info);
-    app.agents
-        .get_mut(&agent_id)
-        .unwrap()
-        .session
-        .models
-        .set_current(id.clone(), None);
+    app.models.available.insert(id.clone(), info);
+    app.models.set_current(id.clone(), None);
     let effects = dispatch(Action::SetDefaultModel(id), &mut app);
     assert!(
         effects.is_empty(),
@@ -1287,7 +1227,10 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             let _ = dispatch(Action::SetAutoLightTheme("rosepine-dawn".to_owned()), app);
         }
         "permission_mode" => {
-            let _ = dispatch(Action::SetYoloMode(true), app);
+            let _ = dispatch(
+                Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),
+                app,
+            );
         }
         "default_model" => {
             use agent_client_protocol as acp;
@@ -1304,9 +1247,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "max_thoughts_width" => {
             let _ = dispatch(Action::SetMaxThoughtsWidth(200), app);
         }
-        "plan_mode" => {
+        "behavior" => {
             let _ = dispatch(
-                Action::SetPlanMode(crate::app::actions::PlanModeKind::On),
+                Action::SetBehaviorMode(grow_tools::types::SessionMode::Plan),
                 app,
             );
         }
@@ -1717,16 +1660,10 @@ fn set_multiline_mode_mutates_only_active_agent_not_others() {
              setters address the active agent only",
     );
 }
-/// Regression test.
-///
-/// Open the settings modal, dispatch `SetMultilineMode(true)`,
-/// assert the modal's `pager_snapshot.multiline_mode` is refreshed
-/// to `true`. Without `refresh_open_settings_modals`, the snapshot
-/// stays at the open-time value and the user gets stuck — the
-/// indicator shows the wrong state AND subsequent toggles are
-/// no-ops via the idempotent guard.
+/// Multiline remains a session interaction even while Settings is open; it
+/// never reappears as a persistent Settings row.
 #[test]
-fn set_multiline_mode_refreshes_open_modal_pager_snapshot() {
+fn set_multiline_mode_remains_absent_from_open_settings() {
     use crate::views::modal::ActiveModal;
     let mut app = test_app_with_agent();
     let _ = dispatch(Action::OpenSettings, &mut app);
@@ -1735,8 +1672,12 @@ fn set_multiline_mode_refreshes_open_modal_pager_snapshot() {
         panic!("expected Settings modal after OpenSettings dispatch")
     };
     assert!(
-        !state.pager_snapshot.multiline_mode,
-        "snapshot at open should be false (agent default)",
+        crate::settings::current_value_for(
+            "multiline_mode",
+            &state.ui_snapshot,
+            &state.pager_snapshot,
+        )
+        .is_none()
     );
     let _ = dispatch(Action::SetMultilineMode(true), &mut app);
     let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -1744,20 +1685,12 @@ fn set_multiline_mode_refreshes_open_modal_pager_snapshot() {
         panic!("Settings modal must remain open across the dispatch")
     };
     assert!(
-        state.pager_snapshot.multiline_mode,
-        "snapshot must be refreshed to true after SetMultilineMode(true) — \
-             stale-snapshot bug (Round-2 Issue 1) would leave it false",
-    );
-    let cur_value = crate::settings::current_value_for(
-        "multiline_mode",
-        &state.ui_snapshot,
-        &state.pager_snapshot,
-    )
-    .expect("multiline_mode must resolve");
-    assert_eq!(
-        cur_value,
-        crate::settings::SettingValue::Bool(true),
-        "current_value_for must read the refreshed snapshot",
+        crate::settings::current_value_for(
+            "multiline_mode",
+            &state.ui_snapshot,
+            &state.pager_snapshot,
+        )
+        .is_none()
     );
 }
 /// Regression test (SHARED path).
@@ -2638,17 +2571,18 @@ fn non_permission_rollback_preserves_session_auto_mode() {
         "non-permission rollback must not clobber the per-session auto flag"
     );
 }
-/// Rollback path: a `SettingPersistFailed` for `permission_mode`
-/// reverts `agent.session.yolo_mode` + `app.default_yolo` +
-/// `app.current_ui.permission_mode` via `set_yolo_mode_inner`.
-/// MUST NOT re-emit any effects (would loop on persistent disk
-/// failure).
+/// Rollback of the persistent Permission default leaves the active session
+/// untouched and restores only default state.
 #[test]
 fn rollback_permission_mode_reverts_state_no_effect() {
     use crate::settings::SettingValue;
     let mut app = test_app_with_agent();
-    let _ = dispatch(Action::SetYoloMode(true), &mut app);
-    assert!(app.agents[&AgentId(0)].session.is_yolo());
+    let _ = dispatch(
+        Action::SetDefaultPermissionMode(PermissionModeKind::AlwaysApprove),
+        &mut app,
+    );
+    assert!(!app.agents[&AgentId(0)].session.is_yolo());
+    assert!(app.default_yolo);
     assert_eq!(
         app.current_ui.permission_mode.as_deref(),
         Some("always-approve")
@@ -2667,7 +2601,7 @@ fn rollback_permission_mode_reverts_state_no_effect() {
     );
     assert!(
         !app.agents[&AgentId(0)].session.is_yolo(),
-        "session.yolo_mode must revert via apply_setting_rollback"
+        "persistent-default rollback must not mutate the active session"
     );
     assert!(!app.default_yolo);
     assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
@@ -2683,84 +2617,44 @@ fn rollback_permission_mode_reverts_state_no_effect() {
     );
 }
 /// The reset-dispatch test asserts the typed Action lineage. The
-/// reset path dispatches `Action::SetPermissionMode(Ask)` (the
-/// registered default) rather than `Action::SetYoloMode(false)`.
+/// reset path dispatches `Action::SetDefaultPermissionMode(Ask)` (the
+/// registered default) rather than `Action::SetPermissionMode(PermissionModeKind::Ask)`.
 /// Both emit `Effect::PersistPermissionMode` so the `has_persist`
 /// assertion in the parent test holds; this test pins the typed
 /// Action shape directly so a future refactor that drops the
-/// `SetPermissionMode` mapping in `action_for_reset` is caught.
+/// persistent-default mapping in `action_for_reset` is caught.
 #[test]
-fn action_for_reset_permission_mode_dispatches_set_permission_mode_for_each_canonical() {
+fn action_for_reset_permission_mode_dispatches_default_setter_for_each_canonical() {
     use crate::app::actions::PermissionModeKind;
     use crate::settings::SettingValue;
     match action_for_reset("permission_mode", &SettingValue::Enum("ask")) {
-        Some(Action::SetPermissionMode(PermissionModeKind::Ask)) => {}
+        Some(Action::SetDefaultPermissionMode(PermissionModeKind::Ask)) => {}
         other => {
             panic!(
                 "action_for_reset(permission_mode, 'ask') must produce \
-                 Action::SetPermissionMode(Ask), got {other:?}"
+                 Action::SetDefaultPermissionMode(Ask), got {other:?}"
             )
         }
     }
     match action_for_reset("permission_mode", &SettingValue::Enum("always-approve")) {
-        Some(Action::SetPermissionMode(PermissionModeKind::AlwaysApprove)) => {}
+        Some(Action::SetDefaultPermissionMode(PermissionModeKind::AlwaysApprove)) => {}
         other => {
             panic!(
                 "action_for_reset(permission_mode, 'always-approve') must produce \
-                 Action::SetPermissionMode(AlwaysApprove), got {other:?}"
+                 Action::SetDefaultPermissionMode(AlwaysApprove), got {other:?}"
             )
         }
     }
     match action_for_reset("permission_mode", &SettingValue::Enum("default")) {
-        Some(Action::SetPermissionMode(PermissionModeKind::Default)) => {}
+        Some(Action::SetDefaultPermissionMode(PermissionModeKind::Default)) => {}
         other => {
             panic!(
                 "action_for_reset(permission_mode, 'default') must produce \
-                 Action::SetPermissionMode(Default), got {other:?}"
+                 Action::SetDefaultPermissionMode(Default), got {other:?}"
             )
         }
     }
     assert!(action_for_reset("permission_mode", &SettingValue::Enum("bogus")).is_none());
-}
-/// Slash-command-while-modal-open refresh.
-/// `dispatch_cycle_mode` is the entry point for both Ctrl+R
-/// and the `/plan` / `/cycle-mode` slash commands. When the
-/// settings modal is open and a cycle lands, the modal's
-/// `pager_snapshot.plan_mode_active` must refresh to reflect
-/// the new effective state — otherwise the indicator stays
-/// stale until the next setter dispatch. Mirror of
-/// `set_plan_mode_refreshes_open_modal_pager_snapshot`.
-#[test]
-fn dispatch_cycle_mode_refreshes_open_modal_snapshot() {
-    use crate::views::modal::ActiveModal;
-    let mut app = test_app_with_agent();
-    let _ = dispatch(Action::OpenSettings, &mut app);
-    let agent = app.agents.get(&AgentId(0)).unwrap();
-    let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
-        panic!("expected Settings modal after OpenSettings dispatch")
-    };
-    assert!(
-        !state.pager_snapshot.plan_mode_active,
-        "snapshot at open should be false (agent default)",
-    );
-    let _ = dispatch(Action::CycleMode, &mut app);
-    let agent = app.agents.get(&AgentId(0)).unwrap();
-    let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
-        panic!("Settings modal must remain open across CycleMode")
-    };
-    assert!(
-        state.pager_snapshot.plan_mode_active,
-        "snapshot must be refreshed to true after CycleMode (Normal → Plan) — \
-             without refresh_open_settings_modals the indicator would stay stale",
-    );
-    let cur_value =
-        crate::settings::current_value_for("plan_mode", &state.ui_snapshot, &state.pager_snapshot)
-            .expect("plan_mode must resolve");
-    assert_eq!(
-        cur_value,
-        crate::settings::SettingValue::Enum("on"),
-        "current_value_for must read the refreshed snapshot",
-    );
 }
 /// `dispatch(Action::SetTheme("growday"), &mut app)` emits
 /// exactly one `Effect::PersistSetting`, mutates
@@ -3243,44 +3137,12 @@ fn rollback_auto_light_theme_with_auto_value_clears_to_none() {
         assert_eq!(app.current_ui.auto_light_theme, None);
     });
 }
-/// Setter refreshes the open settings modal
-/// snapshot so the indicator reflects the new value before the
-/// shell's CurrentModeUpdate round-trip. Mirrors
-/// `set_multiline_mode_refreshes_open_modal_pager_snapshot`.
+/// Session-only interaction state does not appear in persistent Settings.
 #[test]
-fn set_plan_mode_refreshes_open_modal_pager_snapshot() {
-    use crate::views::modal::ActiveModal;
-    let mut app = test_app_with_agent();
-    let _ = dispatch(Action::OpenSettings, &mut app);
-    let agent = app.agents.get(&AgentId(0)).unwrap();
-    let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
-        panic!("expected Settings modal after OpenSettings dispatch")
-    };
-    assert!(
-        !state.pager_snapshot.plan_mode_active,
-        "snapshot at open should be false (agent default)",
-    );
-    let _ = dispatch(
-        Action::SetPlanMode(crate::app::actions::PlanModeKind::On),
-        &mut app,
-    );
-    let agent = app.agents.get(&AgentId(0)).unwrap();
-    let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
-        panic!("Settings modal must remain open across the dispatch")
-    };
-    assert!(
-        state.pager_snapshot.plan_mode_active,
-        "snapshot must be refreshed to true after SetPlanMode(On) — \
-             without refresh_open_settings_modals the indicator would stay stale",
-    );
-    let cur_value =
-        crate::settings::current_value_for("plan_mode", &state.ui_snapshot, &state.pager_snapshot)
-            .expect("plan_mode must resolve");
-    assert_eq!(
-        cur_value,
-        crate::settings::SettingValue::Enum("on"),
-        "current_value_for must read the refreshed snapshot",
-    );
+fn settings_registry_excludes_session_behavior_and_multiline() {
+    let registry = crate::settings::SettingsRegistry::defaults();
+    assert!(registry.find("behavior").is_none());
+    assert!(registry.find("multiline_mode").is_none());
 }
 #[test]
 fn new_session_inherits_switched_default_model_for_welcome() {
@@ -3314,38 +3176,6 @@ fn new_session_inherits_switched_default_model_for_welcome() {
              switched model, not the previous default"
     );
 }
-/// Without config, Ctrl+R does not toggle mouse reporting on scrollback.
-/// Prompt-focused Ctrl+R remains the permission-mode cycle regardless of the
-/// optional scrollback mouse-capture binding.
-#[test]
-fn mouse_reporting_toggle_inactive_without_config() {
-    use crate::actions::{ActionId, ActionRegistry, When};
-    let reg_off = ActionRegistry::defaults();
-    let reg_on = ActionRegistry::defaults_with_config(true);
-    let ctrl_r = crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Char('r'),
-        crossterm::event::KeyModifiers::CONTROL,
-    );
-    assert!(reg_off.find(ActionId::ToggleMouseCapture).is_none());
-    assert_eq!(
-        reg_off.lookup(&ctrl_r, When::ScrollbackFocused),
-        None,
-        "scrollback Ctrl+R must not toggle mouse without config"
-    );
-    assert_eq!(
-        reg_off.lookup(&ctrl_r, When::PromptFocused),
-        Some(ActionId::CycleMode),
-    );
-    assert!(reg_on.find(ActionId::ToggleMouseCapture).is_some());
-    assert_eq!(
-        reg_on.lookup(&ctrl_r, When::ScrollbackFocused),
-        Some(ActionId::ToggleMouseCapture),
-    );
-    assert_eq!(
-        reg_on.lookup(&ctrl_r, When::PromptFocused),
-        Some(ActionId::CycleMode),
-    );
-}
 /// Config on: toggle off sets process atomic + sticky banner that survives
 /// transient toasts and tick/keypress dismissal of transients.
 #[serial_test::serial(MOUSE_CAPTURE_ENABLED)]
@@ -3355,7 +3185,7 @@ fn mouse_reporting_toggle_off_sticky_persists_after_transient_toast() {
     assert!(mouse_capture_is_enabled());
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    app.registry = crate::actions::ActionRegistry::defaults_with_config(true);
+    app.registry = crate::actions::ActionRegistry::defaults();
     let _ = dispatch(Action::ToggleMouseCapture, &mut app);
     assert!(
         !mouse_capture_is_enabled(),

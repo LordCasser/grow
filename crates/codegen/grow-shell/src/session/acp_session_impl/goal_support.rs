@@ -174,9 +174,9 @@ pub(super) fn render_goal_plan_block(plan_path: &std::path::Path, names: &GoalTo
         .replace("{TODO_TOOL}", &names.todo)
 }
 
-/// Plan path for the goal-mode reminder, or `None` on the legacy path.
-/// `Some` only when the planner is enabled (`GROW_GOAL_PLANNER`) and a plan
-/// exists; disabled ⇒ `None` ⇒ legacy block (no dangling `Plan:` line).
+/// Plan path for the goal-mode reminder, or `None` when no planner artifact
+/// exists. `Some` only when the planner is enabled (`GROW_GOAL_PLANNER`) and a
+/// plan exists; disabled means no plan block and no dangling `Plan:` line.
 /// All three render sites (`setup_goal`, `resume_goal`, continuation nudge)
 /// route through this helper so the gate can't drift. Borrows, no alloc.
 pub(super) fn goal_reminder_plan_path(
@@ -232,7 +232,7 @@ pub(super) const GOAL_CONTINUATION_BAIL_PREFACE: &str = "You appear to be stoppi
 ///
 /// Legacy artifacts (the deleted COMPLETION AUDIT / canonical
 /// verifier blocks / `{VERIFIER_ID}` placeholder) are pinned absent
-/// by `goal_rules_template_drops_all_legacy_verifier_artifacts`.
+/// by `goal_rules_template_drops_all_obsolete_verifier_artifacts`.
 pub(super) fn render_goal_rules(
     objective: &str,
     names: &GoalToolNames,
@@ -270,7 +270,7 @@ pub(super) fn render_goal_rules(
         )
 }
 
-pub(super) fn render_goal_rules_legacy(
+pub(super) fn render_goal_rules_foreground(
     objective: &str,
     names: &GoalToolNames,
     block_recap: &str,
@@ -284,7 +284,7 @@ pub(super) fn render_goal_rules_legacy(
         Some(path) => render_goal_plan_block(path, names),
         None => String::new(),
     };
-    GOAL_RULES_TEMPLATE_LEGACY
+    GOAL_RULES_TEMPLATE_FOREGROUND
         .replace("{OBJECTIVE}", objective)
         .replace("{GOAL_TOOL}", &names.goal)
         .replace("{TASK_TOOL}", &names.task)
@@ -447,7 +447,7 @@ pub(super) fn render_goal_continuation_directive(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn render_goal_continuation_directive_legacy(
+pub(super) fn render_goal_continuation_directive_foreground(
     objective: &str,
     tokens: u64,
     elapsed: &str,
@@ -464,14 +464,14 @@ pub(super) fn render_goal_continuation_directive_legacy(
 ) -> String {
     debug_assert!(
         !objective.is_empty(),
-        "render_goal_continuation_directive_legacy requires a non-empty objective; \
+        "render_goal_continuation_directive_foreground requires a non-empty objective; \
          an empty value leaves the Objective: line dangling in the nudge",
     );
     let bail_preface = neutralize_directive_slot(bail_preface);
     let verifier_gaps = neutralize_directive_slot(verifier_gaps);
     let strategist_note = neutralize_directive_slot(strategist_note);
     let next_step = neutralize_directive_slot(next_step);
-    GOAL_CONTINUATION_DIRECTIVE_TEMPLATE_LEGACY
+    GOAL_CONTINUATION_DIRECTIVE_TEMPLATE_FOREGROUND
         .replace("{objective}", objective)
         .replace("{tokens}", &tokens.to_string())
         .replace("{elapsed}", elapsed)
@@ -519,7 +519,7 @@ pub(super) fn render_goal_reverify_block(
     )
 }
 
-pub(super) fn render_goal_reverify_block_legacy(
+pub(super) fn render_goal_reverify_block_foreground(
     rounds_since_verify: u32,
     refuted: bool,
     threshold: u32,
@@ -624,7 +624,7 @@ pub(super) fn render_verifier_gaps_block(gaps: &str) -> String {
     )
 }
 
-pub(super) fn render_verifier_gaps_block_legacy(gaps: &str, goal_tool: &str) -> String {
+pub(super) fn render_verifier_gaps_block_foreground(gaps: &str, goal_tool: &str) -> String {
     if gaps.is_empty() {
         return String::new();
     }
@@ -951,13 +951,17 @@ impl SessionActor {
     }
 
     pub(super) fn sync_goal_harness(&self) -> bool {
+        let enabled = self.goal_enabled && self.goal_classifier_enabled;
         self.goal_harness_enabled
-            .store(self.goal_enabled, std::sync::atomic::Ordering::Relaxed);
-        self.goal_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        enabled
     }
 
     pub(super) fn sync_goal_harness_from_tools(&self, tool_names: &[String]) -> bool {
-        let enabled = goal_slash_and_harness_available(self.goal_enabled, tool_names);
+        let enabled = goal_slash_and_harness_available(
+            self.goal_enabled && self.goal_classifier_enabled,
+            tool_names,
+        );
         self.goal_harness_enabled
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
         enabled
@@ -998,7 +1002,7 @@ impl SessionActor {
     }
 
     /// Load-time safety net: an Active goal restored with `plan_file == None`
-    /// (legacy snapshot) is paused with the canonical message.
+    /// (foreground snapshot) is paused with the canonical message.
     /// One-shot via `goal_plan_reconciled`; the mid-session retry path lives
     /// in `resume_goal`, not here.
     pub(super) async fn maybe_reconcile_active_goal_without_plan(&self) {

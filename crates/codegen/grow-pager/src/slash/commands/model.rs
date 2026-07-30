@@ -37,14 +37,10 @@ impl SlashCommand for ModelCommand {
     }
 
     fn usage(&self) -> &str {
-        "/model <name> [effort]"
+        "/model [name] [effort]"
     }
 
     fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn args_required(&self) -> bool {
         true
     }
 
@@ -67,7 +63,10 @@ impl SlashCommand for ModelCommand {
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let trimmed = args.trim();
         if trimmed.is_empty() {
-            return CommandResult::Error("Usage: /model <name> [effort]".into());
+            return CommandResult::Action(Action::OpenCommandPicker {
+                command: "model".to_string(),
+                args_query: String::new(),
+            });
         }
 
         // Prefer an exact full-string catalog match first. Model display names
@@ -75,7 +74,10 @@ impl SlashCommand for ModelCommand {
         // first, a shorter catalog entry ("Grow") would steal the prefix and
         // treat "4.5" as an effort level.
         if let Some(id) = ctx.models.resolve_by_name_or_id(trimmed) {
-            return CommandResult::Action(Action::SetDefaultModel(id));
+            return CommandResult::Action(Action::SwitchModel {
+                model_id: id,
+                effort: None,
+            });
         }
 
         // Trailing effort token + reasoning model → session-scoped switch
@@ -274,6 +276,13 @@ mod tests {
         let cmd = ModelCommand;
         let ctx = AppCtx {
             models: &state,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             workflows_available: true,
@@ -305,6 +314,13 @@ mod tests {
         let cmd = ModelCommand;
         let ctx = AppCtx {
             models: &state,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             workflows_available: true,
@@ -335,6 +351,13 @@ mod tests {
         let cmd = ModelCommand;
         let ctx = AppCtx {
             models: &state,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             workflows_available: true,
@@ -354,6 +377,13 @@ mod tests {
         let cmd = ModelCommand;
         let ctx = AppCtx {
             models: &state,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             workflows_available: true,
@@ -426,10 +456,13 @@ mod tests {
         let mut ctx = dummy_exec_ctx(&state);
         let result = ModelCommand.run(&mut ctx, "Grow 4.5");
         match result {
-            CommandResult::Action(Action::SetDefaultModel(resolved_id)) => {
+            CommandResult::Action(Action::SwitchModel {
+                model_id: resolved_id,
+                effort: None,
+            }) => {
                 assert_eq!(resolved_id, long_id);
             }
-            other => panic!("expected SetDefaultModel(Grow 4.5), got {other:?}"),
+            other => panic!("expected SwitchModel(Grow 4.5), got {other:?}"),
         }
     }
 
@@ -445,12 +478,7 @@ mod tests {
         assert!(matches!(result, CommandResult::Error(_)));
     }
 
-    /// The bare `/model <name>` form dispatches
-    /// `Action::SetDefaultModel(<ModelId>)` instead of the legacy
-    /// `Action::SwitchModel { effort: None }`. The dispatcher routes
-    /// the typed setter through both `Effect::SwitchModel`
-    /// (session-level mutation) AND `Effect::PersistSetting`
-    /// (next-session default).
+    /// The bare `/model <name>` form changes only the current session.
     ///
     /// The payload is the typed `acp::ModelId` (resolved at the slash
     /// boundary), not a String.
@@ -462,27 +490,33 @@ mod tests {
         let mut ctx = dummy_exec_ctx(&state);
         let result = ModelCommand.run(&mut ctx, "Grow 4.5");
         match result {
-            CommandResult::Action(Action::SetDefaultModel(resolved_id)) => {
+            CommandResult::Action(Action::SwitchModel {
+                model_id: resolved_id,
+                effort: None,
+            }) => {
                 assert_eq!(resolved_id, id);
             }
-            other => panic!("expected Action::SetDefaultModel(<id>), got {other:?}"),
+            other => panic!("expected Action::SwitchModel(<id>), got {other:?}"),
         }
     }
 
     /// Case-insensitive matching against the catalog: `/model grow 4.5`
     /// resolves to the same `ModelId` as `/model Grow 4.5`.
     #[test]
-    fn run_set_default_model_resolves_case_insensitively() {
+    fn run_switch_model_resolves_case_insensitively() {
         let mut state = ModelState::default();
         let (id, info) = plain_model("grow-4.5", "Grow 4.5");
         state.available.insert(id.clone(), info);
         let mut ctx = dummy_exec_ctx(&state);
         let result = ModelCommand.run(&mut ctx, "grow 4.5");
         match result {
-            CommandResult::Action(Action::SetDefaultModel(resolved_id)) => {
+            CommandResult::Action(Action::SwitchModel {
+                model_id: resolved_id,
+                effort: None,
+            }) => {
                 assert_eq!(resolved_id, id);
             }
-            other => panic!("expected Action::SetDefaultModel(<id>), got {other:?}"),
+            other => panic!("expected Action::SwitchModel(<id>), got {other:?}"),
         }
     }
 }

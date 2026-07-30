@@ -1440,7 +1440,7 @@ fn mouse_reporting_toggle_sticky_survives_subagent_esc_to_parent() {
             .insert(child_sid.clone(), Box::new(child));
         parent.active_subagent = Some(child_sid.clone());
     }
-    app.registry = crate::actions::ActionRegistry::defaults_with_config(true);
+    app.registry = crate::actions::ActionRegistry::defaults();
 
     // Toggle while subagent is "focused" (active_subagent set).
     let _ = dispatch(Action::ToggleMouseCapture, &mut app);

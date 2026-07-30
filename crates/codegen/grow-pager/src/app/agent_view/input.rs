@@ -8,8 +8,7 @@ use super::paste::paste_key_tests;
 use super::test_fixtures;
 use super::{
     AgentPane, AgentView, CtaPhase, InputMode, MULTI_CLICK_TIMEOUT_MS, PromptInputMode,
-    active_contexts_for_pane, format_key_for_log, is_link_modifier_for_key,
-    is_mouse_reporting_toggle_chord, resolve_action,
+    active_contexts_for_pane, is_link_modifier_for_key, resolve_action,
 };
 use crate::actions::{ActionId, ActionRegistry, When};
 use crate::app::actions::Action;
@@ -21,7 +20,12 @@ use crossterm::event::{
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use std::time::Instant;
-const LEADER_KEY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+pub(super) const LEADER_KEY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn leader_continuation_matches(key: &crossterm::event::KeyEvent, expected: char) -> bool {
+    matches!(key.code, KeyCode::Char(actual) if actual.eq_ignore_ascii_case(&expected))
+        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+}
 /// External-editor access to the ordinary composer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExternalPromptEditorAccess {
@@ -431,6 +435,17 @@ impl AgentView {
         registry: &ActionRegistry,
         prompt_paging: bool,
     ) -> InputOutcome {
+        self.sync_command_selection_context();
+        if self.behavior_switch_warning_pending
+            && let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && key.modifiers.is_empty()
+            && matches!(key.code, KeyCode::Esc | KeyCode::Enter)
+        {
+            self.behavior_switch_warning_pending = false;
+            self.mode_switch_banner = None;
+            return InputOutcome::Action(Action::DismissBehaviorSwitchWarning);
+        }
         if self.scrollback_drag_latched() {
             let live_drag_event = matches!(
                 ev,
@@ -1016,14 +1031,24 @@ impl AgentView {
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
         {
-            if let Some(started_at) = self.leader_key_started_at.take()
-                && started_at.elapsed() <= LEADER_KEY_TIMEOUT
-            {
-                if key!('m').matches(key) {
+            if let Some(started_at) = self.leader_key_started_at.take() {
+                if started_at.elapsed() > LEADER_KEY_TIMEOUT {
+                    return InputOutcome::Changed;
+                }
+                if leader_continuation_matches(key, 'm') {
                     return self.handle_agent_action(ActionId::ModelPicker);
                 }
-                if key!('a').matches(key) {
+                if leader_continuation_matches(key, 'a') {
                     return self.handle_agent_action(ActionId::AgentPicker);
+                }
+                if leader_continuation_matches(key, 'e') {
+                    return self.handle_agent_action(ActionId::EffortPicker);
+                }
+                if leader_continuation_matches(key, 'p') {
+                    return self.handle_agent_action(ActionId::PermissionPicker);
+                }
+                if leader_continuation_matches(key, 'b') {
+                    return self.handle_agent_action(ActionId::BehaviorPicker);
                 }
                 // Esc, Backspace, and unknown continuations all cancel and
                 // consume the leader so they cannot leak into the composer.
@@ -1220,22 +1245,6 @@ impl AgentView {
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
         {
-            if is_mouse_reporting_toggle_chord(key) {
-                let looked_up = registry.lookup(key, When::ScrollbackFocused);
-                crate::unified_log::info(
-                    "mouse_reporting_toggle.key",
-                    None,
-                    Some(serde_json::json!({
-                        "path": "agent_view.scrollback_or_pane",
-                        "active_pane": format!("{:?}", self.active_pane),
-                        "key": format_key_for_log(key),
-                        "lookup": looked_up.map(|id| format!("{id:?}")),
-                        "action_registered": registry
-                            .find(ActionId::ToggleMouseCapture)
-                            .is_some(),
-                    })),
-                );
-            }
             if let Some(action_id) = registry.lookup(key, When::AgentScreen) {
                 return self.handle_agent_action(action_id);
             }
@@ -1254,6 +1263,81 @@ impl AgentView {
         }
         InputOutcome::Unchanged
     }
+    pub(crate) fn open_command_picker(&mut self, command: &str, args_query: &str) {
+        let toggle = crate::views::agents_modal::load_agent_toggle();
+        self.prompt.slash_controller.set_agent_catalog(
+            crate::views::agents_modal::build_agent_list(&self.session.cwd, &toggle)
+                .into_iter()
+                .filter(|entry| entry.enabled)
+                .map(|entry| crate::slash::command::AgentArg {
+                    name: entry.name,
+                    description: entry.description,
+                })
+                .collect(),
+        );
+        self.sync_command_selection_context();
+        let items = self
+            .prompt
+            .slash_controller
+            .registry()
+            .get(command)
+            .and_then(|cmd| {
+                let ctx = self.prompt.slash_controller.app_ctx(&self.session.models);
+                cmd.suggest_args(&ctx, args_query)
+            });
+        match items {
+            Some(items) if !items.is_empty() => {
+                self.active_modal = Some(crate::views::modal::ActiveModal::ArgPicker {
+                    command: command.to_string(),
+                    args_query: args_query.to_string(),
+                    items: items.clone(),
+                    original_items: items,
+                    state: crate::views::picker::PickerState::input_active(),
+                    previous_palette: None,
+                    window: crate::views::modal_window::ModalWindowState::new(),
+                });
+            }
+            _ => self.show_toast("No options are available for this selector."),
+        }
+    }
+
+    fn sync_command_selection_context(&mut self) {
+        let behavior = self.behavior_mode_pending.unwrap_or(self.behavior_mode);
+        let deep_research = self
+            .prompt
+            .slash_controller
+            .registry()
+            .get("deep-research")
+            .is_some();
+        let goal = self
+            .prompt
+            .slash_controller
+            .registry()
+            .get("goal")
+            .is_some();
+        let auto_permission = self
+            .prompt
+            .slash_controller
+            .registry()
+            .get("auto")
+            .is_some();
+        let permission = if self.session.is_yolo() {
+            "always-approve"
+        } else if self.session.is_auto() {
+            "auto"
+        } else {
+            "ask"
+        };
+        self.prompt.slash_controller.set_selection_context(
+            self.session_agent_name.clone(),
+            behavior,
+            deep_research,
+            goal,
+            auto_permission,
+            permission,
+        );
+    }
+
     /// Handle an agent-level action resolved by the caller's live registry.
     pub(super) fn handle_agent_action(&mut self, action_id: ActionId) -> InputOutcome {
         match action_id {
@@ -1272,13 +1356,6 @@ impl AgentView {
                     return InputOutcome::Action(Action::Quit);
                 }
                 InputOutcome::Unchanged
-            }
-            ActionId::ToggleYolo => {
-                if self.pinned_promo_cta_live {
-                    InputOutcome::Action(Action::AnnouncementsOpenCta)
-                } else {
-                    InputOutcome::Action(Action::SetYoloMode(!self.session.is_yolo()))
-                }
             }
             ActionId::SendToBackground => {
                 if !self.is_subagent_view
@@ -1312,75 +1389,27 @@ impl AgentView {
                 });
                 InputOutcome::Changed
             }
-            ActionId::ModelPicker => {
-                let command = "model";
-                if let Some(cmd) = self.prompt.slash_controller.registry().get(command) {
-                    let ctx = self.prompt.slash_controller.app_ctx(&self.session.models);
-                    if let Some(items) = cmd.suggest_args(&ctx, "")
-                        && !items.is_empty()
-                    {
-                        self.active_modal = Some(crate::views::modal::ActiveModal::ArgPicker {
-                            command: command.to_string(),
-                            args_query: String::new(),
-                            items: items.clone(),
-                            original_items: items,
-                            state: crate::views::picker::PickerState::input_active(),
-                            previous_palette: None,
-                            window: crate::views::modal_window::ModalWindowState::new(),
-                        });
-                        return InputOutcome::Changed;
-                    }
-                }
-                self.show_toast("No LLM configured. Add a provider and model first.");
-                InputOutcome::Changed
-            }
-            ActionId::AgentPicker => {
-                let toggle = crate::views::agents_modal::load_agent_toggle();
-                let items: Vec<crate::slash::command::ArgItem> =
-                    crate::views::agents_modal::build_agent_list(&self.session.cwd, &toggle)
-                        .into_iter()
-                        .filter(|entry| entry.enabled)
-                        .map(|entry| {
-                            let current =
-                                self.session_agent_name.as_deref() == Some(entry.name.as_str());
-                            crate::slash::command::ArgItem {
-                                display: if current {
-                                    format!("{} (current)", entry.name)
-                                } else {
-                                    entry.name.clone()
-                                },
-                                match_text: format!("{} {}", entry.name, entry.description),
-                                insert_text: entry.name,
-                                description: entry.description,
-                            }
-                        })
-                        .collect();
-                if items.is_empty() {
-                    self.show_toast("No Agent definitions found.");
-                    return InputOutcome::Changed;
-                }
-                self.active_modal = Some(crate::views::modal::ActiveModal::ArgPicker {
-                    command: "__agent".to_string(),
-                    args_query: String::new(),
-                    items: items.clone(),
-                    original_items: items,
-                    state: crate::views::picker::PickerState::input_active(),
-                    previous_palette: None,
-                    window: crate::views::modal_window::ModalWindowState::new(),
-                });
-                InputOutcome::Changed
-            }
+            ActionId::ModelPicker => InputOutcome::Action(Action::OpenCommandPicker {
+                command: "model".to_string(),
+                args_query: String::new(),
+            }),
+            ActionId::AgentPicker => InputOutcome::Action(Action::OpenCommandPicker {
+                command: "agent".to_string(),
+                args_query: String::new(),
+            }),
+            ActionId::EffortPicker => InputOutcome::Action(Action::OpenCommandPicker {
+                command: "effort".to_string(),
+                args_query: String::new(),
+            }),
+            ActionId::PermissionPicker => InputOutcome::Action(Action::OpenCommandPicker {
+                command: "permission".to_string(),
+                args_query: String::new(),
+            }),
+            ActionId::BehaviorPicker => InputOutcome::Action(Action::OpenCommandPicker {
+                command: "behavior".to_string(),
+                args_query: String::new(),
+            }),
             ActionId::OpenSettings => InputOutcome::Action(Action::OpenSettings),
-            ActionId::ToggleMouseCapture => {
-                crate::unified_log::info(
-                    "mouse_reporting_toggle.handle_agent_action",
-                    None,
-                    Some(serde_json::json!({
-                        "returning": "Action::ToggleMouseCapture",
-                    })),
-                );
-                InputOutcome::Action(Action::ToggleMouseCapture)
-            }
             other => resolve_action(Some(other)).unwrap_or(InputOutcome::Unchanged),
         }
     }
@@ -1721,8 +1750,8 @@ mod command_palette_input_default_tests {
 mod leader_key_tests {
     use super::test_fixtures::make_agent;
     use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
     use crate::app::app_view::InputOutcome;
-    use crate::views::modal::ActiveModal;
     use agent_client_protocol as acp;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
@@ -1751,11 +1780,8 @@ mod leader_key_tests {
         ));
         assert!(matches!(
             agent.handle_input(&bare('m'), &registry),
-            InputOutcome::Changed
-        ));
-        assert!(matches!(
-            agent.active_modal,
-            Some(ActiveModal::ArgPicker { ref command, .. }) if command == "model"
+            InputOutcome::Action(Action::OpenCommandPicker { ref command, .. })
+                if command == "model"
         ));
     }
 
@@ -1765,12 +1791,85 @@ mod leader_key_tests {
         let mut agent = make_agent();
 
         let _ = agent.handle_input(&ctrl_x(), &registry);
-        let _ = agent.handle_input(&bare('a'), &registry);
-
         assert!(matches!(
-            agent.active_modal,
-            Some(ActiveModal::ArgPicker { ref command, .. }) if command == "__agent"
+            agent.handle_input(&bare('a'), &registry),
+            InputOutcome::Action(Action::OpenCommandPicker { ref command, .. })
+                if command == "agent"
         ));
+    }
+
+    #[test]
+    fn ctrl_x_b_opens_behavior_picker() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.prompt.slash_controller.set_workflows_available(true);
+        agent
+            .prompt
+            .slash_controller
+            .registry_mut()
+            .set_acp_commands(&[
+                agent_client_protocol::AvailableCommand::new(
+                    "deep-research".to_string(),
+                    "Deep Research".to_string(),
+                ),
+                agent_client_protocol::AvailableCommand::new(
+                    "goal".to_string(),
+                    "Goal".to_string(),
+                ),
+            ]);
+
+        let _ = agent.handle_input(&ctrl_x(), &registry);
+        assert!(matches!(
+            agent.handle_input(&bare('b'), &registry),
+            InputOutcome::Action(Action::OpenCommandPicker { ref command, .. })
+                if command == "behavior"
+        ));
+    }
+
+    #[test]
+    fn ctrl_x_e_and_p_open_their_shared_selectors() {
+        let registry = ActionRegistry::defaults();
+        for (key, expected) in [('e', "effort"), ('p', "permission")] {
+            let mut agent = make_agent();
+            let _ = agent.handle_input(&ctrl_x(), &registry);
+            assert!(matches!(
+                agent.handle_input(&bare(key), &registry),
+                InputOutcome::Action(Action::OpenCommandPicker { ref command, .. })
+                    if command == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn leader_continuations_are_case_insensitive() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        let _ = agent.handle_input(&ctrl_x(), &registry);
+        let upper = Event::Key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT));
+        assert!(matches!(
+            agent.handle_input(&upper, &registry),
+            InputOutcome::Action(Action::OpenCommandPicker { ref command, .. })
+                if command == "permission"
+        ));
+    }
+
+    #[test]
+    fn behavior_switch_warning_enter_dismisses_without_sending_input() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.behavior_switch_warning_pending = true;
+        agent.prompt.set_text("preserve this draft");
+
+        let outcome = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &registry,
+        );
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::DismissBehaviorSwitchWarning)
+        ));
+        assert_eq!(agent.prompt.text(), "preserve this draft");
+        assert!(!agent.behavior_switch_warning_pending);
     }
 
     #[test]

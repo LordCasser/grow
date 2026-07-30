@@ -40,7 +40,7 @@
     }
 
     #[test]
-    fn models_update_preserves_active_agent_model() {
+    fn models_update_refreshes_default_and_preserves_active_agent_model() {
         let mut app = make_app_with_agent("sess-1");
 
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -57,8 +57,8 @@
 
         assert_eq!(
             app.models.current.as_ref().map(|id| id.0.as_ref()),
-            Some("grow-3"),
-            "app.models.current must preserve active agent's model, not remote settings default"
+            Some("grow-4"),
+            "app.models is the new-session template and must follow the shell default"
         );
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -192,7 +192,7 @@
 
         assert_eq!(
             app.models.current.as_ref().map(|id| id.0.as_ref()),
-            Some("grow-3"),
+            Some("grow-4"),
         );
         let agent_a = app.agents.get(&AgentId(0)).unwrap();
         assert_eq!(
@@ -441,4 +441,3 @@
             "unrelated-session broadcast must not touch this agent's model"
         );
     }
-

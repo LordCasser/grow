@@ -98,6 +98,10 @@ pub struct PromptContext {
     /// audience, and runtime layers always remain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_body: Option<String>,
+    /// Primary-session collaboration protocol, rendered after the Agent role
+    /// and before runtime context. Subagents leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior_instructions: Option<String>,
     /// Which base template to use for `Extend` mode.
     /// `TemplateOverride::None` = standard base/subagent template.
     /// `TemplateOverride::Codex` = apply-patch profile template.
@@ -181,6 +185,7 @@ impl Default for PromptContext {
             prompt_composition: PromptComposition::Extend,
             audience: PromptAudience::default(),
             prompt_body: None,
+            behavior_instructions: None,
             system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
             persona_summaries: vec![],
@@ -289,6 +294,9 @@ impl PromptContext {
         if let Some(body) = &self.prompt_body {
             sections.push(render(body).unwrap_or_else(|| body.clone()));
         }
+        if let Some(behavior) = &self.behavior_instructions {
+            sections.push(render(behavior).unwrap_or_else(|| behavior.clone()));
+        }
         sections.push(render(RUNTIME_CONTEXT_PROMPT)?);
         let prompt = sections
             .into_iter()
@@ -309,6 +317,7 @@ mod tests {
             prompt_composition: PromptComposition::Extend,
             audience: PromptAudience::Primary,
             prompt_body: None,
+            behavior_instructions: None,
             system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
             persona_summaries: vec![],
@@ -591,6 +600,7 @@ mod tests {
             prompt_composition: PromptComposition::Extend,
             audience: PromptAudience::Subagent,
             prompt_body: Some(subagent_prompts::GENERAL_PURPOSE_PROMPT.to_string()),
+            behavior_instructions: None,
             system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
             persona_summaries: vec![
@@ -1131,6 +1141,25 @@ mod tests {
             json.contains("prompt_body"),
             "prompt_body should be included when Some"
         );
+    }
+    #[test]
+    fn active_behavior_is_rendered_between_role_and_runtime_context() {
+        let mut ctx = test_context();
+        ctx.prompt_body = Some("ROLE_LAYER_SENTINEL".to_string());
+        ctx.behavior_instructions = Some("BEHAVIOR_LAYER_SENTINEL".to_string());
+        ctx.os_name = Some("test-os".into());
+        ctx.shell_path = Some("test-shell".into());
+        ctx.working_directory = Some("/test-workspace".into());
+        ctx.current_date = Some("2026-07-30".into());
+        let renderer = grow_tools::types::template_renderer::TemplateRenderer::new(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        );
+        let prompt = ctx.render_with_renderer(&renderer).unwrap();
+        let role = prompt.find("ROLE_LAYER_SENTINEL").unwrap();
+        let behavior = prompt.find("BEHAVIOR_LAYER_SENTINEL").unwrap();
+        let runtime = prompt.find("<runtime_context>").unwrap();
+        assert!(role < behavior && behavior < runtime, "{prompt}");
     }
     /// Verify that AGENTS.md file paths rewritten to the display cwd are
     /// rendered into the system prompt correctly. When `AgentConfigFile.file_path`

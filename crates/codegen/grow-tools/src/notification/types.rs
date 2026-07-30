@@ -209,38 +209,6 @@ pub struct FileWritten {
     pub is_new_file: bool,
 }
 
-/// Notification that the agent has entered plan mode.
-///
-/// Sent by the `EnterPlanMode` tool so the gateway / client can transition
-/// into plan-mode state (enforce read-only constraints, inject plan-mode
-/// system prompts, display plan-mode UI indicators, etc.).
-#[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct PlanModeEntered {
-    /// The tool call ID (correlates with the EnterPlanMode tool invocation)
-    pub tool_call_id: String,
-}
-
-/// Notification that the agent has exited plan mode.
-///
-/// Sent by the `ExitPlanMode` tool so the gateway / client can transition
-/// out of plan-mode state. The notification carries the plan file content
-/// (if any) so the client can present it for user approval without needing
-/// a separate file-read round-trip.
-#[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct PlanModeExited {
-    /// The tool call ID (correlates with the ExitPlanMode tool invocation)
-    pub tool_call_id: String,
-
-    /// The plan file content at the time ExitPlanMode was called.
-    /// `None` if the plan file did not exist or was empty.
-    pub plan_content: Option<String>,
-
-    /// The path where the plan file lives (e.g., `.grow/plan.md`).
-    pub plan_file_path: String,
-}
-
 /// Notification that the agent is asking the user a question.
 ///
 /// Sent by the `AskUserQuestion` tool so the gateway / client can present
@@ -416,17 +384,6 @@ pub enum ToolNotification {
     /// A background subagent reached a terminal state.
     SubagentCompleted(SubagentCompleted),
 
-    /// The agent requested to enter plan mode.
-    /// Consumers (gateway, TUI) use this to transition the client into
-    /// plan-mode UI state (e.g., enforce read-only, inject plan-mode
-    /// system prompts, show plan-mode indicators).
-    PlanModeEntered(PlanModeEntered),
-
-    /// The agent signaled it is done planning and wants to exit plan mode.
-    /// Consumers (gateway, TUI) use this to present the plan for user
-    /// approval and transition out of plan-mode state.
-    PlanModeExited(PlanModeExited),
-
     /// The agent is asking the user a structured question.
     /// Consumers (gateway, TUI) use this to present the question UI
     /// and collect the user's answers.
@@ -499,8 +456,6 @@ notification_variants! {
     FileWritten => FileWritten,
     TaskCompleted => TaskSnapshot,
     SubagentCompleted => SubagentCompleted,
-    PlanModeEntered => PlanModeEntered,
-    PlanModeExited => PlanModeExited,
     UserQuestionAsked => UserQuestionAsked,
     LspServerStarting => LspServerStarting,
     LspServerReady => LspServerReady,

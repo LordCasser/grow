@@ -122,27 +122,27 @@ pub(crate) fn handle_ask_user_question(
     is_active
 }
 
-/// Handle an `grow/exit_plan_mode` ext_method request.
+/// Handle a `grow/plan_approval` reverse request.
 ///
 /// Creates a `PlanApprovalViewState` overlay for interactive approval.
 ///
 /// Follows the `handle_ask_user_question` pattern: parse → guard → cancel old
 /// → stash prompt → create state → clear prompt → return true.
-pub(super) fn handle_exit_plan_mode(
+pub(super) fn handle_plan_approval(
     ext: xai_acp_lib::AcpArgs<acp::ExtRequest>,
     app: &mut AppView,
 ) -> bool {
-    use crate::views::plan_approval_view::{ExitPlanModeExtRequest, PlanApprovalViewState};
+    use crate::views::plan_approval_view::{PlanApprovalExtRequest, PlanApprovalViewState};
 
     // 1. Parse typed request from raw JSON params.
-    let params: ExitPlanModeExtRequest = match serde_json::from_str(ext.request.params.get()) {
+    let params: PlanApprovalExtRequest = match serde_json::from_str(ext.request.params.get()) {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!("Failed to parse ExitPlanModeExtRequest: {e}");
+            tracing::error!("Failed to parse PlanApprovalExtRequest: {e}");
             ext.response_tx
                 .send(Err(acp::Error::new(
                     -32602,
-                    format!("Invalid exit_plan_mode params: {e}"),
+                    format!("Invalid plan approval params: {e}"),
                 )))
                 .ok();
             return false;
@@ -152,7 +152,7 @@ pub(super) fn handle_exit_plan_mode(
         ext.response_tx
             .send(Err(acp::Error::new(
                 -32602,
-                "Invalid exit_plan_mode params: planContent must be non-empty",
+                "Invalid plan approval params: planContent must be non-empty",
             )))
             .ok();
         return false;
@@ -167,7 +167,7 @@ pub(super) fn handle_exit_plan_mode(
         // replay-on-attach.
         tracing::info!(
             session_id = %params.session_id,
-            "exit_plan_mode for a session with no local view; parked for leader replay-on-attach"
+            "plan approval for a session with no local view; parked for leader replay-on-attach"
         );
         drop(ext.response_tx);
         return false;
@@ -175,7 +175,7 @@ pub(super) fn handle_exit_plan_mode(
     let is_active = is_matched_agent_active(app, id);
     let Some(agent) = app.agents.get_mut(&id) else {
         // `interaction_target_agent` only returns ids that exist; defensive.
-        tracing::warn!("exit_plan_mode: agent {id:?} not found");
+        tracing::warn!("plan approval: agent {id:?} not found");
         drop(ext.response_tx);
         return false;
     };

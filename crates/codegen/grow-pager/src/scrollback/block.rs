@@ -893,27 +893,14 @@ impl RenderBlock {
         matches!(self, RenderBlock::AgentMessage(_))
     }
 
-    /// Check if this block is a plan mode tool call (enter or exit).
-    ///
-    /// Exact-matches the canonical tool-name set rather than substring-matching
-    /// the human title: titles incorporate raw model/user input, so a substring
-    /// match on `"enter_plan_mode"` false-positives on ordinary tool calls.
-    /// Covers both the raw function name and the refined display titles
-    /// emitted by the shell.
-    pub fn is_plan_mode_tool(&self) -> bool {
+    /// Check if this block is the Plan lifecycle control call.
+    pub fn is_plan_control_tool(&self) -> bool {
         use super::blocks::ToolCallBlock;
-        const PLAN_MODE_TOOL_NAMES: &[&str] = &[
-            "EnterPlanMode",
-            "ExitPlanMode",
-            "enter_plan_mode",
-            "exit_plan_mode",
-            "Plan: Enter",
-            "Plan: Exit",
-        ];
+        const PLAN_CONTROL_TOOL_NAMES: &[&str] = &["PlanControl", "plan_control", "Plan: Control"];
         matches!(
             self,
             RenderBlock::ToolCall(ToolCallBlock::Other(b))
-                if PLAN_MODE_TOOL_NAMES.iter().any(|n| b.name == *n)
+                if PLAN_CONTROL_TOOL_NAMES.iter().any(|n| b.name == *n)
         )
     }
 

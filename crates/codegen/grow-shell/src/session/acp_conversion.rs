@@ -561,34 +561,13 @@ pub fn acp_tool_update(
                     .raw_output(raw_output_json(output, rewriter)),
             ))
         }
-        ToolOutput::EnterPlanMode(enter) => {
-            let message = match enter {
-                grow_tools::types::output::EnterPlanModeOutput::Entered { message, .. } => {
-                    message.clone()
-                }
-            };
+        ToolOutput::PlanControl(control) => {
+            let message = control.message.clone();
             Some(acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(Arc::from(tool_call_id)),
                 acp::ToolCallUpdateFields::new()
                     .status(Some(acp::ToolCallStatus::Completed))
-                    .title(Some("Plan mode entered".to_string()))
-                    .content(Some(vec![acp::ToolCallContent::from(
-                        acp::ContentBlock::Text(acp::TextContent::new(message)),
-                    )]))
-                    .raw_output(raw_output_json(output, rewriter)),
-            ))
-        }
-        ToolOutput::ExitPlanMode(exit) => {
-            let message = match exit {
-                grow_tools::types::output::ExitPlanModeOutput::PlanReady { message, .. } => {
-                    message.clone()
-                }
-            };
-            Some(acp::ToolCallUpdate::new(
-                acp::ToolCallId::new(Arc::from(tool_call_id)),
-                acp::ToolCallUpdateFields::new()
-                    .status(Some(acp::ToolCallStatus::Completed))
-                    .title(Some("Plan mode exited".to_string()))
+                    .title(Some("Plan control".to_string()))
                     .content(Some(vec![acp::ToolCallContent::from(
                         acp::ContentBlock::Text(acp::TextContent::new(message)),
                     )]))

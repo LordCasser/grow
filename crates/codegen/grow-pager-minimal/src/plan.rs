@@ -35,32 +35,8 @@ fn focus(agent: &AgentView) -> PlanApprovalFocus {
         .unwrap_or(PlanApprovalFocus::Preview)
 }
 
-/// Scrollback notice when exit_plan_mode parks with no plan body.
-///
-/// Kept short and plain (no markdown chrome) so native scrollback reads cleanly
-/// under minimal mode's chromeless commit path.
-const EMPTY_PLAN_SCROLLBACK: &str = "\
-No plan written yet.
-
-Approve to leave plan mode and start implementing, request changes to send the \
-agent back to planning, or quit to abandon.";
-
 /// Controls-strip header for the parked plan-approval surface.
-fn plan_header(has_plan: bool) -> &'static str {
-    if has_plan {
-        "Plan ready for review"
-    } else {
-        "No plan written yet"
-    }
-}
-
-/// Body committed into native scrollback for a parked plan approval.
-fn plan_scrollback_body(plan_content: Option<&str>) -> String {
-    plan_content
-        .filter(|s| !s.trim().is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| EMPTY_PLAN_SCROLLBACK.to_owned())
-}
+const PLAN_HEADER: &str = "Plan ready for review";
 
 /// Commit the active plan into native scrollback, once per plan (and once per
 /// revision).
@@ -69,10 +45,9 @@ fn plan_scrollback_body(plan_content: Option<&str>) -> String {
 /// history, so the plan is pushed as an ordinary finalized agent-message block
 /// and printed into native scrollback by the normal commit pass — leaving only
 /// the decision controls under the prompt. De-duplicated by the plan's
-/// `tool_call_id`; a revised plan arrives as a fresh ExitPlanMode with a new id
-/// and is committed as its own block. Empty / whitespace-only plans still commit
-/// a short notice so the user sees *why* approval is parked (otherwise only the
-/// controls strip appears and the session looks stuck).
+/// `tool_call_id`; a revised plan arrives as a fresh PlanControl call with a new id
+/// and is committed as its own block. The PlanControl protocol rejects empty plans
+/// before an approval view can be created.
 ///
 /// NOTE (draw-path state mutation + replay durability): this pushes into
 /// `ScrollbackState` from the render path — a deliberate exception, since the
@@ -92,10 +67,8 @@ pub fn maybe_commit_plan(app: &mut AppView) {
     // Extract the plan (owned) under a short immutable borrow so the mutable
     // scrollback push and the `minimal_state` read/write below don't overlap it.
     let plan = app.agents.get(&id).and_then(|agent| {
-        minimal_api::plan_approval_view(agent).map(|pav| {
-            let content = plan_scrollback_body(pav.plan_content.as_deref());
-            (pav.tool_call_id.clone(), content)
-        })
+        minimal_api::plan_approval_view(agent)
+            .map(|pav| (pav.tool_call_id.clone(), pav.plan_content.clone()))
     });
     let Some((tool_call_id, content)) = plan else {
         return;
@@ -152,9 +125,6 @@ pub fn render(
     let controls_y = (area.y + area.height).saturating_sub(1 + input_h);
 
     // ── header ──
-    let has_plan = minimal_api::plan_approval_view(agent)
-        .map(|p| p.has_plan)
-        .unwrap_or(false);
     let header_style = Style::default()
         .fg(theme.accent_user)
         .bg(Color::Reset)
@@ -166,7 +136,7 @@ pub fn render(
     buf.set_span(
         area.x,
         area.y,
-        &Span::styled(plan_header(has_plan), header_style),
+        &Span::styled(PLAN_HEADER, header_style),
         area.width,
     );
 
@@ -175,7 +145,7 @@ pub fn render(
         .map(|p| !p.comments.is_empty())
         .unwrap_or(false)
         || !agent.prompt.text().trim().is_empty();
-    // Tab reopens the preview (including the empty-plan placeholder).
+    // Tab reopens the submitted plan preview.
     let hint = match foc {
         PlanApprovalFocus::Prompt if has_content => {
             "enter request changes \u{00b7} tab plan \u{00b7} esc back"
@@ -233,29 +203,5 @@ fn input_style(theme: &Theme) -> PromptStyle {
         show_borders: false,
         title: None,
         image_preview: true,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn empty_plan_header_is_explicit() {
-        assert_eq!(plan_header(true), "Plan ready for review");
-        assert_eq!(plan_header(false), "No plan written yet");
-    }
-
-    #[test]
-    fn empty_plan_scrollback_uses_notice_not_silence() {
-        let body = plan_scrollback_body(None);
-        assert!(body.contains("No plan written yet"));
-        assert!(body.contains("Approve"));
-
-        let whitespace = plan_scrollback_body(Some("  \n\t  "));
-        assert_eq!(whitespace, body, "whitespace-only counts as empty");
-
-        let real = plan_scrollback_body(Some("# Plan\n- do it"));
-        assert_eq!(real, "# Plan\n- do it");
     }
 }

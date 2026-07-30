@@ -28,6 +28,7 @@ pub(crate) struct LaunchSpec {
     pub objective: String,
     pub args: serde_json::Value,
     pub agent_budget: Option<u64>,
+    pub max_concurrency: Option<u16>,
     pub resume_run_id: Option<String>,
 }
 
@@ -174,7 +175,15 @@ impl WorkflowManager {
                 let state = {
                     let mut tracker = self.tracker.lock();
                     tracker.reconcile_agents_used(run_id, journal.agent_reservation_count());
-                    tracker.resume_run(run_id, spec.agent_budget)
+                    tracker
+                        .resume_run(run_id, spec.agent_budget)
+                        .and_then(|resumed| {
+                            if let Some(max_concurrency) = spec.max_concurrency {
+                                tracker.set_max_concurrency(run_id, max_concurrency)
+                            } else {
+                                Some(resumed)
+                            }
+                        })
                 }
                 .ok_or_else(|| {
                     if existing.status
@@ -194,6 +203,9 @@ impl WorkflowManager {
             None => {
                 let run_id = format!("wf_{}", uuid::Uuid::now_v7().simple());
                 let agent_budget = spec.agent_budget.unwrap_or(WORKFLOW_DEFAULT_AGENT_BUDGET);
+                let max_concurrency = spec.max_concurrency.unwrap_or(
+                    grow_tools::implementations::grow_build::workflow::WorkflowToolInput::DEFAULT_MAX_CONCURRENCY,
+                );
                 self.store
                     .register(&run_id, &execution_script, &spec.args)
                     .map_err(|error| LaunchError::Store(error.to_string()))?;
@@ -208,6 +220,11 @@ impl WorkflowManager {
                     Some(agent_budget),
                     self.session_dir.as_ref().map(|_| journal_rel),
                 );
+                let state = self
+                    .tracker
+                    .lock()
+                    .set_max_concurrency(&run_id, max_concurrency)
+                    .expect("new workflow run must exist");
                 (run_id, journal, state)
             }
         };
@@ -254,6 +271,7 @@ impl WorkflowManager {
                 templates: self.templates.clone(),
                 diagnostics: self.diagnostics.clone(),
                 cancel: cancel.clone(),
+                max_concurrency: state.max_concurrency,
             },
             host_rx,
         );
@@ -368,6 +386,7 @@ impl WorkflowManager {
                         crate::session::commands::SessionCommand::WorkflowCompletionTurn {
                             run_id: watcher_run_id.clone(),
                             revision: state.revision,
+                            outcome: outcome.clone(),
                         },
                     );
                 }
@@ -733,6 +752,7 @@ mod tests {
             objective: "obj".into(),
             args: serde_json::json!({}),
             agent_budget: None,
+            max_concurrency: None,
             resume_run_id: None,
         }
     }
@@ -755,6 +775,7 @@ mod tests {
             crate::session::workflow::tracker::WorkflowRunStatus::Complete
         );
         assert_eq!(state.result_summary.as_deref(), Some("done"));
+        assert_eq!(state.max_concurrency, 3);
         assert!(
             dir.path()
                 .join("workflows")
@@ -762,6 +783,29 @@ mod tests {
                 .join("script.rhai")
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn launch_persists_explicit_max_concurrency_independently_of_budget() {
+        let (mut manager, _rx) = test_manager(None);
+        let resolved = resolve_inline(
+            "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"done\");".into(),
+        )
+        .unwrap();
+        let (run_id, outcome_rx) = manager
+            .launch(
+                resolved,
+                LaunchSpec {
+                    max_concurrency: Some(7),
+                    agent_budget: Some(29),
+                    ..spec()
+                },
+            )
+            .unwrap();
+        let _ = outcome_rx.await.unwrap();
+        let state = manager.tracker.lock().get(&run_id).unwrap();
+        assert_eq!(state.max_concurrency, 7);
+        assert_eq!(state.agent_budget, Some(29));
     }
 
     #[tokio::test]

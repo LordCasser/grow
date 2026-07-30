@@ -90,9 +90,11 @@ Rename the current session. Alias: `/title`.
 
 ---
 
-## Model and Mode
+## Session Selection
 
-### `/model <name>`
+The selector commands below open a compact picker when invoked without arguments. Inline Slash completion and the `Ctrl+X` picker use the same catalog, ordering, availability gates, and execution path.
+
+### `/model [name] [effort]`
 
 Switch models. Accepts a model ID or display name (case-insensitive), and for reasoning models you can add an effort level as a second argument. Alias: `/m`.
 
@@ -102,7 +104,11 @@ Switch models. Accepts a model ID or display name (case-insensitive), and for re
 /model Reasoning X high
 ```
 
-### `/effort <level>`
+### `/agent [agent] [behavior]`
+
+Switch the current session's Agent and optionally its Behavior. Completion first selects an Agent, then offers **Keep current Behavior** followed by the available Behaviors. When a Behavior transition needs confirmation or is rejected, the Agent is not partially switched.
+
+### `/effort [level]`
 
 Set reasoning effort on the **current** model without reselecting it. Levels are `low`, `medium`, `high`, and `xhigh`, and it only applies when the active model supports reasoning effort.
 
@@ -110,16 +116,15 @@ Set reasoning effort on the **current** model without reselecting it. Levels are
 /effort high
 ```
 
-### `/always-approve` and `/auto`
+### `/permission [ask|auto|always-approve]`
 
-Both are real toggles for the permission mode: they stay in the menu, and running the mode you're already in turns it back off.
+Choose the current session's Permission policy. `/ask`, `/auto`, and `/always-approve` are idempotent one-step selections, identified in completion by a `[permission]` prefix. `/auto` is hidden when classifier-based permission is unavailable.
 
-| Command | When off | When already on |
-|---|---|---|
-| `/always-approve` | Skip all permission prompts | Back to ask |
-| `/auto` | Classifier approves safe tools (dangerous ones may still prompt) | Back to ask |
+### `/behavior [normal|clarify|plan|workflow|deep-research|goal]`
 
-Running one while the other is active switches modes — for example, `/auto` while always-approve is on switches to auto. `/auto` only appears when the auto permission-mode feature is enabled. You can also change mode with `Ctrl+R`, `Ctrl+O`, or `/settings`.
+Choose the primary Agent's collaboration protocol. `/normal`, `/clarify`, `/plan`, `/workflow`, `/deep-research`, and `/goal` are idempotent one-step selections with a `[behavior]` prefix. Runtime-dependent Behaviors are omitted when unavailable. Plan, active Goal, and running/paused Deep Research may require the documented second selection before interruption.
+
+These commands modify only the current session. Persistent defaults remain in Settings and affect future sessions only.
 
 ### `/multiline`
 
@@ -233,7 +238,9 @@ Intervals are `Ns` (seconds, minimum 60), `Nm` (minutes), `Nh` (hours), or `Nd` 
 
 ### `/goal`
 
-Set, manage, or check an autonomous goal. Grow works across rounds and only marks the goal complete after an independent evidence review confirms the claim; if that review can't reproduce the result or has no usable evidence, the goal stays active or pauses with concrete gaps.
+Enter Goal Behavior, resume a paused goal, or manage a persistent objective. A bare `/goal` resumes the paused objective when one exists; otherwise the next non-empty message becomes the objective. `/goal <objective>` explicitly creates or replaces it. Later ordinary messages add constraints or evidence and never silently replace the objective.
+
+Grow works across rounds and only marks the goal complete after an independent verifier returns `Achieved`. Missing verification, timeout, infrastructure failure, insufficient evidence, exhausted attempts, or exhausted budget pauses the goal; the Agent cannot self-report completion.
 
 ```
 /goal Migrate the auth module to the new API
@@ -243,35 +250,39 @@ Set, manage, or check an autonomous goal. Grow works across rounds and only mark
 /goal clear
 ```
 
-Arguments are `<objective> [--budget <tokens>]`, or one of `status`, `pause`, `resume`, `clear`. The `--budget` here is a **token** budget for the goal run, separate from the agent-count budgets that workflows use. `/goal` appears when goal mode is enabled for the session. Which driver runs it depends on background workflows: with them on, the host evaluates each model round and runs adversarial verification on completion candidates; with them off, the legacy model-facing `update_goal` path reports progress and triggers verification.
+Arguments are `<objective> [--budget <tokens>]`, or one of `status`, `pause`, `resume`, `clear`. The `--budget` here is a **token** budget for the goal run, separate from Workflow child-call budgets. `/goal pause` keeps Goal Behavior selected; `/goal clear` removes the tracker and returns to Normal. Goal is only offered when orchestration and an independent verifier are configured.
 
-### `/deep-research <query>`
+### `/deep-research [query]`
 
-Kick off a background research workflow. It plans a bounded set of questions, gathers structured claims with source evidence, cross-checks each claim on an independent verifier shard, and renders only the claims that survive, with their verified source locators. Failed shards, dropped claims, and researcher uncertainties are reported as coverage limitations, and the report is marked **Partial** whenever any remain.
+Enter Deep Research Behavior. With no query it waits for the next non-empty message; with a query it immediately starts the private read-only research run. It plans bounded questions, gathers source evidence, cross-checks claims on independent verifier shards, and produces a terminal report for every outcome, including cancellation and runtime failure.
 
 ```
 /deep-research Compare the migration risks of PostgreSQL 17 and MySQL 9
 ```
 
-The command returns right away — follow progress in `/workflows`, and the final report appears in the conversation on its own.
+The command returns right away. While it runs, ordinary messages do not start another turn or a second research run. Use `/workflows` for status and `/workflow-run pause|resume|stop` for the owned runtime. The final report includes status, query, verified findings, evidence, limitations, and termination reason; natural completion returns the session to Normal. Deep Research is private and cannot be launched from `/workflow-run`.
 
-Model-launched workflows may set `agent_budget` on the `workflow` tool. It's an absolute cumulative cap on logical child-agent calls: every `agent()` call and every item in a `parallel()` panel spends one slot, while schema-correction retries don't. The default is 128, explicit values run 1–1,024, and a panel that would cross the remaining budget is rejected before any of its children launch. `budget()` reports the cap as `total`, admitted calls as `spent`, `reserved` (always zero), and `remaining`. Named slash launches use the default budget.
+### `/workflow [prompt]`
 
-### `/workflow`
+Enter Workflow Behavior, optionally sending the prompt after the Behavior switch succeeds. Workflow Behavior lets the primary Agent dynamically scout, create one bounded local sub-plan at a time, launch parallel children, verify the result, and choose the next phase without a whole-plan approval boundary.
+
+Model-launched workflows may set `agent_budget` and `max_concurrency` independently. `agent_budget` is an absolute cumulative cap on logical child-agent calls: every `agent()` call and every item in a `parallel()` panel spends one slot, while schema-correction retries don't. The default is 128 and explicit values run 1–1,024. `max_concurrency` bounds simultaneous children, defaults to 3, and accepts 1–16. Queued children remain cancellable. Named slash launches use both defaults.
+
+### `/workflow-run`
 
 Launch a saved workflow, or manage a running one by the session-unique display name shown in `/workflows`. Launch the same workflow twice and the display names are numbered (`review-changes`, `review-changes-2`); you never need the internal run IDs.
 
 ```
-/workflow review-changes {"target":"origin/main...HEAD"}
-/workflow pause review-changes
-/workflow resume review-changes
-/workflow stop review-changes-2
-/workflow save review-changes
+/workflow-run review-changes {"target":"origin/main...HEAD"}
+/workflow-run pause review-changes
+/workflow-run resume review-changes
+/workflow-run stop review-changes-2
+/workflow-run save review-changes
 ```
 
 Project workflows live in `.grow/workflows/*.rhai`; user workflows live in `~/.grow/workflows/*.rhai`. A same-process pause/resume continues the original immutable script, args, and `agent_budget` cap from committed host-call results — to iterate, edit the returned script copy and launch it as a new run.
 
-A budget-limited run is different: it only resumes through a model/tool resume request that supplies an `agent_budget` above the admitted agent count. A bare `/workflow resume <name>` can't raise the cap, so it rejects budget-limited runs. Runs interrupted by a process restart aren't resumed at all, because external effects have no stable cross-process identity. And resume is not exactly-once: an external effect whose result wasn't committed before a same-process pause can run again.
+A budget-limited run is different: it only resumes through a model/tool resume request that supplies an `agent_budget` above the admitted agent count. A bare `/workflow-run resume <name>` can't raise the cap, so it rejects budget-limited runs. Runs interrupted by a process restart aren't resumed at all, because external effects have no stable cross-process identity. And resume is not exactly-once: an external effect whose result wasn't committed before a same-process pause can run again.
 
 ### `/workflows`
 
@@ -347,7 +358,11 @@ Open the Claude import modal to bring over `~/.claude` settings: permissions, en
 
 ### `/config-agents`
 
-Open the agents modal to view and manage agent definitions, set the default, and switch the active one. Alias: `/agents`.
+Open the configuration surface for Agent/persona definitions.
+
+### `/agents`
+
+Open the Agent Dashboard. This is the only formal dashboard Slash command; removed aliases such as `/dashboard` and `/sessions` are not retained.
 
 ### `/personas`
 

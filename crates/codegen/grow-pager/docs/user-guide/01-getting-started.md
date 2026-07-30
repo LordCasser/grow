@@ -63,11 +63,11 @@ The `@` operator opens a fuzzy file picker. By default it respects `.gitignore` 
 
 ### Permissions
 
-By default, Grow asks for permission before executing shell commands or editing files. You can approve individually or toggle always-approve mode:
+By default, Grow asks for permission before executing shell commands or editing files. You can approve individually or select another session policy:
 
-- Press `Ctrl+R` to cycle the permission mode
+- Press `Ctrl+X`, then `P`, to open the Permission picker
+- Use `/permission`, `/ask`, `/auto`, or `/always-approve`
 - Use the `--yolo` flag at launch: `grow --yolo`
-- Type `/always-approve` in the prompt to toggle the mode
 
 ---
 
@@ -118,7 +118,7 @@ Type `/` in the prompt to access commands. These provide quick actions without w
 ```
 /model provider/model             # Switch to a configured model
 /compact                          # Compress conversation history
-/always-approve                   # Toggle always-approve mode
+/always-approve                   # Select Always Approve for this session
 /new                              # Start a new session
 ```
 

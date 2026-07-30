@@ -84,7 +84,6 @@ xai-acp-lib = { workspace = true }
 axum = { workspace = true, features = ["ws", "multipart"] }
 backon = { workspace = true }
 webbrowser = { workspace = true }
-tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 tokio-rustls = { version = "0.26", default-features = false, features = [
     "ring",
     "logging",
@@ -154,7 +153,6 @@ grow-plugin-marketplace = { path = "../grow-plugin-marketplace" }
 grow-auth = { workspace = true, features = ["middleware"] }
 grow-diagnostics = { workspace = true }
 grow-http = { workspace = true }
-grow-models = { workspace = true }
 prod-mc-cli-chat-proxy-types = { path = "../../../prod/mc/cli-chat-proxy-types" }
 flate2 = { workspace = true }
 fs2 = { workspace = true }

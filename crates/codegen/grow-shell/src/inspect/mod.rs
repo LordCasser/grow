@@ -1832,17 +1832,24 @@ mod tests {
         assert!(!enforced_label(&p).contains("yolo"));
     }
 
-    /// Model-override warnings flow from an effective config through `Config`
-    /// to the human renderer and the JSON report.
+    /// Public provider/model warnings flow from an effective config through
+    /// `Config` to the human renderer and the JSON report.
     #[test]
     fn config_warnings_inspect_smoke() {
         let effective: toml::Value = toml::from_str(
             r#"
-            [model."grow-4.5"]
-            model = "grow-4.5"
-            env_key = "ANTHROPIC_AUTH_TOKEN"
-            compactions_remaining = 1
-            send_compactions_remaining = true
+            [provider.gateway]
+            api_backend = "responses"
+
+            [provider.gateway.options]
+            base_url = "https://gateway.example/v1"
+
+            [provider.gateway.options.auth]
+            type = "command"
+            command = ""
+            token_ttl_secs = 10
+
+            [provider.gateway.models.model-a]
             reasoning_effort = "not-a-level"
             "#,
         )
@@ -1850,10 +1857,8 @@ mod tests {
         let cfg = crate::agent::config::Config::new_from_toml_cfg(&effective).unwrap();
         let warnings = cfg.config_warnings;
         assert!(
-            warnings
-                .iter()
-                .any(|w| w.field() == Some("send_compactions_remaining")),
-            "duplicate alias should warn: {warnings:?}"
+            warnings.iter().any(|w| w.field() == Some("auth.command")),
+            "invalid inline auth should warn: {warnings:?}"
         );
         assert!(
             warnings
@@ -1861,16 +1866,16 @@ mod tests {
                 .any(|w| w.field() == Some("reasoning_effort")),
             "invalid enum should warn: {warnings:?}"
         );
-        assert!(cfg.config_models.contains_key("grow-4.5"));
+        assert!(cfg.config_models.contains_key("gateway/model-a"));
 
         let human = render_config_warnings(&warnings);
         assert!(human.contains("Config Warnings"), "{human}");
         assert!(
-            human.contains("[model.\"grow-4.5\"] send_compactions_remaining"),
+            human.contains("[provider.\"gateway\".options] auth.command"),
             "{human}"
         );
         assert!(
-            human.contains("[model.\"grow-4.5\"] reasoning_effort"),
+            human.contains("[provider.\"gateway\".models.\"model-a\"] reasoning_effort"),
             "{human}"
         );
         // Auth-provider warnings render under their own table syntax.
@@ -1902,17 +1907,17 @@ mod tests {
         assert_eq!(render_config_warnings(&[]), "");
 
         let json = serde_json::to_value(&warnings).unwrap();
-        let alias_warning = json
+        let auth_warning = json
             .as_array()
             .unwrap()
             .iter()
-            .find(|w| w["field"] == "send_compactions_remaining")
-            .expect("alias warning present in JSON");
-        assert_eq!(alias_warning["target"], "model");
-        assert_eq!(alias_warning["key"], "grow-4.5");
-        assert_eq!(alias_warning["kind"], "duplicate-alias");
+            .find(|w| w["field"] == "auth.command")
+            .expect("inline auth warning present in JSON");
+        assert_eq!(auth_warning["target"], "modelProvider");
+        assert_eq!(auth_warning["id"], "gateway");
+        assert_eq!(auth_warning["kind"], "invalid-value");
         assert!(
-            alias_warning["reason"]
+            auth_warning["reason"]
                 .as_str()
                 .is_some_and(|r| !r.is_empty())
         );

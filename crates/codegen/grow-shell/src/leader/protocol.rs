@@ -104,15 +104,11 @@ impl Default for ClientId {
     }
 }
 
-/// Client mode determines how the leader handles communication for this client.
+/// Local leader transport used by ACP clients.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientMode {
-    /// Headless mode (grow agent, grow agent headless) - uses websocket relay.
-    /// Leader connects to websocket relay once and forwards messages.
-    Headless,
-    /// Stdio mode (grow agent stdio, grow -p) - uses local IPC.
-    /// Client sends/receives ACP messages directly via IPC.
+    /// Clients send and receive ACP messages through the local IPC leader.
     Stdio,
 }
 
@@ -218,7 +214,6 @@ pub enum ControlPayload {
         pid: u32,
         socket_path: PathBuf,
         lock_path: PathBuf,
-        ws_url_suffix: String,
         leader_protocol_version: u32,
         leader_binary_version: String,
         profiling_supported: bool,
@@ -556,7 +551,6 @@ mod tests {
             "pid":123,
             "socket_path":"/tmp/leader.sock",
             "lock_path":"/tmp/leader.lock",
-            "ws_url_suffix":"suffix",
             "leader_protocol_version":1,
             "leader_binary_version":"1.2.3",
             "profiling_supported":true,

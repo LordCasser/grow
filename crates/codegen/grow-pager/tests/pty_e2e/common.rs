@@ -346,36 +346,12 @@ pub(crate) const SEND_NOW_TIP_SENTINEL: &str = "to send now";
 // careful environment variable setup to avoid static caching issues with
 // GROW_HOME.
 
-// ── Mouse reporting toggle (opt-in scrollback Ctrl+R) ───────────────────
-
-/// Sticky banner shown while mouse reporting is off (must match pager copy).
-pub(crate) const MOUSE_OFF_STICKY: &str =
-    "Ctrl+r to enable mouse reporting and restore TUI features";
-
-/// Prompt-focused form of the same sticky (swap at render time in `active_toast_message`).
-pub(crate) const MOUSE_OFF_HINT_PROMPT: &str =
-    "/toggle-mouse-reporting to enable mouse reporting and restore TUI features";
-
 /// Seed `~/.grow/config.toml` with a `[ui]` section body (e.g.
-/// `"vim_mode = true"`). Same `{GROW_HOME|HOME}/.grow/config.toml` location
-/// `seed_mouse_reporting_toggle_config` uses; call before spawning the pager.
+/// `"vim_mode = true"`). Call before spawning the pager.
 pub(crate) fn seed_ui_config(content: &ContentController, ui_body: &str) {
     let grow_home = content.home().join(".grow");
     std::fs::create_dir_all(&grow_home).expect("create .grow");
     let config = format!("[ui]\n{ui_body}\n");
-    std::fs::write(grow_home.join("config.toml"), config).expect("write config.toml");
-}
-
-pub(crate) fn seed_mouse_reporting_toggle_config(content: &ContentController, enabled: bool) {
-    let grow_home = content.home().join(".grow");
-    std::fs::create_dir_all(&grow_home).expect("create .grow");
-    // Minimal opt-in only — matches load_config's `{GROW_HOME|HOME}/.grow/config.toml`.
-    let config = if enabled {
-        "[ui]\nmouse_reporting_toggle = true\n"
-    } else {
-        // Minimal config so HOME layout matches the enabled case; toggle stays off.
-        "[ui]\n"
-    };
     std::fs::write(grow_home.join("config.toml"), config).expect("write config.toml");
 }
 

@@ -110,6 +110,15 @@ impl EventWriter {
         }
     }
 
+    #[cfg(test)]
+    pub fn local(directory: &std::path::Path) -> Self {
+        Self {
+            sinks: Arc::new(vec![Box::new(LocalFileSink::new(
+                &directory.to_string_lossy(),
+            ))]),
+        }
+    }
+
     /// No-op writer that discards all events.
     pub fn noop() -> Self {
         Self {

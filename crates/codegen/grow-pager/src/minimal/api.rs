@@ -30,6 +30,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
+pub use grow_tools::types::SessionMode;
+
 use crate::acp::tracker::TurnActivity;
 // Only the test-only setters below reference `AgentSession`.
 #[cfg(any(test, feature = "test-support"))]
@@ -154,7 +156,7 @@ pub(crate) struct MinimalState {
     /// `tool_call_id` of the plan already emitted into native scrollback. Minimal
     /// prints the whole plan as a normal committed conversation block (rather than
     /// rendering it under the prompt), so this de-dupes the per-frame push — and,
-    /// because each revision is a fresh ExitPlanMode with a new id, still commits
+    /// because each revision is a fresh PlanControl call with a new id, still commits
     /// every revised plan as its own block.
     pub(crate) committed_plan_tool_call_id: Option<String>,
 }
@@ -367,14 +369,14 @@ pub fn hovered_permission_item(v: &AgentView) -> Option<usize> {
     v.hovered_permission_item
 }
 
-/// `AgentView::plan_mode_active`.
-pub fn plan_mode_active(v: &AgentView) -> bool {
-    v.plan_mode_active
+/// Confirmed or optimistically selected user-facing Behavior.
+pub fn effective_behavior_mode(v: &AgentView) -> SessionMode {
+    v.behavior_mode_pending.unwrap_or(v.behavior_mode)
 }
 
-/// `AgentView::plan_mode_pending`.
-pub fn plan_mode_pending(v: &AgentView) -> Option<bool> {
-    v.plan_mode_pending
+/// Current Plan phase supplied by `CurrentModeUpdate` metadata.
+pub fn plan_phase(v: &AgentView) -> Option<&str> {
+    v.plan_phase.as_deref()
 }
 
 /// `AgentView::mcp_init_progress`.
@@ -837,16 +839,11 @@ pub fn set_question_view(v: &mut AgentView, val: Option<QuestionViewState>) {
     v.question_view = val;
 }
 
-/// Test-only setter for `AgentView::plan_mode_active`.
+/// Test-only setter for the confirmed user-facing Behavior.
 #[cfg(any(test, feature = "test-support"))]
-pub fn set_plan_mode_active(v: &mut AgentView, on: bool) {
-    v.plan_mode_active = on;
-}
-
-/// Test-only setter for `AgentView::plan_mode_pending`.
-#[cfg(any(test, feature = "test-support"))]
-pub fn set_plan_mode_pending(v: &mut AgentView, val: Option<bool>) {
-    v.plan_mode_pending = val;
+pub fn set_behavior_mode_for_test(v: &mut AgentView, mode: SessionMode) {
+    v.behavior_mode = mode;
+    v.behavior_mode_pending = None;
 }
 
 /// Test-only mutable access to `PromptWidget::suggestions`.

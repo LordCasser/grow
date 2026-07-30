@@ -165,42 +165,6 @@ fn pin_title_resume_finds_saved_profile_and_conflicts() {
     }
 }
 
-/// Regression: a non-UUID remote id with a restored local child pins to the
-/// child, so the peek reads the child's profile instead of an exact same-id
-/// session in another cwd.
-#[serial_test::serial(GROW_HOME)]
-#[test]
-fn pin_prefers_restored_child_over_same_id_in_other_cwd() {
-    let mut fx = GrowHomeFixture::new();
-    let cwd_str = fx.cwd_str();
-    let child = "cafecafe-1111-2222-3333-444444444444";
-    fx.write_summary(
-        &cwd_str,
-        child,
-        serde_json::json!({
-            "parent_session_id": "legacy-remote-7",
-            "sandbox_profile": "strict",
-        }),
-    );
-    let other_cwd = tempfile::tempdir().expect("other cwd tempdir");
-    let other_str = other_cwd.path().to_string_lossy().to_string();
-    fx.write_summary(
-        &other_str,
-        "legacy-remote-7",
-        serde_json::json!({ "sandbox_profile": "off" }),
-    );
-
-    let mut args =
-        crate::app::cli::PagerArgs::try_parse_from(["grow", "-r", "legacy-remote-7"]).unwrap();
-    args.pin_local_resume_target_for_cwd(Some(&cwd_str))
-        .unwrap();
-    assert_eq!(args.session_to_resume(), Some(child));
-    assert_eq!(
-        args.saved_resume_profile_for_cwd(Some(&cwd_str)).as_deref(),
-        Some("strict")
-    );
-}
-
 /// Regression: materialization consumes the pinned id via the ordinary id
 /// path. A rename/create between the pre-sandbox pin and materialization
 /// must not re-select by title.

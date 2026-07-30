@@ -6,9 +6,8 @@
 // Re-exports from restored local stub modules (previously in xai-file-utils).
 pub(crate) use crate::session::event_tracker::EventTracker;
 pub(crate) use crate::session::event_types::{
-    CancellationCategory, EVENT_SCHEMA_VERSION, Event, GoalClassifierVerdictDiagnostic,
-    GoalPauseReasonDiagnostic, InterjectionSource, Phase, RedirectKind, SessionRelationship,
-    ToolOutcome, TurnOutcomeLabel,
+    CancellationCategory, EVENT_SCHEMA_VERSION, Event, GoalPauseReasonDiagnostic,
+    InterjectionSource, Phase, RedirectKind, SessionRelationship, ToolOutcome, TurnOutcomeLabel,
 };
 pub(crate) use crate::session::event_writer::EventWriter;
 
@@ -217,29 +216,29 @@ pub(crate) fn prior_turn_interrupt_from_cancellation(
 // ── GoalClassifier discriminator vocabulary ───────────────────────────
 //
 // Single source of truth for the `reason` field on
-// `Event::GoalClassifierFailOpen` / `Event::GoalClassifierFailClosed`.
+// `Event::GoalVerificationUnavailable` / `Event::GoalClassifierFailClosed`.
 // The producer wraps the reason strings via the `as_const_str()`
-// methods on `GoalClassifierFailOpenReason` / `GoalClassifierFailClosedReason`
+// methods on `GoalVerificationUnavailableReason` / `GoalClassifierFailClosedReason`
 // so the variant set is compiler-enforced; the consts here are the wire
 // vocabulary the dashboards group by.
 
-/// Fail-open — legacy wire string; runner does not emit.
-pub const GOAL_CLASSIFIER_FAIL_OPEN_TIMEOUT: &str = "timeout";
+/// Verification unavailable because the verifier timed out.
+pub const GOAL_VERIFICATION_UNAVAILABLE_TIMEOUT: &str = "timeout";
 
-/// Fail-open — the subagent spawn returned an error (channel closed,
+/// Verification unavailable because the subagent spawn returned an error (channel closed,
 /// coordinator rejected, etc.). INFRA-class.
-pub const GOAL_CLASSIFIER_FAIL_OPEN_SAMPLER_ERROR: &str = "sampler_error";
+pub const GOAL_VERIFICATION_UNAVAILABLE_SAMPLER_ERROR: &str = "sampler_error";
 
-/// Fail-open — the user aborted the run mid-classification.
-pub const GOAL_CLASSIFIER_FAIL_OPEN_ABORTED: &str = "aborted";
+/// Verification unavailable because the user aborted the verifier.
+pub const GOAL_VERIFICATION_UNAVAILABLE_ABORTED: &str = "aborted";
 
-/// Fail-open — the harness could not pre-create the details-file parent
+/// Verification unavailable because the harness could not pre-create the details-file parent
 /// directory or otherwise prepare the on-disk state.
-pub const GOAL_CLASSIFIER_FAIL_OPEN_FILE_WRITE_FAILED: &str = "file_write_failed";
+pub const GOAL_VERIFICATION_UNAVAILABLE_FILE_WRITE_FAILED: &str = "file_write_failed";
 
-/// Fail-open — the goal was no longer Active when the runner resolved
+/// Verification unavailable because the goal was no longer Active when the runner resolved
 /// its inputs (status changed during the spawn).
-pub const GOAL_CLASSIFIER_FAIL_OPEN_GOAL_NOT_ACTIVE: &str = "goal_not_active_at_resolve";
+pub const GOAL_VERIFICATION_UNAVAILABLE_GOAL_NOT_ACTIVE: &str = "goal_not_active_at_resolve";
 
 /// Fail-closed — a second `update_goal(completed: true)` arrived
 /// while a verification stage was already in flight for this goal.
@@ -255,24 +254,20 @@ pub const GOAL_CLASSIFIER_FAIL_CLOSED_PENDING_QUEUE_FULL: &str = "pending_queue_
 // Compile-time non-empty guard (mirrors the laziness const block).
 #[allow(clippy::const_is_empty)]
 const _: () = assert!(
-    !GOAL_CLASSIFIER_FAIL_OPEN_TIMEOUT.is_empty()
-        && !GOAL_CLASSIFIER_FAIL_OPEN_SAMPLER_ERROR.is_empty()
-        && !GOAL_CLASSIFIER_FAIL_OPEN_ABORTED.is_empty()
-        && !GOAL_CLASSIFIER_FAIL_OPEN_FILE_WRITE_FAILED.is_empty()
-        && !GOAL_CLASSIFIER_FAIL_OPEN_GOAL_NOT_ACTIVE.is_empty()
+    !GOAL_VERIFICATION_UNAVAILABLE_TIMEOUT.is_empty()
+        && !GOAL_VERIFICATION_UNAVAILABLE_SAMPLER_ERROR.is_empty()
+        && !GOAL_VERIFICATION_UNAVAILABLE_ABORTED.is_empty()
+        && !GOAL_VERIFICATION_UNAVAILABLE_FILE_WRITE_FAILED.is_empty()
+        && !GOAL_VERIFICATION_UNAVAILABLE_GOAL_NOT_ACTIVE.is_empty()
         && !GOAL_CLASSIFIER_FAIL_CLOSED_CONCURRENT.is_empty()
         && !GOAL_CLASSIFIER_FAIL_CLOSED_PENDING_QUEUE_FULL.is_empty(),
     "GoalClassifier discriminator consts must be non-empty",
 );
 
-/// Closed set of fail-open reasons. Variants are INFRA-class:
-/// the harness could not verify the verdict and treats the goal as
-/// achieved to avoid blocking the user on an internal failure.
+/// Closed set of INFRA-class reasons for pausing without completion.
 ///
-/// `Timeout` is a legacy wire string production no longer emits; kept so
-/// dashboards joining on the historical string still parse cleanly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GoalClassifierFailOpenReason {
+pub(crate) enum GoalVerificationUnavailableReason {
     /// Legacy wire only — no production emitter today.
     #[cfg_attr(
         not(test),
@@ -290,14 +285,14 @@ pub(crate) enum GoalClassifierFailOpenReason {
     GoalNotActiveAtResolve,
 }
 
-impl GoalClassifierFailOpenReason {
+impl GoalVerificationUnavailableReason {
     pub(crate) fn as_const_str(self) -> &'static str {
         match self {
-            Self::Timeout => GOAL_CLASSIFIER_FAIL_OPEN_TIMEOUT,
-            Self::SamplerError => GOAL_CLASSIFIER_FAIL_OPEN_SAMPLER_ERROR,
-            Self::Aborted => GOAL_CLASSIFIER_FAIL_OPEN_ABORTED,
-            Self::FileWriteFailed => GOAL_CLASSIFIER_FAIL_OPEN_FILE_WRITE_FAILED,
-            Self::GoalNotActiveAtResolve => GOAL_CLASSIFIER_FAIL_OPEN_GOAL_NOT_ACTIVE,
+            Self::Timeout => GOAL_VERIFICATION_UNAVAILABLE_TIMEOUT,
+            Self::SamplerError => GOAL_VERIFICATION_UNAVAILABLE_SAMPLER_ERROR,
+            Self::Aborted => GOAL_VERIFICATION_UNAVAILABLE_ABORTED,
+            Self::FileWriteFailed => GOAL_VERIFICATION_UNAVAILABLE_FILE_WRITE_FAILED,
+            Self::GoalNotActiveAtResolve => GOAL_VERIFICATION_UNAVAILABLE_GOAL_NOT_ACTIVE,
         }
     }
 }
@@ -331,9 +326,8 @@ impl GoalClassifierFailClosedReason {
 
 // ── GoalPlanner discriminator vocabulary ──────────────────────────────
 //
-// The planner is fail-CLOSED by design (the opposite of the classifier).
-// Every reason here represents a path that pauses the goal — there is no
-// fail-open analogue.
+// The planner is fail-CLOSED by design. Every reason here represents a path
+// that pauses the goal — there is no completion fallback.
 
 /// Planner subagent coordinator channel was unreachable.
 pub const GOAL_PLANNER_FAIL_CLOSED_TRANSPORT: &str = "transport";
@@ -644,19 +638,6 @@ impl GoalRoleModelFailOpenReason {
             Self::SpawnFailed,
             Self::HarnessFlavorUnsupported,
         ]
-    }
-}
-
-/// Bridge `GoalClassifierVerdict` (shell) → `GoalClassifierVerdictDiagnostic`.
-/// Mirrors the `GoalPauseReason` → `GoalPauseReasonDiagnostic` pattern;
-/// exhaustive match catches drift if either side adds a variant.
-impl From<crate::session::goal_tracker::GoalClassifierVerdict> for GoalClassifierVerdictDiagnostic {
-    fn from(verdict: crate::session::goal_tracker::GoalClassifierVerdict) -> Self {
-        use crate::session::goal_tracker::GoalClassifierVerdict;
-        match verdict {
-            GoalClassifierVerdict::Achieved => Self::Achieved,
-            GoalClassifierVerdict::NotAchieved => Self::NotAchieved,
-        }
     }
 }
 

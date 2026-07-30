@@ -1,5 +1,5 @@
 //! Plan-nudge trigger: detects planning keywords typed into the prompt so the
-//! pager can hint that Ctrl+R cycles into plan mode first.
+//! pager can hint that Ctrl+X, B opens the Behavior picker.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -32,12 +32,8 @@ const PLANNING_KEYWORDS: &[&str] = &[
     "strategy",
 ];
 
-/// Plan-mode chord for the tip copy, derived from the real `CycleMode`
-/// binding so the nudge cannot drift from the prompt action.
 fn plan_chord_label() -> String {
-    crate::key!('r', CONTROL)
-        .display_pretty()
-        .to_ascii_lowercase()
+    "ctrl+x b".to_owned()
 }
 
 /// Build the "Planning? Check out plan mode via {chord}" tip, seen-gated to
@@ -142,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_nudge_chord_is_ctrl_r() {
-        assert_eq!(plan_chord_label(), "ctrl+r");
+    fn plan_nudge_chord_opens_behavior_picker() {
+        assert_eq!(plan_chord_label(), "ctrl+x b");
     }
 }

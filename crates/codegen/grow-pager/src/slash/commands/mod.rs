@@ -3,9 +3,11 @@
 //! Each command lives in its own submodule. This module re-exports
 //! command structs and provides `builtin_commands()` for registry
 //! construction.
+pub mod agent;
 pub mod always_approve;
 pub mod announcements;
 pub mod auto;
+pub mod behavior;
 pub mod btw;
 pub mod cd;
 pub mod compact;
@@ -39,6 +41,7 @@ pub mod mcps;
 pub mod model;
 pub mod multiline;
 pub mod new;
+pub mod permission;
 pub mod personas;
 pub mod plan;
 pub mod plugin;
@@ -53,7 +56,6 @@ pub mod screen_mode_switch;
 pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
-pub mod share;
 pub mod shortcuts;
 pub mod tasks;
 pub mod theme;
@@ -65,6 +67,7 @@ pub mod tutorial;
 pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;
+pub mod workflow;
 pub mod workflows;
 use super::command::SlashCommand;
 use std::sync::Arc;
@@ -95,8 +98,14 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(screen_mode_switch::ScreenModeSwitchCommand::fullscreen()),
         Arc::new(model::ModelCommand),
         Arc::new(effort::EffortCommand),
+        Arc::new(agent::AgentCommand),
+        Arc::new(permission::PermissionCommand),
+        Arc::new(permission::AskCommand),
         Arc::new(always_approve::AlwaysApproveCommand),
         Arc::new(auto::AutoCommand),
+        Arc::new(behavior::BehaviorCommand),
+        Arc::new(behavior::BehaviorShortcutCommand::normal()),
+        Arc::new(behavior::BehaviorShortcutCommand::clarify()),
         Arc::new(multiline::MultilineCommand),
         Arc::new(compact_mode::CompactModeCommand),
         Arc::new(vim_mode::VimModeCommand),
@@ -104,7 +113,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(plugin::PluginsCommand),
         Arc::new(plugin::MarketplaceCommand),
         Arc::new(plugin::SkillsCommand),
-        Arc::new(share::ShareCommand),
         Arc::new(session_info::SessionInfoCommand),
         Arc::new(rename::RenameCommand),
         Arc::new(dashboard::DashboardCommand),
@@ -118,6 +126,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(resume::ResumeCommand),
         Arc::new(mcps::McpsCommand),
         Arc::new(workflows::WorkflowsCommand),
+        Arc::new(workflow::WorkflowCommand),
         Arc::new(btw::BtwCommand),
         Arc::new(recap::RecapCommand),
         Arc::new(doctor::DoctorCommand),
@@ -236,17 +245,20 @@ mod tests {
     #[test]
     fn shell_collision_contract_covers_every_pager_command_and_alias() {
         const SHELL_RESERVED: &[&str] = &[
+            "agent",
             "agents",
-            "agents-dashboard",
             "always-approve",
             "announcements",
+            "ask",
             "auto",
+            "behavior",
             "btw",
             "cd",
             "changelog",
             "chat",
             "clear",
             "cloud",
+            "clarify",
             "compact",
             "compact-mode",
             "config",
@@ -254,7 +266,6 @@ mod tests {
             "context",
             "copy",
             "cost",
-            "dashboard",
             "debug",
             "docs",
             "doctor",
@@ -289,8 +300,10 @@ mod tests {
             "model",
             "multiline",
             "new",
+            "normal",
             "onboarding",
             "personas",
+            "permission",
             "plan",
             "plan-view",
             "plugins",
@@ -306,9 +319,7 @@ mod tests {
             "rewind",
             "scroll-debug",
             "session-info",
-            "sessions",
             "settings",
-            "share",
             "show-plan",
             "shortcuts",
             "skills",
@@ -330,6 +341,7 @@ mod tests {
             "view-plan",
             "vim-mode",
             "welcome",
+            "workflow",
             "workflows",
             "yolo",
         ];
@@ -430,8 +442,7 @@ mod tests {
             other => panic!("expected QueueCommand, got {other:?}"),
         }
     }
-    /// Bare `/model <name>` → `SetDefaultModel` (switch + persist).
-    /// `/model <name> <effort>` → `SwitchModel` (session-scoped).
+    /// `/model` changes only the current session; defaults live in Settings.
     #[test]
     fn model_resolves_by_display_name() {
         let models = sample_models();
@@ -439,10 +450,13 @@ mod tests {
         let cmd = model::ModelCommand;
         let result = cmd.run(&mut ctx, "Grow 4.5");
         match result {
-            CommandResult::Action(Action::SetDefaultModel(id)) => {
+            CommandResult::Action(Action::SwitchModel {
+                model_id: id,
+                effort: None,
+            }) => {
                 assert_eq!(id.0.as_ref(), "grow-4.5");
             }
-            other => panic!("expected Action(SetDefaultModel), got {other:?}"),
+            other => panic!("expected Action(SwitchModel), got {other:?}"),
         }
     }
     #[test]
@@ -452,10 +466,13 @@ mod tests {
         let cmd = model::ModelCommand;
         let result = cmd.run(&mut ctx, "grow-4.3");
         match result {
-            CommandResult::Action(Action::SetDefaultModel(id)) => {
+            CommandResult::Action(Action::SwitchModel {
+                model_id: id,
+                effort: None,
+            }) => {
                 assert_eq!(id.0.as_ref(), "grow-4.3");
             }
-            other => panic!("expected Action(SetDefaultModel), got {other:?}"),
+            other => panic!("expected Action(SwitchModel), got {other:?}"),
         }
     }
     #[test]
@@ -465,10 +482,13 @@ mod tests {
         let cmd = model::ModelCommand;
         let result = cmd.run(&mut ctx, "grow 4.5");
         match result {
-            CommandResult::Action(Action::SetDefaultModel(id)) => {
+            CommandResult::Action(Action::SwitchModel {
+                model_id: id,
+                effort: None,
+            }) => {
                 assert_eq!(id.0.as_ref(), "grow-4.5");
             }
-            other => panic!("expected Action(SetDefaultModel), got {other:?}"),
+            other => panic!("expected Action(SwitchModel), got {other:?}"),
         }
     }
     #[test]
@@ -488,26 +508,41 @@ mod tests {
         }
     }
     #[test]
-    fn model_empty_arg_returns_error() {
+    fn model_empty_arg_opens_picker() {
         let models = sample_models();
         let mut ctx = make_ctx(&models);
         let cmd = model::ModelCommand;
         let result = cmd.run(&mut ctx, "");
-        assert!(matches!(result, CommandResult::Error(_)));
+        assert!(matches!(
+            result,
+            CommandResult::Action(Action::OpenCommandPicker { ref command, .. })
+                if command == "model"
+        ));
     }
     #[test]
-    fn model_whitespace_only_arg_returns_error() {
+    fn model_whitespace_only_arg_opens_picker() {
         let models = sample_models();
         let mut ctx = make_ctx(&models);
         let cmd = model::ModelCommand;
         let result = cmd.run(&mut ctx, "   ");
-        assert!(matches!(result, CommandResult::Error(_)));
+        assert!(matches!(
+            result,
+            CommandResult::Action(Action::OpenCommandPicker { ref command, .. })
+                if command == "model"
+        ));
     }
     #[test]
     fn model_suggest_args_returns_available_models() {
         let models = sample_models();
         let ctx = crate::slash::command::AppCtx {
             models: &models,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             workflows_available: true,
@@ -532,6 +567,13 @@ mod tests {
         let models = ModelState::default();
         let ctx = crate::slash::command::AppCtx {
             models: &models,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             workflows_available: true,
@@ -641,6 +683,13 @@ mod tests {
         let models = ModelState::default();
         let ctx = crate::slash::command::AppCtx {
             models: &models,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             workflows_available: true,

@@ -11,17 +11,17 @@ When plan mode is active, the agent:
 1. Investigates the available environment, constraints, and existing design
 2. Builds the complete plan in context
 3. May use `ask_user_question` to clarify specific questions
-4. Calls `exit_plan_mode` to present the plan for your approval
+4. Calls `plan_control(action="submit", plan=...)` to present the plan for your approval
 
-Plan mode is a planning behavior, not a tool preset or a strict no-side-effect sandbox. Ordinary file-edit calls are rejected outright in every permission mode, including always-approve. Other tools already authorized for the Agent remain available for investigation and verification and continue through their normal permission flow. The completed plan is submitted through `exit_plan_mode` and stored as session-owned state before approval.
+Plan is a human-approval protocol, not a permission preset. Before approval, workspace mutation is rejected in every permission mode, including shell and MCP execution paths that may mutate state. Read, search, web, and question tools still pass through their normal policy and permission checks. After approval, the frozen plan becomes the execution contract and normal mutation capabilities reopen.
 
 ---
 
 ## How to Enter Plan Mode
 
-### Agent-Initiated Entry
-
-The agent enters plan mode when it determines a task has genuine ambiguity. It calls the `enter_plan_mode` tool, which requires your approval before plan mode activates. If you decline, the agent stays in normal mode.
+Plan is selected explicitly by the user. The Agent cannot enter it through a
+tool call: `plan_control` is available only after Plan is selected and controls
+the approval lifecycle inside that Behavior.
 
 **Good triggers for plan mode:**
 
@@ -37,12 +37,13 @@ The agent enters plan mode when it determines a task has genuine ambiguity. It c
 - "Update the error handling in the API" -- start working, ask specific questions if needed
 - "Can we work on the search feature?" -- user wants to get started, not plan
 
-### User-Initiated Entry
-
 You can enter plan mode yourself in two ways:
 
 - **`/plan`** -- Enter plan mode. Plan mode activates when you send your next prompt. Run `/plan <description>` to enter plan mode and start a turn with that description in one step.
-- **Ctrl+R** -- Cycle the session mode: Normal, then Plan, then Auto (when enabled), then Always-approve, then back to Normal. From Normal, a single press lands on Plan.
+- **Ctrl+X, then B** -- Open the Behavior picker and select Plan. The same picker selects Normal, Clarify, Workflow, Deep Research, and Goal when those Behaviors are available.
+
+Permission is selected independently through `Ctrl+X P` or `/permission`;
+`Ctrl+R` remains the prompt editor's redo shortcut.
 
 After a plan exists, run **`/view-plan`** (aliases `/show-plan`, `/plan-view`) to reopen its saved preview.
 
@@ -50,7 +51,7 @@ After a plan exists, run **`/view-plan`** (aliases `/show-plan`, `/plan-view`) t
 
 ## The Plan Artifact
 
-The complete plan is passed in the `plan` argument to `exit_plan_mode`. Before approval opens, Grow atomically persists it as a session-owned artifact at `plan.md` inside the session directory (`~/.grow/sessions/<cwd>/<session-id>/plan.md`, where `<cwd>` is an encoded directory name, not the literal path).
+The complete plan is passed to `plan_control`. Before approval opens, Grow atomically persists the candidate at `plan.md`. Approval freezes the exact accepted version at `approved_plan.md` in the same session directory. Execution reminders inject that frozen artifact as a contract; later material changes require `action="amend"` and another approval.
 
 This artifact belongs to the session control plane. It is not exposed as a model-editable workspace target and does not grant the Agent arbitrary file-write access.
 
@@ -66,7 +67,7 @@ The plan file contains:
 
 ## Plan Approval
 
-When the agent finishes planning, it calls `exit_plan_mode(plan=...)`. Grow validates that the submitted plan is non-empty, atomically persists it, and then opens a scrollable preview with an action bar along the bottom.
+When the agent finishes planning, it calls `plan_control(action="submit", plan=...)`. Grow validates that the submitted plan is non-empty, atomically persists it, and then opens a scrollable preview with an action bar along the bottom.
 
 An empty or whitespace-only plan is rejected and Plan remains active. If persistence fails, approval does not open and the Agent receives the failure so it can retry.
 
@@ -102,41 +103,32 @@ Press `Esc` to return focus from the prompt to the plan preview. To dismiss the 
 
 ## Plan Mode Lifecycle
 
-The plan mode state machine has four states:
+The user-facing Plan protocol has these phases:
 
-| State          | Description                                                    |
-| -------------- | -------------------------------------------------------------- |
-| `Inactive`     | Normal operating mode. No plan mode constraints.               |
-| `Pending`      | Client toggled plan mode ON, but no prompt has been sent yet.  |
-| `Active`       | Plan behavior is active. All ordinary file-edit calls are rejected. |
-| `ExitPending`  | User toggled plan mode OFF while a turn is in-flight.          |
+| Phase | Description |
+| --- | --- |
+| `Drafting` | Investigate and form a complete plan; workspace mutation is blocked. |
+| `AwaitingApproval` | The submitted candidate is frozen for user review; mutation remains blocked. |
+| `Executing` | The approved version is injected as the execution contract; mutation is allowed by normal policy. |
+| `Amending` | A material deviation has stopped execution and awaits approval of a complete replacement plan. |
+| `Completed/Cancelled` | The lifecycle is cleared and Behavior returns to Normal. |
 
 Transitions:
 
-```
-Inactive    --> Active   (enter_plan_mode tool called and approved -- skips Pending)
-Inactive    --> Pending  (you toggle plan mode on with /plan or Ctrl+R)
-Pending     --> Active   (your first prompt activates plan mode)
-Active      --> Inactive (exit_plan_mode approved, or you toggle plan mode off when idle)
-Active      --> ExitPending (you toggle plan mode off while a turn is in-flight)
-ExitPending --> Inactive (after the turn completes)
-```
-
-Plan mode state is persisted to disk and survives process restarts. Transient states (`Pending`, `ExitPending`) are collapsed to `Inactive` on restart since they depend on in-flight interactions.
+`submit` moves Drafting to AwaitingApproval. Approval moves to Executing. `amend` moves Executing to Amending and approval returns to Executing with a new frozen version. `complete` and `cancel` return to Normal. Plan state and the outstanding approval survive process restarts.
 
 ---
 
 ## Edits During Plan Mode
 
-During active Plan behavior, **all ordinary file-edit calls are rejected before permission evaluation**, including attempts to edit the session artifact path. The Agent revises the plan in context and submits the complete version through `exit_plan_mode`.
+During Drafting, AwaitingApproval, and Amending, **all workspace mutation is rejected before permission evaluation**, including attempts to edit the session artifact path. Workflow is not advertised and stale Workflow calls are rejected. During Executing, edits are allowed only through the ordinary intersection of registered tools, Agent policy, permissions, and the Behavior gate.
 
 This enforcement is independent of the permission mode:
 
-- **Always-approve (yolo) stays armed underneath plan mode.** Non-edit tools (bash commands, reads, MCP tools) still auto-run, but file edits are blocked until you approve exiting plan mode. Once the plan is approved, always-approve resumes for implementation.
-- Bash commands are not inspected for file writes — plan mode blocks the edit tools, not shell redirection.
-- Behavior is selected independently for each subagent task. A parent in Plan does not change the child's role, tool allow/deny policy, or capability mode. Select `behavior: plan` for a child that must use the same Plan guidance and edit gate; otherwise its own resolved permissions apply.
+- **Always-approve stays armed as an independent permission policy**, but it cannot bypass a non-executing Plan phase's mutation gate.
+- Behavior belongs only to the primary Agent. Child Agents receive an explicit role, task, and capability boundary; they neither inherit Plan nor select another Behavior.
 
-The status flag shows `plan` while plan mode is active. If always-approve is enabled underneath, its flag reappears when plan mode exits.
+The prompt status line always shows Behavior between model and permission. Plan includes its current phase, and the permission indicator remains visible because the two dimensions are independent.
 
 ---
 
@@ -160,4 +152,4 @@ When `/compact` runs during an active plan mode session, the plan mode state is 
 - Bug fixes where the fix is obvious once you understand the bug
 - Adding features that follow existing conventions
 - Straightforward modifications (renaming, formatting, adding tests)
-- Research and exploration tasks (use subagents instead)
+- Evidence-heavy research tasks that require a terminal report (use Deep Research)

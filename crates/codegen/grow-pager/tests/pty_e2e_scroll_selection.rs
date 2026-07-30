@@ -32,10 +32,6 @@ mod forced_wheel_mode_env_scrolls_exact_rows;
 mod keep_text_selection_settings_visible_pty;
 #[path = "pty_e2e/misclassified_wheel_flood_does_not_teleport_viewport.rs"]
 mod misclassified_wheel_flood_does_not_teleport_viewport;
-#[path = "pty_e2e/mouse_reporting_toggle_inactive_without_config_pty.rs"]
-mod mouse_reporting_toggle_inactive_without_config_pty;
-#[path = "pty_e2e/mouse_reporting_toggle_sticky_persists_pty.rs"]
-mod mouse_reporting_toggle_sticky_persists_pty;
 #[path = "pty_e2e/nested_quote_drag_copy_excludes_bars_pty.rs"]
 mod nested_quote_drag_copy_excludes_bars_pty;
 #[path = "pty_e2e/page_flip_on_send_pty.rs"]

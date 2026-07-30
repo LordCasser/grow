@@ -1761,10 +1761,8 @@ fn ctx_with_parent_chat_state(
     ctx.model_id = acp::ModelId::new(session_model_id);
     ctx.parent_chat_state = Some(spawn_test_parent_chat_state(inference_slug));
     ctx.models_manager = crate::agent::models::ModelsManager::new(
-        None,
         available_models.clone(),
         acp::ModelId::new(global_model_id),
-        ctx.auth_manager.clone(),
         crate::agent::config::Config::default(),
     );
     ctx.available_models = available_models;
@@ -1816,10 +1814,8 @@ async fn read_parent_sampling_config_fallback_uses_session_model_id() {
     ctx.sampling_config.model = "composer-2-fast".to_string();
     ctx.available_models = models;
     ctx.models_manager = crate::agent::models::ModelsManager::new(
-        None,
         indexmap::IndexMap::new(),
         acp::ModelId::new("auto"),
-        ctx.auth_manager.clone(),
         crate::agent::config::Config::default(),
     );
     let (config, model_id) = read_parent_sampling_config(&ctx).await;
@@ -1874,10 +1870,8 @@ async fn read_parent_sampling_config_fallback_resolves_compactions_remaining_fro
     ctx.sampling_config.model = "composer-2-fast".to_string();
     ctx.sampling_config.compactions_remaining = None;
     ctx.models_manager = crate::agent::models::ModelsManager::new(
-        None,
         models,
         acp::ModelId::new("composer-2-fast"),
-        ctx.auth_manager.clone(),
         crate::agent::config::Config::default(),
     );
     let (config, model_id) = read_parent_sampling_config(&ctx).await;

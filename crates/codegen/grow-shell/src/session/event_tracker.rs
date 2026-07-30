@@ -58,8 +58,12 @@ impl std::fmt::Debug for EventTracker {
 
 impl EventTracker {
     pub fn new(_session_dir: &Path) -> Self {
+        Self::with_writer(EventWriter::open())
+    }
+
+    fn with_writer(writer: EventWriter) -> Self {
         Self {
-            writer: EventWriter::open(),
+            writer,
             turn_ended_emitted: Cell::new(false),
             active_tool: RefCell::new(None),
             turn_tool_count: Cell::new(0),
@@ -67,6 +71,11 @@ impl EventTracker {
             prior_redirect_kind: Cell::new(None),
             pending_interrupt_reminder: Cell::new(false),
         }
+    }
+
+    #[cfg(test)]
+    pub fn local(session_dir: &Path) -> Self {
+        Self::with_writer(EventWriter::local(session_dir))
     }
 
     /// Clone the writer for background tasks.

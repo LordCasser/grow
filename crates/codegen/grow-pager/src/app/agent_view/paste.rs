@@ -1188,7 +1188,7 @@ pub(super) mod paste_key_tests {
     pub(in crate::app::agent_view) fn make_plan_approval_view_state()
     -> crate::views::plan_approval_view::PlanApprovalViewState {
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+        let request = crate::views::plan_approval_view::PlanApprovalExtRequest {
             session_id: "test-session".into(),
             tool_call_id: "call-1".into(),
             plan_content: "# Plan\n\n## Step 1\nDo something".into(),

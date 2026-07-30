@@ -242,7 +242,7 @@ pub(crate) async fn spawn_session_actor(
     compat: CompatConfig,
     incremental_bash_output: bool,
     persisted_signals: Option<crate::session::signals::SessionSignals>,
-    persisted_plan_mode: Option<crate::session::plan_mode::BehaviorSnapshot>,
+    persisted_behavior: Option<crate::session::behavior::BehaviorSnapshot>,
     persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
     persisted_workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
     persisted_announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
@@ -534,14 +534,22 @@ pub(crate) async fn spawn_session_actor(
     let hunk_tracker_handle_for_bridge = tool_context.hunk_tracker_handle.clone();
     let hunk_tracker_handle = tool_context.hunk_tracker_handle.clone();
     let prompt_index_for_bridge = tool_context.prompt_index.clone();
-    let plan_mode = {
+    let (behavior, restored_prompt_mode) = {
         let session_dir = crate::session::persistence::session_dir(&session_info);
-        let tracker = if let Some(snapshot) = persisted_plan_mode {
-            crate::session::plan_mode::BehaviorController::from_snapshot(session_dir, snapshot)
+        let mut tracker = if let Some(snapshot) = persisted_behavior {
+            crate::session::behavior::BehaviorController::from_snapshot(session_dir, snapshot)
         } else {
-            crate::session::plan_mode::BehaviorController::new(session_dir)
+            crate::session::behavior::BehaviorController::new(session_dir)
         };
-        Arc::new(parking_lot::Mutex::new(tracker))
+        let prompt_mode = match tracker.behavior() {
+            None => PromptMode::Agent,
+            Some(xai_tool_types::BehaviorId::Clarify) => PromptMode::Ask,
+            Some(xai_tool_types::BehaviorId::Plan) => PromptMode::Plan,
+            Some(xai_tool_types::BehaviorId::Workflow) => PromptMode::Workflow,
+            Some(xai_tool_types::BehaviorId::DeepResearch) => PromptMode::DeepResearch,
+            Some(xai_tool_types::BehaviorId::Goal) => PromptMode::Goal,
+        };
+        (Arc::new(parking_lot::Mutex::new(tracker)), prompt_mode)
     };
     let goal_was_restored = persisted_goal_mode.is_some();
     let goal_tracker = {
@@ -553,11 +561,10 @@ pub(crate) async fn spawn_session_actor(
         };
         Arc::new(parking_lot::Mutex::new(tracker))
     };
-    let current_prompt_mode = Arc::new(parking_lot::Mutex::new(PromptMode::Agent));
-    let turn_prompt_mode = Arc::new(parking_lot::Mutex::new(PromptMode::Agent));
+    let current_prompt_mode = Arc::new(parking_lot::Mutex::new(restored_prompt_mode));
+    let turn_prompt_mode = Arc::new(parking_lot::Mutex::new(restored_prompt_mode));
     let task_output_tool_name = Arc::new(std::sync::OnceLock::new());
     let read_tool_name = Arc::new(std::sync::OnceLock::new());
-    let queue_exit_reminder_on_approved_exit = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let tools_notification_handle = crate::tools::notification_bridge::spawn_notification_bridge(
         crate::tools::notification_bridge::NotificationBridgeConfig {
             gateway: gateway.clone(),
@@ -569,16 +576,13 @@ pub(crate) async fn spawn_session_actor(
             gateway_enabled: gateway_enabled.clone(),
             persistence: persistence.clone(),
             incremental_bash_output,
-            plan_mode: plan_mode.clone(),
-            current_prompt_mode: current_prompt_mode.clone(),
-            turn_prompt_mode: turn_prompt_mode.clone(),
+            behavior: behavior.clone(),
             session_cmd_tx: cmd_tx.clone(),
             task_completion_reservations: task_completion_reservations.clone(),
             task_wake_suppressed: task_wake_suppressed.clone(),
             task_output_tool_name: task_output_tool_name.clone(),
             read_tool_name: read_tool_name.clone(),
             auto_wake_enabled: tool_context.auto_wake_enabled,
-            queue_exit_reminder_on_approved_exit: queue_exit_reminder_on_approved_exit.clone(),
             goal_loop_active: tool_context.goal_loop_active_gate.clone(),
         },
     );
@@ -774,11 +778,7 @@ pub(crate) async fn spawn_session_actor(
         } else {
             None
         };
-        let embed_credentials = crate::auth::credential_provider::embedding_session_credentials(
-            &embed_base_url,
-            auth_manager.as_ref(),
-            api_key_provider.clone(),
-        );
+        let embed_credentials = grow_memory::EndpointScopedCredentials::none();
         let params = crate::session::memory::MemoryBackendParams {
             session_id: session_info.id.to_string(),
             embed_config: memory_config.as_ref().map(|mc| mc.embedding.clone()),
@@ -958,6 +958,26 @@ pub(crate) async fn spawn_session_actor(
             );
             e
         })?;
+    let mut behavior_normalized = match behavior.lock().behavior() {
+        Some(xai_tool_types::BehaviorId::Plan) => agent
+            .tool_bridge()
+            .tool_for_kind(grow_tools::types::tool::ToolKind::PlanControl)
+            .await
+            .is_none(),
+        Some(xai_tool_types::BehaviorId::Workflow) => agent
+            .tool_bridge()
+            .tool_for_kind(grow_tools::types::tool::ToolKind::Workflow)
+            .await
+            .is_none(),
+        Some(xai_tool_types::BehaviorId::DeepResearch) => !background_workflows_enabled,
+        Some(xai_tool_types::BehaviorId::Goal) => false,
+        Some(xai_tool_types::BehaviorId::Clarify) | None => false,
+    };
+    if behavior_normalized {
+        behavior.lock().select_behavior(None);
+        *current_prompt_mode.lock() = PromptMode::Agent;
+        *turn_prompt_mode.lock() = PromptMode::Agent;
+    }
     agent
         .tool_bridge()
         .update_resource(task_completion_reservations.clone())
@@ -1308,6 +1328,7 @@ pub(crate) async fn spawn_session_actor(
                     objective,
                     args,
                     agent_budget: input.agent_budget,
+                    max_concurrency: input.max_concurrency,
                     resume_run_id: input.resume_from_run_id.clone(),
                 };
                 let launch_outcome = {
@@ -1357,6 +1378,18 @@ pub(crate) async fn spawn_session_actor(
         .and_then(|raw| crate::agent::config::Config::new_from_toml_cfg(&raw).ok())
         .unwrap_or_default();
     effective_config.remote_settings = remote_settings.clone();
+    let goal_behavior_available = goal_enabled
+        && effective_config
+            .resolve_goal_classifier_enabled(goal_enabled)
+            .value;
+    if behavior.lock().behavior() == Some(xai_tool_types::BehaviorId::Goal)
+        && !goal_behavior_available
+    {
+        behavior.lock().select_behavior(None);
+        *current_prompt_mode.lock() = PromptMode::Agent;
+        *turn_prompt_mode.lock() = PromptMode::Agent;
+        behavior_normalized = true;
+    }
     let goal_classifier_max_runs = effective_config.resolve_goal_classifier_max_runs().value;
     let goal_strategist_every = effective_config
         .resolve_goal_strategist_every(goal_classifier_max_runs)
@@ -1497,12 +1530,11 @@ pub(crate) async fn spawn_session_actor(
             lock
         },
         active_agent_type: parking_lot::Mutex::new(initial_agent_type),
-        queue_exit_reminder_on_approved_exit,
         active_skill: parking_lot::Mutex::new(None),
         current_prompt_mode: current_prompt_mode.clone(),
-        turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
+        turn_start_prompt_mode: parking_lot::Mutex::new(restored_prompt_mode),
         turn_prompt_mode: turn_prompt_mode.clone(),
-        plan_mode: plan_mode.clone(),
+        behavior: behavior.clone(),
         goal_enabled,
         background_workflows_enabled,
         goal_harness_enabled: std::sync::atomic::AtomicBool::new(if background_workflows_enabled {
@@ -1519,9 +1551,7 @@ pub(crate) async fn spawn_session_actor(
         goal_update_tx,
         workflow_manager: workflow_manager.clone(),
         workflow_launch_tx: workflow_launch_tx.clone(),
-        goal_classifier_enabled: effective_config
-            .resolve_goal_classifier_enabled(goal_enabled)
-            .value,
+        goal_classifier_enabled: goal_behavior_available,
         goal_planner_enabled: effective_config
             .resolve_goal_planner_enabled(goal_enabled)
             .value,
@@ -1593,6 +1623,10 @@ pub(crate) async fn spawn_session_actor(
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace_ops.clone(),
     });
+    session.finish_restored_deep_research_if_terminal().await;
+    if behavior_normalized {
+        session.persist_behavior_state();
+    }
     if goal_was_restored {
         let current_tokens = session.chat_state_handle.get_total_tokens().await as i64;
         let (tokens_used, finished_marginal) = session.goal_tokens(current_tokens);
@@ -1650,15 +1684,6 @@ pub(crate) async fn spawn_session_actor(
             .borrow()
             .tool_bridge()
             .update_resource(client)
-            .await;
-    }
-    {
-        let plan_path = session.plan_mode.lock().plan_file_path().to_path_buf();
-        session
-            .agent
-            .borrow()
-            .tool_bridge()
-            .update_resource(grow_tools::types::resources::PlanFilePath(plan_path))
             .await;
     }
     session.inject_deny_read_globs().await;
@@ -1913,7 +1938,7 @@ pub(crate) async fn spawn_session_actor(
             origin_client: origin_client.clone(),
             code_nav_enabled,
             ask_user_question_enabled,
-            plan_mode: plan_mode.clone(),
+            behavior: behavior.clone(),
             force_compact,
             permission_handle: permissions_for_handle,
             attribution_callback: attribution_callback_for_handle,
@@ -2006,7 +2031,7 @@ pub(crate) async fn spawn_session_on_thread(
     compat: CompatConfig,
     incremental_bash_output: bool,
     persisted_signals: Option<crate::session::signals::SessionSignals>,
-    persisted_plan_mode: Option<crate::session::plan_mode::BehaviorSnapshot>,
+    persisted_behavior: Option<crate::session::behavior::BehaviorSnapshot>,
     persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
     persisted_workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
     persisted_announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
@@ -2156,7 +2181,7 @@ pub(crate) async fn spawn_session_on_thread(
                         compat,
                         incremental_bash_output,
                         persisted_signals,
-                        persisted_plan_mode,
+                        persisted_behavior,
                         persisted_goal_mode,
                         persisted_workflow_runs,
                         persisted_announcement_state,

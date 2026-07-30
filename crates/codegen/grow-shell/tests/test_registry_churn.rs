@@ -149,7 +149,7 @@ async fn connect_and_auth() -> acp::ClientSideConnection {
     let auth_manager = Arc::new(agent_config.create_auth_manager());
     let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(gw_tx);
-    let agent = MvpAgent::new(gateway, &agent_config, auth_manager, None).expect("valid config");
+    let agent = MvpAgent::new(gateway, &agent_config, auth_manager).expect("valid config");
     let (c2a_a, c2a_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
     let (a2c_a, a2c_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
     let agent_incoming = LineBufferedRead::spawn_local(c2a_b.compat());

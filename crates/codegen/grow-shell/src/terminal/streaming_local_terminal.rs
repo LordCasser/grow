@@ -645,7 +645,7 @@ impl StreamingLocalTerminalRunner {
 
             // The timeout lives inside `tokio::select!` as a competing branch
             // so it fires even when another branch (e.g. `send_update` inside
-            // the ticker arm) is blocked on a stale relay connection.
+            // the ticker arm) is blocked on a stale output connection.
             tokio::select! {
                 result = stdout_fut.as_mut() => {
                     match result {

@@ -56,7 +56,7 @@ pub fn parse_acp_mcp_servers(meta: Option<&acp::Meta>) -> Vec<AcpServerEntry> {
 /// Each [`invoke`](AcpReverseInvoker::invoke) sends one `grow/mcp/sdk_call` reverse request
 /// straight through the gateway. `AcpAgentGatewaySender::send` returns a `Send` future
 /// (unlike the `?Send` `acp::Client::ext_method` trait method), so the rmcp transport's
-/// `Send` invoker bound is satisfied with no relay task. Calls are independent and may
+/// `Send` invoker bound is satisfied without a forwarding task. Calls are independent and may
 /// run concurrently — the gateway serializes them onto the session's message channel.
 pub struct GatewayAcpInvoker {
     gateway: AcpAgentGatewaySender,

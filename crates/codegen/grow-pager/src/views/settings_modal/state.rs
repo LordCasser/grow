@@ -842,7 +842,6 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "contextual_hints.small_screen" => Some(Action::SetContextualHintSmallScreen(new)),
         "contextual_hints.word_select" => Some(Action::SetContextualHintWordSelect(new)),
         "contextual_hints.ssh_wrap" => Some(Action::SetContextualHintSshWrap(new)),
-        "multiline_mode" => Some(Action::SetMultilineMode(new)),
         "vim_mode" => Some(Action::SetVimMode(new)),
         "remember_tool_approvals" => Some(Action::SetRememberToolApprovals(new)),
         "toolset.ask_user_question.timeout_enabled" => {
@@ -873,7 +872,6 @@ pub(super) fn action_for_enum(key: SettingKey, choice: &'static str) -> Option<A
         "auto_light_theme" => Some(Action::PreviewAutoLightTheme(choice.to_string())),
         // No preview for settings with irreversible side effects.
         "permission_mode" => None,
-        "plan_mode" => None,
         "render_mermaid" => None,
         "keep_text_selection" => None,
         "scroll_mode" => None,
@@ -890,27 +888,21 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         "auto_light_theme" => Some(Action::SetAutoLightTheme(choice.to_string())),
         // Canonical strings from settings/defs.rs are the source of truth.
         "permission_mode" => match choice {
-            "always-approve" => Some(Action::SetPermissionMode(
+            "always-approve" => Some(Action::SetDefaultPermissionMode(
                 crate::app::actions::PermissionModeKind::AlwaysApprove,
             )),
-            // Auto's feature gate is enforced in `set_permission_mode`
-            // (via `app.auto_mode_gate`, the same source the Ctrl+R cycle
-            // uses), so the modal and the cycle never disagree. Committing Auto
-            // when the gate is off degrades to Ask there.
-            "auto" => Some(Action::SetPermissionMode(
+            // Auto's feature gate is enforced through `app.auto_mode_gate`,
+            // shared by the persistent default and session selectors. When the
+            // gate is off, Auto degrades to Ask.
+            "auto" => Some(Action::SetDefaultPermissionMode(
                 crate::app::actions::PermissionModeKind::Auto,
             )),
-            "ask" => Some(Action::SetPermissionMode(
+            "ask" => Some(Action::SetDefaultPermissionMode(
                 crate::app::actions::PermissionModeKind::Ask,
             )),
-            "default" => Some(Action::SetPermissionMode(
+            "default" => Some(Action::SetDefaultPermissionMode(
                 crate::app::actions::PermissionModeKind::Default,
             )),
-            _ => None,
-        },
-        "plan_mode" => match choice {
-            "on" => Some(Action::SetPlanMode(crate::app::actions::PlanModeKind::On)),
-            "off" => Some(Action::SetPlanMode(crate::app::actions::PlanModeKind::Off)),
             _ => None,
         },
         "hunk_tracker_mode" => Some(Action::SetHunkTrackerMode(choice.to_string())),
@@ -1036,9 +1028,9 @@ pub(super) fn group_children(state: &SettingsModalState, key: SettingKey) -> &'s
 pub(super) fn enum_choice_gated_off(
     key: SettingKey,
     canonical: &str,
-    auto_mode_gate: bool,
+    snapshot: &PagerLocalSnapshot,
 ) -> bool {
-    key == "permission_mode" && canonical == "auto" && !auto_mode_gate
+    key == "permission_mode" && canonical == "auto" && !snapshot.auto_mode_gate
 }
 
 /// The effective static Enum choices for a picker, hiding gated-off options so
@@ -1051,6 +1043,6 @@ pub(super) fn effective_enum_choices<'a>(
 ) -> Vec<&'a EnumChoice> {
     choices
         .iter()
-        .filter(|c| !enum_choice_gated_off(key, c.canonical, snapshot.auto_mode_gate))
+        .filter(|c| !enum_choice_gated_off(key, c.canonical, snapshot))
         .collect()
 }

@@ -137,7 +137,7 @@ impl SessionActor {
     pub(super) async fn prepare_tool_definitions_inner(&self) -> Vec<ToolDefinition> {
         let bridge = self.agent.borrow().tool_bridge().clone();
         let defs = bridge.tool_definitions_builtins_only().await;
-        let plan_active = self.plan_mode.lock().is_active();
+        let plan_active = self.behavior.lock().is_plan();
         filter_cursor_tools_by_plan_mode(defs, plan_active)
     }
     pub(super) fn model_auth_facts(&self, model_id: &str) -> crate::agent::config::ModelAuthFacts {
@@ -915,27 +915,6 @@ impl SessionActor {
             format!("{session_auth_mode:?}")
         };
         let client_version = grow_version::VERSION;
-        if model_auth_facts.byok != crate::agent::auth_method::ModelByok::Byok
-            && auth_provider.is_none()
-            && session_auth_mode == crate::auth::AuthMode::WebLogin
-        {
-            let msg = format!(
-                "{detailed_message}\n\n\
-                 You are using a deprecated authentication method (WebLogin).\n\
-                 This auth method is no longer supported and will cause errors.\n\n\
-                 To fix: run `grow logout` then `grow login` to re-authenticate with OAuth2.\n\n\
-                 Version: {client_version}"
-            );
-            self.log_terminal_failure("legacy_auth", error.status_code, &msg);
-            self.send_grow_notification(GrowSessionUpdate::RetryState(
-                crate::extensions::notification::RetryState::Failed {
-                    error_type: "legacy_auth".to_string(),
-                    message: msg.clone(),
-                },
-            ))
-            .await;
-            return Err(acp::Error::internal_error().data(msg));
-        }
         let is_model_404 =
             error.status_code == Some(404) && detailed_message.contains("does not exist");
         let detailed_message = if is_model_404 || is_auth_401 {

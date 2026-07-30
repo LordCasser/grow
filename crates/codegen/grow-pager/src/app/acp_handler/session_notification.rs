@@ -1311,17 +1311,15 @@ pub(super) fn apply_retry_state(
         session.in_flight_prompt = None;
     }
 }
-/// Single source of truth for plan-mode state on the pager side.
+/// Single source of truth for Behavior state on the pager side.
 ///
-/// The agent emits `CurrentModeUpdate` on every entry and exit — both for
-/// user-driven mode switches (Ctrl+R → `session/set_mode`) and for
-/// agent-driven `EnterPlanMode` / `ExitPlanMode` tool calls (mapped by the
-/// notification bridge).
+/// The shell emits `CurrentModeUpdate` for every Behavior transition. Tools
+/// never form a second Behavior state-transition channel.
 ///
 /// Do not be tempted to infer mode from tool-call titles: titles incorporate
 /// raw model/user input (Grep pattern, Bash command, search query, ...), so
 /// a substring match silently bricks sessions whenever any tool happens to
-/// mention `enter_plan_mode`.
+/// mention a Behavior control tool.
 ///
 /// Returns `true` when a `CurrentModeUpdate` was processed so the
 /// caller can refresh open settings modals after the per-agent borrow
@@ -1332,15 +1330,45 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
         return false;
     };
     let mode = SessionMode::from_id(cmu.current_mode_id.0.as_ref());
+    let previous = agent.behavior_mode;
+    agent.behavior_mode = mode;
+    agent.behavior_mode_pending = None;
+    agent.plan_phase = cmu
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("grow/planPhase"))
+        .and_then(|phase| phase.as_str())
+        .map(str::to_owned);
+    agent.behavior_switch_warning_pending = false;
+    if let Some(change) = cmu
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("grow/behaviorChange"))
+    {
+        let status = change.get("status").and_then(serde_json::Value::as_str);
+        if status == Some("confirmation_required") {
+            if let Some(message) = change.get("message").and_then(serde_json::Value::as_str) {
+                agent.show_behavior_switch_warning(message);
+            }
+        } else {
+            agent.behavior_switch_warning_pending = false;
+            if status == Some("rejected")
+                && let Some(message) = change.get("message").and_then(serde_json::Value::as_str)
+            {
+                agent.show_toast_ticks(message, 30);
+            }
+        }
+    }
     let was_active = agent.plan_mode_active;
     let now_active = mode.is_plan();
     agent.plan_mode_active = now_active;
     agent.plan_mode_pending = None;
-    if was_active != now_active {
+    if previous != mode || was_active != now_active {
         tracing::info!(
             mode_id = %cmu.current_mode_id.0,
             plan_active = now_active,
-            "Plan mode state updated (from CurrentModeUpdate)"
+            behavior = mode.as_id(),
+            "Behavior state updated (from CurrentModeUpdate)"
         );
     }
     true

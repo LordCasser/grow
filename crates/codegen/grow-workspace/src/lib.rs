@@ -151,28 +151,40 @@ mod init_metrics_tests {
                 })
         };
         assert!(has(
-            "grow_workspace_rpc_requests_total",
-            &[("method", "unknown"), ("result", "error")]
+            "grow_workspace_terminal_backend_orphaned_total",
+            &[("path", "swap")]
         ));
-        for stage in ["startup_recovery", "tool_catalog", "time_to_ready"] {
-            for outcome in ["ok", "error"] {
-                assert!(
-                    has(
-                        "grow_workspace_startup_stage_duration_seconds",
-                        &[("stage", stage), ("outcome", outcome)]
-                    ),
-                    "missing baseline stage={stage} outcome={outcome}"
-                );
-            }
-        }
+        assert!(has(
+            "grow_workspace_rewind_checkpoint_capture_total",
+            &[("domain", "fs"), ("outcome", "completed")]
+        ));
+        assert!(has(
+            "grow_workspace_rewind_checkpoint_finalize_total",
+            &[("outcome", "completed")]
+        ));
+        assert!(has(
+            "grow_workspace_rewind_restore_total",
+            &[("domain", "git"), ("result", "failure")]
+        ));
+        assert!(has(
+            "grow_workspace_rewind_checkpoint_duration_seconds",
+            &[("domain", "hunk")]
+        ));
+        assert!(has(
+            "grow_workspace_rewind_non_completed_finalize_total",
+            &[("outcome", "cancelled")]
+        ));
+        assert!(has(
+            "grow_workspace_toolset_swap_total",
+            &[
+                ("trigger", "update_tool_config"),
+                ("turn_active", "false"),
+                ("in_flight", "false")
+            ]
+        ));
         assert!(has(
             "grow_workspace_toolset_swap_rejected_total",
             &[("reason", "turn_active"), ("trigger", "update_tool_config")]
         ));
-        assert!(
-            families
-                .iter()
-                .any(|mf| mf.name() == "grow_workspace_permission_timeout_total")
-        );
     }
 }

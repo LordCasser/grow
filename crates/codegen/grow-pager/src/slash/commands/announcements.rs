@@ -118,6 +118,13 @@ mod tests {
         let models = ModelState::default();
         let ctx = AppCtx {
             models: &models,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: true,
             workflows_available: true,
@@ -138,6 +145,13 @@ mod tests {
         // still offers /announcements after hide (so show remains discoverable).
         assert!(!cmd.visible(&AppCtx {
             models: &models,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             workflows_available: true,
@@ -145,6 +159,13 @@ mod tests {
         }));
         assert!(cmd.visible(&AppCtx {
             models: &models,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: true,
             workflows_available: true,

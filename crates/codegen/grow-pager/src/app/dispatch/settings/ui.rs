@@ -17,11 +17,9 @@ use super::setters::{
 use crate::app::actions::{Action, Effect};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::app::dispatch::ctx::with_active_agent;
-use crate::app::dispatch::modes::{set_yolo_mode_inner, sync_active_auto_flag};
 use crate::app::dispatch::router::dispatch;
 use crate::app::dispatch::turn::apply_cancel_subagents_preference_global;
 use crate::scrollback::block::RenderBlock;
-use agent_client_protocol as acp;
 
 /// Format a "✓ Label: value" success toast.
 pub(in crate::app::dispatch) fn save_success_toast(label: &str, on: bool) -> String {
@@ -51,6 +49,13 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
+    let default_model_id = app.models.current_model_id_str().map(str::to_owned);
+    let default_model_catalog: Vec<_> = app
+        .models
+        .available
+        .iter()
+        .map(|(id, info)| (info.name.clone(), id.clone()))
+        .collect();
     for agent in app.agents.values_mut() {
         // Walk both `Settings` and `ResetSettingsConfirm` — the
         // confirm dialog embeds settings state that must stay fresh
@@ -69,20 +74,22 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 multiline_mode: agent.multiline_mode,
                 yolo_mode: agent.session.is_yolo(),
                 auto_mode: agent.session.is_auto(),
-                current_model_id: agent
-                    .session
-                    .models
-                    .current_model_id_str()
-                    .map(str::to_owned),
-                available_models: agent
-                    .session
-                    .models
-                    .available
-                    .iter()
-                    .map(|(id, info)| (info.name.clone(), id.clone()))
-                    .collect(),
-                // Prefer optimistic pending over confirmed active.
-                plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
+                current_model_id: default_model_id.clone(),
+                available_models: default_model_catalog.clone(),
+                behavior_mode: agent.behavior_mode_pending.unwrap_or(agent.behavior_mode),
+                workflows_available: agent.prompt.slash_controller.workflows_available(),
+                deep_research_available: agent
+                    .prompt
+                    .slash_controller
+                    .registry()
+                    .get("deep-research")
+                    .is_some(),
+                goal_available: agent
+                    .prompt
+                    .slash_controller
+                    .registry()
+                    .get("goal")
+                    .is_some(),
                 show_tips: show_tips_from_app,
                 auto_update: auto_update_from_app,
                 vim_mode: crate::appearance::cache::load_vim_mode(),
@@ -189,6 +196,13 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
+    let default_model_id = app.models.current_model_id_str().map(str::to_owned);
+    let default_model_catalog: Vec<_> = app
+        .models
+        .available
+        .iter()
+        .map(|(id, info)| (info.name.clone(), id.clone()))
+        .collect();
 
     let Some(agent) = app.agents.get_mut(&id) else {
         return effects;
@@ -216,20 +230,22 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         multiline_mode: agent.multiline_mode,
         yolo_mode: agent.session.is_yolo(),
         auto_mode: agent.session.is_auto(),
-        current_model_id: agent
-            .session
-            .models
-            .current_model_id_str()
-            .map(str::to_owned),
-        available_models: agent
-            .session
-            .models
-            .available
-            .iter()
-            .map(|(id, info)| (info.name.clone(), id.clone()))
-            .collect(),
-        // Prefer optimistic pending over confirmed active.
-        plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
+        current_model_id: default_model_id,
+        available_models: default_model_catalog,
+        behavior_mode: agent.behavior_mode_pending.unwrap_or(agent.behavior_mode),
+        workflows_available: agent.prompt.slash_controller.workflows_available(),
+        deep_research_available: agent
+            .prompt
+            .slash_controller
+            .registry()
+            .get("deep-research")
+            .is_some(),
+        goal_available: agent
+            .prompt
+            .slash_controller
+            .registry()
+            .get("goal")
+            .is_some(),
         show_tips: show_tips_from_app,
         auto_update: auto_update_from_app,
         vim_mode: crate::appearance::cache::load_vim_mode(),
@@ -588,9 +604,7 @@ pub(in crate::app::dispatch) fn dispatch_toggle_mouse_capture(app: &mut AppView)
     // Off state: sticky banner on every agent/subagent view (capture is
     // process-wide; toast must survive subagent open/close and copy toasts).
     // On state: clear sticky everywhere + transient confirmation on active view.
-    // Stored in the scrollback form; `AgentView::active_toast_message` swaps it
-    // to the `/toggle-mouse-reporting` form at render time when the prompt is
-    // focused (Ctrl+R only re-enables from scrollback).
+    // The explicit slash command is the only way to re-enable capture.
     let mut toast_applied = false;
     if enable {
         for agent in app.agents.values_mut() {
@@ -602,7 +616,7 @@ pub(in crate::app::dispatch) fn dispatch_toggle_mouse_capture(app: &mut AppView)
         });
     } else {
         for agent in app.agents.values_mut() {
-            agent.set_sticky_toast_recursive(Some(crate::app::MOUSE_OFF_HINT_SCROLLBACK));
+            agent.set_sticky_toast_recursive(Some(crate::app::MOUSE_OFF_HINT));
             toast_applied = true;
         }
     }
@@ -666,54 +680,31 @@ fn agent_scheduler_background_loops(app: &AppView) -> bool {
     app.scheduler_background_loops_seed
 }
 
-/// Effective `plan_mode` for the active agent
-/// (`pending.unwrap_or(active)`).
-fn agent_plan_mode(app: &AppView) -> bool {
+fn agent_behavior_mode(app: &AppView) -> grow_tools::types::SessionMode {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
     {
-        return agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
+        return agent.behavior_mode_pending.unwrap_or(agent.behavior_mode);
+    }
+    grow_tools::types::SessionMode::Default
+}
+
+fn agent_workflows_available(app: &AppView) -> bool {
+    if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get(&id)
+    {
+        return agent.prompt.slash_controller.workflows_available();
     }
     false
 }
 
-/// Helper to read the active agent's currently-selected canonical model id.
-/// Returns `None` when no agent is active OR no model has been selected. See
-/// [`agent_multiline_mode`] for the no-agent fallback rationale.
-///
-/// Used by the `default_model` row's `current_value_for`.
-fn agent_current_model_id(app: &AppView) -> Option<String> {
+fn agent_command_available(app: &AppView, name: &str) -> bool {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
     {
-        return agent
-            .session
-            .models
-            .current_model_id_str()
-            .map(str::to_owned);
+        return agent.prompt.slash_controller.registry().get(name).is_some();
     }
-    None
-}
-
-/// Helper to clone the `(display_name, ModelId)` pairs from the
-/// active agent's catalog. Returns an empty `Vec` when no agent is
-/// active OR when the catalog is empty.
-///
-/// Used by the `KnownModel` validator and "resolve user input to
-/// ModelId" path.
-fn agent_available_models(app: &AppView) -> Vec<(String, acp::ModelId)> {
-    if let ActiveView::Agent(id) = app.active_view
-        && let Some(agent) = app.agents.get(&id)
-    {
-        return agent
-            .session
-            .models
-            .available
-            .iter()
-            .map(|(id, info)| (info.name.clone(), id.clone()))
-            .collect();
-    }
-    Vec::new()
+    false
 }
 
 /// Build a `PagerLocalSnapshot` from the current `AppView`.
@@ -722,9 +713,17 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         multiline_mode: agent_multiline_mode(app),
         yolo_mode: agent_yolo_mode(app),
         auto_mode: agent_auto_mode(app),
-        current_model_id: agent_current_model_id(app),
-        available_models: agent_available_models(app),
-        plan_mode_active: agent_plan_mode(app),
+        current_model_id: app.models.current_model_id_str().map(str::to_owned),
+        available_models: app
+            .models
+            .available
+            .iter()
+            .map(|(id, info)| (info.name.clone(), id.clone()))
+            .collect(),
+        behavior_mode: agent_behavior_mode(app),
+        workflows_available: agent_workflows_available(app),
+        deep_research_available: agent_command_available(app, "deep-research"),
+        goal_available: agent_command_available(app, "goal"),
         show_tips: app.show_tips,
         auto_update: app.auto_update,
         vim_mode: crate::appearance::cache::load_vim_mode(),
@@ -773,7 +772,6 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("contextual_hints.ssh_wrap", SettingValue::Bool(b)) => {
             Some(Action::SetContextualHintSshWrap(*b))
         }
-        ("multiline_mode", SettingValue::Bool(b)) => Some(Action::SetMultilineMode(*b)),
         ("render_mermaid", SettingValue::Enum(s)) => {
             crate::appearance::RenderMermaid::from_canonical(s).map(Action::SetRenderMermaid)
         }
@@ -810,10 +808,10 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("auto_light_theme", SettingValue::Enum(s)) => {
             Some(Action::SetAutoLightTheme((*s).to_owned()))
         }
-        // Three explicit arms, one per
+        // Four explicit arms, one per
         // canonical, all dispatched through the typed
-        // `Action::SetPermissionMode(kind)` (NOT the legacy
-        // `Action::SetYoloMode(bool)`). The reset path IS modal-
+        // `Action::SetDefaultPermissionMode(kind)` (NOT the session selector
+        // `Action::SetPermissionMode`). The reset path IS modal-
         // initiated (the `d` reset key is part of the
         // settings modal), so it falls under the same "modal commit
         // ↦ typed setter" rule as the picker Enter path.
@@ -825,31 +823,32 @@ pub(in crate::app::dispatch) fn action_for_reset(
         // arms exist as forcing functions:
         //   - If the registered default changes to
         //     "default" or "always-approve", the matching arm fires
-        //     correctly — no silent collapse onto SetYoloMode.
+        //     correctly — no silent collapse onto the session selector.
         //   - The arms exercise the same canonical→kind mapping that
         //     `action_for_enum_commit` uses, so the dispatch surface
         //     stays consistent across modal entry points.
         //
         // The drift guard
         // `pr11_permission_mode_kind_canonical_strings_match_choices_catalog`
-        // pins `len == 3` on `PERMISSION_MODE_CHOICES`, so a future
-        // 4th canonical without a matching arm here would fail the
+        // pins the Permission catalog, so a future canonical without a matching arm would fail the
         // catalog drift test (the registered default would still be
         // one of the existing arms — but a fresh test
         // `pr11_action_for_reset_covers_every_permission_mode_canonical`
         // pins exhaustivity directly).
-        ("permission_mode", SettingValue::Enum("always-approve")) => Some(
-            Action::SetPermissionMode(crate::app::actions::PermissionModeKind::AlwaysApprove),
-        ),
-        ("permission_mode", SettingValue::Enum("ask")) => Some(Action::SetPermissionMode(
+        ("permission_mode", SettingValue::Enum("always-approve")) => {
+            Some(Action::SetDefaultPermissionMode(
+                crate::app::actions::PermissionModeKind::AlwaysApprove,
+            ))
+        }
+        ("permission_mode", SettingValue::Enum("ask")) => Some(Action::SetDefaultPermissionMode(
             crate::app::actions::PermissionModeKind::Ask,
         )),
-        ("permission_mode", SettingValue::Enum("auto")) => Some(Action::SetPermissionMode(
+        ("permission_mode", SettingValue::Enum("auto")) => Some(Action::SetDefaultPermissionMode(
             crate::app::actions::PermissionModeKind::Auto,
         )),
-        ("permission_mode", SettingValue::Enum("default")) => Some(Action::SetPermissionMode(
-            crate::app::actions::PermissionModeKind::Default,
-        )),
+        ("permission_mode", SettingValue::Enum("default")) => Some(
+            Action::SetDefaultPermissionMode(crate::app::actions::PermissionModeKind::Default),
+        ),
         // default_model: empty string → ClearDefaultModel; non-empty
         // is a registry/dispatch skew guard.
         ("default_model", SettingValue::String(s)) => {
@@ -867,14 +866,6 @@ pub(in crate::app::dispatch) fn action_for_reset(
         }
         // max_thoughts_width: direct round-trip.
         ("max_thoughts_width", SettingValue::Int(i)) => Some(Action::SetMaxThoughtsWidth(*i)),
-        // plan_mode: "on" / "off" → PlanModeKind.
-        // "on" arm is a skew guard (default is "off").
-        ("plan_mode", SettingValue::Enum("off")) => {
-            Some(Action::SetPlanMode(crate::app::actions::PlanModeKind::Off))
-        }
-        ("plan_mode", SettingValue::Enum("on")) => {
-            Some(Action::SetPlanMode(crate::app::actions::PlanModeKind::On))
-        }
         // show_tips / auto_update / display_refresh_auto_cadence: direct bool.
         ("show_tips", SettingValue::Bool(b)) => Some(Action::SetShowTips(*b)),
         ("auto_update", SettingValue::Bool(b)) => Some(Action::SetAutoUpdate(*b)),
@@ -923,7 +914,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
     rollback_value: &crate::settings::SettingValue,
 ) -> Vec<Effect> {
     use crate::settings::SettingValue;
-    let mut companion_effects: Vec<Effect> = Vec::new();
+    let companion_effects: Vec<Effect> = Vec::new();
     match (key, rollback_value) {
         ("compact_mode", SettingValue::Bool(b)) => set_compact_mode_inner(app, *b),
         ("show_timestamps", SettingValue::Bool(b)) => set_timestamps_inner(app, *b),
@@ -997,11 +988,11 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("auto_dark_theme", SettingValue::Enum(s)) => set_auto_dark_theme_inner(app, s),
         ("auto_light_theme", SettingValue::Enum(s)) => set_auto_light_theme_inner(app, s),
-        // permission_mode rollback: recover kind from canonical,
-        // run inner, then restore the canonical the inner collapsed.
+        // `permission_mode` is a future-session default. Rollback restores only
+        // the default cache and never mutates the active session or its queue.
         ("permission_mode", SettingValue::Enum(s)) => {
             use crate::app::actions::PermissionModeKind;
-            let kind = match PermissionModeKind::from_canonical(s) {
+            let mut kind = match PermissionModeKind::from_canonical(s) {
                 Some(k) => k,
                 None => {
                     tracing::warn!(
@@ -1013,68 +1004,35 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                     PermissionModeKind::Ask
                 }
             };
-            set_yolo_mode_inner(app, kind.is_always_approve());
-            // Restore canonical (meaningful for `Default`).
-            app.current_ui.permission_mode = Some(kind.as_canonical().to_string());
-            // Sync the per-session auto flag ONLY for a permission_mode rollback;
-            // other rollback arms must not clobber it from the global canonical.
-            sync_active_auto_flag(app);
-        }
-        // default_model: best-effort rollback. If the prior model no
-        // longer resolves, leave optimistic value + log.
-        ("default_model", SettingValue::String(s)) => {
-            if s.is_empty() {
+            if super::super::modes::yolo_enable_blocked(app, kind.is_always_approve()).is_some() {
                 tracing::warn!(
                     target: "settings",
-                    key = "default_model",
-                    "rollback to empty string requested but no \
-                     'clear current model' API exists — leaving live \
-                     state at optimistic value (next session reload \
-                     will resolve via shell default-resolution chain)",
+                    key = "permission_mode",
+                    "rollback refused always-approve because managed policy disables it",
                 );
+                kind = PermissionModeKind::Ask;
+            }
+            app.default_yolo = kind.is_always_approve();
+            app.current_ui.permission_mode = Some(kind.as_canonical().to_string());
+        }
+        // `default_model` rollback restores only the new-session template.
+        ("default_model", SettingValue::String(s)) => {
+            if s.is_empty() {
+                app.models.current = None;
+                app.models.reasoning_effort = None;
             } else {
-                // Resolve the prior model ID back to a ModelId
-                // and call the typed inner. If resolution fails
-                // (catalog changed mid-flight), log + leave
-                // optimistic.
-                let (resolved, session_id) = if let ActiveView::Agent(aid) = app.active_view
-                    && let Some(agent) = app.agents.get(&aid)
-                {
-                    (
-                        agent.session.models.resolve_by_name_or_id(s),
-                        agent.session.session_id.clone(),
-                    )
-                } else {
-                    (None, None)
-                };
+                let resolved = app.models.resolve_by_name_or_id(s);
                 match resolved {
                     Some(id) => {
                         let _ = set_default_model_inner(app, &id);
-                        // Emit reverse SwitchModel so the ACP session
-                        // matches the rolled-back pager mirror.
-                        if let ActiveView::Agent(aid) = app.active_view
-                            && let Some(sid) = session_id
-                        {
-                            if let Some(agent) = app.agents.get_mut(&aid) {
-                                agent.session.model_switch_pending = true;
-                            }
-                            companion_effects.push(Effect::SwitchModel {
-                                agent_id: aid,
-                                session_id: sid,
-                                model_id: id,
-                                effort: None,
-                                prev_model_id: None,
-                            });
-                        }
                     }
                     None => {
                         tracing::warn!(
                             target: "settings",
                             key = "default_model",
                             value = %s,
-                            "rollback model id no longer resolves in catalog — \
-                             in-memory state stays at optimistic value; ACP session \
-                             may diverge from pager mirror until next setter dispatch",
+                            "rollback model id no longer resolves in catalog; \
+                             leaving the new-session default at its optimistic value",
                         );
                     }
                 }
@@ -1159,7 +1117,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         // fork_secondary_model: empty rollback restores baseline default.
         ("fork_secondary_model", SettingValue::String(s)) => {
             let restored = if s.is_empty() {
-                grow_shell::models::default_model().to_string()
+                String::new()
             } else {
                 s.clone()
             };

@@ -157,8 +157,6 @@ async fn handle_logout(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // per-request `AuthManager::auth()` `#[instrument]` span.
     tracing::info_span!("auth.lifecycle", action = "logout", success = true).in_scope(|| {});
 
-    agent.models_manager.on_auth_changed().await;
-
     to_raw_response(&serde_json::json!({
         "ok": true,
         "was_logged_in": result.was_logged_in,

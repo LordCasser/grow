@@ -732,242 +732,6 @@ impl MvpAgent {
     pub(crate) fn deployment_key(&self) -> Option<String> {
         self.cfg.borrow().endpoints.deployment_key.clone()
     }
-    /// Apply settings side effects + push `grow/settings/update` to clients.
-    /// Shared tail for every settings-arrival site.
-    pub(super) fn on_remote_settings_changed(&self) {
-        crate::agent::config::apply_remote_settings_side_effects(
-            self.cfg.borrow().remote_settings.as_ref(),
-        );
-        {
-            let cfg_snapshot = self.cfg.borrow().clone();
-            if self.sessions.borrow().is_empty() {
-                self.models_manager.apply_config_reselecting_default(cfg_snapshot);
-            } else {
-                self.models_manager.apply_config(cfg_snapshot);
-            }
-        }
-        self.emit_settings_update_notification();
-    }
-    /// Run the blocking `/settings` fetch for `auth` off the runtime thread.
-    async fn fetch_settings(
-        &self,
-        auth: &crate::auth::ProviderAuth,
-    ) -> crate::remote::SettingsFetch {
-        let (base_url, alpha) = {
-            let cfg = self.cfg.borrow();
-            (cfg.endpoints.proxy_url(), cfg.endpoints.alpha_test_key.clone())
-        };
-        let auth = auth.clone();
-        match tokio::task::spawn_blocking(move || crate::remote::fetch_settings_blocking(
-                &base_url,
-                &auth,
-                alpha.as_deref(),
-            ))
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                tracing::warn!(error = %e, "settings fetch task panicked");
-                crate::remote::SettingsFetch::Retry
-            }
-        }
-    }
-    /// Fetch remote settings for `auth`, returning them only when the same
-    /// identity is still active after the request completes.
-    ///
-    pub(super) async fn fetch_settings_for_current_identity(
-        &self,
-        auth: &crate::auth::ProviderAuth,
-    ) -> Option<crate::util::config::RemoteSettings> {
-        let identity = auth.user_id.clone();
-        let outcome = self.fetch_settings_self_healing_401(auth).await;
-        let live = self.auth_manager.current_or_expired().map(|a| a.user_id);
-        if live.as_deref() != Some(identity.as_str()) {
-            return None;
-        }
-        match outcome {
-            crate::remote::SettingsFetch::Fetched(settings) => Some(*settings),
-            crate::remote::SettingsFetch::Rejected | crate::remote::SettingsFetch::Retry => None,
-        }
-    }
-    /// Fetch settings; on a `401` try one self-healing [`AuthManager::auth`]
-    /// refresh and re-fetch if it yields a *different* token (recovers a 401
-    /// from a token that expired mid-fetch). The refresh is bounded by
-    /// `STARTUP_AUTH_REFRESH_TIMEOUT` so a wedged IdP can't hang the caller; on
-    /// timeout or error the original `Rejected` stands.
-    async fn fetch_settings_self_healing_401(
-        &self,
-        auth: &crate::auth::ProviderAuth,
-    ) -> crate::remote::SettingsFetch {
-        let outcome = self.fetch_settings(auth).await;
-        if matches!(outcome, crate::remote::SettingsFetch::Rejected)
-            && let Ok(Ok(fresh)) = tokio::time::timeout(
-                    crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-                    self.auth_manager.auth(),
-                )
-                .await && fresh.key != auth.key
-        {
-            return self.fetch_settings(&fresh).await;
-        }
-        outcome
-    }
-    /// Writes remote settings into `cfg` along with the fields derived from
-    /// them, so no derived field drifts between post-fetch callers.
-    pub(super) fn store_remote_settings(
-        &self,
-        settings: crate::util::config::RemoteSettings,
-    ) {
-        let mut cfg = self.cfg.borrow_mut();
-        cfg.remote_settings = Some(settings);
-        crate::util::config::sync_campaign_fields(&mut cfg);
-        if let Some(v) = cfg
-            .remote_settings
-            .as_ref()
-            .and_then(|s| s.path_not_found_hints)
-        {
-            cfg.path_not_found_hints = v;
-        }
-    }
-    /// Stores settings and fans out side effects via
-    /// [`Self::on_remote_settings_changed`].
-    pub(super) fn install_remote_settings(
-        &self,
-        settings: crate::util::config::RemoteSettings,
-    ) {
-        self.store_remote_settings(settings);
-        self.on_remote_settings_changed();
-    }
-    /// Re-fetch remote settings, apply side effects, and push
-    /// `grow/settings/update` to clients. Called from both
-    /// auth handlers (first install + reauth/account switch).
-    ///
-    /// Agent-level fields materialised at startup (`worktree_type`,
-    /// `restore_code`) are NOT re-resolved here; that requires a
-    /// broader refactor of the init path.
-    pub(super) async fn refresh_remote_settings(&self, auth: &crate::auth::ProviderAuth) {
-        if !crate::util::config::resolve_remote_fetch_enabled() {
-            tracing::debug!("post-auth settings refresh skipped: remote_fetch disabled");
-            return;
-        }
-        let remote_was_absent = self.cfg.borrow().remote_settings.is_none();
-        let Some(settings) = self.fetch_settings_for_current_identity(auth).await else {
-            return;
-        };
-        tracing::info!("post-auth settings refreshed");
-        self.store_remote_settings(settings);
-        {
-            let cfg = self.cfg.borrow();
-            crate::util::config::cache_remote_mcp_startup_timeout_secs(
-                cfg.remote_settings.as_ref().and_then(|s| s.mcp_startup_timeout_secs),
-            );
-        }
-        self.on_remote_settings_changed();
-        if remote_was_absent {
-            self.spawn_auto_worktree_gc();
-        }
-    }
-    /// Refresh remote settings settings and re-resolve eagerly-resolved config fields.
-    ///
-    /// Called on `/new` session creation so feature flags reflect the latest
-    /// remote settings state without requiring a TUI restart. Extends
-    /// [`refresh_remote_settings`] by also re-running [`resolve_runtime_fields`]
-    /// with the fresh settings.
-    ///
-    /// In-flight sessions are unaffected — they snapshot config at creation.
-    pub(super) async fn refresh_settings_and_reapply(
-        &self,
-        auth: &crate::auth::ProviderAuth,
-    ) {
-        self.refresh_remote_settings(auth).await;
-        {
-            let mut cfg = self.cfg.borrow_mut();
-            crate::util::config::sync_campaign_fields(&mut cfg);
-            let raw_config = crate::config::load_effective_config()
-                .unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "config reload failed during settings refresh");
-                    toml::Value::Table(toml::map::Map::new())
-                });
-            cfg.announcements = crate::util::config::resolve_announcements(&raw_config);
-            cfg.re_resolve_runtime_fields(&raw_config);
-        }
-        self.emit_settings_update_notification();
-        self.emit_announcements();
-    }
-    /// Spawns a background task coalesced on `in_flight`: a request while one
-    /// is in flight is dropped. The task is bounded by
-    /// `SETTINGS_REAPPLY_TIMEOUT`. Returns whether a task was spawned.
-    fn spawn_coalesced_settings_task(
-        &self,
-        in_flight: &std::rc::Rc<std::cell::Cell<bool>>,
-        task: impl std::future::Future<Output = ()> + 'static,
-    ) -> bool {
-        if in_flight.replace(true) {
-            return false;
-        }
-        let in_flight = in_flight.clone();
-        tokio::task::spawn_local(async move {
-            struct ClearOnDrop(std::rc::Rc<std::cell::Cell<bool>>);
-            impl Drop for ClearOnDrop {
-                fn drop(&mut self) {
-                    self.0.set(false);
-                }
-            }
-            let _clear = ClearOnDrop(in_flight);
-            let _ = tokio::time::timeout(crate::http::SETTINGS_REAPPLY_TIMEOUT, task)
-                .await;
-        });
-        true
-    }
-    /// Fire-and-forget remote settings refresh for new sessions (at most one
-    /// in flight).
-    pub(super) fn spawn_settings_reapply(&self) {
-        let agent_ref = LocalRef::new(self);
-        let auth_manager = self.auth_manager.clone();
-        let _spawned = self
-            .spawn_coalesced_settings_task(
-                &self.settings_reapply_in_flight,
-                async move {
-                    let auth_result = tokio::time::timeout(
-                            crate::http::STARTUP_FETCH_TIMEOUT,
-                            auth_manager.auth(),
-                        )
-                        .await;
-                    if let Ok(Ok(auth)) = auth_result {
-                        let agent = agent_ref.get();
-                        if agent.post_auth_settings_in_flight.get() {
-                            return;
-                        }
-                        agent.refresh_settings_and_reapply(&auth).await;
-                    }
-                },
-            );
-        #[cfg(test)]
-        if _spawned {
-            self.settings_reapply_spawn_count
-                .set(self.settings_reapply_spawn_count.get() + 1);
-        }
-    }
-    /// Resolve post-auth remote settings in the background so a slow or hung
-    /// `/settings` can't gate `authenticate` (and thus the client's first draw).
-    /// The result reaches clients via `grow/settings/update`. Its own guard keeps an
-    /// in-flight reapply from coalescing away the authenticated identity.
-    pub(super) fn spawn_post_auth_settings(&self, auth: crate::auth::ProviderAuth) {
-        let agent_ref = LocalRef::new(self);
-        let _spawned = self
-            .spawn_coalesced_settings_task(
-                &self.post_auth_settings_in_flight,
-                async move {
-                    let agent = agent_ref.get();
-                    agent.refresh_remote_settings(&auth).await;
-                    agent.maybe_fetch_post_auth_settings().await;
-                },
-            );
-        #[cfg(test)]
-        if _spawned {
-            self.post_auth_settings_spawn_count
-                .set(self.post_auth_settings_spawn_count.get() + 1);
-        }
-    }
     /// Push the current, expiry-filtered local announcement configuration to
     /// connected clients. The notification is deliberately stateless: local
     /// config reload and client initialization both publish an authoritative
@@ -989,37 +753,6 @@ impl MvpAgent {
             count = announcements.len(),
             "pushing local announcements update to clients"
         );
-    }
-    /// Shared fetch half of every settings refresh: endpoint fields from a
-    /// scoped `cfg` borrow, `fetch_settings_blocking` off-executor (it already
-    /// retries transient errors internally), failures normalized to `None`.
-    /// Callers own their miss logging; the apply halves deliberately stay
-    /// separate (full reapply vs announcements-only).
-    pub(super) async fn fetch_remote_settings(
-        &self,
-        auth: crate::auth::ProviderAuth,
-    ) -> Option<crate::util::config::RemoteSettings> {
-        if !crate::util::config::resolve_remote_fetch_enabled() {
-            tracing::debug!("settings fetch skipped: remote_fetch disabled");
-            return None;
-        }
-        let (base_url, alpha_test_key) = {
-            let cfg = self.cfg.borrow();
-            (cfg.endpoints.proxy_url(), cfg.endpoints.alpha_test_key.clone())
-        };
-        match tokio::task::spawn_blocking(move || crate::remote::fetch_settings_blocking(
-                &base_url,
-                &auth,
-                alpha_test_key.as_deref(),
-            ))
-            .await
-        {
-            Ok(outcome) => outcome.into_option(),
-            Err(e) => {
-                tracing::warn!(error = %e, "settings fetch task panicked");
-                None
-            }
-        }
     }
     pub(super) async fn send_model_auto_switched(
         &self,
@@ -1182,13 +915,8 @@ impl MvpAgent {
         gateway: GatewaySender,
         cfg: &AgentConfig,
         auth_manager: Arc<AuthManager>,
-        prefetched_models: Option<IndexMap<String, ModelEntry>>,
     ) -> Result<Self, String> {
-        let (cfg, models_manager) = crate::agent::init::bootstrap(
-            cfg,
-            &auth_manager,
-            prefetched_models,
-        )?;
+        let (cfg, models_manager) = crate::agent::init::bootstrap(cfg, &auth_manager)?;
         Ok(Self::with_models(gateway, &cfg, auth_manager, models_manager))
     }
     /// Prepare the web fetch configuration based on feature flags.
@@ -1323,17 +1051,10 @@ impl MvpAgent {
             ),
             session_live_state: RefCell::new(HashMap::new()),
             supervisor_started: std::cell::Cell::new(false),
-            settings_reapply_in_flight: std::rc::Rc::new(std::cell::Cell::new(false)),
-            post_auth_settings_in_flight: std::rc::Rc::new(std::cell::Cell::new(false)),
-            #[cfg(test)]
             #[cfg(test)]
             roster_delta_spy: RefCell::new(Vec::new()),
             #[cfg(test)]
             supervisor_spawn_count: std::cell::Cell::new(0),
-            #[cfg(test)]
-            settings_reapply_spawn_count: std::cell::Cell::new(0),
-            #[cfg(test)]
-            post_auth_settings_spawn_count: std::cell::Cell::new(0),
         };
         instance
             .auth_manager
@@ -2083,7 +1804,7 @@ impl MvpAgent {
             client_fs_write,
             preloaded_envrc,
             persisted_signals,
-            persisted_plan_mode,
+            persisted_behavior,
             persisted_goal_mode,
             persisted_workflow_runs,
             persisted_announcement_state,
@@ -2641,7 +2362,7 @@ impl MvpAgent {
                     compat,
                     incremental_bash_output,
                     persisted_signals,
-                    persisted_plan_mode,
+                    persisted_behavior,
                     persisted_goal_mode,
                     persisted_workflow_runs,
                     persisted_announcement_state,

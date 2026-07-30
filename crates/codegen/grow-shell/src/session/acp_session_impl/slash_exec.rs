@@ -793,68 +793,37 @@ impl SessionActor {
             BuiltinAction::GoalSet { .. } => {
                 unreachable!("GoalSet is intercepted in handle_prompt")
             }
+            BuiltinAction::GoalEnter => {
+                unreachable!("GoalEnter is intercepted in handle_prompt")
+            }
             BuiltinAction::DeepResearch { query } => {
-                if query.is_empty() {
-                    self.send_host_turn_slash_command_output(
-                        "Usage: /deep-research <query>\nResearch with bounded parallel agents, \
-                         independently cross-check the evidence, and write a concise cited report.",
-                    )
+                use crate::session::behavior::BehaviorChangeOutcome;
+                let outcome = self
+                    .request_behavior_change(acp::SessionModeId::new("deep_research"))
                     .await;
-                    return ok_end_turn(0, None);
-                }
-                let resolved = match crate::session::workflow::registry::resolve_by_name(
-                    "deep-research",
-                    None,
-                ) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        self.send_host_turn_slash_command_output(&format!(
-                            "deep-research workflow unavailable: {e}"
-                        ))
+                match outcome {
+                    BehaviorChangeOutcome::Applied if query.is_empty() => {
+                        self.send_host_turn_slash_command_output(
+                            "Deep Research behavior selected. Send a non-empty research query to start.",
+                        )
                         .await;
-                        return ok_end_turn(0, None);
                     }
-                };
-                let spec = crate::session::workflow::manager::LaunchSpec {
-                    objective: query.clone(),
-                    args: serde_json::json!({ "query": query }),
-                    agent_budget: None,
-                    resume_run_id: None,
-                };
-                let launched = self.workflow_manager.lock().await.launch(resolved, spec);
-                match launched {
-                    Ok((run_id, outcome_rx)) => {
-                        let (display, objective) = self
-                            .workflow_tracker()
-                            .await
-                            .lock()
-                            .get(&run_id)
-                            .map(|r| (r.name.clone(), r.objective.clone()))
-                            .unwrap_or_else(|| ("deep-research".to_string(), String::new()));
-                        self.push_workflow_launch_reminder(
-                            &display,
-                            &run_id,
-                            &objective,
-                            &format!("/deep-research {objective}"),
-                            false,
-                        );
-                        self.send_host_turn_slash_command_output(&format!(
-                            "Deep research '{display}' started in the background. It will \
-                             cross-check candidate claims and return a concise cited report here. \
-                             Use /workflows to follow progress."
-                        ))
-                        .await;
-                        tokio::spawn(async move {
-                            if let Ok(outcome) = outcome_rx.await {
-                                tracing::info!(run_id, ?outcome, "deep-research finished");
+                    BehaviorChangeOutcome::Applied => {
+                        match self.launch_deep_research(query).await {
+                            Ok(run_id) => {
+                                self.send_host_turn_slash_command_output(&format!(
+                                "Deep Research started in the background ({run_id}). A terminal report will be delivered here. Use /workflow to manage the run."
+                            ))
+                            .await;
                             }
-                        });
+                            Err(message) => {
+                                self.send_host_turn_slash_command_output(&message).await;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        self.send_host_turn_slash_command_output(&format!(
-                            "Could not start deep research: {e}"
-                        ))
-                        .await;
+                    BehaviorChangeOutcome::ConfirmationRequired { message, .. }
+                    | BehaviorChangeOutcome::Rejected { message } => {
+                        self.send_host_turn_slash_command_output(&message).await;
                     }
                 }
                 ok_end_turn(0, None)
@@ -902,9 +871,9 @@ impl SessionActor {
                             tracker.pause(GoalPauseReason::User);
                             ("Goal paused. Use /goal resume to continue.", true)
                         }
+                        Some(GoalStatus::BudgetLimited) => ("Goal is budget-limited.", false),
                         Some(status) if status.is_paused() => ("Goal is already paused.", false),
                         Some(GoalStatus::Complete) => ("Goal is already complete.", false),
-                        Some(GoalStatus::BudgetLimited) => ("Goal is budget-limited.", false),
                         None => ("No goal is currently set.", false),
                         Some(_) => ("Goal is not active.", false),
                     }
@@ -949,6 +918,12 @@ impl SessionActor {
                 self.goal_turn_task_ids.lock().clear();
                 self.subagent_token_records.lock().clear();
                 self.clear_pending_classifier_completions();
+                self.behavior.lock().select_behavior(None);
+                *self.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
+                self.persist_behavior_state();
+                self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
+                    "default",
+                ));
                 self.send_grow_notification(crate::session::goal_orchestrator::build_goal_cleared())
                     .await;
                 self.send_host_turn_slash_command_output("Goal cleared.")

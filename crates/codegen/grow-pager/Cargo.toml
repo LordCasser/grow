@@ -246,11 +246,6 @@ path = "tests/settings_e2e.rs"
 name = "scripted_scenarios"
 path = "tests/scripted_scenarios.rs"
 
-# Permission Auto mode PTY e2e (Ctrl+R → Auto banner via PtyHarness).
-[[test]]
-name = "pty_permission_mode"
-path = "tests/pty_permission_mode.rs"
-
 [[bin]]
 name = "mouse-events-playground"
 path = "src/bin/mouse_events_playground.rs"

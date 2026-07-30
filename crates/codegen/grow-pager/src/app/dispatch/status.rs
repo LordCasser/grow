@@ -1,4 +1,4 @@
-//! Session status, sharing, privacy, usage, and info dispatchers.
+//! Session status, usage, and info dispatchers.
 
 use agent_client_protocol as acp;
 
@@ -9,35 +9,6 @@ use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
-
-/// Toggle YOLO mode (auto-approve all permissions).
-///
-/// When turning ON: auto-approve all currently queued permissions and
-/// restore the stashed prompt. Future incoming permissions will be
-/// auto-approved in `handle_permission_request`.
-///
-/// Prepare the current session snapshot for a separately configured share service.
-///
-/// Produces Effect::ShareSession which spawns an async ACP ext request.
-/// Until a service is configured, the request reports that state in scrollback.
-pub(super) fn dispatch_share_session(app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
-    };
-    let Some(session_id) = agent.session.session_id.clone() else {
-        // No active session — error should have been caught by slash command,
-        // but guard here just in case.
-        return vec![];
-    };
-
-    vec![Effect::ShareSession {
-        agent_id: id,
-        session_id,
-    }]
-}
 
 /// Show session info: fetch via grow/session/info and display in scrollback.
 ///

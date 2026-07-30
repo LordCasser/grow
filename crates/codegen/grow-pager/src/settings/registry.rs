@@ -245,10 +245,13 @@ pub struct PagerLocalSnapshot {
     /// Cloned into the snapshot so the modal's validator/resolver is
     /// self-contained (the modal outlives the borrow on `app.agents`).
     pub available_models: Vec<(String, acp::ModelId)>,
-    /// Whether plan mode is active. Uses effective state
-    /// (`pending.unwrap_or(active)`) so rapid toggles don't double-send.
-    /// Refreshed on all mutation paths including ACP `CurrentModeUpdate`.
-    pub plan_mode_active: bool,
+    /// Effective primary-agent Behavior, including optimistic selection.
+    pub behavior_mode: grow_tools::types::SessionMode,
+    /// Whether the active session exposes the Workflow tool. Used to hide the
+    /// Workflow Behavior rather than offering an unavailable mode.
+    pub workflows_available: bool,
+    pub deep_research_available: bool,
+    pub goal_available: bool,
     /// `[cli].show_tips` mirror. `None` = no TOML override → default `false`.
     pub show_tips: Option<bool>,
     /// `[cli].auto_update` mirror. `None` = no TOML override → default `true`.
@@ -263,8 +266,8 @@ pub struct PagerLocalSnapshot {
     /// at snapshot time.
     pub respect_manual_folds: bool,
     /// Mirrors `AppView::auto_mode_gate` at snapshot time. When false the
-    /// permission-mode picker hides the "Auto" choice (matches the Ctrl+R
-    /// cycle, which skips Auto when the feature gate is off).
+    /// permission-mode picker hides the "Auto" choice when its feature gate
+    /// is off.
     pub auto_mode_gate: bool,
     /// `[toolset.ask_user_question].timeout_enabled` mirror (effective TOML
     /// merge, like `show_tips`). `None` = unset in TOML → default `true`.
@@ -284,7 +287,10 @@ impl Default for PagerLocalSnapshot {
             auto_mode: false,
             current_model_id: None,
             available_models: Vec::new(),
-            plan_mode_active: false,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            workflows_available: false,
+            deep_research_available: false,
+            goal_available: false,
             show_tips: None,
             auto_update: None,
             vim_mode: false,
@@ -491,7 +497,6 @@ pub fn current_value_for(
             crate::appearance::cache::load_keep_text_selection().as_canonical(),
         )),
         // PAGER — read from snapshot.
-        "multiline_mode" => Some(SettingValue::Bool(pager.multiline_mode)),
         // PAGER — read from process-wide cache (snapshot mirror keeps
         // the modal in sync with the live cache value).
         "vim_mode" => Some(SettingValue::Bool(pager.vim_mode)),
@@ -566,16 +571,13 @@ pub fn current_value_for(
         "render_mermaid" => Some(SettingValue::Enum(
             crate::appearance::cache::load_render_mermaid().as_canonical(),
         )),
-        // permission_mode: live snapshot wins over on-disk value.
-        // yolo=true → "always-approve"; else honor ui ("auto" / "default" / "ask").
-        "permission_mode" => Some(SettingValue::Enum(if pager.yolo_mode {
-            "always-approve"
-        } else if matches!(ui.permission_mode.as_deref(), Some("auto")) {
-            "auto"
-        } else if matches!(ui.permission_mode.as_deref(), Some("default")) {
-            "default"
-        } else {
-            "ask"
+        // This row is a persistent default for future sessions. Active-session
+        // permission state is deliberately absent from Settings.
+        "permission_mode" => Some(SettingValue::Enum(match ui.permission_mode.as_deref() {
+            Some("always-approve") => "always-approve",
+            Some("auto") => "auto",
+            Some("default") => "default",
+            _ => "ask",
         })),
         // remember_tool_approvals: reflects the user-config layer the modal
         // toggles (other layers feed the effective gate at spawn). None → false.
@@ -610,17 +612,12 @@ pub fn current_value_for(
         )),
         // max_thoughts_width: `u16` widened to `i64`.
         "max_thoughts_width" => Some(SettingValue::Int(ui.max_thoughts_width as i64)),
-        // plan_mode: canonical via `PlanModeKind::from_bool().as_canonical()`.
-        "plan_mode" => Some(SettingValue::Enum(
-            crate::app::actions::PlanModeKind::from_bool(pager.plan_mode_active).as_canonical(),
-        )),
         // CLI batch: snapshot mirrors; `None` → effective default `true`.
         "show_tips" => Some(SettingValue::Bool(pager.show_tips.unwrap_or(false))),
         "auto_update" => Some(SettingValue::Bool(pager.auto_update.unwrap_or(true))),
         // fork_secondary_model: baseline value folds to empty string.
         "fork_secondary_model" => Some(SettingValue::String({
-            let baseline = grow_shell::models::default_model();
-            if ui.fork_secondary_model == baseline {
+            if ui.fork_secondary_model.is_empty() {
                 String::new()
             } else {
                 ui.fork_secondary_model.clone()
@@ -1057,15 +1054,13 @@ mod tests {
                     assert_eq!(
                         *default, "",
                         "fork_secondary_model registry default must be empty string — \
-                         the live default is `crate::models::default_model()` and the \
-                         current_value_for arm folds matching values to the empty sentinel",
+                         the empty value means inherit the configured default model",
                     );
-                    // Cross-check: the UiConfig field IS the built-in default.
+                    // Cross-check: the UiConfig field uses the same empty sentinel.
                     assert_eq!(
-                        ui.fork_secondary_model,
-                        grow_shell::models::default_model(),
+                        ui.fork_secondary_model, "",
                         "UiConfig::default().fork_secondary_model must equal \
-                         models::default_model() — drift here breaks the empty-fold contract",
+                         the empty inheritance sentinel — drift here breaks the fold contract",
                     );
                 }
 
@@ -1090,12 +1085,6 @@ mod tests {
                 continue;
             }
             match (meta.key, &meta.kind) {
-                ("multiline_mode", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default, pager.multiline_mode,
-                        "multiline_mode default drifts from PagerLocalSnapshot::default()"
-                    );
-                }
                 ("respect_manual_folds", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default, pager.respect_manual_folds,
@@ -1106,16 +1095,6 @@ mod tests {
                         crate::appearance::ScrollConfig::default().respect_manual_folds,
                         "respect_manual_folds default drifts from ScrollConfig::default() — \
                          the appearance config is the source of truth"
-                    );
-                }
-                // plan_mode: per-session, not persisted.
-                ("plan_mode", SettingKind::Enum { default, .. }) => {
-                    let expected = if pager.plan_mode_active { "on" } else { "off" };
-                    assert_eq!(
-                        *default, expected,
-                        "plan_mode default `{default}` drifts from PagerLocalSnapshot::default() \
-                         (plan_mode_active: {})",
-                        pager.plan_mode_active,
                     );
                 }
                 _ => panic!(

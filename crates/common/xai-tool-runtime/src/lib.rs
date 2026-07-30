@@ -28,9 +28,8 @@ pub use notification::{
     BashExecutionBackgrounded, BashExecutionComplete, BashExecutionFailed, BashExecutionTimeout,
     BashNotificationBase, BashOutputChunk, FileRead, FileWritten, LspServerCrashed,
     LspServerFailed, LspServerReady, LspServerRetrying, LspServerStarting, MonitorEvent,
-    PlanModeEntered, PlanModeExited, ScheduledTaskCreated, ScheduledTaskFired,
-    ScheduledTaskRemoved, TaskKind, TaskSnapshot, ToolNotification, ToolNotificationHandle,
-    UserQuestionAsked,
+    ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved, TaskKind, TaskSnapshot,
+    ToolNotification, ToolNotificationHandle, UserQuestionAsked,
 };
 pub use registry::{ErasedTool, LocalRegistry, ToolHandle};
 pub use render::{

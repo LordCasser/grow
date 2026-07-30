@@ -652,8 +652,8 @@ pub(super) async fn run_session(
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::SessionMode { session_mode, responds_to } => {
-                            session.handle_session_mode(session_mode).await;
-                            let _ = responds_to.send(());
+                            let outcome = session.request_behavior_change(session_mode).await;
+                            let _ = responds_to.send(outcome);
                         }
                         SessionCommand::SetSessionModel { model_id, sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
                             let updated_model_id = session.handle_set_session_model(model_id, sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
@@ -1847,7 +1847,7 @@ pub(super) async fn run_session(
                                 state.pending_inputs.push_back(InputItem {
                                     prompt_id,
                                     prompt_blocks,
-                                    prompt_mode: crate::session::plan_mode::PromptMode::Agent,
+                                    prompt_mode: crate::session::behavior::PromptMode::Agent,
                                     client_identifier: None,
                                     screen_mode: None,
                                     verbatim: true,
@@ -1863,7 +1863,11 @@ pub(super) async fn run_session(
                             }
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
-                        SessionCommand::WorkflowCompletionTurn { run_id, revision } => {
+                        SessionCommand::WorkflowCompletionTurn { run_id, revision, outcome } => {
+                            if session.behavior.lock().deep_research_run_id() == Some(&run_id) {
+                                session.finish_deep_research_run(&run_id, outcome).await;
+                                continue;
+                            }
                             let state_suppressed = session.state.lock().await.notifications_suppressed;
                             let wake_suppressed = state_suppressed
                                 || session.goal_loop_active()
@@ -1895,7 +1899,7 @@ pub(super) async fn run_session(
                                 state.pending_inputs.push_back(InputItem {
                                     prompt_id,
                                     prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(prompt_text))],
-                                    prompt_mode: crate::session::plan_mode::PromptMode::Agent,
+                                    prompt_mode: crate::session::behavior::PromptMode::Agent,
                                     client_identifier: None,
                                     screen_mode: None,
                                     verbatim: true,

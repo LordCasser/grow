@@ -4,7 +4,7 @@
 //! With no argument it opens the dashboard's location picker; with a path
 //! it changes directly. Both are dashboard affordances — invoked from a
 //! non-dashboard surface the dispatcher prints a toast pointing the user
-//! at `/dashboard` (see `dispatch_dashboard_open_location_picker` /
+//! at `/agents` (see `dispatch_dashboard_open_location_picker` /
 //! `dispatch_dashboard_change_location`).
 
 use crate::app::actions::Action;

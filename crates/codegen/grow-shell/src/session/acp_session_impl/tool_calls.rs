@@ -71,35 +71,55 @@ fn interrupted_wait_tool_result_with_msg(args: &serde_json::Value, msg: &str) ->
         effective_tool_name: None,
     }
 }
-/// Clears `awaiting_plan_approval` (and re-persists) when the
+/// Clears the persisted approval transport flag when the
 /// [`SessionActor::request_plan_approval`] await **resolves** (a decision came
 /// back) or is **dropped** (the model turn was cancelled) — so a cancelled
 /// in-session approval can never strand the bit `true`.
 ///
-/// It is deliberately [`disarm`](Self::disarm)ed on the client-disconnect
+/// It is deliberately preserved on the client-disconnect
 /// (quit) path: there the approval is genuinely still pending, so the bit must
 /// stay `true` on disk for the next resume to re-park it.
-/// `PlanModeState` writes are immediate (no debounce), so writing `false` here
+/// `BehaviorState` writes are immediate (no debounce), so writing `false` here
 /// would race the quit and lose the gate.
-struct AwaitingApprovalGuard<'a>(&'a SessionActor);
+struct AwaitingApprovalGuard<'a> {
+    actor: &'a SessionActor,
+    armed: bool,
+}
 impl AwaitingApprovalGuard<'_> {
-    /// Keep `awaiting_plan_approval` set (skip the clear-on-drop). Used when the
-    /// client disconnected without answering, so resume re-parks the approval.
-    fn disarm(self) {
-        std::mem::forget(self);
+    fn new(actor: &SessionActor) -> AwaitingApprovalGuard<'_> {
+        AwaitingApprovalGuard { actor, armed: true }
+    }
+
+    /// A decision arrived. The caller still owns the phase transition.
+    fn resolve(mut self) {
+        self.actor.behavior.lock().set_approval_pending(false);
+        self.actor.persist_behavior_state();
+        self.armed = false;
+    }
+
+    /// Keep the approval durable so reconnect can re-park it.
+    fn preserve_for_resume(mut self) {
+        self.armed = false;
     }
 }
 impl Drop for AwaitingApprovalGuard<'_> {
     fn drop(&mut self) {
-        self.0.plan_mode.lock().set_awaiting_plan_approval(false);
-        self.0.persist_plan_mode_state();
+        if !self.armed {
+            return;
+        }
+        let mut controller = self.actor.behavior.lock();
+        if !controller.reject_submitted_plan() {
+            controller.set_approval_pending(false);
+        }
+        drop(controller);
+        self.actor.persist_behavior_state();
     }
 }
-pub(super) fn is_exit_plan_kind(kind: Option<grow_tools::types::tool::ToolKind>) -> bool {
-    matches!(kind, Some(grow_tools::types::tool::ToolKind::ExitPlan))
+pub(super) fn is_plan_control_kind(kind: Option<grow_tools::types::tool::ToolKind>) -> bool {
+    matches!(kind, Some(grow_tools::types::tool::ToolKind::PlanControl))
 }
-/// Split ExitPlan-kind calls into the tail so they run after the rest of the batch.
-fn split_exit_plan_tail(
+/// Run Plan lifecycle transitions after every ordinary call in the batch.
+fn split_plan_control_tail(
     calls: Vec<crate::sampling::types::ToolCallResponse>,
     kind_of: impl Fn(&str) -> Option<grow_tools::types::tool::ToolKind>,
 ) -> (
@@ -108,7 +128,7 @@ fn split_exit_plan_tail(
 ) {
     calls
         .into_iter()
-        .partition(|call| !is_exit_plan_kind(kind_of(&call.function.name)))
+        .partition(|call| !is_plan_control_kind(kind_of(&call.function.name)))
 }
 /// Verdict for a tool call evaluated against the plan-mode edit gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,33 +137,44 @@ pub(super) enum PlanEditGate {
     Allow,
     /// Any ordinary file edit while Plan behavior is active.
     RejectEdit,
+    /// Dynamic sub-planning is incompatible with an approved Plan contract.
+    RejectWorkflow,
 }
 /// Gate edit-class tool calls while plan mode is active.
 ///
-/// Every `AccessKind::Edit` is rejected before the normal permission flow.
-/// Plan artifact persistence is performed only by `exit_plan_mode`; Behavior
+/// Every potentially mutating access class is rejected before the normal
+/// permission flow. Unknown MCP calls fail closed while drafting/amending.
+/// Plan artifact persistence is performed only by the shell control plane; Behavior
 /// never grants an edit capability and never bypasses session permissions.
 ///
-/// Non-edit tools (bash, read, grep, MCP, web) are never gated here; they
-/// flow to the normal permission path, where yolo may still auto-approve
-/// them. `enter_plan_mode` / `exit_plan_mode` map to `AccessKind::Read` and
-/// are likewise never gated.
+/// Read, grep, web fetch, and Plan control/question calls continue to the
+/// ordinary permission path. Bash, edits, and MCP calls are blocked until the
+/// approved Plan enters Executing.
 pub(super) fn plan_mode_edit_gate(
-    tracker: &crate::session::plan_mode::BehaviorController,
+    tracker: &crate::session::behavior::BehaviorController,
     tool_input: &ToolInput,
     access_kind: &AccessKind,
 ) -> PlanEditGate {
-    if tracker.behavior() != Some(xai_tool_types::BehaviorId::Plan) {
+    if !tracker.is_plan() {
         return PlanEditGate::Allow;
     }
-    let _ = tool_input;
+    if matches!(tool_input, ToolInput::Workflow(_)) {
+        return PlanEditGate::RejectWorkflow;
+    }
+    if tracker.plan_allows_edits() {
+        return PlanEditGate::Allow;
+    }
     match access_kind {
-        AccessKind::Edit(_) => PlanEditGate::RejectEdit,
-        _ => PlanEditGate::Allow,
+        AccessKind::Edit(_) | AccessKind::Bash(_) | AccessKind::MCPTool { .. } => {
+            PlanEditGate::RejectEdit
+        }
+        AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebFetch(_) => {
+            PlanEditGate::Allow
+        }
     }
 }
-/// Typed view of an `exit_plan_mode` approval decision. The wire type
-/// (`ExitPlanModeExtResponse`) carries `outcome` as a string; both the mid-turn
+/// Typed view of a Plan approval decision. The wire type carries `outcome` as
+/// a string; both the mid-turn
 /// intercept and the resume re-park match on this enum instead. Unknown /
 /// unrecognized outcomes map to [`Cancelled`](Self::Cancelled) so the session
 /// fails CLOSED (stays in plan mode) rather than auto-approving.
@@ -155,7 +186,7 @@ pub(super) enum PlanApprovalOutcome {
 }
 impl PlanApprovalOutcome {
     fn from_response(
-        resp: &grow_tools::implementations::grow_build::exit_plan_mode::ExitPlanModeExtResponse,
+        resp: &grow_tools::implementations::grow_build::plan_control::PlanApprovalExtResponse,
     ) -> Self {
         match resp.outcome.as_str() {
             "approved" => Self::Approved,
@@ -255,7 +286,7 @@ impl SessionActor {
         let mut deferred_followups: Vec<ConversationItem> = Vec::new();
         if tool_calls.len() > 1 {
             let kind_of = |name: &str| self.agent.borrow().tool_bridge().tool_kind(name);
-            let (body, tail) = split_exit_plan_tail(tool_calls, kind_of);
+            let (body, tail) = split_plan_control_tail(tool_calls, kind_of);
             if !body.is_empty() {
                 self.execute_tool_calls_batch(body, &mut deferred_followups, &mut final_result)
                     .await?;
@@ -682,7 +713,7 @@ impl SessionActor {
         }
         Ok(())
     }
-    /// Phase 1: pre-flight (MCP, args, hooks, permission, ExitPlanMode).
+    /// Phase 1: pre-flight (MCP, args, hooks, permission, PlanControl).
     pub(crate) async fn prepare_tool_call(
         &self,
         call: crate::sampling::types::ToolCallResponse,
@@ -837,7 +868,7 @@ impl SessionActor {
             }
         };
         let access_kind = AccessKind::from(&tool_input);
-        let plan_gate = plan_mode_edit_gate(&self.plan_mode.lock(), &tool_input, &access_kind);
+        let plan_gate = plan_mode_edit_gate(&self.behavior.lock(), &tool_input, &access_kind);
         if plan_gate != PlanEditGate::Allow {
             tracing::info_span!(
                 "tool.decision",
@@ -848,7 +879,11 @@ impl SessionActor {
                 wait_ms = 0_i64,
             )
             .in_scope(|| {});
-            let msg = self.plan_mode_edit_rejected_message().await;
+            let msg = match plan_gate {
+                PlanEditGate::RejectWorkflow => "Rejected: Workflow cannot be launched while Plan behavior is active. Complete or cancel the approved Plan first.".to_owned(),
+                PlanEditGate::RejectEdit => self.plan_mode_edit_rejected_message().await,
+                PlanEditGate::Allow => unreachable!(),
+            };
             self.handle_tool_not_executed(&call.id, &tool_call_id, msg)
                 .await?;
             return Ok(Err(ToolLoop::Continue));
@@ -1139,107 +1174,233 @@ impl SessionActor {
                 Decision::Allow | Decision::Ask => {}
             }
         }
-        if let ToolInput::ExitPlanMode(input) = &tool_input {
-            let plan_content = input.plan.trim().to_owned();
-            if plan_content.is_empty() {
-                self.handle_tool_not_executed(
+        if let ToolInput::PlanControl(input) = &tool_input {
+            use grow_tools::implementations::grow_build::plan_control::PlanControlAction;
+            if matches!(
+                input.action,
+                PlanControlAction::Complete | PlanControlAction::Cancel
+            ) {
+                if input.plan.is_some() {
+                    self.handle_tool_not_executed(
+                        &call.id,
+                        &tool_call_id,
+                        "Rejected: plan_control complete/cancel must not include `plan`."
+                            .to_owned(),
+                    )
+                    .await?;
+                    return Ok(Err(ToolLoop::Continue));
+                }
+                let valid = match input.action {
+                    PlanControlAction::Complete => {
+                        self.behavior.lock().state()
+                            == crate::session::behavior::BehaviorState::Plan(
+                                crate::session::behavior::PlanPhase::Executing,
+                            )
+                    }
+                    PlanControlAction::Cancel => self.behavior.lock().is_plan(),
+                    PlanControlAction::Submit | PlanControlAction::Amend => unreachable!(),
+                };
+                if !valid {
+                    self.handle_tool_not_executed(
+                        &call.id,
+                        &tool_call_id,
+                        format!(
+                            "Rejected: Plan action `{:?}` is not valid in the current phase.",
+                            input.action
+                        ),
+                    )
+                    .await?;
+                    return Ok(Err(ToolLoop::Continue));
+                }
+                self.finish_plan_to_default();
+            } else {
+                let valid = match input.action {
+                    PlanControlAction::Submit => self.behavior.lock().is_drafting_plan(),
+                    PlanControlAction::Amend => {
+                        self.behavior.lock().state()
+                            == crate::session::behavior::BehaviorState::Plan(
+                                crate::session::behavior::PlanPhase::Executing,
+                            )
+                    }
+                    PlanControlAction::Complete | PlanControlAction::Cancel => unreachable!(),
+                };
+                if !valid {
+                    self.handle_tool_not_executed(
+                        &call.id,
+                        &tool_call_id,
+                        format!(
+                            "Rejected: Plan action `{:?}` is not valid in the current phase.",
+                            input.action
+                        ),
+                    )
+                    .await?;
+                    return Ok(Err(ToolLoop::Continue));
+                }
+                let plan_content = input.plan.as_deref().unwrap_or_default().trim().to_owned();
+                if plan_content.is_empty() {
+                    self.handle_tool_not_executed(
+                        &call.id,
+                        &tool_call_id,
+                        "Rejected: plan_control submit/amend requires a non-empty `plan` argument."
+                            .to_owned(),
+                    )
+                    .await?;
+                    return Ok(Err(ToolLoop::Continue));
+                }
+
+                // Persist the control-plane artifact before opening approval UI.
+                // This is not a workspace edit and does not grant the Agent an
+                // Edit tool.
+                let plan_file_path = self.behavior.lock().plan_file_path().to_path_buf();
+                if let Err(error) = crate::session::storage::write_bytes_atomic_async(
+                    &plan_file_path,
+                    plan_content.as_bytes().to_vec(),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        path = %plan_file_path.display(),
+                        %error,
+                        "failed to persist submitted plan before approval"
+                    );
+                    self.handle_tool_not_executed(
+                        &call.id,
+                        &tool_call_id,
+                        format!("Failed to persist the plan artifact: {error}"),
+                    )
+                    .await?;
+                    return Ok(Err(ToolLoop::Continue));
+                }
+                let submitted = match input.action {
+                    PlanControlAction::Submit => self.behavior.lock().submit_initial_plan(),
+                    PlanControlAction::Amend => self.behavior.lock().submit_plan_amendment(),
+                    PlanControlAction::Complete | PlanControlAction::Cancel => unreachable!(),
+                };
+                if !submitted {
+                    self.handle_tool_not_executed(
                     &call.id,
                     &tool_call_id,
-                    "Rejected: exit_plan_mode requires a non-empty `plan` argument.".to_owned(),
+                    "Rejected: a plan can only be submitted while drafting or while executing an approved plan that needs amendment.".to_owned(),
                 )
                 .await?;
-                return Ok(Err(ToolLoop::Continue));
-            }
+                    return Ok(Err(ToolLoop::Continue));
+                }
+                self.persist_behavior_state();
 
-            // Persist the control-plane artifact before opening approval UI.
-            // This is not a workspace edit and does not grant the Agent an
-            // Edit tool.
-            let plan_file_path = self.plan_mode.lock().plan_file_path().to_path_buf();
-            if let Err(error) = crate::session::storage::write_bytes_atomic_async(
-                &plan_file_path,
-                plan_content.as_bytes().to_vec(),
-            )
-            .await
-            {
-                tracing::warn!(
-                    path = %plan_file_path.display(),
-                    %error,
-                    "failed to persist submitted plan before approval"
+                tracing::info!(
+                    tool_call_id = %tool_call_id,
+                    "plan_control intercepted; requesting user approval"
                 );
-                self.handle_tool_not_executed(
-                    &call.id,
-                    &tool_call_id,
-                    format!("Failed to persist the plan artifact: {error}"),
-                )
-                .await?;
-                return Ok(Err(ToolLoop::Continue));
-            }
-
-            tracing::info!(
-                tool_call_id = %tool_call_id,
-                "[exit_plan_mode] intercepted, sending ext_method to client"
-            );
-            let resp = self
-                .request_plan_approval(&tool_call_id, plan_content)
-                .await;
-            match resp {
-                Ok(parsed) => match PlanApprovalOutcome::from_response(&parsed) {
-                    PlanApprovalOutcome::Abandoned => {
-                        tracing::info!("[exit_plan_mode] user abandoned plan — deactivating");
-                        self.leave_plan_mode_to_default();
-                        let message = format!(
-                            "The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call {} again unless the user explicitly asks to re-enter plan mode.",
-                            call.function.name
-                        );
-                        let tool_update = acp::ToolCallUpdate::new(
-                            tool_call_id.clone(),
-                            acp::ToolCallUpdateFields::new()
-                                .status(Some(acp::ToolCallStatus::Completed))
-                                .content(Some(vec![acp::ToolCallContent::from(
-                                    acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
-                                )])),
-                        );
-                        self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
-                            .await;
-                        let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
-                        self.chat_state_handle.push_tool_result(tool_chat);
-                        return Ok(Err(ToolLoop::Continue));
-                    }
-                    PlanApprovalOutcome::Cancelled => {
-                        let message = revise_plan_message(parsed.feedback.as_deref().unwrap_or(""));
-                        let tool_update = acp::ToolCallUpdate::new(
-                            tool_call_id.clone(),
-                            acp::ToolCallUpdateFields::new()
-                                .status(Some(acp::ToolCallStatus::Completed))
-                                .content(Some(vec![acp::ToolCallContent::from(
-                                    acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
-                                )])),
-                        );
-                        self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
-                            .await;
-                        let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
-                        self.chat_state_handle.push_tool_result(tool_chat);
-                        return Ok(Err(ToolLoop::Continue));
-                    }
-                    PlanApprovalOutcome::Approved => {
-                        tracing::info!("[exit_plan_mode] user approved — executing tool");
-                    }
-                },
-                Err(err) => {
-                    if ext_method_no_client(&err) {
-                        tracing::debug!(%err, "exit_plan_mode: no client wired; executing tool");
-                    } else {
-                        tracing::info!(
-                            %err,
-                            "exit_plan_mode: client disconnected mid-approval; plan mode stays active"
-                        );
-                        let message = "Plan approval could not be completed because the \
+                let resp = self
+                    .request_plan_approval(&tool_call_id, plan_content.clone())
+                    .await;
+                match resp {
+                    Ok(parsed) => match PlanApprovalOutcome::from_response(&parsed) {
+                        PlanApprovalOutcome::Abandoned => {
+                            tracing::info!("plan_control: user abandoned Plan");
+                            self.finish_plan_to_default();
+                            let message = format!(
+                                "The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call {} again unless the user explicitly asks to re-enter plan mode.",
+                                call.function.name
+                            );
+                            let tool_update = acp::ToolCallUpdate::new(
+                                tool_call_id.clone(),
+                                acp::ToolCallUpdateFields::new()
+                                    .status(Some(acp::ToolCallStatus::Completed))
+                                    .content(Some(vec![acp::ToolCallContent::from(
+                                        acp::ContentBlock::Text(acp::TextContent::new(
+                                            message.clone(),
+                                        )),
+                                    )])),
+                            );
+                            self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
+                                .await;
+                            let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
+                            self.chat_state_handle.push_tool_result(tool_chat);
+                            return Ok(Err(ToolLoop::Continue));
+                        }
+                        PlanApprovalOutcome::Cancelled => {
+                            self.behavior.lock().reject_submitted_plan();
+                            self.persist_behavior_state();
+                            let message =
+                                revise_plan_message(parsed.feedback.as_deref().unwrap_or(""));
+                            let tool_update = acp::ToolCallUpdate::new(
+                                tool_call_id.clone(),
+                                acp::ToolCallUpdateFields::new()
+                                    .status(Some(acp::ToolCallStatus::Completed))
+                                    .content(Some(vec![acp::ToolCallContent::from(
+                                        acp::ContentBlock::Text(acp::TextContent::new(
+                                            message.clone(),
+                                        )),
+                                    )])),
+                            );
+                            self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
+                                .await;
+                            let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
+                            self.chat_state_handle.push_tool_result(tool_chat);
+                            return Ok(Err(ToolLoop::Continue));
+                        }
+                        PlanApprovalOutcome::Approved => {
+                            let approved_path =
+                                self.behavior.lock().approved_plan_file_path().to_path_buf();
+                            if let Err(error) = crate::session::storage::write_bytes_atomic_async(
+                                &approved_path,
+                                plan_content.as_bytes().to_vec(),
+                            )
+                            .await
+                            {
+                                tracing::error!(%error, "failed to freeze approved Plan artifact");
+                                self.behavior.lock().reject_submitted_plan();
+                                self.persist_behavior_state();
+                                self.handle_tool_not_executed(
+                                    &call.id,
+                                    &tool_call_id,
+                                    format!("Failed to freeze the approved Plan: {error}"),
+                                )
+                                .await?;
+                                return Ok(Err(ToolLoop::Continue));
+                            }
+                            if !self.behavior.lock().approve_submitted_plan() {
+                                self.handle_tool_not_executed(
+                                    &call.id,
+                                    &tool_call_id,
+                                    "Plan approval arrived in an invalid phase.".to_owned(),
+                                )
+                                .await?;
+                                return Ok(Err(ToolLoop::Continue));
+                            }
+                            self.persist_behavior_state();
+                            self.enqueue_current_mode_update(acp::SessionModeId::new(
+                                grow_tools::types::SessionMode::Plan.as_id(),
+                            ));
+                            tracing::info!("plan_control: user approved frozen Plan contract");
+                        }
+                    },
+                    Err(err) => {
+                        if ext_method_no_client(&err) {
+                            tracing::warn!(%err, "plan_control: no approval client; failing closed");
+                            self.behavior.lock().reject_submitted_plan();
+                            self.persist_behavior_state();
+                            self.handle_tool_not_executed(
+                            &call.id,
+                            &tool_call_id,
+                            "Plan approval requires an interactive user. No approval client is connected, so execution remains blocked.".to_owned(),
+                        )
+                        .await?;
+                            return Ok(Err(ToolLoop::Continue));
+                        } else {
+                            tracing::info!(
+                                %err,
+                                "plan_control: client disconnected mid-approval; Plan stays active"
+                            );
+                            let message = "Plan approval could not be completed because the \
                              client disconnected. Plan mode remains active; the approval \
                              will reappear on reconnect."
-                            .to_string();
-                        self.handle_tool_not_executed(&call.id, &tool_call_id, message)
-                            .await?;
-                        return Ok(Err(ToolLoop::Cancelled));
+                                .to_string();
+                            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                                .await?;
+                            return Ok(Err(ToolLoop::Cancelled));
+                        }
                     }
                 }
             }
@@ -1261,8 +1422,7 @@ impl SessionActor {
                         | ToolKind::MemorySearch
                         | ToolKind::MemoryGet
                         | ToolKind::WebFetch
-                        | ToolKind::EnterPlan
-                        | ToolKind::ExitPlan
+                        | ToolKind::PlanControl
                         | ToolKind::AskUser
                 )
             })
@@ -1280,35 +1440,35 @@ impl SessionActor {
         };
         Ok(Ok(prepared))
     }
-    /// Issue the `grow/exit_plan_mode` reverse-request and await the user's
-    /// decision. Shared by the mid-turn intercept and the resume
-    /// re-park. Marks `awaiting_plan_approval` while the request is
+    /// Issue the `grow/plan_approval` reverse request and await the user's
+    /// decision. Shared by the PlanControl intercept and the resume
+    /// re-park. Marks approval transport as pending while the request is
     /// outstanding and clears it on every exit path via [`AwaitingApprovalGuard`].
     pub(super) async fn request_plan_approval(
         &self,
         tool_call_id: &acp::ToolCallId,
         plan_content: String,
     ) -> Result<
-        grow_tools::implementations::grow_build::exit_plan_mode::ExitPlanModeExtResponse,
+        grow_tools::implementations::grow_build::plan_control::PlanApprovalExtResponse,
         acp::Error,
     > {
         use agent_client_protocol::Client as _;
-        use grow_tools::implementations::grow_build::exit_plan_mode::{
-            ExitPlanModeExtRequest, ExitPlanModeExtResponse,
+        use grow_tools::implementations::grow_build::plan_control::{
+            PlanApprovalExtRequest, PlanApprovalExtResponse,
         };
-        let ext_req = ExitPlanModeExtRequest {
+        let ext_req = PlanApprovalExtRequest {
             session_id: self.session_id_string(),
             tool_call_id: tool_call_id.to_string(),
             plan_content,
         };
         debug_assert!(
             !ext_req.session_id.is_empty(),
-            "exit_plan_mode reverse-request must carry a non-empty sessionId (design §5.4)"
+            "Plan approval request must carry a non-empty sessionId"
         );
         let ext_request = acp::ExtRequest::new(
-            "grow/exit_plan_mode",
+            "grow/plan_approval",
             serde_json::value::to_raw_value(&ext_req)
-                .expect("ExitPlanModeExtRequest serialization should not fail")
+                .expect("PlanApprovalExtRequest serialization should not fail")
                 .into(),
         );
         self.dispatch_notification_hook(
@@ -1318,9 +1478,9 @@ impl SessionActor {
             Some("info".into()),
         )
         .await;
-        self.plan_mode.lock().set_awaiting_plan_approval(true);
-        self.persist_plan_mode_state();
-        let clear_awaiting = AwaitingApprovalGuard(self);
+        self.behavior.lock().set_approval_pending(true);
+        self.persist_behavior_state();
+        let approval_guard = AwaitingApprovalGuard::new(self);
         let resp = {
             let _pending_guard = crate::session::pending_interaction::PendingInteractionGuard::new(
                 self.pending_interactions.clone(),
@@ -1334,35 +1494,36 @@ impl SessionActor {
         let raw = match resp {
             Ok(raw) => raw,
             Err(err) => {
-                clear_awaiting.disarm();
+                approval_guard.preserve_for_resume();
                 return Err(err);
             }
         };
-        Ok(
-            serde_json::from_str::<ExitPlanModeExtResponse>(raw.0.get()).unwrap_or_else(|_| {
-                ExitPlanModeExtResponse {
+        let parsed =
+            serde_json::from_str::<PlanApprovalExtResponse>(raw.0.get()).unwrap_or_else(|_| {
+                PlanApprovalExtResponse {
                     outcome: "cancelled".into(),
                     feedback: None,
                 }
-            }),
-        )
+            });
+        approval_guard.resolve();
+        Ok(parsed)
     }
     /// Leave plan mode (approved/abandoned) and tell the client to show the
     /// Default mode. Mirrors the mid-turn exit so the resume re-park
     /// drives the mode change through the same path.
-    fn leave_plan_mode_to_default(&self) {
-        let deactivated = self.plan_mode.lock().deactivate_approved();
+    fn finish_plan_to_default(&self) {
+        let deactivated = self.behavior.lock().finish_plan();
         if deactivated {
             *self.current_prompt_mode.lock() = PromptMode::Agent;
             *self.turn_prompt_mode.lock() = PromptMode::Agent;
-            self.persist_plan_mode_state();
+            self.persist_behavior_state();
             self.enqueue_current_mode_update(acp::SessionModeId::new(
                 grow_tools::types::SessionMode::Default.as_id(),
             ));
         }
     }
-    /// Resume hook: re-issue the parked `exit_plan_mode` approval
-    /// after a session restored with `awaiting_plan_approval == true`, so the
+    /// Resume hook: re-issue the parked Plan approval
+    /// after a session restored with `approval_pending == true`, so the
     /// client re-shows approval chrome over a real live waiter. Handles the
     /// decision with no in-flight turn — approve: leave plan mode + start an
     /// implement turn; request-changes: stay in plan mode + feed the comments
@@ -1371,57 +1532,72 @@ impl SessionActor {
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
-        if !self.plan_mode.lock().is_awaiting_plan_approval() {
+        if !self.behavior.lock().approval_pending() {
             return;
         }
         if crate::session::pending_interaction::has_parked_plan_approval(&self.pending_interactions)
         {
-            tracing::debug!("[exit_plan_mode] resume: approval already pending; skip re-park");
+            tracing::debug!("plan_control resume: approval already pending; skip re-park");
             return;
         }
-        let plan_path = self.plan_mode.lock().plan_file_path().to_path_buf();
+        let plan_path = self.behavior.lock().plan_file_path().to_path_buf();
         let plan_content = match tokio::fs::read_to_string(&plan_path).await {
             Ok(s) if !s.trim().is_empty() => s,
             _ => {
-                tracing::info!("[exit_plan_mode] resume: no plan.md; clearing awaiting flag");
-                self.plan_mode.lock().set_awaiting_plan_approval(false);
-                self.persist_plan_mode_state();
+                tracing::info!("plan_control resume: no candidate plan; clearing approval state");
+                self.behavior.lock().set_approval_pending(false);
+                self.persist_behavior_state();
                 return;
             }
         };
         let tool_call_id = acp::ToolCallId::new(Arc::from(
-            format!("exit-plan-mode-resume-{}", self.session_info.id.0).as_str(),
+            format!("plan-approval-resume-{}", self.session_info.id.0).as_str(),
         ));
         tracing::info!(
             tool_call_id = %tool_call_id,
-            "[exit_plan_mode] re-parking approval after resume"
+            "plan_control: re-parking approval after resume"
         );
         let parsed = match self
-            .request_plan_approval(&tool_call_id, plan_content)
+            .request_plan_approval(&tool_call_id, plan_content.clone())
             .await
         {
             Ok(parsed) => parsed,
             Err(err) => {
-                tracing::debug!(%err, "resume exit_plan_mode reverse-request failed");
+                tracing::debug!(%err, "resumed Plan approval request failed");
                 return;
             }
         };
         match resume_action_for(PlanApprovalOutcome::from_response(&parsed), parsed.feedback) {
             ResumeAction::LeaveOnly => {
-                tracing::info!("[exit_plan_mode] resume: user abandoned plan");
-                self.leave_plan_mode_to_default();
+                tracing::info!("plan_control resume: user abandoned Plan");
+                self.finish_plan_to_default();
             }
             ResumeAction::StayAndRevise(text) => {
-                tracing::info!("[exit_plan_mode] resume: user requested changes");
+                tracing::info!("plan_control resume: user requested changes");
+                self.behavior.lock().reject_submitted_plan();
+                self.persist_behavior_state();
                 self.start_resume_turn(text, PromptMode::Plan, completion_tx)
                     .await;
             }
             ResumeAction::LeaveAndImplement => {
-                tracing::info!("[exit_plan_mode] resume: user approved plan");
-                self.leave_plan_mode_to_default();
+                tracing::info!("plan_control resume: user approved Plan");
+                let approved_path = self.behavior.lock().approved_plan_file_path().to_path_buf();
+                if let Err(error) = crate::session::storage::write_bytes_atomic_async(
+                    &approved_path,
+                    plan_content.as_bytes().to_vec(),
+                )
+                .await
+                {
+                    tracing::error!(%error, "failed to freeze approved Plan artifact on resume");
+                    self.behavior.lock().reject_submitted_plan();
+                    self.persist_behavior_state();
+                    return;
+                }
+                self.behavior.lock().approve_submitted_plan();
+                self.persist_behavior_state();
                 self.start_resume_turn(
                     PLAN_APPROVED_IMPLEMENT_MESSAGE.to_string(),
-                    PromptMode::Agent,
+                    PromptMode::Plan,
                     completion_tx,
                 )
                 .await;
@@ -1638,14 +1814,8 @@ impl SessionActor {
                 vec![],
                 vec![],
             ),
-            ToolInput::EnterPlanMode(_) => (
-                "Plan: Enter".to_string(),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::ExitPlanMode(_) => (
-                "Plan: Exit".to_string(),
+            ToolInput::PlanControl(input) => (
+                format!("Plan: {:?}", input.action),
                 acp::ToolKind::Other,
                 vec![],
                 vec![],
@@ -2020,10 +2190,9 @@ impl SessionActor {
             }
             if matches!(
                 &result.output,
-                grow_tools::types::output::ToolOutput::EnterPlanMode(_)
-                    | grow_tools::types::output::ToolOutput::ExitPlanMode(_)
+                grow_tools::types::output::ToolOutput::PlanControl(_)
             ) {
-                let plan_path = self.plan_mode.lock().plan_file_path().display().to_string();
+                let plan_path = self.behavior.lock().plan_file_path().display().to_string();
                 if let Some(ref mut content) = tool_update.fields.content {
                     for item in content.iter_mut() {
                         if let acp::ToolCallContent::Content(acp::Content {
@@ -2464,9 +2633,9 @@ impl SessionActor {
     }
     /// Model-facing rejection for an ordinary file edit while Plan is active.
     pub(super) async fn plan_mode_edit_rejected_message(&self) -> String {
-        let plan_path = self.plan_mode.lock().plan_file_path().to_path_buf();
+        let plan_path = self.behavior.lock().plan_file_path().to_path_buf();
         self.render_plan_template(
-            crate::session::plan_mode::plan_mode_edit_rejected_template(),
+            crate::session::behavior::plan_mode_edit_rejected_template(),
             &plan_path,
             false,
         )
@@ -2536,8 +2705,8 @@ mod execute_tool_call_parts_tests {
     }
 }
 #[cfg(test)]
-mod exit_plan_tail_predicate_tests {
-    use super::{is_exit_plan_kind, split_exit_plan_tail};
+mod plan_control_tail_predicate_tests {
+    use super::{is_plan_control_kind, split_plan_control_tail};
     use grow_tools::types::ToolInput;
     use grow_tools::types::tool::ToolKind;
     fn call(name: &str, args: &str) -> crate::sampling::types::ToolCallResponse {
@@ -2547,38 +2716,38 @@ mod exit_plan_tail_predicate_tests {
             function: crate::sampling::types::ToolCallFunction::new(name, args),
         }
     }
-    /// Wire name does not matter — only [`ToolKind::ExitPlan`].
+    /// Wire name does not matter — only [`ToolKind::PlanControl`].
     fn kind_of(name: &str) -> Option<ToolKind> {
         match name {
-            "exit_plan_mode" | "FinishPlan" => Some(ToolKind::ExitPlan),
+            "plan_control" | "PlanControl" => Some(ToolKind::PlanControl),
             _ => None,
         }
     }
     #[test]
-    fn exit_plan_kind_is_protocol_exit() {
-        assert!(is_exit_plan_kind(Some(ToolKind::ExitPlan)));
-        assert!(!is_exit_plan_kind(Some(ToolKind::Edit)));
-        assert!(!is_exit_plan_kind(None));
+    fn plan_control_kind_is_protocol_boundary() {
+        assert!(is_plan_control_kind(Some(ToolKind::PlanControl)));
+        assert!(!is_plan_control_kind(Some(ToolKind::Edit)));
+        assert!(!is_plan_control_kind(None));
     }
     fn mixed(calls: Vec<crate::sampling::types::ToolCallResponse>) -> bool {
-        let (body, tail) = split_exit_plan_tail(calls, kind_of);
+        let (body, tail) = split_plan_control_tail(calls, kind_of);
         !body.is_empty() && !tail.is_empty()
     }
     #[test]
-    fn split_puts_exit_plan_in_tail() {
+    fn split_puts_plan_control_in_tail() {
         let write = call(
             "search_replace",
             r#"{"file_path":"/tmp/plan.md","old_string":"a","new_string":"b"}"#,
         );
-        let exit = call("exit_plan_mode", "{}");
-        let renamed_exit = call("FinishPlan", "{}");
+        let exit = call("plan_control", "{}");
+        let unknown_alias = call("FinishPlan", "{}");
         let proposal = call(
             "SubmitProposal",
             r#"{"name":"p","overview":"o","plan":"plan body","todos":[]}"#,
         );
         assert!(mixed(vec![write.clone(), exit.clone()]));
         assert!(mixed(vec![exit.clone(), write.clone()]));
-        assert!(mixed(vec![write.clone(), renamed_exit.clone()]));
+        assert!(!mixed(vec![write.clone(), unknown_alias]));
         assert!(!mixed(vec![exit.clone()]));
         assert!(!mixed(vec![write.clone()]));
         assert!(!mixed(vec![write.clone(), proposal.clone()]));
@@ -2588,15 +2757,14 @@ mod exit_plan_tail_predicate_tests {
 #[cfg(test)]
 mod plan_mode_edit_gate_tests {
     use super::{PlanEditGate, plan_mode_edit_gate};
-    use crate::session::plan_mode::BehaviorController;
+    use crate::session::behavior::BehaviorController;
     use grow_tools::types::ToolInput;
     use grow_workspace::permission::AccessKind;
-    /// Tracker with plan mode Active and plan file at
+    /// Tracker in Plan Drafting with the session artifact at
     /// `/tmp/gate-session/plan.md`.
     fn active_tracker() -> BehaviorController {
         let mut t = BehaviorController::new(std::path::PathBuf::from("/tmp/gate-session"));
-        assert!(t.enter_pending());
-        assert!(t.activate());
+        assert!(t.select_behavior(Some(xai_tool_types::BehaviorId::Plan)));
         t
     }
     fn gate(tracker: &BehaviorController, input: &ToolInput) -> PlanEditGate {
@@ -2657,11 +2825,10 @@ mod plan_mode_edit_gate_tests {
             PlanEditGate::RejectEdit
         );
     }
-    /// Non-edit tools are never gated — they flow to the normal permission
-    /// path (where yolo may auto-approve them). Plan mode blocks
-    /// edits, not bash/reads.
+    /// Drafting rejects shell execution as potentially mutating; read-only
+    /// discovery continues through the normal permission path.
     #[test]
-    fn non_edit_tools_not_gated() {
+    fn bash_is_gated_during_drafting() {
         use grow_tools::implementations::BashToolInput;
         let t = active_tracker();
         assert_eq!(
@@ -2674,11 +2841,29 @@ mod plan_mode_edit_gate_tests {
                     is_background: false,
                 })
             ),
-            PlanEditGate::Allow,
-            "bash is deliberately not gated — plan mode blocks edits only"
+            PlanEditGate::RejectEdit
         );
     }
-    /// Inactive allows edits; a selected Pending Plan already narrows them.
+    #[test]
+    fn executing_allows_edits_but_never_workflow() {
+        use grow_tools::implementations::grow_build::workflow::WorkflowToolInput;
+        let mut t = active_tracker();
+        assert!(t.submit_initial_plan());
+        assert!(t.approve_submitted_plan());
+        assert_eq!(gate(&t, &write("/tmp/src/main.rs")), PlanEditGate::Allow);
+        let workflow = ToolInput::Workflow(WorkflowToolInput {
+            max_concurrency: None,
+            agent_budget: None,
+            name: Some("review".into()),
+            script: None,
+            script_path: None,
+            args: None,
+            resume_from_run_id: None,
+            validate_only: false,
+        });
+        assert_eq!(gate(&t, &workflow), PlanEditGate::RejectWorkflow);
+    }
+    /// Normal allows edits; a selected Drafting Plan already narrows them.
     #[test]
     fn inactive_allows_edits_but_pending_plan_rejects_them() {
         let inactive = BehaviorController::new(std::path::PathBuf::from("/tmp/gate-session"));
@@ -2687,7 +2872,7 @@ mod plan_mode_edit_gate_tests {
             PlanEditGate::Allow
         );
         let mut pending = BehaviorController::new(std::path::PathBuf::from("/tmp/gate-session"));
-        assert!(pending.enter_pending());
+        assert!(pending.select_behavior(Some(xai_tool_types::BehaviorId::Plan)));
         assert_eq!(
             gate(&pending, &search_replace("/tmp/src/main.rs")),
             PlanEditGate::RejectEdit
@@ -2700,9 +2885,9 @@ mod plan_approval_helper_tests {
         PlanApprovalOutcome, ResumeAction, ext_method_no_client, resume_action_for,
         revise_plan_message,
     };
-    use grow_tools::implementations::grow_build::exit_plan_mode::ExitPlanModeExtResponse;
-    fn resp(outcome: &str) -> ExitPlanModeExtResponse {
-        ExitPlanModeExtResponse {
+    use grow_tools::implementations::grow_build::plan_control::PlanApprovalExtResponse;
+    fn resp(outcome: &str) -> PlanApprovalExtResponse {
+        PlanApprovalExtResponse {
             outcome: outcome.into(),
             feedback: None,
         }

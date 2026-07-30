@@ -48,6 +48,7 @@ pub(crate) struct WorkflowHostParams {
     pub templates: std::collections::HashMap<String, String>,
     pub diagnostics: DiagnosticHook,
     pub cancel: CancellationToken,
+    pub max_concurrency: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,11 +66,13 @@ pub(crate) fn spawn_workflow_host_service(
 ) {
     let (drained_tx, drained_rx) = oneshot::channel();
     let handle = tokio::spawn(async move {
+        let max_concurrency = params.max_concurrency as usize;
         let service = Arc::new(HostService {
             active_agents: AtomicU32::new(0),
             agent_runs: AtomicU32::new(0),
             script_diagnostics_events: AtomicU32::new(0),
             scratch_io: tokio::sync::Mutex::new(()),
+            agent_slots: tokio::sync::Semaphore::new(max_concurrency),
             params,
         });
         loop {
@@ -120,6 +123,7 @@ struct HostService {
     agent_runs: AtomicU32,
     script_diagnostics_events: AtomicU32,
     scratch_io: tokio::sync::Mutex<()>,
+    agent_slots: tokio::sync::Semaphore,
     params: WorkflowHostParams,
 }
 
@@ -400,7 +404,7 @@ impl HostService {
                 label: explicit_label.unwrap_or_default(),
                 phase: opts.phase.clone(),
                 model: opts.model.clone(),
-                state: "running".to_string(),
+                state: "queued".to_string(),
                 tokens_used: 0,
                 duration_ms: 0,
             },
@@ -410,6 +414,24 @@ impl HostService {
             agent_id: id.clone(),
             finished: false,
         };
+        // Persist and surface the queued row before waiting for a permit. This
+        // makes max_concurrency observable and keeps cancellation of queued
+        // work from looking like an agent that never existed.
+        self.tick();
+        let _slot = tokio::select! {
+            permit = self.agent_slots.acquire() => permit.map_err(|_| {
+                HostError::Failed("workflow concurrency gate closed".into())
+            })?,
+            _ = self.params.cancel.cancelled() => {
+                row.finish("cancelled", 0, 0);
+                return Err(HostError::Cancelled);
+            }
+        };
+        self.params
+            .tracker
+            .lock()
+            .agent_running(&self.params.run_id, &id);
+        self.tick();
         let cancel_token = CancellationToken::new();
 
         let spawn_once =
@@ -848,6 +870,121 @@ mod tests {
     use crate::session::workflow::tracker::WorkflowTracker;
 
     #[tokio::test]
+    async fn max_concurrency_queues_agents_until_a_permit_is_released() {
+        let run_id = "wf_concurrency".to_string();
+        let mut tracker = WorkflowTracker::default();
+        tracker.start_run(
+            run_id.clone(),
+            "demo".into(),
+            "objective".into(),
+            vec![],
+            None,
+            None,
+        );
+        let tracker = Arc::new(parking_lot::Mutex::new(tracker));
+        let (persist_tx, _persist_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+        let store = WorkflowRunStore::new(None, persist_tx.clone());
+        let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+        let notify = WorkflowNotifySender::new(
+            agent_client_protocol::SessionId::new("test-session"),
+            xai_acp_lib::AcpAgentGatewaySender::new(gateway_tx),
+            persist_tx,
+            store.clone(),
+        );
+        let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let params = WorkflowHostParams {
+            run_id,
+            cwd: std::env::temp_dir(),
+            scratch_dir: std::env::temp_dir().join("wf-scratch-concurrency"),
+            tracker,
+            store,
+            notify,
+            subagent_event_tx: subagent_tx,
+            parent_session_id: "parent".into(),
+            allow_fork_context: false,
+            templates: Default::default(),
+            diagnostics: Arc::new(|_, _, _| {}),
+            cancel: cancel.clone(),
+            max_concurrency: 1,
+        };
+        let (host_tx, host_rx) = mpsc::unbounded_channel();
+        let (handle, _drained) = spawn_workflow_host_service(params, host_rx);
+
+        let (first_tx, first_rx) = oneshot::channel();
+        let (second_tx, second_rx) = oneshot::channel();
+        host_tx
+            .send(WorkflowHostRequest::SpawnAgent {
+                opts: AgentOpts {
+                    prompt: "first".into(),
+                    ..Default::default()
+                },
+                reply: first_tx,
+            })
+            .unwrap();
+        host_tx
+            .send(WorkflowHostRequest::SpawnAgent {
+                opts: AgentOpts {
+                    prompt: "second".into(),
+                    ..Default::default()
+                },
+                reply: second_tx,
+            })
+            .unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), subagent_rx.recv())
+            .await
+            .expect("first agent should start")
+            .expect("subagent channel should remain open");
+        let SubagentEvent::Spawn(first) = first else {
+            panic!("expected first spawn event")
+        };
+        assert_eq!(first.request.prompt, "first");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), subagent_rx.recv())
+                .await
+                .is_err(),
+            "second agent must remain queued while the only permit is held"
+        );
+
+        first
+            .result_tx
+            .send(
+                grow_tools::implementations::grow_build::task::types::SubagentResult {
+                    success: true,
+                    output: Arc::from("first done"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(first_rx.await.unwrap().is_ok());
+
+        let second = tokio::time::timeout(Duration::from_secs(1), subagent_rx.recv())
+            .await
+            .expect("second agent should start after permit release")
+            .expect("subagent channel should remain open");
+        let SubagentEvent::Spawn(second) = second else {
+            panic!("expected second spawn event")
+        };
+        assert_eq!(second.request.prompt, "second");
+        second
+            .result_tx
+            .send(
+                grow_tools::implementations::grow_build::task::types::SubagentResult {
+                    success: true,
+                    output: Arc::from("second done"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(second_rx.await.unwrap().is_ok());
+
+        drop(host_tx);
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
     async fn reserve_agent_calls_rolls_back_on_persist_failure() {
         let run_id = "wf_reserve_rollback".to_string();
         let mut tracker = WorkflowTracker::default();
@@ -887,6 +1024,7 @@ mod tests {
             templates: Default::default(),
             diagnostics: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
+            max_concurrency: 3,
         };
 
         let (host_tx, host_rx) = mpsc::unbounded_channel();
@@ -959,6 +1097,7 @@ mod tests {
             templates: Default::default(),
             diagnostics: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
+            max_concurrency: 3,
         };
 
         let (host_tx, host_rx) = mpsc::unbounded_channel();

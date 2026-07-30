@@ -236,7 +236,6 @@
         assert!(is_reauthable_failure(Some("reauth_required")));
         assert!(!is_reauthable_failure(Some("auth")));
         assert!(!is_reauthable_failure(Some("provider_credentials")));
-        assert!(!is_reauthable_failure(Some("legacy_auth")));
         assert!(!is_reauthable_failure(Some("server_error")));
         assert!(!is_reauthable_failure(None));
     }
@@ -340,27 +339,6 @@
             session.in_flight_prompt.is_none(),
             "a BYOK failure cannot be auto-resubmitted by /login"
         );
-    }
-
-    /// Legacy WebLogin auth keeps its verbose message (with `grow logout` /
-    /// `grow login` guidance), not the generic re-auth prompt.
-    #[test]
-    fn apply_retry_state_legacy_auth_keeps_detailed_message() {
-        let mut session = make_session(Some("s1"));
-        let mut scrollback = ScrollbackState::new();
-        apply_retry_state(
-            &RetryState::Failed {
-                error_type: "legacy_auth".into(),
-                message: "Unauthorized (401) ... deprecated authentication method (WebLogin) ... \
-                          run `grow logout` then `grow login`"
-                    .into(),
-            },
-            &mut session,
-            &mut scrollback, false);
-        assert!(matches!(
-            last_session_event(&scrollback),
-            Some(SessionEvent::RetryFailed { .. })
-        ));
     }
 
     /// Non-auth terminal failures still render the standard RetryFailed.

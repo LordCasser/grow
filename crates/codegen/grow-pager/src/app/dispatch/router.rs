@@ -14,10 +14,9 @@ use super::dashboard::{
     dispatch_dashboard_dispatch_slash, dispatch_dashboard_open_location_picker,
     dispatch_dashboard_open_shortcuts_help, dispatch_dashboard_overlay_cycle,
     dispatch_dashboard_overlay_exit, dispatch_dashboard_overlay_stop,
-    dispatch_dashboard_peek_cycle_mode, dispatch_dashboard_peek_reply,
-    dispatch_dashboard_permission_followup, dispatch_dashboard_permission_select,
-    dispatch_dashboard_question_answer, dispatch_dashboard_reorder, dispatch_dashboard_select,
-    dispatch_dashboard_stop, dispatch_dashboard_toggle_auto_approve,
+    dispatch_dashboard_peek_reply, dispatch_dashboard_permission_followup,
+    dispatch_dashboard_permission_select, dispatch_dashboard_question_answer,
+    dispatch_dashboard_reorder, dispatch_dashboard_select, dispatch_dashboard_stop,
     dispatch_dashboard_toggle_grouping, dispatch_dashboard_toggle_pin,
     dispatch_dashboard_toggle_worktree, dispatch_exit_dashboard, dispatch_open_dashboard,
 };
@@ -28,8 +27,8 @@ use super::import_claude::{
 use super::interject::dispatch_interject;
 use super::jump::{dispatch_jump_dismiss, dispatch_jump_picker_select, dispatch_jump_show_picker};
 use super::modes::{
-    dispatch_cycle_mode, dispatch_enter_plan_mode, dispatch_show_plan, dispatch_toggle_yolo,
-    set_permission_mode, set_plan_mode, set_yolo_mode,
+    dispatch_set_behavior_mode, dispatch_set_behavior_then_prompt, dispatch_show_plan,
+    set_default_permission_mode, set_permission_mode,
 };
 use super::notes::{
     dispatch_enter_remember_mode, dispatch_save_remember_note_from_modal, dispatch_send_btw,
@@ -92,7 +91,7 @@ use super::settings::ui::{
     dispatch_toggle_vim_mode,
 };
 use super::status::{
-    dispatch_copy_session_id, dispatch_open_gboom, dispatch_open_tutorial, dispatch_share_session,
+    dispatch_copy_session_id, dispatch_open_gboom, dispatch_open_tutorial,
     dispatch_show_context_info, dispatch_show_queue, dispatch_show_release_notes,
     dispatch_show_session_info, dispatch_show_tasks, dispatch_show_usage,
 };
@@ -808,33 +807,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             }]
         }
         Action::NextModel => vec![],
-        Action::CycleReasoningEffort => {
-            let ActiveView::Agent(id) = app.active_view else {
-                return vec![];
-            };
-            let Some(agent) = app.agents.get_mut(&id) else {
-                return vec![];
-            };
-            if agent.session.model_switch_pending {
-                agent.show_toast("A model setting change is already in progress");
-                return vec![];
-            }
-            let Some(model_id) = agent.session.models.current.clone() else {
-                agent.show_toast("Reasoning effort is available after the model connects");
-                return vec![];
-            };
-            let Some(effort) = agent.session.models.next_reasoning_effort() else {
-                agent.show_toast("This model has no configured reasoning-effort levels");
-                return vec![];
-            };
-            dispatch(
-                Action::SwitchModel {
-                    model_id,
-                    effort: Some(effort),
-                },
-                app,
-            )
-        }
         Action::SwitchModel { model_id, effort } => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];
@@ -855,22 +827,66 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 prev_model_id: None,
             }]
         }
-        Action::SwitchAgent { agent_name } => {
+        Action::SwitchAgent {
+            agent_name,
+            behavior,
+        } => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];
             };
-            let Some(agent) = app.agents.get_mut(&id) else {
+            let Some(agent) = app.agents.get(&id) else {
                 return vec![];
             };
+            let toggle = crate::views::agents_modal::load_agent_toggle();
+            let valid = crate::views::agents_modal::build_agent_list(&agent.session.cwd, &toggle)
+                .into_iter()
+                .any(|entry| entry.enabled && entry.name == agent_name);
+            if !valid {
+                app.show_toast("Unknown or disabled Agent");
+                return vec![];
+            }
             let Some(session_id) = agent.session.session_id.clone() else {
-                agent.show_toast("Agent can be changed after the session connects.");
+                app.show_toast("Agent can be changed after the session connects.");
                 return vec![];
             };
+            let current_behavior = agent.behavior_mode_pending.unwrap_or(agent.behavior_mode);
+            if let Some(mode) = behavior
+                && mode != current_behavior
+            {
+                let effects = dispatch_set_behavior_mode(app, mode);
+                return effects
+                    .into_iter()
+                    .map(|effect| match effect {
+                        Effect::SetSessionMode {
+                            session_id,
+                            mode_id,
+                        } => Effect::SetModeThenAgent {
+                            agent_id: id,
+                            session_id,
+                            mode_id,
+                            agent_name: agent_name.clone(),
+                        },
+                        other => other,
+                    })
+                    .collect();
+            }
             vec![Effect::SwitchAgent {
                 agent_id: id,
                 session_id,
                 agent_name,
             }]
+        }
+        Action::OpenCommandPicker {
+            command,
+            args_query,
+        } => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.open_command_picker(&command, &args_query);
+            }
+            vec![]
         }
         Action::AnnouncementsHide => {
             let shown_key = crate::views::announcements::first_session_announcement(
@@ -924,8 +940,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ViewCatalogEntry { kind, name } => {
             vec![Effect::FetchCatalogEntry { kind, name }]
         }
-        Action::CycleMode => dispatch_cycle_mode(app),
-        Action::ShareSession => dispatch_share_session(app),
         Action::ShowSessionInfo => dispatch_show_session_info(app),
         Action::ShowReleaseNotes { title, content } => {
             dispatch_show_release_notes(app, title, content)
@@ -937,14 +951,18 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),
         Action::ShowPlan => dispatch_show_plan(app),
-        Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
-        Action::SetPlanMode(kind) => set_plan_mode(app, kind),
+        Action::SetBehaviorThenPrompt { mode, prompt } => {
+            dispatch_set_behavior_then_prompt(app, mode, prompt)
+        }
+        Action::SetBehaviorMode(mode) => dispatch_set_behavior_mode(app, mode),
+        Action::DismissBehaviorSwitchWarning => {
+            super::modes::dispatch_dismiss_behavior_switch_warning(app)
+        }
         Action::EnterRememberMode => dispatch_enter_remember_mode(app),
         Action::SendRememberNote(text) => dispatch_send_remember_note(app, text),
         Action::SaveRememberNoteFromModal => dispatch_save_remember_note_from_modal(app),
         Action::SendBtw(question) => dispatch_send_btw(app, question),
         Action::SendRecap { auto } => dispatch_send_recap(app, auto),
-        Action::ToggleYolo => dispatch_toggle_yolo(app),
         Action::ToggleMultiline => dispatch_toggle_multiline(app),
         Action::ToggleCompactMode => dispatch_toggle_compact_mode(app),
         Action::ToggleVimMode => dispatch_toggle_vim_mode(app),
@@ -967,8 +985,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetHunkTrackerMode(s) => set_hunk_tracker_mode(app, s),
         Action::SetScreenMode(s) => set_screen_mode(app, s),
         Action::ToggleTimestamps => dispatch_toggle_timestamps(app),
-        Action::SetYoloMode(v) => set_yolo_mode(app, v),
         Action::SetPermissionMode(kind) => set_permission_mode(app, kind),
+        Action::SetDefaultPermissionMode(kind) => set_default_permission_mode(app, kind),
         Action::SetMultilineMode(v) => set_multiline_mode(app, v),
         Action::SetRenderMermaid(kind) => set_render_mermaid(app, kind),
         Action::SetCompactMode(v) => set_compact_mode(app, v),
@@ -1234,20 +1252,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::DashboardStop => dispatch_dashboard_stop(app),
-        Action::DashboardCycleMode => {
-            let policy_block = app.yolo_policy_block;
-            if let Some(d) = app.dashboard.as_mut() {
-                d.pending_mode = d.pending_mode.cycle();
-                if d.pending_mode == crate::views::dashboard::DashboardDispatchMode::AlwaysApprove
-                    && let Some(warning) = policy_block
-                {
-                    d.pending_mode = d.pending_mode.cycle();
-                    d.set_error_toast(warning);
-                }
-            }
-            vec![]
-        }
-        Action::DashboardPeekCycleMode => dispatch_dashboard_peek_cycle_mode(app),
         Action::DashboardToggleGrouping => dispatch_dashboard_toggle_grouping(app),
         Action::DashboardSetFilter(value) => {
             if let Some(d) = app.dashboard.as_mut() {
@@ -1270,7 +1274,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::DashboardOverlayPrev => dispatch_dashboard_overlay_cycle(app, -1),
         Action::DashboardOverlayNext => dispatch_dashboard_overlay_cycle(app, 1),
         Action::DashboardOverlayStop => dispatch_dashboard_overlay_stop(app),
-        Action::DashboardToggleAutoApprove => dispatch_dashboard_toggle_auto_approve(app),
         Action::DashboardToggleWorktree => dispatch_dashboard_toggle_worktree(app),
         Action::DashboardOpenShortcutsHelp => {
             dispatch_dashboard_open_shortcuts_help(app);

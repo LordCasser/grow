@@ -40,13 +40,11 @@ pub enum PreferredAuthMethod {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServiceAuthConfig {
-    pub service_ws_origin: String,
-    pub service_ws_url: String,
     pub token_header: String,
     /// OIDC config for customer-provided IdPs. See [`OidcAuthConfig`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc: Option<OidcAuthConfig>,
-    /// OAuth2 provider config. When set, preferred over the legacy relay flow.
+    /// OAuth2 provider config for an explicitly configured identity provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth2: Option<OAuth2ProviderConfig>,
     /// External auth provider command (stdout = token, stderr = user UX, exit 0 = success).
@@ -140,9 +138,8 @@ pub fn accounts_app_cors_layer(method: axum::http::Method) -> tower_http::cors::
 const DEFAULT_OAUTH2_REFERRER: &str = "grow";
 /// Stable neutral issuer used by auth tests and examples.
 pub const TEST_OAUTH2_ISSUER: &str = "https://login.example.com";
-/// Historical service-auth scope. It is deliberately local and cannot match
-/// credentials created by an upstream vendor client.
-pub const LEGACY_AUTH_SCOPE: &str = "grow::service";
+/// Local auth.json scope for an explicitly configured managed service.
+pub const SERVICE_AUTH_SCOPE: &str = "grow::managed";
 impl ServiceAuthConfig {
     /// Whether `provider.api_key` auth is disabled. Pinning a team
     /// (`force_login_team_uuid`) implies this — team membership can't be verified
@@ -171,7 +168,7 @@ impl ServiceAuthConfig {
         } else if let Some(ref oauth2) = self.oauth2 {
             oauth2.auth_scope()
         } else {
-            LEGACY_AUTH_SCOPE.to_owned()
+            SERVICE_AUTH_SCOPE.to_owned()
         }
     }
 }
@@ -226,8 +223,6 @@ impl Default for ServiceAuthConfig {
             .then(OAuth2ProviderConfig::from_env)
             .flatten();
         Self {
-            service_ws_origin: std::env::var("GROW_WS_ORIGIN").unwrap_or_default(),
-            service_ws_url: std::env::var("GROW_WS_URL").unwrap_or_default(),
             token_header: "grow-cli".to_owned(),
             oidc,
             oauth2,

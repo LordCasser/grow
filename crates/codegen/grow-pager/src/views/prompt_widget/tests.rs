@@ -627,6 +627,19 @@
     }
 
     #[test]
+    fn ctrl_r_redoes() {
+        let mut pw = PromptWidget::new();
+        pw.handle_key(&key!('x').to_key_event());
+        pw.handle_key(&key!('z', CONTROL).to_key_event());
+        assert!(pw.textarea.text().is_empty());
+        assert_eq!(
+            pw.handle_key(&key!('r', CONTROL).to_key_event()),
+            PromptEvent::Edited,
+        );
+        assert_eq!(pw.textarea.text(), "x");
+    }
+
+    #[test]
     fn unknown_ctrl_key_is_ignored() {
         let mut pw = PromptWidget::new();
         assert_eq!(

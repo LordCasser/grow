@@ -605,8 +605,8 @@ fn make_test_handle(
         }),
         code_nav_enabled: false,
         ask_user_question_enabled: true,
-        plan_mode: std::sync::Arc::new(parking_lot::Mutex::new(
-            crate::session::plan_mode::BehaviorController::new(std::path::PathBuf::from("/tmp")),
+        behavior: std::sync::Arc::new(parking_lot::Mutex::new(
+            crate::session::behavior::BehaviorController::new(std::path::PathBuf::from("/tmp")),
         )),
         force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permission_handle: grow_workspace::permission::PermissionHandle::allow_all(),
@@ -688,7 +688,7 @@ async fn model_state_prefers_session_reasoning_effort_over_model_default() {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
     use grow_sampling_types::{REASONING_EFFORT_META_KEY, ReasoningEffort};
     let agent = build_minimal_agent_for_tests();
-    let mut entry = ModelEntry::fallback("effort-model", &EndpointsConfig::default());
+    let mut entry = ModelEntry::fallback("effort-model");
     entry.info.supports_reasoning_effort = true;
     entry.info.reasoning_effort = Some(ReasoningEffort::Low);
     agent
@@ -969,7 +969,7 @@ async fn ext_method_routes_auth_cleared_and_refreshes_resident_sessions() {
         .run_until(async {
             let agent = build_agent_with_auth(crate::auth::ProviderAuth {
                 key: "eligible".into(),
-                auth_mode: crate::auth::AuthMode::WebLogin,
+                auth_mode: crate::auth::AuthMode::Oidc,
                 ..crate::auth::ProviderAuth::test_default()
             });
             use acp::Agent as _;
@@ -1004,7 +1004,7 @@ async fn sync_fresh_managed_mcp_pushes_update() {
         .run_until(async {
             let agent = build_agent_with_auth(crate::auth::ProviderAuth {
                 key: "eligible".into(),
-                auth_mode: crate::auth::AuthMode::WebLogin,
+                auth_mode: crate::auth::AuthMode::Oidc,
                 ..crate::auth::ProviderAuth::test_default()
             });
             let sid = acp::SessionId::new("sess-managed-sync");
@@ -1077,7 +1077,7 @@ fn build_minimal_agent_for_tests() -> MvpAgent {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = valid_agent_config();
-    MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config")
+    MvpAgent::new(gateway, &cfg, auth_manager).expect("valid test config")
 }
 fn session_usage_request(session_id: &str) -> acp::ExtRequest {
     acp::ExtRequest::new(
@@ -1143,7 +1143,7 @@ fn build_agent_with_auth(auth: crate::auth::ProviderAuth) -> MvpAgent {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = valid_agent_config();
-    MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config")
+    MvpAgent::new(gateway, &cfg, auth_manager).expect("valid test config")
 }
 /// Regression: boot-time plugin discovery is deferred past ACP
 /// `initialize`, so the shared plugin registry starts empty.
@@ -1179,7 +1179,7 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
     let gateway = GatewaySender::new(tx);
     let mut cfg = valid_agent_config();
     cfg.plugins.cli_plugin_dirs = vec![plugin_dir.path().to_path_buf()];
-    let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
+    let agent = MvpAgent::new(gateway, &cfg, auth_manager).expect("valid test config");
     assert!(
         agent.plugin_registry_handle.snapshot().is_none(),
         "snapshot must start empty (boot discovery deferred past initialize)"
@@ -1370,7 +1370,7 @@ async fn push_roster_activity_delta_broadcasts_overridden_activity() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = valid_agent_config();
-    let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
+    let agent = MvpAgent::new(gateway, &cfg, auth_manager).expect("valid test config");
     let sid = acp::SessionId::new("sess-activity");
     agent
         .sessions
@@ -1979,7 +1979,6 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
 #[test]
 fn ext_method_rewind_uses_local_dispatch_without_bridge() {
     use acp::Agent as _;
-    let _env = crate::env::EnvVarGuard::remove(crate::env::GROW_DISABLE_CUSTOM_BRIDGE_ENV);
     run_local_for_bridge_test(|| async {
         let agent = build_minimal_agent_for_tests();
         let params = serde_json::json!({ "sessionId": "sess-local" });
@@ -2557,185 +2556,6 @@ fn supervisor_reaps_panicked_resident_actor() {
         );
     });
 }
-/// `spawn_settings_reapply` coalesces: while one reapply is in flight,
-/// repeated calls (boot + rapid `/new`) do not spawn overlapping tasks.
-#[test]
-fn spawn_settings_reapply_coalesces_while_in_flight() {
-    run_local_for_bridge_test(|| async {
-        let agent = build_minimal_agent_for_tests();
-        assert_eq!(agent.settings_reapply_spawn_count.get(), 0);
-        agent.spawn_settings_reapply();
-        agent.spawn_settings_reapply();
-        agent.spawn_settings_reapply();
-        assert_eq!(
-            agent.settings_reapply_spawn_count.get(),
-            1,
-            "overlapping settings reapplies must coalesce to a single task"
-        );
-        assert!(agent.settings_reapply_in_flight.get());
-    });
-}
-/// The in-flight guard clears on task completion (via the `ClearOnDrop`
-/// guard, so it also clears on panic), allowing a later reapply to re-spawn.
-#[test]
-fn spawn_settings_reapply_clears_flag_after_completion() {
-    run_local_for_bridge_test(|| async {
-        let agent = build_minimal_agent_for_tests();
-        agent.spawn_settings_reapply();
-        assert_eq!(agent.settings_reapply_spawn_count.get(), 1);
-        assert!(agent.settings_reapply_in_flight.get());
-        let mut cleared = false;
-        for _ in 0..40 {
-            if !agent.settings_reapply_in_flight.get() {
-                cleared = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        assert!(
-            cleared,
-            "in-flight flag must clear after the task completes"
-        );
-        agent.spawn_settings_reapply();
-        assert_eq!(
-            agent.settings_reapply_spawn_count.get(),
-            2,
-            "a reapply after completion must spawn again"
-        );
-    });
-}
-/// The post-auth fetch has its own guard, so an in-flight settings reapply
-/// cannot coalesce away a freshly authenticated identity's gate and settings
-/// resolution.
-#[test]
-fn post_auth_settings_not_coalesced_by_in_flight_reapply() {
-    run_local_for_bridge_test(|| async {
-        let agent = build_minimal_agent_for_tests();
-        agent.spawn_settings_reapply();
-        assert!(agent.settings_reapply_in_flight.get());
-        agent.spawn_post_auth_settings(crate::auth::ProviderAuth::test_default());
-        assert_eq!(
-            agent.post_auth_settings_spawn_count.get(),
-            1,
-            "post-auth must spawn on its own guard despite an in-flight reapply"
-        );
-        assert!(agent.post_auth_settings_in_flight.get());
-    });
-}
-/// Agent with pre-loaded auth, a gateway receiver (to assert emitted
-/// notifications), and the proxy URL pointed at a mock `/v1/settings`.
-fn build_agent_with_auth_and_proxy(
-    auth: crate::auth::ProviderAuth,
-    proxy_url: String,
-    mode: crate::agent::config::AgentMode,
-) -> (
-    MvpAgent,
-    tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
-) {
-    use crate::agent::config::Config as AgentConfig;
-    use crate::auth::{AuthManager, ServiceAuthConfig};
-    let temp_dir = tempfile::tempdir().unwrap();
-    let auth_manager = std::sync::Arc::new(AuthManager::new(
-        temp_dir.path(),
-        ServiceAuthConfig::default(),
-    ));
-    auth_manager.hot_swap(auth);
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let gateway = GatewaySender::new(tx);
-    let mut cfg = valid_agent_config();
-    cfg.mode = mode;
-    cfg.remote_settings = None;
-    cfg.endpoints.cli_chat_proxy_base_url = Some(proxy_url);
-    let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
-    (agent, rx)
-}
-/// Drain the gateway, returning `true` if any `grow/settings/update`
-/// notification was emitted (and acking each so the sender doesn't warn).
-fn drained_settings_update(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
-) -> bool {
-    let mut found = false;
-    while let Ok(msg) = rx.try_recv() {
-        if let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg {
-            if &*args.request.method == "grow/settings/update" {
-                found = true;
-            }
-            let _ = args.response_tx.send(Ok(()));
-        }
-    }
-    found
-}
-/// A `/settings` 401 from a token that rotated mid-flight must self-heal:
-/// refresh once and, if the token changed, re-fetch with it. Without the
-/// re-fetch the stale 401 fails OPEN (no remote policy).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial]
-async fn settings_self_heal_refetches_after_token_rotation() {
-    use crate::agent::config::AgentMode;
-    use crate::auth::refresh::{RefreshOutcome, TokenRefresher};
-    use crate::auth::{ProviderAuth, TEST_OAUTH2_ISSUER};
-    let server = grow_test_support::MockInferenceServer::start_with_required_auth(
-        vec![grow_test_support::MockModelEntry::new("grow-build")],
-        "rotated-key",
-    )
-    .await
-    .unwrap();
-    server.set_settings(serde_json::json!({}));
-    struct RotatingRefresher;
-    #[async_trait::async_trait]
-    impl TokenRefresher for RotatingRefresher {
-        async fn refresh(&self, _r: crate::auth::manager::RefreshReason) -> RefreshOutcome {
-            RefreshOutcome::Success(Box::new(ProviderAuth {
-                key: "rotated-key".into(),
-                oidc_issuer: Some(TEST_OAUTH2_ISSUER.to_string()),
-                refresh_token: Some("rt".into()),
-                expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
-                ..ProviderAuth::test_default()
-            }))
-        }
-    }
-    let stale = ProviderAuth {
-        key: "stale-key".into(),
-        oidc_issuer: Some(TEST_OAUTH2_ISSUER.to_string()),
-        refresh_token: Some("rt".into()),
-        expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
-        ..ProviderAuth::test_default()
-    };
-    let (agent, _rx) =
-        build_agent_with_auth_and_proxy(stale.clone(), server.url(), AgentMode::Leader);
-    agent
-        .auth_manager
-        .set_refresher(std::sync::Arc::new(RotatingRefresher));
-    agent.refresh_remote_settings(&stale).await;
-    assert!(
-        agent.cfg.borrow().remote_settings.is_some(),
-        "the re-fetched settings must be stored"
-    );
-}
-/// A logout can land while the detached post-auth fetch is in flight; the
-/// result must not be cached for the logged-out identity.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial]
-async fn settings_not_cached_when_identity_logs_out_during_fetch() {
-    use crate::agent::config::AgentMode;
-    use crate::auth::{ProviderAuth, TEST_OAUTH2_ISSUER};
-    let server = grow_test_support::MockInferenceServer::start()
-        .await
-        .unwrap();
-    server.set_settings(serde_json::json!({}));
-    let provider_auth = ProviderAuth {
-        oidc_issuer: Some(TEST_OAUTH2_ISSUER.to_string()),
-        ..ProviderAuth::test_default()
-    };
-    let (agent, _rx) =
-        build_agent_with_auth_and_proxy(provider_auth.clone(), server.url(), AgentMode::Leader);
-    agent.auth_manager.clear_in_memory();
-    agent.refresh_remote_settings(&provider_auth).await;
-    assert!(
-        agent.cfg.borrow().remote_settings.is_none(),
-        "settings fetched for a logged-out identity must not be cached"
-    );
-}
 /// `ensure_session_supervisor` is idempotent: calling it repeatedly spawns
 /// the sweeper loop exactly once.
 #[test]
@@ -2796,7 +2616,7 @@ fn build_agent_with_gateway_rx() -> (
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = valid_agent_config();
-    let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
+    let agent = MvpAgent::new(gateway, &cfg, auth_manager).expect("valid test config");
     (agent, rx)
 }
 fn write_project_subagent_definitions(cwd: &std::path::Path) {
@@ -3001,7 +2821,7 @@ mod soft_default_settings_emit {
                     ..Default::default()
                 });
                 let agent =
-                    MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
+                    MvpAgent::new(gateway, &cfg, auth_manager).expect("valid test config");
                 agent.cfg.borrow_mut().remote_settings = cfg.remote_settings.clone();
                 agent.emit_settings_update_notification();
                 let msg = rx.try_recv().expect("settings/update must be emitted");

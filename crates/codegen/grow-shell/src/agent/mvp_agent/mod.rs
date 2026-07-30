@@ -145,7 +145,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub client_fs_write: bool,
     pub preloaded_envrc: Option<std::collections::HashMap<String, String>>,
     pub persisted_signals: Option<crate::session::signals::SessionSignals>,
-    pub persisted_plan_mode: Option<crate::session::plan_mode::BehaviorSnapshot>,
+    pub persisted_behavior: Option<crate::session::behavior::BehaviorSnapshot>,
     pub persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
     pub persisted_workflow_runs: Vec<
         crate::session::workflow::store::RestoredWorkflowRun,
@@ -602,13 +602,6 @@ pub struct MvpAgent {
     /// once (on the first `spawn_and_register_session`). See
     /// `ensure_session_supervisor`.
     supervisor_started: std::cell::Cell<bool>,
-    /// Dedup guard for `spawn_settings_reapply`; at most one task in flight.
-    /// `Rc` so the drop-guard owns a clone without dereferencing the agent.
-    settings_reapply_in_flight: std::rc::Rc<std::cell::Cell<bool>>,
-    /// Separate dedup guard for `spawn_post_auth_settings`, so an in-flight
-    /// reapply can't coalesce away a freshly authenticated identity's gate and
-    /// settings resolution.
-    post_auth_settings_in_flight: std::rc::Rc<std::cell::Cell<bool>>,
     /// Test-only spy recording every terminal roster delta `(session_id,
     /// final_state)` emitted by `record_roster_delta` (reap → `DeadFailed`,
     /// explicit close → `Completed`). Lets tests observe a terminal demotion
@@ -620,14 +613,6 @@ pub struct MvpAgent {
     /// actually spawned. Asserts `ensure_session_supervisor` is idempotent.
     #[cfg(test)]
     supervisor_spawn_count: std::cell::Cell<usize>,
-    /// Test-only: counts `spawn_settings_reapply` tasks spawned past the
-    /// in-flight guard.
-    #[cfg(test)]
-    settings_reapply_spawn_count: std::cell::Cell<usize>,
-    /// Test-only: counts `spawn_post_auth_settings` tasks spawned past its
-    /// own guard.
-    #[cfg(test)]
-    post_auth_settings_spawn_count: std::cell::Cell<usize>,
 }
 /// Spawn a thread to warm the shared async HTTP client (`OnceLock`-cached).
 /// Loading TLS root certs is ~95ms; doing it here avoids a cold-start hit
@@ -1429,25 +1414,6 @@ impl MvpAgent {
                 .unwrap_or_default()
         });
         AuthenticateResponse::new().meta(meta)
-    }
-    /// Fetch remote settings after authentication when early prefetch had none.
-    /// Notifies the pager so soft-default permission_mode applies post-login.
-    pub(super) async fn maybe_fetch_post_auth_settings(&self) {
-        if self.cfg.borrow().remote_settings.is_some() {
-            return;
-        }
-        if !crate::util::config::resolve_remote_fetch_enabled() {
-            return;
-        }
-        let Some(auth) = self.auth_manager.current() else {
-            return;
-        };
-        let Some(settings) = self.fetch_settings_for_current_identity(&auth).await else {
-            return;
-        };
-        tracing::info!("post-auth remote_settings fetch succeeded");
-        self.install_remote_settings(settings);
-        self.spawn_auto_worktree_gc();
     }
     /// Resolve current auto-GC policy and run it on the blocking pool.
     pub(super) fn spawn_auto_worktree_gc(&self) {

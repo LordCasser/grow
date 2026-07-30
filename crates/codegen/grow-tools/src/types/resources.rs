@@ -404,48 +404,6 @@ impl std::fmt::Debug for Resources {
 /// Current working directory for the session.
 #[derive(Debug, Clone)]
 pub struct Cwd(pub PathBuf);
-/// Absolute path to the plan file for this session.
-///
-/// Set by the session layer (from `PlanModeTracker::plan_file_path()`);
-/// read by `ExitPlanMode` to locate the plan on disk. When absent the
-/// tool falls back to `Cwd/.grow/plan.md`.
-#[derive(Debug, Clone)]
-pub struct PlanFilePath(pub PathBuf);
-/// Default plan-file path (relative to the workspace root) used when no
-/// explicit [`PlanFilePath`] is set. Shared by the plan-mode tools.
-pub const PLAN_FILE_RELATIVE_PATH: &str = ".grow/plan.md";
-/// Resolve the session plan-file path from resources as `(absolute_target, display)`.
-///
-/// `absolute_target` is `Some` ONLY when the resolved path is absolute, so
-/// callers that write/seed never create a file under the process CWD; it is
-/// `None` for the display-only relative fallback. `display` is the
-/// model-facing path string. Resolution: [`PlanFilePath`] (as-is), else
-/// [`Cwd`]`/.grow/plan.md`, else the bare relative `.grow/plan.md`.
-pub(crate) fn resolve_plan_file_path(res: &Resources) -> (Option<PathBuf>, String) {
-    let path = if let Some(configured) = res.get::<PlanFilePath>() {
-        configured.0.clone()
-    } else if let Some(cwd) = res.get::<Cwd>() {
-        cwd.0.join(PLAN_FILE_RELATIVE_PATH)
-    } else {
-        PathBuf::from(PLAN_FILE_RELATIVE_PATH)
-    };
-    let display = path.display().to_string();
-    let absolute_target = path.is_absolute().then_some(path);
-    (absolute_target, display)
-}
-/// Like [`resolve_plan_file_path`] but errors when no absolute target resolves.
-pub(crate) fn require_plan_file_path(
-    res: &Resources,
-) -> Result<(PathBuf, String), xai_tool_runtime::ToolError> {
-    let (target, display) = resolve_plan_file_path(res);
-    let target = target.ok_or_else(|| {
-        xai_tool_runtime::ToolError::custom(
-            "missing_resource",
-            "missing required resource: PlanFilePath or an absolute Cwd",
-        )
-    })?;
-    Ok((target, display))
-}
 /// Stable display path for forked sessions.
 ///
 /// When set, [`resolve_model_path`] rewrites absolute paths that start with

@@ -6,7 +6,7 @@
 //! matchers); the agent builder (`grow-agent`) needs the [`ToolKind`] a `tools:`
 //! allowlist entry resolves to. A row may carry a kind without names (`PowerShell`
 //! shares `Execute`, with no distinct tool) or names without a kind (e.g.
-//! `Agent`/`ExitPlanMode`/`Cron*` are matchable but not allowlist-resolvable).
+//! `Agent`/`PlanControl`/`Cron*` are matchable but not allowlist-resolvable).
 //!
 //! The `grow` names are test-checked against the live registry.
 
@@ -70,8 +70,7 @@ const CLAUDE_TOOLS: &[ClaudeTool] = &[
     k("ToolSearch",      SearchTool,           &["search_tool"]),
     match_only("Agent",         &["spawn_subagent"]),                                 // canonical; Task is the legacy alias
     match_only("Task",          &["spawn_subagent"]),
-    match_only("EnterPlanMode", &["enter_plan_mode"]),                                // kind=None: enter/exit must stay paired
-    match_only("ExitPlanMode",  &["exit_plan_mode"]),
+    match_only("PlanControl",   &["plan_control"]),
     match_only("CronCreate",    &["scheduler_create"]),
     match_only("CronDelete",    &["scheduler_delete"]),
     match_only("CronList",      &["scheduler_list"]),

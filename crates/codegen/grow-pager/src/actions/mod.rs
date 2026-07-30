@@ -22,11 +22,8 @@ use crate::input::key::KeyShortcut;
 use crate::views::shortcuts_bar::HintItem;
 
 #[cfg(test)]
-pub(crate) fn default_actions(
-    screen_mode: crate::app::ScreenMode,
-    mouse_reporting_toggle_enabled: bool,
-) -> Vec<ActionDef> {
-    defaults::default_actions(screen_mode, mouse_reporting_toggle_enabled)
+pub(crate) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<ActionDef> {
+    defaults::default_actions(screen_mode)
 }
 
 /// Unique action identifier. Compile-time checked, no strings.
@@ -58,13 +55,10 @@ pub enum ActionId {
     ToggleExpandAll,
     ExpandAllThinking,
     ToggleRaw,
-    ToggleMouseCapture,
 
     // Agent
     NextModel,
-    CycleReasoningEffort,
     CancelTurn,
-    ToggleYolo,
     ToggleMultiline,
 
     // Focus
@@ -90,7 +84,6 @@ pub enum ActionId {
 
     // Prompt
     EditPromptExternal,
-    CycleMode,
     BashMode,
 
     // Scrollback (contextual)
@@ -108,6 +101,9 @@ pub enum ActionId {
     CommandPalette,
     ModelPicker,
     AgentPicker,
+    EffortPicker,
+    PermissionPicker,
+    BehaviorPicker,
 
     // Settings
     OpenSettings,
@@ -119,7 +115,6 @@ pub enum ActionId {
     DashboardTogglePin,
     DashboardBeginRename,
     DashboardStop,
-    DashboardCycleMode,
     DashboardToggleGrouping,
     DashboardReorderUp,
     DashboardReorderDown,
@@ -128,7 +123,6 @@ pub enum ActionId {
     DashboardOverlayPrev,
     DashboardOverlayNext,
     DashboardOverlayStop,
-    DashboardToggleAutoApprove,
     DashboardOpenLocationPicker,
     DashboardToggleWorktree,
 }
@@ -230,28 +224,7 @@ impl ActionRegistry {
 
     /// Create the default registry for the process-lifetime screen mode.
     pub(crate) fn defaults_for(screen_mode: crate::app::ScreenMode) -> Self {
-        Self::defaults_with_config_for(screen_mode, false)
-    }
-
-    /// Create the default fullscreen/inline registry, optionally including
-    /// config-gated actions.
-    pub fn defaults_with_config(mouse_reporting_toggle_enabled: bool) -> Self {
-        Self::defaults_with_config_for(
-            crate::app::ScreenMode::Fullscreen,
-            mouse_reporting_toggle_enabled,
-        )
-    }
-
-    /// Create the default registry for a screen mode, optionally including
-    /// config-gated actions.
-    pub(crate) fn defaults_with_config_for(
-        screen_mode: crate::app::ScreenMode,
-        mouse_reporting_toggle_enabled: bool,
-    ) -> Self {
-        Self::new(defaults::default_actions(
-            screen_mode,
-            mouse_reporting_toggle_enabled,
-        ))
+        Self::new(defaults::default_actions(screen_mode))
     }
 
     /// Look up an action by key event and current context.
@@ -302,7 +275,7 @@ impl ActionRegistry {
     #[cfg(test)]
     pub(crate) fn non_vscode_for_mode_for_test(screen_mode: crate::app::ScreenMode) -> Self {
         use crate::key;
-        let mut actions = defaults::default_actions(screen_mode, false);
+        let mut actions = defaults::default_actions(screen_mode);
         for def in actions.iter_mut() {
             if def.id == ActionId::Quit {
                 def.default_key = key!('q', CONTROL);
@@ -336,7 +309,7 @@ impl ActionRegistry {
     #[cfg(test)]
     pub(crate) fn apple_terminal_for_mode_for_test(screen_mode: crate::app::ScreenMode) -> Self {
         use crate::key;
-        let mut actions = defaults::default_actions(screen_mode, false);
+        let mut actions = defaults::default_actions(screen_mode);
         for def in actions.iter_mut() {
             if def.id == ActionId::InterjectPrompt {
                 def.default_key = key!('o', CONTROL);
@@ -356,7 +329,7 @@ impl ActionRegistry {
     #[cfg(test)]
     pub(crate) fn vscode_family_for_mode_for_test(screen_mode: crate::app::ScreenMode) -> Self {
         use crate::key;
-        let mut actions = defaults::default_actions(screen_mode, false);
+        let mut actions = defaults::default_actions(screen_mode);
         for def in actions.iter_mut() {
             if def.id == ActionId::InterjectPrompt {
                 def.default_key = key!('l', CONTROL);
@@ -631,20 +604,12 @@ mod tests {
         let minimal = ActionRegistry::defaults_for(crate::app::ScreenMode::Minimal);
         assert!(minimal.find(ActionId::OpenDashboard).is_none());
         assert!(minimal.find(ActionId::FocusScrollback).is_none());
-        assert!(minimal.find(ActionId::ToggleMouseCapture).is_none());
         assert!(minimal.all().iter().all(|def| {
             !matches!(
                 def.context,
                 When::ScrollbackFocused | When::DashboardFocused | When::DashboardOverlay
             )
         }));
-        let minimal_with_config =
-            ActionRegistry::defaults_with_config_for(crate::app::ScreenMode::Minimal, true);
-        assert!(
-            minimal_with_config
-                .find(ActionId::ToggleMouseCapture)
-                .is_none()
-        );
         assert_eq!(
             minimal.find(ActionId::SendPrompt).map(|def| def.context),
             Some(When::PromptFocused)
@@ -804,72 +769,16 @@ mod tests {
     }
 
     #[test]
-    fn shift_tab_encodings_cycle_reasoning_effort_on_agent_screen() {
+    fn shift_tab_encodings_do_not_change_agent_configuration() {
         let registry = ActionRegistry::defaults();
         for shortcut in crate::input::key::shift_tab_keys() {
             let key = KeyEvent::new(shortcut.code, shortcut.modifiers);
             assert_eq!(
                 registry.lookup(&key, When::AgentScreen),
-                Some(ActionId::CycleReasoningEffort),
+                None,
                 "encoding {key:?}"
             );
         }
-    }
-
-    #[test]
-    fn toggle_mouse_capture_disabled_by_default() {
-        // Opt-in via config.toml; default registry must not register it.
-        let registry = ActionRegistry::defaults();
-        assert!(registry.find(ActionId::ToggleMouseCapture).is_none());
-        let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
-        assert_eq!(registry.lookup(&ctrl_r, When::ScrollbackFocused), None);
-    }
-
-    #[test]
-    fn toggle_mouse_capture_bound_on_scrollback_when_enabled() {
-        let registry = ActionRegistry::defaults_with_config(true);
-        // Registered and discoverable (command palette / cheatsheet) only
-        // when config enables the feature.
-        let def = registry
-            .find(ActionId::ToggleMouseCapture)
-            .expect("ToggleMouseCapture must be registered when config-enabled");
-        assert_eq!(def.category, Category::Panels);
-        assert_eq!(def.context, When::ScrollbackFocused);
-
-        let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
-        let ctrl_m = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL);
-        let f9 = KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE);
-        let ctrl_shift_m = KeyEvent::new(
-            KeyCode::Char('m'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        );
-
-        // Single binding: Ctrl+R while scrollback is focused.
-        assert_eq!(
-            registry.lookup(&ctrl_r, When::ScrollbackFocused),
-            Some(ActionId::ToggleMouseCapture)
-        );
-        // Prompt Ctrl+R cycles permissions. Scrollback's more-specific
-        // binding still toggles mouse capture.
-        assert_eq!(registry.lookup(&ctrl_r, When::AgentScreen), None);
-        assert_eq!(
-            registry.lookup(&ctrl_r, When::PromptFocused),
-            Some(ActionId::CycleMode)
-        );
-        assert_eq!(registry.lookup(&ctrl_m, When::AgentScreen), None);
-        assert_eq!(
-            registry.lookup(&ctrl_m, When::PromptFocused),
-            Some(ActionId::ToggleMultiline)
-        );
-        // Former mouse-toggle dual bindings removed from scrollback.
-        assert_eq!(registry.lookup(&f9, When::ScrollbackFocused), None);
-        assert_eq!(registry.lookup(&f9, When::AgentScreen), None);
-        // Ctrl+Shift+M is unbound.
-        assert_eq!(
-            registry.lookup(&ctrl_shift_m, When::ScrollbackFocused),
-            None
-        );
-        assert_eq!(registry.lookup(&ctrl_shift_m, When::Always), None);
     }
 
     #[test]

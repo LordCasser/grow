@@ -1,8 +1,8 @@
 //! Plan-approval chrome restored by the shell after quit + resume.
 //!
-//! When `exit_plan_mode` is parked and the user quits, the shell persists
-//! `awaiting_plan_approval = true` in `plan_mode.json`. On `--continue` the
-//! shell re-issues the `grow/exit_plan_mode` reverse-request — a real live ACP
+//! When Plan approval is parked and the user quits, the shell persists
+//! `approval_pending = true` in `behavior.json`. On `--continue` the
+//! shell re-issues the `grow/plan_approval` reverse-request — a real live ACP
 //! waiter — so the pager re-shows approval chrome through its normal path with
 //! no pager-side disk logic. Approving then leaves plan mode and starts the
 //! implement turn.
@@ -35,7 +35,7 @@ const PLAN_BODY: &str = "\
 3. Resume and expect restored approval chrome
 ";
 
-/// Regression: the shell re-parks `exit_plan_mode` on resume; pressing
+/// Regression: the shell re-parks Plan approval on resume; pressing
 /// approve leaves plan mode and starts the implement turn.
 pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     let content = ContentController::start()
@@ -94,7 +94,7 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     )
     .context("spawn resumed pager")?;
 
-    // The shell re-parks `exit_plan_mode` on resume, so approval chrome can open
+    // The shell re-parks Plan approval on resume, so approval chrome can open
     // immediately and cover chat history. Prefer the chrome markers (product
     // signal) over SETUP_SENTINEL, which may not be visible under the plan viewer.
     // Without the shell re-park this times out.
@@ -134,7 +134,7 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
 }
 
 /// Mark the persisted session as having a parked plan approval: write `plan.md`
-/// and flip `awaiting_plan_approval` to `true` in `plan_mode.json` for every
+/// and flip `approval_pending` to `true` in `behavior.json` for every
 /// session dir under the sandbox home.
 fn seed_parked_approval(home: &Path) -> Result<usize> {
     let sessions_root = home.join(".grow").join("sessions");
@@ -157,7 +157,7 @@ fn seed_parked_approval(home: &Path) -> Result<usize> {
             }
             let dir = sess_ent.path();
             std::fs::write(dir.join("plan.md"), PLAN_BODY).context("write plan.md")?;
-            write_awaiting_plan_mode(&dir.join("plan_mode.json"))?;
+            write_awaiting_plan_mode(&dir.join("behavior.json"))?;
             seeded += 1;
         }
     }
@@ -170,10 +170,10 @@ fn seed_parked_approval(home: &Path) -> Result<usize> {
     Ok(seeded)
 }
 
-/// Round-trip the shell-written `plan_mode.json` and flip `awaiting_plan_approval`
-/// to `true`, preserving every other field. Falls back to a fresh Active
+/// Round-trip the shell-written `behavior.json` and flip `approval_pending`
+/// to `true`, preserving every other field. Falls back to an AwaitingApproval
 /// snapshot if the shell wrote nothing. The shape mirrors
-/// `grow_shell::session::plan_mode::PlanModeSnapshot`; we only touch the one
+/// `grow_shell::session::behavior::BehaviorSnapshot`; we only touch the one
 /// field (robust to schema growth) rather than depend on the heavy shell crate
 /// from this test-only harness.
 fn write_awaiting_plan_mode(path: &Path) -> Result<()> {
@@ -182,21 +182,20 @@ fn write_awaiting_plan_mode(path: &Path) -> Result<()> {
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_else(|| {
             serde_json::json!({
-                "state": "Active",
-                "was_previously_active": true,
+                "state": { "Plan": "AwaitingApproval" },
+                "approval_pending": true,
                 "reminder_count": 0,
-                "pending_exit_reminder": false,
             })
         });
     let obj = value
         .as_object_mut()
-        .context("plan_mode.json must be a JSON object")?;
-    // Must be Active for the re-park; awaiting flag is the trigger.
-    obj.insert("state".into(), serde_json::Value::String("Active".into()));
+        .context("behavior.json must be a JSON object")?;
+    // The Plan phase and transport flag must agree for a valid re-park.
     obj.insert(
-        "awaiting_plan_approval".into(),
-        serde_json::Value::Bool(true),
+        "state".into(),
+        serde_json::json!({ "Plan": "AwaitingApproval" }),
     );
-    std::fs::write(path, serde_json::to_vec_pretty(&value)?).context("write plan_mode.json")?;
+    obj.insert("approval_pending".into(), serde_json::Value::Bool(true));
+    std::fs::write(path, serde_json::to_vec_pretty(&value)?).context("write behavior.json")?;
     Ok(())
 }

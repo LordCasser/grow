@@ -16,12 +16,13 @@ Grow 不是 xAI 官方产品，也不内置 Grok 模型、推理端点或推理�
 | 推理凭据 | 可依赖产品登录态 | 每个 provider 自带 API key、环境变量、auth helper 或显式 OAuth；不存在全局内置推理登录态 |
 | 默认模型 | 产品默认值 | `[models].default` 只为新 session 提供初始值 |
 | session 恢复 | 受产品模型状态影响 | 打开已有 session 时恢复该 session 上次退出时的 Agent 和模型 |
-| 模型切换 | slash command / 旧式选择流程 | `Ctrl+X` 后按 `m` 打开已配置模型选单，同时保留 `/model` |
-| 思考强度 | 依赖产品模型能力 | 每个 BYOK 模型显式声明 `reasoning_efforts`；`Shift+Tab` 按声明顺序循环 |
-| Agent 切换 | 上游内置 Agent 流程 | `Ctrl+X` 后按 `a` 打开平级 Agent 选单，同时保留 `/agents` |
+| 模型切换 | slash command / 旧式选择流程 | `Ctrl+X` 后按 `M` 打开已配置模型选单，同时保留 `/model` |
+| 思考强度 | 依赖产品模型能力 | 每个 BYOK 模型显式声明 `reasoning_efforts`；`Ctrl+X` 后按 `E` 打开选单 |
+| Agent 切换 | 上游内置 Agent 流程 | `Ctrl+X` 后按 `A` 打开平级 Agent 选单，同时保留 `/agent` |
 | Agent 定义 | 上游格式 | 兼容 Harness/OpenCode 常见 Markdown frontmatter；忽略外部权限、mode 和 model 字段 |
 | Agent 关系 | 可包含产品特定模式 | 所有 Agent 定义平级；主/子只是一次 session 中的运行角色，主 Agent 可通过工具策略限制本次可调用的子 Agent |
-| 权限切换 | 上游快捷键/模式 | `Ctrl+R` 循环 Grow 原有权限模式；Tab 保持原行为 |
+| 权限切换 | 上游快捷键/模式 | `Ctrl+X` 后按 `P` 打开 Ask / Auto / Always Approve 选单；`Ctrl+R` 用于 redo |
+| Behavior 切换 | 与权限或 Agent 混合 | `Ctrl+X` 后按 `B` 打开 Normal / Clarify / Plan / Workflow / Deep Research / Goal 选单 |
 | Agent/Skill 用户目录 | 产品目录 | 优先 `~/.config/.grow`，同名资源找不到时再回退 `~/.agent` |
 | 缺少 LLM 配置 | 可落入产品默认模型 | 连接前阻止启动，并引导编辑 `~/.grow/config.toml` |
 
@@ -47,6 +48,71 @@ Web Search 由用户配置 MCP Server 提供。
 完整可复制配置见 [config.example.toml](config.example.toml)。示例不包含真实密钥，默认通过
 `env_key` 读取环境变量。
 
+## 架构边界
+
+Grow 不把“当前用什么 Agent”“如何推进任务”“允许执行什么操作”混成一个 mode。主 Agent
+的系统提示词按固定顺序组合：
+
+```text
+Mandatory Core → Audience → Agent Role → Active Behavior → Runtime Context
+```
+
+- **Mandatory Core** 始终存在，规定指令优先级、安全边界、工具规则和项目指令作用域。
+- **Audience** 只区分直接面对用户的主 Agent 与接受委派的子 Agent。
+- **Agent Role** 来自内置或用户 Markdown 定义，描述职责和工具策略。`promptComposition: full`
+  只能替换标准 Role 基础，不会覆盖 Mandatory Core、Audience、Behavior 或 Runtime Context。
+- **Behavior** 是主 Agent 推进当前目标的互斥协作协议。
+- **Runtime Context** 注入当前工作区、会话和已解析能力等运行时事实。
+
+最终工具能力是 Tool Registry、Agent policy、子 Agent 深度/能力限制、Behavior gate 和当前
+Permission 决策的交集。Behavior 不会授予工具，Permission 也不会改变 Agent Role。
+完整组合规则见 [Prompt Architecture](crates/codegen/grow-agent/PROMPT_ARCHITECTURE.md)。
+
+### Behavior、Role 与运行实例
+
+主 Agent 在一个 session 中只处于一种 Behavior：
+`Normal | Clarify | Plan(phase) | Workflow | Deep Research | Goal`。子 Agent 不继承这些
+Behavior，只接收明确的 Role、任务和能力边界，也不能递归启动 Workflow。
+
+| 概念 | 负责什么 | 不负责什么 |
+|---|---|---|
+| Behavior | 主 Agent 与用户如何推进目标 | 工具授权、Permission、子 Agent 职责 |
+| Role | Agent 或子 Agent 的职责与策略 | 会话协作协议和运行生命周期 |
+| WorkflowRun | 动态子计划的执行、journal、暂停与恢复 | 选择或改变当前 Behavior |
+| GoalTracker | 目标、续跑状态和独立验证证据 | Agent Role 与 Permission |
+| Permission | Ask / Auto / Always Approve 的审批策略 | 规划方式和工具注册 |
+
+六种 Behavior 的边界是：Normal 直接完成当前请求；Clarify 持续询问会实质影响结果的未知
+信息；Plan 先形成完整方案、等待人类批准，再严格执行冻结方案；Workflow 由 Agent 在执行中
+动态生成、并行验证和调整有界子计划，不设整体审批点；Deep Research 严格只读、交叉验证
+证据并保证交付终态报告；Goal 持续推进明确目标，只有独立 verifier 判定 `Achieved` 才能完成。
+
+Plan 的阶段固定为 `Drafting → AwaitingApproval → Executing`，重大偏离进入 `Amending` 并
+重新审批。只有 Executing 可修改工作区；`plan_control` 是唯一生命周期接口。Plan 期间不会
+暴露 Workflow tool。Workflow、Deep Research 和 Goal 的运行状态分别属于 Workflow runtime
+或 GoalTracker，不会再叠加成隐藏 Behavior。
+
+### 统一的会话交互
+
+Model、Agent、Effort、Permission 和 Behavior 共享两种会话入口：Slash 选择器与 `Ctrl+X`
+前导键。对应快捷键为 `M`、`A`、`E`、`P`、`B`；弹窗、补全、availability 和执行逻辑使用
+同一份目录。Behavior 与 Permission 还提供 `/plan`、`/goal`、`/ask`、`/always-approve` 等
+幂等一级命令。带任务文本的 Behavior 命令只有在切换真正 `Applied` 后才发送文本，避免把
+目标交给旧 Behavior。
+
+输入框右下角固定显示 `model | behavior | permission`，未选择特殊 Behavior 时显示
+`normal`。设置菜单只保存新 session 的持久默认值；`/model`、`/permission`、`/behavior`
+和前导键只修改当前 session。`/agent` 是 Agent/Behavior 两阶段选择器，`/agents` 打开运行
+详情面板，Dashboard 只为下一次 spawn 暂存选择，不维护另一套配置协议。
+
+### 从产品运行时收敛为本地 Agent
+
+Fork 后删除的不是表面入口，而是整条产品依赖链：托管模型目录与推理登录态、计费/订阅、
+遥测和 trace 上传、托管 Web Search、远程会话同步、远程公告、Coding Data Sharing、桌面
+产品残留，以及图片/视频生成和远程 computer runtime。Grow 保留的是本地 session、代码与
+计算机工具、ACP、MCP、LSP、插件、Agent/Skill 和用户显式配置的网络能力。删除范围构成架构
+边界：这些产品服务不会以隐藏默认值、兼容别名或备用端点重新进入运行时。
+
 ## 网络边界
 
 Grow 没有内置的 xAI/Grok 服务端点、OAuth issuer 或 OAuth client。未在本地显式开启
@@ -56,10 +122,12 @@ Grow 没有内置的 xAI/Grok 服务端点、OAuth issuer 或 OAuth client。未
 
 - 模型调用：只访问当前 session 所选 provider 的 `base_url`。
 - 用户显式配置：MCP、插件源和其他可选服务端点只在用户配置或执行对应操作后访问。
+- 发布更新：仅在 `[cli].auto_update = true` 时访问 Grow 的 GitHub Releases。
 
 Grow 不内置 Web Search 提供商。需要联网搜索时，请配置提供搜索能力的 MCP Server；
 Grow 会像发现其他 MCP 工具一样发现它，不要求固定的服务器名或工具名。内置 `web_fetch`
 仍可用于读取已知 URL。
+
 - `grow/*` 与 `_grow/*` 是本地 ACP wire protocol，不表示任何外部服务。
 
 Grow 不包含遥测、产品分析、Sentry、OTLP exporter 或 trace upload。诊断事件只写入用户指定
@@ -106,7 +174,7 @@ MCP、Memory、本地公告和可替换 marketplace 的组合方式，见
 ### 配置模型思考强度
 
 不同供应商没有统一的模型能力发现接口。需要切换思考强度时，在具体模型下用
-`reasoning_efforts` 显式声明该模型真正接受的档位；数组顺序就是 `Shift+Tab` 的循环顺序，
+`reasoning_efforts` 显式声明该模型真正接受的档位；数组顺序就是 Effort 选单中的顺序，
 `default = true` 标记新 session 的初始档位。以 DeepSeek 为例：
 
 ```toml
@@ -141,11 +209,11 @@ reasoning_efforts = ["none", "high", "max"]
 
 请求时，Grow 会根据 `api_backend` 转换字段：`chat_completions` 发送顶层
 `reasoning_effort`，`responses` 发送 `reasoning.effort`，`messages` 使用对应的
-thinking/output-config 字段。`Shift+Tab`、`/effort` 和 `/model` 共用同一份模型档位配置。
+thinking/output-config 字段。`Ctrl+X E`、`/effort` 和 `/model` 共用同一份模型档位配置。
 切换结果保存在当前 session。有效默认值按精确程度解析：已有 session 的最后选择、模型上的
 `reasoning_effort` 或 `default = true`、模型支持的全局 `default_reasoning_effort`，最后是该
 模型声明档位中的最低值。没有声明 `reasoning_efforts` 的 BYOK 模型不会被 Grow 猜测支持，
-按 `Shift+Tab` 时只会显示配置提示。
+此时 Effort 选单只会显示配置提示。
 
 OAuth 是 provider 的另一种可选凭据来源，不是 Grow 的全局登录态。模型仍然必须显式属于
 该 provider，也不会因为登录成功而自动添加模型：
@@ -436,11 +504,14 @@ Grow 不发布 npm 包，也不调用 npm 查询或安装更新；GitHub Release
 
 ## 常用交互
 
-- `Ctrl+X`，然后 `m`：选择已经配置的模型
-- `Ctrl+X`，然后 `a`：选择 Agent
-- `Ctrl+R`：循环权限模式
-- `Shift+Tab`：按当前模型的 `reasoning_efforts` 顺序循环思考强度
-- `/model`、`/agents`：保留原命令行为
+- `Ctrl+X`，然后 `M`：选择已经配置的模型
+- `Ctrl+X`，然后 `A`：选择 Agent
+- `Ctrl+X`，然后 `E`：选择当前模型的思考强度
+- `Ctrl+X`，然后 `P`：选择 Permission
+- `Ctrl+X`，然后 `B`：选择 Behavior；输入框右下角按 `model | behavior | permission` 显示当前状态
+- `Ctrl+R`：重做输入框中的上一次撤销
+- `/model`、`/agent`、`/effort`、`/permission`、`/behavior`：打开与快捷键相同的选单
+- `/agents`：打开 Agent Dashboard；`/config-agents` 管理 Agent 定义
 - `Tab`：保留原有补全/导航行为
 
 ## 仓库结构
@@ -449,11 +520,10 @@ Grow 不发布 npm 包，也不调用 npm 查询或安装更新；GitHub Release
 |---|---|
 | `crates/codegen/grow-pager-bin` | composition root，构建 `grow` 二进制 |
 | `crates/codegen/grow-pager` | TUI、输入、modal、session UI |
-| `crates/codegen/grow-shell` | Agent runtime、stdio/headless/leader 入口 |
+| `crates/codegen/grow-shell` | Agent runtime、stdio/serve/leader 入口 |
 | `crates/codegen/grow-agent` | Agent 定义、发现、prompt 与工具装配 |
 | `crates/codegen/grow-tools` | 终端、文件、搜索等工具实现 |
 | `crates/codegen/grow-config` | `GROW_HOME`、配置加载和路径约束 |
-| `crates/codegen/grow-models` | 空的编译期模型目录；运行时模型只来自用户配置 |
 | `crates/codegen/grow-workspace` | 文件系统、VCS、执行、权限和 checkpoint |
 | `crates/common/` | 通用叶子 crate |
 | `third_party/` | vendored 第三方代码 |

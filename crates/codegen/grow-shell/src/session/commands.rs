@@ -4,7 +4,7 @@
 //! actor. It was extracted from `acp_session.rs` to keep the actor
 //! implementation focused on behaviour.
 use super::acp_types::*;
-use super::plan_mode::PromptMode;
+use super::behavior::PromptMode;
 use crate::extensions::notification::SessionNotification;
 use crate::session::signals::TurnDeltaSnapshot;
 use agent_client_protocol as acp;
@@ -132,7 +132,7 @@ pub enum SessionCommand {
         system_prompt: String,
     },
     /// Resume hook: after a session is restored with
-    /// `awaiting_plan_approval == true`, re-issue the `exit_plan_mode`
+    /// `approval_pending == true`, re-issue the `grow/plan_approval`
     /// reverse-request so the client re-shows approval chrome over a real live
     /// waiter. Fire-and-forget; the actor spawns the round-trip + decision.
     RestorePlanApproval,
@@ -170,7 +170,7 @@ pub enum SessionCommand {
     },
     SessionMode {
         session_mode: acp::SessionModeId,
-        responds_to: oneshot::Sender<()>,
+        responds_to: oneshot::Sender<crate::session::behavior::BehaviorChangeOutcome>,
     },
     SetSessionModel {
         /// Stable `provider/model` catalog identity used by the UI and
@@ -616,7 +616,7 @@ pub enum SessionCommand {
     /// Retrieve the session's active agent type.
     ///
     /// Returns the name of the `AgentDefinition` that was used to initialize
-    /// this session (or the most recent one applied via `handle_session_mode`).
+    /// this session (or the most recent one applied via `request_behavior_change`).
     /// Used by `mvp_agent.set_session_model` to check whether a model's
     /// `agent_type` is compatible with the current session before switching.
     GetActiveAgent {
@@ -698,6 +698,7 @@ pub enum SessionCommand {
     WorkflowCompletionTurn {
         run_id: String,
         revision: u64,
+        outcome: xai_workflow::WorkflowOutcome,
     },
     /// Take turn messages from the chat state actor (proxied from mvp_agent).
     TakeTurnMessages {

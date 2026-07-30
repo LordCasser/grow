@@ -9,6 +9,13 @@ pub use grow_tools_api::slash_commands::WORKFLOW_TOOL_NAME;
 pub struct WorkflowToolInput {
     #[serde(default)]
     #[schemars(
+        range(min = 1, max = 16),
+        description = "Maximum number of child Agents that may execute simultaneously in this run. Defaults to 3 and may be set from 1 through 16. This limits concurrency; agent_budget separately limits cumulative logical calls."
+    )]
+    pub max_concurrency: Option<u16>,
+
+    #[serde(default)]
+    #[schemars(
         range(min = 1, max = 1024),
         description = "Absolute cumulative cap on logical child-agent calls for this run. Every agent() and every parallel() item consumes one slot; schema retries do not. Defaults to 128 and may be set from 1 through 1,024. A panel that would exceed the remaining budget is rejected before any of its children launch."
     )]
@@ -22,7 +29,7 @@ pub struct WorkflowToolInput {
 
     #[serde(default)]
     #[schemars(
-        description = "Inline Rhai workflow script. It must start with a pure-literal `let meta = #{ name: ..., description: ... };` map. Before authoring, read the `create-workflow` skill's SKILL.md. Run the path-specific `validate_only` smoke check with representative args."
+        description = "Inline Rhai workflow script. Start with `let meta = #{ name: ..., description: ... };`, declare phases with phase(), use agent(prompt, opts) or parallel([opts...]), and terminate with complete(value) or pause(kind, message). Run validate_only with representative args before launch."
     )]
     pub script: Option<String>,
 
@@ -51,6 +58,8 @@ pub struct WorkflowToolInput {
 
 impl WorkflowToolInput {
     pub const MAX_AGENT_BUDGET: u64 = 1_024;
+    pub const DEFAULT_MAX_CONCURRENCY: u16 = 3;
+    pub const MAX_CONCURRENCY: u16 = 16;
 
     pub fn normalize(&mut self) {
         self.name = blank_to_none(self.name.take());
@@ -60,6 +69,14 @@ impl WorkflowToolInput {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(max_concurrency) = self.max_concurrency
+            && !(1..=Self::MAX_CONCURRENCY).contains(&max_concurrency)
+        {
+            return Err(format!(
+                "`max_concurrency` must be from 1 through {}",
+                Self::MAX_CONCURRENCY
+            ));
+        }
         if let Some(budget) = self.agent_budget {
             if budget == 0 {
                 return Err("`agent_budget` must be a positive integer".into());
@@ -169,11 +186,11 @@ impl crate::types::tool_metadata::ToolMetadata for WorkflowTool {
     }
 
     fn description_template(&self) -> &str {
-        r##"Launch a workflow: a Rhai script that orchestrates subagents as one background run. Provide exactly one source: `name` (a registered workflow — built-in, or from the project `.grow/workflows/` or user `~/.grow/workflows/`), an inline `script`, or a `script_path`. Optionally pass `args` (bound to the script's `args`) and `agent_budget`, an absolute cap on cumulative child-agent calls: every agent() and parallel() item consumes one slot (schema retries do not); default 128. The call returns immediately; progress appears in `/workflows` and completion is reported automatically — do not poll or sleep-wait.
+        r##"Launch a workflow: a Rhai script that orchestrates subagents as one background run. Provide exactly one source: `name` (a registered workflow — built-in, or from the project `.grow/workflows/` or user `~/.grow/workflows/`), an inline `script`, or a `script_path`. Optionally pass `args` (bound to the script's `args`), `max_concurrency` (simultaneous children, default 3, maximum 16), and `agent_budget` (cumulative logical child calls, default 128, maximum 1,024). These limits are independent. The call returns immediately; progress appears in `/workflows` and completion is reported automatically — do not poll or sleep-wait.
 
-Prefer a registered workflow when one fits; author a script for bounded fan-out over a known work list, staged research and verification, or several independent perspectives, and confirm unusually large fan-out first. Before writing or editing a script, read the `create-workflow` skill's SKILL.md. `validate_only: true` runs a path-specific smoke check (metadata, compile, one canned-host path) — not proof that every branch or live tool works.
+Prefer a registered workflow when one fits; author a script for bounded fan-out over a known work list, staged research and verification, or several independent perspectives. Inline scripts start with `let meta = #{ name: "...", description: "..." };`; use phase(title), agent(prompt, opts), parallel([opts...]), complete(value), or pause(kind, message). `validate_only: true` runs a path-specific smoke check (metadata, compile, one canned-host path) — not proof that every branch or live tool works.
 
-A started run gets a session-unique display name (e.g. `review-changes`, `review-changes-2`) — the handle to show the user and use with `/workflow pause|resume|stop <name>`; keep run IDs internal. Each launch persists an editable `script_path`; edit it and launch as a new run to iterate. Use `resume_from_run_id` only for a same-process paused run (process restarts are terminal); a budget-limited run resumes only with a higher `agent_budget`. Save reusable scripts to `.grow/workflows/<name>.rhai`."##
+A started run gets a session-unique display name (e.g. `review-changes`, `review-changes-2`) — the handle to show the user and use with `/workflow-run pause|resume|stop <name>`; keep run IDs internal. Each launch persists an editable `script_path`; edit it and launch as a new run to iterate. Use `resume_from_run_id` only for a same-process paused run (process restarts are terminal); a budget-limited run resumes only with a higher `agent_budget`. Save reusable scripts to `.grow/workflows/<name>.rhai`."##
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -327,6 +344,7 @@ mod tests {
     #[test]
     fn validation_requires_exactly_one_source_and_bounded_positive_budget() {
         let base = WorkflowToolInput {
+            max_concurrency: None,
             agent_budget: None,
             name: None,
             script: None,
@@ -342,6 +360,38 @@ mod tests {
             ..base.clone()
         };
         assert!(named.validate().is_ok());
+        assert!(
+            WorkflowToolInput {
+                max_concurrency: Some(1),
+                ..named.clone()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            WorkflowToolInput {
+                max_concurrency: Some(WorkflowToolInput::MAX_CONCURRENCY),
+                ..named.clone()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            WorkflowToolInput {
+                max_concurrency: Some(0),
+                ..named.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            WorkflowToolInput {
+                max_concurrency: Some(WorkflowToolInput::MAX_CONCURRENCY + 1),
+                ..named.clone()
+            }
+            .validate()
+            .is_err()
+        );
 
         let both = WorkflowToolInput {
             name: Some("goal".into()),

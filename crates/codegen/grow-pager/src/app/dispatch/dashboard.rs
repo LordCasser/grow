@@ -4,7 +4,7 @@ use super::ctx::{show_welcome, surface_yolo_launch_block_notice};
 use super::dashboard_diagnostics::{
     log_dashboard_attached, log_dashboard_closed, log_dashboard_launched, log_dashboard_opened,
 };
-use super::modes::{dispatch_cycle_mode_and_sync, set_yolo_mode, yolo_enable_blocked};
+use super::modes::yolo_enable_blocked;
 use super::permissions::resolve_permission_queue_transition;
 use super::queue::{maybe_drain_queue, note_peek_page_flip};
 use super::router::dispatch;
@@ -56,13 +56,19 @@ pub(super) fn ensure_dashboard_state(app: &mut AppView) {
 }
 
 /// Configure the dashboard for display: snapshot app-wide state (cwd, models,
-/// plugins, `default_yolo`) and reset per-session staging. Shared by
+/// plugins, and persistent defaults) and reset per-session staging. Shared by
 /// `dispatch_open_dashboard` and the overlay-cycle path; no-op if unallocated.
 fn configure_dashboard_state(app: &mut AppView) {
     let bootstrap_commands = app.bootstrap_acp_commands.clone();
     let models = app.models.clone();
     let disable_plugins = app.appearance.disable_plugins;
-    let default_yolo = app.default_yolo;
+    let pending_permission = if app.default_yolo {
+        crate::app::actions::PermissionModeKind::AlwaysApprove
+    } else if app.current_ui.permission_mode.as_deref() == Some("auto") {
+        crate::app::actions::PermissionModeKind::Auto
+    } else {
+        crate::app::actions::PermissionModeKind::Ask
+    };
     let cwd = app.cwd.clone();
     let cwd_has_git_ancestor = app.cwd_has_git_ancestor;
     let has_agents = !app.agents.is_empty();
@@ -87,11 +93,16 @@ fn configure_dashboard_state(app: &mut AppView) {
             .sync_acp_commands(&bootstrap_commands, None, &models);
         d.models = models;
         d.pending_model = None;
-        d.pending_mode = if default_yolo {
-            crate::views::dashboard::DashboardDispatchMode::AlwaysApprove
-        } else {
-            crate::views::dashboard::DashboardDispatchMode::Normal
-        };
+        d.pending_behavior = grow_tools::types::SessionMode::Default;
+        d.pending_permission = pending_permission;
+        d.dispatch.slash_controller.set_selection_context(
+            None,
+            d.pending_behavior,
+            false,
+            false,
+            app.auto_mode_gate,
+            d.pending_permission.as_canonical(),
+        );
     }
 }
 
@@ -176,7 +187,7 @@ pub(super) fn dispatch_open_dashboard(app: &mut AppView) -> Vec<Effect> {
     }
     // The previous "auto-attach popup overlay" path
     // showed BOTH the dashboard (as a top banner) AND the focused
-    // agent (as a bottom popup) on every `/dashboard` open. The
+    // Agent (as a bottom popup) on every `/agents` open. The
     // stacked layout was confusing — the user couldn't tell which
     // view owned the prompt, and the popup's keybindings (Enter
     // to send, etc.) had subtle input-routing bugs. Dashboard
@@ -550,60 +561,6 @@ pub(super) fn dispatch_dashboard_toggle_worktree(app: &mut AppView) -> Vec<Effec
     vec![]
 }
 
-/// Toggle auto-approve (YOLO mode) on the selected dashboard
-/// row's owning agent. Subagents inherit their parent's mode, so
-/// a subagent selection routes to the parent.
-///
-/// Reuses `set_yolo_mode` (which reads `active_view` to target
-/// the agent) by temporarily switching the active view to the
-/// selected agent for the duration of the call — keeps all the
-/// existing drain / persist / toast logic in a single code path
-/// instead of duplicating it.
-pub(super) fn dispatch_dashboard_toggle_auto_approve(app: &mut AppView) -> Vec<Effect> {
-    use crate::views::dashboard::DashboardRowId;
-
-    let Some(d) = app.dashboard.as_ref() else {
-        return vec![];
-    };
-    let Some(selected) = d.selected.as_ref() else {
-        if let Some(d) = app.dashboard.as_mut() {
-            d.set_error_toast("Select a session first");
-        }
-        return vec![];
-    };
-    let agent_id = match selected {
-        DashboardRowId::TopLevel(id) => *id,
-        DashboardRowId::Subagent { parent, .. } => *parent,
-        DashboardRowId::Roster { .. } => return vec![],
-    };
-    if !app.agents.contains_key(&agent_id) {
-        if let Some(d) = app.dashboard.as_mut() {
-            d.set_error_toast("Session no longer exists");
-        }
-        return vec![];
-    }
-    let agent = app.agents.get(&agent_id).expect("checked above");
-    let new = !agent.session.yolo_mode;
-
-    // Managed policy pins always-approve off — toast on the dashboard's own
-    // error slot (the inner gate's agent toast is invisible from here).
-    if let Some(warning) = yolo_enable_blocked(app, new) {
-        if let Some(d) = app.dashboard.as_mut() {
-            d.set_error_toast(warning);
-        }
-        return vec![];
-    }
-
-    // Temporarily borrow active_view so `set_yolo_mode` targets
-    // the dashboard's selected agent rather than whichever view
-    // is currently active. Restored before returning.
-    let saved_view = app.active_view;
-    app.active_view = ActiveView::Agent(agent_id);
-    let effects = set_yolo_mode(app, new);
-    app.active_view = saved_view;
-    effects
-}
-
 fn snapshot_prompt_widget(
     prompt: &mut crate::views::prompt_widget::PromptWidget,
     text: String,
@@ -647,17 +604,26 @@ pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView)
         return open_dashboard_worktree_dialog(app, None, /* attach */ true);
     }
     let pending_model = app.dashboard.as_ref().and_then(|d| d.pending_model.clone());
-    let pending_mode = app
+    let (pending_behavior, pending_permission) = app
         .dashboard
         .as_ref()
-        .map(|d| d.pending_mode)
-        .unwrap_or_default();
+        .map(|d| (d.pending_behavior, d.pending_permission))
+        .unwrap_or((
+            grow_tools::types::SessionMode::Default,
+            crate::app::actions::PermissionModeKind::Ask,
+        ));
     let model_id = pending_model.as_ref().map(|m| m.id.clone());
     log_dashboard_launched("new_agent_button");
     let (new_id, effects) = dispatch_new_session_inner_with_id(app, model_id);
     let policy_block = app.yolo_policy_block;
     if let Some(agent) = app.agents.get_mut(&new_id) {
-        apply_pending_dispatch_config(agent, pending_model.as_ref(), pending_mode, policy_block);
+        apply_pending_dispatch_config(
+            agent,
+            pending_model.as_ref(),
+            pending_behavior,
+            pending_permission,
+            policy_block,
+        );
     }
     if let Some(d) = app.dashboard.as_mut() {
         d.restore_peek_viewport(&mut app.agents);
@@ -761,7 +727,7 @@ pub(super) fn dispatch_dashboard_open_location_picker(app: &mut AppView) -> Vec<
         // Gate on the dashboard being the *foreground* view (not merely
         // `app.dashboard.is_some()`, which stays true for the rest of the
         // session once the dashboard has been opened even once).
-        app.show_toast("Open the dashboard (/dashboard) to change location");
+        app.show_toast("Open the Agent Dashboard (/agents) to change location");
         return vec![];
     }
     // Idempotent — re-triggering while open keeps the current query.
@@ -837,7 +803,7 @@ pub(super) fn dispatch_dashboard_change_location(app: &mut AppView, input: Strin
     // overlay) would otherwise silently change the process cwd, since
     // `app.dashboard` stays `Some` for the rest of the session once opened.
     if !matches!(app.active_view, ActiveView::AgentDashboard) {
-        app.show_toast("Open the dashboard (/dashboard) to change location");
+        app.show_toast("Open the Agent Dashboard (/agents) to change location");
         return vec![];
     }
     let path = match resolve_location_input(&input, &app.cwd).filter(|p| p.is_dir()) {
@@ -930,11 +896,14 @@ pub(super) fn dispatch_dashboard_confirm_worktree(
         None => (None, false),
     };
     let pending_model = app.dashboard.as_ref().and_then(|d| d.pending_model.clone());
-    let pending_mode = app
+    let (pending_behavior, pending_permission) = app
         .dashboard
         .as_ref()
-        .map(|d| d.pending_mode)
-        .unwrap_or_default();
+        .map(|d| (d.pending_behavior, d.pending_permission))
+        .unwrap_or((
+            grow_tools::types::SessionMode::Default,
+            crate::app::actions::PermissionModeKind::Ask,
+        ));
     if !app.cwd_has_git_ancestor {
         if let Some(d) = app.dashboard.as_mut() {
             // Restore the typed prompt if the cwd stopped being a repo.
@@ -967,7 +936,8 @@ pub(super) fn dispatch_dashboard_confirm_worktree(
             apply_pending_dispatch_config(
                 agent,
                 pending_model.as_ref(),
-                pending_mode,
+                pending_behavior,
+                pending_permission,
                 policy_block,
             );
             if let Some(entry) = agent.session.pending_prompts.back_mut() {
@@ -1141,11 +1111,14 @@ pub(super) fn dispatch_dashboard_dispatch(
     // `/plan`) onto the new session: the model id seeds `CreateSession`, and
     // effort / plan are applied post-creation by `apply_pending_dispatch_config`.
     let pending_model = app.dashboard.as_ref().and_then(|d| d.pending_model.clone());
-    let pending_mode = app
+    let (pending_behavior, pending_permission) = app
         .dashboard
         .as_ref()
-        .map(|d| d.pending_mode)
-        .unwrap_or_default();
+        .map(|d| (d.pending_behavior, d.pending_permission))
+        .unwrap_or((
+            grow_tools::types::SessionMode::Default,
+            crate::app::actions::PermissionModeKind::Ask,
+        ));
     let model_id = pending_model.as_ref().map(|m| m.id.clone());
     let prompt_state = app
         .dashboard
@@ -1171,7 +1144,13 @@ pub(super) fn dispatch_dashboard_dispatch(
             entry.images = std::mem::take(&mut pasted_images);
             entry.chip_elements = chip_elements;
         }
-        apply_pending_dispatch_config(agent, pending_model.as_ref(), pending_mode, policy_block);
+        apply_pending_dispatch_config(
+            agent,
+            pending_model.as_ref(),
+            pending_behavior,
+            pending_permission,
+            policy_block,
+        );
     }
     crate::prompt_images::drain_and_cleanup(&mut pasted_images);
     // Only clear the input AFTER successful session
@@ -1207,8 +1186,7 @@ pub(super) fn dispatch_dashboard_dispatch(
         // `apply_pending_dispatch_config` clamps a pinned always-approve to
         // Normal and toasts the new agent, but that toast is invisible while the
         // view stays on the dashboard — mirror it on the dashboard's error slot.
-        let enabling =
-            pending_mode == crate::views::dashboard::DashboardDispatchMode::AlwaysApprove;
+        let enabling = pending_permission.is_always_approve();
         if let Some(warning) = yolo_enable_blocked(app, enabling)
             && let Some(d) = app.dashboard.as_mut()
         {
@@ -1224,7 +1202,7 @@ pub(super) fn dispatch_dashboard_dispatch(
 /// limited than the agent view's:
 ///
 ///   - Builtin commands that return `CommandResult::Action(...)` (e.g.
-///     `/dashboard`, `/exit`, `/theme`, `/settings`, `/help`, `/model`,
+///     `/agents`, `/exit`, `/theme`, `/settings`, `/help`, `/model`,
 ///     `/mcps`, `/plugin`, …) are dispatched identically to the agent path.
 ///   - `CommandResult::Message` / `Error` surface as an `error_toast`
 ///     on the dashboard (no scrollback to push into). `Error` strings
@@ -1266,7 +1244,8 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
 
     // Build the execution context from app-wide state. The dashboard
     // is session-less, so `session_id` is `None`. Offered session-less
-    // opt-ins (`/model`, `/plan`) and pager-global commands still run
+    // opt-ins (`/model`, `/effort`, `/behavior`, `/permission`) and
+    // pager-global commands still run
     // and may toast if a dispatcher needs an agent.
     let result = {
         let Some(invocation) = parse_invocation(trimmed.as_str()) else {
@@ -1325,6 +1304,14 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         }
 
         let dashboard_multiline = app.dashboard.as_ref().is_some_and(|d| d.multiline_mode);
+        let (pending_behavior, pending_permission) = app
+            .dashboard
+            .as_ref()
+            .map(|d| (d.pending_behavior, d.pending_permission))
+            .unwrap_or((
+                grow_tools::types::SessionMode::Default,
+                crate::app::actions::PermissionModeKind::Ask,
+            ));
         let mut ctx = CommandExecCtx {
             models: &app.models,
             session_id: None,
@@ -1332,9 +1319,8 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             screen_mode: app.screen_mode,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: dashboard_multiline,
-                yolo_mode: app.default_yolo,
-                auto_mode: app.current_ui.permission_mode.as_deref() == Some("auto")
-                    && !app.default_yolo,
+                yolo_mode: pending_permission.is_always_approve(),
+                auto_mode: pending_permission.is_auto(),
                 current_model_id: app.models.current_model_id_str().map(str::to_owned),
                 available_models: app
                     .models
@@ -1342,7 +1328,10 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                     .iter()
                     .map(|(id, info)| (info.name.clone(), id.clone()))
                     .collect(),
-                plan_mode_active: false,
+                behavior_mode: pending_behavior,
+                workflows_available: false,
+                deep_research_available: false,
+                goal_available: false,
                 show_tips: show_tips_from_app,
                 auto_update: auto_update_from_app,
                 vim_mode: crate::appearance::cache::load_vim_mode(),
@@ -1386,7 +1375,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         }
         CommandResult::Action(Action::ExitSession) => {
             // ExitSession from a session-less surface is meaningless
-            // — collapse it to `/dashboard`'s exit semantics.
+            // — collapse it to `/agents`' exit semantics.
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
             }
@@ -1394,44 +1383,58 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         }
         // `/model` on the session-less dashboard stages the model for the
         // NEXT spawned agent instead of switching a (nonexistent) session.
-        // Both the effort-bearing (`SwitchModel`) and bare
-        // (`SetDefaultModel`) forms map to the same per-spawn staging — we
-        // deliberately do NOT persist a global default here.
+        // Effort is part of the same per-spawn staging; no persistent default
+        // is modified here.
         CommandResult::Action(Action::SwitchModel { model_id, effort }) => {
             stage_dashboard_model(app, model_id, effort);
             vec![]
         }
-        CommandResult::Action(Action::SetDefaultModel(model_id)) => {
-            stage_dashboard_model(app, model_id, None);
+        // Bare selector commands reuse their normal suggestions in the
+        // dashboard input. This surface has no AgentView-owned modal stack,
+        // so opening the selector means entering the same Slash args phase.
+        CommandResult::Action(Action::OpenCommandPicker {
+            command,
+            args_query,
+        }) => {
+            if let Some(d) = app.dashboard.as_mut() {
+                let suffix = if args_query.is_empty() {
+                    String::new()
+                } else {
+                    args_query
+                };
+                let picker_input = format!("/{command} {suffix}");
+                d.dispatch.set_text(&picker_input);
+                d.dispatch.set_cursor(picker_input.len());
+                d.dispatch.refresh_slash(&d.models);
+                d.error_toast = None;
+            }
             vec![]
         }
-        // `/plan` toggles whether the next spawned agent starts in plan
-        // mode. The command always reports `On` here (the dashboard's
-        // `plan_mode_active` snapshot is always false), so we flip between
-        // Plan and Normal to give a session-less way to turn it back off.
-        CommandResult::Action(Action::SetPlanMode(_)) => {
-            use crate::views::dashboard::DashboardDispatchMode;
+        // Behavior selectors stage the next spawned Agent. Selection is
+        // idempotent and independent from its Permission policy.
+        CommandResult::Action(Action::SetBehaviorMode(mode)) => {
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
                 d.error_toast = None;
-                d.pending_mode = if d.pending_mode == DashboardDispatchMode::Plan {
-                    DashboardDispatchMode::Normal
-                } else {
-                    DashboardDispatchMode::Plan
-                };
+                d.pending_behavior = mode;
+                d.dispatch.slash_controller.set_selection_context(
+                    None,
+                    mode,
+                    false,
+                    false,
+                    app.auto_mode_gate,
+                    d.pending_permission.as_canonical(),
+                );
             }
             vec![]
         }
-        // `/plan <description>` — stage plan mode AND spawn immediately with
-        // the description as the first prompt.
-        CommandResult::Action(Action::EnterPlanMode { description }) => {
+        // A Behavior command with a prompt stages the Behavior before spawn.
+        CommandResult::Action(Action::SetBehaviorThenPrompt { mode, prompt }) => {
             if let Some(d) = app.dashboard.as_mut() {
-                d.pending_mode = crate::views::dashboard::DashboardDispatchMode::Plan;
+                d.pending_behavior = mode;
             }
-            match description {
-                Some(desc) => {
-                    dispatch_dashboard_dispatch(app, desc, /* attach */ false)
-                }
+            match prompt {
+                Some(prompt) => dispatch_dashboard_dispatch(app, prompt, /* attach */ false),
                 None => {
                     if let Some(d) = app.dashboard.as_mut() {
                         d.dispatch.set_text("");
@@ -1447,6 +1450,36 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
                 d.set_error_toast("No plan to show on the dashboard");
+            }
+            vec![]
+        }
+        CommandResult::Action(Action::SetPermissionMode(permission)) => {
+            if permission.is_always_approve()
+                && let Some(warning) = yolo_enable_blocked(app, true)
+            {
+                if let Some(d) = app.dashboard.as_mut() {
+                    d.dispatch.set_text("");
+                    d.set_error_toast(warning);
+                }
+                return vec![];
+            }
+            let permission = if permission.is_auto() && !app.auto_mode_gate {
+                crate::app::actions::PermissionModeKind::Ask
+            } else {
+                permission
+            };
+            if let Some(d) = app.dashboard.as_mut() {
+                d.dispatch.set_text("");
+                d.error_toast = None;
+                d.pending_permission = permission;
+                d.dispatch.slash_controller.set_selection_context(
+                    None,
+                    d.pending_behavior,
+                    false,
+                    false,
+                    app.auto_mode_gate,
+                    permission.as_canonical(),
+                );
             }
             vec![]
         }
@@ -1509,19 +1542,18 @@ fn stage_dashboard_model(
     }
 }
 
-/// Apply the dashboard's staged model effort + plan mode to a freshly
+/// Apply the dashboard's staged model, Behavior, and Permission to a freshly
 /// spawned agent. The base model is already seeded via `CreateSession`'s
 /// `model_id`; here we stash the reasoning effort (pushed to the shell once
-/// the session exists, mirroring the agent-view flow) and the deferred plan
+/// the session exists, mirroring the agent-view flow) and the deferred
 /// `SessionMode` (consumed in the `SessionCreated` handlers).
 pub(super) fn apply_pending_dispatch_config(
     agent: &mut AgentView,
     pending_model: Option<&crate::views::dashboard::PendingDispatchModel>,
-    pending_mode: crate::views::dashboard::DashboardDispatchMode,
+    pending_behavior: grow_tools::types::SessionMode,
+    pending_permission: crate::app::actions::PermissionModeKind,
     policy_block: Option<&'static str>,
 ) {
-    use crate::views::dashboard::DashboardDispatchMode;
-
     if let Some(m) = pending_model {
         // The base model is seeded via `CreateSession.model_id`; only stash a
         // deferred switch when an explicit effort must be pushed. Setting it
@@ -1529,30 +1561,29 @@ pub(super) fn apply_pending_dispatch_config(
         // dashboard's `/model` choice wins.
         agent.session.deferred_model_switch = m.effort.map(|e| (m.id.clone(), Some(e)));
     }
-    match pending_mode {
-        DashboardDispatchMode::Normal => {
-            // Explicit normal overrides any `app.default_yolo` seed.
-            agent.session.yolo_mode = false;
-        }
-        DashboardDispatchMode::Plan => {
-            agent.session.yolo_mode = false;
-            agent.deferred_session_mode = Some(grow_tools::types::SessionMode::Plan);
-            // Optimistic so the agent view reflects plan mode immediately when
-            // opened via Ctrl+S, before the ACP round-trip confirms it.
-            agent.plan_mode_pending = Some(true);
-        }
-        // Backstop: staging is already gated, but this write sits outside
-        // `set_yolo_mode_inner`, so re-check the pin here.
-        DashboardDispatchMode::AlwaysApprove => {
+    agent.deferred_session_mode =
+        (pending_behavior != grow_tools::types::SessionMode::Default).then_some(pending_behavior);
+    if pending_behavior == grow_tools::types::SessionMode::Plan {
+        // Optimistic so the Agent view reflects Plan immediately when opened,
+        // before the ACP round-trip confirms it.
+        agent.plan_mode_pending = Some(true);
+    }
+
+    agent.session.yolo_mode = false;
+    agent.session.auto_mode = false;
+    match pending_permission {
+        crate::app::actions::PermissionModeKind::Auto => agent.session.auto_mode = true,
+        crate::app::actions::PermissionModeKind::AlwaysApprove => {
+            // Backstop: staging is already gated, but this write sits outside
+            // `set_yolo_mode_inner`, so re-check managed policy here.
             if let Some(warning) = policy_block {
-                agent.session.yolo_mode = false;
                 agent.show_toast(warning);
             } else {
-                // Client-side auto-approve for the spawned session (per-spawn;
-                // not persisted as a global default).
                 agent.session.yolo_mode = true;
             }
         }
+        crate::app::actions::PermissionModeKind::Default
+        | crate::app::actions::PermissionModeKind::Ask => {}
     }
 }
 
@@ -1570,54 +1601,6 @@ pub(super) fn apply_pending_dispatch_config(
 ///
 /// `attach` (Ctrl+S) additionally walks into the agent's detail
 /// view, mirroring the dispatch input's send+open affordance.
-/// Cycle the PEEKED agent's live mode (Normal → Plan → Always-Approve →
-/// Normal), the peek-panel counterpart to `DashboardCycleMode`. Reuses
-/// the shared cycle body `dispatch_cycle_mode_and_sync` by temporarily
-/// targeting the peeked agent (the same `active_view` swap as
-/// `dispatch_dashboard_toggle_auto_approve`), so the peek behaves exactly
-/// like Ctrl+R inside that agent's chat view. The bottom-border badge
-/// reflects the new mode on the next frame. Only top-level agents have a
-/// mode to cycle — subagents are parent-driven.
-pub(super) fn dispatch_dashboard_peek_cycle_mode(app: &mut AppView) -> Vec<Effect> {
-    use crate::views::dashboard::DashboardRowId;
-
-    let Some(row) = app
-        .dashboard
-        .as_ref()
-        .and_then(|d| d.peek.as_ref().map(|p| p.row.clone()))
-    else {
-        return vec![];
-    };
-    let agent_id = match row {
-        DashboardRowId::TopLevel(id) => id,
-        DashboardRowId::Subagent { .. } => {
-            if let Some(d) = app.dashboard.as_mut() {
-                d.set_error_toast("Can't change a subagent's mode");
-            }
-            return vec![];
-        }
-        DashboardRowId::Roster { .. } => return vec![],
-    };
-    if !app.agents.contains_key(&agent_id) {
-        if let Some(d) = app.dashboard.as_mut() {
-            d.set_peek(None);
-            d.set_error_toast("Session no longer exists");
-        }
-        return vec![];
-    }
-
-    // Temporarily target the peeked agent so `dispatch_cycle_mode_and_sync`
-    // (which reads `active_view`) acts on it; restored before returning so the
-    // dashboard stays foregrounded. Uses the diagnostics-free cycle body: the
-    // user is viewing the dashboard, not this agent's prompt, so a plan nudge
-    // still within TTL must not attribute a (spurious) acceptance.
-    let saved_view = app.active_view;
-    app.active_view = ActiveView::Agent(agent_id);
-    let effects = dispatch_cycle_mode_and_sync(app);
-    app.active_view = saved_view;
-    effects
-}
-
 pub(super) fn dispatch_dashboard_peek_reply(
     app: &mut AppView,
     row: crate::views::dashboard::DashboardRowId,

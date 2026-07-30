@@ -19,8 +19,6 @@ mod cancel_discards_buffered_interjection;
 mod cancel_then_resend_prompt_appears_once;
 #[path = "pty_e2e/ctrl_c_cancel_during_stream_recovers_cleanly.rs"]
 mod ctrl_c_cancel_during_stream_recovers_cleanly;
-#[path = "pty_e2e/ctrl_r_plan_nudge_from_always_approve_enters_plan.rs"]
-mod ctrl_r_plan_nudge_from_always_approve_enters_plan;
 #[path = "pty_e2e/ctrlc_after_activity_no_rewind_prompt_once.rs"]
 mod ctrlc_after_activity_no_rewind_prompt_once;
 #[path = "pty_e2e/ctrlc_with_queued_prompt_no_dup.rs"]

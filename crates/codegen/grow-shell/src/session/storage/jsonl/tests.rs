@@ -2034,7 +2034,7 @@ async fn copy_session_preserves_head_fields() {
     assert_eq!(loaded.head_branch.as_deref(), Some("feature-branch"));
 }
 #[tokio::test]
-async fn copy_plan_mode_state_false_skips_plan_mode() {
+async fn copy_behavior_state_false_skips_behavior() {
     let tmp = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
     let source_info = Info {
@@ -2046,20 +2046,20 @@ async fn copy_plan_mode_state_false_skips_plan_mode() {
         cwd: "/tgt".to_string(),
     };
     adapter.init_session(&source_info, default_model_id()).await.unwrap();
-    std::fs::write(adapter.plan_mode_state_file(&source_info), b"{}").unwrap();
+    std::fs::write(adapter.behavior_state_file(&source_info), b"{}").unwrap();
     let result = adapter
         .copy_session_data(
             &source_info,
             &target_info,
             CopySessionOptions {
-                copy_plan_mode_state: false,
+                copy_behavior_state: false,
                 ..Default::default()
             },
         )
         .await
         .unwrap();
-    assert!(!result.plan_mode_state_copied);
-    assert!(!adapter.plan_mode_state_file(&target_info).exists());
+    assert!(!result.behavior_state_copied);
+    assert!(!adapter.behavior_state_file(&target_info).exists());
 }
 #[tokio::test]
 async fn copy_tool_state_false_skips_tool_state() {

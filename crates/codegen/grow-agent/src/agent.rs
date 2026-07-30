@@ -204,21 +204,13 @@ impl Agent {
             .unwrap_or_default();
     }
 
-    /// Re-render the system prompt for a different definition, reusing
-    /// the existing ToolBridge. Used for mid-session mode switching.
-    pub async fn render_prompt_for_definition(&self, definition: &AgentDefinition) -> String {
-        let mut ctx = self.prompt_context.clone();
-        ctx.prompt_composition = definition.prompt_composition.clone();
-        ctx.prompt_body = definition.prompt_body.clone();
-        ctx.system_prompt = definition.system_prompt.clone();
-        ctx.build_timestamp_utc = chrono::Utc::now().to_rfc3339();
-
-        // Clear agents_md if the new definition doesn't want it
-        if !definition.agents_md {
-            ctx.agents_md_files.clear();
-        }
-
-        ctx.render(&self.tool_bridge).await.unwrap_or_default()
+    /// Replace the primary-session Behavior layer and re-render the system
+    /// prompt. Re-rendering is intentional even when the selection is stable:
+    /// compaction may have replaced the conversation's system prompt.
+    pub async fn set_behavior_instructions(&mut self, instructions: Option<String>) -> String {
+        self.prompt_context.behavior_instructions = instructions;
+        self.finalize_prompt().await;
+        self.system_prompt.clone()
     }
 }
 

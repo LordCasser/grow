@@ -1,9 +1,8 @@
 //! `/toggle-mouse-reporting` — flip terminal mouse capture from anywhere.
 //!
-//! Opt-in companion to the `Ctrl+R` (scrollback-focused) shortcut. Disabling
-//! capture hands mouse selection back to the terminal for native click-drag
-//! copy/paste; re-enabling restores in-app mouse support. Unlike the keybinding,
-//! the command runs from the prompt or scrollback without defocusing input.
+//! Disabling capture hands mouse selection back to the terminal for native
+//! click-drag copy/paste; re-enabling restores in-app mouse support. This is an
+//! explicit command and intentionally has no configuration shortcut.
 //!
 //! Gated on `[ui] mouse_reporting_toggle = true` (cached at startup in
 //! [`crate::app::mouse_reporting_toggle_enabled`]): hidden from the dropdown and
@@ -12,8 +11,7 @@
 use crate::app::actions::Action;
 use crate::slash::command::{AppCtx, CommandExecCtx, CommandResult, SlashCommand};
 
-/// Toggle terminal mouse reporting (mouse capture). Mirrors the `Ctrl+R`
-/// scrollback shortcut via the same `Action::ToggleMouseCapture` path.
+/// Toggle terminal mouse reporting (mouse capture).
 pub struct ToggleMouseReportingCommand;
 
 impl SlashCommand for ToggleMouseReportingCommand {
@@ -101,6 +99,13 @@ mod tests {
         let models = ModelState::default();
         let ctx = AppCtx {
             models: &models,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             workflows_available: true,

@@ -27,35 +27,21 @@ mod jemalloc_malloc_conf {
 }
 use anyhow::Result;
 use grow_pager::app::{
-    AgentCmd, Command, HeadlessArgs, LeaderMgmtArgs, LeaderMgmtCommand, LeaderMode,
-    LeaderTargetArgs, PagerArgs, join_early_prefetch, resolve_leader_mode, resolve_use_leader,
-    warn_leader_disabled_by_sandbox,
+    AgentCmd, Command, LeaderMgmtArgs, LeaderMgmtCommand, LeaderMode, LeaderTargetArgs, PagerArgs,
+    resolve_leader_mode, resolve_use_leader, warn_leader_disabled_by_sandbox,
 };
 use grow_pager::client_identity::PAGER_CLIENT_VERSION;
-use grow_shell::agent::app::{run_headless, run_leader, run_stdio_agent};
+use grow_shell::agent::app::{run_leader, run_stdio_agent};
 use grow_shell::agent::config::Config as AgentConfig;
 use grow_shell::leader::{
     ClientCapabilities, ClientMode, ControlCommand, LeaderCapabilities, LeaderDescriptor,
     LeaderRegistration, LeaderTarget, leader_is_older_than,
 };
-use grow_shell::leader::{
-    ControlPayload, LeaderClient, LeaderEnvUrls, connect_or_spawn, socket_path_for_ws_url,
-};
+use grow_shell::leader::{ControlPayload, LeaderClient, connect_or_spawn};
 use grow_update::{UpdateConfig, auto_update, enforce_version_policy_or_exit};
 use std::env;
 use std::net::SocketAddr;
 use tokio_util::sync::CancellationToken;
-/// Apply headless args to an existing config, only overriding values that are
-/// explicitly set. This allows environment defaults to be preserved when
-/// specific args are not provided.
-fn apply_headless_args_to_config(args: &HeadlessArgs, config: &mut AgentConfig) {
-    if let Some(v) = &args.service_ws_origin {
-        config.auth.service_ws_origin = v.clone();
-    }
-    if let Some(v) = &args.service_ws_url {
-        config.auth.service_ws_url = v.clone();
-    }
-}
 /// Apply global endpoint CLI args to an existing config.
 fn apply_agent_endpoint_args(agent_args: &grow_pager::app::AgentArgs, config: &mut AgentConfig) {
     if let Some(v) = &agent_args.cli_chat_proxy_base_url {
@@ -275,7 +261,7 @@ async fn kill_leaders() -> Result<()> {
 fn resolve_target(args: &LeaderTargetArgs) -> LeaderTarget {
     match args.pid {
         Some(pid) => LeaderTarget::Pid(pid),
-        None => LeaderTarget::Environment(grow_shell::env::GrowEnvironment::Production),
+        None => LeaderTarget::Local,
     }
 }
 async fn connect_to_leader(
@@ -321,7 +307,6 @@ fn leader_descriptor_json(d: &LeaderDescriptor) -> serde_json::Value {
         "classification": format!("{:?}", d.classification),
         "socketPath": d.socket_path.as_deref().map(|p| p.display().to_string()),
         "lockPath": d.lock_path.as_deref().map(|p| p.display().to_string()),
-        "wsUrlSuffix": d.ws_url_suffix,
     })
 }
 fn leader_info_json(
@@ -757,7 +742,6 @@ async fn run_agent_command(
             }
         }
     }
-    let early_prefetch = grow_shell::agent::models::start_early_prefetch(None);
     grow_shell::agent::mvp_agent::warm_async_http_client();
     tokio::task::spawn_blocking(|| {});
     let is_stdio = matches!(agent_args.mode, Some(AgentCmd::Stdio));
@@ -780,8 +764,7 @@ async fn run_agent_command(
             .ok();
         }
     }
-    let remote_settings = join_early_prefetch(early_prefetch);
-    grow_shell::util::config::set_remote_campaigns_from_settings(remote_settings.as_ref());
+    let remote_settings = None;
     let raw_config = grow_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
     let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
@@ -829,10 +812,7 @@ async fn run_agent_command(
         laziness_debug_log: None,
     });
     let agent_memory_config = agent_config.memory_config.clone();
-    let leader_eligible = matches!(
-        &agent_args.mode,
-        None | Some(AgentCmd::Stdio) | Some(AgentCmd::Headless(_))
-    );
+    let leader_eligible = matches!(&agent_args.mode, None | Some(AgentCmd::Stdio));
     let requested_confinement = grow_sandbox::requested_confinement_profile();
     let LeaderMode {
         use_leader,
@@ -889,12 +869,7 @@ async fn run_agent_command(
         use std::sync::Arc;
         use tokio::io::AsyncWriteExt;
         use tokio::sync::Mutex as TokioMutex;
-        let mode = match &agent_args.mode {
-            Some(AgentCmd::Stdio) => ClientMode::Stdio,
-            Some(AgentCmd::Headless(_)) | None => ClientMode::Headless,
-            _ => ClientMode::Stdio,
-        };
-        let env_urls = grow_shell::leader::LeaderEnvUrls::from(&agent_config.auth);
+        let mode = ClientMode::Stdio;
         let default_model = agent_config
             .default_model_override
             .clone()
@@ -910,16 +885,10 @@ async fn run_agent_command(
             fs_read: false,
             fs_write: false,
         };
-        let conn = connect_or_spawn(&client_type, mode, &env_urls, capabilities.clone()).await?;
+        let conn = connect_or_spawn(&client_type, mode, capabilities.clone()).await?;
         let (tx, rx) = conn.into_channels();
         let (status_tx, _status_rx) = LeaderReconnector::status_channel();
-        let reconnector = LeaderReconnector::new(
-            &client_type,
-            mode,
-            env_urls.clone(),
-            capabilities,
-            status_tx,
-        );
+        let reconnector = LeaderReconnector::new(&client_type, mode, capabilities, status_tx);
         let cancel = CancellationToken::new();
         match mode {
             ClientMode::Stdio => {
@@ -1021,64 +990,20 @@ async fn run_agent_command(
                 }
                 return Ok(());
             }
-            ClientMode::Headless => {
-                drop(tx);
-                let mut rx = rx;
-                loop {
-                    match rx.recv().await {
-                        Some(_) => continue,
-                        None => {
-                            tracing::warn!(
-                                "Leader disconnected (headless), attempting reconnect..."
-                            );
-                            match reconnector
-                                .reconnect(ReconnectPolicy::bounded(), &cancel)
-                                .await
-                            {
-                                Ok((_new_tx, new_rx, _disconnect_rx)) => {
-                                    tracing::info!("Reconnected to leader (headless)");
-                                    rx = new_rx;
-                                    reconnector.notify_connected();
-                                    continue;
-                                }
-                                Err(e) => {
-                                    tracing::error!(error = %e, "Failed to reconnect (headless)");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                return Ok(());
-            }
         }
     }
     match agent_args.mode {
-        Some(AgentCmd::Stdio) => run_stdio_agent(&agent_config, None, agent_memory_config).await,
-        Some(AgentCmd::Headless(a)) => {
-            let mut agent_config = agent_config.clone();
-            apply_headless_args_to_config(&a, &mut agent_config);
-            run_headless(
-                &agent_config,
-                agent_args.reauthenticate,
-                agent_memory_config,
-            )
-            .await
-        }
+        Some(AgentCmd::Stdio) | None => run_stdio_agent(&agent_config, agent_memory_config).await,
         Some(AgentCmd::Serve(a)) => {
-            let mut agent_config = agent_config.clone();
-            apply_headless_args_to_config(&a.headless, &mut agent_config);
             let secret = a.get_secret();
             let server_config = grow_shell::agent::ServerConfig {
                 bind_addr: a.bind,
                 secret: secret.clone(),
             };
             print_serve_startup_info(a.bind, &secret);
-            grow_shell::agent::run_agent_server(server_config, agent_config).await
+            grow_shell::agent::run_agent_server(server_config, agent_config.clone()).await
         }
         Some(AgentCmd::Leader(a)) => {
-            let mut agent_config = agent_config.clone();
-            apply_headless_args_to_config(&a.headless, &mut agent_config);
             let leader_auto_update = if !should_check_for_updates(
                 no_auto_update || a.no_auto_update,
             ) {
@@ -1129,18 +1054,7 @@ async fn run_agent_command(
             run_leader(
                 &agent_config,
                 a.no_exit_on_disconnect,
-                a.relay_on_demand,
                 leader_auto_update,
-                agent_memory_config,
-            )
-            .await
-        }
-        None => {
-            let mut agent_config = agent_config.clone();
-            apply_headless_args_to_config(&agent_args.headless, &mut agent_config);
-            run_headless(
-                &agent_config,
-                agent_args.reauthenticate,
                 agent_memory_config,
             )
             .await
@@ -1590,14 +1504,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                     .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
                 return grow_pager::sessions_cmd::run(sessions_args, &agent_config).await;
             }
-            Command::Share(ref share_args) => {
-                init_tracing_simple("cli");
-                let config = grow_shell::config::load_effective_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let agent_config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                return grow_pager::share_cmd::run(share_args, &agent_config).await;
-            }
             Command::Export(export_args) => {
                 init_tracing_simple("cli");
                 return grow_pager::export_cmd::run(export_args);
@@ -1818,8 +1724,7 @@ async fn finish_update_on_exit(
 }
 /// Build an [`UpdateConfig`] from the current environment and config files.
 fn build_update_config() -> UpdateConfig {
-    let environment = grow_shell::env::GrowEnvironment::from_flags(false, false);
-    let mut config = UpdateConfig::from_environment(&environment);
+    let mut config = UpdateConfig::default();
     config.deployment_key = grow_shell::agent::config::EndpointsConfig::default().deployment_key;
     if let Ok(root) = grow_shell::config::load_effective_config_disk_only()
         && let Some(ch) = grow_shell::util::config::channel_from_toml_opt(&root)

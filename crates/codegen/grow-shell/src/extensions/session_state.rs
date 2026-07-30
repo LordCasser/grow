@@ -19,7 +19,7 @@ const SUMMARY_COLUMN: &str = "summary";
 /// is last so import writes it last, as the commit marker; keep it there.
 const COLUMNS: &[(&str, &str)] = &[
     ("plan", st::PLAN_FILE),
-    ("planMode", st::PLAN_MODE_FILE),
+    ("behavior", st::BEHAVIOR_STATE_FILE),
     ("signals", st::SIGNALS_FILE),
     ("goal", st::GOAL_STATE_FILE),
     ("announcement", st::ANNOUNCEMENT_STATE_FILE),

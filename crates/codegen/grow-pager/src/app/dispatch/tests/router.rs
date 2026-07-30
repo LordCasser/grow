@@ -779,7 +779,8 @@ fn switch_agent_dispatch_preserves_model_and_emits_session_effect() {
 
     let effects = dispatch(
         Action::SwitchAgent {
-            agent_name: "reviewer".into(),
+            agent_name: "grow".into(),
+            behavior: None,
         },
         &mut app,
     );
@@ -787,7 +788,7 @@ fn switch_agent_dispatch_preserves_model_and_emits_session_effect() {
     assert!(matches!(
         effects.as_slice(),
         [Effect::SwitchAgent { agent_id, agent_name, .. }]
-            if *agent_id == id && agent_name == "reviewer"
+            if *agent_id == id && agent_name == "grow"
     ));
     assert_eq!(app.agents[&id].session.models.current, Some(model_id));
 }
@@ -878,13 +879,22 @@ fn slash_model_invalid_arg_produces_scrollback_error() {
     assert!(app.agents[&id].prompt.text().is_empty());
 }
 #[test]
-fn slash_model_no_args_produces_scrollback_error() {
+fn slash_model_no_args_opens_picker_without_scrollback_error() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
+    let model_id = acp::ModelId::new("grow-test");
+    app.agents[&id].session.models.available.insert(
+        model_id.clone(),
+        acp::ModelInfo::new(model_id, "Grow Test".to_string()),
+    );
     let initial_scrollback = app.agents[&id].scrollback.len();
     let effects = dispatch(Action::SendPrompt("/model".into()), &mut app);
     assert!(effects.is_empty());
-    assert_eq!(app.agents[&id].scrollback.len(), initial_scrollback + 1);
+    assert_eq!(app.agents[&id].scrollback.len(), initial_scrollback);
+    assert!(matches!(
+        app.agents[&id].active_modal,
+        Some(crate::views::modal::ActiveModal::ArgPicker { .. })
+    ));
 }
 #[test]
 fn slash_hooks_opens_modal() {
@@ -1548,13 +1558,13 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
                     agent.multiline_mode,
                 );
             }
-            ("plan_mode", SettingKind::Enum { default, .. }) => {
-                let effective = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
-                let expected = if effective { "on" } else { "off" };
+            ("behavior", SettingKind::Enum { default, .. }) => {
+                let effective = agent.behavior_mode_pending.unwrap_or(agent.behavior_mode);
+                let expected = effective.as_id();
                 assert_eq!(
                     *default, expected,
-                    "registry default for `plan_mode` (`{default}`) drifts from \
-                         AgentView::new's initializer (effective={effective} → \
+                    "registry default for `behavior` (`{default}`) drifts from \
+                         AgentView::new's initializer (effective={effective:?} → \
                          expected `{expected}`). Update one to match the other — \
                          the registry is the contract surface.",
                 );

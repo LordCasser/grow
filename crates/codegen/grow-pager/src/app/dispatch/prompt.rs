@@ -509,8 +509,20 @@ pub(super) fn dispatch_send_prompt_inner(
                         .iter()
                         .map(|(id, info)| (info.name.clone(), id.clone()))
                         .collect(),
-                    // Prefer optimistic pending over confirmed active.
-                    plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
+                    behavior_mode: agent.behavior_mode_pending.unwrap_or(agent.behavior_mode),
+                    workflows_available: agent.prompt.slash_controller.workflows_available(),
+                    deep_research_available: agent
+                        .prompt
+                        .slash_controller
+                        .registry()
+                        .get("deep-research")
+                        .is_some(),
+                    goal_available: agent
+                        .prompt
+                        .slash_controller
+                        .registry()
+                        .get("goal")
+                        .is_some(),
                     show_tips: show_tips_from_app,
                     auto_update: auto_update_from_app,
                     vim_mode: crate::appearance::cache::load_vim_mode(),
@@ -551,7 +563,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 if let Some(command) = command {
                     if ctx.screen_mode.is_minimal() && !command.available_in_minimal() {
                         // Central minimal gate: commands that drive the deleted
-                        // fullscreen pane / dashboard (/find, /dashboard, …)
+                        // fullscreen pane / dashboard (/find, /agents, …)
                         // have nothing to act on in scrollback-native mode.
                         // Surface a friendly system block instead of running them.
                         CommandResult::Message(format!(

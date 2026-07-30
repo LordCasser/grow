@@ -436,7 +436,7 @@ mod tests {
     use super::*;
     use crate::agent::config::{EndpointsConfig, ModelEntry};
     fn model_entry(internal_id: &str) -> ModelEntry {
-        ModelEntry::fallback(internal_id, &EndpointsConfig::default())
+        ModelEntry::fallback(internal_id)
     }
     fn task_description(agent: &Agent) -> String {
         let toolset = agent.tool_bridge().toolset();

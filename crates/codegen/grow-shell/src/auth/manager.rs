@@ -45,7 +45,6 @@ use enrichment::apply_user_info_enrichment;
 
 #[cfg(test)]
 use super::model::AuthStore;
-use super::model::LEGACY_SCOPE;
 
 /// Why a token refresh is being requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,7 +222,7 @@ pub(crate) enum DiskAuthState {
     /// auth.json does not exist.
     FileMissing,
     /// auth.json readable but has no usable entry for this scope
-    /// (scope removed, or only a skipped legacy WebLogin entry).
+    /// (scope removed or absent).
     EntryMissing,
     /// auth.json exists but could not be read (corrupt JSON, permission
     /// or I/O error).
@@ -322,27 +321,6 @@ impl AuthManager {
         let (auth, auth_read_detail, initial_disk_state) = match read_auth_json(&path) {
             Ok(map) => {
                 let found = lookup_auth(&map, &scope);
-                // If lookup_auth skipped a legacy WebLogin token, remove the
-                // stale scope entry from auth.json so it is not re-evaluated
-                // on every launch.
-                if found.is_none()
-                    && map
-                        .get(LEGACY_SCOPE)
-                        .is_some_and(|a| a.auth_mode == AuthMode::WebLogin)
-                {
-                    // Best-effort cleanup under advisory lock (consistent with
-                    // other auth.json writers). Non-blocking: if the lock is
-                    // held by a concurrent process, skip — retried next launch.
-                    if let Some(_lock) = lock::try_lock_auth_file_nonblocking(&path) {
-                        let mut cleaned = map.clone();
-                        cleaned.remove(LEGACY_SCOPE);
-                        let _ = write_auth_json(&path, &cleaned);
-                        tracing::debug!("auth: removed stale WebLogin scope from auth.json");
-                        // lock released on drop
-                    } else {
-                        tracing::debug!("auth: skipped WebLogin cleanup (lock unavailable)");
-                    }
-                }
                 let detail = serde_json::json!({
                     "read": "ok",
                     "resolved_path": path.display().to_string(),
@@ -563,7 +541,7 @@ impl AuthManager {
                 // of the same broken refresh_token.
                 DiskAuthState::Ok => {
                     *self.inner.write() = auth;
-                    // A re-read (e.g. relay reconnect) can adopt a wrong-team
+                    // A concurrent disk re-read can adopt a wrong-team
                     // token a sibling wrote; clear it here, mirroring `new()`.
                     self.enforce_pin_on_loaded_token();
                     return;
@@ -768,7 +746,7 @@ impl AuthManager {
 
     /// Expiry policy: `expires_at - early_invalidation` if present;
     /// `External` with `auth_token_ttl` -> `create_time + ttl`;
-    /// fallback `create_time + 30d` (WebLogin-style).
+    /// fallback `create_time + 30d`.
     fn is_token_expired(&self, auth: &ProviderAuth) -> bool {
         self.token_expired_with_buffer(auth, early_invalidation())
     }

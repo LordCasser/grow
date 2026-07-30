@@ -1542,16 +1542,24 @@ impl SessionActor {
             .await
         };
         let system_reminder = {
-            let plan_path = {
-                let guard = self.plan_mode.lock();
-                guard
-                    .is_active()
-                    .then(|| guard.plan_file_path().to_path_buf())
+            let plan = {
+                use crate::session::behavior::{BehaviorState, PlanPhase};
+                let controller = self.behavior.lock();
+                match controller.state() {
+                    BehaviorState::Plan(PlanPhase::Executing) => Some((
+                        crate::session::behavior::plan_execution_reminder_template(),
+                        controller.approved_plan_file_path().to_path_buf(),
+                    )),
+                    BehaviorState::Plan(_) => Some((
+                        crate::session::behavior::plan_mode_reminder_full_template(),
+                        controller.plan_file_path().to_path_buf(),
+                    )),
+                    _ => None,
+                }
             };
-            if let Some(plan_path) = plan_path {
+            if let Some((template, plan_path)) = plan {
                 let plan_has_content =
-                    crate::session::plan_mode::plan_file_has_content(&plan_path).await;
-                let template = crate::session::plan_mode::plan_mode_reminder_full_template();
+                    crate::session::behavior::plan_file_has_content(&plan_path).await;
                 let wrapper = self.reminder_wrapper_tag();
                 let rendered = self
                     .render_plan_template(template, &plan_path, plan_has_content)
@@ -1752,8 +1760,8 @@ impl SessionActor {
             .on_skill_discovery_compaction()
             .await;
         self.persist_announcement_state().await;
-        self.plan_mode.lock().reset_after_compaction();
-        self.persist_plan_mode_state();
+        self.behavior.lock().reset_after_compaction();
+        self.persist_behavior_state();
         self.dispatch_hook(
             grow_hooks::event::HookEventName::PostCompact,
             grow_hooks::event::HookPayload::PostCompact {
@@ -2392,15 +2400,12 @@ mod inline_auto_compact_flow_tests {
             models_manager: Default::default(),
             display_cwd: std::sync::OnceLock::new(),
             active_agent_type: parking_lot::Mutex::new(None),
-            queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(
-                false,
-            )),
             active_skill: parking_lot::Mutex::new(None),
             current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
             turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
             turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
-            plan_mode: Arc::new(parking_lot::Mutex::new(
-                crate::session::plan_mode::BehaviorController::new(std::path::PathBuf::from(
+            behavior: Arc::new(parking_lot::Mutex::new(
+                crate::session::behavior::BehaviorController::new(std::path::PathBuf::from(
                     "/tmp/test-session",
                 )),
             )),
@@ -2890,7 +2895,7 @@ mod inline_auto_compact_flow_tests {
                     "provider_limit: {provider_limit}"
                 );
                 let auth = notification_for(SuppressReason::Auth).await;
-                assert!(auth.contains("/login"), "auth: {auth}");
+                assert!(auth.contains("provider authentication"), "auth: {auth}");
                 let size = notification_for(SuppressReason::Size).await;
                 assert!(size.contains("too large to compact"), "size: {size}");
                 let schema = notification_for(SuppressReason::Schema).await;

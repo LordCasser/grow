@@ -23,7 +23,6 @@ members = [
     "crates/codegen/grow-auth",
     "crates/codegen/grow-config",
     "crates/codegen/grow-config-types",
-    "crates/codegen/grow-env",
     "crates/codegen/grow-hooks",
     "crates/codegen/grow-http",
     "crates/codegen/grow-markdown",
@@ -31,7 +30,6 @@ members = [
     "crates/codegen/grow-mcp",
     "crates/codegen/grow-memory",
     "crates/codegen/grow-mermaid",
-    "crates/codegen/grow-models",
     "crates/codegen/grow-pager",
     "crates/codegen/grow-pager-bin",
     "crates/codegen/grow-pager-minimal",
@@ -265,14 +263,12 @@ grow-announcements = { path = "crates/codegen/grow-announcements" }
 grow-auth = { path = "crates/codegen/grow-auth" }
 grow-config = { path = "crates/codegen/grow-config" }
 grow-config-types = { path = "crates/codegen/grow-config-types" }
-grow-env = { path = "crates/codegen/grow-env" }
 grow-http = { path = "crates/codegen/grow-http" }
 grow-markdown = { path = "crates/codegen/grow-markdown" }
 grow-markdown-core = { path = "crates/codegen/grow-markdown-core" }
 grow-mcp = { path = "crates/codegen/grow-mcp" }
 grow-memory = { path = "crates/codegen/grow-memory" }
 grow-mermaid = { path = "crates/codegen/grow-mermaid" }
-grow-models = { path = "crates/codegen/grow-models" }
 grow-sampler = { path = "crates/codegen/grow-sampler" }
 grow-shared = { path = "crates/codegen/grow-shared" }
 grow-shell = { path = "crates/codegen/grow-shell" }

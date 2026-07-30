@@ -21,7 +21,7 @@ fn management_command(
     if !allowed {
         return None;
     }
-    Some(format!("/workflow {op} {}", run.name))
+    Some(format!("/workflow-run {op} {}", run.name))
 }
 
 fn resolve_management_command(
@@ -32,7 +32,7 @@ fn resolve_management_command(
         if op == "resume"
             && target.is_some_and(|r| r.status == "budget_limited" && r.management_available)
         {
-            target.map(|r| format!("/workflow resume {}", r.name))
+            target.map(|r| format!("/workflow-run resume {}", r.name))
         } else {
             None
         }
@@ -523,7 +523,7 @@ mod workflows_overlay_key_tests {
         assert!(matches!(
             out,
             InputOutcome::Action(Action::SendSlashCommandPreservingDraft(ref command))
-                if command == "/workflow resume deep-research"
+                if command == "/workflow-run resume deep-research"
         ));
 
         agent.show_workflows = true;
@@ -532,7 +532,7 @@ mod workflows_overlay_key_tests {
         assert!(matches!(
             out,
             InputOutcome::Action(Action::SendSlashCommandPreservingDraft(ref command))
-                if command == "/workflow resume deep-research"
+                if command == "/workflow-run resume deep-research"
         ));
         assert!(
             !agent.show_workflows,
@@ -546,7 +546,7 @@ mod workflows_overlay_key_tests {
             matches!(
                 out,
                 InputOutcome::Action(Action::SendSlashCommandPreservingDraft(ref command))
-                    if command == "/workflow resume deep-research"
+                    if command == "/workflow-run resume deep-research"
             ),
             "failed runs resume via journal replay"
         );

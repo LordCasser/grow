@@ -109,11 +109,7 @@ pub fn resolve_collapsed_edit_blocks(
     )
 }
 
-/// Resolve the opt-in mouse-reporting toggle shortcut flag.
-///
-/// When enabled, the pager registers `Ctrl+R` (scrollback-focused only) so the
-/// user can flip terminal mouse capture and hand selection back to the terminal
-/// for native click-drag copy/paste.
+/// Resolve whether the opt-in `/toggle-mouse-reporting` command is exposed.
 ///
 /// Precedence: `GROW_MOUSE_REPORTING_TOGGLE` env > `[ui] mouse_reporting_toggle`
 /// in effective config > the parsed [`UiConfig`] field (defends against a

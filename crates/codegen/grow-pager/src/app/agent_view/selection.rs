@@ -958,7 +958,7 @@ impl AgentView {
             && self
                 .scrollback
                 .entry(idx)
-                .is_some_and(|e| e.block.is_plan_mode_tool());
+                .is_some_and(|e| e.block.is_plan_control_tool());
 
         // Credit-limit URL click is handled upstream (before this method)
         // so only the URL line is clickable, not the whole block.

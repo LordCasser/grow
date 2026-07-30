@@ -1,8 +1,4 @@
-//! `/always-approve` -- toggle auto-approve (YOLO / `permission_mode`).
-//!
-//! Dispatches `Action::SetYoloMode(!current)`. The dispatcher handles
-//! state mutation, permission_queue drain, persistence (with rollback
-//! on disk-write failure), and toast.
+//! `/always-approve` -- select Always Approve for the current session.
 //!
 //! No scrollback turn — visible effects are the prompt-line chip and
 //! a toast (destructive-styled when enabling).
@@ -10,7 +6,7 @@
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 
-/// Toggle always-approve (YOLO / `permission_mode`).
+/// Select always-approve (YOLO / `permission_mode`).
 pub struct AlwaysApproveCommand;
 
 impl SlashCommand for AlwaysApproveCommand {
@@ -19,16 +15,25 @@ impl SlashCommand for AlwaysApproveCommand {
     }
 
     fn description(&self) -> &str {
-        "Toggle always-approve mode (skip all permission prompts)"
+        "[permission] Switch to Always Approve"
     }
 
     fn usage(&self) -> &str {
         "/always-approve"
     }
 
-    fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        let new = !ctx.pager_state.yolo_mode;
-        CommandResult::Action(Action::SetYoloMode(new))
+    fn session_scoped(&self) -> bool {
+        true
+    }
+
+    fn offered_when_session_less(&self) -> bool {
+        true
+    }
+
+    fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
+        CommandResult::Action(Action::SetPermissionMode(
+            crate::app::actions::PermissionModeKind::AlwaysApprove,
+        ))
     }
 }
 
@@ -64,18 +69,22 @@ mod tests {
         let mut ctx = make_ctx(&models, &bundle, false);
         assert!(matches!(
             AlwaysApproveCommand.run(&mut ctx, ""),
-            CommandResult::Action(Action::SetYoloMode(true))
+            CommandResult::Action(Action::SetPermissionMode(
+                crate::app::actions::PermissionModeKind::AlwaysApprove
+            ))
         ));
     }
 
     #[test]
-    fn on_turns_always_approve_off() {
+    fn on_selects_always_approve_idempotently() {
         let models = ModelState::default();
         let bundle = BundleState::default();
         let mut ctx = make_ctx(&models, &bundle, true);
         assert!(matches!(
             AlwaysApproveCommand.run(&mut ctx, ""),
-            CommandResult::Action(Action::SetYoloMode(false))
+            CommandResult::Action(Action::SetPermissionMode(
+                crate::app::actions::PermissionModeKind::AlwaysApprove
+            ))
         ));
     }
 
@@ -86,7 +95,9 @@ mod tests {
         let mut ctx = make_ctx(&models, &bundle, false);
         assert!(matches!(
             AlwaysApproveCommand.run(&mut ctx, "extra"),
-            CommandResult::Action(Action::SetYoloMode(true))
+            CommandResult::Action(Action::SetPermissionMode(
+                crate::app::actions::PermissionModeKind::AlwaysApprove
+            ))
         ));
     }
 }

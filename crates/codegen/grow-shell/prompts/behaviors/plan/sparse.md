@@ -1,1 +1,1 @@
-Plan behavior remains active. Ordinary file editing is prohibited. Use other authorized tools only to investigate or verify, under their existing permission rules, and submit the complete plan through `${{ tools.by_kind.exit_plan }}` using its `plan` argument.
+Plan behavior remains active. Workspace mutation is prohibited until approval. Investigate with read/search/web tools under their existing permission rules, then submit the complete plan through `${{ tools.by_kind.plan_control }}` with `action="submit"` and its `plan` argument.

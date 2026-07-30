@@ -119,8 +119,8 @@ impl JsonlStorageAdapter {
     fn plan_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::PLAN_FILE)
     }
-    fn plan_mode_state_file(&self, info: &Info) -> PathBuf {
-        self.session_dir(info).join(super::PLAN_MODE_FILE)
+    fn behavior_state_file(&self, info: &Info) -> PathBuf {
+        self.session_dir(info).join(super::BEHAVIOR_STATE_FILE)
     }
     fn signals_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::SIGNALS_FILE)
@@ -661,22 +661,35 @@ impl JsonlStorageAdapter {
             }
             Err(error) => return Err(error),
         };
+        // Invalid/symlinked rows must not consume the restored-run budget.
+        // Bound directory scanning separately so a hostile directory cannot
+        // turn restore into unbounded work while still allowing bad rows to
+        // be skipped before the valid-run cap is reached.
+        let scan_limit = MAX_RESTORED_WORKFLOW_RUNS.saturating_mul(4);
         let mut entries: Vec<_> = std::fs::read_dir(&workflows_dir)?
             .filter_map(Result::ok)
-            .take(MAX_RESTORED_WORKFLOW_RUNS.saturating_add(1))
+            .take(scan_limit.saturating_add(1))
             .collect();
-        let entries_truncated = entries.len() > MAX_RESTORED_WORKFLOW_RUNS;
-        entries.truncate(MAX_RESTORED_WORKFLOW_RUNS);
+        let entries_truncated = entries.len() > scan_limit;
+        entries.truncate(scan_limit);
         entries.sort_by_key(|entry| entry.file_name());
         if entries_truncated {
             tracing::warn!(
                 path = %workflows_dir.display(),
-                limit = MAX_RESTORED_WORKFLOW_RUNS,
-                "workflow restore run-count cap reached; ignoring remaining entries"
+                limit = scan_limit,
+                "workflow restore scan cap reached; ignoring remaining directory entries"
             );
         }
         let mut restored = Vec::new();
         for entry in entries {
+            if restored.len() == MAX_RESTORED_WORKFLOW_RUNS {
+                tracing::warn!(
+                    path = %workflows_dir.display(),
+                    limit = MAX_RESTORED_WORKFLOW_RUNS,
+                    "workflow restore run-count cap reached; ignoring remaining valid entries"
+                );
+                break;
+            }
             let run_dir = entry.path();
             let Ok(run_meta) = std::fs::symlink_metadata(&run_dir) else {
                 continue;
@@ -1209,12 +1222,12 @@ impl JsonlStorageAdapter {
         } else {
             false
         };
-        let plan_mode_state_copied = if options.copy_plan_mode_state {
-            let plan_mode_path = self.plan_mode_state_file(source_info);
-            if plan_mode_path.exists() {
+        let behavior_state_copied = if options.copy_behavior_state {
+            let behavior_path = self.behavior_state_file(source_info);
+            if behavior_path.exists() {
                 std::fs::write(
-                    self.plan_mode_state_file(target_info),
-                    std::fs::read(&plan_mode_path)?,
+                    self.behavior_state_file(target_info),
+                    std::fs::read(&behavior_path)?,
                 )?;
                 true
             } else {
@@ -1352,7 +1365,7 @@ impl JsonlStorageAdapter {
             chat_messages_copied: num_chat_messages,
             updates_copied: num_messages,
             plan_state_copied: plan_copied,
-            plan_mode_state_copied,
+            behavior_state_copied,
             signals_copied,
             tool_state_copied,
             announcement_state_copied,
@@ -1503,14 +1516,14 @@ impl StorageAdapter for JsonlStorageAdapter {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         tokio::fs::write(self.plan_file(info), state_json).await
     }
-    async fn write_plan_mode_state(
+    async fn write_behavior_state(
         &self,
         info: &Info,
-        state: &crate::session::plan_mode::BehaviorSnapshot,
+        state: &crate::session::behavior::BehaviorSnapshot,
     ) -> io::Result<()> {
         let json = serde_json::to_vec_pretty(state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        super::write_bytes_atomic_async(&self.plan_mode_state_file(info), json).await
+        super::write_bytes_atomic_async(&self.behavior_state_file(info), json).await
     }
     async fn write_signals(
         &self,
@@ -1623,9 +1636,9 @@ impl StorageAdapter for JsonlStorageAdapter {
         let chat_history = self.read_chat_history_sync(chat_file, summary.chat_format_version)?;
         let updates = self.read_updates_jsonl(self.updates_file(info))?;
         let plan_state = self.read_optional_json_sync::<TodoState>(&self.plan_file(info))?;
-        let plan_mode_state = self
-            .read_optional_json_sync::<crate::session::plan_mode::BehaviorSnapshot>(
-                &self.plan_mode_state_file(info),
+        let behavior_state = self
+            .read_optional_json_sync::<crate::session::behavior::BehaviorSnapshot>(
+                &self.behavior_state_file(info),
             )?;
         let signals = self.read_optional_json_sync::<crate::session::signals::SessionSignals>(
             &self.signals_file(info),
@@ -1645,7 +1658,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             chat_history,
             updates,
             plan_state,
-            plan_mode_state,
+            behavior_state,
             rewind_points,
             signals,
             announcement_state,
@@ -1677,9 +1690,9 @@ impl StorageAdapter for JsonlStorageAdapter {
         self.ensure_chat_history(info, summary.chat_format_version)?;
         let chat_history = self.read_chat_history_sync(chat_file, summary.chat_format_version)?;
         let plan_state = self.read_optional_json_sync::<TodoState>(&self.plan_file(info))?;
-        let plan_mode_state = self
-            .read_optional_json_sync::<crate::session::plan_mode::BehaviorSnapshot>(
-                &self.plan_mode_state_file(info),
+        let behavior_state = self
+            .read_optional_json_sync::<crate::session::behavior::BehaviorSnapshot>(
+                &self.behavior_state_file(info),
             )?;
         let signals = self.read_optional_json_sync::<crate::session::signals::SessionSignals>(
             &self.signals_file(info),
@@ -1697,7 +1710,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             summary,
             chat_history,
             plan_state,
-            plan_mode_state,
+            behavior_state,
             signals,
             announcement_state,
             goal_mode_state,

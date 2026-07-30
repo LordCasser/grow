@@ -12,10 +12,7 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
 use grow_shell::{
-    agent::{
-        MvpAgent, activity::SESSION_FLUSH_GRACE, config::Config as AgentConfig,
-        models::RefreshStrategy,
-    },
+    agent::{MvpAgent, activity::SESSION_FLUSH_GRACE, config::Config as AgentConfig},
     auth::AuthManager,
     util::grow_home::grow_home,
 };
@@ -191,14 +188,8 @@ pub async fn spawn_grow_shell(
     // Run the full bootstrap sequence: config resolution, process-level
     // singletons, and model catalog construction.
     let (agent_config, models_manager) =
-        grow_shell::agent::init::bootstrap(&agent_config, &auth_manager, None)
+        grow_shell::agent::init::bootstrap(&agent_config, &auth_manager)
             .map_err(|e| anyhow::anyhow!(e))?;
-    models_manager
-        .list_models(RefreshStrategy::OnlineIfUncached)
-        .await;
-    // Self-heal a cold-cache/failed boot fetch once the backend recovers,
-    // matching the leader and stdio paths.
-    models_manager.spawn_background_refresh();
 
     let agent_cancel = cancel.child_token();
     let (acp_client, acp_agent) = acp_channels();

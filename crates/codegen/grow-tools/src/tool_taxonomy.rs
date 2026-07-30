@@ -27,7 +27,7 @@ pub mod field {
 pub const TOOL_META_KEY: &str = "grow/tool";
 /// Version of the canonical tool `_meta` contract. Bump on any breaking change
 /// to keys or value shapes so consumers can adapt.
-pub const TOOL_META_VERSION: u32 = 1;
+pub const TOOL_META_VERSION: u32 = 2;
 impl ToolKind {
     /// Unified, harness-independent display label for this semantic kind. A pure
     /// function of the kind, so equivalent tools across toolsets share it
@@ -55,8 +55,7 @@ impl ToolKind {
             ToolKind::MemorySearch => "Memory Search",
             ToolKind::MemoryGet => "Memory Read",
             ToolKind::Task => "Subagent",
-            ToolKind::EnterPlan => "Enter Plan Mode",
-            ToolKind::ExitPlan => "Exit Plan Mode",
+            ToolKind::PlanControl => "Plan Control",
             ToolKind::AskUser => "Ask User",
             ToolKind::DeployApp => "Deploy App",
             ToolKind::SearchTool => "Search Tools",
@@ -81,8 +80,7 @@ impl ToolKind {
             | ToolKind::MemorySearch
             | ToolKind::MemoryGet
             | ToolKind::WebFetch
-            | ToolKind::EnterPlan
-            | ToolKind::ExitPlan
+            | ToolKind::PlanControl
             | ToolKind::AskUser => true,
             ToolKind::Edit
             | ToolKind::Delete
@@ -142,10 +140,10 @@ pub struct ToolIdentity {
 ///
 /// ```json
 /// "grow/tool": {
-///   "version": 1,
+///   "version": 2,
 ///   "name": "read_file",
 ///   "kind": "read",
-///   "namespace": "grow_build",
+///   "namespace": "grow",
 ///   "label": "Read",
 ///   "read_only": true,
 ///   "input": { "path": "..." }
@@ -253,27 +251,23 @@ mod tests {
         assert!(!ToolKind::Delete.is_read_only());
     }
     #[test]
-    fn namespace_round_trips_snake_case_with_pascal_aliases() {
+    fn namespace_round_trips_canonical_wire_values() {
         use strum::IntoEnumIterator;
-        fn wire_and_pascal(ns: ToolNamespace) -> (&'static str, &'static str) {
+        fn wire(ns: ToolNamespace) -> &'static str {
             match ns {
-                ToolNamespace::Grow => ("grow_build", "Grow"),
-                ToolNamespace::GrowConcise => ("grow_build_concise", "GrowConcise"),
-                ToolNamespace::GrowHashline => ("grow_build_hashline", "GrowHashline"),
-                ToolNamespace::Codex => ("codex", "Codex"),
-                ToolNamespace::OpenCode => ("opencode", "OpenCode"),
-                ToolNamespace::MCP => ("mcp", "MCP"),
+                ToolNamespace::Grow => "grow",
+                ToolNamespace::GrowConcise => "grow_concise",
+                ToolNamespace::GrowHashline => "grow_hashline",
+                ToolNamespace::Codex => "codex",
+                ToolNamespace::OpenCode => "opencode",
+                ToolNamespace::MCP => "mcp",
             }
         }
         for ns in ToolNamespace::iter() {
-            let (snake, pascal) = wire_and_pascal(ns);
-            assert_eq!(serde_json::to_value(ns).unwrap(), serde_json::json!(snake));
+            let wire = wire(ns);
+            assert_eq!(serde_json::to_value(ns).unwrap(), serde_json::json!(wire));
             assert_eq!(
-                serde_json::from_value::<ToolNamespace>(serde_json::json!(snake)).unwrap(),
-                ns
-            );
-            assert_eq!(
-                serde_json::from_value::<ToolNamespace>(serde_json::json!(pascal)).unwrap(),
+                serde_json::from_value::<ToolNamespace>(serde_json::json!(wire)).unwrap(),
                 ns
             );
         }
@@ -310,7 +304,7 @@ mod tests {
         assert_eq!(t["version"], serde_json::json!(TOOL_META_VERSION));
         assert_eq!(t["name"], "read_file");
         assert_eq!(t["kind"], "read");
-        assert_eq!(t["namespace"], "grow_build");
+        assert_eq!(t["namespace"], "grow");
         assert_eq!(t["label"], "Read");
         assert_eq!(t["read_only"], true);
         assert_eq!(t["input"]["path"], "/a");

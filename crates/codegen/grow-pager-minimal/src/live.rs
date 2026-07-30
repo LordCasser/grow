@@ -630,20 +630,34 @@ fn render_prompt_info(
             };
             segs.push((label, base));
         }
-        let effective_plan =
-            minimal_api::plan_mode_pending(agent).unwrap_or(minimal_api::plan_mode_active(agent));
-        let mode_flag: Option<(&str, Color)> = if effective_plan {
-            Some(("plan", theme.accent_plan))
-        } else if agent.session.is_yolo() {
-            Some(("always-approve", theme.warning))
-        } else if agent.session.is_auto() {
-            Some(("auto", theme.accent_system))
-        } else {
-            None
+        let behavior = minimal_api::effective_behavior_mode(agent);
+        let behavior_label = match behavior {
+            minimal_api::SessionMode::Default => "normal",
+            minimal_api::SessionMode::Ask => "clarify",
+            minimal_api::SessionMode::Plan => match minimal_api::plan_phase(agent) {
+                Some("awaiting_approval") => "plan · awaiting approval",
+                Some("executing") => "plan · executing",
+                Some("amending") => "plan · amending",
+                _ => "plan · drafting",
+            },
+            minimal_api::SessionMode::Workflow => "workflow",
+            minimal_api::SessionMode::DeepResearch => "deep-research",
+            minimal_api::SessionMode::Goal => "goal",
         };
-        if let Some((label, color)) = mode_flag {
-            segs.push((label.to_string(), base.fg(color)));
-        }
+        let behavior_color = if behavior == minimal_api::SessionMode::Plan {
+            theme.accent_plan
+        } else {
+            theme.accent_system
+        };
+        segs.push((behavior_label.to_string(), base.fg(behavior_color)));
+        let (permission_label, permission_style) = if agent.session.is_yolo() {
+            ("always-approve", base.fg(theme.warning))
+        } else if agent.session.is_auto() {
+            ("auto", base.fg(theme.accent_system))
+        } else {
+            ("ask", base)
+        };
+        segs.push((permission_label.to_string(), permission_style));
         let used = agent.context_state.as_ref().map(|c| c.used);
         let total = agent
             .context_state
@@ -664,7 +678,6 @@ fn render_prompt_info(
         segs.push((format!("{queued} queued"), base));
         segs.push(("/queue".to_string(), base));
     }
-    segs.push(("shift+tab effort".to_string(), base));
     segs.push((transcript_hint.to_string(), base));
     if segs.is_empty() {
         return;
@@ -1007,12 +1020,17 @@ mod tests {
         };
         let mut a = agent();
         let text = render(&a);
-        assert!(!text.contains("plan"), "normal shows no flag: {text:?}");
+        assert!(text.contains("normal"), "normal behavior: {text:?}");
+        assert!(text.contains("ask"), "ask permission: {text:?}");
         assert!(!text.contains("always-approve"), "normal: {text:?}");
-        minimal_api::set_plan_mode_pending(&mut a, Some(true));
+        minimal_api::set_behavior_mode_for_test(&mut a, minimal_api::SessionMode::Plan);
         assert!(render(&a).contains("plan"), "plan flag: {:?}", render(&a));
-        minimal_api::set_plan_mode_pending(&mut a, None);
-        minimal_api::set_plan_mode_active(&mut a, false);
+        minimal_api::set_behavior_mode_for_test(&mut a, minimal_api::SessionMode::Workflow);
+        assert!(
+            render(&a).contains("workflow"),
+            "workflow flag: {:?}",
+            render(&a)
+        );
         minimal_api::set_yolo_mode_for_test(&mut a.session, true);
         minimal_api::set_auto_mode_for_test(&mut a.session, true);
         let text = render(&a);

@@ -419,10 +419,10 @@ async fn fallback_prompt_respects_active_plan_mode() {
         .run_until(async {
             let (actor, _rx) = build_actor().await;
             {
-                let mut tracker = actor.plan_mode.lock();
-                tracker.enter_pending();
-                tracker.activate();
+                let mut tracker = actor.behavior.lock();
+                tracker.select_behavior(Some(xai_tool_types::BehaviorId::Plan));
             }
+            *actor.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Plan;
 
             actor
                 .queue_interjection_fallback_prompt("plan steer".to_string(), vec![], true)
@@ -432,7 +432,7 @@ async fn fallback_prompt_respects_active_plan_mode() {
             let front = state.pending_inputs.front().expect("fallback queued");
             assert_eq!(
                 front.prompt_mode,
-                crate::session::plan_mode::PromptMode::Plan,
+                crate::session::behavior::PromptMode::Plan,
                 "fallback turn must stay inside plan mode"
             );
         })

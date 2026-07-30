@@ -98,12 +98,28 @@ pub struct ArgItem {
     pub description: String,
 }
 
+/// Lightweight Agent entry shared by slash completion and compact pickers.
+/// Discovery remains owned by the UI; the slash layer only consumes the
+/// already-resolved catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentArg {
+    pub name: String,
+    pub description: String,
+}
+
 /// Read-only context for generating suggestions.
 ///
 /// Passed to `SlashCommand::suggest_args()` and `SlashCommand::visible()`.
 /// Kept minimal -- extend as needed.
 pub struct AppCtx<'a> {
     pub models: &'a ModelState,
+    pub agents: &'a [AgentArg],
+    pub current_agent: Option<&'a str>,
+    pub behavior_mode: grow_tools::types::SessionMode,
+    pub deep_research_available: bool,
+    pub goal_available: bool,
+    pub auto_permission_available: bool,
+    pub current_permission: &'a str,
     /// Working directory of the active session (for filesystem completions).
     pub cwd: &'a std::path::Path,
     /// Session announcements (critical or promo) exist (gates `/announcements` visibility).
@@ -248,7 +264,7 @@ pub trait SlashCommand: Send + Sync {
     /// Minimal mode deletes the interactive fullscreen scrollback pane, the
     /// in-app mouse selection path, and the agent dashboard, handing scroll /
     /// search / selection back to the terminal (K7). Commands that drive those
-    /// deleted surfaces — `/find`, `/dashboard` — have nothing to act on, so
+    /// deleted surfaces — `/find`, `/agents` — have nothing to act on, so
     /// the central dispatch gate refuses them with a "/<x> is not available in
     /// minimal mode" message (committed as a system block). Clipboard helpers
     /// like `/copy` stay available: they read scrollback state and do not need

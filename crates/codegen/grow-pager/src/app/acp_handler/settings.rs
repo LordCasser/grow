@@ -13,16 +13,10 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
 
         let shell_fallback_current = new_models.current.clone();
 
-        // Override app-level default with the active agent's model.
-        let mut app_models = new_models.clone();
-        if let ActiveView::Agent(id) = app.active_view
-            && let Some(agent) = app.agents.get(&id)
-            && let Some(ref agent_model) = agent.session.models.current
-            && app_models.available.contains_key(agent_model)
-        {
-            app_models.current = Some(agent_model.clone());
-        }
-
+        // Refresh the new-session template catalog without importing the active
+        // session's transient model selection into the persistent default.
+        let mut app_models = app.models.clone();
+        app_models.update_catalog(new_models.available.clone(), new_models.current.clone());
         app.models = app_models;
 
         for agent in app.agents.values_mut() {
@@ -75,8 +69,8 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
     if let Some(v) = update.auto_permission_mode_enabled {
         // Keep the pager's auto-permission-mode gate live with the remote settings
         // remote tier (the leader caches it agent-side; the pager process needs
-        // its own copy). Refresh the startup snapshot so the Ctrl+R cycle and
-        // the settings modal both reflect a remote-only enablement/kill-switch
+        // its own copy). Refresh the startup snapshot so permission selectors
+        // and the settings modal both reflect a remote-only enablement/kill-switch
         // without a restart.
         grow_shell::util::config::cache_remote_auto_permission_mode_enabled(Some(v));
         app.auto_mode_gate = grow_shell::util::config::auto_permission_mode_enabled_from_disk();
@@ -104,8 +98,8 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
 
     // `permission_mode` is presence-aware (omit / null / string). While the
     // soft default still owns the mode, a push re-arms `default_yolo` + UI for
-    // the next `/new`; once the user claims a mode (Ctrl+R / settings /
-    // `/mode`) the latch is cleared and pushes leave it alone.
+    // the next `/new`; once the user claims a mode through a session selector,
+    // the latch is cleared and pushes leave it alone.
     if let Some(remote_opt) = update.permission_mode.as_ref()
         && app.permission_mode_from_soft_default
     {

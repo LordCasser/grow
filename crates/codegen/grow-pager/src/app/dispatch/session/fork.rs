@@ -415,7 +415,7 @@ fn build_fork_placeholder(
 /// Build the discoverability banner for the child agent. Includes the
 /// child's session id, the full parent session id, and — when
 /// `switch_hint` names a command (the caller's
-/// [`crate::views::dashboard::session_switch_hint_command`]: `/dashboard`
+/// [`crate::views::dashboard::session_switch_hint_command`]: `/agents`
 /// normally, `/resume` in minimal mode where the dashboard is refused) —
 /// a session-switch tip so the user knows how to switch back. No-worktree
 /// case appends the dim continuation `(both agents share cwd)`.

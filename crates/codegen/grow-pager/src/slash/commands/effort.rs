@@ -23,17 +23,19 @@ impl SlashCommand for EffortCommand {
         true
     }
 
-    fn usage(&self) -> &str {
-        // Levels are model-specific; empty-args and UnknownToken errors list
-        // the active model's offered option ids instead of a hardcoded set.
-        "/effort <level>"
-    }
-
-    fn takes_args(&self) -> bool {
+    fn offered_when_session_less(&self) -> bool {
+        // The dashboard stages effort together with the model for the next
+        // spawned Agent.
         true
     }
 
-    fn args_required(&self) -> bool {
+    fn usage(&self) -> &str {
+        // Levels are model-specific; empty-args and UnknownToken errors list
+        // the active model's offered option ids instead of a hardcoded set.
+        "/effort [level]"
+    }
+
+    fn takes_args(&self) -> bool {
         true
     }
 
@@ -61,23 +63,10 @@ impl SlashCommand for EffortCommand {
         };
 
         if trimmed.is_empty() {
-            let offered: Vec<String> = ctx
-                .models
-                .reasoning_effort_options_for(&model_id)
-                .into_iter()
-                .map(|opt| opt.id)
-                .collect();
-            let current = ctx
-                .models
-                .reasoning_effort
-                .map(|e| format!(" (current: {e})"))
-                .unwrap_or_default();
-            let levels = if offered.is_empty() {
-                "<level>".to_string()
-            } else {
-                offered.join("|")
-            };
-            return CommandResult::Error(format!("Usage: /effort <{levels}>{current}"));
+            return CommandResult::Action(Action::OpenCommandPicker {
+                command: "effort".to_string(),
+                args_query: String::new(),
+            });
         }
 
         // Same gate-first policy as the CLI (`--effort`) and headless.
@@ -144,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_args_errors_with_usage() {
+    fn empty_args_opens_picker() {
         let mut state = ModelState::default();
         let (id, info) = model_with_reasoning("reasoning-x", "Reasoning X");
         state.available.insert(id.clone(), info);
@@ -152,17 +141,11 @@ mod tests {
         state.reasoning_effort = Some(ReasoningEffort::Medium);
         let mut ctx = dummy_exec_ctx(&state);
         let result = EffortCommand.run(&mut ctx, "");
-        match result {
-            CommandResult::Error(msg) => {
-                assert!(msg.contains("Usage: /effort"));
-                // Legacy menu option ids only — not none/minimal.
-                assert!(msg.contains("xhigh|high|medium|low"), "msg={msg}");
-                assert!(msg.contains("current: medium"));
-                assert!(!msg.contains("none"));
-                assert!(!msg.contains("minimal"));
-            }
-            other => panic!("expected Error, got {other:?}"),
-        }
+        assert!(matches!(
+            result,
+            CommandResult::Action(Action::OpenCommandPicker { ref command, .. })
+                if command == "effort"
+        ));
     }
 
     #[test]
@@ -319,6 +302,13 @@ mod tests {
         let empty = ModelState::default();
         let ctx = AppCtx {
             models: &empty,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             workflows_available: true,
@@ -332,6 +322,13 @@ mod tests {
         plain.current = Some(id);
         let ctx = AppCtx {
             models: &plain,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             workflows_available: true,
@@ -351,6 +348,13 @@ mod tests {
         let cmd = EffortCommand;
         let ctx = AppCtx {
             models: &state,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             workflows_available: true,

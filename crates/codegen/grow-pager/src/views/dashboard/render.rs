@@ -2750,12 +2750,10 @@ fn paint_dispatch_feedback_badge(
     );
 }
 
-/// Paint the model + mode indicator onto the dispatch box's **bottom
+/// Paint the model + Behavior + Permission indicator onto the dispatch box's **bottom
 /// border**, reusing the shared prompt info-line renderer so its style,
 /// spacing, and position match the chat prompt exactly (`╰──model · flag──╯`).
-/// The model name renders in dim secondary text; the mode shows as a `plan`
-/// (plan accent) or `always-approve` (default) flag. No-op when the box is
-/// too short or there's nothing to show.
+/// The ordering mirrors the live Agent input: model | behavior | permission.
 fn paint_dispatch_config_badge(
     buf: &mut Buffer,
     area: Rect,
@@ -2763,7 +2761,6 @@ fn paint_dispatch_config_badge(
     state: &DashboardState,
     input_focused: bool,
 ) {
-    use crate::views::dashboard::DashboardDispatchMode;
     use crate::views::prompt_widget::{PromptFlag, PromptInfo};
 
     if area.height < 3 || area.width < 6 {
@@ -2779,25 +2776,31 @@ fn paint_dispatch_config_badge(
         .or_else(|| state.models.current_model_name())
         .unwrap_or_default();
 
-    // Mode flag, styled exactly like the chat prompt's mode flags.
-    let mut flags: Vec<PromptFlag> = Vec::new();
-    match state.pending_mode {
-        DashboardDispatchMode::Plan => flags.push(PromptFlag {
-            text: "plan",
-            color: Some(theme.accent_plan),
+    let behavior = match state.pending_behavior {
+        grow_tools::types::SessionMode::Default => "normal",
+        grow_tools::types::SessionMode::Ask => "clarify",
+        grow_tools::types::SessionMode::Plan => "plan",
+        grow_tools::types::SessionMode::Workflow => "workflow",
+        grow_tools::types::SessionMode::DeepResearch => "deep-research",
+        grow_tools::types::SessionMode::Goal => "goal",
+    };
+    let permission = state.pending_permission.as_canonical();
+    let flags = vec![
+        PromptFlag {
+            text: behavior,
+            color: if state.pending_behavior.is_plan() {
+                Some(theme.accent_plan)
+            } else {
+                Some(theme.accent_system)
+            },
             bold: false,
-        }),
-        DashboardDispatchMode::AlwaysApprove => flags.push(PromptFlag {
-            text: "always-approve",
+        },
+        PromptFlag {
+            text: permission,
             color: None,
             bold: false,
-        }),
-        DashboardDispatchMode::Normal => {}
-    }
-
-    if model_label.is_empty() && flags.is_empty() && !state.multiline_mode {
-        return;
-    }
+        },
+    ];
 
     let info = PromptInfo {
         model_name: &model_label,
@@ -3618,12 +3621,11 @@ fn render_footer(
             // Typed text dispatches a NEW agent (a section header is
             // never a reply target), so surface the same chips as the
             // `[+ New Agent]` button with a draft: send_key sends (stays
-            // on the dashboard), Ctrl+S sends + opens detail,
-            // Shift+Tab cycles the dispatch mode.
+            // on the dashboard), Ctrl+S sends + opens detail. Configuration
+            // is staged with the shared Slash selectors.
             vec![
                 HintItem::new(send_key, "send"),
                 HintItem::new(send_open, "send+open"),
-                HintItem::new(key!(BackTab), "mode"),
             ]
         }
     } else if state.selected_idle_overflow {
@@ -3643,7 +3645,6 @@ fn render_footer(
             vec![
                 HintItem::new(send_key, "send"),
                 HintItem::new(send_open, "send+open"),
-                HintItem::new(key!(BackTab), "mode"),
             ]
         }
     } else if button_focused {
@@ -3655,7 +3656,6 @@ fn render_footer(
             h.push(HintItem::new(send_key, "send"));
             h.push(HintItem::new(send_open, "send+open"));
         }
-        h.push(HintItem::new(key!(BackTab), "mode"));
         h
     } else if row_selected {
         let mut h: Vec<HintItem> = vec![];
@@ -7796,7 +7796,7 @@ mod tests {
             None,
         );
         let content = buf_to_text(&buf);
-        for chip in [":create", ":shortcuts"] {
+        for chip in [":create", ":list"] {
             assert!(
                 content.contains(chip),
                 "footer must contain `{chip}` chip, got: {content:?}",
@@ -8489,7 +8489,7 @@ mod tests {
     /// Section header selected + typed text in the (focused) dispatch
     /// input — the draft dispatches a NEW agent (a section header is
     /// never a reply target), so the footer flips to the dispatch
-    /// chips: send / send+open / mode. The collapse toggle is gone
+    /// chips: send / send+open. The collapse toggle is gone
     /// (it only fires on an empty prompt).
     #[test]
     fn render_footer_section_selected_with_prompt_shows_dispatch_chips() {
@@ -8514,10 +8514,7 @@ mod tests {
             content.contains(":send") && content.contains(":send+open"),
             "section + typed prompt footer must hint send / send+open, got: {content:?}",
         );
-        assert!(
-            content.contains(":mode"),
-            "section + typed prompt footer must hint Shift+Tab:mode, got: {content:?}",
-        );
+        assert!(!content.contains(":mode"), "{content:?}");
         assert!(
             !content.contains(":collapse") && !content.contains(":expand"),
             "section + typed prompt footer must NOT show the toggle chip, got: {content:?}",

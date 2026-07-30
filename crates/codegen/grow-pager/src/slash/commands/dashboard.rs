@@ -1,4 +1,4 @@
-//! `/dashboard` — open the Agent Dashboard view.
+//! `/agents` — open the Agent Dashboard view.
 //!
 //! Centralised overview of every running session (top-level + subagents)
 //! with peek, attach, and dispatch from one screen. The dashboard reuses
@@ -6,9 +6,7 @@
 //! so attaching never bypasses `active_subagent`.
 //!
 //! Same `Action`-only run path as other session-less commands, no args.
-//! `/sessions` is an alias (see [`SlashCommand::aliases`]): the dashboard
-//! replaced the removed sessions picker modal for switching, renaming, and
-//! closing active sessions. Visibility is feature-flag-gated: the
+//! Visibility is feature-flag-gated: the
 //! command is hidden by default in the registry and revealed when the
 //! dashboard feature is enabled (`dashboard_enabled()`), via
 //! [`crate::app::agent_view::AgentView::set_dashboard_visible`]. When
@@ -24,19 +22,7 @@ pub struct DashboardCommand;
 
 impl SlashCommand for DashboardCommand {
     fn name(&self) -> &str {
-        "dashboard"
-    }
-
-    /// `/agents-dashboard` is registered as an alias. The canonical
-    /// name remains `/dashboard`.
-    ///
-    /// `/sessions` survives the sessions-modal removal as an alias: the
-    /// dashboard is the replacement surface for switching, renaming, and
-    /// closing active sessions, so old muscle memory redirects here. As an
-    /// alias it inherits the feature-flag gate (`set_dashboard_visible`
-    /// hides by canonical name) and the minimal-mode gates below.
-    fn aliases(&self) -> &[&str] {
-        &["agents-dashboard", "sessions"]
+        "agents"
     }
 
     fn description(&self) -> &str {
@@ -44,7 +30,7 @@ impl SlashCommand for DashboardCommand {
     }
 
     fn usage(&self) -> &str {
-        "/dashboard"
+        "/agents"
     }
 
     /// The agent dashboard is intentionally out of scope in minimal mode
@@ -54,7 +40,7 @@ impl SlashCommand for DashboardCommand {
     }
 
     /// Hidden from the completion dropdown in minimal mode: the dashboard
-    /// (and its `/sessions` / `/agents-dashboard` spellings) has nothing to
+    /// has nothing to
     /// open there, so offering it just to refuse at dispatch is noise. A
     /// fully-typed invocation still resolves and hits the central
     /// `available_in_minimal` dispatch gate (friendly refusal, fail-closed).
@@ -107,6 +93,13 @@ mod tests {
         let cmd = DashboardCommand;
         let ctx = |screen_mode| AppCtx {
             models: &models,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             workflows_available: true,
@@ -116,7 +109,7 @@ mod tests {
         assert!(cmd.visible(&ctx(crate::app::ScreenMode::Inline)));
         assert!(
             !cmd.visible(&ctx(crate::app::ScreenMode::Minimal)),
-            "the dashboard (and its /sessions alias) must not be offered in minimal mode"
+            "the Agent Dashboard must not be offered in minimal mode"
         );
     }
 
@@ -127,17 +120,15 @@ mod tests {
     }
 
     #[test]
-    fn name_is_dashboard() {
+    fn name_is_agents() {
         let cmd = DashboardCommand;
-        assert_eq!(cmd.name(), "dashboard");
+        assert_eq!(cmd.name(), "agents");
     }
 
-    /// `/sessions` (removed picker modal) and `/agents-dashboard`
-    /// both spell this command.
     #[test]
-    fn aliases_include_sessions() {
+    fn has_no_legacy_aliases() {
         let cmd = DashboardCommand;
-        assert_eq!(cmd.aliases(), &["agents-dashboard", "sessions"]);
+        assert!(cmd.aliases().is_empty());
     }
 
     #[test]

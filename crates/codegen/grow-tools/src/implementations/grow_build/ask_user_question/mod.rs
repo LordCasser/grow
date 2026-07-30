@@ -252,7 +252,7 @@ impl crate::types::tool_metadata::ToolMetadata for AskUserQuestionTool {
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
         // Standalone. The plan-mode prompt note is
-        // `${% if tools.by_kind.exit_plan %}`-guarded, so it renders
+        // `${% if tools.by_kind.plan_control %}`-guarded, so it renders
         // fine without the plan tools.
         Expr::True
     }

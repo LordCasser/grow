@@ -150,6 +150,8 @@ pub struct WorkflowRunState {
     pub current_phase: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_budget: Option<u64>,
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: u16,
     #[serde(default)]
     pub agents_used: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -168,6 +170,10 @@ pub struct WorkflowRunState {
     pub result_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<WorkflowAgentRow>,
+}
+
+fn default_max_concurrency() -> u16 {
+    grow_tools::implementations::grow_build::workflow::WorkflowToolInput::DEFAULT_MAX_CONCURRENCY
 }
 
 impl WorkflowRunState {
@@ -242,6 +248,7 @@ impl WorkflowTracker {
             phases,
             current_phase: None,
             agent_budget,
+            max_concurrency: default_max_concurrency(),
             agents_used: 0,
             token_leases: Vec::new(),
             agent_usage_incomplete: false,
@@ -298,6 +305,17 @@ impl WorkflowTracker {
         self.reported_terminal_run_ids.remove(run_id);
         self.terminal_at_restore_run_ids.remove(run_id);
         Some(state)
+    }
+
+    pub fn set_max_concurrency(
+        &mut self,
+        run_id: &str,
+        max_concurrency: u16,
+    ) -> Option<WorkflowRunState> {
+        let run = self.run_mut(run_id)?;
+        run.state.max_concurrency = max_concurrency;
+        run.state.advance_revision();
+        Some(run.state.clone())
     }
 
     pub fn set_phase(&mut self, run_id: &str, title: &str) -> Option<WorkflowRunState> {
@@ -418,6 +436,19 @@ impl WorkflowTracker {
             run.state.agents.remove(pos);
         }
         label
+    }
+
+    pub fn agent_running(&mut self, run_id: &str, agent_id: &str) -> Option<WorkflowRunState> {
+        let run = self.run_mut(run_id)?;
+        let agent = run
+            .state
+            .agents
+            .iter_mut()
+            .find(|agent| agent.agent_id == agent_id)?;
+        agent.state = "running".to_string();
+        run.state
+            .record_event("agent_running", Some(agent_id.to_string()));
+        Some(run.state.clone())
     }
 
     /// Point a roster row at a fresh child session id. Contract retries

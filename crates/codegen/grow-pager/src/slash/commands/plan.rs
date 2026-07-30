@@ -5,7 +5,7 @@
 //!
 //! Use `/view-plan` to open the current saved plan preview.
 
-use crate::app::actions::{Action, PlanModeKind};
+use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 
 /// Enter plan mode.
@@ -17,7 +17,7 @@ impl SlashCommand for PlanCommand {
     }
 
     fn description(&self) -> &str {
-        "Enter plan mode"
+        "[behavior] Switch to Plan"
     }
 
     fn session_scoped(&self) -> bool {
@@ -25,8 +25,7 @@ impl SlashCommand for PlanCommand {
     }
 
     fn offered_when_session_less(&self) -> bool {
-        // The dashboard offers `/plan` to start the next spawned agent in
-        // plan mode (intercepted in `dispatch_dashboard_dispatch_slash`).
+        // The dashboard stages Plan for the next spawned Agent.
         true
     }
 
@@ -45,10 +44,13 @@ impl SlashCommand for PlanCommand {
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let trimmed = args.trim();
         if trimmed.is_empty() {
-            return CommandResult::Action(Action::SetPlanMode(PlanModeKind::On));
+            return CommandResult::Action(Action::SetBehaviorMode(
+                grow_tools::types::SessionMode::Plan,
+            ));
         }
-        CommandResult::Action(Action::EnterPlanMode {
-            description: Some(trimmed.to_string()),
+        CommandResult::Action(Action::SetBehaviorThenPrompt {
+            mode: grow_tools::types::SessionMode::Plan,
+            prompt: Some(trimmed.to_string()),
         })
     }
 }
@@ -70,7 +72,7 @@ mod tests {
             bundle_state: bundle,
             screen_mode: crate::app::ScreenMode::Inline,
             pager_state: PagerLocalSnapshot {
-                plan_mode_active: false,
+                behavior_mode: grow_tools::types::SessionMode::Default,
                 ..PagerLocalSnapshot::default()
             },
         }
@@ -86,13 +88,13 @@ mod tests {
             bundle_state: bundle,
             screen_mode: crate::app::ScreenMode::Inline,
             pager_state: PagerLocalSnapshot {
-                plan_mode_active: true,
+                behavior_mode: grow_tools::types::SessionMode::Plan,
                 ..PagerLocalSnapshot::default()
             },
         }
     }
 
-    /// `/plan` (no args, not in plan mode) → `SetPlanMode(On)`.
+    /// `/plan` (no args) selects the Plan Behavior.
     #[test]
     fn no_args_not_in_plan_dispatches_set_plan_mode_on() {
         let cmd = PlanCommand;
@@ -100,18 +102,14 @@ mod tests {
         let bundle = BundleState::default();
         let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "") {
-            CommandResult::Action(Action::SetPlanMode(kind)) => {
-                assert_eq!(
-                    kind,
-                    PlanModeKind::On,
-                    "`/plan` (no args, not in plan mode) must dispatch SetPlanMode(On)"
-                );
+            CommandResult::Action(Action::SetBehaviorMode(mode)) => {
+                assert_eq!(mode, grow_tools::types::SessionMode::Plan);
             }
-            other => panic!("expected Action::SetPlanMode, got {other:?}"),
+            other => panic!("expected Action::SetBehaviorMode(Plan), got {other:?}"),
         }
     }
 
-    /// `/plan` (no args, already in plan mode) → idempotent `SetPlanMode(On)`.
+    /// `/plan` remains an idempotent Plan Behavior selection.
     #[test]
     fn no_args_already_in_plan_dispatches_set_plan_mode_on() {
         let cmd = PlanCommand;
@@ -119,10 +117,10 @@ mod tests {
         let bundle = BundleState::default();
         let mut ctx = make_ctx_active_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "") {
-            CommandResult::Action(Action::SetPlanMode(kind)) => {
-                assert_eq!(kind, PlanModeKind::On);
+            CommandResult::Action(Action::SetBehaviorMode(mode)) => {
+                assert_eq!(mode, grow_tools::types::SessionMode::Plan);
             }
-            other => panic!("expected Action::SetPlanMode, got {other:?}"),
+            other => panic!("expected Action::SetBehaviorMode(Plan), got {other:?}"),
         }
     }
 
@@ -134,45 +132,47 @@ mod tests {
         let bundle = BundleState::default();
         let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "   ") {
-            CommandResult::Action(Action::SetPlanMode(kind)) => {
-                assert_eq!(kind, PlanModeKind::On);
+            CommandResult::Action(Action::SetBehaviorMode(mode)) => {
+                assert_eq!(mode, grow_tools::types::SessionMode::Plan);
             }
-            other => panic!("expected SetPlanMode for whitespace-only arg, got {other:?}"),
+            other => panic!("expected SetBehaviorMode(Plan), got {other:?}"),
         }
     }
 
-    /// `/plan <description>` → `EnterPlanMode` with description.
+    /// `/plan <description>` selects Plan before sending the description.
     #[test]
-    fn with_description_keeps_enter_plan_mode_when_not_in_plan() {
+    fn with_description_orders_behavior_before_prompt() {
         let cmd = PlanCommand;
         let models = ModelState::default();
         let bundle = BundleState::default();
         let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "Refactor the auth flow") {
-            CommandResult::Action(Action::EnterPlanMode { description }) => {
+            CommandResult::Action(Action::SetBehaviorThenPrompt { mode, prompt }) => {
+                assert_eq!(mode, grow_tools::types::SessionMode::Plan);
                 assert_eq!(
-                    description.as_deref(),
+                    prompt.as_deref(),
                     Some("Refactor the auth flow"),
-                    "`/plan <desc>` must dispatch EnterPlanMode with the description"
+                    "`/plan <desc>` must defer the prompt until Plan is applied"
                 );
             }
-            other => panic!("expected Action::EnterPlanMode, got {other:?}"),
+            other => panic!("expected Action::SetBehaviorThenPrompt, got {other:?}"),
         }
     }
 
     /// `/plan <description>` when already in plan mode still emits
-    /// `EnterPlanMode`; the dispatcher owns the idempotent mode handling.
+    /// the same ordered Behavior transition action.
     #[test]
-    fn with_description_already_in_plan_keeps_enter_plan_mode() {
+    fn with_description_is_idempotent_when_already_in_plan() {
         let cmd = PlanCommand;
         let models = ModelState::default();
         let bundle = BundleState::default();
         let mut ctx = make_ctx_active_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "something") {
-            CommandResult::Action(Action::EnterPlanMode { description }) => {
-                assert_eq!(description.as_deref(), Some("something"));
+            CommandResult::Action(Action::SetBehaviorThenPrompt { mode, prompt }) => {
+                assert_eq!(mode, grow_tools::types::SessionMode::Plan);
+                assert_eq!(prompt.as_deref(), Some("something"));
             }
-            other => panic!("expected EnterPlanMode, got {other:?}"),
+            other => panic!("expected SetBehaviorThenPrompt, got {other:?}"),
         }
     }
 
@@ -184,10 +184,11 @@ mod tests {
         let bundle = BundleState::default();
         let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "  hello world  ") {
-            CommandResult::Action(Action::EnterPlanMode { description }) => {
-                assert_eq!(description.as_deref(), Some("hello world"));
+            CommandResult::Action(Action::SetBehaviorThenPrompt { mode, prompt }) => {
+                assert_eq!(mode, grow_tools::types::SessionMode::Plan);
+                assert_eq!(prompt.as_deref(), Some("hello world"));
             }
-            other => panic!("expected EnterPlanMode, got {other:?}"),
+            other => panic!("expected SetBehaviorThenPrompt, got {other:?}"),
         }
     }
 }

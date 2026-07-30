@@ -44,7 +44,7 @@ pub async fn set_contextual_hint_undo(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.contextual_hints.undo = Some(value)).await
 }
 
-/// Persist `[ui.contextual_hints].plan_mode` via `update_config`.
+/// Persist `[ui.contextual_hints].behavior` via `update_config`.
 pub async fn set_contextual_hint_plan_mode(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.contextual_hints.plan_mode = Some(value)).await
 }
@@ -107,7 +107,7 @@ pub const MAX_DEFAULT_MODEL_LEN: usize = 256;
 /// or a campaign would keep overriding the user's choice.
 ///
 /// Caller must validate `value` against the model catalog first.
-/// Empty string clears the field (falls back to remote/built-in default).
+/// Empty string clears the field; startup then requires an explicit configured default.
 /// Length over [`MAX_DEFAULT_MODEL_LEN`] returns `Err`.
 pub async fn set_default_model(value: String) -> Result<()> {
     super::campaigns::persist_models_default(
@@ -120,7 +120,7 @@ pub async fn set_default_model(value: String) -> Result<()> {
 /// Persist `[ui].fork_secondary_model` via `update_config`.
 ///
 /// Caller must validate against the model catalog. Empty string
-/// restores the built-in default. Length > [`MAX_DEFAULT_MODEL_LEN`] → `Err`.
+/// clears the override. Length > [`MAX_DEFAULT_MODEL_LEN`] → `Err`.
 pub async fn set_fork_secondary_model(value: String) -> Result<()> {
     if value.len() > MAX_DEFAULT_MODEL_LEN {
         anyhow::bail!(

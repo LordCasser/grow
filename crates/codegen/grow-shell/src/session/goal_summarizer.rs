@@ -232,7 +232,11 @@ pub(crate) async fn run_goal_summarizer(
         Ok(text) => text,
         Err(SpawnError::Transport(detail)) => {
             tracing::warn!(error = %detail, "goal summarizer: transport error; failing open");
-            return record_fail_open(GoalSummarizerFailReason::Transport, inputs.attempt, started);
+            return record_verification_unavailable(
+                GoalSummarizerFailReason::Transport,
+                inputs.attempt,
+                started,
+            );
         }
         Err(SpawnError::Runtime { message, cancelled }) => {
             let reason = if cancelled {
@@ -245,14 +249,14 @@ pub(crate) async fn run_goal_summarizer(
                 cancelled,
                 "goal summarizer: subagent runtime error; failing open",
             );
-            return record_fail_open(reason, inputs.attempt, started);
+            return record_verification_unavailable(reason, inputs.attempt, started);
         }
     };
 
     let trimmed = response.trim();
     if trimmed.is_empty() {
         tracing::info!("goal summarizer: empty summary; failing open");
-        return record_fail_open(
+        return record_verification_unavailable(
             GoalSummarizerFailReason::EmptySummary,
             inputs.attempt,
             started,
@@ -277,7 +281,7 @@ pub(crate) async fn run_goal_summarizer(
     }
 }
 
-fn record_fail_open(
+fn record_verification_unavailable(
     reason: GoalSummarizerFailReason,
     attempt: u32,
     started: std::time::Instant,

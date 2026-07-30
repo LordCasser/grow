@@ -215,19 +215,13 @@ async fn auth_backend_contract_concurrent_401s_hit_idp_once() {
 }
 
 /// The instrumentation loop through the live recovery state machine: a dead
-/// refresh token on each user-facing source (`Turn`, `Relay`) emits one
-/// `manual_auth` event carrying the typed reason, the matching surface, and the
+/// refresh token on a user-facing turn emits one `manual_auth` event carrying the typed reason and
 /// rejected principal; a refreshable token auto-refreshes and emits nothing.
 #[tokio::test]
 async fn auth_backend_contract_dead_token_emits_typed_manual_auth_event() {
     use grow_diagnostics::events::ManualAuthSurface;
 
-    // A dead refresh token on each user-facing source emits the typed event
-    // with the surface that produced it.
-    for (source, want_surface) in [
-        (RecoverySource::Turn, ManualAuthSurface::Turn),
-        (RecoverySource::Relay, ManualAuthSurface::Relay),
-    ] {
+    for (source, want_surface) in [(RecoverySource::Turn, ManualAuthSurface::Turn)] {
         let hits = Arc::new(AtomicU32::new(0));
         let (url, server) =
             start_idp(400, r#"{"error":"invalid_grant"}"#.to_string(), hits, 0).await;

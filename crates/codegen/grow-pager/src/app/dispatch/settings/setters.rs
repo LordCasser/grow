@@ -1457,45 +1457,21 @@ pub(in crate::app::dispatch) fn preview_auto_light_theme(
 }
 
 // ---------------------------------------------------------------------------
-// default_model — resolves display name to `ModelId`, then emits both
-// `Effect::SwitchModel` (active session) and `Effect::PersistSetting`
-// (next-session default). No live preview (model switch has ACP side
-// effects).
+// default_model — future-session default only. Current sessions are changed
+// through `Action::SwitchModel`.
 // ---------------------------------------------------------------------------
 
-/// State-only mutation for `default_model`: set
-/// `agent.session.models.current` to the supplied id. Returns `true`
+/// State-only mutation for `default_model`: set the new-session model template
+/// to the supplied id. Returns `true`
 /// if the catalog contains `id`; `false` otherwise.
 pub(in crate::app::dispatch) fn set_default_model_inner(
     app: &mut AppView,
     id: &acp::ModelId,
 ) -> bool {
-    let ActiveView::Agent(aid) = app.active_view else {
+    if !app.models.available.contains_key(id) {
         return false;
-    };
-    {
-        let Some(agent) = app.agents.get_mut(&aid) else {
-            return false;
-        };
-        if !agent.session.models.available.contains_key(id) {
-            return false;
-        }
-        // Update the agent's session model state's current pointer so
-        // subsequent reads (e.g. `current_model_name` via the pager
-        // snapshot) reflect the new selection without waiting for the
-        // ACP roundtrip.
-        //
-        // `set_current(_, None)` resets `reasoning_effort` to model default.
-        agent.session.models.set_current(id.clone(), None);
     }
-    // Mirror the new default into the app-level model state too. A later `/new`
-    // or `/clear` creates a fresh session by cloning `app.models`
-    // (`dispatch_new_session_inner_with_id`), so without this the new session —
-    // and the welcome card it commits — would show the previous default until
-    // the next `grow/models/update` roundtrip.
-    if app.models.available.contains_key(id) {
-        app.models.set_current(id.clone(), None);
-    }
+    app.models.set_current(id.clone(), None);
     true
 }
 
@@ -1506,40 +1482,15 @@ fn save_default_model_toast(value: &str) -> String {
     format!("\u{2713} Default model: {value}")
 }
 
-/// Outer dispatcher for `Action::SetDefaultModel`. Switches and persists
-/// and toasts. `PersistSetting` emitted first for consistent rollback;
-/// `SwitchModel` second. Idempotent: same model already active → no-op.
+/// Persist the default used by future sessions without switching the active
+/// session.
 pub(in crate::app::dispatch) fn set_default_model(
     app: &mut AppView,
     new_id: acp::ModelId,
 ) -> Vec<Effect> {
-    let ActiveView::Agent(aid) = app.active_view else {
-        tracing::error!(
-            target: "settings",
-            key = "default_model",
-            "Action::SetDefaultModel dispatched with no active agent — no-op",
-        );
-        return vec![];
-    };
-
-    // Snapshot previous id + display name from the active agent's
-    // session (the same source `set_default_model_inner` mutates
-    // and the modal reads).
-    let (prev_id, session_id, available_has_new, new_display) = {
-        let Some(agent) = app.agents.get(&aid) else {
-            tracing::error!(
-                target: "settings",
-                key = "default_model",
-                "Action::SetDefaultModel: active_view::Agent points to missing agent",
-            );
-            return vec![];
-        };
-        let prev_id = agent.session.models.current.clone();
-        let session_id = agent.session.session_id.clone();
-        let available_has_new = agent.session.models.available.contains_key(&new_id);
-        let new_display = agent.session.models.display_name_for(&new_id);
-        (prev_id, session_id, available_has_new, new_display)
-    };
+    let prev_id = app.models.current.clone();
+    let available_has_new = app.models.available.contains_key(&new_id);
+    let new_display = app.models.display_name_for(&new_id);
 
     if !available_has_new {
         tracing::error!(
@@ -1580,35 +1531,11 @@ pub(in crate::app::dispatch) fn set_default_model(
         .as_ref()
         .map(|id| id.0.to_string())
         .unwrap_or_default();
-    let mut effects = vec![Effect::PersistSetting {
+    vec![Effect::PersistSetting {
         key: "default_model",
         value: crate::settings::SettingValue::String(new_id_str),
         rollback_value: crate::settings::SettingValue::String(prev_id_str),
-    }];
-
-    // Best-effort session-level switch. The `Effect::SwitchModel`
-    // pipeline handles its own deferred-switch semantics for the
-    // no-session-id-yet case (see line 583 of this file).
-    if let Some(sid) = session_id {
-        // We already hold a reference path to the agent above; re-borrow
-        // mutably here to flip `model_switch_pending`.
-        if let Some(agent) = app.agents.get_mut(&aid) {
-            agent.session.model_switch_pending = true;
-        }
-        effects.push(Effect::SwitchModel {
-            agent_id: aid,
-            session_id: sid,
-            model_id: new_id,
-            effort: None,
-            prev_model_id: prev_id.clone(),
-        });
-    } else if let Some(agent) = app.agents.get_mut(&aid) {
-        // No session id yet — stash for
-        // `EventLoop::on_session_created` to apply once the session
-        // id materialises. Mirrors `Action::SwitchModel` line 586.
-        agent.session.deferred_model_switch = Some((new_id, None));
-    }
-    effects
+    }]
 }
 
 /// Clear the default model override. Persists `[models].default = None`;
@@ -1617,19 +1544,14 @@ pub(in crate::app::dispatch) fn clear_default_model(app: &mut AppView) -> Vec<Ef
     // Active-agent snapshot: prev model ID for the rollback payload.
     // Use the model ID (catalog key), not the display name, so that
     // rollback persists a value `resolve_default_model` can match.
-    let prev_id_str = if let ActiveView::Agent(aid) = app.active_view
-        && let Some(agent) = app.agents.get(&aid)
-    {
-        agent
-            .session
-            .models
-            .current
-            .as_ref()
-            .map(|id| id.0.to_string())
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let prev_id_str = app
+        .models
+        .current
+        .as_ref()
+        .map(|id| id.0.to_string())
+        .unwrap_or_default();
+    app.models.current = None;
+    app.models.reasoning_effort = None;
 
     // During the startup window `current` is None even if a default
     // is on disk. Emit persist unconditionally — the shell de-dupes.
@@ -1730,7 +1652,7 @@ pub(in crate::app::dispatch) fn set_fork_secondary_model(
     // (catalog key), not the display name. The shell's
     // `cfg.ui.fork_secondary_model` consumers match by slug / map key,
     // and the `current_value_for` fold-to-empty comparison checks
-    // against `models::default_model()` (also a slug).
+    // against the empty "inherit the active/default model" sentinel.
     let new_id_str = new_id.0.to_string();
     let prev_id_str = app.current_ui.fork_secondary_model.clone();
     if prev_id_str == new_id_str {
@@ -1756,10 +1678,9 @@ pub(in crate::app::dispatch) fn set_fork_secondary_model(
 }
 
 /// Outer dispatcher for `Action::ClearForkSecondaryModel`. Resets
-/// the persisted override to the built-in baseline
-/// (`grow_shell::models::default_model()`).
+/// the persisted override to the empty "inherit the default model" sentinel.
 pub(in crate::app::dispatch) fn clear_fork_secondary_model(app: &mut AppView) -> Vec<Effect> {
-    let baseline = grow_shell::models::default_model().to_string();
+    let baseline = String::new();
     let prev_id_str = app.current_ui.fork_secondary_model.clone();
     if prev_id_str == baseline {
         // Idempotent: already at baseline.

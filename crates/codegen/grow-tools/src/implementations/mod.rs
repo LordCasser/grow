@@ -14,9 +14,9 @@ pub mod task_output;
 pub mod use_tool;
 pub use grow_build::bash::{BashError, BashToolInput};
 pub use grow_build::{
-    AskUserQuestionTool, BashTool, EnterPlanModeTool, ExitPlanModeTool, GrepTool, KillTaskTool,
-    ListDirTool, ReadFileTool, SearchReplaceTool, TaskOutputTool, TaskTool, TodoWriteTool,
-    WaitTasksTool, WebFetchTool,
+    AskUserQuestionTool, BashTool, GrepTool, KillTaskTool, ListDirTool, PlanControlTool,
+    ReadFileTool, SearchReplaceTool, TaskOutputTool, TaskTool, TodoWriteTool, WaitTasksTool,
+    WebFetchTool,
 };
 pub use memory::{MemoryGetImpl, MemorySearchImpl};
 pub use opencode::{

@@ -200,7 +200,7 @@ pub(in crate::app::dispatch) fn open_new_session_question(app: &mut AppView) -> 
     vec![]
 }
 /// Core new-session logic: create a placeholder agent, push the
-/// `/dashboard` tip, and return the `CreateSession` effect.
+/// `/agents` tip, and return the `CreateSession` effect.
 ///
 /// Factored out of [`dispatch_new_session`] so the worktree-question
 /// "No" path can call it directly without re-opening the modal.

@@ -12,11 +12,10 @@ use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::SharedResources;
 /// The toolset a tool belongs to.
 ///
-/// Serializes to snake_case (`grow_build`, `mcp`, …) for the
-/// canonical tool `_meta` wire contract. PascalCase aliases are accepted on
-/// deserialize so legacy persisted/manifest values still parse. The
-/// `Display` impl remains PascalCase for existing qualified id strings
-/// (e.g. `"Grow:read_file"`); only the serde form goes on the wire.
+/// Serializes to one canonical snake_case vocabulary (`grow`, `mcp`, …) for
+/// the tool `_meta` wire contract. The `Display` impl remains PascalCase for
+/// qualified runtime ids (for example `"Grow:read_file"`); only the serde form
+/// goes on the wire.
 #[derive(
     Debug,
     Clone,
@@ -31,17 +30,13 @@ use crate::types::resources::SharedResources;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ToolNamespace {
-    #[serde(alias = "Grow")]
     Grow,
-    #[serde(alias = "GrowConcise")]
     GrowConcise,
-    #[serde(alias = "GrowHashline")]
     GrowHashline,
-    #[serde(alias = "Codex")]
     Codex,
-    #[serde(rename = "opencode", alias = "OpenCode", alias = "open_code")]
+    #[serde(rename = "opencode")]
     OpenCode,
-    #[serde(rename = "mcp", alias = "MCP")]
+    #[serde(rename = "mcp")]
     MCP,
 }
 /// Categorizes what a tool does at a high level.
@@ -87,8 +82,7 @@ pub enum ToolKind {
     MemorySearch,
     MemoryGet,
     Task,
-    EnterPlan,
-    ExitPlan,
+    PlanControl,
     AskUser,
     DeployApp,
     SearchTool,

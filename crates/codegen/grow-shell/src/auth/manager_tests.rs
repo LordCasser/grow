@@ -89,55 +89,7 @@ fn default_auth_scope_has_no_built_in_oauth_provider() {
     let cfg = ServiceAuthConfig::default();
     assert!(cfg.oidc.is_none());
     assert!(cfg.oauth2.is_none());
-    assert_eq!(cfg.auth_scope(), crate::auth::config::LEGACY_AUTH_SCOPE);
-}
-
-#[test]
-fn legacy_scope_fallback_reads_old_auth_json() {
-    let dir = tempfile::tempdir().unwrap();
-    let auth_path = dir.path().join("auth.json");
-
-    // Write auth.json with the legacy scope key (as `x setup` copies from
-    // a machine that was authenticated with an older grow version).
-    let legacy_auth = make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now());
-    let mut store = AuthStore::new();
-    store.insert(LEGACY_SCOPE.to_string(), legacy_auth);
-    write_auth_json(&auth_path, &store).unwrap();
-
-    // AuthManager uses the new OAuth2 scope, but should still find the
-    // token under the legacy key.
-    let cfg = ServiceAuthConfig::default();
-    let mgr = Arc::new(AuthManager::new(dir.path(), cfg));
-    let current = mgr.current();
-    assert!(current.is_some(), "should fall back to legacy scope key");
-    assert_eq!(current.unwrap().key, "test-key");
-}
-
-#[test]
-fn new_scope_takes_precedence_over_legacy() {
-    let dir = tempfile::tempdir().unwrap();
-    let auth_path = dir.path().join("auth.json");
-
-    let legacy_auth = ProviderAuth {
-        key: "legacy-key".into(),
-        ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
-    };
-    let new_auth = ProviderAuth {
-        key: "new-key".into(),
-        ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
-    };
-
-    let cfg = ServiceAuthConfig::default();
-    let scope = cfg.auth_scope();
-
-    let mut store = AuthStore::new();
-    store.insert(LEGACY_SCOPE.to_string(), legacy_auth);
-    store.insert(scope, new_auth);
-    write_auth_json(&auth_path, &store).unwrap();
-
-    let mgr = Arc::new(AuthManager::new(dir.path(), cfg));
-    let current = mgr.current().expect("should find auth");
-    assert_eq!(current.key, "new-key", "new scope should take precedence");
+    assert_eq!(cfg.auth_scope(), crate::auth::config::SERVICE_AUTH_SCOPE);
 }
 
 // -- Near-expiry (5-minute buffer) behavior ------------------------
@@ -393,46 +345,6 @@ async fn team_login_then_personal_evicts_team_token() {
     );
     assert!(store.contains_key(&base_scope));
     assert_eq!(store.get(&base_scope).unwrap().key, "personal-token");
-}
-
-/// Regression test: clear() must only remove the current scope, not the
-/// legacy scope. Previously, logging in with OAuth would also delete the
-/// legacy `https://login.example.com/sign-in` entry from auth.json.
-#[test]
-fn clear_does_not_remove_legacy_scope() {
-    let dir = tempfile::tempdir().unwrap();
-    let auth_path = dir.path().join("auth.json");
-
-    let legacy_auth = ProviderAuth {
-        key: "legacy-key".into(),
-        ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
-    };
-    let oauth_auth = ProviderAuth {
-        key: "oauth-key".into(),
-        ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
-    };
-
-    let cfg = ServiceAuthConfig::default();
-    let scope = cfg.auth_scope();
-
-    let mut store = AuthStore::new();
-    store.insert(LEGACY_SCOPE.to_string(), legacy_auth);
-    store.insert(scope, oauth_auth);
-    write_auth_json(&auth_path, &store).unwrap();
-
-    let mgr = Arc::new(AuthManager::new(dir.path(), cfg));
-    // clear() should only remove the OAuth scope, not legacy
-    mgr.clear().unwrap();
-
-    let on_disk = read_auth_json(&auth_path).unwrap();
-    assert!(
-        on_disk.contains_key(LEGACY_SCOPE),
-        "legacy scope should be preserved after clear()"
-    );
-    assert!(
-        !on_disk.contains_key(&mgr.scope),
-        "current scope should be removed after clear()"
-    );
 }
 
 // -- token_suffix ----------------------------------------------------------------
@@ -1777,7 +1689,7 @@ fn compute_proactive_sleep_permanent_failure_returns_backoff() {
     );
 }
 
-/// Non-refreshable types (LegacySession, ApiKey, None) -> BACKOFF_INTERVAL
+/// Non-refreshable types (ApiKey, None) -> BACKOFF_INTERVAL
 /// even when expires_at is past. This is the gate the original
 /// test failed to exercise.
 #[test]
@@ -1791,19 +1703,7 @@ fn compute_proactive_sleep_non_refreshable_returns_backoff() {
         delay: StdDuration::from_millis(0),
     }));
 
-    // (a) LegacySession (WebLogin) + Some(past) -- the canonical
-    //     scenario where the absence of the gate produces a busy-loop.
-    mgr.hot_swap(ProviderAuth {
-        key: "legacy".into(),
-        auth_mode: AuthMode::WebLogin,
-        create_time: Utc::now() - Duration::hours(2),
-        expires_at: Some(Utc::now() - Duration::hours(1)),
-        ..ProviderAuth::test_default()
-    });
-    assert_eq!(mgr.token_type(), TokenType::LegacySession);
-    assert_eq!(compute_proactive_sleep(&mgr), BACKOFF_INTERVAL);
-
-    // (b) ApiKey + Some(past).
+    // ApiKey + Some(past).
     mgr.hot_swap(ProviderAuth {
         key: "api".into(),
         auth_mode: AuthMode::ApiKey,
@@ -3265,7 +3165,7 @@ async fn auth_rejects_token_refreshed_into_wrong_team() {
 }
 
 /// A sibling-written wrong-team token picked up by `force_reload_from_disk`
-/// (relay reconnect) is cleared, not just hidden.
+/// is cleared, not just hidden.
 #[test]
 fn force_reload_clears_wrong_team_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -3728,19 +3628,24 @@ async fn process_key_from_model_env_key() {
     let _xai = EnvGuard::unset("GROW_API_KEY");
     let _tok = EnvGuard::set(ENV, TOKEN);
 
-    let dm = crate::models::default_model();
+    let dm = "test/model";
     let cfg = Config::new_from_toml_cfg(
         &toml::from_str(&format!(
             r#"
-            [model."{dm}"]
-            model = "{dm}"
+            [models]
+            default = "{dm}"
+
+            [provider.test.options]
+            base_url = "https://provider.example/v1"
             env_key = "{ENV}"
+
+            [provider.test.models.model]
             "#
         ))
         .unwrap(),
     )
     .unwrap();
-    let key = resolve_model_list(&cfg, None)
+    let key = resolve_model_list(&cfg)
         .get(dm)
         .and_then(|m| m.own_credential())
         .unwrap();
@@ -4330,40 +4235,6 @@ fn manual_auth_reason_maps_terminal_and_skips_non_forcing() {
     assert_eq!(manual_auth_reason(&AuthError::transient("x")), None);
     assert_eq!(manual_auth_reason(&AuthError::NotLoggedIn), None);
     assert_eq!(manual_auth_reason(&AuthError::ApiKeyAuthDisabled), None);
-}
-
-/// Truth table for `relay_should_cancel`: the relay gives up on any terminal
-/// auth failure — including `ApiKeyAuthDisabled`, which is deliberately out of
-/// the `manual_auth` KPI's scope — and keeps reconnecting through transient
-/// blips, absent credentials, and the self-healing permanent reasons (those
-/// age out via the TTL, so cancelling on them would orphan a session that
-/// recovers minutes later).
-#[test]
-fn relay_should_cancel_gives_up_only_on_terminal_failures() {
-    use crate::auth::error::RefreshTokenFailedReason as Reason;
-    use crate::auth::recovery::relay_should_cancel;
-
-    // Terminal: the handshake can't recover; stop reconnecting.
-    assert!(relay_should_cancel(&AuthError::permanent(
-        Reason::RefreshTokenRejected
-    )));
-    assert!(relay_should_cancel(&AuthError::ServerRejectedNoRecovery));
-    assert!(relay_should_cancel(&AuthError::RecoveryExhausted));
-    assert!(relay_should_cancel(&AuthError::TokenExpiredNoRefresh));
-    assert!(relay_should_cancel(&AuthError::PinnedTeamMismatch {
-        message: String::new()
-    }));
-    // Cancelled even though it never emits the KPI (a kill-switched API key
-    // means rotate the key, not `/login`).
-    assert!(relay_should_cancel(&AuthError::ApiKeyAuthDisabled));
-
-    // Recoverable: fall through and reconnect.
-    assert!(!relay_should_cancel(&AuthError::transient("network blip")));
-    assert!(!relay_should_cancel(&AuthError::permanent(
-        Reason::ClientRejected
-    )));
-    assert!(!relay_should_cancel(&AuthError::permanent(Reason::Other)));
-    assert!(!relay_should_cancel(&AuthError::NotLoggedIn));
 }
 
 // Async so `record` has a runtime for its diagnostics `tokio::spawn`: another

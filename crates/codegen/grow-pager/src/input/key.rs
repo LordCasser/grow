@@ -202,8 +202,7 @@ pub fn is_altgr(_modifiers: KeyModifiers) -> bool {
 
 /// Canonical Shift+Tab encodings: `BackTab` (most xterm-likes),
 /// `BackTab+SHIFT` (some terminals), `Tab+SHIFT` (kitty protocol, some
-/// Windows terminals). Single source of truth for the `CycleReasoningEffort` /
-/// `DashboardCycleMode` ActionDefs and [`is_shift_tab`].
+/// Windows terminals). Used by modal navigation and [`is_shift_tab`].
 pub fn shift_tab_keys() -> [KeyShortcut; 3] {
     [
         KeyShortcut::key(KeyCode::BackTab),

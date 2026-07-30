@@ -87,24 +87,6 @@ impl AuthCredentialProvider for ShellAuthCredentialProvider {
         self.static_credentials.deployment_key.is_none()
     }
 }
-/// Resolves embedding credentials for `embed_base_url`, attaching the optional
-/// service credential only to the explicitly configured trusted endpoint over HTTPS.
-pub(crate) fn embedding_session_credentials(
-    embed_base_url: &str,
-    auth_manager: Option<&Arc<AuthManager>>,
-    api_key_provider: Option<grow_tools::types::SharedApiKeyProvider>,
-) -> grow_memory::EndpointScopedCredentials {
-    let auth_credentials = auth_manager.map(|am| {
-        Arc::new(ShellAuthCredentialProvider::new(am.clone(), None, None))
-            as Arc<dyn AuthCredentialProvider>
-    });
-    grow_memory::EndpointScopedCredentials::for_endpoint(
-        embed_base_url,
-        crate::util::is_service_api_bearer_url,
-        auth_credentials,
-        api_key_provider,
-    )
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,37 +256,6 @@ mod tests {
             Some("fresh"),
             "snapshot must reflect refreshed token for subsequent apply() calls"
         );
-    }
-    #[test]
-    fn embedding_session_credentials_scopes_to_first_party() {
-        let _guard = EarlyInvalidationGuard::pin_to_default();
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = make_manager(
-            &dir,
-            Some(make_auth(
-                "provider-session-token",
-                ChronoDuration::hours(1),
-            )),
-        );
-        let api_key_provider: grow_tools::types::SharedApiKeyProvider =
-            Arc::new(crate::auth::manager::SharedAuthKeyProvider(mgr.clone()));
-        for denied in [
-            "https://byok.attacker.example/v1",
-            "http://api.example.com/v1",
-        ] {
-            let resolved =
-                embedding_session_credentials(denied, Some(&mgr), Some(api_key_provider.clone()));
-            assert!(
-                resolved.is_empty(),
-                "session credentials must not reach {denied}"
-            );
-        }
-        let resolved = embedding_session_credentials(
-            "https://api.example.com/v1",
-            Some(&mgr),
-            Some(api_key_provider),
-        );
-        assert!(!resolved.is_empty());
     }
     /// Deployment-key path has no recovery (operator owns the bearer).
     #[tokio::test]

@@ -1,11 +1,9 @@
 //! Transient user feedback: toasts, ephemeral tips, mode-switch banners,
 //! terminal-size notes, clipboard-copy feedback, and their tick timers.
 
-use super::{
-    ActivePane, AgentView, CLIPBOARD_TOAST_DEBOUNCE_MS, MODE_BANNER_TOTAL_TICKS, PromptInputMode,
-};
 #[cfg(test)]
 use super::{AgentPane, test_fixtures};
+use super::{AgentView, CLIPBOARD_TOAST_DEBOUNCE_MS, MODE_BANNER_TOTAL_TICKS, PromptInputMode};
 use crate::app::actions::Action;
 use std::time::Instant;
 
@@ -234,25 +232,21 @@ impl AgentView {
         if let Some((ref msg, _)) = self.toast {
             return Some(msg.as_str());
         }
-        let sticky = self.sticky_toast.as_deref()?;
-        // The mouse-off banner advertises how to re-enable. `Ctrl+R` only works
-        // from scrollback, so when the prompt is focused show the
-        // `/toggle-mouse-reporting` command instead (it toggles from any pane).
-        // Storage keeps the scrollback form; swap the displayed text here.
-        if sticky == crate::app::MOUSE_OFF_HINT_SCROLLBACK && self.active_pane == ActivePane::Prompt
-        {
-            return Some(crate::app::MOUSE_OFF_HINT_PROMPT);
-        }
-        Some(sticky)
+        self.sticky_toast.as_deref()
     }
 
     /// Show a transient "Switched to mode: ..." banner above the prompt.
     ///
-    /// Triggered on Ctrl+R mode cycles.
+    /// Triggered after a Behavior transition.
     /// Renders at full visibility for 2 s, then fades out over the final 0.3 s.
     pub fn show_mode_switch_banner(&mut self, mode_name: &str) {
         let msg = format!("Switched to mode: {}", mode_name);
         self.mode_switch_banner = Some((msg, MODE_BANNER_TOTAL_TICKS));
+    }
+
+    pub fn show_behavior_switch_warning(&mut self, message: &str) {
+        self.mode_switch_banner = Some((message.to_string(), MODE_BANNER_TOTAL_TICKS));
+        self.behavior_switch_warning_pending = true;
     }
 
     /// Tick the mode-switch banner timer. Returns true if redraw needed
@@ -361,27 +355,25 @@ impl AgentView {
 }
 
 #[cfg(test)]
-mod mouse_off_banner_tests {
+mod sticky_banner_tests {
     use super::test_fixtures::make_running_agent;
     use super::*;
 
     #[test]
-    fn mouse_off_banner_key_swaps_with_focused_pane() {
+    fn mouse_off_banner_uses_explicit_command_in_every_pane() {
         let mut view = make_running_agent();
-        view.set_sticky_toast(Some(crate::app::MOUSE_OFF_HINT_SCROLLBACK));
+        view.set_sticky_toast(Some(crate::app::MOUSE_OFF_HINT));
 
-        // Scrollback focus: Ctrl+R works there, so advertise it.
         view.active_pane = AgentPane::Scrollback;
         assert_eq!(
             view.active_toast_message(),
-            Some(crate::app::MOUSE_OFF_HINT_SCROLLBACK)
+            Some(crate::app::MOUSE_OFF_HINT)
         );
 
-        // Prompt focus: the toggle chord is scrollback-only, so advertise the command.
         view.active_pane = AgentPane::Prompt;
         assert_eq!(
             view.active_toast_message(),
-            Some(crate::app::MOUSE_OFF_HINT_PROMPT)
+            Some(crate::app::MOUSE_OFF_HINT)
         );
 
         // A transient toast still wins over the sticky banner, regardless of pane.

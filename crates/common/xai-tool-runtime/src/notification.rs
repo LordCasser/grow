@@ -157,26 +157,6 @@ pub struct FileWritten {
     pub is_new_file: bool,
 }
 
-/// Sent when the agent transitions into plan mode. Subscribers use this to
-/// enforce the read-only constraint and switch UI affordances.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlanModeEntered {
-    pub tool_call_id: String,
-}
-
-/// Sent when the agent transitions out of plan mode. Carries the plan
-/// document so subscribers can present it for approval without an extra
-/// file read.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlanModeExited {
-    pub tool_call_id: String,
-    /// Plan content as captured at exit time. `None` when the plan file
-    /// did not exist or was empty.
-    pub plan_content: Option<String>,
-    /// Path the plan file lives at.
-    pub plan_file_path: String,
-}
-
 /// Sent when the agent issues a structured question to the user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserQuestionAsked {
@@ -327,8 +307,6 @@ pub enum ToolNotification {
     BashExecutionFailed(BashExecutionFailed),
     FileWritten(FileWritten),
     TaskCompleted(TaskSnapshot),
-    PlanModeEntered(PlanModeEntered),
-    PlanModeExited(PlanModeExited),
     UserQuestionAsked(UserQuestionAsked),
     LspServerStarting(LspServerStarting),
     LspServerReady(LspServerReady),
@@ -353,8 +331,6 @@ impl ToolNotification {
             Self::BashExecutionFailed(_) => "BashExecutionFailed",
             Self::FileWritten(_) => "FileWritten",
             Self::TaskCompleted(_) => "TaskCompleted",
-            Self::PlanModeEntered(_) => "PlanModeEntered",
-            Self::PlanModeExited(_) => "PlanModeExited",
             Self::UserQuestionAsked(_) => "UserQuestionAsked",
             Self::LspServerStarting(_) => "LspServerStarting",
             Self::LspServerReady(_) => "LspServerReady",
@@ -454,18 +430,6 @@ impl ToolNotificationHandle {
     /// transitioned to a terminal state.
     pub fn send_task_complete(&self, task_completed: TaskSnapshot) {
         self.send(ToolNotification::TaskCompleted(task_completed));
-    }
-
-    /// Send a [`ToolNotification::PlanModeEntered`]: the agent
-    /// transitioned into plan mode.
-    pub fn send_plan_mode_entered(&self, entered: PlanModeEntered) {
-        self.send(ToolNotification::PlanModeEntered(entered));
-    }
-
-    /// Send a [`ToolNotification::PlanModeExited`]: the agent transitioned
-    /// out of plan mode and the captured plan is attached.
-    pub fn send_plan_mode_exited(&self, exited: PlanModeExited) {
-        self.send(ToolNotification::PlanModeExited(exited));
     }
 
     /// Send a [`ToolNotification::UserQuestionAsked`]: the agent issued a

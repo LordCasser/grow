@@ -9,9 +9,9 @@ use serde_json::{Value, json};
 use xai_tool_runtime::{
     BashExecutionBackgrounded, BashExecutionComplete, BashExecutionFailed, BashExecutionTimeout,
     BashNotificationBase, BashOutputChunk, FileWritten, LspServerCrashed, LspServerFailed,
-    LspServerReady, LspServerRetrying, LspServerStarting, MonitorEvent, PlanModeEntered,
-    PlanModeExited, ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved, TaskKind,
-    TaskSnapshot, ToolNotification, UserQuestionAsked,
+    LspServerReady, LspServerRetrying, LspServerStarting, MonitorEvent, ScheduledTaskCreated,
+    ScheduledTaskFired, ScheduledTaskRemoved, TaskKind, TaskSnapshot, ToolNotification,
+    UserQuestionAsked,
 };
 
 fn base() -> BashNotificationBase {
@@ -142,27 +142,6 @@ fn task_completed_round_trip() {
     let n = ToolNotification::TaskCompleted(snap);
     let json = round_trip(&n);
     assert_type_tag(&json, "TaskCompleted");
-}
-
-#[test]
-fn plan_mode_entered_round_trip() {
-    let n = ToolNotification::PlanModeEntered(PlanModeEntered {
-        tool_call_id: "call-4".into(),
-    });
-    let json = round_trip(&n);
-    assert_type_tag(&json, "PlanModeEntered");
-}
-
-#[test]
-fn plan_mode_exited_round_trip() {
-    let n = ToolNotification::PlanModeExited(PlanModeExited {
-        tool_call_id: "call-5".into(),
-        plan_content: Some("plan".into()),
-        plan_file_path: ".grow/plan.md".into(),
-    });
-    let json = round_trip(&n);
-    assert_type_tag(&json, "PlanModeExited");
-    assert_eq!(json["plan_file_path"], json!(".grow/plan.md"));
 }
 
 #[test]
@@ -297,14 +276,6 @@ fn variant_count_matches_variant_name() {
             completed: false,
             kind: TaskKind::Bash,
         }),
-        ToolNotification::PlanModeEntered(PlanModeEntered {
-            tool_call_id: String::new(),
-        }),
-        ToolNotification::PlanModeExited(PlanModeExited {
-            tool_call_id: String::new(),
-            plan_content: None,
-            plan_file_path: String::new(),
-        }),
         ToolNotification::UserQuestionAsked(UserQuestionAsked {
             tool_call_id: String::new(),
             questions_json: json!(null),
@@ -356,10 +327,10 @@ fn variant_count_matches_variant_name() {
         all_variants.iter().map(|n| n.variant_name()).collect();
     assert_eq!(
         names.len(),
-        19,
-        "expected 19 distinct variant names; if you added a notification, extend the test list and `variant_name`"
+        17,
+        "expected 17 distinct variant names; if you added or removed a notification, update the test list and `variant_name`"
     );
-    assert_eq!(all_variants.len(), 19);
+    assert_eq!(all_variants.len(), 17);
 }
 
 #[test]

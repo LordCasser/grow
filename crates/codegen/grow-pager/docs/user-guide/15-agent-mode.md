@@ -54,7 +54,7 @@ Typical clients: IDE extensions (Zed, Neovim, Emacs), custom tools, and ACP SDKs
 
 ### Options
 
-Agent options apply to every transport (`stdio`, `serve`, `headless`, `leader`). They go after `agent` and before the mode name. Mode-specific flags go after the mode (for example `serve --bind`).
+Agent options apply to the `stdio`, `serve`, and internal `leader` transports. They go after `agent` and before the mode name. Mode-specific flags go after the mode (for example `serve --bind`).
 
 ```bash
 grow agent --always-approve --model grow-build stdio
@@ -78,16 +78,6 @@ grow agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
 ```
 
 Clients connect over WebSocket and authenticate with the secret token. If you omit `--secret`, the agent prints a generated token at startup, or set `GROW_AGENT_SECRET`. The process keeps state across client reconnects. Permissions match other entry points; see [Permissions and safety](22-permissions-and-safety.md).
-
----
-
-## WebSocket relay
-
-To reach the agent over the internet, connect the agent to a relay and point browsers at the same relay:
-
-```bash
-grow agent --always-approve headless --grow-ws-url wss://your-relay.example.com/ws
-```
 
 ---
 

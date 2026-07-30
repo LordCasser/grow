@@ -23,7 +23,7 @@ use std::sync::Arc;
 use educe::Educe;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use xai_tool_types::{BehaviorId, SubagentCapabilityMode, SubagentIsolationMode, WaitMode};
+use xai_tool_types::{SubagentCapabilityMode, SubagentIsolationMode, WaitMode};
 
 use crate::register_resource;
 
@@ -156,8 +156,6 @@ pub struct SubagentRuntimeOverrides {
     pub persona: Option<String>,
     /// Capability mode controlling tool access.
     pub capability_mode: Option<SubagentCapabilityMode>,
-    /// Work behavior for the child. Independent of role and capability.
-    pub behavior: Option<BehaviorId>,
     /// Isolation mode for child execution environment.
     /// `None` means "use role/persona default" (which itself defaults to `None`/shared workspace).
     pub isolation: Option<SubagentIsolationMode>,
@@ -286,8 +284,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::BackgroundTaskAction,
                 ToolKind::KillTaskAction,
                 ToolKind::Task,
-                ToolKind::EnterPlan,
-                ToolKind::ExitPlan,
+                ToolKind::PlanControl,
                 ToolKind::AskUser,
                 ToolKind::Skill,
             ],
@@ -308,8 +305,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::BackgroundTaskAction,
                 ToolKind::KillTaskAction,
                 ToolKind::Task,
-                ToolKind::EnterPlan,
-                ToolKind::ExitPlan,
+                ToolKind::PlanControl,
                 ToolKind::AskUser,
                 ToolKind::Skill,
             ],
@@ -327,8 +323,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::BackgroundTaskAction,
                 ToolKind::KillTaskAction,
                 ToolKind::Task,
-                ToolKind::EnterPlan,
-                ToolKind::ExitPlan,
+                ToolKind::PlanControl,
                 ToolKind::AskUser,
                 ToolKind::Skill,
             ],
@@ -350,8 +345,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::BackgroundTaskAction,
                 ToolKind::KillTaskAction,
                 ToolKind::Task,
-                ToolKind::EnterPlan,
-                ToolKind::ExitPlan,
+                ToolKind::PlanControl,
                 ToolKind::AskUser,
                 ToolKind::Skill,
             ],

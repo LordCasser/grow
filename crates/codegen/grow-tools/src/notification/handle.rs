@@ -5,9 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::types::{
     BashExecutionBackgrounded, BashExecutionComplete, BashExecutionFailed, BashExecutionTimeout,
     BashOutputChunk, FileWritten, LspServerCrashed, LspServerFailed, LspServerReady,
-    LspServerRetrying, LspServerStarting, MonitorEvent, PlanModeEntered, PlanModeExited,
-    ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved, SubagentCompleted,
-    ToolNotification, UserQuestionAsked,
+    LspServerRetrying, LspServerStarting, MonitorEvent, ScheduledTaskCreated, ScheduledTaskFired,
+    ScheduledTaskRemoved, SubagentCompleted, ToolNotification, UserQuestionAsked,
 };
 use crate::types::TaskSnapshot;
 
@@ -136,8 +135,6 @@ fn is_critical_notification(notification: &ToolNotification) -> bool {
             | ToolNotification::BashExecutionFailed(_)
             | ToolNotification::TaskCompleted(_)
             | ToolNotification::SubagentCompleted(_)
-            | ToolNotification::PlanModeEntered(_)
-            | ToolNotification::PlanModeExited(_)
             | ToolNotification::UserQuestionAsked(_)
             | ToolNotification::LspServerCrashed(_)
             | ToolNotification::LspServerFailed(_)
@@ -359,8 +356,6 @@ impl ToolNotificationHandle {
         send_file_written, FileWritten, FileWritten;
         send_task_complete, TaskSnapshot, TaskCompleted;
         send_subagent_completed, SubagentCompleted, SubagentCompleted;
-        send_plan_mode_entered, PlanModeEntered, PlanModeEntered;
-        send_plan_mode_exited, PlanModeExited, PlanModeExited;
         send_user_question_asked, UserQuestionAsked, UserQuestionAsked;
         send_lsp_starting, LspServerStarting, LspServerStarting;
         send_lsp_ready, LspServerReady, LspServerReady;

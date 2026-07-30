@@ -79,7 +79,7 @@ pub struct FuzzyOpenRequest {
     pub request_id: Option<String>,
     #[serde(default)]
     pub hidden: bool,
-    /// Metadata for routing (contains client_id from relay).
+    /// Metadata for routing (contains the originating client id).
     #[serde(default, rename = "_meta")]
     pub meta: Option<RequestMeta>,
 }
@@ -322,14 +322,14 @@ mod tests {
     #[test]
     fn test_fuzzy_open_request_with_meta() {
         // Test that FuzzyOpenRequest correctly deserializes _meta.clientId
-        // This is what the relay injects into the request
+        // This is what an ACP client injects into the request.
         let json = r#"{
             "cwd": "/path/to/project",
             "requestId": "req-123",
             "hidden": false,
             "_meta": {
                 "clientId": {
-                    "instanceId": "relay-instance-1",
+                    "instanceId": "client-instance-1",
                     "connId": "client-conn-abc"
                 }
             }
@@ -343,7 +343,7 @@ mod tests {
         let meta = req.meta.unwrap();
         match &meta.client_id {
             TargetClientId::ClientId(client_id) => {
-                assert_eq!(client_id.instance_id, "relay-instance-1");
+                assert_eq!(client_id.instance_id, "client-instance-1");
                 assert_eq!(client_id.conn_id, "client-conn-abc");
             }
             TargetClientId::None => {

@@ -6,7 +6,7 @@ Grow composes an Agent session from independent layers. The layers have a fixed 
 Mandatory Core
   + Audience (primary | subagent)
   + Agent Role (Markdown body)
-  + Active Behavior (none | clarify | plan)
+  + Active Behavior (normal | clarify | plan | workflow | deep-research | goal)
   + Runtime Context
 ```
 
@@ -28,7 +28,14 @@ subagents:
 
 `toolPreset` is resolved first, followed by `additionalTools`, fixed runtime injection, availability/depth/capability filtering, Agent denies and subagent policy, session clamps, and ToolBridge finalization. `ToolKind`, `ToolMetadata`, registry finalization, template name resolution, and `ToolServerConfig.behavior_preset` retain their existing responsibilities.
 
-Behavior is session state, not part of `AgentDefinition`. ACP maps `default` to no Behavior, `ask` to Clarify, and `plan` to Plan. A Task call may select the same Behavior independently of `subagent_type`. A Behavior never adds a tool, changes which Agent may be delegated to, changes capability mode, or bypasses permission checks.
+Behavior is mutually-exclusive primary-session state, not part of `AgentDefinition`. The state is exactly `Normal | Clarify | Plan(phase) | Workflow | DeepResearch { run_id } | Goal`. ACP maps these to `default`, `ask`, `plan`, `workflow`, `deep_research`, and `goal`. Every mode request, including prompt metadata and slash-command shortcuts, passes through the same Behavior transition gateway. Delegated Agents receive an explicit role and task; they never inherit or select a user-facing Behavior. A Behavior never adds a tool, changes which Agent may be delegated to, changes capability mode, or bypasses permission checks.
+
+The layers have different owners and must not be substituted for one another:
+
+- **Behavior** is the primary Agent's protocol for advancing the user's request.
+- **Role** is a delegated Agent's bounded responsibility.
+- **WorkflowRun** is an execution/journal instance owned by the Workflow runtime. Leaving Workflow does not implicitly cancel an ordinary run.
+- **GoalTracker** is the persistent objective, continuation, and verification instance used while Goal Behavior is selected.
 
 The effective call rule is:
 
@@ -40,8 +47,16 @@ registered by Tool Preset / Registry
   ∩ session permission decision
 ```
 
-Plan preserves the existing Pending, Active, ExitPending, approval, reentry, compaction, and restore lifecycle in `BehaviorController`. While Plan is active, every ordinary `AccessKind::Edit` call is rejected before the permission manager. Other already-authorized calls continue into the ordinary permission flow and are guided to investigation and verification only.
+Clarify keeps decision authority with the user for material unknowns: the primary Agent asks until the goal is sufficiently specified, then completes it without a mandatory plan or approval step.
 
-The completed plan is passed as `exit_plan_mode(plan=...)`. The host validates it, atomically writes it to the session-owned artifact, and only then requests approval. The artifact is control-plane state, never an editable workspace target and never an implied Agent file capability.
+Plan is a human-governed contract with Drafting, AwaitingApproval, Executing, and Amending phases. Workspace edits are rejected before permissions until the submitted plan is approved. Approval freezes the plan and opens edits only for its execution; material deviation stops execution and requires an approved replacement. Workflow is unavailable throughout Plan. Completing or cancelling the contract returns the session to Normal (`default` on the ACP wire).
 
-Dynamic Workflow is intentionally outside the current Behavior set. A later workflow design should attach to the same controller and one-way capability rule rather than introducing role/tool combination Agents.
+`plan_control` owns Plan transitions: `submit` and `amend` atomically persist a complete candidate before requesting approval, while `complete` and `cancel` terminate the contract. The artifact is control-plane state, never an editable workspace target and never an implied Agent file capability.
+
+Workflow is agent-governed dynamic sub-planning. The primary Agent scouts a bounded phase, launches at most one suitable Workflow run for that phase, yields instead of polling, and decides the next phase from the completion result. WorkflowRun remains an independent runtime/journal entity and never changes Behavior. Workflow is offered only when the finalized ToolBridge contains the Workflow tool; each run has independent cumulative (`agent_budget`) and simultaneous (`max_concurrency`) child limits.
+
+Deep Research is read-only evidence work with a mandatory terminal report. It uses a private Workflow definition and runtime, but the report contract and Behavior-owned run lifecycle are not public Workflow semantics. A terminal report is delivered for success, partial completion, verification failure, budget exhaustion, infrastructure failure, cancellation, and restart interruption. Natural completion delivers the report before returning to Normal; an interrupting Behavior switch delivers a cancellation report before applying the target Behavior.
+
+Goal is objective-governed continuation. GoalTracker owns the objective and runtime status; Behavior owns only the collaboration protocol. The Agent may request verification, but only an independent verifier verdict of `Achieved` may complete the tracker and return to Normal. Missing verification, timeout, infrastructure failure, insufficient evidence, exhausted verification attempts, or exhausted budget pauses the Goal and keeps Goal Behavior selected.
+
+The transition gateway rejects Plan, Goal, or Deep Research while an unrelated WorkflowRun is non-terminal. Leaving a non-terminal Plan, an active Goal, or a running/paused Deep Research run requires a repeated selection of the same target within three seconds. Pending confirmation is ephemeral and never persisted.

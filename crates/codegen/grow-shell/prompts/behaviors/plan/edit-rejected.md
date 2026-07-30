@@ -1,1 +1,1 @@
-Rejected: ordinary file editing is prohibited while Plan behavior is active. Continue investigating with other already-authorized tools, or submit the complete plan through `${{ tools.by_kind.exit_plan }}` using its `plan` argument.
+Rejected: workspace editing is prohibited until a Plan is approved. Continue investigating with already-authorized tools, or submit the complete plan through `${{ tools.by_kind.plan_control }}` with `action="submit"` and its `plan` argument.

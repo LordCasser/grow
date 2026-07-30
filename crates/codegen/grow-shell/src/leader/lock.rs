@@ -8,39 +8,13 @@ use grow_workspace::util::is_lock_contended;
 
 use crate::util::grow_home::grow_home;
 
-/// Compute a short hash suffix from a WS URL for differentiating leader instances.
-/// Returns empty string for the default/production URL.
-pub fn compute_ws_url_suffix(ws_url: &str) -> String {
-    use std::hash::{Hash, Hasher};
-
-    if ws_url.is_empty() {
-        return String::new();
-    }
-
-    // Default production URL doesn't need a suffix.
-    // `service_ws_url` is always the *relay* endpoint (see
-    // [`crate::env::PROD_RELAY_WS_URL`]); the gateway URL never reaches
-    // the leader-lock path-derivation code.
-    if ws_url == crate::env::PROD_RELAY_WS_URL {
-        return String::new();
-    }
-
-    // Compute a short hash of the URL
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    ws_url.hash(&mut hasher);
-    let hash = hasher.finish();
-    format!("-{:08x}", hash as u32)
-}
-
 /// Env var that overrides the leader socket path (and, by extension, the lock
 /// path — the sibling `.lock`). Set by the `--leader-socket` flag, or exported
 /// directly. Lets a developer sandbox a leader instance away from the default
 /// `~/.grow/leader.sock` — e.g. run a local branch build's leader without
 /// colliding with an installed stable leader on the same machine. Honored by
-/// BOTH the client (`connect_or_spawn`) and the leader (`run_leader`), and
-/// inherited by the spawned leader subprocess, so all parties bind the same
-/// path. When set, the WS-URL-derived suffix (`compute_ws_url_suffix`) is
-/// bypassed entirely.
+/// BOTH the client (`connect_or_spawn`) and the leader (`run_leader`), and is
+/// inherited by the spawned leader subprocess so all parties bind the same path.
 pub const LEADER_SOCKET_ENV: &str = "GROW_LEADER_SOCKET";
 
 /// The explicit socket-path override, if [`LEADER_SOCKET_ENV`] is set and
@@ -58,58 +32,37 @@ fn lock_path_for_socket(socket: &Path) -> PathBuf {
     socket.with_extension("lock")
 }
 
-/// Resolve the socket path: the explicit override wins, else the WS-URL-derived
-/// default under `root`. Pure (the override is passed in) so it is unit-testable
+/// Resolve the socket path: the explicit override wins, else the local default
+/// under `root`. Pure (the override is passed in) so it is unit-testable
 /// without touching process env.
-fn resolve_socket_path(override_socket: Option<PathBuf>, root: &Path, ws_url: &str) -> PathBuf {
-    override_socket.unwrap_or_else(|| socket_path_for_ws_url_in(root, ws_url))
+fn resolve_socket_path(override_socket: Option<PathBuf>, root: &Path) -> PathBuf {
+    override_socket.unwrap_or_else(|| socket_path_in(root))
 }
 
 /// Resolve the lock path: the sibling `.lock` of the override socket if set,
-/// else the WS-URL-derived default under `root`. Pure (see
+/// else the local default under `root`. Pure (see
 /// [`resolve_socket_path`]).
-fn resolve_lock_path(override_socket: Option<PathBuf>, root: &Path, ws_url: &str) -> PathBuf {
+fn resolve_lock_path(override_socket: Option<PathBuf>, root: &Path) -> PathBuf {
     match override_socket {
         Some(socket) => lock_path_for_socket(&socket),
-        None => lock_path_for_ws_url_in(root, ws_url),
+        None => lock_path_in(root),
     }
 }
 
-pub fn lock_path_for_ws_url_in(root: &Path, ws_url: &str) -> PathBuf {
-    let suffix = compute_ws_url_suffix(ws_url);
-    root.join(format!("leader{}.lock", suffix))
+pub fn lock_path_in(root: &Path) -> PathBuf {
+    root.join("leader.lock")
 }
 
-pub fn lock_path_for_ws_url(ws_url: &str) -> PathBuf {
-    resolve_lock_path(leader_socket_override(), &grow_home(), ws_url)
+pub fn lock_path() -> PathBuf {
+    resolve_lock_path(leader_socket_override(), &grow_home())
 }
 
-pub fn socket_path_for_ws_url_in(root: &Path, ws_url: &str) -> PathBuf {
-    let suffix = compute_ws_url_suffix(ws_url);
-    root.join(format!("leader{}.sock", suffix))
+pub fn socket_path_in(root: &Path) -> PathBuf {
+    root.join("leader.sock")
 }
 
-pub fn socket_path_for_ws_url(ws_url: &str) -> PathBuf {
-    resolve_socket_path(leader_socket_override(), &grow_home(), ws_url)
-}
-
-pub fn ws_url_suffix_from_paths(lock_path: &Path, socket_path: &Path) -> Option<String> {
-    let lock_name = lock_path.file_name()?.to_str()?;
-    let socket_name = socket_path.file_name()?.to_str()?;
-    let lock_suffix = lock_name
-        .strip_prefix("leader")?
-        .strip_suffix(".lock")?
-        .to_string();
-    let socket_suffix = socket_name
-        .strip_prefix("leader")?
-        .strip_suffix(".sock")?
-        .to_string();
-
-    if lock_suffix == socket_suffix {
-        Some(lock_suffix)
-    } else {
-        None
-    }
+pub fn socket_path() -> PathBuf {
+    resolve_socket_path(leader_socket_override(), &grow_home())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -148,13 +101,11 @@ pub struct LeaderLock {
 }
 
 impl LeaderLock {
-    /// Create a new LeaderLock using the default paths in grow home.
-    /// If ws_url differs from the default production URL, a hash suffix is added
-    /// to the lock and socket file names to differentiate leader instances.
-    pub fn new(ws_url: &str) -> Self {
+    /// Create a new LeaderLock using the configured local socket path.
+    pub fn new() -> Self {
         Self {
-            lock_path: lock_path_for_ws_url(ws_url),
-            sock_path: socket_path_for_ws_url(ws_url),
+            lock_path: lock_path(),
+            sock_path: socket_path(),
             lock_file: None,
             was_leader: false,
         }
@@ -337,32 +288,25 @@ mod tests {
     }
 
     #[test]
-    fn override_socket_path_wins_over_ws_url_derivation() {
+    fn override_socket_path_wins_over_local_default() {
         let root = Path::new("/home/u/.grow");
         let override_sock = PathBuf::from("/home/u/.grow/leader-branch.sock");
 
-        // With an override, the path is taken verbatim and the WS-URL suffix is
-        // ignored (a non-default ws_url would otherwise add a hash suffix).
         assert_eq!(
-            resolve_socket_path(Some(override_sock.clone()), root, "wss://custom.example/ws"),
+            resolve_socket_path(Some(override_sock.clone()), root),
             override_sock
         );
-        // The lock is the sibling `.lock`, NOT a ws-url-derived name.
         assert_eq!(
-            resolve_lock_path(Some(override_sock), root, "wss://custom.example/ws"),
+            resolve_lock_path(Some(override_sock), root),
             PathBuf::from("/home/u/.grow/leader-branch.lock")
         );
     }
 
     #[test]
-    fn no_override_falls_back_to_ws_url_derivation() {
+    fn no_override_uses_local_default() {
         let root = Path::new("/home/u/.grow");
-        // Default (empty) ws_url → bare leader.sock / leader.lock under root.
-        assert_eq!(
-            resolve_socket_path(None, root, ""),
-            root.join("leader.sock")
-        );
-        assert_eq!(resolve_lock_path(None, root, ""), root.join("leader.lock"));
+        assert_eq!(resolve_socket_path(None, root), root.join("leader.sock"));
+        assert_eq!(resolve_lock_path(None, root), root.join("leader.lock"));
     }
 
     #[test]
@@ -410,18 +354,6 @@ mod tests {
         assert_eq!(
             LeaderLock::read_pid_from_path(lock.lock_path()),
             Some(std::process::id())
-        );
-    }
-
-    #[test]
-    fn derived_lock_and_socket_paths_match_suffix() {
-        let ws_url = "wss://relay.staging.example/ws/code-agent";
-        let lock_path = lock_path_for_ws_url(ws_url);
-        let socket_path = socket_path_for_ws_url(ws_url);
-
-        assert_eq!(
-            ws_url_suffix_from_paths(&lock_path, &socket_path),
-            Some(compute_ws_url_suffix(ws_url))
         );
     }
 

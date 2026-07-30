@@ -239,20 +239,6 @@ impl SessionActor {
         // Note: Auto-compact is now handled inline during process_conversation_turn,
         // so we no longer need to queue it here after turn completion.
 
-        // If the user toggled plan mode off while this turn was in-flight
-        // (state == ExitPending), complete the deferred exit now that the
-        // turn is finished. The next handle_prompt() will inject the exit
-        // reminder via has_pending_exit_reminder().
-        {
-            let mut tracker = self.plan_mode.lock();
-            let transitioned =
-                tracker.state() == crate::session::plan_mode::PlanModeState::ExitPending;
-            tracker.complete_deferred_exit();
-            drop(tracker);
-            if transitioned {
-                self.persist_plan_mode_state();
-            }
-        }
         // Drop the state guard before the async emit so the persist/broadcast
         // fork doesn't run under the state lock.
         drop(state);

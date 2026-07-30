@@ -668,9 +668,11 @@ mod tests {
     }
     #[tokio::test]
     async fn resume_in_worktree_reports_when_session_is_not_found_locally() {
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
         let req = ResumeSessionInWorktreeRequest {
             session_id: "nonexistent-session-id".to_string(),
-            source_cwd: "/tmp/definitely-not-a-repo".to_string(),
+            source_cwd: repo.path().to_string_lossy().into_owned(),
             copy_mode: WorktreeCopyMode::Dirty,
             worktree_type: None,
             restore_code: Some(true),

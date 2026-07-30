@@ -52,13 +52,9 @@ impl SessionActor {
         let prompt_id = format!("{INTERJECT_FALLBACK_PROMPT_PREFIX}{}", uuid::Uuid::now_v7());
         let mut prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
         prompt_blocks.extend(images.into_iter().map(acp::ContentBlock::Image));
-        // Respect an active plan mode: the interjection was aimed at a turn
-        // that ran under it, so its fallback turn must not escape the gate.
-        let prompt_mode = if self.plan_mode.lock().is_active() {
-            crate::session::plan_mode::PromptMode::Plan
-        } else {
-            crate::session::plan_mode::PromptMode::Agent
-        };
+        // Preserve the selected Behavior when an interjection becomes a new
+        // turn; it must not silently fall back to Normal.
+        let prompt_mode = *self.current_prompt_mode.lock();
         let (respond_to, _) = tokio::sync::oneshot::channel();
         // User message (skips queue_input); invalidate in-flight recap now.
         self.cancel_pending_recap_for_new_prompt();

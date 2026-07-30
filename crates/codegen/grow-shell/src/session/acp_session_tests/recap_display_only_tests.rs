@@ -55,7 +55,7 @@ async fn queue_input_user_prompt_bumps_recap_epoch() {
                 .queue_input(
                     vec![],
                     "user-next".to_string(),
-                    crate::session::plan_mode::PromptMode::Agent,
+                    crate::session::behavior::PromptMode::Agent,
                     None,
                     None,
                     false,
@@ -92,7 +92,7 @@ async fn queue_input_synthetic_does_not_bump_recap_epoch() {
                 .queue_input(
                     vec![],
                     "task-completed-bg-1".to_string(),
-                    crate::session::plan_mode::PromptMode::Agent,
+                    crate::session::behavior::PromptMode::Agent,
                     None,
                     None,
                     false,

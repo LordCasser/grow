@@ -25,25 +25,9 @@ impl acp::Agent for MvpAgent {
         tracing::debug!(target: "sampling_log", "Received initialize request");
         grow_diagnostics::unified_log::info("agent initialized", None, None);
         self.start_subagent_coordinator();
-        if self.cfg.borrow().remote_settings.is_none() {
-            self.spawn_settings_reapply();
-        }
-        let (auto_gc_policy, run_auto_gc) = {
-            let cfg = self.cfg.borrow();
-            let has_remote = cfg.remote_settings.is_some();
-            let run = has_remote || !crate::util::config::resolve_remote_fetch_enabled();
-            (cfg.resolve_worktree_auto_gc(), run)
-        };
-        if !run_auto_gc {
-            tracing::debug!(
-                "auto worktree gc deferred until remote_settings are available"
-            );
-        }
+        let auto_gc_policy = self.cfg.borrow().resolve_worktree_auto_gc();
         tokio::task::spawn_blocking(move || {
             crate::session::worktree_pool::cleanup_stale_pool_worktrees(None);
-            if !run_auto_gc {
-                return;
-            }
             let opts = xai_fast_worktree::AutoGcOptions::from_resolved(auto_gc_policy);
             if let Err(e) = xai_fast_worktree::WorktreeDb::open_default()
                 .and_then(|db| xai_fast_worktree::maybe_auto_gc(&db, &opts))
@@ -573,10 +557,6 @@ impl acp::Agent for MvpAgent {
                 let current_auth = self.auth_manager.current();
                 let has_current = current_auth.is_some();
                 let is_expired = self.auth_manager.is_expired();
-                let is_devbox = crate::auth::devbox_login::is_devbox_environment();
-                let is_legacy = current_auth
-                    .as_ref()
-                    .is_some_and(|a| a.auth_mode == crate::auth::AuthMode::WebLogin);
                 grow_diagnostics::unified_log::info(
                     "auth cached_token check",
                     None,
@@ -584,61 +564,9 @@ impl acp::Agent for MvpAgent {
                         serde_json::json!({
                         "has_current": has_current,
                         "is_expired": is_expired,
-                        "is_devbox": is_devbox,
-                        "is_legacy": is_legacy,
                     }),
                     ),
                 );
-                let pin_blocks_oidc_mint = matches!(
-                    self.cfg.borrow().auth.preferred_method,
-                    Some(crate::auth::PreferredAuthMethod::ApiKey)
-                );
-                if is_devbox && is_legacy && !pin_blocks_oidc_mint {
-                    grow_diagnostics::unified_log::info(
-                        "auth cached_token: devbox legacy migration starting",
-                        None,
-                        None,
-                    );
-                    match crate::auth::devbox_login::mint_devbox_auth(&self.auth_manager)
-                        .await
-                    {
-                        Ok(new_auth) => {
-                            match self
-                                .auth_manager
-                                .save_without_enrichment(new_auth)
-                                .await
-                            {
-                                Ok(_) => {
-                                    if let Err(e) = self
-                                        .auth_manager
-                                        .remove_scope(crate::auth::LEGACY_AUTH_SCOPE)
-                                    {
-                                        tracing::warn!(error = ?e, "auth: failed to remove legacy scope (non-fatal)");
-                                    }
-                                    grow_diagnostics::unified_log::info(
-                                        "auth cached_token: devbox legacy migration succeeded",
-                                        None,
-                                        None,
-                                    );
-                                }
-                                Err(e) => {
-                                    grow_diagnostics::unified_log::warn(
-                                        "auth cached_token: devbox migration save failed",
-                                        None,
-                                        Some(serde_json::json!({ "error": e.to_string() })),
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            grow_diagnostics::unified_log::warn(
-                                "auth cached_token: devbox mint failed, will reject legacy token",
-                                None,
-                                Some(serde_json::json!({ "error": format!("{e}") })),
-                            );
-                        }
-                    }
-                }
                 let Some(auth) = self.auth_manager.current() else {
                     let message = if self.auth_manager.is_expired() {
                         "Session expired, re-authentication required"
@@ -655,26 +583,6 @@ impl acp::Agent for MvpAgent {
                         .authenticate_after_cached_token_unavailable(arguments)
                         .await;
                 };
-                if auth.auth_mode == crate::auth::AuthMode::WebLogin {
-                    tracing::info!("auth: rejecting legacy WebLogin token");
-                    grow_diagnostics::unified_log::warn(
-                        "auth cached_token legacy rejected",
-                        None,
-                        Some(
-                            serde_json::json!({ "auth_mode": format!("{:?}", auth.auth_mode) }),
-                        ),
-                    );
-                    self.auth_manager.clear_in_memory();
-                    if let Err(e) = self
-                        .auth_manager
-                        .remove_scope(crate::auth::LEGACY_AUTH_SCOPE)
-                    {
-                        tracing::warn!(error = ?e, "auth: failed to remove legacy scope during WebLogin rejection (non-fatal)");
-                    }
-                    return self
-                        .authenticate_after_cached_token_unavailable(arguments)
-                        .await;
-                }
                 self.maybe_sync_bundle_in_background(false);
                 let auth_for_settings = auth.clone();
                 {
@@ -694,7 +602,6 @@ impl acp::Agent for MvpAgent {
                     auth_method: "cached_token".to_string(),
                     user_id: uid,
                 });
-                self.spawn_post_auth_settings(auth_for_settings);
                 Ok(self.auth_response_with_meta())
             }
             auth_method::PROVIDER_OAUTH_METHOD_ID | auth_method::OIDC_METHOD_ID => {
@@ -823,7 +730,6 @@ impl acp::Agent for MvpAgent {
                     crate::managed_config::post_login_sync(Some(auth.clone())),
                 );
                 self.set_auth_method(arguments.method_id.clone());
-                self.models_manager.on_auth_changed().await;
                 emit_login_span(
                     true,
                     arguments.method_id.0.as_ref(),
@@ -834,7 +740,6 @@ impl acp::Agent for MvpAgent {
                     auth_method: arguments.method_id.0.as_ref().to_string(),
                     user_id: Some(auth.user_id.clone()),
                 });
-                self.spawn_post_auth_settings(auth);
                 Ok(self.auth_response_with_meta())
             }
             _ => {
@@ -863,7 +768,6 @@ impl acp::Agent for MvpAgent {
                     .data("initialize must be called before new_session")
             })?;
         self.seed_client_config_auth_if_available();
-        self.spawn_settings_reapply();
         let cwd = AbsPathBuf::new(arguments.cwd.clone())
             .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
         let remote_settings = self.cfg.borrow().remote_settings.clone();
@@ -1049,7 +953,7 @@ impl acp::Agent for MvpAgent {
                         client_fs_write,
                         preloaded_envrc: None,
                         persisted_signals: None,
-                        persisted_plan_mode: None,
+                        persisted_behavior: None,
                         persisted_goal_mode: None,
                         persisted_workflow_runs: Vec::new(),
                         persisted_announcement_state: None,
@@ -1287,7 +1191,7 @@ impl acp::Agent for MvpAgent {
             mut summary,
             chat_history,
             plan_state: _,
-            plan_mode_state: persisted_plan_mode,
+            behavior_state: persisted_behavior,
             updates_file_path,
             rewind_points_file_path,
             signals: persisted_signals,
@@ -1320,26 +1224,46 @@ impl acp::Agent for MvpAgent {
             .as_ref()
             .map(|s| s.tool_call_count as u64)
             .unwrap_or(0);
-        let restored_plan_mode_state = match &persisted_plan_mode {
-            Some(s) => {
-                match s.state {
-                    crate::session::plan_mode::PlanModeState::Inactive => {
-                        grow_diagnostics::events::PlanModeState::Inactive
-                    }
-                    crate::session::plan_mode::PlanModeState::Pending => {
-                        grow_diagnostics::events::PlanModeState::Pending
-                    }
-                    crate::session::plan_mode::PlanModeState::Active
-                    | crate::session::plan_mode::PlanModeState::ExitPending => {
-                        grow_diagnostics::events::PlanModeState::Active
-                    }
-                }
-            }
-            None => grow_diagnostics::events::PlanModeState::Inactive,
-        };
-        let restored_awaiting_plan_approval = persisted_plan_mode
+        let (restored_behavior, restored_plan_phase) = match persisted_behavior
             .as_ref()
-            .is_some_and(|s| s.awaiting_plan_approval);
+            .map(|snapshot| &snapshot.state)
+        {
+            Some(crate::session::behavior::BehaviorState::Clarify) => {
+                (grow_diagnostics::events::BehaviorKind::Clarify, None)
+            }
+            Some(crate::session::behavior::BehaviorState::Plan(phase)) => {
+                let phase = match phase {
+                    crate::session::behavior::PlanPhase::Drafting => {
+                        grow_diagnostics::events::PlanPhase::Drafting
+                    }
+                    crate::session::behavior::PlanPhase::AwaitingApproval => {
+                        grow_diagnostics::events::PlanPhase::AwaitingApproval
+                    }
+                    crate::session::behavior::PlanPhase::Executing => {
+                        grow_diagnostics::events::PlanPhase::Executing
+                    }
+                    crate::session::behavior::PlanPhase::Amending => {
+                        grow_diagnostics::events::PlanPhase::Amending
+                    }
+                };
+                (grow_diagnostics::events::BehaviorKind::Plan, Some(phase))
+            }
+            Some(crate::session::behavior::BehaviorState::Workflow) => {
+                (grow_diagnostics::events::BehaviorKind::Workflow, None)
+            }
+            Some(crate::session::behavior::BehaviorState::DeepResearch { .. }) => {
+                (grow_diagnostics::events::BehaviorKind::DeepResearch, None)
+            }
+            Some(crate::session::behavior::BehaviorState::Goal) => {
+                (grow_diagnostics::events::BehaviorKind::Goal, None)
+            }
+            Some(crate::session::behavior::BehaviorState::Normal) | None => {
+                (grow_diagnostics::events::BehaviorKind::Normal, None)
+            }
+        };
+        let restored_approval_pending = persisted_behavior
+            .as_ref()
+            .is_some_and(|s| s.approval_pending);
         self.session_turn_numbers
             .borrow_mut()
             .insert(session_id.clone(), 0);
@@ -1429,7 +1353,7 @@ impl acp::Agent for MvpAgent {
         let (initial_total_tokens, delta_completions, unfinished_subagents) = if no_replay {
             tracing::info!(
                 session_id = %session_id.0,
-                "Skipping session replay (noReplay flag set by relay)"
+                "Skipping session replay (noReplay requested by client)"
             );
             (
                 Self::extract_initial_tokens_from_updates(&updates_file_path),
@@ -1530,7 +1454,7 @@ impl acp::Agent for MvpAgent {
                         client_fs_write,
                         preloaded_envrc: Some(preloaded_envrc),
                         persisted_signals,
-                        persisted_plan_mode,
+                        persisted_behavior,
                         persisted_goal_mode: _persisted_goal_mode,
                         persisted_workflow_runs,
                         persisted_announcement_state,
@@ -1754,7 +1678,7 @@ impl acp::Agent for MvpAgent {
             .meta(response_meta.as_object().cloned());
         if let Some(handle) = self.sessions.borrow().get(&session_id) {
             let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
-            if restored_awaiting_plan_approval {
+            if restored_approval_pending {
                 let _ = handle.cmd_tx.send(SessionCommand::RestorePlanApproval);
             }
         }
@@ -1764,7 +1688,8 @@ impl acp::Agent for MvpAgent {
                 compaction_count: restored_compaction_count,
                 turn_count: restored_turn_count,
                 tool_call_count: restored_tool_call_count,
-                plan_mode_state: restored_plan_mode_state,
+                behavior: restored_behavior,
+                plan_phase: restored_plan_phase,
                 permission_mode: if session_yolo_mode {
                     grow_diagnostics::enums::PermissionMode::AlwaysApprove
                 } else if session_auto_mode
@@ -1790,7 +1715,7 @@ impl acp::Agent for MvpAgent {
         &self,
         mut arguments: acp::PromptRequest,
     ) -> Result<acp::PromptResponse, acp::Error> {
-        use crate::session::plan_mode::PromptMode;
+        use crate::session::behavior::PromptMode;
         tracing::debug!(
             target: "sampling_log",
             session_id = %arguments.session_id.0,
@@ -2233,12 +2158,12 @@ impl acp::Agent for MvpAgent {
                     responds_to: tx,
                 });
         }
-        let _ = rx
+        let outcome = rx
             .await
             .map_err(|_| {
                 acp::Error::internal_error().data("response to set session failed")
             })?;
-        Ok(acp::SetSessionModeResponse::new())
+        Ok(acp::SetSessionModeResponse::new().meta(outcome.response_meta()))
     }
     async fn set_session_model(
         &self,
@@ -2315,7 +2240,7 @@ impl acp::Agent for MvpAgent {
             | "grow/internal/reload_all_mcp_servers"
             | "grow/internal/reload_project_mcp_servers" | "grow/internal/reload_skills"
             | "grow/internal/reload_workflows" | "grow/internal/reload_models"
-            | "grow/internal/reload_models_cache" | "grow/internal/reload_announcements"
+            | "grow/internal/reload_announcements"
             | "grow/internal/auth_cleared"
             | "grow/plugins/reload" | "grow/commands/list" => {
                 crate::extensions::session_admin::handle(self, &args).await
@@ -2336,208 +2261,6 @@ impl acp::Agent for MvpAgent {
                 crate::extensions::feedback::handle(self, &args).await
             }
             "grow/recap" => crate::extensions::recap::handle(self, &args).await,
-            "grow/cloud/terminate" => {
-                crate::extensions::auth_gate::require_service_auth(
-                    &self.auth_manager,
-                    "Authentication required",
-                    "Run `grow login` to authenticate.",
-                )?;
-                let params: serde_json::Value = serde_json::from_str(args.params.get())
-                    .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
-                let sandbox_id = params
-                    .get("sandbox_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        acp::Error::invalid_params().data("missing sandbox_id")
-                    })?;
-                let sandbox_client = crate::remote::SandboxClient::new(
-                    self.cli_chat_proxy_base_url(),
-                    self.auth_manager.clone(),
-                );
-                sandbox_client
-                    .terminate_session(
-                        sandbox_id,
-                        &crate::remote::SandboxTerminateRequest {
-                            environment_id: None,
-                        },
-                    )
-                    .await
-                    .map_err(|e| {
-                        acp::Error::internal_error()
-                            .data(format!("Failed to terminate sandbox: {e}"))
-                    })?;
-                crate::extensions::to_raw_response(&serde_json::json!({ "ok": true }))
-            }
-            "grow/cloud/env/list" => {
-                crate::extensions::auth_gate::require_service_auth(
-                    &self.auth_manager,
-                    "Authentication required",
-                    "Run `grow login` to authenticate.",
-                )?;
-                let sandbox_client = crate::remote::SandboxClient::new(
-                    self.cli_chat_proxy_base_url(),
-                    self.auth_manager.clone(),
-                );
-                let resp = sandbox_client
-                    .list_environments(
-                        &crate::remote::SandboxListEnvironmentsRequest::default(),
-                    )
-                    .await
-                    .map_err(|e| {
-                        acp::Error::internal_error()
-                            .data(format!("Failed to list environments: {e}"))
-                    })?;
-                crate::extensions::to_raw_response(
-                    &serde_json::json!({
-                    "environments": resp.environments,
-                }),
-                )
-            }
-            "grow/cloud/env/create" => {
-                crate::extensions::auth_gate::require_service_auth(
-                    &self.auth_manager,
-                    "Authentication required",
-                    "Run `grow login` to authenticate.",
-                )?;
-                let params: serde_json::Value = serde_json::from_str(args.params.get())
-                    .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
-                let sandbox_client = crate::remote::SandboxClient::new(
-                    self.cli_chat_proxy_base_url(),
-                    self.auth_manager.clone(),
-                );
-                let resp = sandbox_client
-                    .create_environment(
-                        &crate::remote::SandboxCreateEnvironmentRequest {
-                            name: params
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .map(String::from),
-                            description: params
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .map(String::from),
-                            repository: params
-                                .get("repository")
-                                .and_then(|v| v.as_str())
-                                .map(String::from),
-                            default_branch: params
-                                .get("default_branch")
-                                .and_then(|v| v.as_str())
-                                .map(String::from),
-                            container_image: params
-                                .get("container_image")
-                                .and_then(|v| v.as_str())
-                                .map(String::from),
-                            setup_script: params
-                                .get("setup_script")
-                                .and_then(|v| v.as_str())
-                                .map(String::from),
-                            workspace_directory: Some("/workspace".to_string()),
-                            internet_enabled: Some(true),
-                            domain_allowlist_preset: Some("common".to_string()),
-                            allowed_http_methods: Some("all".to_string()),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .map_err(|e| {
-                        acp::Error::internal_error()
-                            .data(format!("Failed to create environment: {e}"))
-                    })?;
-                crate::extensions::to_raw_response(
-                    &serde_json::json!({
-                    "environment": resp.environment,
-                }),
-                )
-            }
-            "grow/cloud/env/update" => {
-                crate::extensions::auth_gate::require_service_auth(
-                    &self.auth_manager,
-                    "Authentication required",
-                    "Run `grow login` to authenticate.",
-                )?;
-                let params: serde_json::Value = serde_json::from_str(args.params.get())
-                    .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
-                let environment_id = params
-                    .get("environment_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        acp::Error::invalid_params().data("missing environment_id")
-                    })?;
-                let sandbox_client = crate::remote::SandboxClient::new(
-                    self.cli_chat_proxy_base_url(),
-                    self.auth_manager.clone(),
-                );
-                let resp = sandbox_client
-                    .update_environment(
-                        environment_id,
-                        &crate::remote::SandboxUpdateEnvironmentRequest {
-                            name: params
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .map(String::from),
-                            description: params
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .map(String::from),
-                            repository: params
-                                .get("repository")
-                                .and_then(|v| v.as_str())
-                                .map(String::from),
-                            default_branch: params
-                                .get("default_branch")
-                                .and_then(|v| v.as_str())
-                                .map(String::from),
-                            container_image: params
-                                .get("container_image")
-                                .and_then(|v| v.as_str())
-                                .map(String::from),
-                            setup_script: params
-                                .get("setup_script")
-                                .and_then(|v| v.as_str())
-                                .map(String::from),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .map_err(|e| {
-                        acp::Error::internal_error()
-                            .data(format!("Failed to update environment: {e}"))
-                    })?;
-                crate::extensions::to_raw_response(
-                    &serde_json::json!({
-                    "environment": resp.environment,
-                }),
-                )
-            }
-            "grow/cloud/env/delete" => {
-                crate::extensions::auth_gate::require_service_auth(
-                    &self.auth_manager,
-                    "Authentication required",
-                    "Run `grow login` to authenticate.",
-                )?;
-                let params: serde_json::Value = serde_json::from_str(args.params.get())
-                    .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
-                let environment_id = params
-                    .get("environment_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        acp::Error::invalid_params().data("missing environment_id")
-                    })?;
-                let sandbox_client = crate::remote::SandboxClient::new(
-                    self.cli_chat_proxy_base_url(),
-                    self.auth_manager.clone(),
-                );
-                sandbox_client
-                    .delete_environment(environment_id)
-                    .await
-                    .map_err(|e| {
-                        acp::Error::internal_error()
-                            .data(format!("Failed to delete environment: {e}"))
-                    })?;
-                crate::extensions::to_raw_response(&serde_json::json!({ "ok": true }))
-            }
-            "grow/share_session" => crate::extensions::share::handle(self, &args).await,
             "grow/prompt_history" => {
                 crate::extensions::prompt_history::handle(self, &args).await
             }
@@ -2747,8 +2470,7 @@ impl acp::Agent for MvpAgent {
                 .find(|s| s.info.id.0.as_ref() == session_id_str)
                 .cloned();
             if let Some(handle) = handle {
-                let is_engaged = handle.plan_mode.lock().state()
-                    != crate::session::plan_mode::PlanModeState::Inactive;
+                let is_engaged = handle.behavior.lock().is_plan();
                 let next_mode_id = acp::SessionModeId::new(
                     if is_engaged { "default" } else { "plan" },
                 );

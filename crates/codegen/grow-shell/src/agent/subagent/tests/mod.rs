@@ -1339,7 +1339,7 @@ async fn copy_session_data_preserves_parent_chat_history() {
                 session_kind: Some("subagent_fork".to_string()),
                 fork_context_source: Some("forked".to_string()),
                 copy_plan_state: false,
-                copy_plan_mode_state: false,
+                copy_behavior_state: false,
                 copy_signals: false,
                 copy_tool_state: false,
                 fork_filter: true,
@@ -1388,7 +1388,7 @@ fn validate_subagent_type_returns_unknown_for_invented_type() {
     let outcome = validate_subagent_type("totally-invented-agent-name", &ctx);
     match outcome {
         SubagentValidateTypeOutcome::Unknown { available } => {
-            for expected in ["general-purpose", "explore", "plan"] {
+            for expected in ["general-purpose", "explore"] {
                 assert!(
                         available.iter().any(|n| n == expected),
                         "available list must include built-in {expected:?}: {available:?}",
@@ -1414,7 +1414,7 @@ fn validate_subagent_type_returns_disabled_when_toggled_off() {
 #[test]
 fn validate_subagent_type_honors_parent_agent_filter() {
     let mut definition = grow_agent::AgentDefinition::default_grow_build();
-    definition.tools = vec!["Agent(explore)".to_string()];
+    definition.subagents.allow = vec!["explore".to_string()];
     let mut ctx = make_validation_ctx(HashMap::new());
     ctx.subagent_filter = definition.subagent_filter();
 
@@ -1423,7 +1423,7 @@ fn validate_subagent_type_honors_parent_agent_filter() {
         SubagentValidateTypeOutcome::Ok,
     ));
     assert!(matches!(
-        validate_subagent_type("plan", &ctx),
+        validate_subagent_type("general-purpose", &ctx),
         SubagentValidateTypeOutcome::Disabled,
     ));
 }
@@ -1896,8 +1896,6 @@ fn fresh_tool_model_rejects_unknown_and_nonavailable_entries() {
         "hidden-internal",
         "disabled",
         "disabled-internal",
-        "oauth-only",
-        "oauth-only-internal",
     ] {
         let error = super::handle_request::task_model_override_error(
                 Some(requested),
@@ -1910,7 +1908,7 @@ fn fresh_tool_model_rejects_unknown_and_nonavailable_entries() {
         assert_eq!(
                 error,
                 format!(
-                    "Unknown Task.model slug '{requested}'. Valid model slugs: alpha, zeta. \
+                    "Unknown Task.model slug '{requested}'. Valid model slugs: alpha, oauth-only, zeta. \
                      Omit `model` to inherit the parent model."
                 )
             );
@@ -1922,10 +1920,10 @@ fn fresh_tool_model_rejects_unknown_and_nonavailable_entries() {
                 ModelOverrideProvenance::Tool,
                 false,
                 &models,
-                true,
+                false,
             )
             .is_none(),
-            "OAuth-only model should resolve for session auth"
+            "every explicitly configured provider model is selectable regardless of credential kind"
         );
 }
 #[test]

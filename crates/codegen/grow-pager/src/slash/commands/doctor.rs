@@ -185,6 +185,13 @@ mod tests {
         let models = ModelState::default();
         let context = AppCtx {
             models: &models,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
             cwd: std::path::Path::new("/tmp"),
             has_session_announcements: false,
             workflows_available: false,
