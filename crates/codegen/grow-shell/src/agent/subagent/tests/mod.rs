@@ -1412,6 +1412,22 @@ fn validate_subagent_type_returns_disabled_when_toggled_off() {
         );
 }
 #[test]
+fn validate_subagent_type_honors_parent_agent_filter() {
+    let mut definition = grow_agent::AgentDefinition::default_grow_build();
+    definition.tools = vec!["Agent(explore)".to_string()];
+    let mut ctx = make_validation_ctx(HashMap::new());
+    ctx.subagent_filter = definition.subagent_filter();
+
+    assert!(matches!(
+        validate_subagent_type("explore", &ctx),
+        SubagentValidateTypeOutcome::Ok,
+    ));
+    assert!(matches!(
+        validate_subagent_type("plan", &ctx),
+        SubagentValidateTypeOutcome::Disabled,
+    ));
+}
+#[test]
 fn validate_subagent_type_unknown_includes_cli_agents_in_available() {
     let mut ctx = make_validation_ctx(HashMap::new());
     ctx.cli_agent_names = vec!["user-defined-agent".to_string()];

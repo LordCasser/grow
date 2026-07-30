@@ -185,12 +185,15 @@ impl MvpAgent {
         parent_session_id: &str,
     ) -> crate::agent::subagent::SubagentValidationContext {
         let parent_sid = acp::SessionId::new(parent_session_id);
-        let parent_cwd = {
+        let (parent_cwd, subagent_filter) = {
             let sessions = self.sessions.borrow();
             let ps = sessions.get(&parent_sid);
             warn_on_missing_parent_session_for_validate_type(parent_session_id, ps.is_some());
-            ps.map(|h| std::path::PathBuf::from(&h.info.cwd))
-                .unwrap_or_default()
+            (
+                ps.map(|h| std::path::PathBuf::from(&h.info.cwd))
+                    .unwrap_or_default(),
+                ps.map(|h| h.subagent_filter.clone()).unwrap_or_default(),
+            )
         };
         let (cli_agent_names, subagent_toggle) = {
             let cfg = self.cfg.borrow();
@@ -203,6 +206,7 @@ impl MvpAgent {
             parent_cwd,
             plugin_registry: self.plugin_registry_handle.snapshot(),
             subagent_toggle,
+            subagent_filter,
             cli_agent_names,
         }
     }
@@ -245,6 +249,7 @@ impl MvpAgent {
             session_env,
             parent_attribution_callback,
             parent_agent_name,
+            parent_subagent_filter,
             parent_managed_mcp_proxy_base_url,
         ) = {
             let sessions = self.sessions.borrow();
@@ -280,6 +285,7 @@ impl MvpAgent {
                     .unwrap_or_else(|| std::sync::Arc::new(std::collections::HashMap::new())),
                 ps.and_then(|h| h.attribution_callback.clone()),
                 ps.map(|h| h.agent_name.clone()),
+                ps.map(|h| h.subagent_filter.clone()).unwrap_or_default(),
                 ps.map(|h| h.managed_mcp_proxy_base_url.clone()),
             )
         };
@@ -402,6 +408,7 @@ impl MvpAgent {
             available_models,
             subagent_model_overrides,
             subagent_toggle,
+            subagent_filter: parent_subagent_filter,
             subagent_roles,
             subagent_personas,
             todo_gate: self.cfg.borrow().todo_gate,

@@ -140,6 +140,10 @@ pub struct SessionHandle {
     pub attribution_callback: Option<grow_sampler::SharedAttributionCallback>,
     /// The agent definition name for this session.
     pub agent_name: String,
+    /// Peer-Agent visibility derived from the active Agent's task-tool policy.
+    /// Kept beside `agent_name` so runtime spawn validation matches the tool
+    /// description even after an in-session Agent switch.
+    pub subagent_filter: grow_agent::config::SubagentFilter,
     pub managed_mcp_proxy_base_url: String,
     /// Hook registry for this session (snapshot from spawn time).
     pub hook_registry: Option<std::sync::Arc<grow_hooks::discovery::HookRegistry>>,

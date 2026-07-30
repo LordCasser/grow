@@ -76,6 +76,7 @@ async fn handle_set_session_agent(
         acp::Error::invalid_params().data(format!("unknown agent: {}", request.agent_name))
     })?;
     let selected_name = definition.name.clone();
+    let subagent_filter = definition.subagent_filter();
     let (responds_to, response) = tokio::sync::oneshot::channel();
     handle
         .cmd_tx
@@ -90,6 +91,7 @@ async fn handle_set_session_agent(
 
     if let Some(handle) = agent.sessions.borrow_mut().get_mut(&session_id) {
         handle.agent_name = selected_name.clone();
+        handle.subagent_filter = subagent_filter;
     }
     broadcast_agent_changed(agent, &session_id, &selected_name);
     ExtMethodResult::success(serde_json::json!({ "agentName": selected_name }))

@@ -201,6 +201,9 @@ pub(crate) struct SubagentSpawnContext {
     /// Per-subagent enable/disable toggles from config.toml `[subagents.toggle]`.
     /// Omitted agents default to enabled (`true`).
     pub subagent_toggle: std::collections::HashMap<String, bool>,
+    /// Active parent Agent's task-tool restriction, composed with the global
+    /// toggle at validation and spawn time.
+    pub subagent_filter: grow_agent::config::SubagentFilter,
     /// Whether the runtime turn-end TodoGate is force-enabled via
     /// `--todo-gate`. Inherited from the parent session.
     pub todo_gate: bool,
@@ -1365,6 +1368,9 @@ fn available_agent_names(ctx: &SubagentSpawnContext) -> Vec<String> {
             toggles: &ctx.subagent_toggle,
         },
     )
+    .into_iter()
+    .filter(|name| ctx.subagent_filter.allows(name))
+    .collect()
 }
 /// Minimal per-session context for `validate_subagent_type`.
 /// Avoids the heavy `SubagentSpawnContext` clone on the validation hot path.
@@ -1373,6 +1379,7 @@ pub(crate) struct SubagentValidationContext {
     pub parent_cwd: PathBuf,
     pub plugin_registry: Option<Arc<grow_agent::plugins::PluginRegistry>>,
     pub subagent_toggle: HashMap<String, bool>,
+    pub subagent_filter: grow_agent::config::SubagentFilter,
     pub cli_agent_names: Vec<String>,
 }
 /// Synchronously validate a subagent type against discovery and the global toggle.
@@ -1381,6 +1388,9 @@ pub(crate) fn validate_subagent_type(
     subagent_type: &str,
     ctx: &SubagentValidationContext,
 ) -> SubagentValidateTypeOutcome {
+    if !ctx.subagent_filter.allows(subagent_type) {
+        return SubagentValidateTypeOutcome::Disabled;
+    }
     let context = grow_subagent_resolution::DefinitionValidationContext {
         cwd: &ctx.parent_cwd,
         plugins: ctx.plugin_registry.as_deref(),
@@ -1390,7 +1400,12 @@ pub(crate) fn validate_subagent_type(
     match grow_subagent_resolution::validate_agent_name(subagent_type, &context) {
         Ok(()) => SubagentValidateTypeOutcome::Ok,
         Err(grow_subagent_resolution::ResolutionError::Unknown { available, .. }) => {
-            SubagentValidateTypeOutcome::Unknown { available }
+            SubagentValidateTypeOutcome::Unknown {
+                available: available
+                    .into_iter()
+                    .filter(|name| ctx.subagent_filter.allows(name))
+                    .collect(),
+            }
         }
         Err(grow_subagent_resolution::ResolutionError::Disabled { .. }) => {
             SubagentValidateTypeOutcome::Disabled
@@ -1413,6 +1428,9 @@ fn gate_subagent_type(
     subagent_type: &str,
     ctx: &SubagentSpawnContext,
 ) -> SubagentValidateTypeOutcome {
+    if !ctx.subagent_filter.allows(subagent_type) {
+        return SubagentValidateTypeOutcome::Disabled;
+    }
     let cli_agents = ctx
         .agent_config
         .as_ref()

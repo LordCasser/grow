@@ -658,6 +658,7 @@ pub(crate) async fn spawn_session_actor(
     let bridge_state_path =
         crate::session::persistence::session_dir(&session_info).join("tool_state.json");
     let initial_agent_type = Some(agent_definition.name.clone());
+    let subagent_filter_for_handle = agent_definition.subagent_filter();
     let harness_metrics = {
         let plugin_names = plugin_registry
             .as_ref()
@@ -1092,8 +1093,6 @@ pub(crate) async fn spawn_session_actor(
         .as_deref()
         .unwrap_or(crate::agent::config::DEFAULT_AGENT_TYPE)
         .to_owned();
-    // Agent selection is flat. Delegation availability is a session/tool
-    // capability, never a parent-Agent-specific allowlist.
     let mut hook_discovery_errors: Vec<grow_hooks::error::HookError> = Vec::new();
     let built_hook_registry: Option<Arc<grow_hooks::discovery::HookRegistry>> =
         if let Some(override_reg) = hook_registry_override {
@@ -1919,6 +1918,7 @@ pub(crate) async fn spawn_session_actor(
             permission_handle: permissions_for_handle,
             attribution_callback: attribution_callback_for_handle,
             agent_name: agent_name_for_handle,
+            subagent_filter: subagent_filter_for_handle,
             managed_mcp_proxy_base_url,
             hook_registry: hook_registry_for_handle,
             workspace_ops: workspace_ops_for_handle,

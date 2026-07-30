@@ -20,7 +20,7 @@ Grow 不是 xAI 官方产品，也不内置 Grok 模型、推理端点或推理�
 | 思考强度 | 依赖产品模型能力 | 每个 BYOK 模型显式声明 `reasoning_efforts`；`Shift+Tab` 按声明顺序循环 |
 | Agent 切换 | 上游内置 Agent 流程 | `Ctrl+X` 后按 `a` 打开平级 Agent 选单，同时保留 `/agents` |
 | Agent 定义 | 上游格式 | 兼容 Harness/OpenCode 常见 Markdown frontmatter；忽略外部权限、mode 和 model 字段 |
-| Agent 关系 | 可包含产品特定模式 | 所有 Agent 平级；Agent 不绑定 provider/model，也不引入父/子 Agent 限定 |
+| Agent 关系 | 可包含产品特定模式 | 所有 Agent 定义平级；主/子只是一次 session 中的运行角色，主 Agent 可通过工具策略限制本次可调用的子 Agent |
 | 权限切换 | 上游快捷键/模式 | `Ctrl+R` 循环 Grow 原有权限模式；Tab 保持原行为 |
 | Agent/Skill 用户目录 | 产品目录 | 优先 `~/.config/.grow`，同名资源找不到时再回退 `~/.agent` |
 | 缺少 LLM 配置 | 可落入产品默认模型 | 连接前阻止启动，并引导编辑 `~/.grow/config.toml` |
@@ -191,15 +191,149 @@ path = "~/projects/plugins"
 
 ## Agent 与 Skill
 
-用户级资源按以下顺序加载：
+Grow 只有一套平级的 Agent 定义。一个 Markdown 定义既可以被选作当前 session 的主 Agent，
+也可以被其他 Agent 通过 `task` 工具启动为子 Agent；Agent 不绑定 provider/model，也不声明
+OpenCode 式的 `mode`、父 Agent 或子 Agent 身份。主/子只是运行时角色。
+
+### 增加 Agent
+
+新建一个 Markdown 文件即可增加 Agent。文件的相对路径是稳定 ID，例如
+`.grow/agents/review/backend.md` 的 ID 是 `review/backend`；frontmatter 中的 `name` 只是兼容
+元数据，不会改变 ID。
+
+```text
+<project>/.grow/agents/       # 当前项目，优先级最高
+~/.config/.grow/agents/       # Grow 用户级定义
+~/.agent/agents/              # 用户级回退目录
+```
+
+项目级定义会从当前目录向上发现到仓库根。用户级资源按以下顺序加载：
 
 1. `~/.config/.grow/agents/`、`~/.config/.grow/skills/`
 2. 对当前名称未命中时，回退到 `~/.agent/agents/`、`~/.agent/skills/`
 
-项目级 Agent 可以放在 `.grow/agents/`。Agent 使用 Markdown + YAML frontmatter；权限模式、
-provider 和 model 都属于 session，不属于 Agent 定义。格式见
-[agent.md.example](agent.md.example)；字段语义和发现优先级见
-[grow-agent README](crates/codegen/grow-agent/README.md)。
+最小定义示例：
+
+```markdown
+---
+description: Review code without modifying it
+tools:
+  - read_file
+  - grep
+  - list_dir
+---
+
+You are a strict code reviewer. Report concrete findings with file locations.
+```
+
+完整、可复制的所有字段见 [agent.md.example](agent.md.example)；字段语义见
+[grow-agent README](crates/codegen/grow-agent/README.md)。权限模式、provider 和 model 都属于
+session，不属于 Agent 定义。
+
+### 选择、替换或停止使用主 Agent
+
+在 `~/.grow/config.toml` 中按 ID 设置新 session 的默认主 Agent：
+
+```toml
+[agent]
+name = "review/backend"
+```
+
+也可以直接指定一个 Markdown 文件。`definition` 比同一节中的 `name` 优先，通常二选一：
+
+```toml
+[agent]
+definition = "/absolute/path/to/my-agent.md"
+```
+
+单次启动可使用 `grow --agent-profile /absolute/path/to/my-agent.md`。TUI 中按 `Ctrl+X` 后按
+`a` 可切换当前 session 的主 Agent；选择会随 session 保存。新 session 使用全局默认，打开
+已有 session 时优先恢复它上次使用的 Agent，因此修改 `[agent]` 不会改写已有 session。
+
+主 Agent 始终必须存在，所以没有“关闭主 Agent”开关。停止使用某个自定义主 Agent 时：
+
+- 把 `[agent].name` 或 `definition` 改成另一个定义，或删除 `[agent]` 回到内置默认
+  `grow-build-plan`。
+- 删除或重命名对应 Markdown 文件，使它不再被发现。
+- `[subagents.toggle]` 和 `/agents` 中的 Enabled 开关只控制它能否作为子 Agent 启动，
+  不会禁止它被选择为主 Agent。
+
+替换遵循发现优先级，而不是修改内置文件：
+
+- 项目 `.grow/agents/<id>.md` 可同名覆盖项目内可见的用户定义或内置定义。例如创建
+  `.grow/agents/explore.md` 可在该项目替换内置 `explore`。
+- `~/.config/.grow/agents/` 同名覆盖 `~/.agent/agents/`。
+- 为保证“列表中看到的定义就是实际调用的定义”，用户级文件不能同名覆盖内置 Agent；需要
+  全局采用不同 ID，或用项目级文件覆盖。需要强制使用任意路径作为主 Agent 时使用
+  `[agent].definition`。
+
+新 session 的主 Agent 解析顺序为：ACP session 配置、`--agent-profile`、`[agent]`、
+`GROW_AGENT`、内置 `grow-build-plan`；恢复已有 session 时，已保存的 Agent 优先于这些全局
+默认值。
+
+### 增加、替换或禁用子 Agent
+
+所有发现到的自定义 Agent 都可以作为子 Agent。内置可调用子 Agent 为
+`general-purpose`、`explore` 和 `plan`。增加和替换仍使用上面的 Markdown 目录与同名覆盖
+规则，不需要额外注册。
+
+在配置中可以关闭某个子 Agent，省略的名称默认启用：
+
+```toml
+[subagents]
+enabled = true
+
+[subagents.toggle]
+explore = true
+plan = false
+"review/backend" = true
+```
+
+包含 `/` 的 TOML key 必须像示例一样加引号。`/agents` 打开管理页面，
+其中的 Enabled 开关写入同一份 `[subagents.toggle]`。要关闭整个子 Agent 系统，设置：
+
+```toml
+[subagents]
+enabled = false
+```
+
+也可临时用 `GROW_SUBAGENTS=0` 强制关闭。全局关闭或 `[subagents.toggle]` 的禁用结果对所有
+主 Agent 生效。
+
+### 为不同主 Agent 指定可用子 Agent
+
+在每个主 Agent 自己的 Markdown frontmatter 中，用 `tools` 里的 `Agent(...)` 限定它能看到
+并实际启动的子 Agent。这是 task 工具权限，不会建立固定的父子层级：
+
+```markdown
+---
+description: Coordinates review work
+tools:
+  - read_file
+  - grep
+  - Agent(explore, review/backend)
+disallowedTools:
+  - Agent(plan)
+---
+
+Delegate repository discovery to explore and code review to review/backend.
+```
+
+规则如下：
+
+- 未声明或留空 `tools`：继承完整工具集，可使用所有全局启用的子 Agent。
+- 非空 `tools` 中写 `Agent(explore, review/backend)`：只允许列出的子 Agent，并保留 task
+  工具及其生命周期工具。
+- 非空 `tools` 中写裸 `Agent` 或 `task`：允许所有全局启用的子 Agent。
+- 非空 `tools` 中没有 `Agent(...)`、`Agent` 或 `task`：该 Agent 没有 task 工具，不能启动
+  子 Agent。
+- `disallowedTools: [Agent(plan)]` 只拒绝指定类型；裸 `Agent` 拒绝所有子 Agent。
+- `disallowedTools` 优先于 `tools`，全局 `[subagents.toggle]` 和 `[subagents].enabled` 仍是
+  最终上限，Agent 定义不能重新启用全局已禁用的类型。
+
+例如，`coordinator.md` 可以只允许 `explore` 与 `review/backend`，而 `implementer.md` 可以只
+允许 `general-purpose`。两者仍是平级定义，也都能被直接选为主 Agent。若子 Agent 自身允许
+继续委派，同一规则会应用到它自己的定义，并同时受 `[subagents].max_depth` 限制。
 
 ## 从源码构建
 

@@ -11,7 +11,7 @@ use grow_tools::implementations::search_tool;
 use grow_tools::implementations::use_tool;
 use grow_tools::registry::types::{ToolConfig, ToolServerConfig};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use strum::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
@@ -560,6 +560,25 @@ pub static AGENT_TASK_CLASSIFIER_RE: std::sync::LazyLock<regex::Regex> =
         regex::Regex::new(&format!(r"^(?i:{AGENT_TASK_KEYWORDS})(?:\(([^)]*)\))?$"))
             .expect("valid regex")
     });
+
+/// Per-Agent restriction on which peer definitions may be launched through
+/// the task tool. This is a tool capability, not an Agent hierarchy: the same
+/// definition remains selectable as a primary Agent and launchable anywhere
+/// another Agent permits it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubagentFilter {
+    allow: Option<HashSet<String>>,
+    deny: HashSet<String>,
+}
+
+impl SubagentFilter {
+    pub fn allows(&self, name: &str) -> bool {
+        self.allow
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(name))
+            && !self.deny.contains(name)
+    }
+}
 /// Accepts `"a, b, c"` or `["a", "b"]`. Trims whitespace.
 fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
@@ -1213,6 +1232,63 @@ pub(crate) fn tool_id_matches(list: &[String], id: &str) -> bool {
     list.iter().any(|e| tool_id_eq(e, id))
 }
 impl AgentDefinition {
+    /// Resolve `Agent(...)` / `Task(...)` entries from this definition's tool
+    /// filters into the peer Agents visible to its task tool.
+    ///
+    /// An empty `tools` list inherits all peer Agents. A bare `Agent` or the
+    /// concrete `task` tool also permits all. Typed entries form an allowlist;
+    /// omitting task/Agent from a non-empty tool allowlist permits none.
+    /// `disallowedTools` is applied last and therefore wins.
+    pub fn subagent_filter(&self) -> SubagentFilter {
+        fn clauses(entries: &[String]) -> (bool, HashSet<String>) {
+            let mut all = false;
+            let mut names = HashSet::new();
+            for entry in entries {
+                if tool_id_eq("task", entry) {
+                    all = true;
+                    continue;
+                }
+                let Some(captures) = AGENT_TASK_CLASSIFIER_RE.captures(entry) else {
+                    continue;
+                };
+                let Some(list) = captures.get(1) else {
+                    all = true;
+                    continue;
+                };
+                let mut found_name = false;
+                for name in list
+                    .as_str()
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    found_name = true;
+                    names.insert(name.to_owned());
+                }
+                if !found_name {
+                    all = true;
+                }
+            }
+            (all, names)
+        }
+
+        let (allow_all, allowed) = clauses(&self.tools);
+        let allow = if self.tools.is_empty() || allow_all {
+            None
+        } else {
+            Some(allowed)
+        };
+        let (deny_all, denied) = clauses(&self.disallowed_tools);
+        SubagentFilter {
+            allow: if deny_all {
+                Some(HashSet::new())
+            } else {
+                allow
+            },
+            deny: denied,
+        }
+    }
+
     /// Parse an agent definition from a Markdown file with YAML frontmatter.
     ///
     /// File format:
@@ -1934,6 +2010,37 @@ Agent.
             vec!["Agent(worker, researcher)", "Read", "Bash"],
             "Agent(a, b) must be kept as a single token"
         );
+    }
+    #[test]
+    fn subagent_filter_uses_typed_agent_entries_as_allowlist() {
+        let mut def = AgentDefinition::default_grow_build();
+        def.tools = vec!["read_file".into(), "Agent(explore, reviewer)".into()];
+        let filter = def.subagent_filter();
+        assert!(filter.allows("explore"));
+        assert!(filter.allows("reviewer"));
+        assert!(!filter.allows("plan"));
+    }
+    #[test]
+    fn subagent_filter_denylist_wins_and_bare_task_allows_all() {
+        let mut def = AgentDefinition::default_grow_build();
+        def.tools = vec!["Grow:task".into(), "read_file".into()];
+        def.disallowed_tools = vec!["Agent(plan)".into()];
+        let filter = def.subagent_filter();
+        assert!(filter.allows("explore"));
+        assert!(!filter.allows("plan"));
+
+        def.disallowed_tools = vec!["Agent".into()];
+        let filter = def.subagent_filter();
+        assert!(!filter.allows("explore"));
+        assert!(!filter.allows("plan"));
+    }
+    #[test]
+    fn subagent_filter_requires_task_entry_in_explicit_tool_allowlist() {
+        let mut def = AgentDefinition::default_grow_build();
+        assert!(def.subagent_filter().allows("explore"));
+
+        def.tools = vec!["read_file".into(), "grep".into()];
+        assert!(!def.subagent_filter().allows("explore"));
     }
     #[test]
     fn test_parse_tools_comma_separated() {

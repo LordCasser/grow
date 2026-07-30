@@ -686,11 +686,13 @@ impl AgentBuilder {
             tool_config.tools.retain(|tc| tc.id != task_tool_id);
             task_stripped = true;
         } else {
-            let subagents = crate::discovery::all_subagents_with_plugins(
+            let filter = definition.subagent_filter();
+            let mut subagents = crate::discovery::all_subagents_with_plugins(
                 &self.working_directory,
                 &self.subagent_toggle,
                 self.plugin_registry.as_deref(),
             );
+            subagents.retain(|entry| filter.allows(&entry.name));
             if subagents.is_empty() {
                 tool_config.tools.retain(|tc| tc.id != task_tool_id);
                 task_stripped = true;
@@ -1699,6 +1701,38 @@ mod tests {
             .map(|definition| definition.function.name)
             .collect();
         assert!(!names.iter().any(|name| name == "task"));
+    }
+    #[tokio::test]
+    async fn typed_agent_allowlist_filters_task_description() {
+        use grow_tools::computer::local::LocalTerminalBackend;
+        use grow_tools::notification::ToolNotificationHandle;
+        let mut tools: Vec<String> = AGENT_TOOLS_BASE.iter().map(|s| s.to_string()).collect();
+        tools.push("Agent(explore)".into());
+        let mut definition = crate::config::AgentDefinition::default_grow_build();
+        definition.tools = tools;
+        let agent = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(definition)
+        .with_subagents_enabled(true)
+        .build()
+        .await
+        .expect("agent should build");
+        let task = agent
+            .tool_definitions()
+            .await
+            .into_iter()
+            .find(|definition| definition.function.name == "spawn_subagent")
+            .expect("Agent(explore) must retain the task tool");
+        let description = task
+            .function
+            .description
+            .expect("task tool must have a description");
+        assert!(description.contains("**explore**"));
+        assert!(!description.contains("**plan**"));
+        assert!(!description.contains("**general-purpose**"));
     }
     #[tokio::test]
     async fn spawning_blocked_disables_all_background_bash_modes() {

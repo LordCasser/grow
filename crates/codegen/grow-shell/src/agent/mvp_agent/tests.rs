@@ -612,6 +612,7 @@ fn make_test_handle(
         permission_handle: grow_workspace::permission::PermissionHandle::allow_all(),
         attribution_callback: None,
         agent_name: "grow-build".to_string(),
+        subagent_filter: Default::default(),
         managed_mcp_proxy_base_url: String::new(),
         hook_registry: None,
         workspace_ops: grow_workspace::WorkspaceOps::for_test(),

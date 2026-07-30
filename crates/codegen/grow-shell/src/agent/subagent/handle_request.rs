@@ -88,7 +88,7 @@ pub(crate) async fn run_shell_child(
     match gate_subagent_type(&request.subagent_type, &ctx) {
         SubagentValidateTypeOutcome::Disabled => {
             let msg = format!(
-                "Subagent '{}' is disabled via [subagents.toggle] in config.toml",
+                "Subagent '{}' is not available to the current Agent or is disabled via [subagents.toggle]",
                 request.subagent_type
             );
             return child_run_output(failure_result(&request, &msg), completion_data, None);
@@ -991,7 +991,7 @@ pub(crate) async fn run_shell_child(
         ctx.ask_user_question_enabled,
         ctx.client_hooks.clone(),
         None,
-        std::collections::HashMap::new(),
+        ctx.subagent_toggle.clone(),
         Vec::new(),
         grow_agent::prompt::context::PromptAudience::Subagent,
         effective_runtime.role_prompt.clone(),
