@@ -305,6 +305,29 @@ enabled = false
 在每个主 Agent 自己的 Markdown frontmatter 中，用 `tools` 里的 `Agent(...)` 限定它能看到
 并实际启动的子 Agent。这是 task 工具权限，不会建立固定的父子层级：
 
+如果不需要限制，主 Agent **不必声明 `Agent(...)`**。当 `tools` 整节未声明或为空时，它会
+继承完整工具集，因此可以调用当前发现且全局启用的全部子 Agent：既包括内置的
+`general-purpose`、`explore`、`plan`，也包括用户添加的 `review/backend` 等自定义 Agent。
+
+例如下面的主 Agent 没有显式指定子 Agent，但仍可调用全部已启用的内置和用户子 Agent：
+
+```markdown
+---
+description: General coordinator
+---
+
+Choose the most suitable subagent for each delegated task.
+```
+
+`tools` 的不同写法具有以下精确语义：
+
+| 主 Agent 的 `tools` 配置 | 可用子 Agent |
+| --- | --- |
+| 未声明 `tools`，或 `tools: []` | 所有当前发现且全局启用的内置和用户子 Agent |
+| 非空并包含裸 `Agent` 或 `task` | 所有当前发现且全局启用的内置和用户子 Agent |
+| 非空并包含 `Agent(explore, review/backend)` | 仅列出的 `explore` 和 `review/backend` |
+| 非空但不包含 `Agent(...)`、裸 `Agent` 或 `task` | 无；该主 Agent 不会获得 task 工具 |
+
 ```markdown
 ---
 description: Coordinates review work
@@ -319,21 +342,18 @@ disallowedTools:
 Delegate repository discovery to explore and code review to review/backend.
 ```
 
-规则如下：
-
-- 未声明或留空 `tools`：继承完整工具集，可使用所有全局启用的子 Agent。
-- 非空 `tools` 中写 `Agent(explore, review/backend)`：只允许列出的子 Agent，并保留 task
-  工具及其生命周期工具。
-- 非空 `tools` 中写裸 `Agent` 或 `task`：允许所有全局启用的子 Agent。
-- 非空 `tools` 中没有 `Agent(...)`、`Agent` 或 `task`：该 Agent 没有 task 工具，不能启动
-  子 Agent。
-- `disallowedTools: [Agent(plan)]` 只拒绝指定类型；裸 `Agent` 拒绝所有子 Agent。
-- `disallowedTools` 优先于 `tools`，全局 `[subagents.toggle]` 和 `[subagents].enabled` 仍是
-  最终上限，Agent 定义不能重新启用全局已禁用的类型。
+其中，带类型的 `Agent(...)` 会保留 task 工具及其生命周期工具，但只向模型展示并允许启动
+列出的类型。`disallowedTools: [Agent(plan)]` 只拒绝指定类型；裸 `Agent` 则拒绝所有子 Agent。
+`disallowedTools` 优先于 `tools`，全局 `[subagents.toggle]` 和 `[subagents].enabled` 仍是最终
+上限，Agent 定义不能重新启用全局已禁用的类型。
 
 例如，`coordinator.md` 可以只允许 `explore` 与 `review/backend`，而 `implementer.md` 可以只
 允许 `general-purpose`。两者仍是平级定义，也都能被直接选为主 Agent。若子 Agent 自身允许
 继续委派，同一规则会应用到它自己的定义，并同时受 `[subagents].max_depth` 限制。
+
+“可用”表示该子 Agent 已进入 task 工具目录并通过运行时权限检查，不表示模型一定会选择它。
+模型会依据任务内容以及 Agent 的名称和 `description` 自行决定委派对象；自定义 Agent 应提供
+清晰、可区分的职责描述。需要确定性限制时，再使用 `Agent(...)` 白名单。
 
 ## 从源码构建
 
