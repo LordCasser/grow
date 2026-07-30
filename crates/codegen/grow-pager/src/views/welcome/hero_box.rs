@@ -324,7 +324,6 @@ pub(super) fn render_hero_box(
         theme,
         None,
         0,
-        false,
         super::VersionBadgeMode::HeroInline,
     );
 

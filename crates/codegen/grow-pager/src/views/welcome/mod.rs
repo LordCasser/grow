@@ -374,9 +374,9 @@ impl WelcomeLayout {
 
 /// Controls what the version badge renders.
 pub(super) enum VersionBadgeMode {
-    /// Full badge: team | api_key | **Grow** VERSION+channel **Beta** (right-aligned).
+    /// Full badge: team | **Grow** VERSION+channel **Beta** (right-aligned).
     Full,
-    /// Hero footer: team | api_key | Grow Beta [channel] (right-aligned, gray).
+    /// Hero footer: team | Grow Beta [channel] (right-aligned, gray).
     HeroFooter,
     /// Hero inline: **Grow Beta**  VERSION (left-aligned).
     HeroInline,
@@ -388,7 +388,6 @@ pub(super) fn render_version_badge(
     theme: &Theme,
     team_name: Option<&str>,
     h_margin: u16,
-    is_api_key_auth: bool,
     mode: VersionBadgeMode,
 ) {
     let version_area = Rect {
@@ -401,24 +400,16 @@ pub(super) fn render_version_badge(
     );
     let mut spans = Vec::new();
 
-    let (show_team, show_api_key, align) = match &mode {
-        VersionBadgeMode::Full => (true, true, Alignment::Right),
-        VersionBadgeMode::HeroFooter => (true, true, Alignment::Right),
-        VersionBadgeMode::HeroInline => (false, false, Alignment::Left),
+    let (show_team, align) = match &mode {
+        VersionBadgeMode::Full => (true, Alignment::Right),
+        VersionBadgeMode::HeroFooter => (true, Alignment::Right),
+        VersionBadgeMode::HeroInline => (false, Alignment::Left),
     };
 
     if show_team && let Some(team) = team_name {
         spans.push(Span::styled(team, Style::default().fg(theme.gray)));
-        spans.push(sep.clone());
-    }
-    if show_api_key && is_api_key_auth {
-        spans.push(Span::styled(
-            "Logged in with API key",
-            Style::default().fg(theme.gray),
-        ));
         spans.push(sep);
     }
-
     let channel = grow_update::channel_label();
     match &mode {
         VersionBadgeMode::Full => {
@@ -486,7 +477,6 @@ fn render_prompt_and_version(
     h_margin: u16,
     compact: bool,
     pending_hint: Option<crate::views::shortcuts_bar::PendingHint>,
-    is_api_key_auth: bool,
     skip_version: bool,
 ) -> (
     Option<(u16, u16)>,
@@ -547,7 +537,6 @@ fn render_prompt_and_version(
             theme,
             team_name,
             h_margin,
-            is_api_key_auth,
             VersionBadgeMode::Full,
         );
     } else {
@@ -557,7 +546,6 @@ fn render_prompt_and_version(
             theme,
             team_name,
             h_margin,
-            is_api_key_auth,
             VersionBadgeMode::HeroFooter,
         );
     }
@@ -594,7 +582,6 @@ pub struct WelcomeRenderParams<'a> {
     pub pending_update_version: Option<&'a str>,
     /// Recent foreign session offered on ctrl+u, suppressed by a pending update.
     pub foreign_resume_hint: Option<&'a grow_workspace::foreign_sessions::RecentForeignSession>,
-    pub is_api_key_auth: bool,
     pub session_picker_content_results:
         Option<&'a [grow_shell::extensions::session_search::SearchSessionHit]>,
     pub session_picker_content_loading: bool,
@@ -865,7 +852,6 @@ fn render_welcome_blocked(
         &theme,
         None,
         h_margin,
-        false,
         VersionBadgeMode::Full,
     );
     (menu_rects, post_flush_escapes)
@@ -938,7 +924,6 @@ fn render_welcome_trust(
         theme,
         None,
         h_margin,
-        false,
         VersionBadgeMode::Full,
     );
 
@@ -1944,7 +1929,6 @@ fn render_welcome_done(
             h_margin,
             p.compact,
             p.pending_hint,
-            p.is_api_key_auth,
             layout.has_hero_box(),
         )
     };
@@ -2507,7 +2491,6 @@ mod tests {
             startup_warnings: &[],
             pending_update_version: None,
             foreign_resume_hint: None,
-            is_api_key_auth: false,
             session_picker_content_results: None,
             session_picker_content_loading: false,
             session_picker_entries_query: None,

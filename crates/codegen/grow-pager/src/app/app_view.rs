@@ -921,7 +921,8 @@ pub struct AppView {
     /// Structured startup warnings collected from the terminal diagnostics
     /// engine at launch. Empty when the environment is healthy.
     pub startup_warnings: Vec<crate::startup::StartupWarning>,
-    /// Whether the user authenticated with an API key (shown in the version badge).
+    /// Whether the active credential is an API key, used for auth-specific errors and
+    /// session flags.
     pub is_api_key_auth: bool,
     /// Latest version string from a background update check. Set when
     /// a newer version is detected; rendered as a notification on the
@@ -3542,7 +3543,6 @@ impl AppView {
                             welcome_tick: self.welcome_tick,
                             session_picker_grouped: self.session_picker_grouped,
                             session_picker_source_filter: self.session_picker_source_filter,
-                            is_api_key_auth: self.is_api_key_auth,
                             changelog_bullets: &self.changelog_bullets,
                             changelog_has_full_notes: self.changelog_markdown.is_some(),
                             welcome_announcement_expanded: self.welcome_announcement.expanded,
