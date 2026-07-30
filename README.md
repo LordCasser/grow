@@ -99,7 +99,8 @@ Grow 不设置可选的输出限制。`context_window` 只用于本地上下文�
 `chat_completions`/`messages` 使用 `max_tokens`，`responses` 使用 `max_output_tokens`。
 完整字段和 session 继承规则见
 [LLM Providers and BYOK](crates/codegen/grow-pager/docs/user-guide/11-custom-models.md)。
-多 Provider、模型思考强度、本地公告、可替换 marketplace 和 MCP Web Search 的组合示例见
+全部公开配置项的注释示例，以及多 Provider、模型思考强度、Agent/子 Agent、工具、权限、
+MCP、Memory、本地公告和可替换 marketplace 的组合方式，见
 [config.example.toml](config.example.toml)。
 
 ### 配置模型思考强度

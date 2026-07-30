@@ -1,51 +1,206 @@
-# Grow 1.0.0 example configuration
-# Copy this file to ~/.grow/config.toml and set the referenced environment
-# variables before starting Grow. No provider or model is built in.
+# Grow 1.0.0 完整配置示例
+#
+# 用法：
+#   1. 复制到 ~/.grow/config.toml。
+#   2. 至少保留一个 [provider.<id>.models.<id>]，并设置 [models].default。
+#   3. 设置 env_key 指向的环境变量；不要把真实密钥提交到仓库。
+#   4. 删除不需要的段落。除 Provider/BYOK 基线外，本文件主要用于展示配置面。
+#
+# 本文件覆盖 Grow 面向用户的 config.toml 配置。运行时状态、内部服务字段、已弃用别名和
+# pager.toml 外观细节不在这里重复。项目级 .grow/config.toml 只应放 MCP、插件、权限规则和
+# [mcp] 输出上限；其他设置放在 ~/.grow/config.toml。
+#
+# 一般优先级：CLI > 环境变量 > config.toml > 受管理配置 > 内置默认值。
+# 已存在的 session 恢复退出时的模型和思考强度；新 session 使用这里的全局默认值。
+
+# 若要彻底关闭本地公告，请取消下一行注释，并删除文件末尾的 [[announcements]] 示例。
+# announcements = []
+
+# 可在这里列出要强制忽略的 MCP server；不存在的名称不会产生副作用。
+# disabled_mcp_servers = ["legacy-server"]
+
+# -----------------------------------------------------------------------------
+# CLI 与版本策略
+# -----------------------------------------------------------------------------
 
 [cli]
-auto_update = false
+auto_update = false                 # 是否从 LordCasser/grow GitHub Releases 检查更新
+channel = "stable"                  # stable | beta；由发布渠道决定是否存在对应版本
+use_leader = false                  # 多终端共享本地 leader 进程
+show_tips = true                    # 启动时显示本地 tips
+worktree_type = "linked"            # linked | standalone | git
+session_picker_grouped = true       # session picker 按仓库分组
+
+# 以下版本边界均为 SemVer。minimum/maximum 约束更新器；required_* 约束启动。
+# minimum_version = "1.0.0"
+# maximum_version = "1.9.0"
+# required_minimum_version = "1.0.0"
+# required_maximum_version = "1.9.0"
+
+# -----------------------------------------------------------------------------
+# TUI
+# -----------------------------------------------------------------------------
 
 [ui]
-permission_mode = "ask" # ask | auto | always-approve
+permission_mode = "ask"             # ask | auto | always-approve
 max_thoughts_width = 120
+fork_secondary_model = "deepseek/deepseek-chat" # 留空则跟随主模型
+yolo = false                        # always-approve 的旧布尔入口；优先使用 permission_mode
+compact_mode = false
+simple_mode = true                  # true=readline 输入；false=实验性 Vim 输入
+vim_mode = false                    # 仅控制 scrollback 的 Vim 导航
+default_selected_permission = "allow_once" # allow_once | allow_command_always | reject
+show_timestamps = false
+show_timeline = false
+page_flip_on_send = true
+scroll_speed = 50                   # 1..100
+scroll_mode = "auto"                # auto | wheel | trackpad
+invert_scroll = false
+scroll_lines = 3                    # 1..10；删除本行则采用终端配置
+render_mermaid = "auto"             # auto | on | off
+hunk_tracker_mode = "agent_only"    # agent_only | all_dirty | off
+mouse_reporting_toggle = false      # scrollback 聚焦时允许切换终端鼠标捕获
+cancel_subagents_on_turn_cancel = "ask" # ask | always_stop | always_continue
+remember_tool_approvals = false
+keep_text_selection = "flash"       # flash | hold | word_select
 show_thinking_blocks = true
+group_tool_verbs = true
+collapsed_edit_blocks = false
+prompt_suggestions = true
+cursor_blink = true                 # 删除本行则继承终端光标样式
+screen_mode = "fullscreen"          # fullscreen | minimal
+combine_queued_prompts = false
+
+# 主题名取决于已安装主题；不确定时保持未配置。
+# theme = "dark"
+# ui_theme = "dark"
+# auto_dark_theme = "dark"
+# auto_light_theme = "light"
+
+[ui.contextual_hints]
+undo = true
+plan_mode = true
+image_input = true
+send_now = true
+small_screen = true
+word_select = true
+ssh_wrap = true
+
+[ui.display_refresh]
+probe_enabled = true
+auto_cadence_enabled = false
+floor_ms = 8
+ceiling_ms = 16
+min_hz = 55
+max_hz = 165
+
+# 终端原生通知。Grow Desktop 使用自己的本地通知，不需要这些协议。
+[ui.notifications]
+method = "auto"                    # auto | osc9 | osc99 | osc777 | bel | none
+condition = "unfocused"            # unfocused | always | never
+idle_threshold_secs = 3
+events = ["turn_complete", "approval_required"]
+sleep_prevention = true
+progress_bar = true
+
+[ui.notifications.title]
+enabled = true
+items = ["action-required", "spinner", "activity", "session-name", "grow"]
+
+# 通知 hook 会执行本地命令，因此默认不启用。
+# [[ui.notifications.hooks]]
+# command = "terminal-notifier -title Grow -message '$GROW_MESSAGE'"
+# events = ["turn_complete", "approval_required"]
+# only_unfocused = true
+# timeout_secs = 10
+
+# -----------------------------------------------------------------------------
+# 模型全局默认
+# -----------------------------------------------------------------------------
 
 [models]
-# New sessions start with this provider/model pair. Existing sessions restore
-# the model and reasoning effort that were active when they last exited.
-default = "deepseek/deepseek-chat"
-default_reasoning_effort = "high"
-output_limit = 65536
+default = "deepseek/deepseek-chat"  # 必须使用 provider/model
+default_reasoning_effort = "high"  # 模型支持该档位时才生效
+output_limit = 65536                # 模型级 output_limit 优先
+max_retries = 3
+inference_idle_timeout_secs = 300   # 两个流式 chunk 之间的超时，不是整轮超时
+stream_tool_calls = true
+
+# 以下采样参数会应用到没有更精确配置的所有模型。
+# temperature = 0.7
+# top_p = 0.95
+# extra_headers = { "X-Request-Tags" = "team=example" }
+
+# 辅助模型必须同样存在于 provider/model catalog。留空或删除以使用默认行为。
+# session_summary = "deepseek/deepseek-chat"
+# image_description = "vision/provider-model"
+# prompt_suggestion = "deepseek/deepseek-chat"
+
+# 模型目录过滤：allowed 控制普通 picker；hidden 仅隐藏；disabled 完全移除。
+allowed_models = ["deepseek/*", "local/*"]
+hidden_models = []
+disabled_models = []
+
+# -----------------------------------------------------------------------------
+# Provider / BYOK
+# -----------------------------------------------------------------------------
 
 [provider.deepseek]
-# chat_completions -> /chat/completions
-# responses        -> /responses
-# messages         -> /messages
-api_backend = "chat_completions"
+api_backend = "chat_completions"    # chat_completions | responses | messages
 
 [provider.deepseek.options]
 base_url = "https://api.deepseek.com/v1"
-# The value is an environment-variable name, not the API key itself.
-env_key = "DEEPSEEK_API_KEY"
-# For local-only experiments you may use: api_key = "sk-..."
+env_key = "DEEPSEEK_API_KEY"       # 也可为 ["PRIMARY_KEY", "FALLBACK_KEY"]
+extra_headers = {}
+query_params = {}
+env_http_headers = {}               # { "X-Tenant" = "TENANT_TOKEN_ENV" }
+
+# api_key = "sk-..."                # 不推荐：明文保存在 TOML
+# api_base_url = "https://..."      # API-key 认证时单独使用的 URL
+# auth_provider = "corporate"       # 引用 [auth_provider.corporate]
+# context_window = 128000            # Provider 默认；模型级配置优先
 
 [provider.deepseek.models.deepseek-chat]
 name = "DeepSeek Chat"
-context_window = 128000
-# A model-level value overrides [models].output_limit.
+description = "Primary coding model"
+context_window = 128000             # 仅用于本地上下文管理与自动压缩
 output_limit = 65536
+auto_compact_threshold_percent = 85
+system_prompt_label = "Grow"
+use_concise = false
+inference_idle_timeout_secs = 300
+max_retries = 3
+hidden = false
+stream_tool_calls = true
 
+# 下列字段可在模型级覆盖 provider 或 [models]：
+# model = "actual-api-routing-slug"
+# base_url = "https://model-specific.example/v1"
+# api_base_url = "https://api-key-specific.example/v1"
+# api_backend = "responses"
+# api_key = "sk-..."
+# env_key = "MODEL_SPECIFIC_API_KEY"
+# auth_provider = "corporate"
+# temperature = 0.7
+# top_p = 0.95
+# reasoning_effort = "high"          # 单一默认；reasoning_efforts 的 default 更精确
+# extra_headers = { "X-Model-Header" = "value" }
+# query_params = { api-version = "2026-07-22" }
+# env_http_headers = { "X-Tenant" = "TENANT_TOKEN_ENV" }
+
+# Shift+Tab 按声明顺序循环；default=true 是模型级默认，并覆盖全局默认。
 [[provider.deepseek.models.deepseek-chat.reasoning_efforts]]
-value = "high"
+value = "high"                     # none|minimal|low|medium|high|xhigh|max
 label = "High"
+description = "Balanced reasoning"
 default = true
 
 [[provider.deepseek.models.deepseek-chat.reasoning_efforts]]
 value = "max"
 label = "Max"
+description = "Maximum reasoning"
 
-# Add more providers beside the first one. Ctrl+X then m, or /model, only
-# shows models declared in this file.
+# 第二个 Provider 示例：本地 OpenAI-compatible 服务可以不配置凭据。
 [provider.local]
 api_backend = "chat_completions"
 
@@ -56,39 +211,489 @@ base_url = "http://127.0.0.1:11434/v1"
 name = "Qwen3 Coder (local)"
 context_window = 131072
 output_limit = 16384
+reasoning_efforts = ["none", "high"] # 简写形式
 
-# OAuth is provider-scoped and never adds models implicitly. To use it, attach
-# an inline auth table to a provider, then run `grow login <provider>`:
-#
+# Anthropic Messages-compatible Provider 只需更换 backend；它不是厂商绑定。
+# [provider.anthropic-compatible]
+# api_backend = "messages"
+# [provider.anthropic-compatible.options]
+# base_url = "https://gateway.example.com/v1"
+# env_key = "ANTHROPIC_COMPATIBLE_API_KEY"
+# [provider.anthropic-compatible.models.claude]
+# name = "Claude-compatible model"
+# context_window = 200000
+
+# -----------------------------------------------------------------------------
+# 可选 Provider 凭据机制
+# -----------------------------------------------------------------------------
+
+# 外部命令 stdout 返回 token；只有引用它的 Provider 才会调用。
+[auth_provider.corporate]
+type = "command"
+command = "/usr/local/bin/company-llm-token"
+args = ["--format", "json"]
+token_ttl_secs = 3600
+timeout_secs = 30
+cwd = "~"
+
+# OAuth 是某个 LLM Provider 的可选认证方式，不是 Grow 全局登录要求。
+[auth_provider.team-sso]
+type = "oauth"
+issuer = "https://login.example.com"
+client_id = "public-client-id"
+scopes = ["openid", "profile", "offline_access"]
+
+# 也可直接嵌在某个 Provider 下；不要与该 Provider 的静态 api_key 同时配置。
 # [provider.example.options.auth]
 # type = "oauth"
-# issuer = "https://auth.example.com"
+# issuer = "https://login.example.com"
 # client_id = "public-client-id"
-# scopes = ["openid", "profile", "email", "offline_access"]
+# scopes = ["openid", "profile", "offline_access"]
 
-# Grow does not download announcements. This local array completely replaces
-# the built-in default announcement; use `announcements = []` at the top level
-# instead if you want no announcements.
+# -----------------------------------------------------------------------------
+# 主 Agent 与子 Agent
+# -----------------------------------------------------------------------------
+
+[agent]
+# name 与 definition 二选一；均未设置时使用内置主 Agent。
+# name = "review/backend"
+# definition = "/absolute/path/to/agent.md"
+system_prompt_label = "Grow"
+
+[subagents]
+enabled = true
+max_depth = 2                       # 1=仅主 Agent 可派生；2=允许一级子 Agent 再派生
+
+[subagents.toggle]
+explore = true
+plan = true
+"review/backend" = true
+
+# 这是全局执行路由，不写入 Agent Markdown，也不改变 Agent 身份。
+[subagents.models]
+explore = "deepseek/deepseek-chat"
+"review/backend" = "deepseek/deepseek-chat"
+
+# 推荐用 ~/.config/.grow/agents/**/*.md 定义 Agent。下面是仍受支持的可选 role/persona
+# spawn preset；它们不会建立固定父子层级。
+[subagents.roles.researcher]
+description = "Read-only repository research"
+default_capability_mode = "read-only" # read-only | read-write | execute | all
+reasoning_effort = "high"
+prompt_file = ".grow/prompts/researcher.md"
+default_isolation = "none"          # none | worktree
+# model = "deepseek/deepseek-chat"  # 可选 spawn 路由；通常优先用 [subagents.models]
+
+[subagents.personas.concise]
+description = "Concise technical reviewer"
+instructions = "Report evidence first and avoid filler."
+instructions_file = ".grow/personas/concise.md"
+default_isolation = "none"
+reasoning_effort = "high"
+# model = "deepseek/deepseek-chat"
+
+[[subagents.personas.concise.inputs]]
+name = "review_target"
+io_type = "file"
+required = true
+description = "Path to the file or review brief"
+
+[[subagents.personas.concise.outputs]]
+name = "review_report"
+io_type = "text"
+required = true
+description = "Prioritized review findings"
+
+# 主 Agent 能否看到某个子 Agent，由 Agent Markdown 的 tools: Agent(...) 决定；
+# 未声明或留空 tools 时，可见全部发现且启用的内置与用户 Agent。见 agent.md.example。
+
+# -----------------------------------------------------------------------------
+# 功能开关、Session 与压缩
+# -----------------------------------------------------------------------------
+
+[features]
+support_permission = true
+codebase_indexing = true             # 也可为 ["src/**", "!vendor/**"]
+non_git_warning = false
+managed_config = false               # 本地个人使用通常关闭受管理配置获取
+remote_fetch = false                 # 关闭可选远程 catalog/settings；不影响 BYOK Provider
+lsp_tools = false
+tool_search = true                   # MCP tool search/discovery
+web_fetch = true
+ask_user_question = true
+session_recap = true
+two_pass_compaction = false
+write_file = true
+cancel_rewind = true
+auto_wake = true
+compaction_mode = "summary"          # summary | transcript | segments
+compaction_detail = "verbose"        # none | minimal | balanced | verbose
+compaction_verbatim_input = true
+subagent_worktree_snapshot = false
+mcp_liveness_watchers = true
+mcp_auto_restart = true
+mcp_push_server_status = true
+mcp_recursive_config_watch = true    # 名称保留；实际控制 cwd 配置监听
+
+# compaction_tool_choice 的值取决于当前 backend；不确定时保持未配置。
+# compaction_tool_choice = "auto"
+
+[session]
+auto_compact_threshold_percent = 85
+load_envrc = true
+
+[compaction.memory_flush]
+enabled = true
+soft_threshold_tokens = 4000
+flush_model = "deepseek/deepseek-chat" # 删除本行则使用当前 session 模型
+max_flush_write_chars = 8000
+# idle_timeout_secs = 1800            # 删除/注释则仅在压缩前 flush
+semantic_dedup_threshold = 0.92
+
+[compaction.pruning]
+enabled = true
+keep_last_n_turns = 3
+soft_trim_threshold = 4000
+soft_trim_head = 1500
+soft_trim_tail = 1500
+hard_clear_age_turns = 10
+
+[repo_changes_dedup]
+enabled = true
+include_inline_fallback = false
+max_inline_bytes = 0                # 0=不限
+dedup_untracked = true
+dedup_binary = true
+untracked_max_bytes = 0             # 0=不限
+untracked_exclude_globs = ["target/**", "node_modules/**"]
+
+[storage]
+cleanup_ttl_days = 30               # 本地旧 session 清理周期
+
+# -----------------------------------------------------------------------------
+# 工具、权限与沙箱
+# -----------------------------------------------------------------------------
+
+[toolset]
+file_toolset = "standard"            # standard | hashline
+
+[toolset.hashline]
+scheme = "chunk"                    # chunk | content_only
+hash_len = 3                        # 1..4
+chunk_size = 8
+
+[toolset.bash]
+timeout_secs = 120.0
+max_timeout_secs = 36000.0          # 模型可请求的前台命令超时上限
+output_byte_limit = 20000
+# cmd_prefix = "devbox run --"       # 给每条 shell 命令添加前缀
+auto_background_on_timeout = true
+foreground_block_budget_ms = 15000  # 0=不使用短前台预算
+allow_background_operator = true
+login_shell_capture = false
+
+[toolset.ask_user_question]
+timeout_enabled = true
+timeout_secs = 1800
+
+[toolset.web_fetch]
+# proxy_endpoint = "https://proxy.example.com"
+# allowed_domains = ["docs.rs", "example.com"] # [] 表示全部阻止
+allow_local = false                 # 只额外允许显式 loopback；私网/metadata 仍阻止
+
+[tools]
+respect_gitignore = false           # true 时所有文件工具都跳过 gitignored 文件
+
+[sandbox]
+profile = "off"                     # off | workspace | devbox | read-only | strict | 自定义名
+auto_allow_bash = false
+
+[shell_environment_policy]
+inherit = "all"                     # all | core | none
+ignore_default_excludes = true      # false 时过滤 *KEY*/*SECRET*/*TOKEN*
+exclude = []                        # 大小写不敏感 glob
+set = {}
+include_only = []                   # 非空时仅保留匹配项
+
+[permission]
+# 简写规则和结构化 rules 可以同时使用；冲突时 deny > ask > allow。
+allow = ["Bash(git status*)", "Bash(git diff*)"]
+ask = ["Edit(**)"]
+deny = ["Bash(rm -rf *)"]
+rules = [
+  { action = "allow", tool = "read" },
+  { action = "allow", tool = "grep" },
+  { action = "ask", tool = "mcp", pattern = "*" },
+  { action = "deny", tool = "webfetch", pattern = "*.internal.example", pattern_mode = "domain" },
+]
+
+# -----------------------------------------------------------------------------
+# MCP（Web Search 也通过普通 MCP 工具提供）
+# -----------------------------------------------------------------------------
+
+[mcp]
+max_output_bytes = 20000            # 单次 MCP 工具结果的本地截断上限，必须为正数
+
+[mcp_servers.web-search]
+command = "/absolute/path/to/search-mcp-server"
+args = []
+env = { SEARCH_API_KEY = "${SEARCH_API_KEY}" }
+cwd = "/absolute/path/to/server-workdir"
+enabled = false                     # 示例默认关闭，改好路径后再启用
+startup_timeout_sec = 30
+tool_timeout_sec = 600
+tool_timeouts = { search = 120 }
+expose_image_base64 = false
+
+[mcp_servers.remote-tools]
+url = "https://mcp.example.com/api/mcp"
+type = "streamable-http"
+bearer_token_env_var = "REMOTE_MCP_TOKEN"
+headers = { "X-Workspace" = "example" }
+oauth_client_id = "public-client-id"
+oauth_client_secret_env_var = "MCP_OAUTH_CLIENT_SECRET"
+oauth_scopes = ["tools.read", "tools.execute"]
+enabled = false
+
+# MCP JSON 兼容 OAuth block 使用 camelCase 字段；通常只需上面的 snake_case 字段。
+# [mcp_servers.remote-tools.oauth]
+# clientId = "public-client-id"
+# clientSecretEnvVar = "MCP_OAUTH_CLIENT_SECRET"
+# scopes = ["tools.read"]
+# callbackPort = 8787
+
+# 可选 setup schema 可让 UI 在首次启用 MCP 时收集选项，并把选择映射进 URL/header/env 模板。
+# [[mcp_servers.remote-tools.setup.fields]]
+# id = "region"
+# label = "Region"
+# type = "select"
+# required = true
+# default = "us"
+# options = [
+#   { label = "US", value = "us" },
+#   { label = "EU", value = "eu" },
+# ]
+#
+# [mcp_servers.remote-tools.setup.variables.endpoint]
+# from = "region"
+# map = { us = "https://us-mcp.example.com/api/mcp", eu = "https://eu-mcp.example.com/api/mcp" }
+
+# 按 server 禁用工具；server/tool 名称均为发现后的实际 ID。
+[disabled_mcp_tools]
+remote-tools = ["dangerous_tool"]
+
+# -----------------------------------------------------------------------------
+# Skills、兼容目录与插件
+# -----------------------------------------------------------------------------
+
+[skills]
+paths = ["~/my-team-skills"]        # SKILL.md 或递归扫描目录
+ignore = ["~/my-team-skills/wip"]
+disabled = ["experimental-skill"]
+
+[paths]
+extra_skill_dirs = ["~/.custom/skills"]
+extra_rule_dirs = ["~/.custom/rules"]
+
+# 每个兼容单元默认 true。关闭后 Grow 不扫描对应产品的目录。
+[compat.cursor]
+skills = false
+rules = false
+agents = false
+mcps = false
+hooks = false
+sessions = false
+
+[compat.claude]
+skills = false
+rules = false
+agents = false
+mcps = false
+hooks = false
+sessions = false
+
+[compat.codex]
+sessions = false                   # 其他 Codex 单元当前保留但无消费者，不建议配置
+
+[plugins]
+paths = ["~/my-plugins/custom-tools"]
+enabled = []                       # 可显式启用默认关闭的 project plugin
+disabled = []
+
+# Grow 不内置官方 marketplace。配置后可能访问本地路径或 Git 仓库，因此默认注释。
+# [marketplace.bootstrap]
+# name = "My Marketplace"
+# git = "https://github.com/example/plugin-marketplace.git"
+# branch = "main"
+#
+# [[marketplace.sources]]
+# name = "Local Plugins"
+# path = "~/projects/plugins"
+
+# -----------------------------------------------------------------------------
+# 跨 Session Memory（实验性；还需 --experimental-memory 或 GROW_MEMORY=1）
+# -----------------------------------------------------------------------------
+
+[memory]
+enabled = false
+
+[memory.index]
+max_chunk_chars = 1600
+chunk_overlap_chars = 320
+
+[memory.embedding]
+provider = "api"                    # api | local | auto
+# model = "provider/embedding-model" # 未设置时禁用向量 embedding
+dimensions = 1024
+
+[memory.search]
+max_results = 6
+min_score = 0.35
+vector_weight = 0.7
+text_weight = 0.3
+source_weights = { workspace = 1.0, session = 1.0, global = 1.0 }
+
+[memory.search.temporal_decay]
+enabled = true
+half_life_days = 7.0
+
+[memory.search.mmr]
+enabled = false
+lambda = 0.7                       # 0=最大多样性，1=纯相关性
+
+[memory.initial_injection]
+enabled = true
+min_score = 0.0
+
+[memory.session]
+save_on_end = true
+
+[memory.watcher]
+enabled = true
+stale_claim_secs = 60
+
+[memory.gc]
+max_age_days = 30
+
+[memory.dream]
+enabled = true
+min_hours = 4
+min_sessions = 3
+stale_lock_secs = 3600
+# check_interval_secs = 3600         # 未设置则只在 session 结束或 /dream 时检查
+
+# -----------------------------------------------------------------------------
+# Goal、Workflow 与 Auto 权限模式
+# -----------------------------------------------------------------------------
+
+[goal]
+enabled = true
+classifier_enabled = true
+planner_enabled = true
+summary_enabled = true
+use_current_model_only = true
+verifier_count = 1
+classifier_max_runs = 3
+strategist_every = 3
+reverify_after = 2
+
+# 若关闭 use_current_model_only，可给 Goal 内部角色显式路由模型与 harness。
+# planner_model = { model = "deepseek/deepseek-chat", agent_type = "grow-build" }
+# strategist_model = { model = "deepseek/deepseek-chat", agent_type = "grow-build" }
+# skeptic_models = [
+#   { model = "deepseek/deepseek-chat", agent_type = "grow-build" },
+# ]
+
+[workflows]
+enabled = true
+
+[auto_mode]
+enabled = false
+prompt_type = "just_command"         # full|no_user_tool_prefix|bare_instructions|just_command
+classifier_model = "deepseek/deepseek-chat" # 删除本行则继承 session 模型
+classify_timeout_ms = 30000
+reasoning_effort = "low"
+
+# -----------------------------------------------------------------------------
+# Worktree 与本地存储维护
+# -----------------------------------------------------------------------------
+
+[worktree_pool]
+enabled = false
+pool_size = 2
+file_count_threshold = 10000
+parallelism = 2
+
+[worktree.auto_gc]
+enabled = true
+max_age_secs = 604800
+min_interval_secs = 21600
+dry_run = false
+include_orphan_snapshots = false
+include_rebuild = false
+rebuild_min_interval_secs = 86400
+
+[worktree.auto_gc.max_age_by_kind]
+session = 604800
+ab = 604800
+pool = 86400
+fork = 604800
+manual = "never"
+subagent = 86400
+
+# -----------------------------------------------------------------------------
+# 本地公告、Tips、Hints、Suggestions 与 Diagnostics
+# -----------------------------------------------------------------------------
+
 [[announcements]]
 id = "team-notice"
 title = "Grow"
 message = "Local configuration is active."
-severity = "info"
+severity = "info"                  # info | warning | critical | promo
 dismissible = true
 persistent = false
+expires_at = "2027-12-31T23:59:59Z"
 
-# Grow has no built-in or xAI-bound marketplace. A bootstrap source is optional
-# and fully replaceable.
-[marketplace.bootstrap]
-name = "My Marketplace"
-git = "https://github.com/example/plugin-marketplace.git"
-branch = "main"
+[announcements.cta]
+label = "Open docs"
+url = "https://github.com/LordCasser/grow"
+caption = "Optional local announcement action"
 
-# Web Search is intentionally not built in. Configure any MCP server that
-# exposes search tools; Grow does not require a fixed server or tool name.
-[mcp_servers.web-search]
-command = "/absolute/path/to/search-mcp-server"
-args = []
-enabled = false
-startup_timeout_sec = 30
-tool_timeout_sec = 600
+[tips]
+exclude_default = false
+tips = ["Use /shortcuts to inspect the current shortcut list."]
+
+[hints]
+project_picker_disabled = false
+memory_modal_fullscreen = false
+new_session_worktree_mode = "never" # ask | always | never
+fork_worktree_mode = "ask"          # ask | always | never
+
+[suggestions]
+enabled = false                     # shell command suggestion pipeline
+ai_enabled = false
+ai_model = "deepseek/deepseek-chat"
+debounce_ms = 50
+
+[diagnostics]
+crash_handler = true                # 仅本地 crash capture；无 telemetry exporter
+
+# -----------------------------------------------------------------------------
+# 本地 Hooks（会执行命令或访问 URL，默认不启用）
+# -----------------------------------------------------------------------------
+
+# [[hooks.PreToolUse]]
+# matcher = "Bash|Write|Edit"
+# hooks = [
+#   { type = "command", command = "/absolute/path/to/guard.sh", timeout = 10,
+#     env = { POLICY = "strict" } },
+# ]
+#
+# [[hooks.SessionEnd]]
+# hooks = [
+#   { type = "command", command = "/absolute/path/to/session-end.sh", timeout = 10 },
+# ]
+
+# Web Search 不由 Grow 内置。请启用上面的 MCP server，或配置任意提供搜索工具的 MCP。
+# 本地 diagnostics 通过 --debug、GROW_DEBUG_LOG、GROW_LOG_FILE、RUST_LOG 配置，不存在
+# [telemetry]、upload、billing、credits、subscription 或内置 media-generation 配置。
