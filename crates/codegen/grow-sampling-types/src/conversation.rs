@@ -89,6 +89,11 @@ pub enum SyntheticReason {
     /// Injected by the auto-recovery logic after a transient tool failure
     /// to retry the operation.  Not real user input.
     AutoRecovery,
+    /// Injected by the truncation-recovery logic after a max_tokens
+    /// truncation to resume generation. Parallels [`SyntheticReason::AutoContinue`]
+    /// (post-compaction continue) but targets truncation continue. Not real
+    /// user input.
+    TruncationContinue,
     /// User-initiated mid-turn interjection sent via Ctrl+Enter while the
     /// model was actively running.  Injected between tool batches so the
     /// model sees it as steering context without canceling the turn.
@@ -151,6 +156,7 @@ impl SyntheticReason {
             | Self::ProjectInstructions
             | Self::AutoContinue
             | Self::AutoRecovery
+            | Self::TruncationContinue
             | Self::Interjection
             | Self::GoalSummary
             | Self::StopHookFeedback
@@ -562,6 +568,15 @@ pub enum StopReason {
     ToolCalls,
     /// Content was filtered
     ContentFilter,
+    /// Anthropic `model_context_window_exceeded`: input + output filled the
+    /// context window mid-generation. Semantically distinct from `Length`
+    /// (max_tokens truncation) — more output budget cannot help, so the
+    /// session layer must trigger compaction rather than continue.
+    ModelContextWindowExceeded,
+    /// Anthropic `pause_turn`: the server-tool loop hit its iteration limit.
+    /// The assistant content is complete — the session layer should resend
+    /// this content as-is to continue.
+    PauseTurn,
 }
 
 impl StopReason {
@@ -572,6 +587,8 @@ impl StopReason {
             StopReason::Length => "length",
             StopReason::ToolCalls => "tool_calls",
             StopReason::ContentFilter => "content_filter",
+            StopReason::ModelContextWindowExceeded => "model_context_window_exceeded",
+            StopReason::PauseTurn => "pause_turn",
         }
     }
 }
@@ -918,6 +935,25 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::AutoContinue),
+            cwd_generation: None,
+            prior_turn_interrupt: None,
+            prompt_index: None,
+        })
+    }
+
+    /// Create a synthetic user message continuing a truncated response.
+    ///
+    /// Used after a max_tokens truncation to ask the model to resume from
+    /// its partial output. Tagged with [`SyntheticReason::TruncationContinue`]
+    /// so it is not counted as a real user prompt by truncation / rewind
+    /// logic. Content is provided by the caller (the prompt constant lives
+    /// in grow-chat-state, owned by Task 3).
+    pub fn truncation_continue(content: impl Into<String>) -> Self {
+        Self::User(UserItem {
+            content: vec![ContentPart::Text {
+                text: Arc::<str>::from(content.into()),
+            }],
+            synthetic_reason: Some(SyntheticReason::TruncationContinue),
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -5066,7 +5102,7 @@ mod tests {
 
         // Reasoning now lives as a sibling `ConversationItem::Reasoning`,
         // so "stripping reasoning" means filtering those siblings out — see
-        // `strip_reasoning_blocks` in xai-chat-state. Here the assistant
+        // `strip_reasoning_blocks` in grow-chat-state. Here the assistant
         // never had a sibling Reasoning, so the strip is a no-op.
         let stripped = with_reasoning;
 
@@ -7872,6 +7908,36 @@ mod tests {
     }
 
     #[test]
+    fn truncation_continue_synthetic_reason_serde_round_trip() {
+        let wire = "\"truncation_continue\"";
+        assert_eq!(
+            serde_json::to_string(&SyntheticReason::TruncationContinue).unwrap(),
+            wire
+        );
+        let back: SyntheticReason = serde_json::from_str(wire).unwrap();
+        assert_eq!(back, SyntheticReason::TruncationContinue);
+    }
+
+    #[test]
+    fn truncation_continue_constructs_tagged_user_item() {
+        let item = ConversationItem::truncation_continue("resume your output");
+        let ConversationItem::User(u) = &item else {
+            panic!("truncation_continue must produce a User item, got {item:?}");
+        };
+        assert_eq!(
+            u.synthetic_reason,
+            Some(SyntheticReason::TruncationContinue)
+        );
+        assert_eq!(u.prompt_index, None);
+        // Mid-turn injection: must not consume a prompt_index slot.
+        let reason = u
+            .synthetic_reason
+            .as_ref()
+            .expect("tagged with TruncationContinue");
+        assert!(!reason.starts_prompt_turn());
+    }
+
+    #[test]
     fn responses_api_conversion_preserves_model_fingerprint() {
         use std::collections::HashMap;
 
@@ -8027,6 +8093,30 @@ mod tests {
         assert_eq!(StopReason::Length.as_str(), "length");
         assert_eq!(StopReason::ToolCalls.as_str(), "tool_calls");
         assert_eq!(StopReason::ContentFilter.as_str(), "content_filter");
+    }
+
+    #[test]
+    fn new_stop_reason_variants_serde_round_trip() {
+        for (variant, wire) in [
+            (
+                StopReason::ModelContextWindowExceeded,
+                "\"model_context_window_exceeded\"",
+            ),
+            (StopReason::PauseTurn, "\"pause_turn\""),
+        ] {
+            assert_eq!(serde_json::to_string(&variant).unwrap(), wire);
+            let back: StopReason = serde_json::from_str(wire).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn new_stop_reason_variants_as_str() {
+        assert_eq!(
+            StopReason::ModelContextWindowExceeded.as_str(),
+            "model_context_window_exceeded"
+        );
+        assert_eq!(StopReason::PauseTurn.as_str(), "pause_turn");
     }
 
     // ============================================================================

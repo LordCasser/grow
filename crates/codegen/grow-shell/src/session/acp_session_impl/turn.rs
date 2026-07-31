@@ -2294,6 +2294,7 @@ impl SessionActor {
             let turn_refused = stop_reason == Some(grow_sampling_types::StopReason::ContentFilter);
             let refusal_explanation = response.stop_message.clone();
             let final_answer_text = json_schema.is_some().then(|| response.assistant_text());
+            let persisted_items = response.items.len();
             for item in response.items {
                 match item {
                     grow_sampling_types::ConversationItem::Assistant(_) => {
@@ -2336,6 +2337,115 @@ impl SessionActor {
                     None,
                 )
                 .await;
+            }
+            // Truncation-recovery branches (Task 3): the items loop above has
+            // already persisted the partial assistant content into chat state,
+            // and the next loop iteration rebuilds the request from it
+            // (`build_request` clones the full conversation). These branches
+            // only pick the recovery strategy for the next sampling cycle. A
+            // completed `tool_use` wins over any of these stop reasons — the
+            // turn falls through to tool execution below.
+            match stop_reason {
+                Some(grow_sampling_types::StopReason::Length) if tool_calls.is_empty() => {
+                    // max_tokens truncation: inject the continue prompt and
+                    // resample. No count limit and no config toggle (user
+                    // decision D2).
+                    self.chat_state_handle.push_user_message(
+                        grow_sampling_types::ConversationItem::truncation_continue(
+                            grow_chat_state::compaction_utils::TRUNCATION_CONTINUE_PROMPT
+                                .to_string(),
+                        ),
+                    );
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        prompt_id = %req_id,
+                        loop_index,
+                        persisted_items,
+                        "max_tokens truncation: partial response persisted, continue prompt injected, resampling"
+                    );
+                    grow_diagnostics::unified_log::info(
+                        "shell.turn.truncation_continue",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "prompt_id": req_id,
+                            "loop_index": loop_index,
+                            "persisted_items": persisted_items,
+                        })),
+                    );
+                    continue;
+                }
+                Some(grow_sampling_types::StopReason::ModelContextWindowExceeded)
+                    if tool_calls.is_empty() =>
+                {
+                    // Input-side context exhaustion: the server reported the
+                    // overflow, so compaction is triggered unconditionally
+                    // (client-side estimation can under-count) — not gated on
+                    // `check_auto_compact_needed()`.
+                    let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
+                    let context_window = self
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .map(|cfg| cfg.context_window.get())
+                        .unwrap_or(0);
+                    let percentage =
+                        xai_token_estimation::usage_percentage_u8(total_tokens, context_window);
+                    let trigger_info = compaction::AutoCompactTriggerInfo {
+                        tokens_used: total_tokens,
+                        context_window,
+                        percentage,
+                    };
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        prompt_id = %req_id,
+                        loop_index,
+                        total_tokens,
+                        context_window,
+                        "model_context_window_exceeded: triggering compaction before resampling"
+                    );
+                    grow_diagnostics::unified_log::info(
+                        "shell.turn.context_window_exceeded_compact",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "prompt_id": req_id,
+                            "loop_index": loop_index,
+                            "tokens_used": total_tokens,
+                            "context_window": context_window,
+                            "percentage": percentage,
+                        })),
+                    );
+                    if let Err(e) = self.run_compact_only(trigger_info).await {
+                        tracing::error!(error = %e, "compaction after model_context_window_exceeded failed");
+                        if Self::is_auth_compact_error(&e) {
+                            return Err(self.surface_compact_auth_failure(e).await);
+                        }
+                        return Err(e);
+                    }
+                    continue;
+                }
+                Some(grow_sampling_types::StopReason::PauseTurn) if tool_calls.is_empty() => {
+                    // Anthropic server-tool iteration limit: resend the
+                    // persisted assistant content as-is (no continue prompt —
+                    // Anthropic's resend-to-continue semantics).
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        prompt_id = %req_id,
+                        loop_index,
+                        persisted_items,
+                        "pause_turn: resending persisted assistant content to continue"
+                    );
+                    grow_diagnostics::unified_log::info(
+                        "shell.turn.pause_turn_resend",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "prompt_id": req_id,
+                            "loop_index": loop_index,
+                            "persisted_items": persisted_items,
+                        })),
+                    );
+                    continue;
+                }
+                _ => {}
             }
             if tool_calls.is_empty() {
                 if !schema_ok

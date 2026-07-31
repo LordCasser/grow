@@ -372,24 +372,16 @@ pub fn stream_messages<'a>(
                         // the complete response, so end the turn cleanly.
                         messages::StopReason::Refusal => StopReason::ContentFilter,
                         messages::StopReason::PauseTurn => {
-                            // Anthropic Messages API expects a resend-to-continue; we end the
-                            // turn instead, so leave a triage trail.
-                            tracing::warn!(
-                                wire_stop_reason = "pause_turn",
-                                "pause_turn ended the turn like stop (no auto-continue)"
-                            );
-                            StopReason::Stop
+                            // The server-tool loop hit its iteration limit; the
+                            // session layer will resend this content to continue.
+                            StopReason::PauseTurn
                         }
                         messages::StopReason::ModelContextWindowExceeded => {
-                            // Output-side overflow on a successful stream: stays in the
-                            // max_tokens truncation class — compact-on-error recovery needs
-                            // an Api error carrying model metadata plus a prompt-side
-                            // overflow, neither of which exists here.
-                            tracing::warn!(
-                                wire_stop_reason = "model_context_window_exceeded",
-                                "context window hit mid-generation; surfacing as max_tokens truncation"
-                            );
-                            StopReason::Length
+                            // Output-side generation hit the context window
+                            // limit; the session layer must compact, not
+                            // continue — distinct from the user-configured
+                            // max_tokens limit.
+                            StopReason::ModelContextWindowExceeded
                         }
                         messages::StopReason::Unknown(wire) => {
                             tracing::warn!(
@@ -451,14 +443,6 @@ pub fn stream_messages<'a>(
                 };
                 return;
             }
-        }
-
-        if final_stop_reason == Some(StopReason::Length) {
-            yield SamplingEvent::Failed {
-                request_id: request_id.clone(),
-                error: SamplingErrorInfo::from(&SamplingError::MaxTokensTruncation),
-            };
-            return;
         }
 
         // ── Build the final response ─────────────────────────────────

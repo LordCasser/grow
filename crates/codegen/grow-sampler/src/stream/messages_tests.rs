@@ -342,40 +342,65 @@ async fn refusal_stop_message_flows_to_response() {
 }
 
 #[tokio::test]
-async fn pause_turn_and_unknown_stop_reasons_complete_as_stop() {
-    for stop in [
-        messages::StopReason::PauseTurn,
-        messages::StopReason::Unknown("mystery_reason".to_string()),
-    ] {
-        let label = format!("{stop:?}");
-        let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
-            Ok(message_start()),
-            Ok(text_block_start(0)),
-            Ok(text_delta(0, "partial answer")),
-            Ok(block_stop(0)),
-            Ok(message_delta_with_stop(stop)),
-            Ok(MessageStreamEvent::MessageStop),
-        ];
-        let raw = stream::iter(events).boxed();
-        let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
-        match evs.last().unwrap() {
-            SamplingEvent::Completed { response, .. } => {
-                assert_eq!(
-                    response.stop_reason,
-                    Some(StopReason::Stop),
-                    "{label} must end the turn like stop"
-                );
-            }
-            other => panic!("{label}: expected Completed, got {other:?}"),
+async fn pause_turn_completes_with_pause_turn_stop_reason() {
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        Ok(text_block_start(0)),
+        Ok(text_delta(0, "partial answer")),
+        Ok(block_stop(0)),
+        Ok(message_delta_with_stop(messages::StopReason::PauseTurn)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    assert!(
+        !evs.iter().any(|e| matches!(e, SamplingEvent::Failed { .. })),
+        "pause_turn stream must not yield Failed: {evs:?}"
+    );
+    match evs.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            assert_eq!(
+                response.stop_reason,
+                Some(StopReason::PauseTurn),
+                "pause_turn must surface verbatim so the session can resend-to-continue"
+            );
         }
+        other => panic!("expected Completed, got {other:?}"),
     }
 }
 
-/// Pins the model_context_window_exceeded decision: it stays in the
-/// max_tokens truncation class (fatal, non-retryable), not the
-/// context-length Api class.
 #[tokio::test]
-async fn model_context_window_exceeded_fails_as_max_tokens_truncation() {
+async fn unknown_stop_reason_completes_as_stop() {
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        Ok(text_block_start(0)),
+        Ok(text_delta(0, "partial answer")),
+        Ok(block_stop(0)),
+        Ok(message_delta_with_stop(messages::StopReason::Unknown(
+            "mystery_reason".to_string(),
+        ))),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+    match evs.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            assert_eq!(
+                response.stop_reason,
+                Some(StopReason::Stop),
+                "unknown wire stop_reason must still end the turn like stop"
+            );
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+/// Pins the model_context_window_exceeded mapping: it surfaces verbatim as
+/// a Completed stop_reason (distinct from the max_tokens `Length` class) so
+/// the session layer can trigger compaction rather than continue.
+#[tokio::test]
+async fn model_context_window_exceeded_completes_with_context_window_stop_reason() {
     let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
         Ok(message_start()),
         Ok(text_block_start(0)),
@@ -390,19 +415,191 @@ async fn model_context_window_exceeded_fails_as_max_tokens_truncation() {
     let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
 
     assert!(
-        !evs.iter()
-            .any(|e| matches!(e, SamplingEvent::Completed { .. })),
-        "context-window truncation must not complete: {evs:?}"
+        !evs.iter().any(|e| matches!(e, SamplingEvent::Failed { .. })),
+        "context-window truncation must not yield Failed: {evs:?}"
     );
     match evs.last().unwrap() {
-        SamplingEvent::Failed { error, .. } => {
+        SamplingEvent::Completed { response, .. } => {
             assert_eq!(
-                error.kind,
-                crate::events::SamplingErrorKind::MaxTokensTruncation
+                response.stop_reason,
+                Some(StopReason::ModelContextWindowExceeded),
+                "context-window overflow must not be collapsed into max_tokens truncation"
             );
-            assert!(!error.is_retryable, "truncation is deterministic");
         }
-        other => panic!("expected Failed(MaxTokensTruncation), got {other:?}"),
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+/// Core truncation contract: max_tokens cut-off completes with the partial
+/// response and `Length` as the stop_reason — the stream layer no longer
+/// fails and discards the generated content.
+#[tokio::test]
+async fn max_tokens_truncation_completes_with_length_stop_reason() {
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        Ok(text_block_start(0)),
+        Ok(text_delta(0, "partial answer")),
+        Ok(block_stop(0)),
+        Ok(message_delta_with_stop(messages::StopReason::MaxTokens)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    assert!(
+        !evs.iter().any(|e| matches!(e, SamplingEvent::Failed { .. })),
+        "max_tokens truncation must not yield Failed: {evs:?}"
+    );
+    match evs.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            let a = response.assistant().expect("assistant item present");
+            assert_eq!(a.content.as_ref(), "partial answer");
+            assert_eq!(
+                response.stop_reason,
+                Some(StopReason::Length),
+                "Length must surface on the completed response"
+            );
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+/// An in-progress thinking block (no ContentBlockStop) at truncation time
+/// must not leak into the response: the accumulated delta is streamed to the
+/// UI but never persisted — matching Anthropic's "thinking blocks cannot be
+/// partially recovered" semantics.
+#[tokio::test]
+async fn truncated_incomplete_thinking_block_discarded() {
+    let thinking_start = MessageStreamEvent::ContentBlockStart {
+        index: 0,
+        content_block: ContentBlock::Thinking {
+            thinking: String::new(),
+            signature: String::new(),
+        },
+    };
+    let thinking_delta = MessageStreamEvent::ContentBlockDelta {
+        index: 0,
+        delta: StreamDelta::ThinkingDelta {
+            thinking: "let me think...".into(),
+        },
+    };
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        Ok(thinking_start),
+        Ok(thinking_delta),
+        // No content_block_stop: the block never completed before the cut-off.
+        Ok(message_delta_with_stop(messages::StopReason::MaxTokens)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    match evs.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            assert_eq!(
+                response.stop_reason,
+                Some(StopReason::Length),
+                "truncation stop_reason must survive on the completed response"
+            );
+            assert!(
+                response.reasoning_items().next().is_none(),
+                "in-progress thinking block must be discarded: {response:?}"
+            );
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+/// An in-progress tool_use block (start + partial input_json, no
+/// ContentBlockStop) at truncation time must not leak into the response as
+/// an executable tool call — the arguments were never completed.
+#[tokio::test]
+async fn truncated_incomplete_tool_use_discarded() {
+    let tool_start = MessageStreamEvent::ContentBlockStart {
+        index: 0,
+        content_block: ContentBlock::ToolUse {
+            id: "call_truncated".into(),
+            name: "do_thing".into(),
+            input: serde_json::json!({}),
+        },
+    };
+    let arg_delta = MessageStreamEvent::ContentBlockDelta {
+        index: 0,
+        delta: StreamDelta::InputJsonDelta {
+            partial_json: "{\"x\":".into(),
+        },
+    };
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        Ok(tool_start),
+        Ok(arg_delta),
+        // No content_block_stop: the tool call never completed.
+        Ok(message_delta_with_stop(messages::StopReason::MaxTokens)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    match evs.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            assert_eq!(response.stop_reason, Some(StopReason::Length));
+            let a = response.assistant().expect("assistant item present");
+            assert!(
+                a.tool_calls.is_empty(),
+                "in-progress tool_use must be discarded: {:?}",
+                a.tool_calls
+            );
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+/// A COMPLETED tool_use block followed by a max_tokens cut-off keeps its
+/// tool calls, and the ToolCalls override wins over Length — the calls are
+/// real model output the agent loop must resolve (same philosophy as
+/// refusal_after_tool_use). Behavior change pinned here: previously this
+/// stream failed and discarded everything.
+#[tokio::test]
+async fn complete_tool_use_with_length_truncation_keeps_tool_calls() {
+    let tool_start = MessageStreamEvent::ContentBlockStart {
+        index: 0,
+        content_block: ContentBlock::ToolUse {
+            id: "call_kept".into(),
+            name: "do_thing".into(),
+            input: serde_json::json!({}),
+        },
+    };
+    let arg_delta = MessageStreamEvent::ContentBlockDelta {
+        index: 0,
+        delta: StreamDelta::InputJsonDelta {
+            partial_json: "{}".into(),
+        },
+    };
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        Ok(tool_start),
+        Ok(arg_delta),
+        Ok(block_stop(0)),
+        Ok(message_delta_with_stop(messages::StopReason::MaxTokens)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    assert!(
+        !evs.iter().any(|e| matches!(e, SamplingEvent::Failed { .. })),
+        "completed tool_use + truncation must not fail: {evs:?}"
+    );
+    match evs.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            assert_eq!(response.tool_calls().len(), 1);
+            assert_eq!(
+                response.stop_reason,
+                Some(StopReason::ToolCalls),
+                "completed tool_use blocks must win over the Length truncation"
+            );
+        }
+        other => panic!("expected Completed, got {other:?}"),
     }
 }
 

@@ -72,6 +72,26 @@ enum AttemptOutcome {
     /// Failed to construct the underlying raw stream (e.g., HTTP
     /// connect error before any chunks arrive).
     InitFailed { error: SamplingError },
+    /// Output was truncated by the configured max_tokens limit. Carries the
+    /// partial response (with completed text/tool_calls; incomplete thinking
+    /// and tool_use blocks discarded by the stream layer) for the session
+    /// layer to persist and continue from.
+    Truncated {
+        partial_response: Box<ConversationResponse>,
+        metrics: InferenceLatencyStats,
+    },
+    /// Generation hit the model's context window mid-turn (Anthropic
+    /// model_context_window_exceeded). Session layer must compact, not continue.
+    ContextWindowExceeded {
+        partial_response: Box<ConversationResponse>,
+        metrics: InferenceLatencyStats,
+    },
+    /// Anthropic pause_turn: assistant content is complete but the server-tool
+    /// loop hit its iteration limit. Session layer resends this content to continue.
+    PauseTurn {
+        response: Box<ConversationResponse>,
+        metrics: InferenceLatencyStats,
+    },
 }
 
 /// Run a single sampling request to completion (or final failure).
@@ -306,6 +326,46 @@ pub(crate) async fn run_request_task(
                 {
                     return request_id;
                 }
+            }
+            // Truncation-class outcomes are facts the sampler reports, not
+            // errors it retries: the same parameters would truncate again, so
+            // skip the retry decision and surface the partial response. The
+            // session layer tells the three kinds apart via
+            // `response.stop_reason` (continue vs compact vs resend-to-continue).
+            AttemptOutcome::Truncated {
+                partial_response,
+                metrics,
+            }
+            | AttemptOutcome::ContextWindowExceeded {
+                partial_response,
+                metrics,
+            }
+            | AttemptOutcome::PauseTurn {
+                response: partial_response,
+                metrics,
+            } => {
+                let mut metrics = metrics;
+                metrics.attempts = retry_count + doom_retry_count + 1;
+                // Surface token usage on the sampling span alongside effort.
+                if let Some(usage) = partial_response.usage.as_ref() {
+                    sampling_span.record("output_tokens", usage.completion_tokens);
+                    sampling_span.record("reasoning_tokens", usage.reasoning_tokens);
+                }
+                tracing::info!(
+                    target: crate::sampling_log::TARGET,
+                    stop_reason = ?partial_response.stop_reason,
+                    "turn ended by truncation-class stop_reason; partial response surfaced (no retry)"
+                );
+                // Emit Completed: the L2 stream's terminal event was
+                // suppressed by `run_one_attempt`, so this is the only
+                // terminal event the session sees.
+                let _ = event_tx.send(SamplingEvent::Completed {
+                    request_id: request_id.clone(),
+                    response: partial_response.clone(),
+                    metrics: metrics.clone(),
+                });
+                send_completion(&mut completion_tx, Ok((*partial_response, metrics)));
+                return request_id;
             }
         }
     }
@@ -619,10 +679,28 @@ async fn drive_l2(
                             };
                         }
                     }
-                    if response.stop_reason == Some(grow_sampling_types::StopReason::Length) {
-                        return AttemptOutcome::Failed {
-                            error: SamplingError::MaxTokensTruncation,
-                        };
+                    // Truncation-class stop reasons are facts, not errors:
+                    // classify them for the retry loop so the partial
+                    // response survives to the session layer. `Some(..)`
+                    // branches move `response`; the `_` arm keeps it for the
+                    // empty/Completed checks below.
+                    match response.stop_reason {
+                        Some(grow_sampling_types::StopReason::Length) => {
+                            return AttemptOutcome::Truncated {
+                                partial_response: response,
+                                metrics,
+                            };
+                        }
+                        Some(grow_sampling_types::StopReason::ModelContextWindowExceeded) => {
+                            return AttemptOutcome::ContextWindowExceeded {
+                                partial_response: response,
+                                metrics,
+                            };
+                        }
+                        Some(grow_sampling_types::StopReason::PauseTurn) => {
+                            return AttemptOutcome::PauseTurn { response, metrics };
+                        }
+                        _ => {}
                     }
                     // A content-filtered turn (Anthropic refusal, OpenAI
                     // content_filter stop reason) is legitimately content-less and
@@ -1012,6 +1090,142 @@ mod tests {
         match captured {
             SamplingError::EventStreamError(msg) => assert_eq!(msg, "first"),
             other => panic!("expected EventStreamError, got {other:?}"),
+        }
+    }
+
+    // ── drive_l2 stop_reason classification ──────────────────────────
+
+    use grow_sampling_types::{
+        AssistantItem, ConversationItem, DoomLoopRecoveryPolicy, DoomLoopSignal, StopReason,
+    };
+    use std::time::Instant;
+
+    /// Drive `drive_l2` over a single `Completed` event carrying the given
+    /// stop_reason; returns the outcome.
+    async fn drive_l2_with_stop_reason(
+        stop_reason: Option<StopReason>,
+        doom_signals: Vec<DoomLoopSignal>,
+        doom_check: Option<DoomLoopRecoveryPolicy>,
+    ) -> AttemptOutcome {
+        let request_id = RequestId::from("drive-l2-test");
+        let response = ConversationResponse {
+            items: vec![ConversationItem::Assistant(AssistantItem {
+                content: "partial answer".into(),
+                tool_calls: vec![],
+                model_id: Some("test-model".into()),
+                model_fingerprint: None,
+                reasoning_effort: None,
+            })],
+            stop_reason,
+            usage: None,
+            cost_usd_ticks: None,
+            message_chunks_emitted: 0,
+            doom_loop_signals: doom_signals,
+            stop_message: None,
+        };
+        let metrics =
+            InferenceLatencyStats::from_timestamps(Instant::now(), &[], Instant::now());
+        let l2 = stream::iter(vec![SamplingEvent::Completed {
+            request_id: request_id.clone(),
+            response: Box::new(response),
+            metrics,
+        }]);
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let cancel_token = CancellationToken::new();
+        let captured: ErrorCell = Arc::new(Mutex::new(None));
+        let output_observed = Arc::new(AtomicBool::new(false));
+        drive_l2(
+            l2,
+            request_id,
+            &event_tx,
+            &cancel_token,
+            captured,
+            doom_check,
+            output_observed,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn drive_l2_length_maps_to_truncated_outcome() {
+        let outcome = drive_l2_with_stop_reason(Some(StopReason::Length), vec![], None).await;
+        match outcome {
+            AttemptOutcome::Truncated {
+                partial_response, ..
+            } => {
+                // The partial response must survive intact for the session
+                // layer to persist and continue from.
+                assert_eq!(partial_response.stop_reason, Some(StopReason::Length));
+                let a = partial_response.assistant().expect("assistant item present");
+                assert_eq!(a.content.as_ref(), "partial answer");
+            }
+            _ => panic!("expected Truncated outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drive_l2_context_window_exceeded_outcome() {
+        let outcome = drive_l2_with_stop_reason(
+            Some(StopReason::ModelContextWindowExceeded),
+            vec![],
+            None,
+        )
+        .await;
+        match outcome {
+            AttemptOutcome::ContextWindowExceeded {
+                partial_response, ..
+            } => {
+                assert_eq!(
+                    partial_response.stop_reason,
+                    Some(StopReason::ModelContextWindowExceeded)
+                );
+            }
+            _ => panic!("expected ContextWindowExceeded outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drive_l2_pause_turn_outcome() {
+        let outcome = drive_l2_with_stop_reason(Some(StopReason::PauseTurn), vec![], None).await;
+        match outcome {
+            AttemptOutcome::PauseTurn { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::PauseTurn));
+            }
+            _ => panic!("expected PauseTurn outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drive_l2_untouched_stop_reasons_complete() {
+        for stop in [
+            Some(StopReason::Stop),
+            Some(StopReason::ToolCalls),
+            Some(StopReason::ContentFilter),
+            None,
+        ] {
+            let label = format!("{stop:?}");
+            let outcome = drive_l2_with_stop_reason(stop, vec![], None).await;
+            assert!(
+                matches!(outcome, AttemptOutcome::Completed { .. }),
+                "{label}: expected Completed outcome"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn drive_l2_doom_check_outranks_truncation() {
+        let signals = vec![DoomLoopSignal::parse("tail_repetition:4@thinking")];
+        let outcome = drive_l2_with_stop_reason(
+            Some(StopReason::Length),
+            signals,
+            Some(DoomLoopRecoveryPolicy::default()),
+        )
+        .await;
+        match outcome {
+            AttemptOutcome::Failed {
+                error: SamplingError::DoomLoopDetected { .. },
+            } => {}
+            _ => panic!("expected Failed(DoomLoopDetected) outcome"),
         }
     }
 }
