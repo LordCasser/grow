@@ -25,7 +25,7 @@ pub(crate) fn available_modes(ctx: &AppCtx<'_>) -> Vec<(SessionMode, &'static st
     if ctx.workflows_available {
         modes.push((
             SessionMode::Workflow,
-            "Workflow",
+            "Dynamic Workflow",
             "Dynamically create and run bounded sub-plans without approval",
         ));
     }
@@ -174,5 +174,67 @@ impl SlashCommand for BehaviorShortcutCommand {
     }
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
         CommandResult::Action(Action::SetBehaviorMode(self.mode))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::acp::model_state::ModelState;
+
+    fn ctx_with_all_behaviors(models: &ModelState) -> AppCtx<'_> {
+        AppCtx {
+            models,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: true,
+            goal_available: true,
+            auto_permission_available: false,
+            current_permission: "ask",
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            workflows_available: true,
+            screen_mode: crate::app::ScreenMode::Inline,
+        }
+    }
+
+    #[test]
+    fn behavior_items_labels_workflow_as_dynamic_workflow() {
+        let state = ModelState::default();
+        let ctx = ctx_with_all_behaviors(&state);
+        let items = behavior_items(&ctx, None, false);
+
+        let by_wire_id = |id: &str| {
+            items
+                .iter()
+                .find(|i| i.insert_text == id)
+                .unwrap_or_else(|| panic!("missing behavior item with wire id {id}"))
+        };
+
+        // Dynamic Workflow: new display label, unchanged wire id in insert_text.
+        let workflow = by_wire_id("workflow");
+        assert_eq!(workflow.display, "Dynamic Workflow");
+        assert!(workflow.insert_text.ends_with("workflow"));
+
+        // Other behavior labels are untouched.
+        assert_eq!(by_wire_id("default").display, "Normal (current)");
+        assert_eq!(by_wire_id("ask").display, "Clarify");
+        assert_eq!(by_wire_id("plan").display, "Plan");
+        assert_eq!(by_wire_id("deep_research").display, "Deep Research");
+        assert_eq!(by_wire_id("goal").display, "Goal");
+        assert_eq!(items.len(), 6);
+    }
+
+    #[test]
+    fn workflow_item_absent_when_workflows_unavailable() {
+        let state = ModelState::default();
+        let mut ctx = ctx_with_all_behaviors(&state);
+        ctx.workflows_available = false;
+        let items = behavior_items(&ctx, None, false);
+        assert!(
+            !items.iter().any(|i| i.insert_text == "workflow"),
+            "workflow item must be hidden when workflows_available is false"
+        );
     }
 }

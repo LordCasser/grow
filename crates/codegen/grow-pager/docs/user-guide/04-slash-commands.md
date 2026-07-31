@@ -250,7 +250,7 @@ Grow works across rounds and only marks the goal complete after an independent v
 /goal clear
 ```
 
-Arguments are `<objective> [--budget <tokens>]`, or one of `status`, `pause`, `resume`, `clear`. The `--budget` here is a **token** budget for the goal run, separate from Workflow child-call budgets. `/goal pause` keeps Goal Behavior selected; `/goal clear` removes the tracker and returns to Normal. Goal is only offered when orchestration and an independent verifier are configured.
+Arguments are `<objective> [--budget <tokens>]`, or one of `status`, `pause`, `resume`, `clear`. The `--budget` here is a **token** budget for the goal run, separate from workflow child-call budgets. `/goal pause` keeps Goal Behavior selected; `/goal clear` removes the tracker and returns to Normal. Goal is only offered when orchestration and an independent verifier are configured.
 
 ### `/deep-research [query]`
 
@@ -264,7 +264,7 @@ The command returns right away. While it runs, ordinary messages do not start an
 
 ### `/workflow [prompt]`
 
-Enter Workflow Behavior, optionally sending the prompt after the Behavior switch succeeds. Workflow Behavior lets the primary Agent dynamically scout, create one bounded local sub-plan at a time, launch parallel children, verify the result, and choose the next phase without a whole-plan approval boundary.
+Enter Dynamic Workflow Behavior, optionally sending the prompt after the Behavior switch succeeds. Dynamic Workflow Behavior lets the primary Agent dynamically scout, create one bounded local sub-plan at a time, launch parallel children, verify the result, and choose the next phase without a whole-plan approval boundary.
 
 Model-launched workflows may set `agent_budget` and `max_concurrency` independently. `agent_budget` is an absolute cumulative cap on logical child-agent calls: every `agent()` call and every item in a `parallel()` panel spends one slot, while schema-correction retries don't. The default is 128 and explicit values run 1–1,024. `max_concurrency` bounds simultaneous children, defaults to 3, and accepts 1–16. Queued children remain cancellable. Named slash launches use both defaults.
 

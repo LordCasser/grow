@@ -172,7 +172,7 @@ pub(super) fn dispatch_set_behavior_mode(
         grow_tools::types::SessionMode::Default => "Default",
         grow_tools::types::SessionMode::Ask => "Clarify",
         grow_tools::types::SessionMode::Plan => "Plan",
-        grow_tools::types::SessionMode::Workflow => "Workflow",
+        grow_tools::types::SessionMode::Workflow => "Dynamic Workflow",
         grow_tools::types::SessionMode::DeepResearch => "Deep Research",
         grow_tools::types::SessionMode::Goal => "Goal",
     });

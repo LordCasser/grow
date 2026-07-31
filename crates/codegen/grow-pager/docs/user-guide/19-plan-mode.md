@@ -40,7 +40,7 @@ the approval lifecycle inside that Behavior.
 You can enter plan mode yourself in two ways:
 
 - **`/plan`** -- Enter plan mode. Plan mode activates when you send your next prompt. Run `/plan <description>` to enter plan mode and start a turn with that description in one step.
-- **Ctrl+X, then B** -- Open the Behavior picker and select Plan. The same picker selects Normal, Clarify, Workflow, Deep Research, and Goal when those Behaviors are available.
+- **Ctrl+X, then B** -- Open the Behavior picker and select Plan. The same picker selects Normal, Clarify, Dynamic Workflow, Deep Research, and Goal when those Behaviors are available.
 
 Permission is selected independently through `Ctrl+X P` or `/permission`;
 `Ctrl+R` remains the prompt editor's redo shortcut.
@@ -121,7 +121,7 @@ Transitions:
 
 ## Edits During Plan Mode
 
-During Drafting, AwaitingApproval, and Amending, **all workspace mutation is rejected before permission evaluation**, including attempts to edit the session artifact path. Workflow is not advertised and stale Workflow calls are rejected. During Executing, edits are allowed only through the ordinary intersection of registered tools, Agent policy, permissions, and the Behavior gate.
+During Drafting, AwaitingApproval, and Amending, **all workspace mutation is rejected before permission evaluation**, including attempts to edit the session artifact path. Dynamic Workflow is not advertised and stale Dynamic Workflow calls are rejected. During Executing, edits are allowed only through the ordinary intersection of registered tools, Agent policy, permissions, and the Behavior gate.
 
 This enforcement is independent of the permission mode:
 

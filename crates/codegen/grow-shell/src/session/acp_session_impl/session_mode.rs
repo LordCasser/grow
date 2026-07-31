@@ -168,7 +168,7 @@ impl SessionActor {
                 .await
                 .is_none()
         {
-            let message = "Workflow behavior is unavailable in this session.".to_string();
+            let message = "Dynamic Workflow behavior is unavailable in this session.".to_string();
             self.enqueue_current_mode_update_with_behavior_change(
                 acp::SessionModeId::new(
                     session_mode_from_prompt_mode(previous_prompt_mode).as_id(),

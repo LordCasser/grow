@@ -34,7 +34,7 @@ The layers have different owners and must not be substituted for one another:
 
 - **Behavior** is the primary Agent's protocol for advancing the user's request.
 - **Role** is a delegated Agent's bounded responsibility.
-- **WorkflowRun** is an execution/journal instance owned by the Workflow runtime. Leaving Workflow does not implicitly cancel an ordinary run.
+- **WorkflowRun** is an execution/journal instance owned by the workflow engine. Leaving Dynamic Workflow does not implicitly cancel an ordinary run.
 - **GoalTracker** is the persistent objective, continuation, and verification instance used while Goal Behavior is selected.
 
 The effective call rule is:
@@ -49,11 +49,11 @@ registered by Tool Preset / Registry
 
 Clarify keeps decision authority with the user for material unknowns: the primary Agent asks until the goal is sufficiently specified, then completes it without a mandatory plan or approval step.
 
-Plan is a human-governed contract with Drafting, AwaitingApproval, Executing, and Amending phases. Workspace edits are rejected before permissions until the submitted plan is approved. Approval freezes the plan and opens edits only for its execution; material deviation stops execution and requires an approved replacement. Workflow is unavailable throughout Plan. Completing or cancelling the contract returns the session to Normal (`default` on the ACP wire).
+Plan is a human-governed contract with Drafting, AwaitingApproval, Executing, and Amending phases. Workspace edits are rejected before permissions until the submitted plan is approved. Approval freezes the plan and opens edits only for its execution; material deviation stops execution and requires an approved replacement. Dynamic Workflow is unavailable throughout Plan. Completing or cancelling the contract returns the session to Normal (`default` on the ACP wire).
 
 `plan_control` owns Plan transitions: `submit` and `amend` atomically persist a complete candidate before requesting approval, while `complete` and `cancel` terminate the contract. The artifact is control-plane state, never an editable workspace target and never an implied Agent file capability.
 
-Workflow is agent-governed dynamic sub-planning. The primary Agent scouts a bounded phase, launches at most one suitable Workflow run for that phase, yields instead of polling, and decides the next phase from the completion result. WorkflowRun remains an independent runtime/journal entity and never changes Behavior. Workflow is offered only when the finalized ToolBridge contains the Workflow tool; each run has independent cumulative (`agent_budget`) and simultaneous (`max_concurrency`) child limits.
+Dynamic Workflow is agent-governed dynamic sub-planning. The primary Agent scouts a bounded phase, launches at most one suitable workflow run for that phase, yields instead of polling, and decides the next phase from the completion result. WorkflowRun remains an independent runtime/journal entity and never changes Behavior. Dynamic Workflow is offered only when the finalized ToolBridge contains the Workflow tool; each run has independent cumulative (`agent_budget`) and simultaneous (`max_concurrency`) child limits.
 
 Deep Research is read-only evidence work with a mandatory terminal report. It uses a private Workflow definition and runtime, but the report contract and Behavior-owned run lifecycle are not public Workflow semantics. A terminal report is delivered for success, partial completion, verification failure, budget exhaustion, infrastructure failure, cancellation, and restart interruption. Natural completion delivers the report before returning to Normal; an interrupting Behavior switch delivers a cancellation report before applying the target Behavior.
 

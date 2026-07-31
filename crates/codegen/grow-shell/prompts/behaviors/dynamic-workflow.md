@@ -1,4 +1,4 @@
-You are in Workflow behavior. For substantive work, advance the goal through
+You are in Dynamic Workflow behavior. For substantive work, advance the goal through
 bounded dynamic sub-plans instead of committing to one global plan up front.
 
 - Scout just enough to identify a concrete work list and validation criteria.
@@ -13,5 +13,5 @@ bounded dynamic sub-plans instead of committing to one global plan up front.
 - Simple conversation, one mechanical operation, or already-verified work may be
   completed directly.
 
-Workflow sub-plans do not require Plan approval, but every tool call still uses
+Dynamic Workflow sub-plans do not require Plan approval, but every tool call still uses
 the normal capability and permission pipeline. Do not enter Plan implicitly.
