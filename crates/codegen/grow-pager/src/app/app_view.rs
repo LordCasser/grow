@@ -6,6 +6,7 @@
 use super::ScreenMode;
 use crate::acp::model_state::ModelState;
 use crate::actions::{ActionId, ActionRegistry, When};
+use crate::app::agent::AgentSession;
 use crate::appearance::AppearanceConfig;
 use crate::input::KeyboardNormalizer;
 use crate::input::key::KeyShortcut;
@@ -4264,12 +4265,11 @@ impl AppView {
             ) && spinner_frame_tick;
             needs_redraw |= agent.drain_blocked();
             agent.prompt.slash_controller.set_workflows_available(
-                agent
-                    .session
-                    .available_commands
-                    .iter()
-                    .any(|c| c.name == "workflow")
-                    || !agent.workflow_runs.is_empty(),
+                AgentSession::workflows_available(
+                    agent.session.available_tools.as_ref(),
+                    &agent.session.available_commands,
+                    !agent.workflow_runs.is_empty(),
+                ),
             );
             if agent.acp_synced_generation != agent.session.available_commands_generation {
                 agent.prompt.sync_acp_commands(

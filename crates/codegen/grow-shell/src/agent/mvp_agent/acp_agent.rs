@@ -907,9 +907,20 @@ impl acp::Agent for MvpAgent {
         }
         let (summary_client, summary_model) = self
             .build_summary_client(&session_sampling)?;
-        let model_id = resolved_custom_model
-            .map(acp::ModelId::new)
-            .unwrap_or_else(|| self.models_manager.current_model_id());
+        let (model_id, fallback_notice) = crate::agent::models::resolve_new_session_model_id(
+            &self.models_manager.models(),
+            resolved_custom_model,
+            &self.models_manager.current_model_id(),
+        );
+        if let Some(notice) = fallback_notice {
+            tracing::warn!(
+                requested_model = %notice.requested.0,
+                fallback_model = %model_id.0,
+                "new_session: requested model no longer resolves to a catalog key; falling back to the default model"
+            );
+            self.send_model_auto_switched(&session_id, &notice.requested, &model_id, &notice.reason)
+                .await;
+        }
         let session_model_id = model_id.clone();
         let _timer = crate::instrumentation_timer!("session.persistence_init");
         let persistence = crate::session::persistence::new(
@@ -1201,17 +1212,43 @@ impl acp::Agent for MvpAgent {
         } = persistence_info;
         let configured_models = self.models_manager.models();
         let available_models = self.models_manager.available();
+        let persisted_model_id = summary.current_model_id.clone();
         summary.current_model_id = selectable_catalog_key_for_persisted(
             &configured_models,
             &available_models,
             &summary.current_model_id,
         )
         .ok_or_else(|| {
+            let provider_list = configured_models
+                .keys()
+                .filter_map(|key| key.split_once('/').map(|(provider, _)| provider))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let provider_clause = if provider_list.is_empty() {
+                String::new()
+            } else {
+                format!(" Configured providers: {provider_list}.")
+            };
             acp::Error::invalid_params().data(format!(
-                "Session model `{}` is no longer configured. Add it under [provider.<id>.models] before reopening this session.",
-                summary.current_model_id.0
+                "Session model `{}` is no longer configured.{provider_clause} Add it under [provider.<id>.models] before reopening this session.",
+                persisted_model_id.0
             ))
         })?;
+        if summary.current_model_id != persisted_model_id {
+            // Self-heal: the persisted id was a bare slug that only resolved
+            // through unique-slug recovery — rewrite the summary with the
+            // canonical key. `agent_name`/`reasoning_effort` stay `None` so
+            // the persisted values are preserved.
+            let _ = persistence
+                .tx
+                .send(crate::session::persistence::PersistenceMsg::CurrentModel {
+                    model_id: summary.current_model_id.clone(),
+                    agent_name: None,
+                    reasoning_effort: None,
+                });
+        }
         let restored_compaction_count = persisted_signals
             .as_ref()
             .map(|s| s.compaction_count as u64)

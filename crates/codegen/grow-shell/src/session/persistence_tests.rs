@@ -200,3 +200,73 @@ async fn durable_append_drains_pending_update_in_fifo_order() {
     assert_eq!(texts, ["before", "durable"]);
     actor.stop().await;
 }
+
+/// The load path self-heals a persisted bare model slug by sending
+/// `PersistenceMsg::CurrentModel` with the resolved canonical key and
+/// `agent_name`/`reasoning_effort` left `None` — the write must replace only
+/// the model id and preserve the persisted effort and agent name.
+#[tokio::test]
+async fn current_model_write_back_replaces_bare_slug_and_preserves_rest() {
+    use grow_sampling_types::ReasoningEffort;
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("slug-write-back"),
+        cwd: dir.path().to_string_lossy().into_owned(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    let bare = acp::ModelId::new("deepseek-v4-flash");
+    let canonical = acp::ModelId::new("deepseek/deepseek-v4-flash");
+    storage.init_session(&info, bare.clone()).await.unwrap();
+    storage
+        .update_current_model_and_agent(
+            &info,
+            &bare,
+            Some("grow-build"),
+            Some(Some(ReasoningEffort::High)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.load_summary(&info).await.unwrap().current_model_id,
+        bare,
+        "precondition: summary holds the bare slug"
+    );
+
+    let actor = test_actor(info.clone(), storage.clone());
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::CurrentModel {
+            model_id: canonical.clone(),
+            agent_name: None,
+            reasoning_effort: None,
+        })
+        .unwrap();
+    // Ordering barrier: the actor processes messages in order, so once this
+    // ack returns the CurrentModel patch above has been applied.
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::FlushAndAck {
+            respond_to: ack_tx,
+        })
+        .unwrap();
+    ack_rx.await.unwrap();
+
+    let summary = storage.load_summary(&info).await.unwrap();
+    assert_eq!(summary.current_model_id, canonical);
+    assert_eq!(
+        summary.reasoning_effort,
+        Some(ReasoningEffort::High),
+        "the write-back must not clear the persisted reasoning effort"
+    );
+    assert_eq!(
+        summary.agent_name.as_deref(),
+        Some("grow-build"),
+        "the write-back must not clear the persisted agent name"
+    );
+    actor.stop().await;
+}

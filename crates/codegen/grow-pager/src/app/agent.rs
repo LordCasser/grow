@@ -10,6 +10,7 @@ use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
 use grow_shell::extensions::notification::GoalClassifierVerdict;
 use grow_shell::sampling::types::ReasoningEffort;
+use grow_tools::implementations::grow_build::workflow::WORKFLOW_TOOL_NAME;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
@@ -746,6 +747,11 @@ pub struct ChipElement {
     pub kind: xai_ratatui_textarea::ElementKind,
     pub display: Option<ratatui::text::Line<'static>>,
 }
+/// Name of the shell's built-in `/workflow-run` slash command (see
+/// `grow-shell`'s `BUILTIN_COMMANDS`; the shell does not export the name as a
+/// constant). Mirrors the shell-side gate for the workflow capability, which
+/// advertises `workflow-run` in the pre-session command list.
+const WORKFLOW_RUN_COMMAND_NAME: &str = "workflow-run";
 impl AgentSession {
     /// Whether YOLO mode is active. Prefer this over direct field access.
     pub fn is_yolo(&self) -> bool {
@@ -767,6 +773,35 @@ impl AgentSession {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_auto_mode_for_test(&mut self, on: bool) {
         self.auto_mode = on;
+    }
+    /// Whether workflows can be launched in this session. Gates the `/workflow`
+    /// command, the behavior-picker Workflow entry, and
+    /// `SetBehaviorMode(Workflow)`.
+    ///
+    /// Signals (any true → available):
+    /// 1. `available_tools` is `Some(_)` and contains the `workflow` tool —
+    ///    the authoritative tool-level signal from
+    ///    `AvailableCommandsUpdate.meta.tools` once the bootstrap window has
+    ///    closed.
+    /// 2. A `workflow` or `workflow-run` slash command is advertised. During
+    ///    bootstrap (`available_tools` is still `None`) the shell's pre-session
+    ///    command list contains `workflow-run`, so this covers the startup
+    ///    window without flicker.
+    /// 3. `has_workflow_runs` — workflows stay selectable while a run is known
+    ///    to the pager (running or history).
+    ///
+    /// Recomputed by the app tick each frame; field/iterator checks only.
+    pub(crate) fn workflows_available(
+        available_tools: Option<&HashSet<String>>,
+        available_commands: &[acp::AvailableCommand],
+        has_workflow_runs: bool,
+    ) -> bool {
+        let has_workflow_tool =
+            available_tools.is_some_and(|tools| tools.contains(WORKFLOW_TOOL_NAME));
+        let has_workflow_command = available_commands.iter().any(|c| {
+            c.name == WORKFLOW_TOOL_NAME || c.name == WORKFLOW_RUN_COMMAND_NAME
+        });
+        has_workflow_tool || has_workflow_command || has_workflow_runs
     }
     /// Process an ACP session update. Returns true if scrollback was modified.
     pub fn handle_update(
@@ -1074,6 +1109,51 @@ mod tests {
             created_via_new: false,
         }
     }
+    #[test]
+    fn workflows_available_true_when_workflow_tool_advertised() {
+        // (a) Tool-level signal: `AvailableCommandsUpdate.meta.tools` contains
+        // the `workflow` tool, with no advertised commands or runs.
+        let tools = HashSet::from([WORKFLOW_TOOL_NAME.to_string()]);
+        assert!(AgentSession::workflows_available(Some(&tools), &[], false));
+    }
+
+    #[test]
+    fn workflows_available_true_via_workflow_run_command_in_bootstrap() {
+        // (b) Bootstrap window: `available_tools` not yet advertised (None),
+        // but the shell's pre-session command list contains `workflow-run`.
+        let cmds = [acp::AvailableCommand::new(
+            WORKFLOW_RUN_COMMAND_NAME.to_string(),
+            "run a workflow".to_string(),
+        )];
+        assert!(AgentSession::workflows_available(None, &cmds, false));
+    }
+
+    #[test]
+    fn workflows_available_true_via_workflow_command() {
+        // The literal `workflow` command name also counts (previously the only
+        // pager-side signal alongside runs).
+        let cmds = [acp::AvailableCommand::new(
+            WORKFLOW_TOOL_NAME.to_string(),
+            "workflows".to_string(),
+        )];
+        assert!(AgentSession::workflows_available(Some(&HashSet::new()), &cmds, false));
+    }
+
+    #[test]
+    fn workflows_available_false_without_any_signal() {
+        // (c) No tool, no command, no runs → unavailable. Covers both the
+        // not-yet-received (None) and empty-toolset (Some(&[])) cases.
+        assert!(!AgentSession::workflows_available(None, &[], false));
+        assert!(!AgentSession::workflows_available(Some(&HashSet::new()), &[], false));
+    }
+
+    #[test]
+    fn workflows_available_true_when_workflow_runs_exist() {
+        // (d) Runs-only signal: workflows stay selectable while a run exists,
+        // regardless of tool/command advertisement.
+        assert!(AgentSession::workflows_available(None, &[], true));
+    }
+
     #[test]
     fn goal_display_status_parse_known_values() {
         assert_eq!(

@@ -20,12 +20,74 @@ pub(crate) fn resolve_catalog_key(
 ///
 /// Persisted sessions never guess by routing slug: two providers may expose
 /// the same upstream model name, while `provider/model` remains unambiguous.
+///
+/// Exception — unique slug recovery: sessions created before write-path
+/// normalization could persist a bare client slug (`_meta.modelId` passed
+/// through verbatim, e.g. `deepseek-v4-flash` instead of
+/// `deepseek/deepseek-v4-flash`). A bare slug is recovered only when
+/// **exactly one** catalog entry exposes it and that entry's key is in
+/// `available` — the same slug semantics as [`resolve_catalog_key`] but
+/// strictly unique, so an ambiguous slug (two providers exposing the same
+/// model name) still fails rather than guessing which provider was meant.
 pub(crate) fn selectable_catalog_key_for_persisted(
     models: &IndexMap<String, ModelEntry>,
     available: &IndexMap<acp::ModelId, acp::ModelInfo>,
     id: &acp::ModelId,
 ) -> Option<acp::ModelId> {
-    (models.contains_key(id.0.as_ref()) && available.contains_key(id)).then(|| id.clone())
+    if models.contains_key(id.0.as_ref()) && available.contains_key(id) {
+        return Some(id.clone());
+    }
+    let id_str = id.0.as_ref();
+    let mut slug_matches = models
+        .iter()
+        .filter(|(_, entry)| entry.info.model == id_str)
+        .map(|(key, _)| key.clone());
+    let unique_key = slug_matches.next()?;
+    if slug_matches.next().is_some() {
+        return None;
+    }
+    let key = acp::ModelId::new(unique_key);
+    available.contains_key(&key).then_some(key)
+}
+
+/// Notice the caller must surface to the user when a requested session model
+/// cannot be resolved to a catalog key and the new session falls back to the
+/// default model instead (never a silent fallback).
+pub(crate) struct ModelFallbackNotice {
+    pub requested: acp::ModelId,
+    pub reason: String,
+}
+
+/// Resolve the model id to persist for a brand-new session.
+///
+/// A client-requested model (`_meta.modelId`, already gated by
+/// `resolve_model_id`) is normalized to its canonical `provider/model`
+/// catalog key so the persisted summary never stores a bare slug. When
+/// normalization fails (the catalog changed between validation and
+/// persistence), the default model is returned together with a
+/// [`ModelFallbackNotice`] describing what was requested and why it fell back.
+pub(crate) fn resolve_new_session_model_id(
+    models: &IndexMap<String, ModelEntry>,
+    resolved_custom_model: Option<&str>,
+    current_default: &acp::ModelId,
+) -> (acp::ModelId, Option<ModelFallbackNotice>) {
+    let Some(requested) = resolved_custom_model else {
+        return (current_default.clone(), None);
+    };
+    let requested_id = acp::ModelId::new(requested.to_string());
+    match resolve_catalog_key(models, &requested_id) {
+        Some(canonical) => (canonical, None),
+        None => (
+            current_default.clone(),
+            Some(ModelFallbackNotice {
+                requested: requested_id,
+                reason: format!(
+                    "\"{requested}\" is no longer configured, so this session is using \"{}\".",
+                    current_default.0
+                ),
+            }),
+        ),
+    }
 }
 
 /// A "campaign-only" preferred flip: the default changed and either side's value
@@ -325,4 +387,187 @@ pub(crate) fn validate_selectable(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(slug: &str) -> ModelEntry {
+        config::ModelEntry::fallback(slug)
+    }
+
+    /// `(catalog_key, routing_slug)` pairs -> catalog map.
+    fn catalog(pairs: &[(&str, &str)]) -> IndexMap<String, ModelEntry> {
+        pairs
+            .iter()
+            .map(|(key, slug)| (key.to_string(), entry(slug)))
+            .collect()
+    }
+
+    /// The `user_selectable`-style projection `ModelsManager::available()`
+    /// feeds the loader: only the given keys, non-hidden.
+    fn available_for(
+        models: &IndexMap<String, ModelEntry>,
+        keys: &[&str],
+    ) -> IndexMap<acp::ModelId, acp::ModelInfo> {
+        let subset: IndexMap<String, ModelEntry> = keys
+            .iter()
+            .filter_map(|k| models.get(*k).map(|e| (k.to_string(), e.clone())))
+            .collect();
+        available_models(&subset)
+    }
+
+    #[test]
+    fn persisted_exact_key_match_returns_the_key() {
+        let models = catalog(&[("deepseek/deepseek-v4-flash", "deepseek-v4-flash")]);
+        let available = available_for(&models, &["deepseek/deepseek-v4-flash"]);
+        let id = acp::ModelId::new("deepseek/deepseek-v4-flash");
+        assert_eq!(
+            selectable_catalog_key_for_persisted(&models, &available, &id),
+            Some(id)
+        );
+    }
+
+    #[test]
+    fn persisted_exact_key_match_not_selectable_returns_none() {
+        let models = catalog(&[
+            ("deepseek/deepseek-v4-flash", "deepseek-v4-flash"),
+            ("other/other-model", "other-model"),
+        ]);
+        let available = available_for(&models, &["other/other-model"]);
+        assert_eq!(
+            selectable_catalog_key_for_persisted(
+                &models,
+                &available,
+                &acp::ModelId::new("deepseek/deepseek-v4-flash"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn persisted_unique_slug_recovers_the_catalog_key() {
+        let models = catalog(&[("deepseek/deepseek-v4-flash", "deepseek-v4-flash")]);
+        let available = available_for(&models, &["deepseek/deepseek-v4-flash"]);
+        assert_eq!(
+            selectable_catalog_key_for_persisted(
+                &models,
+                &available,
+                &acp::ModelId::new("deepseek-v4-flash"),
+            ),
+            Some(acp::ModelId::new("deepseek/deepseek-v4-flash"))
+        );
+    }
+
+    #[test]
+    fn persisted_ambiguous_slug_returns_none() {
+        let models = catalog(&[
+            ("provider-a/deepseek-v4-flash", "deepseek-v4-flash"),
+            ("provider-b/deepseek-v4-flash", "deepseek-v4-flash"),
+        ]);
+        let available = available_for(
+            &models,
+            &[
+                "provider-a/deepseek-v4-flash",
+                "provider-b/deepseek-v4-flash",
+            ],
+        );
+        assert_eq!(
+            selectable_catalog_key_for_persisted(
+                &models,
+                &available,
+                &acp::ModelId::new("deepseek-v4-flash"),
+            ),
+            None,
+            "an ambiguous slug must never be guessed, even though a unique \
+             slug is recoverable"
+        );
+    }
+
+    #[test]
+    fn persisted_slug_match_not_selectable_returns_none() {
+        let models = catalog(&[
+            ("deepseek/deepseek-v4-flash", "deepseek-v4-flash"),
+            ("other/other-model", "other-model"),
+        ]);
+        // The slug matches exactly one entry, but that key is absent from the
+        // selectable projection (e.g. `user_selectable = false`).
+        let available = available_for(&models, &["other/other-model"]);
+        assert_eq!(
+            selectable_catalog_key_for_persisted(
+                &models,
+                &available,
+                &acp::ModelId::new("deepseek-v4-flash"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn persisted_unknown_id_returns_none() {
+        let models = catalog(&[("deepseek/deepseek-v4-flash", "deepseek-v4-flash")]);
+        let available = available_for(&models, &["deepseek/deepseek-v4-flash"]);
+        assert_eq!(
+            selectable_catalog_key_for_persisted(
+                &models,
+                &available,
+                &acp::ModelId::new("totally-unknown"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn new_session_model_normalizes_bare_slug_to_canonical_key() {
+        let models = catalog(&[("deepseek/deepseek-v4-flash", "deepseek-v4-flash")]);
+        let default = acp::ModelId::new("deepseek/deepseek-v4-pro");
+        let (model_id, notice) =
+            resolve_new_session_model_id(&models, Some("deepseek-v4-flash"), &default);
+        assert_eq!(model_id, acp::ModelId::new("deepseek/deepseek-v4-flash"));
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn new_session_model_keeps_an_already_qualified_key() {
+        let models = catalog(&[("deepseek/deepseek-v4-flash", "deepseek-v4-flash")]);
+        let default = acp::ModelId::new("deepseek/deepseek-v4-pro");
+        let (model_id, notice) =
+            resolve_new_session_model_id(&models, Some("deepseek/deepseek-v4-flash"), &default);
+        assert_eq!(model_id, acp::ModelId::new("deepseek/deepseek-v4-flash"));
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn new_session_model_without_custom_request_uses_default() {
+        let models = catalog(&[("deepseek/deepseek-v4-flash", "deepseek-v4-flash")]);
+        let default = acp::ModelId::new("deepseek/deepseek-v4-pro");
+        let (model_id, notice) = resolve_new_session_model_id(&models, None, &default);
+        assert_eq!(model_id, default);
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn new_session_model_unresolvable_request_signals_fallback_notice() {
+        let models = catalog(&[("other/other-model", "other-model")]);
+        let default = acp::ModelId::new("other/other-model");
+        let (model_id, notice) =
+            resolve_new_session_model_id(&models, Some("deepseek-v4-flash"), &default);
+        assert_eq!(
+            model_id, default,
+            "an unresolvable request must fall back to the default model"
+        );
+        let notice = notice.expect("an unresolvable request must surface a fallback notice");
+        assert_eq!(notice.requested, acp::ModelId::new("deepseek-v4-flash"));
+        assert!(
+            notice.reason.contains("deepseek-v4-flash"),
+            "reason should name the requested model: {}",
+            notice.reason
+        );
+        assert!(
+            notice.reason.contains("other/other-model"),
+            "reason should name the fallback model: {}",
+            notice.reason
+        );
+    }
 }

@@ -23,8 +23,11 @@ use crate::views::picker::PickerState;
 /// Visual / input policy for compact ArgPicker selectors (Ctrl+X / bare slash).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArgPickerProfile {
-    /// Short fixed lists: effort, permission, behavior, model/agent phase-2.
+    /// Short fixed lists: effort, permission, model/agent phase-2.
     NavCompact,
+    /// Short fixed list with long descriptions: behavior. Wider than
+    /// `NavCompact` so ~60-char descriptions fit without truncation.
+    Behavior,
     /// Type-to-find catalog: model phase-1, theme.
     SearchMedium,
     /// Type-to-find with multi-line descriptions: agent phase-1.
@@ -39,13 +42,14 @@ impl ArgPickerProfile {
             "model" | "m" | "theme" | "t" => Self::SearchMedium,
             // Agent is single-phase (no Behavior follow-up).
             "agent" => Self::SearchRich,
-            "effort" | "permission" | "behavior" => Self::NavCompact,
+            "effort" | "permission" => Self::NavCompact,
+            "behavior" => Self::Behavior,
             _ => Self::SearchMedium,
         }
     }
 
     fn disable_search(self) -> bool {
-        matches!(self, Self::NavCompact)
+        matches!(self, Self::NavCompact | Self::Behavior)
     }
 
     /// Modal chrome rows consumed before list items (border + pad + footer +
@@ -54,14 +58,14 @@ impl ArgPickerProfile {
     fn chrome_rows(self) -> u16 {
         // border 2 + v_pad 1 + footer 2 = 5; search+divider adds 2 when enabled.
         match self {
-            Self::NavCompact => 5,
+            Self::NavCompact | Self::Behavior => 5,
             Self::SearchMedium | Self::SearchRich => 7,
         }
     }
 
     fn max_visible_items(self) -> u16 {
         match self {
-            Self::NavCompact => 8,
+            Self::NavCompact | Self::Behavior => 8,
             Self::SearchMedium => 8,
             Self::SearchRich => 6,
         }
@@ -70,6 +74,7 @@ impl ArgPickerProfile {
     fn max_width(self) -> u16 {
         match self {
             Self::NavCompact => 40,
+            Self::Behavior => 64,
             Self::SearchMedium => 56,
             Self::SearchRich => 76,
         }
@@ -78,6 +83,7 @@ impl ArgPickerProfile {
     fn min_width(self) -> u16 {
         match self {
             Self::NavCompact => 28,
+            Self::Behavior => 40,
             Self::SearchMedium => 36,
             Self::SearchRich => 48,
         }
@@ -86,6 +92,7 @@ impl ArgPickerProfile {
     fn width_pct(self) -> f32 {
         match self {
             Self::NavCompact => 0.36,
+            Self::Behavior => 0.50,
             Self::SearchMedium => 0.42,
             Self::SearchRich => 0.55,
         }
@@ -3069,6 +3076,53 @@ mod arg_picker_profile_tests {
         assert!(
             h_nav < h_search,
             "effort (nav) should be shorter than model (search): nav={h_nav} search={h_search}"
+        );
+    }
+
+    #[test]
+    fn behavior_profile_is_wide_and_nav_like() {
+        let profile = ArgPickerProfile::for_command("behavior", "");
+        assert_eq!(profile, ArgPickerProfile::Behavior);
+        assert!(
+            profile.max_width() >= 56,
+            "behavior max_width {} should be >= 56",
+            profile.max_width()
+        );
+        assert!(
+            profile.width_pct() >= 0.45,
+            "behavior width_pct {} should be >= 0.45",
+            profile.width_pct()
+        );
+        // Same chrome / list policy as NavCompact: search off, 8 items visible.
+        assert!(profile.disable_search(), "behavior list is short and fixed");
+        assert_eq!(profile.chrome_rows(), 5);
+        assert_eq!(profile.max_visible_items(), 8);
+        assert!(
+            !profile.initial_state().search_active,
+            "behavior opens with search inactive (like NavCompact)"
+        );
+        // Wider than NavCompact, same selector-height logic.
+        assert!(profile.max_width() > ArgPickerProfile::NavCompact.max_width());
+        assert!(profile.min_width() > ArgPickerProfile::NavCompact.min_width());
+        let h_behavior = profile.selector_height(3, 80);
+        let h_nav = ArgPickerProfile::NavCompact.selector_height(3, 80);
+        assert_eq!(h_behavior, h_nav, "same selector-height logic as NavCompact");
+    }
+
+    #[test]
+    fn effort_and_permission_remain_nav_compact() {
+        assert_eq!(
+            ArgPickerProfile::for_command("effort", ""),
+            ArgPickerProfile::NavCompact
+        );
+        assert_eq!(
+            ArgPickerProfile::for_command("permission", ""),
+            ArgPickerProfile::NavCompact
+        );
+        // phase-2 model stays NavCompact too (unchanged mapping).
+        assert_eq!(
+            ArgPickerProfile::for_command("model", "x"),
+            ArgPickerProfile::NavCompact
         );
     }
 
