@@ -54,13 +54,13 @@ pub(super) fn handle_permission_request(
             .find(|o| o.kind == acp::PermissionOptionKind::AllowOnce)
     {
         let option_id = allow.option_id.clone();
-        perm.response_tx
-            .send(Ok(acp::RequestPermissionResponse::new(
-                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
-                    option_id,
-                )),
-            )))
-            .ok();
+        crate::app::dispatch::respond_permission(
+            agent,
+            perm,
+            acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(
+                acp::SelectedPermissionOutcome::new(option_id),
+            )),
+        );
         return false; // no redraw needed
     }
 

@@ -188,6 +188,57 @@ fn drain_permission_queue_clears_double_click_tracker() {
     );
 }
 
+/// Regression: answering a permission whose requester has already
+/// disconnected (response channel closed — e.g. a subagent session was
+/// torn down or timed out while its request sat in the queue) must toast
+/// instead of silently swallowing the user's approval.
+#[test]
+fn permission_select_toasts_when_requester_disconnected() {
+    use std::sync::Arc;
+
+    let mut app = test_app_with_agent();
+    let response_rx = enqueue_permission_with_enable_always_approve(&mut app);
+    // Requester gone before the user answers — `send` will fail.
+    drop(response_rx);
+
+    let _ = dispatch(
+        Action::PermissionSelect(acp::PermissionOptionId::new(Arc::from("opt-allow-once"))),
+        &mut app,
+    );
+
+    assert!(
+        app.agents[&AgentId(0)].permission_queue.is_empty(),
+        "the dead request must still be popped from the queue"
+    );
+    assert_eq!(
+        agent_toast(&app).as_deref(),
+        Some("This permission request is no longer valid (the requester disconnected)"),
+        "answering a request whose requester disconnected must toast",
+    );
+}
+
+/// Same as [`permission_select_toasts_when_requester_disconnected`] for the
+/// cancel path (Ctrl-C / Esc).
+#[test]
+fn permission_cancel_toasts_when_requester_disconnected() {
+    let mut app = test_app_with_agent();
+    let response_rx = enqueue_permission_with_enable_always_approve(&mut app);
+    // Requester gone before the user answers — `send` will fail.
+    drop(response_rx);
+
+    let _ = dispatch(Action::PermissionCancel, &mut app);
+
+    assert!(
+        app.agents[&AgentId(0)].permission_queue.is_empty(),
+        "the dead request must still be popped from the queue"
+    );
+    assert_eq!(
+        agent_toast(&app).as_deref(),
+        Some("This permission request is no longer valid (the requester disconnected)"),
+        "cancelling a request whose requester disconnected must toast",
+    );
+}
+
 #[test]
 fn set_permission_mode_always_approve_blocked_by_policy_pin() {
     use crate::app::actions::PermissionModeKind;

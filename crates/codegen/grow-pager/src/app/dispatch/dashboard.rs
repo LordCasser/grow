@@ -2158,13 +2158,14 @@ pub(super) fn dispatch_dashboard_permission_select(
         None
     };
 
-    perm.request
-        .response_tx
-        .send(Ok(acp::RequestPermissionResponse::new(
+    super::permissions::respond_permission(
+        agent,
+        perm.request,
+        acp::RequestPermissionResponse::new(
             acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
         )
-        .meta(meta)))
-        .ok();
+        .meta(meta),
+    );
 
     resolve_permission_queue_transition(agent);
 
@@ -2235,10 +2236,11 @@ pub(super) fn dispatch_dashboard_permission_followup(
     } else {
         None
     };
-    perm.request
-        .response_tx
-        .send(Ok(acp::RequestPermissionResponse::new(outcome).meta(meta)))
-        .ok();
+    super::permissions::respond_permission(
+        agent,
+        perm.request,
+        acp::RequestPermissionResponse::new(outcome).meta(meta),
+    );
     resolve_permission_queue_transition(agent);
     if let Some(d) = app.dashboard.as_mut() {
         d.set_peek(None);

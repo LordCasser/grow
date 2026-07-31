@@ -37,7 +37,7 @@ mod turn;
 
 pub(crate) use modes::{downgrade_displayed_auto_if_gated, effective_auto};
 pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};
-pub(crate) use permissions::resolve_permission_queue_transition;
+pub(crate) use permissions::{resolve_permission_queue_transition, respond_permission};
 pub(crate) use prompt::dispatch_initial_prompt;
 pub(in crate::app) use prompt::{show_small_screen_tip, show_ssh_wrap_tip};
 pub(super) use queue::{

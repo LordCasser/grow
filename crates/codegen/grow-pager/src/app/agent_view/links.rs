@@ -882,6 +882,55 @@ mod link_click_tests {
         assert!(agent.hit_announcement_hide.rect.is_none());
         assert!(agent.hit_promo_cta.rect.is_none());
     }
+    /// Subagent fullscreen takeover hides the parent's permission modal and
+    /// routes input to the child view — pending parent permission requests
+    /// must be advertised as a banner inside the subagent frame so the user
+    /// knows to press Esc and answer.
+    #[test]
+    fn subagent_fullscreen_shows_parent_permission_pending_banner() {
+        let reg = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.last_terminal_size = (120, 30);
+        agent.active_subagent = Some("child-sid".into());
+
+        // No pending permissions → no banner.
+        let buf = draw_frame_sized(&mut agent, &reg, &[], 0, 120);
+        let rows: Vec<String> = (0..8)
+            .map(|y| {
+                (0..120)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect()
+            })
+            .collect();
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.contains("permission request(s) pending")),
+            "no banner without pending permissions; rows={rows:?}"
+        );
+
+        // Pending parent permission → banner on the frame's top content row.
+        agent
+            .permission_queue
+            .push_back(paste_key_tests::make_followup_permission_state());
+        let buf = draw_frame_sized(&mut agent, &reg, &[], 0, 120);
+        let rows: Vec<String> = (0..8)
+            .map(|y| {
+                (0..120)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect()
+            })
+            .collect();
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("1 permission request(s) pending")),
+            "pending parent permissions must be advertised in the subagent frame; rows={rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("Esc")),
+            "banner must point at Esc to return; rows={rows:?}"
+        );
+    }
     /// In-session header promo CTA: a promo owning the slot arms
     /// `hit_promo_cta` (clickable → `AnnouncementsOpenCta`).
     #[test]

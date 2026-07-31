@@ -6,6 +6,26 @@ use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use agent_client_protocol as acp;
 
+/// Shown when the user answers a permission request whose requester has
+/// already disconnected (response channel closed) — the answer cannot be
+/// delivered, so surface it instead of silently swallowing the approval.
+const PERMISSION_REQUESTER_GONE_TOAST: &str =
+    "This permission request is no longer valid (the requester disconnected)";
+
+/// Send a permission response on the request's oneshot channel. When the
+/// receiver is gone — e.g. a subagent session was torn down or timed out
+/// while its request sat in the queue — `send` fails and the user's
+/// answer would silently do nothing; toast instead.
+pub(crate) fn respond_permission(
+    agent: &mut AgentView,
+    request: xai_acp_lib::AcpArgs<acp::RequestPermissionRequest>,
+    response: acp::RequestPermissionResponse,
+) {
+    if request.response_tx.send(Ok(response)).is_err() {
+        agent.show_toast(PERMISSION_REQUESTER_GONE_TOAST);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Permission dispatch
 // ---------------------------------------------------------------------------
@@ -110,13 +130,14 @@ pub(super) fn dispatch_permission_select(
         None
     };
 
-    perm.request
-        .response_tx
-        .send(Ok(acp::RequestPermissionResponse::new(
+    respond_permission(
+        agent,
+        perm.request,
+        acp::RequestPermissionResponse::new(
             acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
         )
-        .meta(meta)))
-        .ok();
+        .meta(meta),
+    );
 
     // Queue transition: restore prompt if queue is now empty, clear if next-front.
     resolve_permission_queue_transition(agent);
@@ -167,12 +188,11 @@ pub(super) fn dispatch_permission_followup(app: &mut AppView, text: String) -> V
 
     let Some(option_id) = option_id else {
         // No RejectOnce option — cancel instead.
-        perm.request
-            .response_tx
-            .send(Ok(acp::RequestPermissionResponse::new(
-                acp::RequestPermissionOutcome::Cancelled,
-            )))
-            .ok();
+        respond_permission(
+            agent,
+            perm.request,
+            acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled),
+        );
         resolve_permission_queue_transition(agent);
         return vec![];
     };
@@ -188,13 +208,14 @@ pub(super) fn dispatch_permission_followup(app: &mut AppView, text: String) -> V
         None
     };
 
-    perm.request
-        .response_tx
-        .send(Ok(acp::RequestPermissionResponse::new(
+    respond_permission(
+        agent,
+        perm.request,
+        acp::RequestPermissionResponse::new(
             acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
         )
-        .meta(meta)))
-        .ok();
+        .meta(meta),
+    );
 
     resolve_permission_queue_transition(agent);
     vec![]
@@ -212,12 +233,11 @@ pub(super) fn dispatch_permission_cancel(app: &mut AppView) -> Vec<Effect> {
         return vec![];
     };
 
-    perm.request
-        .response_tx
-        .send(Ok(acp::RequestPermissionResponse::new(
-            acp::RequestPermissionOutcome::Cancelled,
-        )))
-        .ok();
+    respond_permission(
+        agent,
+        perm.request,
+        acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled),
+    );
 
     resolve_permission_queue_transition(agent);
     vec![]
@@ -232,13 +252,14 @@ pub(super) fn drain_permission_queue(agent: &mut AgentView) {
     if agent.permission_queue.is_empty() {
         return;
     }
-    for perm in agent.permission_queue.drain(..) {
-        perm.request
-            .response_tx
-            .send(Ok(acp::RequestPermissionResponse::new(
-                acp::RequestPermissionOutcome::Cancelled,
-            )))
-            .ok();
+    // `pop_front` (not `drain`) so each iteration can re-borrow `agent`
+    // for `respond_permission`; order is unchanged.
+    while let Some(perm) = agent.permission_queue.pop_front() {
+        respond_permission(
+            agent,
+            perm.request,
+            acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled),
+        );
     }
     restore_permission_stashes(agent);
 }

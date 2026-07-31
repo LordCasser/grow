@@ -1786,11 +1786,22 @@ mod tests {
         ctrl.refresh(&state, text, text.len(), &models);
         let snapshot = state.snapshot();
         assert!(snapshot.open);
+        // Selection UI shows the stable catalog id (`provider/model`), never
+        // the friendly display name — see `build_model_items` in
+        // slash/commands/model.rs.
         assert!(
             snapshot
                 .matches
                 .iter()
-                .any(|row| row.display.contains("Example"))
+                .any(|row| row.display.contains("example")),
+            "catalog id must be displayed in model suggestions"
+        );
+        assert!(
+            !snapshot
+                .matches
+                .iter()
+                .any(|row| row.display.contains("Example")),
+            "friendly display names must not appear in model suggestions"
         );
         assert!(snapshot.args_range.is_some());
     }

@@ -337,28 +337,24 @@ fn set_yolo_mode_inner_scoped(app: &mut AppView, new: bool, update_default: bool
         // even on idempotent re-dispatch. Prefers `AllowOnce`; falls
         // back to `Cancelled` (never `AllowAlways`).
         agent.last_permission_click = None;
-        for perm in agent.permission_queue.drain(..) {
-            if let Some(allow) = perm
+        // `pop_front` (not `drain`) so each iteration can re-borrow `agent`
+        // for `respond_permission`; order is unchanged. The response is
+        // built before `perm.request` is moved (option lookup borrows it).
+        while let Some(perm) = agent.permission_queue.pop_front() {
+            let response = if let Some(allow) = perm
                 .options
                 .iter()
                 .find(|o| o.kind == acp::PermissionOptionKind::AllowOnce)
             {
-                perm.request
-                    .response_tx
-                    .send(Ok(acp::RequestPermissionResponse::new(
-                        acp::RequestPermissionOutcome::Selected(
-                            acp::SelectedPermissionOutcome::new(allow.option_id.clone()),
-                        ),
-                    )))
-                    .ok();
+                acp::RequestPermissionResponse::new(
+                    acp::RequestPermissionOutcome::Selected(
+                        acp::SelectedPermissionOutcome::new(allow.option_id.clone()),
+                    ),
+                )
             } else {
-                perm.request
-                    .response_tx
-                    .send(Ok(acp::RequestPermissionResponse::new(
-                        acp::RequestPermissionOutcome::Cancelled,
-                    )))
-                    .ok();
-            }
+                acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled)
+            };
+            super::permissions::respond_permission(agent, perm.request, response);
         }
         super::permissions::restore_permission_stashes(agent);
     }
