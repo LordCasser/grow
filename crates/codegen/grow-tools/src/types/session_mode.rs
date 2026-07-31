@@ -36,6 +36,21 @@ impl SessionMode {
         self.into()
     }
 
+    /// Human-readable display label, matching the pager's Behavior picker
+    /// labels. Wire ids (`default`, `deep_research`, …) are protocol
+    /// identifiers; user-facing messages must use this label so "Normal"
+    /// never reads as "default".
+    pub fn display_label(&self) -> &'static str {
+        match self {
+            Self::Default => "Normal",
+            Self::Plan => "Plan",
+            Self::Ask => "Clarify",
+            Self::Workflow => "Dynamic Workflow",
+            Self::DeepResearch => "Deep Research",
+            Self::Goal => "Goal",
+        }
+    }
+
     pub fn is_plan(&self) -> bool {
         matches!(self, Self::Plan)
     }
@@ -92,5 +107,15 @@ mod tests {
         assert!(!SessionMode::Workflow.is_plan());
         assert!(!SessionMode::DeepResearch.is_plan());
         assert!(!SessionMode::Goal.is_plan());
+    }
+
+    #[test]
+    fn display_labels_match_pager_picker_labels() {
+        assert_eq!(SessionMode::Default.display_label(), "Normal");
+        assert_eq!(SessionMode::Plan.display_label(), "Plan");
+        assert_eq!(SessionMode::Ask.display_label(), "Clarify");
+        assert_eq!(SessionMode::Workflow.display_label(), "Dynamic Workflow");
+        assert_eq!(SessionMode::DeepResearch.display_label(), "Deep Research");
+        assert_eq!(SessionMode::Goal.display_label(), "Goal");
     }
 }

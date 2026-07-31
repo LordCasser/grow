@@ -1624,7 +1624,7 @@ async fn set_mode_then_prompt_confirmation_required_parks_prompt_in_task_result(
                         serde_json::json!({
                             "grow/behaviorChange": {
                                 "status": "confirmation_required",
-                                "message": "Switching to plan will interrupt the active default work. Press Enter to confirm the switch, or press Esc to cancel.",
+                                "message": "Switching to Plan will interrupt the active default work. Press Enter to confirm the switch, or press Esc to cancel.",
                                 "remainingMs": 8000,
                             }
                         })

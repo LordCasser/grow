@@ -1102,3 +1102,190 @@ mod grow_event_id_stamping_tests {
             .await;
     }
 }
+
+/// Synthetic auto-wake prompts (background subagent / bash / monitor /
+/// workflow completions, notification drain) are completion notifications,
+/// NOT Behavior-switch requests. `handle_prompt` must run them under the
+/// session's current Behavior: previously the hardcoded `PromptMode::Agent`
+/// tripped the interrupting-switch gate while Plan work was active, failing
+/// the wake turn with "Turn failed: switching to default will interrupt the
+/// active Plan work", and could even auto-confirm a parked user-initiated
+/// switch. See the `handle_prompt` gate for the full contract.
+#[cfg(test)]
+mod synthetic_prompt_behavior_tests {
+    use super::support::create_test_actor;
+    use super::*;
+
+    /// A `subagent-completed-*` wake arriving while Plan is active must not
+    /// fail the behavior gate: the turn starts under Plan and the Behavior
+    /// state is untouched.
+    #[tokio::test]
+    async fn synthetic_subagent_completion_runs_under_plan_without_switch() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+                let (persistence_tx, _prx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = std::sync::Arc::new(
+                    create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
+                );
+                *actor.agent.borrow_mut() = super::support::test_agent_with_plan_tools().await;
+                // Enter Plan first (Normal → Plan is not an interrupting switch).
+                let entered = actor
+                    .request_behavior_change(acp::SessionModeId::new("plan"))
+                    .await;
+                assert!(matches!(
+                    entered,
+                    crate::session::behavior::BehaviorChangeOutcome::Applied
+                ));
+                assert!(actor.behavior.lock().is_plan());
+                assert_eq!(
+                    *actor.current_prompt_mode.lock(),
+                    crate::session::behavior::PromptMode::Plan
+                );
+
+                // A background subagent completes: the shell injects
+                // `subagent-completed-*` hardcoded to PromptMode::Agent. With
+                // the bug this failed the wake turn with the behaviorChange
+                // `confirmation_required` meta; now it must pass the gate and
+                // record the CURRENT (Plan) turn mode before the turn blocks
+                // on the noop test sampler.
+                let wake = {
+                    let actor = actor.clone();
+                    tokio::task::spawn_local(async move {
+                        actor
+                            .handle_prompt(
+                                "subagent-completed-sa-1",
+                                vec![acp::ContentBlock::Text(acp::TextContent::new(
+                                    "subagent sa-1 finished",
+                                ))],
+                                crate::session::behavior::PromptMode::Agent,
+                                None,
+                                None,
+                                true,
+                                None,
+                                None,
+                                None,
+                            )
+                            .await
+                    })
+                };
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    async {
+                        loop {
+                            if *actor.turn_start_prompt_mode.lock()
+                                == crate::session::behavior::PromptMode::Plan
+                            {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    },
+                )
+                .await
+                .expect("the synthetic wake must pass the behavior gate and start under Plan");
+                wake.abort();
+
+                // The wake must not have switched Behavior.
+                assert!(
+                    actor.behavior.lock().is_plan(),
+                    "the synthetic wake must leave Plan active"
+                );
+                assert_eq!(
+                    *actor.current_prompt_mode.lock(),
+                    crate::session::behavior::PromptMode::Plan,
+                    "the synthetic wake must inherit the current prompt mode"
+                );
+            })
+            .await;
+    }
+
+    /// A parked interrupting switch (user-initiated, awaiting Enter/Esc)
+    /// must survive a synthetic wake: it is neither auto-confirmed (the
+    /// pre-fix behavior — the wake's Agent request matched the parked
+    /// `default` target) nor cleared.
+    #[tokio::test]
+    async fn synthetic_wake_does_not_resolve_parked_switch() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+                let (persistence_tx, _prx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = std::sync::Arc::new(
+                    create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
+                );
+                *actor.agent.borrow_mut() = super::support::test_agent_with_plan_tools().await;
+                // Enter Plan, then park a user-initiated switch to default.
+                assert!(matches!(
+                    actor
+                        .request_behavior_change(acp::SessionModeId::new("plan"))
+                        .await,
+                    crate::session::behavior::BehaviorChangeOutcome::Applied
+                ));
+                assert!(matches!(
+                    actor
+                        .request_behavior_change(acp::SessionModeId::new("default"))
+                        .await,
+                    crate::session::behavior::BehaviorChangeOutcome::ConfirmationRequired { .. }
+                ));
+                assert!(
+                    actor.behavior.lock().pending_switch().is_some(),
+                    "the interrupting switch must be parked"
+                );
+
+                // A synthetic wake lands while the switch is parked.
+                let wake = {
+                    let actor = actor.clone();
+                    tokio::task::spawn_local(async move {
+                        actor
+                            .handle_prompt(
+                                "subagent-completed-sa-2",
+                                vec![acp::ContentBlock::Text(acp::TextContent::new(
+                                    "subagent sa-2 finished",
+                                ))],
+                                crate::session::behavior::PromptMode::Agent,
+                                None,
+                                None,
+                                true,
+                                None,
+                                None,
+                                None,
+                            )
+                            .await
+                    })
+                };
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    async {
+                        loop {
+                            if *actor.turn_start_prompt_mode.lock()
+                                == crate::session::behavior::PromptMode::Plan
+                            {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    },
+                )
+                .await
+                .expect("the synthetic wake must pass the behavior gate and start under Plan");
+                wake.abort();
+
+                // The parked switch must still be waiting for the user.
+                assert!(
+                    actor.behavior.lock().pending_switch().is_some(),
+                    "a synthetic wake must not resolve the parked switch"
+                );
+                assert!(
+                    actor.behavior.lock().is_plan(),
+                    "the synthetic wake must not switch Behavior"
+                );
+            })
+            .await;
+    }
+}

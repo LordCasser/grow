@@ -278,16 +278,34 @@ impl SessionActor {
         if !origin.is_synthetic() {
             self.cancel_pending_recap_for_new_prompt();
         }
-        let behavior_outcome = self
-            .request_behavior_change(acp::SessionModeId::new(
-                session_mode_from_prompt_mode(prompt_mode).as_id(),
-            ))
-            .await;
-        if !matches!(behavior_outcome, BehaviorChangeOutcome::Applied) {
-            return Err(acp::Error::invalid_params().data(
-                serde_json::to_value(behavior_outcome.response_meta())
-                    .unwrap_or_else(|_| serde_json::json!({})),
-            ));
+        // Synthetic auto-wake prompts (subagent/bash/monitor/workflow
+        // completions, notification drain, goal summaries) are completion
+        // notifications, NOT Behavior-switch requests. They run under the
+        // session's current Behavior:
+        //  - the interrupting-switch gate must not fail the wake turn while
+        //    Plan (or Goal/Deep Research) work is active — it surfaced as
+        //    "Turn failed: switching to default will interrupt the active
+        //    Plan work" whenever a background subagent finished during Plan;
+        //  - a parked user-initiated switch must not be auto-confirmed or
+        //    cleared by an unrelated completion.
+        // Only `User` prompts may drive the Behavior state machine.
+        let prompt_mode = if origin.is_synthetic() {
+            *self.current_prompt_mode.lock()
+        } else {
+            prompt_mode
+        };
+        if !origin.is_synthetic() {
+            let behavior_outcome = self
+                .request_behavior_change(acp::SessionModeId::new(
+                    session_mode_from_prompt_mode(prompt_mode).as_id(),
+                ))
+                .await;
+            if !matches!(behavior_outcome, BehaviorChangeOutcome::Applied) {
+                return Err(acp::Error::invalid_params().data(
+                    serde_json::to_value(behavior_outcome.response_meta())
+                        .unwrap_or_else(|_| serde_json::json!({})),
+                ));
+            }
         }
         *self.turn_start_prompt_mode.lock() = prompt_mode;
         *self.turn_prompt_mode.lock() = prompt_mode;

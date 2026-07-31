@@ -245,7 +245,7 @@ impl SessionActor {
                     .unwrap_or(8_000);
                 let message = format!(
                     "Switching to {} will interrupt the active {} work. Press Enter to confirm the switch, or press Esc to cancel.",
-                    mode.as_id(),
+                    mode.display_label(),
                     current_behavior
                         .map(|behavior| format!("{behavior:?}"))
                         .unwrap_or_else(|| "session".to_string())
