@@ -69,11 +69,9 @@ impl SlashCommand for ModelCommand {
             });
         }
 
-        // Prefer an exact full-string catalog match first. Model display names
-        // often contain spaces ("Grow 4.5"); if we split on the last token
-        // first, a shorter catalog entry ("Grow") would steal the prefix and
-        // treat "4.5" as an effort level.
-        if let Some(id) = ctx.models.resolve_by_name_or_id(trimmed) {
+        // Exact catalog id match first (case-insensitive). Only `provider/model`
+        // ids are accepted — no display-name fallback.
+        if let Some(id) = ctx.models.resolve_by_id(trimmed) {
             return CommandResult::Action(Action::SwitchModel {
                 model_id: id,
                 effort: None,
@@ -106,9 +104,9 @@ impl SlashCommand for ModelCommand {
     }
 }
 
-/// Look up a model by case-insensitive display name OR model id match.
-fn resolve_model(models: &ModelState, name: &str) -> Option<acp::ModelId> {
-    models.resolve_by_name_or_id(name)
+/// Look up a model by case-insensitive catalog id only.
+fn resolve_model(models: &ModelState, id: &str) -> Option<acp::ModelId> {
+    models.resolve_by_id(id)
 }
 
 fn supports_reasoning_effort(info: &acp::ModelInfo) -> bool {
@@ -127,22 +125,23 @@ fn split_trailing_token(args: &str) -> Option<(&str, &str)> {
     Some((prefix, last))
 }
 
-/// Returns the matched model id when `args_query` is `"<reasoning-model> ..."`.
-/// Longest-name-first to disambiguate names that share a prefix.
+/// Returns the matched model id when `args_query` is `"<catalog-id> ..."`.
+/// Matches only stable catalog ids (`provider/model`). Longest id first so
+/// shared prefixes do not steal the match.
 fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::ModelId> {
     let mut candidates: Vec<(&acp::ModelId, &str)> = models
         .available
         .iter()
         .filter(|(_, info)| supports_reasoning_effort(info))
-        .map(|(id, info)| (id, info.name.as_str()))
+        .map(|(id, _)| (id, id.0.as_ref()))
         .collect();
-    candidates.sort_by_key(|(_, name)| std::cmp::Reverse(name.len()));
+    candidates.sort_by_key(|(_, token)| std::cmp::Reverse(token.len()));
 
-    for (id, name) in candidates {
-        if args_query.len() > name.len()
-            && args_query.is_char_boundary(name.len())
-            && args_query[..name.len()].eq_ignore_ascii_case(name)
-            && args_query[name.len()..].starts_with(char::is_whitespace)
+    for (id, token) in candidates {
+        if args_query.len() > token.len()
+            && args_query.is_char_boundary(token.len())
+            && args_query[..token.len()].eq_ignore_ascii_case(token)
+            && args_query[token.len()..].starts_with(char::is_whitespace)
         {
             return Some(id.clone());
         }
@@ -152,31 +151,35 @@ fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::Mod
 
 /// One row per logical model. Reasoning models get a trailing space in
 /// `insert_text` so the prompt widget chains into the effort sub-menu.
+///
+/// Display, match, and insert all use the stable catalog id
+/// (`provider/model`). Friendly display names are not shown in selection UI.
 fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
     let current_id = models.current.as_ref();
     let mut items: Vec<ArgItem> = Vec::with_capacity(models.available.len());
     for (id, info) in &models.available {
         let is_current = current_id == Some(id);
         let supports = supports_reasoning_effort(info);
+        let catalog_id = id.0.as_ref();
 
         let display = if is_current {
-            format!("{} (current)", info.name)
+            format!("{catalog_id} (current)")
         } else {
-            info.name.clone()
+            catalog_id.to_string()
         };
 
         // Trailing space on reasoning models: signals "more input
         // expected" to the prompt widget so Enter advances to effort
         // phase instead of submitting.
         let insert_text = if supports {
-            format!("{} ", info.name)
+            format!("{catalog_id} ")
         } else {
-            info.name.clone()
+            catalog_id.to_string()
         };
 
         items.push(ArgItem {
             display,
-            match_text: info.name.clone(),
+            match_text: catalog_id.to_string(),
             insert_text,
             description: info.description.clone().unwrap_or_default(),
         });
@@ -185,20 +188,19 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
 }
 
 /// One row per effort level for the `/model` chained effort phase.
-/// `insert_text` is `"ModelName high"` so selecting a row completes both tokens.
+/// `insert_text` is `"<catalog-id> high"` so selecting a row completes both tokens.
 fn build_effort_items(models: &ModelState, model_id: &acp::ModelId) -> Vec<ArgItem> {
-    let info = match models.available.get(model_id) {
-        Some(info) => info,
-        None => return Vec::new(),
-    };
-    let model_name = info.name.clone();
+    if models.available.get(model_id).is_none() {
+        return Vec::new();
+    }
+    let catalog_id = model_id.0.to_string();
     let is_current_model = models.current.as_ref() == Some(model_id);
     let options = models.reasoning_effort_options_for(model_id);
     build_effort_arg_items(
         &options,
         models.reasoning_effort,
         is_current_model,
-        |option| format!("{model_name} {}", option.id),
+        |option| format!("{catalog_id} {}", option.id),
     )
 }
 
@@ -293,16 +295,23 @@ mod tests {
 
         // Reasoning model has trailing space in insert_text -- this is the
         // signal the prompt widget reads to keep the dropdown open after
-        // Enter so the effort sub-menu can render.
+        // Enter so the effort sub-menu can render. Insert uses catalog id.
         let reasoning = items
             .iter()
-            .find(|i| i.match_text == "Reasoning X")
+            .find(|i| i.insert_text.starts_with("reasoning-x"))
             .unwrap();
-        assert_eq!(reasoning.insert_text, "Reasoning X ");
+        assert_eq!(reasoning.insert_text, "reasoning-x ");
+        assert_eq!(reasoning.display, "reasoning-x");
+        assert_eq!(reasoning.match_text, "reasoning-x");
 
         // Plain model has no trailing space -- Enter commits immediately.
-        let plain = items.iter().find(|i| i.match_text == "Grow 4.5").unwrap();
-        assert_eq!(plain.insert_text, "Grow 4.5");
+        let plain = items
+            .iter()
+            .find(|i| i.insert_text == "grow-4.5")
+            .unwrap();
+        assert_eq!(plain.insert_text, "grow-4.5");
+        assert_eq!(plain.display, "grow-4.5");
+        assert_eq!(plain.match_text, "grow-4.5");
     }
 
     #[test]
@@ -326,20 +335,25 @@ mod tests {
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
-        // Args query has a trailing space -> effort phase. Items come out
-        // ordered xhigh -> low (strongest first) per EFFORT_LEVELS.
-        let items = cmd.suggest_args(&ctx, "Reasoning X ").unwrap();
+        // Args query has a trailing space after catalog id -> effort phase.
+        let items = cmd.suggest_args(&ctx, "reasoning-x ").unwrap();
         assert_eq!(items.len(), 4);
-        assert_eq!(items[0].insert_text, "Reasoning X xhigh");
-        assert_eq!(items[1].insert_text, "Reasoning X high");
-        assert_eq!(items[2].insert_text, "Reasoning X medium");
-        assert_eq!(items[3].insert_text, "Reasoning X low");
+        assert_eq!(items[0].insert_text, "reasoning-x xhigh");
+        assert_eq!(items[1].insert_text, "reasoning-x high");
+        assert_eq!(items[2].insert_text, "reasoning-x medium");
+        assert_eq!(items[3].insert_text, "reasoning-x low");
         // Display is just the level so the user sees a clean column.
         assert_eq!(items[0].display, "xhigh");
         // match_text carries the sort-key prefix that forces the matcher's
         // alphabetical tiebreak to render rows in EFFORT_LEVELS order.
         assert!(items[0].match_text.starts_with("a "));
         assert!(items[3].match_text.starts_with("d "));
+        // Display names are not accepted for effort-phase entry.
+        let by_name = cmd.suggest_args(&ctx, "Reasoning X ").unwrap();
+        assert!(
+            by_name.iter().all(|i| i.display != "xhigh"),
+            "display-name query must stay in model phase, got {by_name:?}"
+        );
     }
 
     #[test]
@@ -364,7 +378,7 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
         // Still in effort phase; matcher upstream narrows to high / xhigh.
-        let items = cmd.suggest_args(&ctx, "Reasoning X h").unwrap();
+        let items = cmd.suggest_args(&ctx, "reasoning-x h").unwrap();
         assert_eq!(items.len(), 4);
     }
 
@@ -389,10 +403,10 @@ mod tests {
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
-        // No trailing space, user is still typing the model name.
-        let items = cmd.suggest_args(&ctx, "Reason").unwrap();
+        // No trailing space, user is still typing the catalog id.
+        let items = cmd.suggest_args(&ctx, "reason").unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].insert_text, "Reasoning X ");
+        assert_eq!(items[0].insert_text, "reasoning-x ");
     }
 
     #[test]
@@ -401,7 +415,7 @@ mod tests {
         let (id, info) = model_with_reasoning("reasoning-x", "Reasoning X");
         state.available.insert(id, info);
         let mut ctx = dummy_exec_ctx(&state);
-        let result = ModelCommand.run(&mut ctx, "Reasoning X xhigh");
+        let result = ModelCommand.run(&mut ctx, "reasoning-x xhigh");
         match result {
             CommandResult::Action(Action::SwitchModel { model_id, effort }) => {
                 assert_eq!(model_id.0.as_ref(), "reasoning-x");
@@ -414,12 +428,12 @@ mod tests {
     #[test]
     fn run_rejects_unoffered_effort_with_effort_error_not_unknown_model() {
         // Regression: previously `resolve_effort_token_for` returned None and
-        // the handler fell through to `Unknown model: Reasoning X none`.
+        // the handler fell through to `Unknown model: reasoning-x none`.
         let mut state = ModelState::default();
         let (id, info) = model_with_reasoning("reasoning-x", "Reasoning X");
         state.available.insert(id, info);
         let mut ctx = dummy_exec_ctx(&state);
-        let result = ModelCommand.run(&mut ctx, "Reasoning X none");
+        let result = ModelCommand.run(&mut ctx, "reasoning-x none");
         match result {
             CommandResult::Error(msg) => {
                 assert!(
@@ -445,16 +459,16 @@ mod tests {
     }
 
     #[test]
-    fn run_prefers_full_multi_word_model_name_over_prefix_plus_effort() {
-        // Catalog has both "Grow" (reasoning) and "Grow 4.5". `/model Grow 4.5`
-        // must select the full name, not treat "4.5" as an effort on "Grow".
+    fn run_prefers_full_catalog_id_over_prefix_plus_effort() {
+        // Catalog has both "grow" (reasoning) and "grow-4.5". `/model grow-4.5`
+        // must select the full id, not treat a suffix as effort on "grow".
         let mut state = ModelState::default();
         let (short_id, short_info) = model_with_reasoning("grow", "Grow");
         let (long_id, long_info) = model_with_reasoning("grow-4.5", "Grow 4.5");
         state.available.insert(short_id, short_info);
         state.available.insert(long_id.clone(), long_info);
         let mut ctx = dummy_exec_ctx(&state);
-        let result = ModelCommand.run(&mut ctx, "Grow 4.5");
+        let result = ModelCommand.run(&mut ctx, "grow-4.5");
         match result {
             CommandResult::Action(Action::SwitchModel {
                 model_id: resolved_id,
@@ -462,7 +476,7 @@ mod tests {
             }) => {
                 assert_eq!(resolved_id, long_id);
             }
-            other => panic!("expected SwitchModel(Grow 4.5), got {other:?}"),
+            other => panic!("expected SwitchModel(grow-4.5), got {other:?}"),
         }
     }
 
@@ -472,23 +486,33 @@ mod tests {
         let (id, info) = plain_model("grow-4.5", "Grow 4.5");
         state.available.insert(id, info);
         let mut ctx = dummy_exec_ctx(&state);
-        let result = ModelCommand.run(&mut ctx, "Grow 4.5 high");
-        // Falls through to "is the whole string a model name?" — which
-        // it isn't, so we get an Unknown error.
+        let result = ModelCommand.run(&mut ctx, "grow-4.5 high");
+        // Falls through — not a reasoning model — Unknown error.
         assert!(matches!(result, CommandResult::Error(_)));
     }
 
-    /// The bare `/model <name>` form changes only the current session.
-    ///
-    /// The payload is the typed `acp::ModelId` (resolved at the slash
-    /// boundary), not a String.
+    /// Display names are rejected; only catalog ids switch the session.
     #[test]
-    fn run_bare_model_name_dispatches_set_default_model() {
+    fn run_rejects_display_name() {
+        let mut state = ModelState::default();
+        let (id, info) = plain_model("grow-4.5", "Grow 4.5");
+        state.available.insert(id, info);
+        let mut ctx = dummy_exec_ctx(&state);
+        let result = ModelCommand.run(&mut ctx, "Grow 4.5");
+        assert!(
+            matches!(result, CommandResult::Error(ref msg) if msg.contains("Unknown model")),
+            "got {result:?}"
+        );
+    }
+
+    /// The bare `/model <catalog-id>` form changes only the current session.
+    #[test]
+    fn run_bare_catalog_id_switches_session_model() {
         let mut state = ModelState::default();
         let (id, info) = plain_model("grow-4.5", "Grow 4.5");
         state.available.insert(id.clone(), info);
         let mut ctx = dummy_exec_ctx(&state);
-        let result = ModelCommand.run(&mut ctx, "Grow 4.5");
+        let result = ModelCommand.run(&mut ctx, "grow-4.5");
         match result {
             CommandResult::Action(Action::SwitchModel {
                 model_id: resolved_id,
@@ -500,15 +524,14 @@ mod tests {
         }
     }
 
-    /// Case-insensitive matching against the catalog: `/model grow 4.5`
-    /// resolves to the same `ModelId` as `/model Grow 4.5`.
+    /// Case-insensitive matching against catalog ids only.
     #[test]
     fn run_switch_model_resolves_case_insensitively() {
         let mut state = ModelState::default();
         let (id, info) = plain_model("grow-4.5", "Grow 4.5");
         state.available.insert(id.clone(), info);
         let mut ctx = dummy_exec_ctx(&state);
-        let result = ModelCommand.run(&mut ctx, "grow 4.5");
+        let result = ModelCommand.run(&mut ctx, "GROW-4.5");
         match result {
             CommandResult::Action(Action::SwitchModel {
                 model_id: resolved_id,

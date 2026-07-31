@@ -1674,15 +1674,19 @@
         assert!(snap.open, "arg suggestions should be open");
         assert!(snap.args_range.is_some());
 
-        // Accept arg completion → should replace "gr" with "Grow 4.5".
+        // Accept arg completion → should replace "gr" with catalog id "grow-4.5".
         pw.accept_slash_completion(&models);
         let text = pw.textarea.text().to_string();
         assert!(
-            text.contains("Grow 4.5"),
-            "arg should be replaced, got: {:?}",
+            text.contains("grow-4.5"),
+            "arg should be replaced with catalog id, got: {:?}",
             text
         );
         assert!(text.starts_with("/model "));
+        assert!(
+            !text.contains("Grow 4.5"),
+            "display name must not be inserted: {text:?}"
+        );
     }
 
     #[test]

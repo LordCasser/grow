@@ -507,7 +507,7 @@ pub(super) fn dispatch_send_prompt_inner(
                         .models
                         .available
                         .iter()
-                        .map(|(id, info)| (info.name.clone(), id.clone()))
+                        .map(|(id, _info)| (id.0.to_string(), id.clone()))
                         .collect(),
                     behavior_mode: agent.behavior_mode_pending.unwrap_or(agent.behavior_mode),
                     workflows_available: agent.prompt.slash_controller.workflows_available(),

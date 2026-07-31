@@ -1326,7 +1326,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                     .models
                     .available
                     .iter()
-                    .map(|(id, info)| (info.name.clone(), id.clone()))
+                    .map(|(id, _info)| (id.0.to_string(), id.clone()))
                     .collect(),
                 behavior_mode: pending_behavior,
                 workflows_available: false,
@@ -1510,21 +1510,14 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
 }
 
 /// Stage a model (+ optional reasoning effort) for the next agent the
-/// dashboard spawns. Resolves the human-readable display name from the
-/// app's model catalog (falling back to the raw id) so the renderer can
-/// show the indicator without a live `ModelState`. Clears the dispatch
-/// input + any error toast.
+/// dashboard spawns. Label is the catalog id (`provider/model`). Clears the
+/// dispatch input + any error toast.
 fn stage_dashboard_model(
     app: &mut AppView,
     model_id: acp::ModelId,
     effort: Option<grow_shell::sampling::types::ReasoningEffort>,
 ) {
-    let display = app
-        .models
-        .available
-        .get(&model_id)
-        .map(|info| info.name.clone())
-        .unwrap_or_else(|| model_id.0.to_string());
+    let display = model_id.0.to_string();
     if let Some(d) = app.dashboard.as_mut() {
         d.dispatch.set_text("");
         d.error_toast = None;

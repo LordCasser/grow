@@ -987,14 +987,11 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
         agent.session.model_switch_pending = false;
         let mut effects = match result {
             Ok(()) => {
+                // Session-scoped only: never write `[models].default` here.
+                // Future-session defaults are set exclusively via Settings /
+                // `Action::SetDefaultModel`.
                 agent.session.user_model_preference = Some(model_id.clone());
-                let display_name = agent
-                    .session
-                    .models
-                    .available
-                    .get(&model_id)
-                    .map(|info| info.name.clone())
-                    .unwrap_or_else(|| model_id.0.to_string());
+                let display_name = model_id.0.to_string();
                 let prev_model = agent.session.models.current.clone();
                 let prev_effort = agent.session.models.reasoning_effort;
                 agent.session.models.set_current(model_id.clone(), effort);
@@ -1009,14 +1006,7 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                     };
                     agent.scrollback.push_block(RenderBlock::system(msg));
                 }
-                if unchanged {
-                    vec![]
-                } else {
-                    vec![Effect::PersistPreferredModel {
-                        model_id: model_id.clone(),
-                        reasoning_effort: resolved_effort,
-                    }]
-                }
+                vec![]
             }
             Err(msg) => {
                 if let Some(ref prev) = prev_model_id {

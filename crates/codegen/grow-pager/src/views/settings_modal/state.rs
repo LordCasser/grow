@@ -996,8 +996,8 @@ pub(super) fn validate_string(
             if available_models.is_empty() {
                 return Some("Model catalog still loading — try again".to_string());
             }
-            let matched = available_models.iter().any(|(name, id)| {
-                name.eq_ignore_ascii_case(buffer) || id.0.as_ref().eq_ignore_ascii_case(buffer)
+            let matched = available_models.iter().any(|(label, id)| {
+                label.eq_ignore_ascii_case(buffer) || id.0.as_ref().eq_ignore_ascii_case(buffer)
             });
             if matched {
                 None

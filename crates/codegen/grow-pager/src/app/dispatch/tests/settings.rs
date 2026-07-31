@@ -251,7 +251,7 @@ fn slash_model_valid_switches_session_without_persisting_default() {
             model_id.clone(),
             acp::ModelInfo::new(model_id.clone(), "Grow 4.5".to_string()),
         );
-    let effects = dispatch(Action::SendPrompt("/model Grow 4.5".into()), &mut app);
+    let effects = dispatch(Action::SendPrompt("/model grow-4.5".into()), &mut app);
     assert_eq!(
         effects.len(),
         1,

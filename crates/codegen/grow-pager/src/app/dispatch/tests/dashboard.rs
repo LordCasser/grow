@@ -522,7 +522,7 @@ fn dashboard_confirm_worktree_applies_pending_model_and_plan() {
         d.pending_model = Some(crate::views::dashboard::PendingDispatchModel {
             id: model_id.clone(),
             effort: Some(grow_shell::sampling::types::ReasoningEffort::High),
-            display: "Grow 4.5".to_string(),
+            display: "grow-4.5".to_string(),
         });
         d.pending_behavior = grow_tools::types::SessionMode::Plan;
         d.dispatch.set_text("do the thing");
@@ -1075,7 +1075,7 @@ fn dashboard_slash_model_stages_pending_model() {
         .as_ref()
         .expect("pending_model must be set");
     assert_eq!(pending.id.0.as_ref(), "grow-4.5");
-    assert_eq!(pending.display, "Grow 4.5");
+    assert_eq!(pending.display, "grow-4.5");
     assert!(pending.effort.is_none());
     assert_eq!(
         app.dashboard
@@ -1321,7 +1321,7 @@ fn dashboard_open_reseeds_pending_dispatch_config() {
         d.pending_model = Some(crate::views::dashboard::PendingDispatchModel {
             id: acp::ModelId::new(std::sync::Arc::from("grow-4.5")),
             effort: None,
-            display: "Grow 4.5".to_string(),
+            display: "grow-4.5".to_string(),
         });
         d.pending_behavior = grow_tools::types::SessionMode::Plan;
         d.pending_permission = crate::app::actions::PermissionModeKind::AlwaysApprove;
@@ -1509,7 +1509,7 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
         d.pending_model = Some(crate::views::dashboard::PendingDispatchModel {
             id: model_id.clone(),
             effort: Some(grow_shell::sampling::types::ReasoningEffort::High),
-            display: "Grow 4.5".to_string(),
+            display: "grow-4.5".to_string(),
         });
         d.pending_behavior = grow_tools::types::SessionMode::Plan;
     }
@@ -1550,7 +1550,7 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
         d.pending_model = Some(crate::views::dashboard::PendingDispatchModel {
             id: model_id.clone(),
             effort: Some(grow_shell::sampling::types::ReasoningEffort::High),
-            display: "Grow 4.5".to_string(),
+            display: "grow-4.5".to_string(),
         });
         d.pending_behavior = grow_tools::types::SessionMode::Plan;
     }

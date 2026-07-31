@@ -442,22 +442,17 @@ mod tests {
             other => panic!("expected QueueCommand, got {other:?}"),
         }
     }
-    /// `/model` changes only the current session; defaults live in Settings.
+    /// Display names are rejected; only catalog ids switch the session.
     #[test]
-    fn model_resolves_by_display_name() {
+    fn model_rejects_display_name() {
         let models = sample_models();
         let mut ctx = make_ctx(&models);
         let cmd = model::ModelCommand;
         let result = cmd.run(&mut ctx, "Grow 4.5");
-        match result {
-            CommandResult::Action(Action::SwitchModel {
-                model_id: id,
-                effort: None,
-            }) => {
-                assert_eq!(id.0.as_ref(), "grow-4.5");
-            }
-            other => panic!("expected Action(SwitchModel), got {other:?}"),
-        }
+        assert!(
+            matches!(result, CommandResult::Error(ref msg) if msg.contains("Unknown model")),
+            "got {result:?}"
+        );
     }
     #[test]
     fn model_resolves_by_model_id() {
@@ -480,7 +475,7 @@ mod tests {
         let models = sample_models();
         let mut ctx = make_ctx(&models);
         let cmd = model::ModelCommand;
-        let result = cmd.run(&mut ctx, "grow 4.5");
+        let result = cmd.run(&mut ctx, "GROW-4.5");
         match result {
             CommandResult::Action(Action::SwitchModel {
                 model_id: id,
@@ -554,12 +549,12 @@ mod tests {
         assert!(
             items
                 .iter()
-                .any(|i| i.display.starts_with("Grow 4.5") && i.insert_text == "Grow 4.5")
+                .any(|i| i.display.starts_with("grow-4.5") && i.insert_text == "grow-4.5")
         );
         assert!(
             items
                 .iter()
-                .any(|i| i.display == "Grow 4.3" && i.insert_text == "Grow 4.3")
+                .any(|i| i.display == "grow-4.3" && i.insert_text == "grow-4.3")
         );
     }
     #[test]

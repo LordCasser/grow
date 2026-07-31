@@ -331,16 +331,16 @@ pub fn canonical_screen_mode(value: Option<&str>) -> &'static str {
 }
 
 impl PagerLocalSnapshot {
-    /// Iterate over just the display names. Convenience helper for
-    /// validator paths that don't need the ids.
+    /// Iterate over catalog id labels. Convenience helper for validator paths
+    /// that don't need the `ModelId` handles.
     pub fn available_model_names(&self) -> impl Iterator<Item = &str> {
-        self.available_models.iter().map(|(name, _)| name.as_str())
+        self.available_models.iter().map(|(label, _)| label.as_str())
     }
 
-    /// Resolve a user-supplied display name or canonical id to a `ModelId`.
+    /// Resolve a user-supplied catalog id (`provider/model`) to a `ModelId`.
     pub fn resolve_model_name_or_id(&self, query: &str) -> Option<acp::ModelId> {
-        self.available_models.iter().find_map(|(name, id)| {
-            if name.eq_ignore_ascii_case(query) || id.0.as_ref().eq_ignore_ascii_case(query) {
+        self.available_models.iter().find_map(|(label, id)| {
+            if label.eq_ignore_ascii_case(query) || id.0.as_ref().eq_ignore_ascii_case(query) {
                 Some(id.clone())
             } else {
                 None

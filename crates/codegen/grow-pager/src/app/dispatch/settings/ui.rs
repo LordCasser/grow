@@ -54,7 +54,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
         .models
         .available
         .iter()
-        .map(|(id, info)| (info.name.clone(), id.clone()))
+        .map(|(id, _info)| (id.0.to_string(), id.clone()))
         .collect();
     for agent in app.agents.values_mut() {
         // Walk both `Settings` and `ResetSettingsConfirm` — the
@@ -201,7 +201,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         .models
         .available
         .iter()
-        .map(|(id, info)| (info.name.clone(), id.clone()))
+        .map(|(id, _info)| (id.0.to_string(), id.clone()))
         .collect();
 
     let Some(agent) = app.agents.get_mut(&id) else {
@@ -718,7 +718,7 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
             .models
             .available
             .iter()
-            .map(|(id, info)| (info.name.clone(), id.clone()))
+            .map(|(id, _info)| (id.0.to_string(), id.clone()))
             .collect(),
         behavior_mode: agent_behavior_mode(app),
         workflows_available: agent_workflows_available(app),
@@ -1021,7 +1021,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 app.models.current = None;
                 app.models.reasoning_effort = None;
             } else {
-                let resolved = app.models.resolve_by_name_or_id(s);
+                let resolved = app.models.resolve_by_id(s);
                 match resolved {
                     Some(id) => {
                         let _ = set_default_model_inner(app, &id);

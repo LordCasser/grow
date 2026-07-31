@@ -280,11 +280,11 @@ impl ModelState {
             })
     }
 
-    /// Resolve a user-supplied name to a `ModelId` via case-insensitive
-    /// ASCII match against the catalog.
-    pub fn resolve_by_name_or_id(&self, query: &str) -> Option<acp::ModelId> {
-        self.available.iter().find_map(|(id, info)| {
-            if info.name.eq_ignore_ascii_case(query) || id.0.as_ref().eq_ignore_ascii_case(query) {
+    /// Resolve a user-supplied catalog id (`provider/model`) case-insensitively.
+    /// Display names are not accepted.
+    pub fn resolve_by_id(&self, query: &str) -> Option<acp::ModelId> {
+        self.available.iter().find_map(|(id, _)| {
+            if id.0.as_ref().eq_ignore_ascii_case(query) {
                 Some(id.clone())
             } else {
                 None
@@ -292,12 +292,9 @@ impl ModelState {
         })
     }
 
-    /// Look up the display name for a `ModelId` in the catalog.
+    /// Catalog id string for UI labels (`provider/model`).
     pub fn display_name_for(&self, id: &acp::ModelId) -> String {
-        self.available
-            .get(id)
-            .map(|info| info.name.clone())
-            .unwrap_or_else(|| id.0.to_string())
+        id.0.to_string()
     }
 
     /// Cycle to the next model.

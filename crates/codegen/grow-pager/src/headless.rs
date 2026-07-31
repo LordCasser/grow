@@ -722,7 +722,7 @@ async fn apply_headless_model_and_effort(
 
     let model_id = if let Some(name) = model_name {
         models
-            .resolve_by_name_or_id(name)
+            .resolve_by_id(name)
             .unwrap_or_else(|| acp::ModelId::new(name))
     } else {
         models.current.clone().ok_or_else(|| {
