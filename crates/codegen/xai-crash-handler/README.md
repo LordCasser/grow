@@ -8,7 +8,8 @@ Crash handler for SIGBUS/SIGSEGV with best-effort backtrace capture.
 
 On next launch, `check_previous_crash()` reads the blob, resolves IPs to symbols via `backtrace`, writes `last-crash-report.txt`, and archives it (keeping the last 5 reports).
 
-No-ops on non-unix platforms. On musl-based Linux (release builds), the handler still records signal/address/version but skips frame capture since musl does not provide `backtrace()`.
+No-ops on non-unix platforms. Frame-pointer capture is fully supported on
+Linux release builds (the release pipeline builds glibc-based binaries).
 
 ## Limitations
 

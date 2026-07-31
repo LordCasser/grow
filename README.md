@@ -485,8 +485,10 @@ env GROW_TOOLS_BUNDLE_RG_PATH=/absolute/path/to/rg \
 
 当前官方 release 只构建三个目标：macOS arm64、Linux arm64、Linux amd64（无 Windows / x86_64
 macOS / 其他架构）。创建并发布 `v<crate-version>` GitHub Release 后，
-[release workflow](.github/workflows/release.yml) 会构建这些目标。Linux 产物使用
-`*-unknown-linux-musl` 静态链接，并在 CI 校验无动态库依赖，避免绑定 runner 的 glibc 版本。
+[release workflow](.github/workflows/release.yml) 会构建这些目标。Linux 产物在
+AlmaLinux 8 容器内以 `*-unknown-linux-gnu` 构建，glibc 基线 2.28（覆盖 RHEL 8 / Ubuntu
+20.04+ / Debian 10+ 等），CI 校验动态依赖仅限标准 glibc 库（NEEDED 白名单）且最大
+`GLIBC_` 符号版本 ≤ 2.28；protoc 与 ripgrep sidecar 在构建前 staging 到工作区供容器使用。
 
 GitHub Release 页面**只挂最终 `grow` 二进制**（`grow-{version}-linux-x86_64` /
 `grow-{version}-linux-aarch64` / `grow-{version}-macos-aarch64`），与 auto-update 契约一致；

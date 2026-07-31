@@ -3,6 +3,10 @@
 **/*.rs.bk
 .DS_Store
 
+# CI staging dir for build tools (protoc / ripgrep) consumed by the
+# AlmaLinux 8 release build container.
+.build-tools/
+
 # Local IDE / act machine config (not shared)
 .idea/
 .actrc

@@ -1,6 +1,11 @@
 # Official Grow release assets for the three supported platforms:
 #   macos-aarch64, linux-x86_64, linux-aarch64
 # Asset names must stay grow-{version}-{asset_platform} for grow-update.
+#
+# Linux builds run inside an AlmaLinux 8 container (glibc 2.28 baseline) so the
+# shipped binaries work on older distros than the ubuntu-24.04 runner provides.
+# The container only links: the toolchain (rustc) comes from the host rustup
+# install, mounted into the container (official rustc builds run on glibc >= 2.17).
 name: Build release assets
 
 on:
@@ -89,28 +94,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux amd64: static musl binary (portable across glibc distros).
+          # Linux amd64: glibc 2.28 baseline via the AlmaLinux 8 build container.
           - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
             asset_platform: linux-x86_64
             binary: grow
-            musl: true
+            linux: true
             rg_target: x86_64-unknown-linux-musl
             rg_sha256: 253ad0fd5fef0d64cba56c70dccdacc1916d4ed70ad057cc525fcdb0c3bbd2a7
-          # Linux arm64: static musl binary. Official ripgrep has no aarch64-musl
-          # asset for 15.0.0, so embed the gnu build (extracted sidecar).
+          # Linux arm64: same glibc 2.28 container. Official ripgrep has no
+          # aarch64-musl asset for 15.0.0, so embed the gnu build (extracted
+          # sidecar; runnable on any distro with glibc >= the rg build baseline).
           - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
+            target: aarch64-unknown-linux-gnu
             asset_platform: linux-aarch64
             binary: grow
-            musl: true
+            linux: true
             rg_target: aarch64-unknown-linux-gnu
             rg_sha256: 15f8cc2fab12d88491c54d49f38589922a9d6a7353c29b0a0856727bcdf80754
           - runner: macos-15
             target: aarch64-apple-darwin
             asset_platform: macos-aarch64
             binary: grow
-            musl: false
+            linux: false
             rg_target: aarch64-apple-darwin
             rg_sha256: 98bb2e61e7277ba0ea72d2ae2592497fd8d2940934a16b122448d302a6637e3b
     runs-on: ${{ matrix.runner }}
@@ -140,23 +146,48 @@ jobs:
           git checkout --detach "${RELEASE_TAG}"
           echo "ACT build tree=$(git rev-parse --short HEAD) (${RELEASE_TAG})"
 
+      # Toolchain on the host: rustc/rustup (official builds, glibc >= 2.17) run
+      # fine inside the AlmaLinux 8 container; the container provides the linker
+      # (gcc 8.5) so the binary's glibc baseline is the container's 2.28.
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.92.0"
           targets: ${{ matrix.target }}
 
+      # macOS builds compile directly on the runner and use this PATH protoc.
       - uses: arduino/setup-protoc@v3
+        if: ${{ !matrix.linux }}
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install musl tools
-        if: matrix.musl
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
           shared-key: release-dist
+
+      # The Linux build runs inside a container: only the workspace (and the
+      # host CARGO_HOME/RUSTUP_HOME mounts in the Build step) is visible, so
+      # protoc and the ripgrep sidecar must live under $GITHUB_WORKSPACE.
+      - name: Prepare protoc (Linux container build)
+        if: matrix.linux
+        shell: bash
+        env:
+          PROTOC_VERSION: "30.1"
+          PROTOC_ARCH: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'x86_64' || 'aarch_64' }}
+          PROTOC_SHA256: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && '5537e15ab0c0e610f809573948d3ec7d6ef387a07991e1c361a2a0e8cad983e5' || 'e866d3dc4775e8032721915e83e3fb6e1ab4def7199a49b4f95c4d1f6cf4c03a' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/.build-tools/protoc"
+          archive="${RUNNER_TEMP}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
+          url="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --connect-timeout 30 --max-time 300 \
+            --output "$archive" "$url"
+          echo "${PROTOC_SHA256}  $archive" | sha256sum -c -
+          unzip -q -o "$archive" -d "${GITHUB_WORKSPACE}/.build-tools/protoc"
+          test -x "${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc"
+          "${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" --version
+          echo "PROTOC=${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" >> "$GITHUB_ENV"
 
       - name: Prepare bundled ripgrep
         shell: bash
@@ -167,7 +198,8 @@ jobs:
         run: |
           set -euo pipefail
           archive="${RUNNER_TEMP}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
-          bundle_dir="${RUNNER_TEMP}/ripgrep-${RG_VERSION}-${RG_TARGET}"
+          # Under $GITHUB_WORKSPACE so the Linux build container sees it.
+          bundle_dir="${GITHUB_WORKSPACE}/.build-tools/rg/ripgrep-${RG_VERSION}-${RG_TARGET}"
           url="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
 
           curl --fail --location --retry 5 --retry-all-errors \
@@ -179,28 +211,76 @@ jobs:
           mkdir -p "$bundle_dir"
           tar -xzf "$archive" --strip-components=1 -C "$bundle_dir"
           test -x "$bundle_dir/rg"
+          # Validate runnability on the native runner (the gnu rg sidecar needs
+          # newer glibc than the AlmaLinux 8 build container provides; that is
+          # fine for real deployment targets, see grow-tools build.rs).
+          "$bundle_dir/rg" --version >/dev/null
           echo "GROW_TOOLS_BUNDLE_RG_PATH=$bundle_dir/rg" >> "$GITHUB_ENV"
 
-      - name: Build Grow
+      - name: Build Grow (AlmaLinux 8 container, glibc 2.28 baseline)
+        if: matrix.linux
+        shell: bash
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+          GROW_VERSION: ${{ needs.validate.outputs.version }}
+          GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK: "1"
+        run: |
+          set -euo pipefail
+          # rustup/cargo default to $HOME/.cargo and $HOME/.rustup when the
+          # env vars are unset (dtolnay/rust-toolchain does not export them).
+          CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
+          RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
+            -v "${CARGO_HOME}:${CARGO_HOME}" -v "${RUSTUP_HOME}:${RUSTUP_HOME}" \
+            -e "PATH=${CARGO_HOME}/bin:${PATH}" \
+            -e "CARGO_HOME=${CARGO_HOME}" -e "RUSTUP_HOME=${RUSTUP_HOME}" \
+            -e "GROW_VERSION=${GROW_VERSION}" \
+            -e "PROTOC=${PROTOC}" \
+            -e "GROW_TOOLS_BUNDLE_RG_PATH=${GROW_TOOLS_BUNDLE_RG_PATH}" \
+            -e "GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1" \
+            -e "TARGET_TRIPLE=${TARGET_TRIPLE}" \
+            -e "CARGO_INCREMENTAL=0" \
+            almalinux:8 bash -euo pipefail -c '
+              dnf install -y gcc gcc-c++ make cmake git perl pkgconf >/dev/null
+              cargo build --locked --profile release-dist \
+                -p grow-pager-bin --bin grow --target "${TARGET_TRIPLE}"
+            '
+
+      - name: Build Grow (macOS)
+        if: ${{ !matrix.linux }}
         shell: bash
         env:
           GROW_VERSION: ${{ needs.validate.outputs.version }}
-          CC_x86_64_unknown_linux_musl: musl-gcc
-          CC_aarch64_unknown_linux_musl: musl-gcc
         run: |
           cargo build --locked --profile release-dist \
             -p grow-pager-bin --bin grow --target "${{ matrix.target }}"
 
-      - name: Verify Linux binary is static
-        if: matrix.musl
+      - name: Verify Linux binary (glibc baseline <= 2.28)
+        if: matrix.linux
         shell: bash
         run: |
           set -euo pipefail
           BIN="target/${{ matrix.target }}/release-dist/${{ matrix.binary }}"
           file "$BIN"
-          if readelf -d "$BIN" 2>/dev/null | grep -q 'NEEDED'; then
-            echo "Linux release binary has dynamic dependencies:" >&2
-            readelf -d "$BIN" >&2
+          echo "NEEDED libraries:"
+          readelf -d "$BIN" | grep NEEDED || true
+          # Only standard glibc runtime libraries may be dynamically linked.
+          bad="$(readelf -d "$BIN" | awk '/\(NEEDED\)/{print $5}' \
+            | grep -Ev '^(ld-linux-(x86-64|aarch64)\.so\.[0-9]+|lib(c|m|gcc_s|pthread|dl|rt|util|resolv)\.so\.[0-9]+)$' || true)"
+          if [[ -n "$bad" ]]; then
+            echo "Unexpected dynamic dependencies:" >&2
+            echo "$bad" >&2
+            exit 1
+          fi
+          # glibc baseline guard: the AlmaLinux 8 container links glibc 2.28.
+          # If a dependency ever needs a newer symbol, raise this threshold
+          # consciously and update the README compatibility note.
+          max_glibc="$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)"
+          echo "max GLIBC_ symbol version: $max_glibc"
+          newest="$(printf '%s\n' "$max_glibc" 'GLIBC_2.28' | sort -V | tail -1)"
+          if [[ "$newest" != "GLIBC_2.28" ]]; then
+            echo "Binary requires newer glibc than the 2.28 baseline ($max_glibc)" >&2
             exit 1
           fi
 
@@ -211,7 +291,7 @@ jobs:
           BIN="target/${{ matrix.target }}/release-dist/${{ matrix.binary }}"
           test -x "$BIN"
           test -s "$BIN"
-          # Native same-arch runners: musl/gnu host can both exec the musl binary.
+          # Native same-arch runners: the glibc binary runs on the ubuntu/macos host.
           version_out="$("$BIN" --version)"
           echo "$version_out"
           echo "$version_out" | grep -F "${{ needs.validate.outputs.version }}"
