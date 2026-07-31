@@ -22,7 +22,7 @@ pub(super) fn session_mode_from_prompt_mode(mode: PromptMode) -> grow_tools::typ
         PromptMode::Goal => grow_tools::types::SessionMode::Goal,
     }
 }
-/// Plan is a frozen, human-approved execution protocol. The dynamic Workflow
+/// Plan is a frozen, human-approved execution protocol. The Static Workflow
 /// launcher is therefore not advertised in any Plan phase; the runtime gate
 /// remains as defense in depth for stale or forged calls.
 pub(super) fn filter_cursor_tools_by_plan_mode(
@@ -45,13 +45,13 @@ impl SessionActor {
     pub(super) async fn sync_active_behavior_prompt(&self) {
         use crate::session::behavior::{
             BehaviorState, clarify_reminder_template, deep_research_reminder_template,
-            goal_reminder_template, plan_behavior_template, workflow_reminder_template,
+            goal_reminder_template, plan_behavior_template, static_workflow_reminder_template,
         };
         let instructions = match self.behavior.lock().state() {
             BehaviorState::Normal => None,
             BehaviorState::Clarify => Some(clarify_reminder_template()),
             BehaviorState::Plan(_) => Some(plan_behavior_template()),
-            BehaviorState::Workflow => Some(workflow_reminder_template()),
+            BehaviorState::Workflow => Some(static_workflow_reminder_template()),
             BehaviorState::DeepResearch { .. } => Some(deep_research_reminder_template()),
             BehaviorState::Goal => Some(goal_reminder_template()),
         }
@@ -168,7 +168,7 @@ impl SessionActor {
                 .await
                 .is_none()
         {
-            let message = "Dynamic Workflow behavior is unavailable in this session.".to_string();
+            let message = "Static Workflow behavior is unavailable in this session.".to_string();
             self.enqueue_current_mode_update_with_behavior_change(
                 acp::SessionModeId::new(
                     session_mode_from_prompt_mode(previous_prompt_mode).as_id(),

@@ -970,10 +970,10 @@ mod grow_event_id_stamping_tests {
                     )
                     .await;
                 actor
-                    .request_behavior_change(acp::SessionModeId::new("default"))
+                    .request_behavior_change(acp::SessionModeId::new("normal"))
                     .await;
                 actor
-                    .request_behavior_change(acp::SessionModeId::new("default"))
+                    .request_behavior_change(acp::SessionModeId::new("normal"))
                     .await;
                 while let Ok(msg) = prx.try_recv() {
                     assert!(
@@ -1000,7 +1000,7 @@ mod grow_event_id_stamping_tests {
                         acp::SessionUpdate::CurrentModeUpdate(cmu) => {
                             assert_eq!(
                                 cmu.current_mode_id.0.as_ref(),
-                                "default",
+                                "normal",
                                 "the exit emission must carry the new mode id"
                             );
                             assert!(
@@ -1073,7 +1073,7 @@ mod grow_event_id_stamping_tests {
                 // Leaving an active Plan interrupts work: the first request parks
                 // the switch and asks for explicit confirmation.
                 let first = actor
-                    .request_behavior_change(acp::SessionModeId::new("default"))
+                    .request_behavior_change(acp::SessionModeId::new("normal"))
                     .await;
                 let crate::session::behavior::BehaviorChangeOutcome::ConfirmationRequired {
                     message,
@@ -1092,7 +1092,7 @@ mod grow_event_id_stamping_tests {
                 );
                 // The second same-target request within the window confirms.
                 let second = actor
-                    .request_behavior_change(acp::SessionModeId::new("default"))
+                    .request_behavior_change(acp::SessionModeId::new("normal"))
                     .await;
                 assert!(
                     matches!(second, crate::session::behavior::BehaviorChangeOutcome::Applied),
@@ -1229,7 +1229,7 @@ mod synthetic_prompt_behavior_tests {
                 ));
                 assert!(matches!(
                     actor
-                        .request_behavior_change(acp::SessionModeId::new("default"))
+                        .request_behavior_change(acp::SessionModeId::new("normal"))
                         .await,
                     crate::session::behavior::BehaviorChangeOutcome::ConfirmationRequired { .. }
                 ));

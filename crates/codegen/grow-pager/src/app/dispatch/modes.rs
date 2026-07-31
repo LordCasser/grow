@@ -168,14 +168,7 @@ pub(super) fn dispatch_set_behavior_mode(
     }
     agent.behavior_mode_pending = Some(mode);
     agent.plan_mode_pending = Some(mode.is_plan());
-    agent.show_mode_switch_banner(match mode {
-        grow_tools::types::SessionMode::Default => "Default",
-        grow_tools::types::SessionMode::Ask => "Clarify",
-        grow_tools::types::SessionMode::Plan => "Plan",
-        grow_tools::types::SessionMode::Workflow => "Dynamic Workflow",
-        grow_tools::types::SessionMode::DeepResearch => "Deep Research",
-        grow_tools::types::SessionMode::Goal => "Goal",
-    });
+    agent.show_mode_switch_banner(mode.display_label());
 
     let session_id = agent.session.session_id.clone();
     if session_id.is_none() {

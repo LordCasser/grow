@@ -16,7 +16,7 @@ fn prompt_mode_from_session_mode_id_uses_acp_session_mode() {
     );
     assert_eq!(
         PromptMode::Agent,
-        prompt_mode_from_session_mode_id(&acp::SessionModeId::new("default"))
+        prompt_mode_from_session_mode_id(&acp::SessionModeId::new("normal"))
     );
     assert_eq!(
         PromptMode::Agent,

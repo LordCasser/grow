@@ -922,7 +922,7 @@ impl SessionActor {
                 *self.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
                 self.persist_behavior_state();
                 self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
-                    "default",
+                    grow_tools::types::SessionMode::Default.as_id(),
                 ));
                 self.send_grow_notification(crate::session::goal_orchestrator::build_goal_cleared())
                     .await;

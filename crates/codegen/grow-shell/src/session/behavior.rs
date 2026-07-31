@@ -336,8 +336,8 @@ pub fn clarify_reminder_template() -> &'static str {
     include_str!("../../prompts/behaviors/clarify.md")
 }
 
-pub fn workflow_reminder_template() -> &'static str {
-    include_str!("../../prompts/behaviors/dynamic-workflow.md")
+pub fn static_workflow_reminder_template() -> &'static str {
+    include_str!("../../prompts/behaviors/static-workflow.md")
 }
 
 pub fn deep_research_reminder_template() -> &'static str {

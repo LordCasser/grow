@@ -25,8 +25,8 @@ pub(crate) fn available_modes(ctx: &AppCtx<'_>) -> Vec<(SessionMode, &'static st
     if ctx.workflows_available {
         modes.push((
             SessionMode::Workflow,
-            "Dynamic Workflow",
-            "Dynamically create and run bounded sub-plans without approval",
+            "Static Workflow",
+            "Author and run one deterministic scripted workflow per phase, without approval",
         ));
     }
     if ctx.deep_research_available {
@@ -120,15 +120,24 @@ impl SlashCommand for BehaviorCommand {
                 args_query: String::new(),
             });
         }
-        let mode = match id.to_ascii_lowercase().as_str() {
-            "normal" => SessionMode::Default,
-            "clarify" => SessionMode::Ask,
-            "plan" => SessionMode::Plan,
-            "workflow" if ctx.pager_state.workflows_available => SessionMode::Workflow,
-            "deep-research" if ctx.pager_state.deep_research_available => SessionMode::DeepResearch,
-            "goal" if ctx.pager_state.goal_available => SessionMode::Goal,
-            _ => return CommandResult::Error(format!("Unknown or unavailable Behavior: {id}")),
+        // Hyphen→underscore normalization lets both the documented
+        // "deep-research" spelling and the canonical wire id
+        // "deep_research" resolve to the same mode; parsing goes through
+        // `SessionMode::try_from_id` so unknown ids (including the legacy
+        // "default") are strictly rejected instead of silently switching.
+        let normalized = id.to_ascii_lowercase().replace('-', "_");
+        let Some(mode) = SessionMode::try_from_id(&normalized) else {
+            return CommandResult::Error(format!("Unknown or unavailable Behavior: {id}"));
         };
+        let unavailable = match mode {
+            SessionMode::Workflow => !ctx.pager_state.workflows_available,
+            SessionMode::DeepResearch => !ctx.pager_state.deep_research_available,
+            SessionMode::Goal => !ctx.pager_state.goal_available,
+            _ => false,
+        };
+        if unavailable {
+            return CommandResult::Error(format!("Unknown or unavailable Behavior: {id}"));
+        }
         CommandResult::Action(Action::SetBehaviorMode(mode))
     }
 }
@@ -200,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn behavior_items_labels_workflow_as_dynamic_workflow() {
+    fn behavior_items_labels_workflow_as_static_workflow() {
         let state = ModelState::default();
         let ctx = ctx_with_all_behaviors(&state);
         let items = behavior_items(&ctx, None, false);
@@ -212,13 +221,13 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing behavior item with wire id {id}"))
         };
 
-        // Dynamic Workflow: new display label, unchanged wire id in insert_text.
+        // Static Workflow: display label changed, wire id unchanged in insert_text.
         let workflow = by_wire_id("workflow");
-        assert_eq!(workflow.display, "Dynamic Workflow");
+        assert_eq!(workflow.display, "Static Workflow");
         assert!(workflow.insert_text.ends_with("workflow"));
 
         // Other behavior labels are untouched.
-        assert_eq!(by_wire_id("default").display, "Normal (current)");
+        assert_eq!(by_wire_id("normal").display, "Normal (current)");
         assert_eq!(by_wire_id("ask").display, "Clarify");
         assert_eq!(by_wire_id("plan").display, "Plan");
         assert_eq!(by_wire_id("deep_research").display, "Deep Research");
@@ -236,5 +245,103 @@ mod tests {
             !items.iter().any(|i| i.insert_text == "workflow"),
             "workflow item must be hidden when workflows_available is false"
         );
+    }
+
+    fn exec_ctx<'a>(
+        models: &'a ModelState,
+        bundle: &'a crate::app::bundle::BundleState,
+        workflows_available: bool,
+        deep_research_available: bool,
+        goal_available: bool,
+    ) -> CommandExecCtx<'a> {
+        CommandExecCtx {
+            models,
+            session_id: None,
+            bundle_state: bundle,
+            screen_mode: crate::app::ScreenMode::Inline,
+            pager_state: crate::settings::PagerLocalSnapshot {
+                workflows_available,
+                deep_research_available,
+                goal_available,
+                ..crate::settings::PagerLocalSnapshot::default()
+            },
+        }
+    }
+
+    fn run_in_ctx(
+        models: &ModelState,
+        bundle: &crate::app::bundle::BundleState,
+        args: &str,
+    ) -> CommandResult {
+        let mut ctx = exec_ctx(models, bundle, true, true, true);
+        BehaviorCommand.run(&mut ctx, args)
+    }
+
+    #[test]
+    fn behavior_run_parses_canonical_wire_ids() {
+        let state = ModelState::default();
+        let bundle = crate::app::bundle::BundleState::default();
+        assert!(matches!(
+            run_in_ctx(&state, &bundle, "normal"),
+            CommandResult::Action(Action::SetBehaviorMode(SessionMode::Default))
+        ));
+        assert!(matches!(
+            run_in_ctx(&state, &bundle, "PLAN"), // case-insensitive, as before
+            CommandResult::Action(Action::SetBehaviorMode(SessionMode::Plan))
+        ));
+        assert!(matches!(
+            run_in_ctx(&state, &bundle, "workflow"),
+            CommandResult::Action(Action::SetBehaviorMode(SessionMode::Workflow))
+        ));
+        assert!(matches!(
+            run_in_ctx(&state, &bundle, "goal"),
+            CommandResult::Action(Action::SetBehaviorMode(SessionMode::Goal))
+        ));
+    }
+
+    #[test]
+    fn behavior_run_accepts_hyphen_and_underscore_deep_research() {
+        let state = ModelState::default();
+        let bundle = crate::app::bundle::BundleState::default();
+        assert!(matches!(
+            run_in_ctx(&state, &bundle, "deep-research"),
+            CommandResult::Action(Action::SetBehaviorMode(SessionMode::DeepResearch))
+        ));
+        assert!(matches!(
+            run_in_ctx(&state, &bundle, "deep_research"),
+            CommandResult::Action(Action::SetBehaviorMode(SessionMode::DeepResearch))
+        ));
+    }
+
+    #[test]
+    fn behavior_run_rejects_legacy_default_id() {
+        let state = ModelState::default();
+        let bundle = crate::app::bundle::BundleState::default();
+        assert!(matches!(
+            run_in_ctx(&state, &bundle, "default"),
+            CommandResult::Error(msg) if msg.contains("Unknown or unavailable Behavior: default")
+        ));
+    }
+
+    #[test]
+    fn behavior_run_rejects_unavailable_modes() {
+        let state = ModelState::default();
+        let bundle = crate::app::bundle::BundleState::default();
+        let mut ctx = exec_ctx(&state, &bundle, false, false, false);
+        for arg in ["workflow", "deep-research", "goal"] {
+            assert!(
+                matches!(
+                    BehaviorCommand.run(&mut ctx, arg),
+                    CommandResult::Error(msg) if msg.contains("Unknown or unavailable Behavior")
+                ),
+                "unavailable mode {arg} must be rejected"
+            );
+        }
+        // Available-modes still resolve when other modes are gated off.
+        let mut ctx = exec_ctx(&state, &bundle, false, true, false);
+        assert!(matches!(
+            BehaviorCommand.run(&mut ctx, "deep_research"),
+            CommandResult::Action(Action::SetBehaviorMode(SessionMode::DeepResearch))
+        ));
     }
 }
