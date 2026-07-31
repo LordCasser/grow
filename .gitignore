@@ -2,3 +2,7 @@
 .atlas/
 **/*.rs.bk
 .DS_Store
+
+# Local IDE / act machine config (not shared)
+.idea/
+.actrc
