@@ -122,7 +122,7 @@ Choose the current session's Permission policy. `/ask`, `/auto`, and `/always-ap
 
 ### `/behavior [normal|clarify|plan|workflow|deep-research|goal]`
 
-Choose the primary Agent's collaboration protocol. `/normal`, `/clarify`, `/plan`, `/workflow`, `/deep-research`, and `/goal` are idempotent one-step selections with a `[behavior]` prefix. Runtime-dependent Behaviors are omitted when unavailable. Plan, active Goal, and running/paused Deep Research may require the documented second selection before interruption.
+Choose the primary Agent's collaboration protocol. `/normal`, `/clarify`, `/plan`, `/workflow`, `/deep-research`, and `/goal` are idempotent one-step selections with a `[behavior]` prefix. Runtime-dependent Behaviors are omitted when unavailable. Plan, active Goal, and running/paused Deep Research show a confirmation warning before interruption: press `Enter` to confirm the switch, or `Esc` to cancel.
 
 These commands modify only the current session. Persistent defaults remain in Settings and affect future sessions only.
 

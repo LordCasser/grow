@@ -289,6 +289,104 @@ fn slash_plan_with_args_already_in_plan_sends_prompt_after_idempotent_transition
     ));
 }
 
+// ── interrupting Behavior switch confirm (Enter) / dismiss (Esc) ──
+
+/// Enter without a stashed prompt re-issues the parked `SetSessionMode`
+/// (the shell's second same-target request within the window applies the
+/// switch) and clears the warning state.
+#[test]
+fn confirm_behavior_switch_warning_without_prompt_issues_set_session_mode() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.behavior_switch_confirm = Some(crate::app::agent_view::BehaviorSwitchConfirm {
+            target: grow_tools::types::SessionMode::Default,
+            prompt: None,
+        });
+        agent.behavior_switch_warning_pending = true;
+        agent.mode_switch_banner = Some(("banner".into(), 69));
+    }
+
+    let effects = dispatch(Action::ConfirmBehaviorSwitchWarning, &mut app);
+
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::SetSessionMode { mode_id, .. }] if mode_id.0.as_ref() == "default"
+        ),
+        "confirm must re-issue the parked SetSessionMode, got: {effects:?}"
+    );
+    let agent = app.agents.get(&id).unwrap();
+    assert!(agent.behavior_switch_confirm.is_none());
+    assert!(!agent.behavior_switch_warning_pending);
+    assert!(agent.mode_switch_banner.is_none());
+    assert_eq!(
+        agent.behavior_mode_pending,
+        Some(grow_tools::types::SessionMode::Default)
+    );
+}
+
+/// Enter with a stashed prompt replays it through the mode+prompt path —
+/// the prompt text must NOT be lost across the confirmation round-trip.
+#[test]
+fn confirm_behavior_switch_warning_with_prompt_replays_set_mode_then_prompt() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.behavior_switch_confirm = Some(crate::app::agent_view::BehaviorSwitchConfirm {
+            target: grow_tools::types::SessionMode::Plan,
+            prompt: Some(crate::app::agent_view::BehaviorSwitchStashedPrompt {
+                text: "add auth to the app".into(),
+            }),
+        });
+    }
+
+    let effects = dispatch(Action::ConfirmBehaviorSwitchWarning, &mut app);
+
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::SetModeThenPrompt { mode_id, text, .. }]
+                if mode_id.0.as_ref() == "plan" && text == "add auth to the app"
+        ),
+        "confirm with a stashed prompt must replay SetModeThenPrompt, got: {effects:?}"
+    );
+    assert!(
+        app.agents[&id].behavior_switch_confirm.is_none(),
+        "the parked confirm must be consumed"
+    );
+}
+
+/// Esc drops the parked switch AND the stashed prompt, then returns the
+/// session to the confirmed behavior.
+#[test]
+fn dismiss_behavior_switch_warning_clears_parked_switch_and_prompt() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.behavior_switch_confirm = Some(crate::app::agent_view::BehaviorSwitchConfirm {
+            target: grow_tools::types::SessionMode::Plan,
+            prompt: Some(crate::app::agent_view::BehaviorSwitchStashedPrompt {
+                text: "dropped on cancel".into(),
+            }),
+        });
+        agent.behavior_switch_warning_pending = true;
+    }
+
+    let effects = dispatch(Action::DismissBehaviorSwitchWarning, &mut app);
+
+    let agent = app.agents.get(&id).unwrap();
+    assert!(agent.behavior_switch_confirm.is_none());
+    assert!(!agent.behavior_switch_warning_pending);
+    assert!(
+        matches!(effects.as_slice(), [Effect::SetSessionMode { mode_id: _, .. }]),
+        "dismiss must re-sync the confirmed behavior, got: {effects:?}"
+    );
+}
+
 /// Multi-agent fan-out (sibling for `plan_mode`).
 /// `Action::SetBehaviorMode(Plan)` populates the active agent's
 /// `plan_mode_pending` and never touches other agents in the

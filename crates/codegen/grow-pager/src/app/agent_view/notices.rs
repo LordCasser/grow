@@ -252,6 +252,12 @@ impl AgentView {
     /// Tick the mode-switch banner timer. Returns true if redraw needed
     /// (active or just expired).
     pub fn tick_mode_banner(&mut self) -> bool {
+        if self.behavior_switch_warning_pending {
+            // An interrupting-switch warning is pinned: it must NOT expire
+            // while awaiting Enter (confirm) / Esc (cancel). Keep the banner
+            // frozen and keep requesting redraws.
+            return self.mode_switch_banner.is_some();
+        }
         if let Some((_, ref mut remaining)) = self.mode_switch_banner {
             if *remaining == 0 {
                 self.mode_switch_banner = None;

@@ -640,6 +640,10 @@ pub enum Action {
     SetBehaviorMode(grow_tools::types::SessionMode),
     /// Dismiss an interrupt warning and clear the shell's ephemeral guard.
     DismissBehaviorSwitchWarning,
+    /// Confirm an interrupting Behavior switch (Enter) after the warning
+    /// banner appeared. With a stashed prompt, replays it after the switch;
+    /// without one, re-issues the `SetSessionMode` for the parked target.
+    ConfirmBehaviorSwitchWarning,
     /// Enter remember mode (visual prompt change, not a send).
     EnterRememberMode,
     /// Send a remember note from # mode. Routes through LLM rewrite when a
@@ -2151,6 +2155,19 @@ pub enum TaskResult {
         /// painting them onto the running turn. `None` for synthetic/test
         /// constructions that don't need gating.
         prompt_id: Option<String>,
+    },
+    /// The `SetModeThenPrompt` RPC answered `confirmation_required`: the
+    /// target Behavior is parked on the shell, but the mode+prompt path must
+    /// NOT drop the prompt. The text is stashed on the agent until the user
+    /// confirms (Enter) or cancels (Esc); `prompt_id` retires the optimistic
+    /// echo of the never-run prompt, and token ranges are re-derived on replay.
+    PromptRequiresBehaviorConfirmation {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        mode_id: acp::SessionModeId,
+        text: String,
+        prompt_id: String,
+        message: String,
     },
     /// A send-now `session/prompt` RPC failed at the transport/RPC layer —
     /// the prompt never reached the shell's queue. Carries the payload so

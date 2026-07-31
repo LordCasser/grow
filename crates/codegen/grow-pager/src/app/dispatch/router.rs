@@ -942,6 +942,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::DismissBehaviorSwitchWarning => {
             super::modes::dispatch_dismiss_behavior_switch_warning(app)
         }
+        Action::ConfirmBehaviorSwitchWarning => {
+            super::modes::dispatch_confirm_behavior_switch_warning(app)
+        }
         Action::EnterRememberMode => dispatch_enter_remember_mode(app),
         Action::SendRememberNote(text) => dispatch_send_remember_note(app, text),
         Action::SaveRememberNoteFromModal => dispatch_save_remember_note_from_modal(app),

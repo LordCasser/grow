@@ -1047,4 +1047,58 @@ mod grow_event_id_stamping_tests {
             })
             .await;
     }
+    /// An interrupting Behavior switch parks on the first request and applies
+    /// on the immediately-following same-target request (the pager's Enter).
+    /// Pins the 8-second confirmation window constant AND the Enter/Esc hint
+    /// the pager relies on to render the confirm/cancel affordance.
+    #[tokio::test]
+    async fn interrupting_behavior_switch_parks_then_confirms_on_second_request() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+                let (persistence_tx, _prx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                *actor.agent.borrow_mut() = super::support::test_agent_with_plan_tools().await;
+                // Enter Plan first (Normal → Plan is not an interrupting switch).
+                let entered = actor
+                    .request_behavior_change(acp::SessionModeId::new("plan"))
+                    .await;
+                assert!(matches!(
+                    entered,
+                    crate::session::behavior::BehaviorChangeOutcome::Applied
+                ));
+                // Leaving an active Plan interrupts work: the first request parks
+                // the switch and asks for explicit confirmation.
+                let first = actor
+                    .request_behavior_change(acp::SessionModeId::new("default"))
+                    .await;
+                let crate::session::behavior::BehaviorChangeOutcome::ConfirmationRequired {
+                    message,
+                    remaining_ms,
+                } = &first
+                else {
+                    panic!("expected ConfirmationRequired, got {first:?}");
+                };
+                assert!(
+                    message.contains("Press Enter to confirm the switch"),
+                    "the confirmation message must carry the Enter/Esc hint: {message}"
+                );
+                assert!(
+                    (7_500..=8_000).contains(remaining_ms),
+                    "the confirmation window must be 8 seconds, got {remaining_ms}ms"
+                );
+                // The second same-target request within the window confirms.
+                let second = actor
+                    .request_behavior_change(acp::SessionModeId::new("default"))
+                    .await;
+                assert!(
+                    matches!(second, crate::session::behavior::BehaviorChangeOutcome::Applied),
+                    "the same-target re-request must apply the switch, got {second:?}"
+                );
+            })
+            .await;
+    }
 }

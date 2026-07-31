@@ -444,7 +444,14 @@ impl AgentView {
         {
             self.behavior_switch_warning_pending = false;
             self.mode_switch_banner = None;
-            return InputOutcome::Action(Action::DismissBehaviorSwitchWarning);
+            // Enter confirms the parked switch (re-issues the mode request);
+            // Esc cancels it. The stashed confirm state is consumed by the
+            // dispatcher, not here.
+            return InputOutcome::Action(match key.code {
+                KeyCode::Enter => Action::ConfirmBehaviorSwitchWarning,
+                KeyCode::Esc => Action::DismissBehaviorSwitchWarning,
+                _ => unreachable!("the guard above admits only Enter and Esc"),
+            });
         }
         if self.scrollback_drag_latched() {
             let live_drag_event = matches!(
@@ -1851,7 +1858,7 @@ mod leader_key_tests {
     }
 
     #[test]
-    fn behavior_switch_warning_enter_dismisses_without_sending_input() {
+    fn behavior_switch_warning_enter_confirms_without_sending_input() {
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.behavior_switch_warning_pending = true;
@@ -1859,6 +1866,25 @@ mod leader_key_tests {
 
         let outcome = agent.handle_input(
             &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &registry,
+        );
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::ConfirmBehaviorSwitchWarning)
+        ));
+        assert_eq!(agent.prompt.text(), "preserve this draft");
+        assert!(!agent.behavior_switch_warning_pending);
+    }
+
+    #[test]
+    fn behavior_switch_warning_esc_dismisses_without_sending_input() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.behavior_switch_warning_pending = true;
+        agent.prompt.set_text("preserve this draft");
+
+        let outcome = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             &registry,
         );
         assert!(matches!(

@@ -1606,3 +1606,70 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     assert_eq!(roster.origin.kind, "local");
     assert_eq!(roster.origin.host.as_deref(), Some("box"));
 }
+/// A `confirmation_required` answer to the mode half of `SetModeThenPrompt`
+/// must return the prompt text to the dispatcher instead of failing and
+/// dropping it. The fake agent answers the `SetSessionMode` RPC with the
+/// shell's `BehaviorChangeOutcome::ConfirmationRequired` response meta.
+#[tokio::test]
+async fn set_mode_then_prompt_confirmation_required_parks_prompt_in_task_result() {
+    use std::sync::Arc;
+    use xai_acp_lib::AcpAgentMessage;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let AcpAgentMessage::SetSessionMode(args) = msg {
+                assert_eq!(args.request.mode_id.0.as_ref(), "plan");
+                let _ = args.response_tx.send(Ok(
+                    acp::SetSessionModeResponse::new().meta(
+                        serde_json::json!({
+                            "grow/behaviorChange": {
+                                "status": "confirmation_required",
+                                "message": "Switching to plan will interrupt the active default work. Press Enter to confirm the switch, or press Esc to cancel.",
+                                "remainingMs": 8000,
+                            }
+                        })
+                        .as_object()
+                        .cloned()
+                        .unwrap(),
+                    ),
+                ));
+            }
+        }
+    });
+    let mut tasks = JoinSet::new();
+    execute(
+        Effect::SetModeThenPrompt {
+            session_id: acp::SessionId::new(Arc::from("s1")),
+            mode_id: acp::SessionModeId::new("plan"),
+            agent_id: AgentId(0),
+            text: "keep this prompt".into(),
+            prompt_id: "p-1".into(),
+            skill_token_ranges: vec![6..18],
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+    );
+    match tasks.join_next().await.expect("task").expect("no panic") {
+        TaskResult::PromptRequiresBehaviorConfirmation {
+            agent_id,
+            session_id,
+            mode_id,
+            text,
+            prompt_id,
+            message,
+        } => {
+            assert_eq!(agent_id, AgentId(0));
+            assert_eq!(session_id.0.as_ref(), "s1");
+            assert_eq!(mode_id.0.as_ref(), "plan");
+            assert_eq!(text, "keep this prompt", "the prompt text must survive");
+            assert_eq!(prompt_id, "p-1");
+            assert!(
+                message.contains("Press Enter to confirm the switch"),
+                "the shell's confirm hint must ride the message: {message}"
+            );
+        }
+        other => panic!("expected PromptRequiresBehaviorConfirmation, got {other:?}"),
+    }
+}

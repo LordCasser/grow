@@ -662,6 +662,29 @@ pub(crate) enum AgentDeferredSend {
     /// Ctrl+Enter — a mid-turn interjection.
     Interject,
 }
+/// A prompt stashed while an interrupting Behavior switch awaits
+/// confirmation. The `SetModeThenPrompt` task parks it here instead of
+/// failing and dropping the text; Enter replays it after the switch.
+///
+/// Only the text is kept: the optimistic-echo retirement consumes the
+/// `prompt_id` directly from the task result in dispatch, and the replay
+/// path recomputes `skill_token_ranges` for a fresh prompt id.
+///
+/// Named distinctly from `prompt_widget::StashedPrompt` (the composer
+/// save/restore stash) so glob imports of `agent_view` never shadow it.
+#[derive(Debug, Clone)]
+pub(crate) struct BehaviorSwitchStashedPrompt {
+    pub(crate) text: String,
+}
+/// The parked interrupting Behavior switch awaiting Enter (confirm) or
+/// Esc (cancel). Single source of truth for the two arrival channels —
+/// the `grow/behaviorChange` notification and the `SetModeThenPrompt` task
+/// result — which may land in either order.
+#[derive(Debug, Clone)]
+pub(crate) struct BehaviorSwitchConfirm {
+    pub(crate) target: grow_tools::types::SessionMode,
+    pub(crate) prompt: Option<BehaviorSwitchStashedPrompt>,
+}
 pub struct AgentView {
     pub session: AgentSession,
     pub(crate) session_binding_epoch: u32,
@@ -1122,6 +1145,11 @@ pub struct AgentView {
     pub(crate) mode_switch_banner: Option<(String, u8)>,
     /// An interrupting Behavior change is awaiting a repeated selection.
     pub(crate) behavior_switch_warning_pending: bool,
+    /// Parked interrupting Behavior switch (target + optional stashed
+    /// mode+prompt text) awaiting Enter/Esc. Kept separate from
+    /// `behavior_switch_warning_pending` so the confirm dispatch can act on
+    /// the parked switch after the input layer clears the banner.
+    pub(crate) behavior_switch_confirm: Option<BehaviorSwitchConfirm>,
     /// Session announcement banner (critical or promo) is showing (set at
     /// start of `draw`). Ephemeral-tip occluder — unlike short-lived
     /// mode-switch, an announcement can last the session, so tips must not
