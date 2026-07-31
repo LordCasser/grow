@@ -120,7 +120,7 @@ async fn shutdown_workflows(session: &SessionActor) {
 pub(super) async fn run_session(
     session: Arc<SessionActor>,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
-    mut chat_state_event_rx: mpsc::UnboundedReceiver<xai_chat_state::ChatStateEvent>,
+    mut chat_state_event_rx: mpsc::UnboundedReceiver<grow_chat_state::ChatStateEvent>,
     mut event_rx: mpsc::UnboundedReceiver<SessionEvent>,
     fs_notify_config: Option<ClientFsConfig>,
     codebase_indexes: std::sync::Arc<parking_lot::Mutex<CodebaseIndexManager>>,
@@ -320,7 +320,7 @@ pub(super) async fn run_session(
                 // ChatStateActor events — coordination signals for session-level concerns.
                 event = chat_state_event_rx.recv() => {
                     match event {
-                        Some(xai_chat_state::ChatStateEvent::ConversationReset { new_len }) => {
+                        Some(grow_chat_state::ChatStateEvent::ConversationReset { new_len }) => {
                             // Reset idle-flush counter so next idle period flushes the new state.
                             session.last_idle_flush_conversation_len
                                 .store(new_len, std::sync::atomic::Ordering::Relaxed);
@@ -329,7 +329,7 @@ pub(super) async fn run_session(
                             session.memory.context_injected
                                 .store(false, std::sync::atomic::Ordering::Relaxed);
                         }
-                        Some(xai_chat_state::ChatStateEvent::ImageBudget {
+                        Some(grow_chat_state::ChatStateEvent::ImageBudget {
                             body_bytes,
                             trigger_bytes,
                             reclaim_target_bytes,
@@ -354,8 +354,8 @@ pub(super) async fn run_session(
                                 })),
                             );
                         }
-                        Some(xai_chat_state::ChatStateEvent::PromptIndexChanged { .. }) |
-                        Some(xai_chat_state::ChatStateEvent::TokensUpdated { .. }) => {
+                        Some(grow_chat_state::ChatStateEvent::PromptIndexChanged { .. }) |
+                        Some(grow_chat_state::ChatStateEvent::TokensUpdated { .. }) => {
                             // Prompt index and token updates are informational —
                             // consumers query the actor directly when they need them.
                         }
@@ -692,7 +692,7 @@ pub(super) async fn run_session(
 
                                 let existing = session.chat_state_handle.get_credentials().await;
                                 if let Some(r) = crate::agent::config::try_resolve_model_credentials(model_name.as_str(), existing.api_key.as_deref()) {
-                                    session.chat_state_handle.update_credentials(xai_chat_state::Credentials {
+                                    session.chat_state_handle.update_credentials(grow_chat_state::Credentials {
                                         api_key: r.api_key,
                                         auth_type: r.auth_type,
                                         alpha_test_key: existing.alpha_test_key,

@@ -1,9 +1,9 @@
 [package]
 license = "Apache-2.0"
-name = "xai-chat-state"
-version = "0.1.0"
+name = "grow-chat-state"
+version.workspace = true
 edition.workspace = true
-description = "Actor-based chat state management for xAI agents"
+description = "Actor-based chat state management"
 
 [features]
 default-bazel = []

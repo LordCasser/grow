@@ -34,7 +34,7 @@ impl SessionActor {
         // Anthropic Messages API rejects requests that include thinking blocks in
         // messages but omit the `thinking` parameter.
         let mut items: Vec<ConversationItem> =
-            xai_chat_state::compaction_utils::strip_reasoning_blocks(
+            grow_chat_state::compaction_utils::strip_reasoning_blocks(
                 self.chat_state_handle.get_conversation().await,
             );
 

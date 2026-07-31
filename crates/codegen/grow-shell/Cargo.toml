@@ -131,7 +131,7 @@ xai-hunk-tracker = { path = "../xai-hunk-tracker" }
 xai-agent-lifecycle = { workspace = true }
 xai-interjection-core = { workspace = true }
 grow-sandbox = { path = "../grow-sandbox", default-features = false }
-xai-chat-state = { path = "../xai-chat-state" }
+grow-chat-state = { path = "../grow-chat-state" }
 grow-compaction = { path = "../../common/grow-compaction" }
 grow-sampler = { path = "../grow-sampler" }
 xai-sqlite-journal = { workspace = true }

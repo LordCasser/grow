@@ -10,7 +10,7 @@ use async_openai::types::responses::ResponseStreamEvent;
 use futures_util::StreamExt;
 use grow_sampler::SamplerConfig as SamplingConfig;
 use reqwest::StatusCode;
-pub use xai_chat_state::compaction_utils::{
+pub use grow_chat_state::compaction_utils::{
     AUTO_CONTINUE_PROMPT, extract_last_real_user_query, extract_last_user_query,
     extract_messages_since_last_user, extract_real_user_queries, is_synthetic_extracted_query,
 };
@@ -924,11 +924,11 @@ mod compacted_history_shape_tests {
         SubagentToolNames, to_system_reminder_sync,
     };
     use std::collections::BTreeSet;
-    use xai_chat_state::compaction_utils::{
+    use grow_chat_state::compaction_utils::{
         CompactedHistoryInput, build_compacted_history as build_compacted_history_shared,
     };
     /// Thin wrapper around the shared `build_compacted_history` from
-    /// `xai-chat-state`, rendering the system-reminder synchronously (no
+    /// `grow-chat-state`, rendering the system-reminder synchronously (no
     /// memory backend) to match the old test-local helper signature.
     fn build_compacted_history(
         system_prompt: &str,
@@ -1065,7 +1065,7 @@ mod compacted_history_shape_tests {
             "Summary should start with the continuation preamble"
         );
         let formatted_summary =
-            xai_chat_state::compaction_utils::format_compact_summary_content(compaction_summary);
+            grow_chat_state::compaction_utils::format_compact_summary_content(compaction_summary);
         assert_eq!(
             msg_summary_text, formatted_summary,
             "Summary message should be the summary text without <user_query> wrapping"
@@ -1200,7 +1200,7 @@ mod compacted_history_shape_tests {
     /// `acp_session.rs`: build → sanitize → validate → (fallback if needed).
     #[test]
     fn sanitize_then_validate_produces_valid_history() {
-        use xai_chat_state::compaction_utils::{
+        use grow_chat_state::compaction_utils::{
             sanitize_compacted_history, validate_compacted_history,
         };
         let raw = vec![
@@ -1230,7 +1230,7 @@ mod compacted_history_shape_tests {
     /// the fallback path should produce a minimal valid history.
     #[test]
     fn fallback_minimal_history_has_no_tool_results() {
-        use xai_chat_state::compaction_utils::validate_compacted_history;
+        use grow_chat_state::compaction_utils::validate_compacted_history;
         let state_context = CompactionStateContext {
             cwd_generation: 0,
             destination_project_instructions: None,

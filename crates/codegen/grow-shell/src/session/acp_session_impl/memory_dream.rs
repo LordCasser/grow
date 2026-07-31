@@ -5,7 +5,7 @@ use super::*;
 
 #[derive(Debug)]
 pub(super) struct MemoryFlushSnapshot {
-    counts: xai_chat_state::ConversationCounts,
+    counts: grow_chat_state::ConversationCounts,
     chat_history: Vec<ChatRequestMessage>,
 }
 
@@ -641,7 +641,7 @@ impl SessionActor {
             self.chat_state_handle.get_conversation(),
         );
         let chat_history = crate::sampling::conversation_to_chat_messages(
-            xai_chat_state::compaction_utils::prepare_conversation_for_summarization(conversation),
+            grow_chat_state::compaction_utils::prepare_conversation_for_summarization(conversation),
         );
         MemoryFlushSnapshot {
             counts,

@@ -78,7 +78,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
             let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
-            let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
+            let chat_state_handle = grow_chat_state::ChatStateActor::spawn(
                 vec![],
                 grow_sampling_types::SamplingConfig {
                     base_url: "http://localhost".to_string(),
@@ -151,7 +151,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     count: std::sync::atomic::AtomicU64::new(0),
                     auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
                     previous_model: std::cell::Cell::new(None),
-                    compaction_mode: xai_chat_state::CompactionMode::Transcript,
+                    compaction_mode: grow_chat_state::CompactionMode::Transcript,
                     verbatim_input: true,
                     tool_choice: crate::util::config::CompactionToolChoice::Auto,
                     prefire: crate::session::compaction_config::PrefireState::default(),
@@ -368,7 +368,7 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                 SessionEvent,
             >();
             let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
-            let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
+            let chat_state_handle = grow_chat_state::ChatStateActor::spawn(
                 vec![
                         ConversationItem::system("sys"),
                         ConversationItem::user("<user_info>OS Version: macos</user_info>"),
@@ -496,7 +496,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     "<user_info>OS Version: macos</user_info>\n\n<user_query>hello</user_query>",
                 ),
             ];
-            let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
+            let chat_state_handle = grow_chat_state::ChatStateActor::spawn(
                 initial_conversation.clone(),
                 grow_sampling_types::SamplingConfig {
                     base_url: "http://localhost".to_string(),
@@ -585,7 +585,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     count: std::sync::atomic::AtomicU64::new(0),
                     auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
                     previous_model: std::cell::Cell::new(None),
-                    compaction_mode: xai_chat_state::CompactionMode::Transcript,
+                    compaction_mode: grow_chat_state::CompactionMode::Transcript,
                     verbatim_input: true,
                     tool_choice: crate::util::config::CompactionToolChoice::Auto,
                     prefire: crate::session::compaction_config::PrefireState::default(),
@@ -811,7 +811,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 deny_read_globs: Vec::new(),
                 mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
                 mcp_strategy: McpInitStrategy::Blocking,
-                chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
+                chat_state_handle: grow_chat_state::ChatStateHandle::noop(),
                 unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
                 current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(Some(
                     "running".to_string(),
@@ -837,7 +837,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     count: std::sync::atomic::AtomicU64::new(0),
                     auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
                     previous_model: std::cell::Cell::new(None),
-                    compaction_mode: xai_chat_state::CompactionMode::Transcript,
+                    compaction_mode: grow_chat_state::CompactionMode::Transcript,
                     verbatim_input: true,
                     tool_choice: crate::util::config::CompactionToolChoice::Auto,
                     prefire: crate::session::compaction_config::PrefireState::default(),
@@ -1994,7 +1994,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 deny_read_globs: Vec::new(),
                 mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
                 mcp_strategy: McpInitStrategy::Blocking,
-                chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
+                chat_state_handle: grow_chat_state::ChatStateHandle::noop(),
                 unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
                 current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(Some(
                     "running".to_string(),
@@ -2020,7 +2020,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     count: std::sync::atomic::AtomicU64::new(0),
                     auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
                     previous_model: std::cell::Cell::new(None),
-                    compaction_mode: xai_chat_state::CompactionMode::Transcript,
+                    compaction_mode: grow_chat_state::CompactionMode::Transcript,
                     verbatim_input: true,
                     tool_choice: crate::util::config::CompactionToolChoice::Auto,
                     prefire: crate::session::compaction_config::PrefireState::default(),

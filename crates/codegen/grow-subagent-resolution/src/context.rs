@@ -18,7 +18,7 @@ const MAX_VERBATIM_TURNS: usize = 3;
 /// session's system prompt builder, so including them in the background
 /// context is pure duplication.
 ///
-/// See also: `xai-chat-state::compaction_utils::strip_system_tags` which
+/// See also: `grow-chat-state::compaction_utils::strip_system_tags` which
 /// strips a related (but different) tag set for compaction.
 const FORK_NOISE_TAGS: &[&str] = &[
     "system-reminder",
@@ -189,7 +189,7 @@ fn strip_fork_noise(text: &str) -> String {
 /// silently eat meaningful content on malformed input.
 /// Same-name nesting is not supported: matches the first closing tag.
 ///
-/// See also: `xai-chat-state::compaction_utils::strip_system_tags` which
+/// See also: `grow-chat-state::compaction_utils::strip_system_tags` which
 /// uses the same leave-unclosed-untouched semantics for a different tag set.
 fn strip_xml_block<'a>(text: &'a str, tag: &str) -> Cow<'a, str> {
     let open_prefix = format!("<{tag}");

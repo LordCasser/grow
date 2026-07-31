@@ -333,8 +333,8 @@ fn resolve_compaction_mode_from(
     env: Option<&str>,
     config: Option<&str>,
     remote: Option<&str>,
-) -> xai_chat_state::CompactionMode {
-    use xai_chat_state::CompactionMode;
+) -> grow_chat_state::CompactionMode {
+    use grow_chat_state::CompactionMode;
     env.and_then(CompactionMode::parse)
         .or_else(|| config.and_then(CompactionMode::parse))
         .or_else(|| remote.and_then(CompactionMode::parse))
@@ -346,8 +346,8 @@ fn resolve_compaction_detail_from(
     env: Option<&str>,
     config: Option<&str>,
     remote: Option<&str>,
-) -> xai_chat_state::CompactionDetail {
-    use xai_chat_state::CompactionDetail;
+) -> grow_chat_state::CompactionDetail {
+    use grow_chat_state::CompactionDetail;
     env.and_then(CompactionDetail::parse)
         .or_else(|| config.and_then(CompactionDetail::parse))
         .or_else(|| remote.and_then(CompactionDetail::parse))
@@ -2186,7 +2186,7 @@ impl Config {
     /// Resolve the mode (env `GROW_COMPACTION_MODE` > config > remote settings >
     /// default, unrecognized falling through) and, for `Segments`, attach the
     /// separately-resolved detail level.
-    pub(crate) fn resolve_compaction_mode(&self) -> xai_chat_state::CompactionMode {
+    pub(crate) fn resolve_compaction_mode(&self) -> grow_chat_state::CompactionMode {
         resolve_compaction_mode_from(
             env_string("GROW_COMPACTION_MODE").as_deref(),
             self.features.compaction_mode.as_deref(),
@@ -2224,7 +2224,7 @@ impl Config {
     /// `features.compaction_detail`, then remote settings
     /// `remote_settings.compaction_detail`, then default (`verbose`). Drives the
     /// `segments` verbatim detail level.
-    fn resolve_compaction_detail(&self) -> xai_chat_state::CompactionDetail {
+    fn resolve_compaction_detail(&self) -> grow_chat_state::CompactionDetail {
         resolve_compaction_detail_from(
             env_string("GROW_COMPACTION_DETAIL").as_deref(),
             self.features.compaction_detail.as_deref(),
@@ -3540,7 +3540,7 @@ pub struct Features {
 pub struct ResolvedCredentials {
     pub api_key: Option<String>,
     pub base_url: String,
-    pub auth_type: xai_chat_state::AuthType,
+    pub auth_type: grow_chat_state::AuthType,
     pub auth_scheme: AuthScheme,
 }
 /// First usable BYOK credential: a non-empty (trimmed) api_key, else the first
@@ -3563,14 +3563,14 @@ pub fn resolve_credentials(model: &ModelEntry, _session_key: Option<&str>) -> Re
         (
             Some(key),
             info.base_url.clone(),
-            xai_chat_state::AuthType::ApiKey,
+            grow_chat_state::AuthType::ApiKey,
         )
     } else if let Some(provider) = model.auth_provider.as_ref() {
         debug_assert!(model.effective_auth_provider().is_some());
         (
             provider.cached_token(),
             info.base_url.clone(),
-            xai_chat_state::AuthType::ApiKey,
+            grow_chat_state::AuthType::ApiKey,
         )
     } else {
         if let Some(ref env_keys) = model.env_key
@@ -3586,7 +3586,7 @@ pub fn resolve_credentials(model: &ModelEntry, _session_key: Option<&str>) -> Re
         (
             None,
             info.base_url.clone(),
-            xai_chat_state::AuthType::ApiKey,
+            grow_chat_state::AuthType::ApiKey,
         )
     };
     let auth_scheme = info.auth_scheme;
@@ -3811,8 +3811,8 @@ pub fn finalize_image_describe_sampler_config(
 pub fn resolve_chat_state_auth_type(
     model_id: &str,
     session_key: Option<&str>,
-    fallback: xai_chat_state::AuthType,
-) -> xai_chat_state::AuthType {
+    fallback: grow_chat_state::AuthType,
+) -> grow_chat_state::AuthType {
     try_resolve_model_credentials(model_id, session_key)
         .map(|r| r.auth_type)
         .unwrap_or(fallback)
@@ -4605,7 +4605,7 @@ reasoning_effort = "low"
     }
     #[tokio::test]
     async fn resolve_credentials_serves_cached_provider_token() {
-        use xai_chat_state::AuthType;
+        use grow_chat_state::AuthType;
         let mut model = test_model_entry("m", "https://litellm.example/v1", None, None, None);
         let provider = crate::auth::AuthProviderRef::new(
             "resolve-creds-test".into(),
@@ -4757,7 +4757,7 @@ reasoning_effort = "low"
             ResolvedCredentials {
                 api_key: Some("fallback-key".to_string()),
                 base_url: model.info().base_url.clone(),
-                auth_type: xai_chat_state::AuthType::ApiKey,
+                auth_type: grow_chat_state::AuthType::ApiKey,
                 auth_scheme: AuthScheme::Bearer,
             },
             None,
@@ -4856,7 +4856,7 @@ reasoning_effort = "low"
     #[test]
     #[serial]
     fn resolve_credentials_multi_env_key_uses_lc_alias() {
-        use xai_chat_state::AuthType;
+        use grow_chat_state::AuthType;
         let primary = "GROW_TEST_MULTI_ENV_PRIMARY";
         let alias = "GROW_TEST_MULTI_ENV_LC_ALIAS";
         unsafe {
@@ -4893,7 +4893,7 @@ reasoning_effort = "low"
     #[test]
     #[serial_test::serial]
     fn resolve_credentials_env_key_byok_keeps_api_key_auth_with_session() {
-        use xai_chat_state::AuthType;
+        use grow_chat_state::AuthType;
         let env_var = "REGRESSION_BYOK_TOKEN_FOR_AUTH_TYPE_TEST";
         unsafe {
             std::env::set_var(env_var, "sk-byok-test-value");
@@ -4928,13 +4928,13 @@ reasoning_effort = "low"
     fn resolve_credentials_no_session_key_returns_api_key() {
         let model = test_model_entry("m", "https://example.com/v1", None, None, None);
         let creds = resolve_credentials(&model, None);
-        assert_eq!(creds.auth_type, xai_chat_state::AuthType::ApiKey);
+        assert_eq!(creds.auth_type, grow_chat_state::AuthType::ApiKey);
     }
     fn api_key_creds(base_url: &str) -> ResolvedCredentials {
         ResolvedCredentials {
             api_key: Some("provider-secret".to_string()),
             base_url: base_url.to_string(),
-            auth_type: xai_chat_state::AuthType::ApiKey,
+            auth_type: grow_chat_state::AuthType::ApiKey,
             auth_scheme: Default::default(),
         }
     }
@@ -4951,7 +4951,7 @@ reasoning_effort = "low"
         model.info.auth_scheme = AuthScheme::XApiKey;
         let creds = resolve_credentials(&model, None);
         assert_eq!(creds.auth_scheme, AuthScheme::XApiKey);
-        assert_eq!(creds.auth_type, xai_chat_state::AuthType::ApiKey);
+        assert_eq!(creds.auth_type, grow_chat_state::AuthType::ApiKey);
         assert_eq!(creds.api_key, Some("sk-ant-test-key".to_string()));
         let config = sampling_config_for_model(&model, creds, None);
         assert_eq!(config.auth_scheme, AuthScheme::XApiKey);
@@ -5046,22 +5046,22 @@ reasoning_effort = "low"
     }
     #[test]
     fn compaction_mode_precedence_env_over_config_over_remote_over_default() {
-        use xai_chat_state::CompactionMode;
+        use grow_chat_state::CompactionMode;
         assert_eq!(
             resolve_compaction_mode_from(Some("transcript"), Some("segments"), Some("summary")),
             CompactionMode::Transcript
         );
         assert_eq!(
             resolve_compaction_mode_from(None, Some("segments"), Some("summary")),
-            CompactionMode::Segments(xai_chat_state::CompactionDetail::default())
+            CompactionMode::Segments(grow_chat_state::CompactionDetail::default())
         );
         assert_eq!(
             resolve_compaction_mode_from(None, None, Some("segments")),
-            CompactionMode::Segments(xai_chat_state::CompactionDetail::default())
+            CompactionMode::Segments(grow_chat_state::CompactionDetail::default())
         );
         assert_eq!(
             resolve_compaction_mode_from(Some("garbage"), None, Some("segments")),
-            CompactionMode::Segments(xai_chat_state::CompactionDetail::default())
+            CompactionMode::Segments(grow_chat_state::CompactionDetail::default())
         );
         assert_eq!(
             resolve_compaction_mode_from(None, None, None),
@@ -5073,7 +5073,7 @@ reasoning_effort = "low"
     /// `Verbose` default (with unrecognized values falling through).
     #[test]
     fn compaction_detail_resolves_remote_settings_and_verbose_default() {
-        use xai_chat_state::CompactionDetail;
+        use grow_chat_state::CompactionDetail;
         assert_eq!(
             resolve_compaction_detail_from(None, None, Some("minimal")),
             CompactionDetail::Minimal

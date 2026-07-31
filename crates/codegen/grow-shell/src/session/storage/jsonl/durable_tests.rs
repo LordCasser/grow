@@ -159,7 +159,7 @@ fn cwd_switch_retry_after_post_append_barrier_failure_is_already_present() {
             || Ok(()),
         ),
         Err(crate::session::storage::AppendCwdSwitchError::Committed {
-            acknowledgement: xai_chat_state::StrictAppendAck::Appended,
+            acknowledgement: grow_chat_state::StrictAppendAck::Appended,
             ..
         })
     ));
@@ -172,7 +172,7 @@ fn cwd_switch_retry_after_post_append_barrier_failure_is_already_present() {
             || Ok(()),
         )
         .unwrap(),
-        xai_chat_state::StrictAppendAck::AlreadyPresent(item)
+        grow_chat_state::StrictAppendAck::AlreadyPresent(item)
             if item.text_content() == "moved"
     ));
     assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
@@ -195,7 +195,7 @@ async fn cwd_switch_retry_repairs_bookkeeping_without_duplicate() {
     assert!(matches!(
         adapter.append_cwd_switch_commit_aware(&info, &item).await,
         Err(crate::session::storage::AppendCwdSwitchError::Committed {
-            acknowledgement: xai_chat_state::StrictAppendAck::Appended,
+            acknowledgement: grow_chat_state::StrictAppendAck::Appended,
             ..
         })
     ));
@@ -207,7 +207,7 @@ async fn cwd_switch_retry_repairs_bookkeeping_without_duplicate() {
             )
             .await,
         Err(crate::session::storage::AppendCwdSwitchError::Committed {
-            acknowledgement: xai_chat_state::StrictAppendAck::AlreadyPresent(authoritative),
+            acknowledgement: grow_chat_state::StrictAppendAck::AlreadyPresent(authoritative),
             ..
         }) if authoritative.text_content() == "moved"
     ));
@@ -222,7 +222,7 @@ async fn cwd_switch_retry_repairs_bookkeeping_without_duplicate() {
             .append_cwd_switch_commit_aware(&info, &item)
             .await
             .unwrap(),
-        xai_chat_state::StrictAppendAck::AlreadyPresent(item)
+        grow_chat_state::StrictAppendAck::AlreadyPresent(item)
             if item.text_content() == "moved"
     ));
     let summary = adapter.read_summary_sync(&info).unwrap();
@@ -234,7 +234,7 @@ async fn cwd_switch_retry_repairs_bookkeeping_without_duplicate() {
             .append_cwd_switch_commit_aware(&info, &item)
             .await
             .unwrap(),
-        xai_chat_state::StrictAppendAck::AlreadyPresent(item)
+        grow_chat_state::StrictAppendAck::AlreadyPresent(item)
             if item.text_content() == "moved"
     ));
     let retried = adapter.read_summary_sync(&info).unwrap();
@@ -276,7 +276,7 @@ async fn cwd_switch_retained_by_history_replacement_is_not_recounted() {
             )
             .await
             .unwrap(),
-        xai_chat_state::StrictAppendAck::AlreadyPresent(authoritative)
+        grow_chat_state::StrictAppendAck::AlreadyPresent(authoritative)
             if authoritative.text_content() == "retained"
     ));
     let summary = adapter.read_summary_sync(&info).unwrap();
@@ -307,7 +307,7 @@ async fn cwd_switch_reappend_after_history_replacement_restores_message_count() 
             .append_cwd_switch_commit_aware(&info, &item)
             .await
             .unwrap(),
-        xai_chat_state::StrictAppendAck::Appended
+        grow_chat_state::StrictAppendAck::Appended
     ));
     adapter.replace_chat_history(&info, &[]).await.unwrap();
     let replaced = adapter.read_summary_sync(&info).unwrap();
@@ -319,7 +319,7 @@ async fn cwd_switch_reappend_after_history_replacement_restores_message_count() 
             .append_cwd_switch_commit_aware(&info, &item)
             .await
             .unwrap(),
-        xai_chat_state::StrictAppendAck::Appended
+        grow_chat_state::StrictAppendAck::Appended
     ));
     let summary = adapter.read_summary_sync(&info).unwrap();
     assert_eq!(summary.cwd_switch_bookkeeping_generation, 7);

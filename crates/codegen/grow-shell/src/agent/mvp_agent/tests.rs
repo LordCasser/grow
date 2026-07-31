@@ -582,7 +582,7 @@ fn make_test_handle(
         },
         max_turns: None,
         hunk_tracker_handle,
-        chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
+        chat_state_handle: grow_chat_state::ChatStateHandle::noop(),
         signals_handle: crate::session::signals::SessionSignalsHandle::new(),
         gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         mcp_servers: vec![],
@@ -1798,7 +1798,7 @@ async fn auth_type_session_based_no_current_returns_session_token() {
         );
         assert_eq!(
             agent.auth_type(),
-            xai_chat_state::AuthType::SessionToken,
+            grow_chat_state::AuthType::SessionToken,
             "{method_id}: session-based auth must report SessionToken even \
                  without a live token -- otherwise chat_state gets locked into \
                  auth_type = ApiKey and try_refresh_session_token will skip \
@@ -1819,7 +1819,7 @@ async fn auth_type_provider_api_key_no_current_returns_api_key() {
     assert!(agent.auth_manager.current().is_none());
     assert_eq!(
         agent.auth_type(),
-        xai_chat_state::AuthType::ApiKey,
+        grow_chat_state::AuthType::ApiKey,
         "provider.api_key auth must report ApiKey -- BYOK has no session-token \
              behavior to fall back to."
     );
@@ -1836,7 +1836,7 @@ async fn auth_type_session_based_with_current_returns_session_token() {
     ));
     agent.auth_manager.hot_swap(ProviderAuth::test_default());
     assert!(agent.auth_manager.current().is_some());
-    assert_eq!(agent.auth_type(), xai_chat_state::AuthType::SessionToken,);
+    assert_eq!(agent.auth_type(), grow_chat_state::AuthType::SessionToken,);
 }
 /// Defensive case: no `auth_method_id` selected yet (pre-`authenticate`
 /// state) and no live credential. We default to `ApiKey` so callers
@@ -1848,7 +1848,7 @@ async fn auth_type_no_method_id_no_current_returns_api_key() {
     let agent = build_minimal_agent_for_tests();
     assert!(agent.auth_method_id.load().is_none());
     assert!(agent.auth_manager.current().is_none());
-    assert_eq!(agent.auth_type(), xai_chat_state::AuthType::ApiKey,);
+    assert_eq!(agent.auth_type(), grow_chat_state::AuthType::ApiKey,);
 }
 /// Live credential present but `auth_method_id` is still `None`. The
 /// in-memory bearer takes precedence: this is the order observed during
@@ -1862,7 +1862,7 @@ async fn auth_type_no_method_id_with_current_returns_session_token() {
     agent.auth_manager.hot_swap(ProviderAuth::test_default());
     assert!(agent.auth_method_id.load().is_none());
     assert!(agent.auth_manager.current().is_some());
-    assert_eq!(agent.auth_type(), xai_chat_state::AuthType::SessionToken,);
+    assert_eq!(agent.auth_type(), grow_chat_state::AuthType::SessionToken,);
 }
 /// Deployment-key / managed-config user: `GROW_API_KEY` resolves and the kill
 /// switch is off, so a dead `cached_token` MUST fall through to `provider.api_key`

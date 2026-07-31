@@ -838,7 +838,7 @@ impl SessionActor {
             .map(|p| p.path.to_string_lossy().into_owned())
             .collect();
         let current_query = crate::session::image_describe::strip_template_context_tags(
-            &xai_chat_state::compaction_utils::extract_user_query(&original_user_message),
+            &grow_chat_state::compaction_utils::extract_user_query(&original_user_message),
         );
         let active_session_config = self.reconstruct_full_config().await;
         let resolved_describe = self

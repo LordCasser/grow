@@ -64,7 +64,7 @@ pub struct SessionHandle {
     /// Handle to the hunk tracker for this session
     pub hunk_tracker_handle: HunkTrackerHandle,
     /// Actor-based chat state handle — lets callers inspect final conversation state.
-    pub chat_state_handle: xai_chat_state::ChatStateHandle,
+    pub chat_state_handle: grow_chat_state::ChatStateHandle,
     /// Handle to session signals (used for completion tracking)
     pub signals_handle: super::signals::SessionSignalsHandle,
     /// Shared gate controlling whether the session actor forwards
@@ -163,7 +163,7 @@ pub struct SessionHandle {
 }
 impl SessionHandle {
     /// Last assistant `model_id` / `model_fingerprint` in conversation (global, not turn-scoped).
-    pub(crate) async fn get_model_metadata(&self) -> xai_chat_state::ModelMetadata {
+    pub(crate) async fn get_model_metadata(&self) -> grow_chat_state::ModelMetadata {
         let (tx, rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -172,7 +172,7 @@ impl SessionHandle {
         {
             rx.await.unwrap_or_default()
         } else {
-            xai_chat_state::ModelMetadata::default()
+            grow_chat_state::ModelMetadata::default()
         }
     }
     /// Move a foreground bash command to background by tool_call_id.

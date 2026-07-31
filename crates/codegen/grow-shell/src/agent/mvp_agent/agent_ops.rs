@@ -662,11 +662,11 @@ impl MvpAgent {
     ///
     /// The session-based clause is load-bearing: without it, chat_state can get
     /// locked into `auth_type = ApiKey` and skip token refresh on later prompts.
-    pub(crate) fn auth_type(&self) -> xai_chat_state::AuthType {
+    pub(crate) fn auth_type(&self) -> grow_chat_state::AuthType {
         if self.auth_manager.current().is_some() || self.is_session_based_auth() {
-            xai_chat_state::AuthType::SessionToken
+            grow_chat_state::AuthType::SessionToken
         } else {
-            xai_chat_state::AuthType::ApiKey
+            grow_chat_state::AuthType::ApiKey
         }
     }
     /// When `cached_token` cannot proceed, prefer non-interactive `provider.api_key`
@@ -829,17 +829,17 @@ impl MvpAgent {
             session.as_ref().map(|a| a.key.as_str()),
         );
         if prefers_oidc && !model.has_own_credentials()
-            && credentials.auth_type == xai_chat_state::AuthType::ApiKey
+            && credentials.auth_type == grow_chat_state::AuthType::ApiKey
         {
             credentials.api_key = None;
-            credentials.auth_type = xai_chat_state::AuthType::SessionToken;
+            credentials.auth_type = grow_chat_state::AuthType::SessionToken;
         }
         crate::agent::config::enforce_disable_api_key_auth(
             &mut credentials,
             self.cfg.borrow().auth.api_key_auth_disabled(),
             session.as_ref().map(|a| a.key.as_str()),
         );
-        if !has_session_key && credentials.auth_type == xai_chat_state::AuthType::ApiKey
+        if !has_session_key && credentials.auth_type == grow_chat_state::AuthType::ApiKey
             && !model.has_own_credentials() && is_session_based_auth
         {
             tracing::info!(
@@ -851,7 +851,7 @@ impl MvpAgent {
                 None,
                 Some(serde_json::json!({ "model": model.info().model.as_str() })),
             );
-            credentials.auth_type = xai_chat_state::AuthType::SessionToken;
+            credentials.auth_type = grow_chat_state::AuthType::SessionToken;
         }
         if should_warn_missing_session(MissingSessionCtx {
             has_session_key,
@@ -2233,7 +2233,7 @@ impl MvpAgent {
         let (mut handle, permission_events_rx, agent_system_prompt, session_thread) = {
             let _timer = crate::instrumentation_timer!("session.spawn_actor_call");
             let session_key = self.auth_manager.current_or_expired().map(|a| a.key);
-            let credentials = xai_chat_state::Credentials {
+            let credentials = grow_chat_state::Credentials {
                 api_key: sampling_config.api_key.clone(),
                 auth_type: crate::agent::config::resolve_chat_state_auth_type(
                     sampling_config.model.as_str(),

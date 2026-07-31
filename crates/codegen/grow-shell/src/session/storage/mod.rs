@@ -967,7 +967,7 @@ pub enum AppendUpdateError {
 pub enum AppendCwdSwitchError {
     NotCommitted(io::Error),
     Committed {
-        acknowledgement: xai_chat_state::StrictAppendAck,
+        acknowledgement: grow_chat_state::StrictAppendAck,
         source: io::Error,
     },
 }
@@ -1047,7 +1047,7 @@ pub trait StorageAdapter: Send + Sync {
         &self,
         _info: &Info,
         _message: &ConversationItem,
-    ) -> Result<xai_chat_state::StrictAppendAck, AppendCwdSwitchError> {
+    ) -> Result<grow_chat_state::StrictAppendAck, AppendCwdSwitchError> {
         Err(AppendCwdSwitchError::NotCommitted(io::Error::new(
             io::ErrorKind::Unsupported,
             "working-directory switch append is unsupported",

@@ -13,7 +13,7 @@
 
 use crate::sampling::ConversationItem;
 use crate::session::helpers::chat::floor_char_boundary;
-use xai_chat_state::{compaction_utils, estimate_conversation_tokens, estimate_item_tokens};
+use grow_chat_state::{compaction_utils, estimate_conversation_tokens, estimate_item_tokens};
 
 /// Hard cap on the recap text length (characters). Generous headroom: the recap
 /// instruction targets ~25–40 words (≈240 chars at the top end), so this only
@@ -79,7 +79,7 @@ pub(crate) fn build_recap_items(
     strip_reasoning: bool,
 ) -> Vec<ConversationItem> {
     let mut items = if strip_reasoning {
-        xai_chat_state::compaction_utils::strip_reasoning_blocks(conversation)
+        grow_chat_state::compaction_utils::strip_reasoning_blocks(conversation)
     } else {
         conversation
     };

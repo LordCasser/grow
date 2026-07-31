@@ -1,5 +1,5 @@
 //! Compaction mode — how much structure the model gets to recover detail the
-//! lossy summary dropped. In `xai-chat-state` so flag resolution and the
+//! lossy summary dropped. In `grow-chat-state` so flag resolution and the
 //! transcript-hint builder share one definition.
 
 use crate::compaction_transcript::CompactionDetail;

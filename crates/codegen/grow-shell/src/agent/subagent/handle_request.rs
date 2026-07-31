@@ -1,7 +1,7 @@
 use super::*;
 use grow_sampling_types::ReasoningEffort;
 use grow_tools::implementations::{grow_build, opencode};
-pub(super) fn canonical_total_tokens(totals: &xai_chat_state::UsageTotals) -> u64 {
+pub(super) fn canonical_total_tokens(totals: &grow_chat_state::UsageTotals) -> u64 {
     totals.total_tokens()
 }
 pub(super) fn usage_is_incomplete(
@@ -14,7 +14,7 @@ pub(super) fn usage_is_incomplete(
 }
 pub(super) async fn record_subagent_usage(
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
-    by_model: Option<Vec<(String, xai_chat_state::UsageTotals)>>,
+    by_model: Option<Vec<(String, grow_chat_state::UsageTotals)>>,
     parent_prompt_id: Option<String>,
     incomplete: bool,
 ) -> bool {
@@ -652,14 +652,14 @@ pub(crate) async fn run_shell_child(
     tool_ctx.lsp = ctx.lsp.clone();
     let tracker_child_cwd = child_session_info.cwd.clone();
     let tracker_model_id = effective_model_id.0.to_string();
-    let initial_child_tokens = xai_chat_state::estimate_conversation_tokens(&forked_conversation);
+    let initial_child_tokens = grow_chat_state::estimate_conversation_tokens(&forked_conversation);
     let model_entry = crate::agent::config::find_model_by_id(
         &ctx.available_models,
         effective_model_id.0.as_ref(),
     );
     let model_has_own_creds = model_entry.is_some_and(|entry| entry.has_own_credentials());
     let inherited_auth_type = subagent_auth_type(model_entry, &ctx.auth_method_id);
-    let credentials = xai_chat_state::Credentials {
+    let credentials = grow_chat_state::Credentials {
         api_key: effective_sampling_config.api_key.clone(),
         auth_type: inherited_auth_type,
         alpha_test_key: ctx.alpha_test_key.clone(),
@@ -926,7 +926,7 @@ pub(crate) async fn run_shell_child(
         grow_workspace::permission::ClientType::Generic,
         ctx.resolve_auto_compact_threshold_percent(&subagent_model_id),
         grow_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
-        xai_chat_state::CompactionMode::Summary,
+        grow_chat_state::CompactionMode::Summary,
         ctx.resolve_compaction_verbatim_input(),
         ctx.resolve_compaction_tool_choice(),
         false,

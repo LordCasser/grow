@@ -33,7 +33,7 @@ use grow_diagnostics::events::{CompactionRetryDegraded, CompactionTrigger};
 use grow_sampler::SamplerConfig as SamplingConfig;
 use grow_sampling_types::{ConversationItem, ToolSpec};
 
-use xai_chat_state::compaction_utils::{
+use grow_chat_state::compaction_utils::{
     CompactionAttempt, MAX_CAPTURED_SUMMARY_CHARS, bound_captured_output,
 };
 

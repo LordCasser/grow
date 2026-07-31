@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn attach_prompt_usage_preserves_error_kind_and_round_trips() {
-        let mut ledger = xai_chat_state::UsageLedger::default();
+        let mut ledger = grow_chat_state::UsageLedger::default();
         ledger.record_main_loop_call(
             "m",
             &grow_sampling_types::TokenUsage {

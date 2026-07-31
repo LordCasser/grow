@@ -1,6 +1,6 @@
 use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
-use xai_chat_state::conversation_util::replace_or_insert_system_head;
+use grow_chat_state::conversation_util::replace_or_insert_system_head;
 impl SessionActor {
     pub(super) async fn handle_set_session_model(
         &self,
@@ -55,7 +55,7 @@ impl SessionActor {
             .as_ref()
             .and_then(|am| am.current_or_expired().map(|a| a.key));
         self.chat_state_handle
-            .update_credentials(xai_chat_state::Credentials {
+            .update_credentials(grow_chat_state::Credentials {
                 api_key: sampling_config.api_key.clone(),
                 auth_type: crate::agent::config::resolve_chat_state_auth_type(
                     sampling_config.model.as_str(),

@@ -92,7 +92,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
         mcp_strategy: McpInitStrategy::Blocking,
-        chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
+        chat_state_handle: grow_chat_state::ChatStateHandle::noop(),
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
@@ -113,7 +113,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
             previous_model: std::cell::Cell::new(None),
-            compaction_mode: xai_chat_state::CompactionMode::Transcript,
+            compaction_mode: grow_chat_state::CompactionMode::Transcript,
             verbatim_input: true,
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),

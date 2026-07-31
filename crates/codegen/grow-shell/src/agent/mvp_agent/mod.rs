@@ -637,7 +637,7 @@ fn read_session_or_init_meta_str<'a>(
     };
     read(session_meta).or_else(|| read(init_meta))
 }
-use xai_chat_state::conversation_util::replace_or_insert_system_head;
+use grow_chat_state::conversation_util::replace_or_insert_system_head;
 /// Non-empty `systemPromptOverride` from session meta (preferred) or init meta.
 /// A blank string (empty or whitespace-only) is treated as "no override" so a
 /// client cannot accidentally blank the system prompt.

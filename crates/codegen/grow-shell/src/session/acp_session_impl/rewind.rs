@@ -526,7 +526,7 @@ impl SessionActor {
     }
 
     /// Out-of-band history repair (`grow/session/repair`) for a resident
-    /// session: run `xai_chat_state::compaction_utils::repair_history` inside
+    /// session: run `grow_chat_state::compaction_utils::repair_history` inside
     /// the chat-state actor, then flush persistence so `chat_history.jsonl`
     /// is rewritten on disk before the caller sees success.
     ///
@@ -538,14 +538,14 @@ impl SessionActor {
     pub(super) async fn handle_repair_history(
         &self,
         dry_run: bool,
-    ) -> anyhow::Result<xai_chat_state::compaction_utils::HistoryRepairReport> {
+    ) -> anyhow::Result<grow_chat_state::compaction_utils::HistoryRepairReport> {
         // Per-session flag — NOT `tool_context.is_turn_active`, which is the
         // agent-wide coordinator flag shared by all sessions (using it would
         // refuse repair of an idle session while any other session runs a
         // turn, and another session's turn end could clear it mid-turn).
         let turn_flag = self.session_turn_active.clone();
         if turn_flag.load(std::sync::atomic::Ordering::SeqCst) {
-            anyhow::bail!(xai_chat_state::commands::RepairHistoryBlocked);
+            anyhow::bail!(grow_chat_state::commands::RepairHistoryBlocked);
         }
 
         let report = self

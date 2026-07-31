@@ -10,10 +10,10 @@ async fn make_actor() -> SessionActor {
     create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await
 }
 
-fn usage_rows() -> Vec<(String, xai_chat_state::UsageTotals)> {
+fn usage_rows() -> Vec<(String, grow_chat_state::UsageTotals)> {
     vec![(
         "m".into(),
-        xai_chat_state::UsageTotals {
+        grow_chat_state::UsageTotals {
             input_tokens: 40,
             model_calls: 1,
             ..Default::default()
@@ -153,7 +153,7 @@ fn project_from_ledger_never_drops_incomplete_flag() {
             .usage_is_incomplete
     );
 
-    let mut ledger = xai_chat_state::UsageLedger::default();
+    let mut ledger = grow_chat_state::UsageLedger::default();
     ledger.record_main_loop_call(
         "m",
         &grow_sampling_types::TokenUsage {
@@ -217,7 +217,7 @@ fn for_error_path_shared_policy() {
             .usage_is_incomplete
     );
 
-    let mut ledger = xai_chat_state::UsageLedger::default();
+    let mut ledger = grow_chat_state::UsageLedger::default();
     ledger.record_main_loop_call(
         "m",
         &grow_sampling_types::TokenUsage {

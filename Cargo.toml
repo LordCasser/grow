@@ -11,7 +11,7 @@ members = [
     "crates/codegen/ptyctl-cli",
     "crates/codegen/xai-acp-lib",
     "crates/codegen/xai-agent-lifecycle",
-    "crates/codegen/xai-chat-state",
+    "crates/codegen/grow-chat-state",
     "crates/codegen/xai-codebase-graph",
     "crates/codegen/xai-crash-handler",
     "crates/codegen/xai-fast-worktree",

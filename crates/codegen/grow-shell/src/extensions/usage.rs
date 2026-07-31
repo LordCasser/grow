@@ -1,6 +1,6 @@
 //! `grow/session/usage` — cumulative session token/cost as [`PromptUsage`].
 //!
-//! Projects the in-memory [`xai_chat_state::UsageLedger`] (main-loop + folded
+//! Projects the in-memory [`grow_chat_state::UsageLedger`] (main-loop + folded
 //! subagent spend). Partial costs are scrubbed (absence ≠ free). Totals reset
 //! when a session is resumed in a new agent process.
 
@@ -60,7 +60,7 @@ async fn handle_session_usage(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
 mod tests {
     use super::*;
     use grow_sampling_types::TokenUsage;
-    use xai_chat_state::UsageLedger;
+    use grow_chat_state::UsageLedger;
 
     fn usage(prompt: u32, completion: u32) -> TokenUsage {
         TokenUsage {

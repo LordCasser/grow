@@ -498,7 +498,7 @@ async fn manual_recap_over_budget_trims_persisted_request_and_is_display_only() 
             let mut saw_recap_request = false;
             while let Ok(msg) = persistence_rx.try_recv() {
                 if let PersistenceMsg::RecapRequest(artifact) = msg {
-                    let est = xai_chat_state::estimate_conversation_tokens(&artifact.chat_history);
+                    let est = grow_chat_state::estimate_conversation_tokens(&artifact.chat_history);
                     assert!(
                         est <= PROMPT_BUDGET,
                         "persisted recap request must be within budget: {est} > {PROMPT_BUDGET}"

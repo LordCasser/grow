@@ -2,8 +2,8 @@
 //! shell-specific types (`grow_tools::MemoryBackend`, memory context).
 //!
 //! The core [`CompactionStateContext`] struct and its builder live in
-//! `xai_chat_state::compaction_utils`. This module adds system-reminder
-//! rendering that requires dependencies not available in `xai-chat-state`.
+//! `grow_chat_state::compaction_utils`. This module adds system-reminder
+//! rendering that requires dependencies not available in `grow-chat-state`.
 //!
 //! The three **common** active-agent sections (background tasks, TODO list,
 //! running subagents) are formatted by
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use grow_compaction::reminder::{
     self, ActiveAgentReminderState, BackgroundTask, RunningSubagent, TodoItem, TodoStatus,
 };
-pub use xai_chat_state::compaction_utils::{
+pub use grow_chat_state::compaction_utils::{
     BackgroundTaskSummary, CompactionInputs, CompactionServerSummary, CompactionStateContext,
     RunningSubagentSummary, TodoSummary, TodoSummaryStatus, extract_last_user_query,
     extract_messages_since_last_user, extract_user_query,

@@ -12,7 +12,7 @@ use grow_tools::implementations::grow_build::task::coordinator::{
 };
 #[test]
 fn canonical_total_tokens_does_not_double_count_reasoning() {
-    let totals = xai_chat_state::UsageTotals {
+    let totals = grow_chat_state::UsageTotals {
         input_tokens: 100,
         output_tokens: 40,
         reasoning_tokens: 25,
@@ -34,7 +34,7 @@ async fn usage_ack_precedes_terminal_presentation() {
     ctx.parent_cmd_tx = Some(parent_cmd_tx);
     let by_model = vec![(
             "test-model".to_string(),
-            xai_chat_state::UsageTotals {
+            grow_chat_state::UsageTotals {
                 input_tokens: 10,
                 output_tokens: 4,
                 ..Default::default()
@@ -1776,7 +1776,7 @@ fn byok_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
 #[test]
 fn subagent_auth_type_rule() {
     use crate::agent::auth_method::{CACHED_TOKEN_AUTH_METHOD_ID, PROVIDER_API_KEY_METHOD_ID};
-    use xai_chat_state::AuthType;
+    use grow_chat_state::AuthType;
     let session = acp::AuthMethodId::new(CACHED_TOKEN_AUTH_METHOD_ID);
     let api_key = acp::AuthMethodId::new(PROVIDER_API_KEY_METHOD_ID);
     let byok = byok_model_entry("grow-byok");
@@ -2043,11 +2043,11 @@ fn test_sampling_config(model_slug: &str) -> grow_sampling_types::SamplingConfig
         stream_tool_calls: None,
     }
 }
-fn spawn_test_parent_chat_state(model_slug: &str) -> xai_chat_state::ChatStateHandle {
-    let (mock, _persistence_rx) = xai_chat_state::MockChatPersistence::new();
+fn spawn_test_parent_chat_state(model_slug: &str) -> grow_chat_state::ChatStateHandle {
+    let (mock, _persistence_rx) = grow_chat_state::MockChatPersistence::new();
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let token = tokio_util::sync::CancellationToken::new();
-    xai_chat_state::ChatStateActor::spawn(
+    grow_chat_state::ChatStateActor::spawn(
         vec![],
         test_sampling_config(model_slug),
         Box::new(mock),

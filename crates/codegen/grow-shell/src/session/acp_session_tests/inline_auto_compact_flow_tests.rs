@@ -44,7 +44,7 @@ async fn create_test_actor(
         nudges_used_this_session: 0,
     });
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
+    let chat_state_handle = grow_chat_state::ChatStateActor::spawn(
         vec![],
         grow_sampling_types::SamplingConfig {
             base_url: "http://localhost".to_string(),
@@ -61,7 +61,7 @@ async fn create_test_actor(
             reasoning_effort: None,
             stream_tool_calls: None,
         },
-        Box::new(xai_chat_state::NullChatPersistence),
+        Box::new(grow_chat_state::NullChatPersistence),
         event_tx,
         tokio_util::sync::CancellationToken::new(),
     );
@@ -111,7 +111,7 @@ async fn create_test_actor(
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
             previous_model: std::cell::Cell::new(None),
-            compaction_mode: xai_chat_state::CompactionMode::Transcript,
+            compaction_mode: grow_chat_state::CompactionMode::Transcript,
             verbatim_input: true,
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
@@ -510,7 +510,7 @@ async fn create_test_actor_with_memory(
         nudges_used_this_session: 0,
     });
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
+    let chat_state_handle = grow_chat_state::ChatStateActor::spawn(
         vec![],
         grow_sampling_types::SamplingConfig {
             base_url: "http://localhost".to_string(),
@@ -527,7 +527,7 @@ async fn create_test_actor_with_memory(
             reasoning_effort: None,
             stream_tool_calls: None,
         },
-        Box::new(xai_chat_state::NullChatPersistence),
+        Box::new(grow_chat_state::NullChatPersistence),
         event_tx,
         tokio_util::sync::CancellationToken::new(),
     );
@@ -578,7 +578,7 @@ async fn create_test_actor_with_memory(
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
             previous_model: std::cell::Cell::new(None),
-            compaction_mode: xai_chat_state::CompactionMode::Transcript,
+            compaction_mode: grow_chat_state::CompactionMode::Transcript,
             verbatim_input: true,
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),

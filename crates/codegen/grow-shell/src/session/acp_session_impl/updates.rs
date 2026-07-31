@@ -15,7 +15,7 @@ impl SessionActor {
     /// Apply subagent usage. `Ok` after chat-state acked; `Err` if apply failed.
     pub(super) async fn record_subagent_usage(
         &self,
-        by_model: &[(String, xai_chat_state::UsageTotals)],
+        by_model: &[(String, grow_chat_state::UsageTotals)],
         parent_prompt_id: Option<&str>,
         incomplete: bool,
     ) -> Result<SubagentUsageApply, ()> {

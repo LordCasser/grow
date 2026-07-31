@@ -1155,13 +1155,13 @@ fn token_estimation_for_window_safety() {
             ConversationItem::user("Hello, how are you?"),
             ConversationItem::assistant("I'm doing well, thank you!"),
         ];
-    let estimated = xai_chat_state::estimate_conversation_tokens(&conversation);
+    let estimated = grow_chat_state::estimate_conversation_tokens(&conversation);
     assert!(estimated > 0, "should produce non-zero estimate");
     assert!(
             estimated < 100,
             "short conversation should have small token estimate"
         );
-    assert_eq!(xai_chat_state::estimate_conversation_tokens(&[]), 0);
+    assert_eq!(grow_chat_state::estimate_conversation_tokens(&[]), 0);
 }
 #[test]
 fn token_estimation_accounts_for_images() {
@@ -1173,7 +1173,7 @@ fn token_estimation_accounts_for_images() {
             synthetic_reason: None,
             ..Default::default()
         })];
-    let text_tokens = xai_chat_state::estimate_conversation_tokens(&text_only);
+    let text_tokens = grow_chat_state::estimate_conversation_tokens(&text_only);
     let with_image = vec![ConversationItem::User(UserItem {
             content: vec![
                 ContentPart::Text {
@@ -1186,7 +1186,7 @@ fn token_estimation_accounts_for_images() {
             synthetic_reason: None,
             ..Default::default()
         })];
-    let image_tokens = xai_chat_state::estimate_conversation_tokens(&with_image);
+    let image_tokens = grow_chat_state::estimate_conversation_tokens(&with_image);
     assert_eq!(
             image_tokens,
             text_tokens + 765,
@@ -1201,7 +1201,7 @@ fn token_estimation_accounts_for_images() {
             synthetic_reason: None,
             ..Default::default()
         })];
-    let multi_tokens = xai_chat_state::estimate_conversation_tokens(&multi_image);
+    let multi_tokens = grow_chat_state::estimate_conversation_tokens(&multi_image);
     assert_eq!(multi_tokens, 765 * 3, "three images = 3 * 765 tokens");
 }
 #[test]

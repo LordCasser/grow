@@ -1,4 +1,4 @@
-//! xai-chat-state — Actor-based chat state management for xAI agents.
+//! grow-chat-state — Actor-based chat state management for xAI agents.
 //!
 //! This crate extracts conversation state management from `grow-shell`'s
 //! `acp_session.rs` into a standalone actor. It follows the same actor pattern

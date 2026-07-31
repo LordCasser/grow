@@ -1,6 +1,6 @@
 //! Compacted-history assembly (grow-build's rebuild structure, generic).
 //!
-//! Moved from `xai-chat-state::compaction_utils::build_compacted_history` and
+//! Moved from `grow-chat-state::compaction_utils::build_compacted_history` and
 //! made generic over a write-side item factory so any harness can assemble
 //! the canonical post-compaction history:
 //!

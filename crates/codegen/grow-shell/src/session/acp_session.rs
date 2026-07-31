@@ -624,7 +624,7 @@ pub(crate) struct SessionActor {
     /// Actor-based chat state handle — manages conversation, tokens, timing, and persistence.
     /// Also stores credentials (api_key, optional extra access key,
     /// client_version) opaquely.
-    pub(crate) chat_state_handle: xai_chat_state::ChatStateHandle,
+    pub(crate) chat_state_handle: grow_chat_state::ChatStateHandle,
     /// Current running prompt/turn id, shared with SessionHandle.
     pub(crate) current_prompt_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     pub(crate) unattributed_background_usage: std::sync::atomic::AtomicBool,
@@ -1987,3 +1987,6 @@ mod recap_display_only_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/reminder_policy_tests.rs"]
 mod reminder_policy_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/truncation_recovery_tests.rs"]
+mod truncation_recovery_tests;

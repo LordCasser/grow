@@ -43,7 +43,7 @@ async fn write_compaction_segment_numbers_and_indexes_resume_safely() {
     let seg = |summary: &str| CompactionSegmentFile {
         items: vec![ConversationItem::user("a"), ConversationItem::user("b")],
         summary: summary.to_string(),
-        detail: xai_chat_state::CompactionDetail::Verbose,
+        detail: grow_chat_state::CompactionDetail::Verbose,
         timestamp: "2026-01-01T00:00:00Z".to_string(),
     };
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
@@ -51,7 +51,7 @@ async fn write_compaction_segment_numbers_and_indexes_resume_safely() {
     adapter.write_compaction_segment(&info, &seg("second")).await.unwrap();
     let base = adapter
         .session_dir(&info)
-        .join(xai_chat_state::compaction_transcript::COMPACTION_DIR);
+        .join(grow_chat_state::compaction_transcript::COMPACTION_DIR);
     let read = |p: &str| std::fs::read_to_string(base.join(p)).unwrap();
     assert!(read("segment_000.md").contains("# HISTORICAL -- DO NOT EDIT"));
     assert!(read("segment_001.md").contains("second"));
@@ -710,7 +710,7 @@ async fn copy_session_data_copies_compaction_segments_when_enabled() {
     let seg = |s: &str| CompactionSegmentFile {
         items: vec![ConversationItem::user("a"), ConversationItem::user("b")],
         summary: s.to_string(),
-        detail: xai_chat_state::CompactionDetail::Verbose,
+        detail: grow_chat_state::CompactionDetail::Verbose,
         timestamp: "2026-01-01T00:00:00Z".to_string(),
     };
     adapter.write_compaction_segment(&source_info, &seg("first")).await.unwrap();
@@ -733,7 +733,7 @@ async fn copy_session_data_copies_compaction_segments_when_enabled() {
     assert_eq!(result.compaction_segments_copied, 3);
     let dst = adapter
         .session_dir(&target_info)
-        .join(xai_chat_state::compaction_transcript::COMPACTION_DIR);
+        .join(grow_chat_state::compaction_transcript::COMPACTION_DIR);
     assert!(dst.join("segment_000.md").is_file());
     assert!(dst.join("segment_001.md").is_file());
     assert!(dst.join("INDEX.md").is_file());
@@ -754,7 +754,7 @@ async fn copy_session_data_copies_compaction_segments_when_enabled() {
     assert!(
             !adapter
                 .session_dir(&target2)
-                .join(xai_chat_state::compaction_transcript::COMPACTION_DIR)
+                .join(grow_chat_state::compaction_transcript::COMPACTION_DIR)
                 .exists()
         );
 }
@@ -2321,7 +2321,7 @@ async fn assert_copy_clears_pending_relocation(fork_filter: bool) {
                     )
                     .await
                     .unwrap(),
-                xai_chat_state::StrictAppendAck::AlreadyPresent(item)
+                grow_chat_state::StrictAppendAck::AlreadyPresent(item)
                     if item.text_content() == "switch"
             ));
         let retried = adapter.read_summary_sync(&target).unwrap();
@@ -3364,12 +3364,12 @@ async fn retry_after_lost_ack_converges_memory_and_disk_to_authoritative_item() 
                 .map_err(|error| match error {
                     crate::session::storage::AppendCwdSwitchError::NotCommitted(
                         error,
-                    ) => xai_chat_state::StrictAppendError::NotCommitted(error),
+                    ) => grow_chat_state::StrictAppendError::NotCommitted(error),
                     crate::session::storage::AppendCwdSwitchError::Committed {
                         acknowledgement,
                         source,
                     } => {
-                        xai_chat_state::StrictAppendError::Committed {
+                        grow_chat_state::StrictAppendError::Committed {
                             acknowledgement,
                             source,
                         }
@@ -3384,7 +3384,7 @@ async fn retry_after_lost_ack_converges_memory_and_disk_to_authoritative_item() 
     });
     let persistence = crate::session::chat_persistence::ChannelChatPersistence::new(tx);
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let chat = xai_chat_state::ChatStateActor::spawn(
+    let chat = grow_chat_state::ChatStateActor::spawn(
         vec![],
         grow_sampling_types::SamplingConfig {
             base_url: String::new(),
@@ -3410,7 +3410,7 @@ async fn retry_after_lost_ack_converges_memory_and_disk_to_authoritative_item() 
                 std::num::NonZeroU64::new(5).unwrap(),
             )
             .await,
-            Err(xai_chat_state::StrictAppendError::Indeterminate(_))
+            Err(grow_chat_state::StrictAppendError::Indeterminate(_))
         ));
     assert!(chat.get_conversation().await.is_empty());
     assert!(matches!(
@@ -3420,7 +3420,7 @@ async fn retry_after_lost_ack_converges_memory_and_disk_to_authoritative_item() 
             )
             .await
             .unwrap(),
-            xai_chat_state::StrictAppendAck::AlreadyPresent(item)
+            grow_chat_state::StrictAppendAck::AlreadyPresent(item)
                 if item.text_content() == "authoritative A"
         ));
     let memory = chat.get_conversation().await;
@@ -3450,7 +3450,7 @@ async fn acknowledged_chat_append_preserves_existing_file_bytes_and_appends_once
                 .append_cwd_switch_commit_aware(&info, &switch)
                 .await
                 .unwrap(),
-            xai_chat_state::StrictAppendAck::Appended
+            grow_chat_state::StrictAppendAck::Appended
         ));
     let after = std::fs::read(&path).unwrap();
     assert!(after.starts_with(&prefix));
