@@ -92,7 +92,7 @@ fn spawn_gateway_responder(
                             .tool_update_statuses
                             .push((
                                 update.tool_call_id.0.to_string(),
-                                update.fields.status.clone(),
+                                update.fields.status,
                             ));
                     }
                     let _ = args.response_tx.send(Ok(()));

@@ -500,8 +500,6 @@ fn write_summary(
         current_model_id: acp::ModelId::new("benchmark-model"),
         parent_session_id: None,
         forked_at: None,
-        collection_id: None,
-        next_trace_turn: 0,
         chat_format_version: 1,
         prompt_display_cwd: None,
         session_kind: None,
@@ -514,7 +512,6 @@ fn write_summary(
         git_remotes: vec!["git@github.com:xai-org/benchmark.git".to_owned()],
         head_commit: Some(format!("{ordinal:040x}")),
         head_branch: Some("main".to_owned()),
-        request_id: None,
         grow_home: None,
         last_active_at: Some(active_at),
         generated_title: Some(format!("Benchmark session {ordinal}")),
@@ -539,15 +536,11 @@ fn summary_ids(summaries: &[Summary]) -> Vec<String> {
 }
 
 async fn build_local_list_with_delayed_peer(cwd: String) -> UnifiedListResult {
-    let local = build_unified_list(
-        None,
-        None,
-        ListReq {
-            cwd: Some(cwd),
-            limit: Some(RECENT_LIMIT),
-            ..ListReq::default()
-        },
-    );
+    let local = build_unified_list(ListReq {
+        cwd: Some(cwd),
+        limit: Some(RECENT_LIMIT),
+        ..ListReq::default()
+    });
     let delayed_peer = async {
         tokio::time::sleep(COOPERATIVE_PEER_DELAY).await;
     };
@@ -645,15 +638,11 @@ fn bench_session_list(c: &mut Criterion) {
         BenchmarkId::new(format!("local_only_cwd_limit_{RECENT_LIMIT}"), &fixture_id),
         |b| {
             b.iter_with_large_drop(|| {
-                black_box(runtime.block_on(build_unified_list(
-                    None,
-                    None,
-                    ListReq {
-                        cwd: Some(black_box(fixture.picker_cwd.clone())),
-                        limit: Some(RECENT_LIMIT),
-                        ..ListReq::default()
-                    },
-                )))
+                black_box(runtime.block_on(build_unified_list(ListReq {
+                    cwd: Some(black_box(fixture.picker_cwd.clone())),
+                    limit: Some(RECENT_LIMIT),
+                    ..ListReq::default()
+                })))
             })
         },
     );
