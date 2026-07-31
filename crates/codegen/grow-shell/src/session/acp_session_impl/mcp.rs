@@ -589,9 +589,13 @@ impl SessionActor {
     /// `<system-reminder>` at a turn boundary. The `search_tool` description
     /// itself stays static (cacheable).
     pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder(&self) {
-        let disabled_gateway_tools = crate::util::config::get_all_mcp_disabled_tools(
-            std::path::Path::new(&self.session_info.cwd),
-        );
+        let cwd = std::path::Path::new(&self.session_info.cwd);
+        let disabled_gateway_tools = crate::util::config::get_all_mcp_disabled_tools(cwd);
+        // Keep the plan-mode gate's read-only classification in sync with the
+        // config on every snapshot refresh (whole-set replace, same source as
+        // the init-time load below).
+        let read_only_servers = crate::util::config::get_read_only_mcp_servers(cwd);
+        self.mcp_state.lock().await.read_only_mcp_servers = read_only_servers;
         self.refresh_mcp_snapshot_and_schedule_reminder_with_disabled(&disabled_gateway_tools)
             .await;
     }
@@ -1093,6 +1097,13 @@ impl SessionActor {
                     mcp_state.disabled_tools = dt;
                 }
             }
+            // Read-only classification for the plan-mode gate: whole-set
+            // replace (no populate-once guard) so config edits that add or
+            // clear `read_only` are reflected on the next init.
+            mcp_state.read_only_mcp_servers =
+                crate::util::config::get_read_only_mcp_servers(std::path::Path::new(
+                    &self.session_info.cwd,
+                ));
             let existing: std::collections::HashSet<String> =
                 mcp_state.owned_clients.keys().cloned().collect();
             (
@@ -1304,6 +1315,9 @@ impl SessionActor {
         let session_id_owned = self.session_info.id.0.clone();
         let mcps_root_bg = self.cursor_mcps_root();
         let disabled_gateway_tools_bg = crate::util::config::get_all_mcp_disabled_tools(
+            std::path::Path::new(&self.session_info.cwd),
+        );
+        let read_only_servers_bg = crate::util::config::get_read_only_mcp_servers(
             std::path::Path::new(&self.session_info.cwd),
         );
         let server_transport_map: std::collections::HashMap<String, &'static str> =
@@ -1717,6 +1731,14 @@ impl SessionActor {
                         );
                     }
                 }
+            }
+            // Refresh the read-only classification with the value loaded at
+            // background-task start (same whole-set pattern as the init-time
+            // load), so the plan-mode gate sees the config this init was
+            // launched against.
+            {
+                let mut mcp_state = mcp_state_bg.lock().await;
+                mcp_state.read_only_mcp_servers = read_only_servers_bg;
             }
             refresh_mcp_snapshot_and_schedule_reminder_with(
                 tool_bridge.clone(),

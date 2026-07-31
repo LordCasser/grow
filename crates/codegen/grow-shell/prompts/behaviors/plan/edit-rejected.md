@@ -1,1 +1,1 @@
-Rejected: workspace editing is prohibited until a Plan is approved. Continue investigating with already-authorized tools, or submit the complete plan through `${{ tools.by_kind.plan_control }}` with `action="submit"` and its `plan` argument.
+Rejected: workspace or external-state mutation is prohibited until a Plan is approved. Continue investigating with already-authorized tools, or submit the complete plan through `${{ tools.by_kind.plan_control }}` with `action="submit"` and its `plan` argument.

@@ -477,6 +477,10 @@ enabled = false
 # from = "region"
 # map = { us = "https://us-mcp.example.com/api/mcp", eu = "https://eu-mcp.example.com/api/mcp" }
 
+# 声明该 server 的全部工具为只读：Plan 模式审批前阶段可放行其工具（仅此用途）。
+# 粗粒度：server 内混合读写工具时需谨慎。
+# read_only = true
+
 # 按 server 禁用工具；server/tool 名称均为发现后的实际 ID。
 [disabled_mcp_tools]
 remote-tools = ["dangerous_tool"]

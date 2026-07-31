@@ -143,17 +143,25 @@ pub(super) enum PlanEditGate {
 /// Gate edit-class tool calls while plan mode is active.
 ///
 /// Every potentially mutating access class is rejected before the normal
-/// permission flow. Unknown MCP calls fail closed while drafting/amending.
-/// Plan artifact persistence is performed only by the shell control plane; Behavior
+/// permission flow. MCP calls are allowed only when the call's server is
+/// config-declared read-only (`[mcp_servers.<name>] read_only = true`);
+/// unknown MCP calls fail closed while drafting/amending. Plan artifact
+/// persistence is performed only by the shell control plane; Behavior
 /// never grants an edit capability and never bypasses session permissions.
 ///
 /// Read, grep, web fetch, and Plan control/question calls continue to the
-/// ordinary permission path. Bash, edits, and MCP calls are blocked until the
-/// approved Plan enters Executing.
+/// ordinary permission path. Bash, edits, and non-read-only MCP calls are
+/// blocked until the approved Plan enters Executing.
+///
+/// `mcp_read_only`: `Some(true)` when the MCP call targets a config-declared
+/// read-only server, `Some(false)` otherwise (fail closed), `None` for
+/// non-MCP access kinds. Callers resolve it from `McpState` (async) BEFORE
+/// taking the `behavior` lock.
 pub(super) fn plan_mode_edit_gate(
     tracker: &crate::session::behavior::BehaviorController,
     tool_input: &ToolInput,
     access_kind: &AccessKind,
+    mcp_read_only: Option<bool>,
 ) -> PlanEditGate {
     if !tracker.is_plan() {
         return PlanEditGate::Allow;
@@ -165,13 +173,42 @@ pub(super) fn plan_mode_edit_gate(
         return PlanEditGate::Allow;
     }
     match access_kind {
-        AccessKind::Edit(_) | AccessKind::Bash(_) | AccessKind::MCPTool { .. } => {
-            PlanEditGate::RejectEdit
+        AccessKind::Edit(_) | AccessKind::Bash(_) => PlanEditGate::RejectEdit,
+        AccessKind::MCPTool { .. } => {
+            if mcp_read_only == Some(true) {
+                PlanEditGate::Allow
+            } else {
+                PlanEditGate::RejectEdit
+            }
         }
         AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebFetch(_) => {
             PlanEditGate::Allow
         }
     }
+}
+
+/// Resolve whether an MCP tool call targets a config-declared read-only
+/// server (`[mcp_servers.<name>] read_only = true`) — the single source of
+/// truth for the plan-mode read-only classification.
+///
+/// Returns `None` for non-MCP access kinds (the gate ignores it), `Some(true)`
+/// when the qualified `server__tool` name parses and the server is in the
+/// cached read-only set, and `Some(false)` otherwise — unparseable qualified
+/// names and unconfigured servers fail closed.
+///
+/// Async because the cached set lives in `McpState` (tokio Mutex). Callers
+/// must run this BEFORE acquiring the `behavior` lock so neither lock is held
+/// across an await of the other.
+async fn plan_gate_mcp_read_only(
+    mcp_state: &TokioMutex<McpState>,
+    access_kind: &AccessKind,
+) -> Option<bool> {
+    let AccessKind::MCPTool { name, .. } = access_kind else {
+        return None;
+    };
+    let server = grow_mcp::servers::parse_mcp_qualified_name(name).map(|(_, server, _)| server);
+    let mcp_state = mcp_state.lock().await;
+    Some(server.is_some_and(|s| mcp_state.read_only_mcp_servers.contains(s)))
 }
 /// Typed view of a Plan approval decision. The wire type carries `outcome` as
 /// a string; both the mid-turn
@@ -868,7 +905,16 @@ impl SessionActor {
             }
         };
         let access_kind = AccessKind::from(&tool_input);
-        let plan_gate = plan_mode_edit_gate(&self.behavior.lock(), &tool_input, &access_kind);
+        // Lock order: resolve the read-only MCP classification from the
+        // (async) `mcp_state` BEFORE taking the `behavior` lock — never hold
+        // one lock while awaiting the other.
+        let mcp_read_only = plan_gate_mcp_read_only(&self.mcp_state, &access_kind).await;
+        let plan_gate = plan_mode_edit_gate(
+            &self.behavior.lock(),
+            &tool_input,
+            &access_kind,
+            mcp_read_only,
+        );
         if plan_gate != PlanEditGate::Allow {
             tracing::info_span!(
                 "tool.decision",
@@ -2756,10 +2802,13 @@ mod plan_control_tail_predicate_tests {
 }
 #[cfg(test)]
 mod plan_mode_edit_gate_tests {
-    use super::{PlanEditGate, plan_mode_edit_gate};
+    use super::{PlanEditGate, plan_gate_mcp_read_only, plan_mode_edit_gate};
     use crate::session::behavior::BehaviorController;
+    use crate::session::mcp_servers::McpState;
     use grow_tools::types::ToolInput;
     use grow_workspace::permission::AccessKind;
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
     /// Tracker in Plan Drafting with the session artifact at
     /// `/tmp/gate-session/plan.md`.
     fn active_tracker() -> BehaviorController {
@@ -2767,8 +2816,20 @@ mod plan_mode_edit_gate_tests {
         assert!(t.select_behavior(Some(xai_tool_types::BehaviorId::Plan)));
         t
     }
+    /// Non-MCP inputs resolve no read-only classification (`None`).
     fn gate(tracker: &BehaviorController, input: &ToolInput) -> PlanEditGate {
-        plan_mode_edit_gate(tracker, input, &AccessKind::from(input))
+        plan_mode_edit_gate(tracker, input, &AccessKind::from(input), None)
+    }
+    /// MCP inputs carry the call-site-resolved read-only classification.
+    fn gate_mcp(tracker: &BehaviorController, input: &ToolInput, read_only: bool) -> PlanEditGate {
+        plan_mode_edit_gate(tracker, input, &AccessKind::from(input), Some(read_only))
+    }
+    fn mcp_tool(qualified_name: &str) -> ToolInput {
+        use grow_tools::implementations::use_tool::UseToolInput;
+        ToolInput::UseTool(UseToolInput {
+            tool_name: qualified_name.into(),
+            tool_input: serde_json::json!({}),
+        })
     }
     fn search_replace(path: &str) -> ToolInput {
         use grow_tools::implementations::grow_build::search_replace::SearchReplaceInput;
@@ -2844,13 +2905,38 @@ mod plan_mode_edit_gate_tests {
             PlanEditGate::RejectEdit
         );
     }
+    /// A config-declared read-only server's MCP tools pass while drafting;
+    /// every other MCP tool fails closed (unconfigured server, or a
+    /// `Some(false)` classification from the call-site lookup).
     #[test]
-    fn executing_allows_edits_but_never_workflow() {
+    fn read_only_mcp_tools_allowed_while_drafting() {
+        let t = active_tracker();
+        assert_eq!(
+            gate_mcp(&t, &mcp_tool("docs__search_docs"), true),
+            PlanEditGate::Allow
+        );
+        assert_eq!(
+            gate_mcp(&t, &mcp_tool("unknown__search_docs"), false),
+            PlanEditGate::RejectEdit
+        );
+    }
+    #[test]
+    fn executing_allows_mcp_tools_regardless_of_read_only() {
         use grow_tools::implementations::grow_build::workflow::WorkflowToolInput;
         let mut t = active_tracker();
         assert!(t.submit_initial_plan());
         assert!(t.approve_submitted_plan());
         assert_eq!(gate(&t, &write("/tmp/src/main.rs")), PlanEditGate::Allow);
+        // MCP tools are unrestricted in Executing; the read-only classification
+        // only narrows non-executing phases.
+        assert_eq!(
+            gate_mcp(&t, &mcp_tool("any__tool"), false),
+            PlanEditGate::Allow
+        );
+        assert_eq!(
+            gate_mcp(&t, &mcp_tool("any__tool"), true),
+            PlanEditGate::Allow
+        );
         let workflow = ToolInput::Workflow(WorkflowToolInput {
             max_concurrency: None,
             agent_budget: None,
@@ -2862,6 +2948,67 @@ mod plan_mode_edit_gate_tests {
             validate_only: false,
         });
         assert_eq!(gate(&t, &workflow), PlanEditGate::RejectWorkflow);
+    }
+    /// The call-site lookup: parse `server__tool`, hit the cached read-only
+    /// set, and fail closed for unparseable names and unconfigured servers.
+    #[tokio::test]
+    async fn mcp_read_only_lookup_hits_set_and_fails_closed() {
+        let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
+        mcp_state
+            .lock()
+            .await
+            .read_only_mcp_servers
+            .insert("docs".to_string());
+
+        // Non-MCP access kinds resolve to `None` (gate ignores it).
+        assert_eq!(
+            plan_gate_mcp_read_only(&mcp_state, &AccessKind::Read(None)).await,
+            None
+        );
+        let mcp = |name: &str| AccessKind::MCPTool {
+            name: name.to_string(),
+            input: serde_json::json!({}),
+        };
+        // Configured read-only server.
+        assert_eq!(
+            plan_gate_mcp_read_only(&mcp_state, &mcp("docs__search_docs")).await,
+            Some(true)
+        );
+        // Configured-but-not-read-only server fails closed.
+        assert_eq!(
+            plan_gate_mcp_read_only(&mcp_state, &mcp("linear__create_issue")).await,
+            Some(false)
+        );
+        // Unparseable qualified name (missing `__` delimiter) fails closed.
+        assert_eq!(
+            plan_gate_mcp_read_only(&mcp_state, &mcp("not_qualified")).await,
+            Some(false)
+        );
+    }
+    /// Drafting: an MCP tool from a config-declared read-only server is
+    /// allowed end-to-end (lookup + gate); an unconfigured server is rejected.
+    #[tokio::test]
+    async fn drafting_read_only_server_tool_passes_gate_end_to_end() {
+        let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
+        mcp_state
+            .lock()
+            .await
+            .read_only_mcp_servers
+            .insert("docs".to_string());
+        let tracker = active_tracker();
+        for (qualified, expected) in [
+            ("docs__search_docs", PlanEditGate::Allow),
+            ("other__search_docs", PlanEditGate::RejectEdit),
+        ] {
+            let input = mcp_tool(qualified);
+            let access_kind = AccessKind::from(&input);
+            let read_only = plan_gate_mcp_read_only(&mcp_state, &access_kind).await;
+            assert_eq!(
+                plan_mode_edit_gate(&tracker, &input, &access_kind, read_only),
+                expected,
+                "unexpected gate outcome for {qualified}"
+            );
+        }
     }
     /// Normal allows edits; a selected Drafting Plan already narrows them.
     #[test]

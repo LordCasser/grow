@@ -232,6 +232,7 @@ async fn run_add(args: AddArgs) -> Result<()> {
     let config = McpServerConfig {
         transport: resolved.transport,
         enabled: true,
+        read_only: false,
         oauth: None,
         setup: None,
         startup_timeout_sec: None,

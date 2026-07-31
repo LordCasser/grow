@@ -837,6 +837,32 @@ pub fn get_all_mcp_disabled_tools(
         .collect()
 }
 
+/// Load server names declared `read_only = true` in `[mcp_servers.<name>]`.
+///
+/// Single source of truth for the plan-mode read-only MCP classification:
+/// while a Plan is in a non-executing phase, tools from a listed server are
+/// allowed through the edit gate; every other MCP tool is rejected. MCP
+/// `annotations`/`readOnlyHint` are never consulted. Mirrors
+/// `get_all_mcp_disabled_tools` (whole-set, config-derived; the session caches
+/// the result in `McpState` at init instead of re-reading per tool call).
+pub fn get_read_only_mcp_servers(
+    _cwd: &std::path::Path,
+) -> std::collections::HashSet<String> {
+    read_only_mcp_servers_from_config(&load_mcp_server_configs())
+}
+
+/// Pure filter over parsed server configs; split out so the classification
+/// rule is unit-testable without the process-cached config home.
+fn read_only_mcp_servers_from_config(
+    servers: &IndexMap<String, McpServerConfig>,
+) -> std::collections::HashSet<String> {
+    servers
+        .iter()
+        .filter(|(_, config)| config.read_only)
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// Load all configured MCP servers as `(name, config)` pairs.
 ///
 /// Reads from `load_effective_config()`, which merges the system-managed,
@@ -1658,6 +1684,31 @@ command = ""
         assert!(!config.mcp_servers.contains_key("bad"));
         assert!(config.mcp_servers.contains_key("good"));
         assert!(config.mcp_servers["good"].enabled);
+    }
+
+    #[test]
+    fn read_only_mcp_servers_filter_matches_config_flag() {
+        let mut servers = IndexMap::new();
+        for (name, read_only) in [
+            ("docs", true),
+            ("search", true),
+            ("linear", false),
+            ("defaults", false),
+        ] {
+            let config: McpServerConfig = serde_json::from_value(serde_json::json!({
+                "command": "npx",
+                "read_only": read_only,
+            }))
+            .unwrap();
+            servers.insert(name.to_string(), config);
+        }
+        // `get_read_only_mcp_servers` itself reads the process-cached config
+        // home (`grow_home()` OnceLock), so the pure filter is tested here.
+        let read_only = read_only_mcp_servers_from_config(&servers);
+        assert_eq!(
+            read_only,
+            std::collections::HashSet::from(["docs".to_string(), "search".to_string()])
+        );
     }
 
     #[test]

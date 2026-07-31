@@ -103,6 +103,7 @@ pub const KNOWN_MCP_SERVER_FIELDS: &[&str] = &[
     "oauth_client_id",
     "oauth_client_secret_env_var",
     "oauth_scopes",
+    "read_only",
     "setup",
     "startup_timeout_sec",
     "tool_timeout_sec",
@@ -217,6 +218,13 @@ pub struct McpServerConfig {
     pub transport: McpServerTransportConfig,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Declares the server's tools read-only for the plan-mode gate: while a
+    /// Plan is in a non-executing phase (Drafting / AwaitingApproval /
+    /// Amending), tools from a `read_only = true` server are allowed, all
+    /// other MCP tools are rejected. Single source of truth for that
+    /// classification — MCP `annotations`/`readOnlyHint` are never consulted.
+    #[serde(default)]
+    pub read_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<McpJsonOAuthBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -599,6 +607,7 @@ mod tests {
                 cwd: Some("/tmp".into()),
             },
             enabled: true,
+            read_only: false,
             oauth: Some(McpJsonOAuthBlock::default()),
             setup: None,
             startup_timeout_sec: Some(10),
@@ -617,6 +626,7 @@ mod tests {
                 oauth_scopes: Some(vec!["s".into()]),
             },
             enabled: true,
+            read_only: false,
             oauth: None,
             setup: None,
             startup_timeout_sec: None,
@@ -657,6 +667,23 @@ mod tests {
             McpServerTransportConfig::StreamableHttp { .. }
         ));
         assert!(http.to_acp_mcp_server("x").is_some());
+    }
+
+    #[test]
+    fn read_only_defaults_to_false_and_parses_explicit_values() {
+        let plain: McpServerConfig =
+            serde_json::from_value(serde_json::json!({ "command": "npx" })).unwrap();
+        assert!(!plain.read_only, "read_only must default to false");
+
+        let flagged: McpServerConfig =
+            serde_json::from_value(serde_json::json!({ "command": "npx", "read_only": true }))
+                .unwrap();
+        assert!(flagged.read_only, "read_only = true must parse");
+
+        let explicit_false: McpServerConfig =
+            serde_json::from_value(serde_json::json!({ "command": "npx", "read_only": false }))
+                .unwrap();
+        assert!(!explicit_false.read_only);
     }
 
     #[test]
@@ -724,6 +751,7 @@ mod tests {
                 oauth_scopes: None,
             },
             enabled: true,
+            read_only: false,
             oauth: None,
             setup: Some(setup),
             startup_timeout_sec: None,
@@ -782,6 +810,7 @@ mod tests {
                 oauth_scopes: None,
             },
             enabled: true,
+            read_only: false,
             oauth: None,
             setup: Some(setup),
             startup_timeout_sec: None,
