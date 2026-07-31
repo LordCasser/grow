@@ -459,8 +459,7 @@ fn is_global_config_dir_impl(dir: &Path, grow_home: &Path, home: Option<&Path>) 
         return true;
     }
     let Some(home) = home else { return false };
-    if canon(dir) == canon(&home.join(".config/.grow")) || canon(dir) == canon(&home.join(".agent"))
-    {
+    if canon(dir) == canon(&home.join(".grow")) {
         return true;
     }
     if dir.parent().map(canon) != Some(canon(home)) {

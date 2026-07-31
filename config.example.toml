@@ -274,7 +274,7 @@ plan = true
 explore = "deepseek/deepseek-chat"
 "review/backend" = "deepseek/deepseek-chat"
 
-# 推荐用 ~/.config/.grow/agents/**/*.md 定义 Agent。下面是仍受支持的可选 role/persona
+# 推荐用 ~/.grow/agents/**/*.md 定义 Agent。下面是仍受支持的可选 role/persona
 # spawn preset；它们不会建立固定父子层级。
 [subagents.roles.researcher]
 description = "Read-only repository research"

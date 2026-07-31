@@ -23,7 +23,7 @@ Grow 不是 xAI 官方产品，也不内置 Grok 模型、推理端点或推理�
 | Agent 关系 | 可包含产品特定模式 | 所有 Agent 定义平级；主/子只是一次 session 中的运行角色，主 Agent 可通过工具策略限制本次可调用的子 Agent |
 | 权限切换 | 上游快捷键/模式 | `Ctrl+X` 后按 `P` 打开 Ask / Auto / Always Approve 选单；`Ctrl+R` 用于 redo |
 | Behavior 切换 | 与权限或 Agent 混合 | `Ctrl+X` 后按 `B` 打开 Normal / Clarify / Plan / Workflow / Deep Research / Goal 选单 |
-| Agent/Skill 用户目录 | 产品目录 | 优先 `~/.config/.grow`，同名资源找不到时再回退 `~/.agent` |
+| Agent/Skill 用户目录 | 产品目录 | 仅 `~/.grow`（项目级 `.grow` + 用户级 `~/.grow`） |
 | 缺少 LLM 配置 | 可落入产品默认模型 | 连接前阻止启动，并引导编辑 `~/.grow/config.toml` |
 
 Grow 的 ACP 扩展协议使用 `grow/*`（转发层使用 `_grow/*`）。上游名称只保留在来源说明、
@@ -43,7 +43,7 @@ Web Search 由用户配置 MCP Server 提供。
 
 1. 确认 `cargo metadata --locked --no-deps` 中所有 `grow-*` 包均为 `1.0.0`。
 2. 按本文的 release 构建方式验证三个支持目标，并确认产物内嵌 `rg`。
-3. 创建并发布 `v1.0.0` GitHub Release；workflow 会校验 tag、构建资产并生成 `SHA256SUMS`。
+3. 创建并发布 `v1.0.0` GitHub Release；workflow 会校验 tag、构建三个平台的 `grow` 二进制并挂到 Release。
 
 完整可复制配置见 [config.example.toml](config.example.toml)。示例不包含真实密钥，默认通过
 `env_key` 读取环境变量。
@@ -272,14 +272,11 @@ OpenCode 式的 `mode`、父 Agent 或子 Agent 身份。主/子只是运行时�
 
 ```text
 <project>/.grow/agents/       # 当前项目，优先级最高
-~/.config/.grow/agents/       # Grow 用户级定义
-~/.agent/agents/              # 用户级回退目录
+~/.grow/agents/               # Grow 用户级定义
 ```
 
-项目级定义会从当前目录向上发现到仓库根。用户级资源按以下顺序加载：
-
-1. `~/.config/.grow/agents/`、`~/.config/.grow/skills/`
-2. 对当前名称未命中时，回退到 `~/.agent/agents/`、`~/.agent/skills/`
+项目级定义会从当前目录向上发现到仓库根。用户级资源只从 `~/.grow/agents/`、
+`~/.grow/skills/` 加载，不再回退 `~/.agent`。
 
 最小定义示例：
 
@@ -331,7 +328,6 @@ definition = "/absolute/path/to/my-agent.md"
 
 - 项目 `.grow/agents/<id>.md` 可同名覆盖项目内可见的用户定义或内置定义。例如创建
   `.grow/agents/explore.md` 可在该项目替换内置 `explore`。
-- `~/.config/.grow/agents/` 同名覆盖 `~/.agent/agents/`。
 - 为保证“列表中看到的定义就是实际调用的定义”，用户级文件不能同名覆盖内置 Agent；需要
   全局采用不同 ID，或用项目级文件覆盖。需要强制使用任意路径作为主 Agent 时使用
   `[agent].definition`。
@@ -487,10 +483,15 @@ env GROW_TOOLS_BUNDLE_RG_PATH=/absolute/path/to/rg \
 
 对应产物位于 `target/release-dist/grow`。
 
-当前官方 release 只构建 macOS arm64、Linux arm64 和 Linux amd64。创建并发布
-`v<crate-version>` GitHub Release 后，[release workflow](.github/workflows/release.yml) 会构建
-这三个目标。CI 会下载并校验与目标架构匹配的固定版本 ripgrep，确认该二进制可通过绝对
-路径在没有 `PATH` 的环境中运行后将其嵌入 Grow，最后上传版本化资产与 `SHA256SUMS`。
+当前官方 release 只构建三个目标：macOS arm64、Linux arm64、Linux amd64（无 Windows / x86_64
+macOS / 其他架构）。创建并发布 `v<crate-version>` GitHub Release 后，
+[release workflow](.github/workflows/release.yml) 会构建这些目标。Linux 产物使用
+`*-unknown-linux-musl` 静态链接，并在 CI 校验无动态库依赖，避免绑定 runner 的 glibc 版本。
+
+GitHub Release 页面**只挂最终 `grow` 二进制**（`grow-{version}-linux-x86_64` /
+`grow-{version}-linux-aarch64` / `grow-{version}-macos-aarch64`），与 auto-update 契约一致；
+protoc、ripgrep 下载包、Actions artifact 等只出现在 CI 过程中，不会作为 Release 下载项。
+CI 会在构建时把固定版本 ripgrep 嵌入二进制，并跑 `grow --version` 烟雾测试。
 
 自动更新只读取 [`LordCasser/grow` Releases](https://github.com/LordCasser/grow/releases)，且默认关闭：
 

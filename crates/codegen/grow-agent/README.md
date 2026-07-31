@@ -15,8 +15,7 @@ independent from Agent selection — whether that host is
 
 Agent definitions are **Markdown files with YAML frontmatter**. Project
 definitions live below `.grow/agents/` or `.claude/agents/`. User definitions
-load from `~/.config/.grow/agents/`, with a per-name fallback to
-`~/.agent/agents/`.
+load from `~/.grow/agents/`.
 
 ```rust
 use grow_agent::{AgentDefinition, AgentBuilder};
@@ -231,14 +230,12 @@ Agent definitions are discovered from multiple locations with priority:
    `.claude/agents/**/*.md` — walk
    from `cwd` up to the git repository root. Files found closer to
    `cwd` take priority.
-2. **User-level primary**: `~/.config/.grow/agents/**/*.md`
-3. **User-level fallback**: `~/.agent/agents/**/*.md`
-4. **Built-in and injected definitions**
+2. **User-level**: `~/.grow/agents/**/*.md`
+3. **Built-in and injected definitions**
 
 Name-based dedup ensures the highest-priority definition wins. For
 example, a project `.grow/agents/code-reviewer.md` shadows a
-user-level definition with the same ID. Within user roots,
-`~/.config/.grow` wins per name and `~/.agent` only fills missing names.
+user-level definition with the same ID.
 
 ## Crate Relationships
 

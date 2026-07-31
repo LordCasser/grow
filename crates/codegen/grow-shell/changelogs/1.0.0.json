@@ -16,7 +16,7 @@
   },
   {
     "category": "features",
-    "description": "**Agent and Skill discovery** prefers `~/.config/.grow` and falls back to `~/.agent`, while Agents remain independent from provider and model selection.",
+    "description": "**Agent and Skill discovery** uses project `.grow` and user `~/.grow` only (no `~/.agent` fallback), while Agents remain independent from provider and model selection.",
     "breaking_change": false
   },
   {

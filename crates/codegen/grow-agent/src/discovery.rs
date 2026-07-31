@@ -1,8 +1,8 @@
 //! Agent definition file discovery.
 //!
 //! Searches project agent roots from cwd to repo root, then
-//! `~/.config/.grow/agents` with per-name fallback to `~/.agent/agents`.
-//! Path-derived IDs and name-based dedup keep the highest-priority definition.
+//! `~/.grow/agents` (user-level). Path-derived IDs and name-based dedup keep
+//! the highest-priority definition.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -184,12 +184,11 @@ fn merge_subagents(
 ///
 /// Search order (highest priority first):
 /// 1. `.grow/agents/` walking from `cwd` up to repo root
-/// 2. `~/.config/.grow/agents/` (user-level)
-/// 3. `~/.agent/agents/` (per-name fallback)
+/// 2. `~/.grow/agents/` (user-level)
 ///
 /// Deduplicates by name — higher-priority definitions win.
-/// User-level Agent directories in priority order. `grow_home` is intentionally
-/// ignored: Agent/Skill resources share stable user roots independent of the
+/// User-level Agent directories. `grow_home` is intentionally ignored:
+/// Agent/Skill resources share stable user roots independent of the
 /// runtime/config home.
 pub(crate) fn user_agent_dirs(
     home: Option<&Path>,
@@ -768,20 +767,14 @@ mod tests {
     }
 
     #[test]
-    fn user_agent_dirs_use_grow_then_agent_fallback() {
+    fn user_agent_dirs_use_grow_only() {
         let home = Path::new("/home/u");
         let grow = Path::new("/custom/growhome");
         let paths: Vec<_> = user_agent_dirs(Some(home), Some(grow))
             .into_iter()
             .map(|(p, _)| p)
             .collect();
-        assert_eq!(
-            paths,
-            vec![
-                home.join(".config/.grow/agents"),
-                home.join(".agent/agents"),
-            ]
-        );
+        assert_eq!(paths, vec![home.join(".grow/agents")]);
     }
 
     #[test]
@@ -889,18 +882,18 @@ mod tests {
     }
 
     #[test]
-    fn user_grow_root_wins_with_agent_root_as_per_name_fallback() {
+    fn user_level_loads_grow_agents_not_legacy_agent_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path().join("workspace");
         let home = tmp.path().join("home");
-        let grow = home.join(".config/.grow/agents");
-        let fallback = home.join(".agent/agents");
+        let grow = home.join(".grow/agents");
+        let legacy = home.join(".agent/agents");
         fs::create_dir_all(&cwd).unwrap();
         fs::create_dir_all(&grow).unwrap();
-        fs::create_dir_all(&fallback).unwrap();
+        fs::create_dir_all(&legacy).unwrap();
         write_agent_file(&grow, "reviewer.md", "ignored", "Grow reviewer");
-        write_agent_file(&fallback, "reviewer.md", "ignored", "Fallback reviewer");
-        write_agent_file(&fallback, "writer.md", "ignored", "Fallback writer");
+        write_agent_file(&legacy, "reviewer.md", "ignored", "Legacy reviewer");
+        write_agent_file(&legacy, "writer.md", "ignored", "Legacy writer");
 
         let defs = discover_with_home(&cwd, Some(&home), None);
         assert_eq!(
@@ -910,12 +903,9 @@ mod tests {
                 .description,
             "Grow reviewer"
         );
-        assert_eq!(
-            defs.iter()
-                .find(|def| def.name == "writer")
-                .unwrap()
-                .description,
-            "Fallback writer"
+        assert!(
+            defs.iter().all(|def| def.name != "writer"),
+            "~/.agent must not be scanned: {defs:?}"
         );
     }
 
@@ -1263,7 +1253,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path().join("workspace");
         let home = tmp.path().join("home");
-        let user_dir = home.join(".config/.grow/agents");
+        let user_dir = home.join(".grow/agents");
         fs::create_dir_all(&cwd).unwrap();
         fs::create_dir_all(&user_dir).unwrap();
 
@@ -1299,7 +1289,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path().join("workspace");
         let home = tmp.path().join("home");
-        let user_dir = home.join(".config/.grow/agents");
+        let user_dir = home.join(".grow/agents");
         fs::create_dir_all(&cwd).unwrap();
         fs::create_dir_all(&user_dir).unwrap();
         write_agent_file(&user_dir, "reviewer.md", "reviewer", "User reviewer");

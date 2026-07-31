@@ -49,7 +49,7 @@ pub struct SkillsConfig {
 /// List all discovered skills with their metadata.
 ///
 /// Priority order: Local (cwd/.grow/skills, cwd/.agents/skills, cwd/.claude/skills) → Intermediate dirs →
-/// Repo (repo_root/.grow/skills, repo_root/.agents/skills, repo_root/.claude/skills) → User (`~/.config/.grow/skills`, then per-name fallback `~/.agent/skills`)
+/// Repo (repo_root/.grow/skills, repo_root/.agents/skills, repo_root/.claude/skills) → User (`~/.grow/skills`)
 /// → additional paths from `config.paths`
 /// → Server (injected `config.server_skill_dirs`)
 /// → Bundled (injected `config.bundled_skill_dirs` + `~/.grow/bundled`; lowest precedence).
@@ -199,8 +199,8 @@ pub fn collect_skill_config_dirs(
         }
     }
 
-    // Priority 3: Grow's user root, then the generic `.agent` per-name
-    // fallback. Vendor compatibility roots are intentionally project-only.
+    // Priority 3: Grow's user root (`~/.grow`). Vendor compatibility roots
+    // are intentionally project-only.
     for root in user_roots {
         try_add(root.clone());
     }

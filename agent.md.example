@@ -1,8 +1,7 @@
 ---
 # Copy this file to one of the following locations and rename it to <agent-id>.md:
 #   Project: .grow/agents/<agent-id>.md
-#   User:    ~/.config/.grow/agents/<agent-id>.md
-#   Fallback: ~/.agent/agents/<agent-id>.md
+#   User:    ~/.grow/agents/<agent-id>.md
 #
 # The file path is the stable Agent ID. `name` is compatibility metadata only.
 # Top-level keys use camelCase. Fields inside `toolConfig.tools` use snake_case.
