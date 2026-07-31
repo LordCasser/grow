@@ -55,7 +55,7 @@ xai-tool-protocol = { workspace = true }
 
 futures = { workspace = true }
 similar = { workspace = true }
-strum = { version = "0.26", features = ["derive"] }
+strum = { workspace = true }
 strip-ansi-escapes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [

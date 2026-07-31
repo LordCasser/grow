@@ -180,7 +180,7 @@ prometheus = { version = "0.14", features = ["process"] }
 prost = "0.14"
 prost-build = "0.14"
 pulldown-cmark = "0.13"
-quick-xml = "0.38"
+quick-xml = "0.39"
 rand = "0.9"
 ratatui = { version = "0.29" }
 ratatui-core = "0.1"
@@ -196,7 +196,7 @@ rsa = "0.9"
 runfiles = "0.1"
 rustc-hash = "2"
 schemars = "1"
-scraper = "0.23"
+scraper = "0.27"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -212,7 +212,7 @@ smallvec = "1"
 strip-ansi-escapes = "0.2.1"
 strum = { version = "0.27", features = ["derive"] }
 supports-color = "3.0"
-syntect = "5.3"
+syntect = { version = "5.3", default-features = false, features = ["parsing", "plist-load", "dump-load", "html"] }
 tar = "0.4"
 tempfile = "3"
 terminput = "0.3"
@@ -231,7 +231,7 @@ tokio-tungstenite = "0.27"
 tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.9"
 toml_edit = "0.22"
-tonic = { version = "0.14", features = ["tls-aws-lc", "gzip", "deflate", "zstd"] }
+tonic = { version = "0.14", features = ["tls-ring", "gzip", "deflate", "zstd"] }
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tower = "0.5"

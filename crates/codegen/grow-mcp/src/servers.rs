@@ -3915,6 +3915,16 @@ fn is_figma_mcp(server_name: &str, url: &str) -> bool {
     {
         return true;
     }
+    // Grow.com remote MCP server name (`grow_com_figma`).
+    const COM_PREFIX: &str = "grow_com_";
+    if let (Some(prefix), Some(rest)) = (
+        server_name.get(..COM_PREFIX.len()),
+        server_name.get(COM_PREFIX.len()..),
+    ) && prefix.eq_ignore_ascii_case(COM_PREFIX)
+        && rest.eq_ignore_ascii_case("figma")
+    {
+        return true;
+    }
     reqwest::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
