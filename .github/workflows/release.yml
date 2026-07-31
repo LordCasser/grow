@@ -1,3 +1,6 @@
+# Official Grow release assets for the three supported platforms:
+#   macos-aarch64, linux-x86_64, linux-aarch64
+# Asset names must stay grow-{version}-{asset_platform} for grow-update.
 name: Build release assets
 
 on:
@@ -29,21 +32,51 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      # Real GHA: fetch the release tag from the remote.
+      # Local act: bind-mount the clone and skip actions/checkout — that action
+      # cleans the workdir and re-fetches origin, which wipes uncommitted work
+      # and fails when the tag exists only locally.
+      - uses: actions/checkout@v6
+        if: ${{ !env.ACT }}
         with:
           ref: ${{ env.RELEASE_TAG }}
+
+      - name: Act — use bind-mounted workspace
+        if: ${{ env.ACT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null
+          echo "ACT workspace HEAD=$(git rev-parse --short HEAD) tag=${RELEASE_TAG}→$(git rev-parse --short "${RELEASE_TAG}^{commit}")"
+
+      # cargo metadata needs a toolchain (not preinstalled on GHA / act images).
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92.0"
 
       - id: version
         name: Match tag to Cargo version
         shell: bash
         run: |
           set -euo pipefail
-          version="$(cargo metadata --locked --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "grow-pager-bin") | .version')"
+          if [[ "${ACT:-}" == "true" ]]; then
+            # Read workspace version from the tagged tree without checkout wipe.
+            version="$(git show "${RELEASE_TAG}:Cargo.toml" \
+              | awk '
+                  $0 == "[workspace.package]" { in_pkg=1; next }
+                  in_pkg && /^\[/ { exit }
+                  in_pkg && $1 == "version" {
+                    gsub(/"/, "", $3); print $3; exit
+                  }
+                ')"
+          else
+            version="$(cargo metadata --locked --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name == "grow-pager-bin") | .version')"
+          fi
           tag_version="${RELEASE_TAG#v}"
           test -n "$version"
           if [[ "$tag_version" != "$version" ]]; then
-            echo "Release tag $RELEASE_TAG does not match grow-pager-bin $version" >&2
+            echo "Release tag $RELEASE_TAG does not match grow-pager-bin / workspace $version" >&2
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -51,33 +84,61 @@ jobs:
   build:
     name: Build ${{ matrix.asset_platform }}
     needs: validate
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Linux amd64: static musl binary (portable across glibc distros).
           - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             asset_platform: linux-x86_64
             binary: grow
+            musl: true
             rg_target: x86_64-unknown-linux-musl
             rg_sha256: 253ad0fd5fef0d64cba56c70dccdacc1916d4ed70ad057cc525fcdb0c3bbd2a7
+          # Linux arm64: static musl binary. Official ripgrep has no aarch64-musl
+          # asset for 15.0.0, so embed the gnu build (extracted sidecar).
           - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             asset_platform: linux-aarch64
             binary: grow
+            musl: true
             rg_target: aarch64-unknown-linux-gnu
             rg_sha256: 15f8cc2fab12d88491c54d49f38589922a9d6a7353c29b0a0856727bcdf80754
           - runner: macos-15
             target: aarch64-apple-darwin
             asset_platform: macos-aarch64
             binary: grow
+            musl: false
             rg_target: aarch64-apple-darwin
             rg_sha256: 98bb2e61e7277ba0ea72d2ae2592497fd8d2940934a16b122448d302a6637e3b
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        if: ${{ !env.ACT }}
         with:
           ref: ${{ env.RELEASE_TAG }}
+
+      - name: Act — checkout tagged tree on bind mount
+        if: ${{ env.ACT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "act build requires a clean worktree (bind mount shares the host clone)" >&2
+            git status --short >&2
+            exit 1
+          fi
+          # Remember how to restore after the job (always step below).
+          if branch="$(git symbolic-ref -q --short HEAD 2>/dev/null)"; then
+            echo "ACT_RESTORE_REF=${branch}" >> "$GITHUB_ENV"
+          else
+            echo "ACT_RESTORE_REF=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          fi
+          git checkout --detach "${RELEASE_TAG}"
+          echo "ACT build tree=$(git rev-parse --short HEAD) (${RELEASE_TAG})"
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -88,9 +149,14 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install musl tools
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+          shared-key: release-dist
 
       - name: Prepare bundled ripgrep
         shell: bash
@@ -119,9 +185,36 @@ jobs:
         shell: bash
         env:
           GROW_VERSION: ${{ needs.validate.outputs.version }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
         run: |
           cargo build --locked --profile release-dist \
             -p grow-pager-bin --bin grow --target "${{ matrix.target }}"
+
+      - name: Verify Linux binary is static
+        if: matrix.musl
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release-dist/${{ matrix.binary }}"
+          file "$BIN"
+          if readelf -d "$BIN" 2>/dev/null | grep -q 'NEEDED'; then
+            echo "Linux release binary has dynamic dependencies:" >&2
+            readelf -d "$BIN" >&2
+            exit 1
+          fi
+
+      - name: Smoke-test binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release-dist/${{ matrix.binary }}"
+          test -x "$BIN"
+          test -s "$BIN"
+          # Native same-arch runners: musl/gnu host can both exec the musl binary.
+          version_out="$("$BIN" --version)"
+          echo "$version_out"
+          echo "$version_out" | grep -F "${{ needs.validate.outputs.version }}"
 
       - name: Stage release asset
         shell: bash
@@ -130,30 +223,69 @@ jobs:
           cp "target/${{ matrix.target }}/release-dist/${{ matrix.binary }}" \
             "dist/grow-${{ needs.validate.outputs.version }}-${{ matrix.asset_platform }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: grow-${{ matrix.asset_platform }}
           path: dist/grow-*
           if-no-files-found: error
           retention-days: 3
 
+      - name: Act — restore bind-mounted branch
+        if: ${{ always() && env.ACT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ACT_RESTORE_REF:-}" ]]; then
+            git checkout -f "${ACT_RESTORE_REF}"
+            echo "restored ${ACT_RESTORE_REF}"
+          fi
+
+  # Intermediate build outputs stay on the Actions run (upload-artifact).
+  # The GitHub Release page only gets final grow binaries for end users.
   publish:
     name: Publish release assets
     needs: [validate, build]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: grow-*
           path: dist
           merge-multiple: true
 
-      - name: Create checksums
+      - name: Verify staged binaries
         working-directory: dist
-        run: sha256sum grow-* > SHA256SUMS
+        run: |
+          set -euo pipefail
+          # Official CI: exactly three platform assets.
+          # Local act often runs a matrix subset (Linux only) — require ≥1.
+          mapfile -t assets < <(find . -maxdepth 1 -type f -name 'grow-*' | sort)
+          if [[ "${ACT:-}" == "true" ]]; then
+            test "${#assets[@]}" -ge 1
+          else
+            test "${#assets[@]}" -eq 3
+          fi
+          for f in "${assets[@]}"; do
+            test -s "$f"
+            echo "release asset: ${f#./} ($(wc -c <"$f") bytes)"
+          done
+          sha256sum grow-*
 
-      - name: Upload assets to GitHub Release
+      # Never touch a real GitHub Release from local act runs.
+      - name: Upload grow binaries to GitHub Release
+        if: ${{ !env.ACT }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: gh release upload "$RELEASE_TAG" dist/* --clobber
+        run: |
+          set -euo pipefail
+          # Only grow-{version}-{platform} binaries — no checksum files, no archives.
+          gh release upload "$RELEASE_TAG" dist/grow-* --clobber
+
+      - name: Act dry-run summary
+        if: ${{ env.ACT }}
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          echo "ACT=true: skipping gh release upload. Staged assets:"
+          ls -la grow-*
