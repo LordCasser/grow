@@ -12,7 +12,7 @@
 //!                                            ← top vpad (configurable)
 //!  ❯ type here, text wraps                   ← prefix + TextArea
 //!    continuation of long input...            ← TextArea continuation
-//!  grow-3 · yolo                             ← info line (optional)
+//!  grow · grow-3 · yolo                      ← info line (agent · model · flags)
 //! ```
 //!
 //! The accent line (┃) and selection box are rendered by the caller.
@@ -307,7 +307,9 @@ pub struct PromptFlag<'a> {
 
 /// Optional info line rendered below the prompt text.
 pub struct PromptInfo<'a> {
-    /// Primary label to display on the info line (left side).
+    /// Current session Agent id (leftmost). Callers pass `"grow"` when unknown.
+    pub agent_name: &'a str,
+    /// Model label to display after the agent (e.g. `grow-4.5 (high)`).
     pub model_name: &'a str,
     /// Flags to display on the left side, joined by " · " (e.g., "plan", "always-approve").
     pub flags: &'a [PromptFlag<'a>],
@@ -536,17 +538,9 @@ impl PromptWidget {
             .bg(theme.bg_base);
         textarea.scrollbar_padding = 1;
         let mut slash_controller = crate::slash::SlashController::with_builtins(cwd.to_path_buf());
-        let toggle = crate::views::agents_modal::load_agent_toggle();
-        slash_controller.set_agent_catalog(
-            crate::views::agents_modal::build_agent_list(cwd, &toggle)
-                .into_iter()
-                .filter(|entry| entry.enabled)
-                .map(|entry| crate::slash::command::AgentArg {
-                    name: entry.name,
-                    description: entry.description,
-                })
-                .collect(),
-        );
+        // Main-session switch catalog (native + plugin); no subagents.toggle.
+        slash_controller
+            .set_agent_catalog(crate::views::agents_modal::build_switch_agent_catalog(cwd));
         Self {
             textarea,
             textarea_state: TextAreaState::default(),
@@ -3253,7 +3247,8 @@ impl PromptWidget {
         Style::default().fg(fg).bg(bg)
     }
 
-    /// Render the info line: left-aligned `model_name · flag1 · flag2`, right-aligned `multiline`.
+    /// Render the info line: left-aligned `agent · model · flag1 · flag2`,
+    /// right-aligned `multiline`.
     ///
     /// `pub(crate)` so the dashboard's dispatch box (which draws its own
     /// chrome) can paint an identical model + mode indicator on its bottom
@@ -3288,7 +3283,7 @@ impl PromptWidget {
         let sep_style = Style::default().fg(sep_fg).bg(bg);
         let flag_style = Style::default().fg(theme.gray).bg(bg);
 
-        // Left side: model name + flags. Wrap with leading/trailing spaces
+        // Left side: agent · model · flags. Wrap with leading/trailing spaces
         // so the rendered cells adjacent to the corner borders (╰ / ╯) are
         // blanked out instead of showing the underlying `─` glyphs from the
         // bottom-border fill — giving 1 cell of visual padding on each side.
@@ -3304,7 +3299,15 @@ impl PromptWidget {
             left_spans.push(Span::styled(warning.to_owned(), warning_style));
             left_spans.push(Span::styled(" · ", sep_style));
         }
-        left_spans.push(Span::styled(info.model_name, model_style));
+        if !info.agent_name.is_empty() {
+            left_spans.push(Span::styled(info.agent_name, model_style));
+            if !info.model_name.is_empty() || !info.flags.is_empty() {
+                left_spans.push(Span::styled(" · ", sep_style));
+            }
+        }
+        if !info.model_name.is_empty() {
+            left_spans.push(Span::styled(info.model_name, model_style));
+        }
         for flag in info.flags {
             left_spans.push(Span::styled(" · ", sep_style));
             let mut style = if let Some(color) = flag.color {

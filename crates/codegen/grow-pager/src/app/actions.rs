@@ -358,10 +358,9 @@ pub enum Action {
         model_id: acp::ModelId,
         effort: Option<ReasoningEffort>,
     },
-    /// Switch the active prompt profile without changing model or permissions.
+    /// Switch the active prompt profile without changing model, permissions, or Behavior.
     SwitchAgent {
         agent_name: String,
-        behavior: Option<grow_tools::types::SessionMode>,
     },
     /// Open a slash command's compact argument picker without mutating the draft.
     OpenCommandPicker {
@@ -1433,14 +1432,6 @@ pub enum Effect {
     SwitchAgent {
         agent_id: AgentId,
         session_id: acp::SessionId,
-        agent_name: String,
-    },
-    /// Apply a Behavior transition and switch Agent only when the shell reports
-    /// that the transition was applied.
-    SetModeThenAgent {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
-        mode_id: acp::SessionModeId,
         agent_name: String,
     },
     /// Fetch changelog from CDN (both markdown + structured JSON).

@@ -104,9 +104,9 @@ Switch models. Accepts a model ID or display name (case-insensitive), and for re
 /model Reasoning X high
 ```
 
-### `/agent [agent] [behavior]`
+### `/agent [agent]`
 
-Switch the current session's Agent and optionally its Behavior. Completion first selects an Agent, then offers **Keep current Behavior** followed by the available Behaviors. When a Behavior transition needs confirmation or is rejected, the Agent is not partially switched.
+Switch the current session's Agent without changing Behavior, model, or permissions. Agent ids come from discovery: built-ins and top-level definitions use a bare name; nested files under `~/.grow/agents/` or `.grow/agents/` use a path-style id (for example `software-engineering/software-architect`). The picker marks each row with `(system)` or `(user)` (and project/bundled when applicable). Use `/behavior` or `Ctrl+X` then `b` to change Behavior separately.
 
 ### `/effort [level]`
 

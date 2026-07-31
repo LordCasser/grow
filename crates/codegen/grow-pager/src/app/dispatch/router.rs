@@ -827,48 +827,32 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 prev_model_id: None,
             }]
         }
-        Action::SwitchAgent {
-            agent_name,
-            behavior,
-        } => {
+        Action::SwitchAgent { agent_name } => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];
             };
             let Some(agent) = app.agents.get(&id) else {
                 return vec![];
             };
-            let toggle = crate::views::agents_modal::load_agent_toggle();
-            let valid = crate::views::agents_modal::build_agent_list(&agent.session.cwd, &toggle)
-                .into_iter()
-                .any(|entry| entry.enabled && entry.name == agent_name);
-            if !valid {
-                app.show_toast("Unknown or disabled Agent");
-                return vec![];
-            }
+            // Main-session switch: do not gate on `[subagents.toggle]` (that
+            // toggle only controls whether a type can be spawned as a child
+            // subagent). Soft-allow names not in the local catalog so shell
+            // discovery (incl. plugin agents) remains SSOT; failures surface
+            // via SwitchAgentComplete scrollback.
             let Some(session_id) = agent.session.session_id.clone() else {
-                app.show_toast("Agent can be changed after the session connects.");
+                if let Some(agent) = app.agents.get_mut(&id) {
+                    agent.scrollback.push_block(crate::scrollback::block::RenderBlock::system(
+                        "Agent can be changed after the session connects.",
+                    ));
+                } else {
+                    app.show_toast("Agent can be changed after the session connects.");
+                }
                 return vec![];
             };
-            let current_behavior = agent.behavior_mode_pending.unwrap_or(agent.behavior_mode);
-            if let Some(mode) = behavior
-                && mode != current_behavior
-            {
-                let effects = dispatch_set_behavior_mode(app, mode);
-                return effects
-                    .into_iter()
-                    .map(|effect| match effect {
-                        Effect::SetSessionMode {
-                            session_id,
-                            mode_id,
-                        } => Effect::SetModeThenAgent {
-                            agent_id: id,
-                            session_id,
-                            mode_id,
-                            agent_name: agent_name.clone(),
-                        },
-                        other => other,
-                    })
-                    .collect();
+            // Mark local intent before the ACP round-trip so complete can
+            // always emit feedback even if AgentChanged updates the name first.
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.agent_switch_pending = Some(agent_name.clone());
             }
             vec![Effect::SwitchAgent {
                 agent_id: id,

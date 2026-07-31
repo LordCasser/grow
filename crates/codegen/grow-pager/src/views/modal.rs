@@ -632,7 +632,7 @@ impl ActiveModal {
             } => match command.as_str() {
                 "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
                 "model" | "m" => "Pick model",
-                "agent" if !args_query.is_empty() => "Pick Behavior",
+                // Agent is single-phase (no Behavior follow-up).
                 "agent" => "Pick Agent",
                 "effort" => "Pick reasoning effort",
                 "permission" => "Pick Permission",

@@ -490,12 +490,24 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             result,
         } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
+                // Local dispatch sets `agent_switch_pending`; clear it here.
+                // `AgentChanged` may have already written `session_agent_name`,
+                // so success feedback keys off pending intent, not name equality.
+                let local_switch = agent.agent_switch_pending.take().is_some();
                 match result {
                     Ok(()) => {
                         agent.session_agent_name = Some(agent_name.clone());
-                        agent.show_toast(&format!("Agent switched to {agent_name}"));
+                        if local_switch {
+                            agent.scrollback.push_block(RenderBlock::system(format!(
+                                "Switched to {agent_name}"
+                            )));
+                        }
                     }
-                    Err(error) => agent.show_toast(&format!("Couldn't switch Agent: {error}")),
+                    Err(error) => {
+                        agent.scrollback.push_block(RenderBlock::system(format!(
+                            "Couldn't switch Agent: {error}"
+                        )));
+                    }
                 }
             }
             vec![]

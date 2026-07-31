@@ -103,8 +103,13 @@ pub struct ArgItem {
 /// already-resolved catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentArg {
+    /// Discovery id: bare name for builtins / top-level files, path-style for
+    /// nested definitions (e.g. `software-engineering/software-architect`).
     pub name: String,
     pub description: String,
+    /// Discovery scope label (`built-in`, `user`, `project`, `bundled`).
+    /// Used for skills-style `(system)` / `(user)` row suffixes.
+    pub scope: String,
 }
 
 /// Read-only context for generating suggestions.

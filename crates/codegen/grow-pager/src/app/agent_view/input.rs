@@ -1264,17 +1264,12 @@ impl AgentView {
         InputOutcome::Unchanged
     }
     pub(crate) fn open_command_picker(&mut self, command: &str, args_query: &str) {
-        let toggle = crate::views::agents_modal::load_agent_toggle();
-        self.prompt.slash_controller.set_agent_catalog(
-            crate::views::agents_modal::build_agent_list(&self.session.cwd, &toggle)
-                .into_iter()
-                .filter(|entry| entry.enabled)
-                .map(|entry| crate::slash::command::AgentArg {
-                    name: entry.name,
-                    description: entry.description,
-                })
-                .collect(),
-        );
+        // Main-session switch catalog (native + plugin); no subagents.toggle.
+        self.prompt
+            .slash_controller
+            .set_agent_catalog(crate::views::agents_modal::build_switch_agent_catalog(
+                &self.session.cwd,
+            ));
         self.sync_command_selection_context();
         let items = self
             .prompt
@@ -1292,7 +1287,9 @@ impl AgentView {
                     args_query: args_query.to_string(),
                     items: items.clone(),
                     original_items: items,
-                    state: crate::views::picker::PickerState::input_active(),
+                    // Policy lives in ArgPickerProfile (modals); do not re-derive
+                    // nav vs type-to-find here.
+                    state: Self::arg_picker_open_state(command, args_query),
                     previous_palette: None,
                     window: crate::views::modal_window::ModalWindowState::new(),
                 });

@@ -1014,12 +1014,28 @@ pub fn render_picker_row(
     } else {
         row.badge.width() as u16 + 1
     }; // +1 space before badge
-    let right_width = row.right_label.width() as u16;
-    let gap = if right_width > 0 { 2u16 } else { 0 };
-    let max_label_width = width
-        .saturating_sub(right_width + gap + trailing_pad + badge_width + prefix_width)
-        as usize;
+    // Budget right_label so long descriptions (e.g. Behavior) never push past
+    // the row width or collapse left label width to zero.
+    let content_width = width.saturating_sub(trailing_pad + badge_width + prefix_width);
+    let raw_right = row.right_label.width() as u16;
+    let (right_budget, max_label_width) = if raw_right == 0 {
+        (0u16, content_width as usize)
+    } else {
+        // Keep at least half the content for the left label when possible.
+        let min_left = (content_width / 2).max(1);
+        let max_right = content_width.saturating_sub(min_left + 2); // gap=2
+        let right_budget = raw_right.min(max_right).min(content_width.saturating_sub(1));
+        let gap = if right_budget > 0 { 2u16 } else { 0 };
+        let max_label = content_width.saturating_sub(right_budget + gap) as usize;
+        (right_budget, max_label)
+    };
     let truncated_label = truncate_str(row.label, max_label_width);
+    let truncated_right = if right_budget > 0 {
+        truncate_str(row.right_label, right_budget as usize)
+    } else {
+        String::new()
+    };
+    let right_width = truncated_right.width() as u16;
 
     // Render as separate spans: indent, fold indicator (shared), label.
     let mut cur_x = x;
@@ -1090,16 +1106,21 @@ pub fn render_picker_row(
         );
     }
 
-    // Right side (with trailing padding).
+    // Right side (with trailing padding). Truncated to stay inside the row.
     if right_width > 0 {
         let right_style = Style::default().fg(meta_fg).bg(row_bg);
         let right_x = x + width.saturating_sub(right_width + trailing_pad);
-        buf.set_span(
-            right_x,
-            y,
-            &Span::styled(row.right_label, right_style),
-            right_width,
-        );
+        // Ensure we never paint left of the content origin (overflow guard).
+        let right_x = right_x.max(x);
+        let paint_w = right_width.min(width.saturating_sub(right_x.saturating_sub(x)));
+        if paint_w > 0 {
+            buf.set_span(
+                right_x,
+                y,
+                &Span::styled(&truncated_right, right_style),
+                paint_w,
+            );
+        }
     }
 
     // Description lines (shown when expanded) or summary lines (collapsed).
@@ -1919,8 +1940,37 @@ pub fn render_picker_in_modal(
     non_selectable: &[bool],
     loading: bool,
 ) {
+    render_picker_in_modal_ex(
+        buf,
+        content_area,
+        inner_x,
+        inner_width,
+        theme,
+        state,
+        entries,
+        non_selectable,
+        loading,
+        false,
+    );
+}
+
+/// Like [`render_picker_in_modal`], with an explicit `disable_search` flag for
+/// compact nav-only ArgPickers (effort / permission / behavior).
+#[allow(clippy::too_many_arguments)]
+pub fn render_picker_in_modal_ex(
+    buf: &mut Buffer,
+    content_area: Rect,
+    inner_x: u16,
+    inner_width: u16,
+    theme: &Theme,
+    state: &mut PickerState,
+    entries: &[PickerEntry<'_>],
+    non_selectable: &[bool],
+    loading: bool,
+    disable_search: bool,
+) {
     let search_active = state.search_active;
-    render_picker_in_modal_inner(
+    render_picker_in_modal_body(
         buf,
         content_area,
         inner_x,
@@ -1932,6 +1982,7 @@ pub fn render_picker_in_modal(
         loading,
         search_active,
         true,
+        disable_search,
     );
 }
 
@@ -1950,23 +2001,61 @@ pub fn render_picker_in_modal_inner(
     search_active: bool,
     show_search_hint: bool,
 ) {
-    render_picker_search_bar(
+    render_picker_in_modal_body(
         buf,
-        content_area.x,
-        content_area.y,
-        content_area.width,
+        content_area,
+        inner_x,
+        inner_width,
         theme,
         state,
+        entries,
+        non_selectable,
+        loading,
         search_active,
         show_search_hint,
-        Some(theme.bg_base),
+        false,
     );
-    let sep_y = content_area.y + 1;
-    if sep_y < content_area.y + content_area.height {
-        render_divider(buf, inner_x, sep_y, inner_width, theme, Some(theme.bg_base));
-    }
-    let entries_start_y = sep_y + 1;
-    let search_bar_rect = Rect::new(content_area.x, content_area.y, content_area.width, 1);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_picker_in_modal_body(
+    buf: &mut Buffer,
+    content_area: Rect,
+    inner_x: u16,
+    inner_width: u16,
+    theme: &Theme,
+    state: &mut PickerState,
+    entries: &[PickerEntry<'_>],
+    non_selectable: &[bool],
+    loading: bool,
+    search_active: bool,
+    show_search_hint: bool,
+    disable_search: bool,
+) {
+    let (entries_start_y, search_bar_rect) = if disable_search {
+        // Title lives on the ModalWindow border; list starts at the top of content.
+        (content_area.y, Rect::default())
+    } else {
+        render_picker_search_bar(
+            buf,
+            content_area.x,
+            content_area.y,
+            content_area.width,
+            theme,
+            state,
+            search_active,
+            show_search_hint,
+            Some(theme.bg_base),
+        );
+        let sep_y = content_area.y + 1;
+        if sep_y < content_area.y + content_area.height {
+            render_divider(buf, inner_x, sep_y, inner_width, theme, Some(theme.bg_base));
+        }
+        (
+            sep_y + 1,
+            Rect::new(content_area.x, content_area.y, content_area.width, 1),
+        )
+    };
     let entries_area = Rect {
         x: content_area.x,
         y: entries_start_y,
@@ -3983,5 +4072,71 @@ mod tests {
             handle_picker_input(&Event::Paste("x\r\ny".to_owned()), &mut state, 3, &config);
         assert!(matches!(outcome, PickerOutcome::QueryChanged));
         assert_eq!(state.query(), "axyb");
+    }
+
+    /// Long right_label (e.g. Behavior descriptions) must not paint past the
+    /// row width — regression for NavCompact overflow.
+    #[test]
+    fn long_right_label_stays_within_row_width() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = Theme::current();
+        let width = 36u16; // ~NavCompact inner width
+        let area = Rect::new(0, 0, width, 1);
+        let mut buffer = Buffer::empty(area);
+        // Sentinel fill past where content should stop (for out-of-bounds check
+        // we only look at cells inside the row).
+        let long_desc = "Direct execution without a specialized collaboration protocol";
+        let row = PickerRow {
+            label: "Normal",
+            right_label: long_desc,
+            selected: false,
+            expanded: false,
+            fields: &[],
+            description_lines: &[],
+            summary_lines: &[],
+            dimmed: false,
+            indent: 0,
+            badge: "",
+            badge_color: None,
+            collapsible: false,
+            underline_last_desc: false,
+        };
+        let rendered = render_picker_row(
+            &mut buffer,
+            area.x,
+            area.y,
+            area.width,
+            &theme,
+            &row,
+            false,
+            None,
+            1,
+        );
+        assert_eq!(rendered.rows, 1);
+
+        // Reconstruct painted non-blank span: every non-space glyph must lie
+        // within [x, x+width).
+        let mut last_nonempty = 0u16;
+        for x in area.x..area.x + area.width {
+            let cell = buffer.cell((x, area.y)).expect("cell in row");
+            if cell.symbol() != " " && !cell.symbol().is_empty() {
+                last_nonempty = x;
+            }
+        }
+        assert!(
+            last_nonempty < area.x + area.width,
+            "painted content must stay inside row width; last={last_nonempty} limit={}",
+            area.x + area.width
+        );
+        // Left label still visible (at least first letter of "Normal").
+        let left_text: String = (area.x..area.x + area.width)
+            .filter_map(|x| buffer.cell((x, area.y)).map(|c| c.symbol().to_string()))
+            .collect();
+        assert!(
+            left_text.contains('N') || left_text.contains("Normal"),
+            "left label should remain visible; got {left_text:?}"
+        );
     }
 }

@@ -1265,6 +1265,10 @@ pub struct AgentView {
     pub(crate) timeline_hover_preview: Option<(usize, String)>,
     /// Running agent definition for this session (`grow/session/info` `agentName`).
     pub session_agent_name: Option<String>,
+    /// Local `/agent` switch in flight: target name set when dispatching
+    /// `Effect::SwitchAgent`, cleared on `SwitchAgentComplete`. Used so the
+    /// success scrollback is not suppressed when `AgentChanged` arrives first.
+    pub agent_switch_pending: Option<String>,
     /// Map of child session IDs to subagent metadata. Populated on
     /// `SubagentSpawned` notifications, used for permission routing
     /// (which agent owns a session) and provenance display.

@@ -1563,53 +1563,6 @@ pub(crate) fn execute(
                 }
             });
         }
-        Effect::SetModeThenAgent {
-            agent_id,
-            session_id,
-            mode_id,
-            agent_name,
-        } => {
-            let tx = acp_tx.clone();
-            tasks.spawn(async move {
-                let mode_request = acp::SetSessionModeRequest::new(session_id.clone(), mode_id);
-                let result = match acp_send(mode_request, &tx).await {
-                    Ok(response) => behavior_change_applied(response.meta.as_ref())
-                        .map_err(|error| sanitize_user_error(&error)),
-                    Err(error) => Err(sanitize_user_error(&error.to_string())),
-                };
-                if let Err(error) = result {
-                    return TaskResult::SwitchAgentComplete {
-                        agent_id,
-                        agent_name,
-                        result: Err(error),
-                    };
-                }
-                #[derive(serde::Serialize)]
-                #[serde(rename_all = "camelCase")]
-                struct SetAgentRequest<'a> {
-                    session_id: &'a str,
-                    agent_name: &'a str,
-                }
-                let request = acp::ExtRequest::new(
-                    "grow/session/set_agent",
-                    serde_json::value::to_raw_value(&SetAgentRequest {
-                        session_id: session_id.0.as_ref(),
-                        agent_name: &agent_name,
-                    })
-                    .expect("serialize set-agent params")
-                    .into(),
-                );
-                let result = acp_send(request, &tx)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| sanitize_user_error(&error.to_string()));
-                TaskResult::SwitchAgentComplete {
-                    agent_id,
-                    agent_name,
-                    result,
-                }
-            });
-        }
         Effect::ProbeClipboardAttachment { ctx, change_count } => {
             tasks
                 .spawn(async move {

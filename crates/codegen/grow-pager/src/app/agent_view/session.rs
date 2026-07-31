@@ -283,6 +283,7 @@ impl AgentView {
             timeline_hover: None,
             timeline_hover_preview: None,
             session_agent_name: None,
+            agent_switch_pending: None,
             subagent_sessions: HashMap::new(),
             subagent_views: HashMap::new(),
             active_subagent: None,
@@ -402,6 +403,7 @@ impl AgentView {
             self.scrollback.remove_entry(rid);
         }
         self.session.model_switch_pending = false;
+        self.agent_switch_pending = None;
         self.pending_adoption_updates.clear();
         let fresh = self.scrollback.fresh_continuation();
         self.session_reload = Some(SessionReload {

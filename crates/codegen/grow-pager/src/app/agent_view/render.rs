@@ -2225,8 +2225,10 @@ impl AgentView {
             Some(eff) => format!("{model_id} ({eff})"),
             None => model_id,
         };
+        let agent_label = self.session_agent_name.as_deref().unwrap_or("grow");
         let info = match &self.prompt_mode {
             PromptMode::Normal => PromptInfo {
+                agent_name: agent_label,
                 model_name: &model_label,
                 flags: mode_flags,
                 multiline,
@@ -2237,6 +2239,7 @@ impl AgentView {
                 let pos = self.session.queue_position(*id).map(|i| i + 1).unwrap_or(1);
                 editing_label = format!("editing queued #{pos}");
                 PromptInfo {
+                    agent_name: agent_label,
                     model_name: &editing_label,
                     flags: mode_flags,
                     multiline,
@@ -2247,6 +2250,7 @@ impl AgentView {
         };
         let info = if let Some(label) = self.prompt_input_mode.prompt_info_override() {
             PromptInfo {
+                agent_name: "",
                 model_name: label,
                 flags: &[],
                 multiline: false,

@@ -1031,12 +1031,11 @@ fn switch_model_complete_success_updates_model_and_pushes_message() {
     );
     // Success message pushed to scrollback.
     assert_eq!(app.agents[&id].scrollback.len(), initial_scrollback + 1);
-    // PersistPreferredModel effect emitted.
-    assert_eq!(effects.len(), 1);
-    assert!(matches!(
-        &effects[0],
-        Effect::PersistPreferredModel { model_id: mid, .. } if *mid == model_id.clone()
-    ));
+    // Session switch is session-scoped only — never writes [models].default.
+    assert!(
+        effects.is_empty(),
+        "session model switch must not PersistPreferredModel, got {effects:?}"
+    );
 }
 
 #[test]
@@ -1047,6 +1046,10 @@ fn switch_agent_complete_updates_only_agent_name() {
     let agent = app.agents.get_mut(&id).unwrap();
     agent.session.models.current = Some(model_id.clone());
     agent.session_agent_name = Some("builder".into());
+    // Local dispatch marks pending; AgentChanged may already have the new name.
+    agent.agent_switch_pending = Some("reviewer".into());
+    agent.session_agent_name = Some("reviewer".into());
+    let before = agent.scrollback.len();
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SwitchAgentComplete {
@@ -1062,7 +1065,72 @@ fn switch_agent_complete_updates_only_agent_name() {
         app.agents[&id].session_agent_name.as_deref(),
         Some("reviewer")
     );
+    assert!(app.agents[&id].agent_switch_pending.is_none());
     assert_eq!(app.agents[&id].session.models.current, Some(model_id));
+    assert_eq!(app.agents[&id].scrollback.len(), before + 1);
+    let scrollback = &app.agents[&id].scrollback;
+    let last = scrollback.entry(scrollback.len() - 1).expect("last entry");
+    let text = match &last.block {
+        crate::scrollback::block::RenderBlock::System(b) => b.text.clone(),
+        other => panic!("expected System block, got {other:?}"),
+    };
+    assert!(
+        text.contains("Switched to reviewer"),
+        "expected scrollback system message even after AgentChanged race, got {text}"
+    );
+}
+
+#[test]
+fn switch_agent_complete_without_pending_skips_success_message() {
+    // Remote AgentChanged-only path: no local pending → no "Switched to" block.
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let before = app.agents[&id].scrollback.len();
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SwitchAgentComplete {
+            agent_id: id,
+            agent_name: "reviewer".into(),
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert_eq!(
+        app.agents[&id].session_agent_name.as_deref(),
+        Some("reviewer")
+    );
+    assert_eq!(
+        app.agents[&id].scrollback.len(),
+        before,
+        "remote-only complete must not push local switch feedback"
+    );
+}
+
+#[test]
+fn switch_agent_complete_failure_writes_scrollback() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let before = app.agents[&id].scrollback.len();
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SwitchAgentComplete {
+            agent_id: id,
+            agent_name: "missing".into(),
+            result: Err("unknown agent: missing".into()),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert_eq!(app.agents[&id].scrollback.len(), before + 1);
+    let scrollback = &app.agents[&id].scrollback;
+    let last = scrollback.entry(scrollback.len() - 1).expect("last entry");
+    let text = match &last.block {
+        crate::scrollback::block::RenderBlock::System(b) => b.text.clone(),
+        other => panic!("expected System block, got {other:?}"),
+    };
+    assert!(
+        text.contains("Couldn't switch Agent"),
+        "expected failure scrollback, got {text}"
+    );
 }
 
 #[test]
@@ -1103,7 +1171,7 @@ fn switch_model_complete_skips_message_and_persist_when_unchanged() {
 }
 
 #[test]
-fn switch_model_complete_persists_resolved_effort_from_catalog_meta() {
+fn switch_model_complete_resolves_effort_from_catalog_meta_session_only() {
     use grow_shell::sampling::types::ReasoningEffort;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -1150,27 +1218,15 @@ fn switch_model_complete_persists_resolved_effort_from_catalog_meta() {
         app.agents[&id].session.models.reasoning_effort,
         Some(ReasoningEffort::Xhigh)
     );
-
-    assert_eq!(effects.len(), 1);
-    match &effects[0] {
-        Effect::PersistPreferredModel {
-            model_id: mid,
-            reasoning_effort,
-        } => {
-            assert_eq!(*mid, model_id);
-            assert_eq!(
-                *reasoning_effort,
-                Some(ReasoningEffort::Xhigh),
-                "persisted effort must mirror the live UI effort so a \
-                     fresh chat does not reset reasoning to a stale default",
-            );
-        }
-        other => panic!("expected PersistPreferredModel, got {other:?}"),
-    }
+    // Session switch does not write config.toml defaults.
+    assert!(
+        effects.is_empty(),
+        "expected no PersistPreferredModel, got {effects:?}"
+    );
 }
 
 #[test]
-fn switch_to_non_reasoning_model_clears_persisted_effort() {
+fn switch_to_non_reasoning_model_clears_session_effort() {
     use grow_shell::sampling::types::ReasoningEffort;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -1216,19 +1272,10 @@ fn switch_to_non_reasoning_model_clears_persisted_effort() {
         app.agents[&id].session.models.reasoning_effort, None,
         "reasoning_effort must be cleared when switching to a non-reasoning model",
     );
-
-    assert_eq!(effects.len(), 1);
-    match &effects[0] {
-        Effect::PersistPreferredModel {
-            reasoning_effort, ..
-        } => {
-            assert_eq!(
-                *reasoning_effort, None,
-                "persisted effort must be None so config.toml clears the stale value",
-            );
-        }
-        other => panic!("expected PersistPreferredModel, got {other:?}"),
-    }
+    assert!(
+        effects.is_empty(),
+        "session switch must not persist defaults, got {effects:?}"
+    );
 }
 
 #[test]
@@ -1343,11 +1390,12 @@ fn model_switch_succeeds_without_changing_agent() {
     // Model should be switched, no modal.
     assert_eq!(app.agents[&id].session.models.current, Some(model_b));
     assert!(app.agents[&id].question_view.is_none());
-    // Should emit PersistPreferredModel.
+    // Session-only: no default-model persist.
     assert!(
-        effects
+        !effects
             .iter()
-            .any(|e| matches!(e, Effect::PersistPreferredModel { .. }))
+            .any(|e| matches!(e, Effect::PersistPreferredModel { .. })),
+        "got {effects:?}"
     );
 }
 

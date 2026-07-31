@@ -780,7 +780,6 @@ fn switch_agent_dispatch_preserves_model_and_emits_session_effect() {
     let effects = dispatch(
         Action::SwitchAgent {
             agent_name: "grow".into(),
-            behavior: None,
         },
         &mut app,
     );
@@ -791,6 +790,32 @@ fn switch_agent_dispatch_preserves_model_and_emits_session_effect() {
             if *agent_id == id && agent_name == "grow"
     ));
     assert_eq!(app.agents[&id].session.models.current, Some(model_id));
+    assert_eq!(
+        app.agents[&id].agent_switch_pending.as_deref(),
+        Some("grow"),
+        "dispatch must mark local switch intent for complete feedback"
+    );
+}
+
+#[test]
+fn switch_agent_soft_allows_unknown_name_for_shell_ssot() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let effects = dispatch(
+        Action::SwitchAgent {
+            agent_name: "software-engineering/software-architect".into(),
+        },
+        &mut app,
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SwitchAgent { agent_id, agent_name, .. }]
+            if *agent_id == id && agent_name == "software-engineering/software-architect"
+    ));
+    assert_eq!(
+        app.agents[&id].agent_switch_pending.as_deref(),
+        Some("software-engineering/software-architect")
+    );
 }
 #[test]
 fn deferred_model_switch_still_works_for_cli_override() {

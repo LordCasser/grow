@@ -17,8 +17,162 @@ use super::app_view::InputOutcome;
 
 use crate::theme::Theme;
 use crate::views::modal::{self, ActiveModal};
+use crate::views::modal_window::ModalSizing;
+use crate::views::picker::PickerState;
+
+/// Visual / input policy for compact ArgPicker selectors (Ctrl+X / bare slash).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgPickerProfile {
+    /// Short fixed lists: effort, permission, behavior, model/agent phase-2.
+    NavCompact,
+    /// Type-to-find catalog: model phase-1, theme.
+    SearchMedium,
+    /// Type-to-find with multi-line descriptions: agent phase-1.
+    SearchRich,
+}
+
+impl ArgPickerProfile {
+    fn for_command(command: &str, args_query: &str) -> Self {
+        let in_phase2 = !args_query.is_empty();
+        match command {
+            "model" | "m" if in_phase2 => Self::NavCompact,
+            "model" | "m" | "theme" | "t" => Self::SearchMedium,
+            // Agent is single-phase (no Behavior follow-up).
+            "agent" => Self::SearchRich,
+            "effort" | "permission" | "behavior" => Self::NavCompact,
+            _ => Self::SearchMedium,
+        }
+    }
+
+    fn disable_search(self) -> bool {
+        matches!(self, Self::NavCompact)
+    }
+
+    /// Modal chrome rows consumed before list items (border + pad + footer +
+    /// optional search/divider). Matches `render_modal_window` +
+    /// `render_picker_in_modal`.
+    fn chrome_rows(self) -> u16 {
+        // border 2 + v_pad 1 + footer 2 = 5; search+divider adds 2 when enabled.
+        match self {
+            Self::NavCompact => 5,
+            Self::SearchMedium | Self::SearchRich => 7,
+        }
+    }
+
+    fn max_visible_items(self) -> u16 {
+        match self {
+            Self::NavCompact => 8,
+            Self::SearchMedium => 8,
+            Self::SearchRich => 6,
+        }
+    }
+
+    fn max_width(self) -> u16 {
+        match self {
+            Self::NavCompact => 40,
+            Self::SearchMedium => 56,
+            Self::SearchRich => 76,
+        }
+    }
+
+    fn min_width(self) -> u16 {
+        match self {
+            Self::NavCompact => 28,
+            Self::SearchMedium => 36,
+            Self::SearchRich => 48,
+        }
+    }
+
+    fn width_pct(self) -> f32 {
+        match self {
+            Self::NavCompact => 0.36,
+            Self::SearchMedium => 0.42,
+            Self::SearchRich => 0.55,
+        }
+    }
+
+    fn initial_state(self) -> PickerState {
+        if self.disable_search() {
+            PickerState::default()
+        } else {
+            PickerState::input_active()
+        }
+    }
+
+    /// Total selector height so `min(n, max_visible)` list rows fit.
+    fn selector_height(self, item_count: usize, area_height: u16) -> u16 {
+        let visible = (item_count as u16)
+            .min(self.max_visible_items())
+            .max(1);
+        // SearchRich may wrap one summary line under each row (+1 per visible).
+        let list_rows = match self {
+            Self::SearchRich => visible.saturating_mul(2),
+            _ => visible,
+        };
+        (self.chrome_rows() + list_rows).min(area_height).max(self.chrome_rows() + 1)
+    }
+
+    fn modal_sizing(self, compact: bool) -> ModalSizing {
+        ModalSizing {
+            width_pct: self.width_pct(),
+            max_width: self.max_width(),
+            min_width: self.min_width(),
+            v_margin: 0,
+            h_pad: 2,
+            v_pad: 1,
+            footer_lines: 2,
+        }
+        .with_compact(compact)
+    }
+}
+
+/// Soft-wrap `text` into at most `max_lines` lines of about `width` columns.
+fn wrap_desc_lines(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    if width == 0 || max_lines == 0 || text.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut rest = text.trim();
+    while !rest.is_empty() && lines.len() < max_lines {
+        if rest.len() <= width {
+            lines.push(rest.to_string());
+            break;
+        }
+        // Prefer break on whitespace near the width budget.
+        let mut split = width.min(rest.len());
+        while split > 0 && !rest.is_char_boundary(split) {
+            split -= 1;
+        }
+        if let Some(space) = rest[..split].rfind(char::is_whitespace) {
+            if space > 0 {
+                split = space;
+            }
+        }
+        let (head, tail) = rest.split_at(split);
+        lines.push(head.trim_end().to_string());
+        rest = tail.trim_start();
+        if lines.len() == max_lines && !rest.is_empty() {
+            // Ellipsize the last line if more text remains.
+            if let Some(last) = lines.last_mut() {
+                if last.len() > 1 {
+                    last.pop();
+                    last.push('…');
+                }
+            }
+            break;
+        }
+    }
+    lines
+}
 
 impl AgentView {
+    /// Initial focus policy for compact command selectors. Single source of
+    /// truth with render/input (`ArgPickerProfile`); used by
+    /// [`Self::open_command_picker`].
+    pub(crate) fn arg_picker_open_state(command: &str, args_query: &str) -> PickerState {
+        ArgPickerProfile::for_command(command, args_query).initial_state()
+    }
+
     /// `suggest_args` falls back to model rows when the query is not in effort
     /// phase. Model-phase reasoning rows use a trailing space in `insert_text`;
     /// effort rows do not. Require a non-empty list with no trailing-space
@@ -81,8 +235,8 @@ impl AgentView {
             args_query.clear();
             *items = model_items.clone();
             *original_items = model_items;
-            // Model list is type-to-find: reopen input-default like the initial /model open.
-            *state = crate::views::picker::PickerState::input_active();
+            // Phase-1 model/agent lists are type-to-find.
+            *state = ArgPickerProfile::for_command(&command, "").initial_state();
         }
         true
     }
@@ -527,16 +681,25 @@ impl AgentView {
             FilterChanged,
         }
 
-        let (command_clone, in_effort_phase, entry_count) = match self.active_modal.as_ref() {
-            Some(ActiveModal::ArgPicker {
-                command,
-                args_query,
-                items,
-                ..
-            }) => (command.clone(), !args_query.is_empty(), items.len()),
-            _ => return InputOutcome::Changed,
-        };
+        let (command_clone, args_query_clone, in_effort_phase, entry_count) =
+            match self.active_modal.as_ref() {
+                Some(ActiveModal::ArgPicker {
+                    command,
+                    args_query,
+                    items,
+                    ..
+                }) => (
+                    command.clone(),
+                    args_query.clone(),
+                    !args_query.is_empty(),
+                    items.len(),
+                ),
+                _ => return InputOutcome::Changed,
+            };
 
+        let profile = ArgPickerProfile::for_command(&command_clone, &args_query_clone);
+        // Compact selectors always type-to-find when search is enabled: do not
+        // inherit scrollback/palette vim nav (Down must not disable filtering).
         let config = PickerConfig {
             title: None,
             show_search_hint: false,
@@ -554,10 +717,10 @@ impl AgentView {
             filter_active: false,
             header_note: None,
             action_keys: &[],
-            disable_search: false,
+            disable_search: profile.disable_search(),
             compact_bottom_bar: false,
             search_only_on_slash: false,
-            vim_normal_first: crate::appearance::cache::load_vim_mode(),
+            vim_normal_first: false,
         };
 
         let step = {
@@ -642,11 +805,15 @@ impl AgentView {
                                 ..
                             }) = self.active_modal.as_mut()
                             {
-                                *args_query = next_query;
+                                *args_query = next_query.clone();
                                 *items = next_items.clone();
                                 *original_items = next_items;
-                                // Effort sub-step is part of the type-to-find /model picker: open input-focused (cursor + type-to-filter), matching the rest of the flow.
-                                *state = crate::views::picker::PickerState::input_active();
+                                // Phase-2 (effort / behavior) is nav-only.
+                                *state = ArgPickerProfile::for_command(
+                                    &command_clone,
+                                    &next_query,
+                                )
+                                .initial_state();
                             }
                             return InputOutcome::Changed;
                         }
@@ -841,13 +1008,12 @@ impl AgentView {
                                             })
                                         };
                                         self.active_modal = Some(ActiveModal::ArgPicker {
-                                            command: trimmed,
+                                            command: trimmed.clone(),
                                             args_query: String::new(),
                                             items: items.clone(),
                                             original_items: items,
-                                            // Type-to-find: open in input mode (vim: Esc→nav, i→input).
-                                            state: crate::views::picker::PickerState::input_active(
-                                            ),
+                                            state: ArgPickerProfile::for_command(&trimmed, "")
+                                                .initial_state(),
                                             previous_palette: prev,
                                             window:
                                                 crate::views::modal_window::ModalWindowState::new(),
@@ -1726,10 +1892,10 @@ impl AgentView {
             } = active_modal
             {
                 // Arg picker: ModalWindow chrome + picker content.
+                let profile = ArgPickerProfile::for_command(command, args_query);
                 let title = match command.as_str() {
                     "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
                     "model" | "m" => "Pick model",
-                    "agent" if !args_query.is_empty() => "Pick Behavior",
                     "agent" => "Pick Agent",
                     "effort" => "Pick reasoning effort",
                     "permission" => "Pick Permission",
@@ -1737,19 +1903,46 @@ impl AgentView {
                     "theme" | "t" => "Pick theme",
                     _ => "Pick option",
                 };
+                // Agent phase-1: show description under the name (up to 2 lines).
+                // Other profiles keep a single-line right_label description.
+                let rich = matches!(profile, ArgPickerProfile::SearchRich);
+                let summary_owned: Vec<Vec<String>> = if rich {
+                    items
+                        .iter()
+                        .map(|item| {
+                            if item.description.is_empty() {
+                                Vec::new()
+                            } else {
+                                // Soft-wrap at ~48 cols; cap at 2 lines.
+                                wrap_desc_lines(&item.description, 48, 2)
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let summary_refs: Vec<Vec<&str>> = summary_owned
+                    .iter()
+                    .map(|lines| lines.iter().map(String::as_str).collect())
+                    .collect();
                 let picker_entries: Vec<PickerEntry> = items
                     .iter()
                     .enumerate()
                     .map(|(i, item)| {
+                        let (right, summary): (&str, &[&str]) = if rich {
+                            ("", summary_refs.get(i).map(Vec::as_slice).unwrap_or(&[]))
+                        } else {
+                            (item.description.as_str(), &[])
+                        };
                         PickerEntry::Row(PickerRow {
                             label: &item.display,
-                            right_label: &item.description,
+                            right_label: right,
                             selected: state.hovered == Some(i)
                                 || (state.hovered.is_none() && i == state.selected),
                             expanded: false,
                             fields: &[],
                             description_lines: &[],
-                            summary_lines: &[],
+                            summary_lines: summary,
                             dimmed: false,
                             indent: 0,
                             badge: "",
@@ -1760,32 +1953,18 @@ impl AgentView {
                     })
                     .collect();
                 let compact = self.scrollback.appearance().prompt.compact;
-                // Surface `i search` in the footer when vim nav mode is active.
-                mw::push_vim_nav_search_hint(&mut picker_shortcuts, state.search_active);
+                // Compact selectors force type-to-find (no vim nav); skip i-search hint.
                 let modal_config = ModalWindowConfig {
                     title,
                     tabs: None,
                     shortcuts: &picker_shortcuts,
-                    sizing: ModalSizing {
-                        width_pct: 0.42,
-                        max_width: 56,
-                        min_width: 36,
-                        v_margin: 0,
-                        h_pad: 2,
-                        v_pad: 1,
-                        footer_lines: 2,
-                    }
-                    .with_compact(compact),
+                    sizing: profile.modal_sizing(compact),
                     fold_info: None,
                 };
                 let selector_area = if mw::embedded() {
                     area
                 } else {
-                    // Eight visible options keeps this selector temporary and
-                    // quick; larger catalogs scroll inside the same surface.
-                    let height = (items.len().min(8) as u16)
-                        .saturating_add(5)
-                        .min(area.height);
+                    let height = profile.selector_height(items.len(), area.height);
                     Rect {
                         x: area.x,
                         y: area.y + area.height.saturating_sub(height) / 2,
@@ -1796,7 +1975,7 @@ impl AgentView {
                 if let Some(mca) =
                     mw::render_modal_window(buf, selector_area, window, &modal_config, &theme)
                 {
-                    picker::render_picker_in_modal(
+                    picker::render_picker_in_modal_ex(
                         buf,
                         mca.content,
                         mca.inner_x,
@@ -1806,6 +1985,7 @@ impl AgentView {
                         &picker_entries,
                         &[],
                         false,
+                        profile.disable_search(),
                     );
                 }
             } else if let modal::ActiveModal::SessionPicker {
@@ -2850,6 +3030,114 @@ mod command_palette_vim_input_tests {
         assert!(matches!(outcome, InputOutcome::Unchanged));
         assert!(palette_state(&agent).query().is_empty());
         assert_eq!(agent.prompt.text(), "hidden prompt");
+        crate::appearance::cache::set_vim_mode(false);
+    }
+}
+
+#[cfg(test)]
+mod arg_picker_profile_tests {
+    use super::{ArgPickerProfile, wrap_desc_lines};
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::modal::ActiveModal;
+    use agent_client_protocol as acp;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn selector_height_fits_small_model_lists() {
+        // SearchMedium chrome is 7; n=1..3 must leave n list rows (not n-2).
+        let profile = ArgPickerProfile::SearchMedium;
+        for n in 1..=8 {
+            let h = profile.selector_height(n, 80);
+            let chrome = profile.chrome_rows();
+            assert!(
+                h >= chrome + n as u16,
+                "n={n}: height {h} must fit chrome {chrome} + {n} rows"
+            );
+            assert_eq!(
+                h - chrome,
+                n as u16,
+                "n={n}: list rows should equal item count for n<=8"
+            );
+        }
+    }
+
+    #[test]
+    fn nav_compact_effort_has_no_search_chrome_overhead() {
+        let h_search = ArgPickerProfile::for_command("model", "").selector_height(3, 80);
+        let h_nav = ArgPickerProfile::for_command("effort", "").selector_height(3, 80);
+        assert!(
+            h_nav < h_search,
+            "effort (nav) should be shorter than model (search): nav={h_nav} search={h_search}"
+        );
+    }
+
+    #[test]
+    fn wrap_desc_lines_caps_and_ellipsizes() {
+        let long = "word ".repeat(40);
+        let lines = wrap_desc_lines(&long, 20, 2);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].ends_with('…') || lines[1].len() <= 20);
+    }
+
+    #[test]
+    fn arg_picker_type_to_filter_survives_arrow_keys_even_with_vim() {
+        crate::appearance::cache::set_vim_mode(true);
+        let mut agent = make_agent();
+        let id = acp::ModelId::new("grow-a");
+        agent.session.models.available.insert(
+            id.clone(),
+            acp::ModelInfo::new(id.clone(), "Grow A".to_string()),
+        );
+        let id_b = acp::ModelId::new("grow-b");
+        agent.session.models.available.insert(
+            id_b.clone(),
+            acp::ModelInfo::new(id_b, "Grow B".to_string()),
+        );
+        agent.session.models.current = Some(id);
+        agent.open_command_picker("model", "");
+
+        // Down would exit search under palette vim semantics; ArgPicker must keep filtering.
+        agent.handle_modal_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        agent.handle_modal_key(&KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+
+        let Some(ActiveModal::ArgPicker {
+            items, state, ..
+        }) = agent.active_modal.as_ref()
+        else {
+            panic!("expected ArgPicker");
+        };
+        assert_eq!(state.query(), "b");
+        assert_eq!(items.len(), 1, "filtered to grow-b");
+        assert_eq!(items[0].display, "grow-b");
+        crate::appearance::cache::set_vim_mode(false);
+    }
+
+    #[test]
+    fn arg_picker_select_emits_slash_with_catalog_id() {
+        let mut agent = make_agent();
+        let id = acp::ModelId::new("provider/model-a");
+        agent.session.models.available.insert(
+            id.clone(),
+            acp::ModelInfo::new(id.clone(), "Friendly Name".to_string()),
+        );
+        agent.session.models.current = Some(id);
+        agent.open_command_picker("model", "");
+
+        let Some(ActiveModal::ArgPicker { items, .. }) = agent.active_modal.as_ref() else {
+            panic!("expected ArgPicker");
+        };
+        assert_eq!(items[0].display, "provider/model-a (current)");
+
+        let out = agent.handle_modal_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match out {
+            InputOutcome::Action(crate::app::actions::Action::SendSlashCommandPreservingDraft(
+                ref cmd,
+            )) => {
+                assert_eq!(cmd, "/model provider/model-a");
+            }
+            other => panic!("expected SendSlashCommandPreservingDraft, got {other:?}"),
+        }
         crate::appearance::cache::set_vim_mode(false);
     }
 }

@@ -368,8 +368,144 @@ impl AgentsModalState {
         }
     }
 }
+/// Catalog for main-session `/agent` / Ctrl+X a switching.
+///
+/// Native discovery (builtins + project/user files, including path-style
+/// nested ids) plus enabled plugin agents under `plugin:name` ids.
+/// **Does not** consult `[subagents.toggle]` — that gate is spawn-only.
+pub fn build_switch_agent_catalog(cwd: &Path) -> Vec<crate::slash::command::AgentArg> {
+    // Empty toggle → every native entry reports enabled=true; switch path
+    // ignores `enabled` anyway and never loads the toggle map.
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for entry in build_agent_list(cwd, &HashMap::new()) {
+        if !seen.insert(entry.name.clone()) {
+            continue;
+        }
+        out.push(crate::slash::command::AgentArg {
+            name: entry.name,
+            description: entry.description,
+            scope: entry.scope.label().to_string(),
+        });
+    }
+    append_plugin_switch_agents(cwd, &mut out, &mut seen);
+    out
+}
+
+/// Append plugin-provided agents (qualified `plugin:agent` names) to the
+/// main-session switch catalog, best-effort using the same discovery stack
+/// as shell inspect/session startup.
+fn append_plugin_switch_agents(
+    cwd: &Path,
+    out: &mut Vec<crate::slash::command::AgentArg>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    use grow_agent::config::AgentDefinition;
+    use grow_agent::plugins::{PluginRegistry, TrustStore, discover_plugins};
+
+    let project_trusted = grow_shell::agent::folder_trust::project_scope_allowed(cwd);
+    let trust_store = TrustStore::load();
+    // Best-effort: config.toml plugins table when readable; else defaults.
+    let mut plugin_config = load_plugins_discovery_config();
+    let discovered = discover_plugins(Some(cwd), &plugin_config, &trust_store, project_trusted);
+    if discovered.is_empty() {
+        return;
+    }
+    plugin_config.populate_plugin_lists(&discovered);
+    let registry =
+        PluginRegistry::from_discovered(discovered, &plugin_config.disabled, &plugin_config.enabled);
+    for plugin in registry.enabled_plugins() {
+        for agent_dir in &plugin.agent_dirs {
+            if !agent_dir.is_dir() {
+                continue;
+            }
+            let Ok(dir_entries) = std::fs::read_dir(agent_dir) else {
+                continue;
+            };
+            for dir_entry in dir_entries.flatten() {
+                let path = dir_entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let def = if plugin.trusted {
+                    AgentDefinition::from_file(&path).ok()
+                } else {
+                    AgentDefinition::from_file_frontmatter_only(&path).ok()
+                };
+                let Some(def) = def else { continue };
+                let qualified = format!("{}:{}", plugin.name, def.name);
+                if !seen.insert(qualified.clone()) {
+                    continue;
+                }
+                let scope = match plugin.scope {
+                    grow_agent::plugins::PluginScope::Project => "project",
+                    grow_agent::plugins::PluginScope::User => "user",
+                    _ => "user",
+                };
+                out.push(crate::slash::command::AgentArg {
+                    name: qualified,
+                    description: def.description,
+                    scope: scope.to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// Load `[plugins]` into a [`DiscoveryConfig`] for catalog listing.
+fn load_plugins_discovery_config() -> grow_agent::plugins::discovery::DiscoveryConfig {
+    use grow_agent::plugins::discovery::DiscoveryConfig;
+    // Prefer the same config surface shell uses when available.
+    let config_path = grow_config::grow_home().join("config.toml");
+    let Ok(text) = std::fs::read_to_string(&config_path) else {
+        return DiscoveryConfig::default();
+    };
+    let Ok(value) = text.parse::<toml::Value>() else {
+        return DiscoveryConfig::default();
+    };
+    let Some(plugins) = value.get("plugins") else {
+        return DiscoveryConfig::default();
+    };
+    let paths = plugins
+        .get("paths")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(PathBuf::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let disabled = plugins
+        .get("disabled")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let enabled = plugins
+        .get("enabled")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    DiscoveryConfig {
+        cli_plugin_dirs: Vec::new(),
+        config_paths: paths,
+        disabled,
+        enabled,
+    }
+}
+
 /// Build the full agent list: user-visible built-ins first, then
 /// file-based agents from discovery, with dedup.
+///
+/// `toggle` is `[subagents.toggle]` and only affects the `enabled` flag
+/// used by the agents modal spawn gate — **not** main-session switching.
 pub fn build_agent_list(cwd: &Path, toggle: &HashMap<String, bool>) -> Vec<AgentListEntry> {
     let mut entries = Vec::new();
     for &builtin in user_visible_builtins() {
@@ -737,7 +873,9 @@ pub fn set_default_agent(name: Option<&str>) -> Result<(), String> {
         .map_err(|e| format!("Failed to write config.toml: {e}"))?;
     Ok(())
 }
-/// Toggle an agent's enabled state via `[subagents.toggle]` in config.toml.
+/// Toggle whether this agent type may be **spawned as a child subagent**
+/// (`[subagents.toggle]` in config.toml). Does **not** block main-session
+/// `/agent` switching.
 pub fn toggle_agent(name: &str, enabled: bool) -> Result<(), String> {
     let config_path = grow_config::grow_home().join("config.toml");
     if let Some(parent) = config_path.parent() {
@@ -1063,7 +1201,7 @@ fn build_agents_tab_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a>>
             id: 0,
         },
         Shortcut {
-            label: "t toggle",
+            label: "t spawn",
             clickable: false,
             id: 0,
         },
@@ -1235,6 +1373,15 @@ fn render_agents_tab(
     if let Some(ref msg) = state.message {
         y = render_modal_message_line(buf, content_area.x, y, w, msg, theme);
     }
+    // Spawn-only framing: `t` writes `[subagents.toggle]` and only gates
+    // child subagent spawn — main-session `/agent` can still select any
+    // discovered definition (including path-style ids).
+    let blurb_style = Style::default().fg(theme.gray_dim);
+    let blurb = "t toggles child-subagent spawn only; main session can still /agent to any definition.";
+    let blurb_display: String = blurb.chars().take(w).collect();
+    buf.set_string(content_area.x, y, &blurb_display, blurb_style);
+    y += 1;
+    y += 1;
     if state.search_active || !state.search_query().is_empty() {
         render_agents_search(
             buf,
@@ -1428,7 +1575,8 @@ fn render_agents_tab(
                     }
                 }
                 if !entry.enabled {
-                    let off_label = " [off]";
+                    // Spawn-only: main session can still `/agent` to this definition.
+                    let off_label = " [spawn off]";
                     let off_remaining =
                         (content_area.x + content_area.width).saturating_sub(x) as usize;
                     if off_remaining >= off_label.len() {

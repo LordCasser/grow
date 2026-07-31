@@ -143,6 +143,9 @@ pub struct PeekPanelState {
     /// when unknown. Set by the render-time refresh from the live agent,
     /// not carried in [`PeekFields`].
     pub model_name: Option<String>,
+    /// Peeked session's Agent id (path-style when nested). Defaults to
+    /// `"grow"` until refresh fills it from the live `AgentView`.
+    pub agent_name: Option<String>,
     /// Whether the peeked agent runs in always-approve (yolo) mode. Shown
     /// as an `always-approve` flag next to the model on the bottom border —
     /// the same signal the dashboard row badge carried.
@@ -176,6 +179,7 @@ impl PeekPanelState {
             // Populated by the render-time refresh from the live agent
             // (see `peek_model_and_mode`); defaults are harmless until then.
             model_name: None,
+            agent_name: None,
             auto_approve: false,
             auto: false,
             plan_mode: false,
@@ -376,10 +380,10 @@ pub fn compute_peek_fields(
 }
 
 /// The peeked row's live config-badge state for the peek box's bottom border:
-/// model display name, always-approve (yolo), auto (classifier) mode, and plan
-/// mode. Named fields so the three adjacent bools can't be transposed at a
-/// call/return site.
+/// agent id, model display name, always-approve (yolo), auto (classifier)
+/// mode, and plan mode. Named fields so adjacent bools can't be transposed.
 pub struct PeekModeBadge {
+    pub agent: Option<String>,
     pub model: Option<String>,
     pub yolo: bool,
     pub auto: bool,
@@ -397,6 +401,7 @@ pub fn peek_model_and_mode(
     agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
 ) -> PeekModeBadge {
     let default = || PeekModeBadge {
+        agent: None,
         model: None,
         yolo: false,
         auto: false,
@@ -409,6 +414,12 @@ pub fn peek_model_and_mode(
                 // confirmed one (matches `dispatch_cycle_mode`).
                 let plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
                 PeekModeBadge {
+                    agent: Some(
+                        agent
+                            .session_agent_name
+                            .clone()
+                            .unwrap_or_else(|| "grow".into()),
+                    ),
                     model: agent.session.models.current_model_name(),
                     yolo: agent.session.yolo_mode,
                     auto: agent.session.is_auto(),
@@ -422,15 +433,19 @@ pub fn peek_model_and_mode(
             child_session_id,
         } => match agents.get(parent) {
             Some(parent_agent) => {
-                let model = parent_agent
-                    .subagent_views
-                    .get(child_session_id)
+                let child = parent_agent.subagent_views.get(child_session_id);
+                let model = child
                     .and_then(|c| c.session.models.current_model_name())
                     .or_else(|| parent_agent.session.models.current_model_name());
+                let agent = child
+                    .and_then(|c| c.session_agent_name.clone())
+                    .or_else(|| parent_agent.session_agent_name.clone())
+                    .or_else(|| Some("grow".into()));
                 // Auto (like always-approve) follows the parent: subagents run
                 // under the parent's permission mode. Plan stays false (subagents
                 // have no plan mode of their own).
                 PeekModeBadge {
+                    agent,
                     model,
                     yolo: parent_agent.session.yolo_mode,
                     auto: parent_agent.session.is_auto(),
@@ -474,6 +489,11 @@ fn paint_peek_config_badge(
     if area.height < 3 || area.width < 6 {
         return;
     }
+    let agent_label = panel
+        .agent_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("grow");
     let model_label = panel.model_name.clone().unwrap_or_default();
     let mut flags: Vec<PromptFlag> = Vec::new();
     // Mirror the chat prompt's flag precedence: plan wins over always-approve
@@ -504,6 +524,7 @@ fn paint_peek_config_badge(
         return;
     }
     let info = PromptInfo {
+        agent_name: agent_label,
         model_name: &model_label,
         flags: &flags,
         multiline,

@@ -254,6 +254,7 @@ pub fn render_dashboard(
                     }
                     if let Some(p) = state.peek.as_mut() {
                         p.model_name = badge.model;
+                        p.agent_name = badge.agent;
                         p.auto_approve = badge.yolo;
                         p.auto = badge.auto;
                         p.plan_mode = badge.plan;
@@ -2776,6 +2777,11 @@ fn paint_dispatch_config_badge(
         .or_else(|| state.models.current_model_name())
         .unwrap_or_default();
 
+    // Dispatch stages a new session: show config default Agent (same as
+    // `resolve_default_agent_name`), not a hard-coded "grow".
+    let default_agent = crate::views::agents_modal::resolve_default_agent_name(&state.cwd);
+    let agent_label = default_agent.as_str();
+
     let behavior = match state.pending_behavior {
         grow_tools::types::SessionMode::Default => "normal",
         grow_tools::types::SessionMode::Ask => "clarify",
@@ -2803,6 +2809,7 @@ fn paint_dispatch_config_badge(
     ];
 
     let info = PromptInfo {
+        agent_name: agent_label,
         model_name: &model_label,
         flags: &flags,
         multiline: state.multiline_mode,
