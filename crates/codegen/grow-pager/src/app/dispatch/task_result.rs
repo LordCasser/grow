@@ -397,6 +397,42 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             http_status,
             prompt_id,
         } => handle_prompt_response(app, agent_id, result, http_status, prompt_id),
+        TaskResult::PromptRequiresBehaviorConfirmation {
+            agent_id,
+            session_id,
+            mode_id,
+            text,
+            prompt_id,
+            message,
+        } => {
+            // This prompt's RPC resolved without running: retire its
+            // optimistic echo exactly like the resolved-without-running arm
+            // of `handle_prompt_response`, so a later queue broadcast can't
+            // re-pin a stale placeholder.
+            let sid = session_id.0.to_string();
+            super::queue::retire_optimistic_echo(
+                &mut app.optimistic_prompt_echoes,
+                &mut app.shared_prompt_queues,
+                &sid,
+                &prompt_id,
+            );
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.shared_queue.retain(|e| e.id != prompt_id);
+                agent.note_queue_echo_retired(&prompt_id);
+                agent.retire_send_now_painted_block(&prompt_id);
+                let target = grow_tools::types::SessionMode::from_id(mode_id.0.as_ref());
+                agent.behavior_switch_confirm = Some(crate::app::agent_view::BehaviorSwitchConfirm {
+                    target,
+                    prompt: Some(crate::app::agent_view::BehaviorSwitchStashedPrompt {
+                        text,
+                    }),
+                });
+                if !agent.behavior_switch_warning_pending {
+                    agent.show_behavior_switch_warning(&message);
+                }
+            }
+            vec![]
+        }
         TaskResult::SendPromptNowFailed {
             agent_id,
             session_id,

@@ -202,12 +202,53 @@ pub(super) fn dispatch_dismiss_behavior_switch_warning(app: &mut AppView) -> Vec
     agent.behavior_switch_warning_pending = false;
     agent.mode_switch_banner = None;
     agent.behavior_mode_pending = None;
+    // The user cancelled: drop the parked switch AND any stashed prompt.
+    agent.behavior_switch_confirm = None;
     let Some(session_id) = agent.session.session_id.clone() else {
         return vec![];
     };
     vec![Effect::SetSessionMode {
         session_id,
         mode_id: acp::SessionModeId::new(agent.behavior_mode.as_id()),
+    }]
+}
+
+/// Enter on an interrupting-switch warning: confirm the parked switch.
+///
+/// With a stashed mode+prompt, replays it through
+/// [`dispatch_set_behavior_then_prompt`] (fresh prompt id, recomputed skill
+/// token ranges) so the prompt text survives the confirmation round-trip.
+/// Without one, re-issues the `SetSessionMode` for the parked target — the
+/// shell's second same-target request within the window applies the switch.
+pub(super) fn dispatch_confirm_behavior_switch_warning(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let Some(confirm) = agent.behavior_switch_confirm.take() else {
+        // Nothing parked (stale banner or double-Enter): degrade to the
+        // dismiss semantics so the warning state can never wedge.
+        agent.behavior_switch_warning_pending = false;
+        agent.mode_switch_banner = None;
+        agent.behavior_mode_pending = None;
+        return vec![];
+    };
+    agent.behavior_switch_warning_pending = false;
+    agent.mode_switch_banner = None;
+    if let Some(prompt) = confirm.prompt {
+        // Replay the stashed prompt through the normal mode+prompt path.
+        return dispatch_set_behavior_then_prompt(app, confirm.target, Some(prompt.text));
+    }
+    agent.behavior_mode_pending = Some(confirm.target);
+    let Some(session_id) = agent.session.session_id.clone() else {
+        agent.show_toast("No active session");
+        return vec![];
+    };
+    vec![Effect::SetSessionMode {
+        session_id,
+        mode_id: acp::SessionModeId::new(confirm.target.as_id()),
     }]
 }
 

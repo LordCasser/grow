@@ -1270,7 +1270,7 @@ pub(crate) fn execute(
                 .spawn(async move {
                     let mode_req = acp::SetSessionModeRequest::new(
                         session_id.clone(),
-                        mode_id,
+                        mode_id.clone(),
                     );
                     let mode_response = match acp_send(mode_req, &tx).await {
                         Ok(response) => response,
@@ -1284,6 +1284,32 @@ pub(crate) fn execute(
                             };
                         }
                     };
+                    // An interrupting switch parks on the shell: keep the
+                    // prompt text instead of failing and dropping it. The
+                    // dispatcher stashes it and Enter replays it.
+                    let behavior_change = mode_response
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("grow/behaviorChange"));
+                    let confirmation_message = behavior_change
+                        .and_then(|change| change.get("status"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|status| *status == "confirmation_required")
+                        .and_then(|_| {
+                            behavior_change
+                                .and_then(|change| change.get("message"))
+                                .and_then(serde_json::Value::as_str)
+                        });
+                    if let Some(message) = confirmation_message {
+                        return TaskResult::PromptRequiresBehaviorConfirmation {
+                            agent_id,
+                            session_id,
+                            mode_id,
+                            text,
+                            prompt_id,
+                            message: message.to_string(),
+                        };
+                    }
                     if let Err(message) = behavior_change_applied(mode_response.meta.as_ref()) {
                         return TaskResult::PromptResponse {
                             agent_id,

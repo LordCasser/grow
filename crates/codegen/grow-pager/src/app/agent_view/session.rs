@@ -233,6 +233,7 @@ impl AgentView {
             sticky_toast: None,
             mode_switch_banner: None,
             behavior_switch_warning_pending: false,
+            behavior_switch_confirm: None,
             session_banner_active: false,
             pinned_promo_cta_live: false,
             block_viewer: None,

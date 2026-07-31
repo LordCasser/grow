@@ -1350,14 +1350,38 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
             if let Some(message) = change.get("message").and_then(serde_json::Value::as_str) {
                 agent.show_behavior_switch_warning(message);
             }
+            // Park the interrupting switch, preserving any prompt stashed by
+            // the `SetModeThenPrompt` task: the notification and the task
+            // result arrive over independent channels in unspecified order,
+            // so re-creating the confirm state must never drop the prompt.
+            if let Some(target) = change.get("target").and_then(serde_json::Value::as_str) {
+                let target = SessionMode::from_id(target);
+                let already_parked =
+                    matches!(&mut agent.behavior_switch_confirm, Some(confirm) if confirm.target == target);
+                if !already_parked {
+                    let prompt = agent
+                        .behavior_switch_confirm
+                        .take()
+                        .and_then(|c| c.prompt);
+                    agent.behavior_switch_confirm = Some(
+                        crate::app::agent_view::BehaviorSwitchConfirm { target, prompt },
+                    );
+                }
+            }
         } else {
             agent.behavior_switch_warning_pending = false;
+            // applied / rejected: the parked switch is resolved either way.
+            agent.behavior_switch_confirm = None;
             if status == Some("rejected")
                 && let Some(message) = change.get("message").and_then(serde_json::Value::as_str)
             {
                 agent.show_toast_ticks(message, 30);
             }
         }
+    } else {
+        // A plain mode update (no behavior-change meta) also resolves any
+        // parked confirmation.
+        agent.behavior_switch_confirm = None;
     }
     let was_active = agent.plan_mode_active;
     let now_active = mode.is_plan();

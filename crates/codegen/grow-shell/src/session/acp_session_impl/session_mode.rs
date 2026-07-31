@@ -231,7 +231,7 @@ impl SessionActor {
             };
         let interrupts_work = self.behavior.lock().is_plan() || goal_active || deep_research_active;
         if interrupts_work {
-            const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+            const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(8);
             if !self
                 .behavior
                 .lock()
@@ -242,9 +242,9 @@ impl SessionActor {
                     .lock()
                     .pending_switch()
                     .map(|(_, _, ms)| ms)
-                    .unwrap_or(3_000);
+                    .unwrap_or(8_000);
                 let message = format!(
-                    "Switching to {} will interrupt the active {} work. Select the same behavior again within 3 seconds to confirm.",
+                    "Switching to {} will interrupt the active {} work. Press Enter to confirm the switch, or press Esc to cancel.",
                     mode.as_id(),
                     current_behavior
                         .map(|behavior| format!("{behavior:?}"))

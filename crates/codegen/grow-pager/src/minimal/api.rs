@@ -844,6 +844,7 @@ pub fn set_question_view(v: &mut AgentView, val: Option<QuestionViewState>) {
 pub fn set_behavior_mode_for_test(v: &mut AgentView, mode: SessionMode) {
     v.behavior_mode = mode;
     v.behavior_mode_pending = None;
+    v.behavior_switch_confirm = None;
 }
 
 /// Test-only mutable access to `PromptWidget::suggestions`.

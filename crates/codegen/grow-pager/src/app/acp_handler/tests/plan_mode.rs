@@ -354,3 +354,124 @@
         assert!(agent.plan_mode_active);
         assert!(agent.plan_mode_pending.is_none());
     }
+
+    /// The `grow/behaviorChange` meta of a `CurrentModeUpdate` mirrors the
+    /// shell's `BehaviorChangeOutcome` wire shape.
+    fn behavior_change_update(status: &str, target: &str) -> acp::SessionUpdate {
+        acp::SessionUpdate::CurrentModeUpdate(
+            acp::CurrentModeUpdate::new(acp::SessionModeId::new("plan")).meta(
+                serde_json::json!({
+                    "grow/behaviorChange": {
+                        "status": status,
+                        "source": "plan",
+                        "target": target,
+                        "message": format!(
+                            "Switching to {target} will interrupt the active plan work. Press Enter to confirm the switch, or press Esc to cancel."
+                        ),
+                        "remainingMs": 8000,
+                    }
+                })
+                .as_object()
+                .cloned()
+                .unwrap(),
+            ),
+        )
+    }
+
+    /// A `confirmation_required` update parks the switch target on the agent
+    /// and pins the warning banner (which must stay visible until Enter/Esc).
+    #[test]
+    fn behavior_change_confirmation_required_parks_switch_target() {
+        let mut agent = make_agent(Some("s1"));
+
+        let refresh = detect_plan_mode_change(
+            &behavior_change_update("confirmation_required", "default"),
+            &mut agent,
+        );
+        assert!(refresh);
+        let confirm = agent
+            .behavior_switch_confirm
+            .as_ref()
+            .expect("the interrupting switch must be parked");
+        assert_eq!(confirm.target, grow_tools::types::SessionMode::Default);
+        assert!(confirm.prompt.is_none());
+        assert!(
+            agent.behavior_switch_warning_pending,
+            "the warning must stay pending until Enter/Esc"
+        );
+        assert!(
+            agent.mode_switch_banner.is_some(),
+            "the warning banner must be visible"
+        );
+    }
+
+    /// The notification and the `SetModeThenPrompt` task result arrive over
+    /// independent channels in unspecified order. A late notification must
+    /// re-park the target WITHOUT dropping the prompt the task already
+    /// stashed (and vice versa — covered by the dispatch-level replay test).
+    #[test]
+    fn behavior_change_confirmation_required_preserves_stashed_prompt() {
+        let mut agent = make_agent(Some("s1"));
+        agent.behavior_switch_confirm = Some(crate::app::agent_view::BehaviorSwitchConfirm {
+            target: grow_tools::types::SessionMode::Default,
+            prompt: Some(crate::app::agent_view::BehaviorSwitchStashedPrompt {
+                text: "add auth to the app".into(),
+            }),
+        });
+
+        detect_plan_mode_change(
+            &behavior_change_update("confirmation_required", "default"),
+            &mut agent,
+        );
+
+        let confirm = agent
+            .behavior_switch_confirm
+            .as_ref()
+            .expect("the interrupting switch must stay parked");
+        assert_eq!(confirm.target, grow_tools::types::SessionMode::Default);
+        let prompt = confirm.prompt.as_ref().expect("the stashed prompt must survive");
+        assert_eq!(prompt.text, "add auth to the app");
+    }
+
+    /// `applied` resolves the parked switch: banner pending and stashed
+    /// prompt (and any confirm state) are cleared.
+    #[test]
+    fn behavior_change_applied_clears_parked_switch() {
+        let mut agent = make_agent(Some("s1"));
+        agent.behavior_switch_confirm = Some(crate::app::agent_view::BehaviorSwitchConfirm {
+            target: grow_tools::types::SessionMode::Default,
+            prompt: Some(crate::app::agent_view::BehaviorSwitchStashedPrompt {
+                text: "add auth to the app".into(),
+            }),
+        });
+        agent.behavior_switch_warning_pending = true;
+        agent.mode_switch_banner = Some(("banner".into(), 69));
+
+        detect_plan_mode_change(&behavior_change_update("applied", "default"), &mut agent);
+
+        assert!(agent.behavior_switch_confirm.is_none());
+        assert!(!agent.behavior_switch_warning_pending);
+        assert!(
+            agent.mode_switch_banner.is_some(),
+            "the banner text itself fades out via the regular tick once unpinned"
+        );
+    }
+
+    /// `rejected` also clears the parked switch (nothing left to confirm) and
+    /// surfaces the rejection toast as before.
+    #[test]
+    fn behavior_change_rejected_clears_parked_switch() {
+        let mut agent = make_agent(Some("s1"));
+        agent.behavior_switch_confirm = Some(crate::app::agent_view::BehaviorSwitchConfirm {
+            target: grow_tools::types::SessionMode::Default,
+            prompt: Some(crate::app::agent_view::BehaviorSwitchStashedPrompt {
+                text: "add auth to the app".into(),
+            }),
+        });
+        agent.behavior_switch_warning_pending = true;
+
+        detect_plan_mode_change(&behavior_change_update("rejected", "default"), &mut agent);
+
+        assert!(agent.behavior_switch_confirm.is_none());
+        assert!(!agent.behavior_switch_warning_pending);
+    }
