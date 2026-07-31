@@ -25,8 +25,8 @@ pub(crate) fn available_modes(ctx: &AppCtx<'_>) -> Vec<(SessionMode, &'static st
     if ctx.workflows_available {
         modes.push((
             SessionMode::Workflow,
-            "Dynamic Workflow",
-            "Dynamically create and run bounded sub-plans without approval",
+            "Static Workflow",
+            "Author and run one deterministic scripted workflow per phase, without approval",
         ));
     }
     if ctx.deep_research_available {
@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn behavior_items_labels_workflow_as_dynamic_workflow() {
+    fn behavior_items_labels_workflow_as_static_workflow() {
         let state = ModelState::default();
         let ctx = ctx_with_all_behaviors(&state);
         let items = behavior_items(&ctx, None, false);
@@ -227,9 +227,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing behavior item with wire id {id}"))
         };
 
-        // Dynamic Workflow: new display label, unchanged wire id in insert_text.
+        // Static Workflow: display label changed, wire id unchanged in insert_text.
         let workflow = by_wire_id("workflow");
-        assert_eq!(workflow.display, "Dynamic Workflow");
+        assert_eq!(workflow.display, "Static Workflow");
         assert!(workflow.insert_text.ends_with("workflow"));
 
         // Other behavior labels are untouched.

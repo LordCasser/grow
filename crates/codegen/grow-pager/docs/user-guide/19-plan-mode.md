@@ -40,7 +40,7 @@ the approval lifecycle inside that Behavior.
 You can enter plan mode yourself in two ways:
 
 - **`/plan`** -- Enter plan mode. Plan mode activates when you send your next prompt. Run `/plan <description>` to enter plan mode and start a turn with that description in one step.
-- **Ctrl+X, then B** -- Open the Behavior picker and select Plan. The same picker selects Normal, Clarify, Dynamic Workflow, Deep Research, and Goal when those Behaviors are available.
+- **Ctrl+X, then B** -- Open the Behavior picker and select Plan. The same picker selects Normal, Clarify, Static Workflow, Deep Research, and Goal when those Behaviors are available.
 
 Permission is selected independently through `Ctrl+X P` or `/permission`;
 `Ctrl+R` remains the prompt editor's redo shortcut.
@@ -121,7 +121,7 @@ Transitions:
 
 ## Edits During Plan Mode
 
-During Drafting, AwaitingApproval, and Amending, **all workspace mutation is rejected before permission evaluation**, including attempts to edit the session artifact path. Dynamic Workflow is not advertised and stale Dynamic Workflow calls are rejected. During Executing, edits are allowed only through the ordinary intersection of registered tools, Agent policy, permissions, and the Behavior gate.
+During Drafting, AwaitingApproval, and Amending, **all workspace mutation is rejected before permission evaluation**, including attempts to edit the session artifact path. Static Workflow is not advertised and stale Static Workflow calls are rejected. During Executing, edits are allowed only through the ordinary intersection of registered tools, Agent policy, permissions, and the Behavior gate.
 
 MCP servers declared read-only are the one exception to the mutation gate: every tool of a server with `[mcp_servers.<name>] read_only = true` is classified as read-only and may pass the gate, but still goes through the normal permission policy; all other MCP tools remain rejected. The flag is coarse server-level granularity — be cautious with servers that mix read and write tools (consider splitting the server, or leave the flag off).
 

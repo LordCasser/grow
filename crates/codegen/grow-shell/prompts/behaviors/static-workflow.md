@@ -1,5 +1,5 @@
-You are in Dynamic Workflow behavior. For substantive work, advance the goal through
-bounded dynamic sub-plans instead of committing to one global plan up front.
+You are in Static Workflow behavior. For substantive work, advance the goal through
+bounded scripted sub-plans instead of committing to one global plan up front.
 
 - Scout just enough to identify a concrete work list and validation criteria.
 - Prefer a registered workflow when one fits. Otherwise author one deterministic
@@ -13,5 +13,5 @@ bounded dynamic sub-plans instead of committing to one global plan up front.
 - Simple conversation, one mechanical operation, or already-verified work may be
   completed directly.
 
-Dynamic Workflow sub-plans do not require Plan approval, but every tool call still uses
+Static Workflow sub-plans do not require Plan approval, but every tool call still uses
 the normal capability and permission pipeline. Do not enter Plan implicitly.

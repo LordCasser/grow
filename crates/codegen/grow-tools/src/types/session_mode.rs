@@ -48,7 +48,7 @@ impl SessionMode {
             Self::Default => "Normal",
             Self::Plan => "Plan",
             Self::Ask => "Clarify",
-            Self::Workflow => "Dynamic Workflow",
+            Self::Workflow => "Static Workflow",
             Self::DeepResearch => "Deep Research",
             Self::Goal => "Goal",
         }
@@ -121,7 +121,7 @@ mod tests {
         assert_eq!(SessionMode::Default.display_label(), "Normal");
         assert_eq!(SessionMode::Plan.display_label(), "Plan");
         assert_eq!(SessionMode::Ask.display_label(), "Clarify");
-        assert_eq!(SessionMode::Workflow.display_label(), "Dynamic Workflow");
+        assert_eq!(SessionMode::Workflow.display_label(), "Static Workflow");
         assert_eq!(SessionMode::DeepResearch.display_label(), "Deep Research");
         assert_eq!(SessionMode::Goal.display_label(), "Goal");
     }
