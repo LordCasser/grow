@@ -2051,6 +2051,7 @@ mod interjection;
 mod session_routing;
 mod plugins;
 mod subagents;
+mod subagent_permission_routing_tests;
 mod goals;
 mod interactions;
 mod background_tasks;
