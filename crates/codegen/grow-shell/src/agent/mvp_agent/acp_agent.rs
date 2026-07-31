@@ -2508,9 +2508,11 @@ impl acp::Agent for MvpAgent {
                 .cloned();
             if let Some(handle) = handle {
                 let is_engaged = handle.behavior.lock().is_plan();
-                let next_mode_id = acp::SessionModeId::new(
-                    if is_engaged { "default" } else { "plan" },
-                );
+                let next_mode_id = acp::SessionModeId::new(if is_engaged {
+                    grow_tools::types::SessionMode::Default.as_id()
+                } else {
+                    "plan"
+                });
                 let (tx, rx) = oneshot::channel();
                 let _ = handle
                     .cmd_tx

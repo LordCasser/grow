@@ -10,7 +10,9 @@ impl SessionActor {
         self.behavior.lock().select_behavior(None);
         *self.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
         self.persist_behavior_state();
-        self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new("default"));
+        self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
+            grow_tools::types::SessionMode::Default.as_id(),
+        ));
     }
 }
 

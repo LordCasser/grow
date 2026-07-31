@@ -313,7 +313,7 @@ fn confirm_behavior_switch_warning_without_prompt_issues_set_session_mode() {
     assert!(
         matches!(
             effects.as_slice(),
-            [Effect::SetSessionMode { mode_id, .. }] if mode_id.0.as_ref() == "default"
+            [Effect::SetSessionMode { mode_id, .. }] if mode_id.0.as_ref() == "normal"
         ),
         "confirm must re-issue the parked SetSessionMode, got: {effects:?}"
     );

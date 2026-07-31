@@ -5,11 +5,14 @@
 //! out of, so plan-mode state is driven by the closed set of variants
 //! instead of by ad-hoc string matching at each boundary.
 
-/// Wire representation is the snake-cased variant name (`default`, `ask`,
-/// `plan`, `workflow`, `deep_research`, `goal`) via [`strum`].
+/// Wire representation is the snake-cased variant name via [`strum`]
+/// (`ask`, `plan`, `workflow`, `deep_research`, `goal`); `Default` uses the
+/// per-variant override `normal` (its variant name `default` is not a valid
+/// wire id and is strictly rejected by [`Self::try_from_id`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum SessionMode {
+    #[strum(serialize = "normal")]
     Default,
     Plan,
     Ask,
@@ -37,9 +40,9 @@ impl SessionMode {
     }
 
     /// Human-readable display label, matching the pager's Behavior picker
-    /// labels. Wire ids (`default`, `deep_research`, …) are protocol
+    /// labels. Wire ids (`normal`, `deep_research`, …) are protocol
     /// identifiers; user-facing messages must use this label so "Normal"
-    /// never reads as "default".
+    /// never reads as "normal".
     pub fn display_label(&self) -> &'static str {
         match self {
             Self::Default => "Normal",
@@ -74,7 +77,7 @@ mod tests {
     #[test]
     fn round_trip_known_ids() {
         for &id in &[
-            "default",
+            "normal",
             "plan",
             "ask",
             "workflow",
@@ -91,12 +94,16 @@ mod tests {
         assert_eq!(SessionMode::from_id("browser_use"), SessionMode::Default);
         assert_eq!(SessionMode::from_id(""), SessionMode::Default);
         assert_eq!(SessionMode::from_id("PLAN"), SessionMode::Default); // case-sensitive
+        // "default" was the pre-unification wire id; the display layer still
+        // falls back to Normal for stale remote state, but it is not parseable.
+        assert_eq!(SessionMode::from_id("default"), SessionMode::Default);
     }
 
     #[test]
     fn transition_parser_rejects_unknown_ids() {
         assert_eq!(SessionMode::try_from_id("goal"), Some(SessionMode::Goal));
         assert_eq!(SessionMode::try_from_id("browser_use"), None);
+        assert_eq!(SessionMode::try_from_id("default"), None); // old id, strictly rejected
     }
 
     #[test]

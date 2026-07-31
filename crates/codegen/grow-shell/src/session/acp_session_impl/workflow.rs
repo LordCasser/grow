@@ -119,7 +119,9 @@ impl SessionActor {
         drop(behavior);
         *self.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
         self.persist_behavior_state();
-        self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new("default"));
+        self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
+            grow_tools::types::SessionMode::Default.as_id(),
+        ));
     }
 
     pub(crate) async fn cancel_deep_research_with_report(&self, run_id: &str) {
@@ -268,7 +270,7 @@ impl SessionActor {
                     *self.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
                     self.persist_behavior_state();
                     self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
-                        "default",
+                        grow_tools::types::SessionMode::Default.as_id(),
                     ));
                 } else {
                     self.workflow_manager.lock().await.cancel(&full_id);
