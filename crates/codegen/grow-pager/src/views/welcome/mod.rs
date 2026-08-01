@@ -2814,4 +2814,47 @@ mod tests {
             "the info slot must never fall back to a changelog:\n{text}"
         );
     }
+
+    #[test]
+    fn home_menu_keys_stay_clear_of_screen_right_edge_on_wide_terminals() {
+        // Regression: at 120×50 the hero renders side-by-side and the menu
+        // row used to span the whole text column, flush-righting ctrl+w to
+        // ~3 cols from the screen edge. The row must cap its width and pad
+        // the shortcuts so the keys keep ≥5 cols of clearance.
+        let auth = AuthState::Done;
+        let trust = TrustState::Done;
+        let params = render_params(&auth, &trust, None);
+        let area = Rect::new(0, 0, 120, 50);
+        let mut buf = Buffer::empty(area);
+        let mut prompt = PromptWidget::new();
+        let mut picker = PickerState::default();
+        render_welcome(area, &mut buf, &params, &mut prompt, &mut picker);
+        // Scan cell-by-cell: each cell is exactly one column, so the x where
+        // the accumulated row first ends with "ctrl+w" is the trailing 'w'
+        // column. (Byte offsets would be skewed by multi-byte symbols such as
+        // the logo's braille glyphs sharing the menu row in side-by-side mode.)
+        let mut key_col = None;
+        'outer: for y in 0..area.height {
+            let mut row = String::new();
+            for x in 0..area.width {
+                row.push_str(buf[(x, y)].symbol());
+                if row.ends_with("ctrl+w") {
+                    // "ctrl+w" is 6 cells wide; its first cell sits 5 cells
+                    // before the 'w' cell at x.
+                    key_col = Some(x - ("ctrl+w".len() as u16 - 1));
+                    break 'outer;
+                }
+            }
+        }
+        let key_col = key_col.unwrap_or_else(|| {
+            panic!("home must render the ctrl+w menu row:\n{}", buffer_text(&buf))
+        });
+        let last_key_col = key_col + "ctrl+w".len() as u16 - 1;
+        let right_gap = area.width - 1 - last_key_col;
+        assert!(
+            right_gap >= 5,
+            "ctrl+w must stay ≥5 cols from the screen right edge (got {right_gap}):\n{}",
+            buffer_text(&buf)
+        );
+    }
 }

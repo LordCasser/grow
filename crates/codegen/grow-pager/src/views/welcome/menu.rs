@@ -7,12 +7,27 @@ use ratatui::text::Span;
 
 use crate::theme::Theme;
 
+/// Row width cap (cols), matching the hero's stacked text-group width: on a
+/// wide terminal the side-by-side hero text column spans nearly the whole
+/// content area, and an uncapped menu row would push the flush-right
+/// shortcuts to the screen edge.
+const MENU_MAX_WIDTH: u16 = 51;
+
+/// Right inset (cols) between the shortcut and the row's right edge, so keys
+/// never sit flush against the row / content edge (the ~6-col margin of the
+/// narrow text-only mode is the reference).
+const KEY_RIGHT_PAD: u16 = 4;
+
 /// Render the welcome menu rows as `label … shortcut`, padded within each row.
 /// Returns the Rect for each item row (for hit-testing clicks and hover).
 ///
-/// The menu centers itself at `max(content width, 30, min_width_hint)` within
-/// `area`; the hero passes its text-column width so the menu spans it
-/// (labels flush left, shortcuts flush right, aligned with the text above).
+/// The row width is `max(content width, 30, min_width_hint)` clamped to
+/// [`MENU_MAX_WIDTH`] and to `area`. When the hero passes its text-column
+/// width as `min_width_hint`, the row is left-aligned with `area` so the
+/// labels stay flush with the version/subtitle above, and the shortcut keeps
+/// a [`KEY_RIGHT_PAD`] right inset so keys never reach the screen edge. With
+/// `min_width_hint == 0` (login / ZDR / trust gates) the row stays compact
+/// and centered within `area`.
 pub fn render_menu(
     area: Rect,
     buf: &mut Buffer,
@@ -41,15 +56,31 @@ pub fn render_menu(
         .map(|(key, label)| (key.len() + label.len() + 4) as u16)
         .max()
         .unwrap_or(0);
-    let menu_width = content_min.max(30).max(min_width_hint);
+    let menu_width = content_min
+        .max(30)
+        .max(min_width_hint)
+        .min(MENU_MAX_WIDTH)
+        .min(area.width);
 
-    let [_, menu_centered, _] = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(menu_width),
-        Constraint::Min(0),
-    ])
-    .flex(Flex::Center)
-    .areas(area);
+    let menu_centered = if min_width_hint > 0 {
+        // Hero: left-align with the text column above (version / subtitle),
+        // so the labels stay flush with the text above the menu.
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: menu_width,
+            height: area.height,
+        }
+    } else {
+        let [_, menu_centered, _] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(menu_width),
+            Constraint::Min(0),
+        ])
+        .flex(Flex::Center)
+        .areas(area);
+        menu_centered
+    };
 
     let mut rects = Vec::with_capacity(items.len());
     let mut y = menu_centered.y;
@@ -88,14 +119,17 @@ pub fn render_menu(
         };
         buf.set_span(menu_centered.x, y, &Span::styled(*label, lstyle), label_len);
 
-        // Key shortcut flush with the right edge of the menu column.
+        // Key shortcut flush with the right edge of the menu column, minus
+        // the right pad so keys never hug the row / content edge.
         let kstyle = if is_selected {
             key_selected_style
         } else {
             key_style
         };
+        let key_x_start =
+            menu_centered.x + menu_centered.width.saturating_sub(key_width + KEY_RIGHT_PAD);
         buf.set_span(
-            menu_centered.x + menu_centered.width - key_width,
+            key_x_start,
             y,
             &Span::styled(*key, kstyle),
             key_width,
@@ -103,7 +137,6 @@ pub fn render_menu(
 
         // [x] dismiss affordance restyling (for the import row)
         if let Some(x_offset) = key.rfind("[x]") {
-            let key_x_start = menu_centered.x + menu_centered.width - key_width;
             let dismiss_start = key_x_start + x_offset as u16;
             let dismiss_end = dismiss_start + 3;
             let mouse_on_dismiss = mouse_pos
@@ -136,4 +169,83 @@ pub fn render_menu(
     }
 
     rects
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_width_is_clamped_by_max_width() {
+        // A huge text-column hint must cap the row at MENU_MAX_WIDTH (the
+        // hero's stacked text-group width) instead of spanning the area.
+        let area = Rect::new(0, 0, 300, 4);
+        let mut buf = Buffer::empty(area);
+        let items = [("ctrl+w", "New worktree")];
+        let rects = render_menu(area, &mut buf, &Theme::current(), &items, None, None, 200);
+        assert_eq!(rects[0].width, MENU_MAX_WIDTH);
+        assert_eq!(rects[0].x, area.x, "hinted rows left-align");
+    }
+
+    #[test]
+    fn menu_aligns_left_with_hint_and_centers_without() {
+        let items = [("l", "Login")];
+        let area = Rect::new(10, 0, 60, 3);
+        let mut buf = Buffer::empty(area);
+        let rects = render_menu(area, &mut buf, &Theme::current(), &items, None, None, 60);
+        assert_eq!(
+            rects[0].x,
+            area.x,
+            "hero rows must left-align with the text column"
+        );
+        let rects = render_menu(area, &mut buf, &Theme::current(), &items, None, None, 0);
+        assert!(
+            rects[0].x > area.x,
+            "gate rows must stay centered when min_width_hint == 0"
+        );
+    }
+
+    #[test]
+    fn shortcut_keeps_right_pad_from_row_edge() {
+        let items = [("ctrl+w", "New worktree")];
+        let area = Rect::new(0, 0, 60, 2);
+        let mut buf = Buffer::empty(area);
+        let rects = render_menu(area, &mut buf, &Theme::current(), &items, None, None, 60);
+        let row = rects[0];
+        let row_right = row.x + row.width - 1;
+        // The key's last cell must sit at least KEY_RIGHT_PAD cols from the
+        // row's right edge, and the pad cells must be blank. (The label
+        // "New worktree" also contains 'w', so take the LAST match.)
+        let mut key_end = None;
+        for x in row.x..=row_right {
+            if buf[(x, row.y)].symbol() == "w" {
+                key_end = Some(x);
+            }
+        }
+        let key_end = key_end.expect("the ctrl+w key must render");
+        assert!(
+            row_right - key_end >= KEY_RIGHT_PAD,
+            "key col {key_end} must be >= {KEY_RIGHT_PAD} cols from row edge {row_right}"
+        );
+        for x in key_end + 1..=row_right {
+            assert_eq!(buf[(x, row.y)].symbol(), " ", "pad cell {x} must be blank");
+        }
+    }
+
+    #[test]
+    fn narrow_area_clamps_width_without_panicking() {
+        // area.width < content_min: the row clamps to the area and the key
+        // position math must saturate instead of underflowing.
+        let items = [("ctrl+w", "New worktree")]; // content_min = 22
+        for w in [20u16, 5u16] {
+            let area = Rect::new(0, 0, w, 2);
+            let mut buf = Buffer::empty(area);
+            let rects = render_menu(area, &mut buf, &Theme::current(), &items, None, None, 0);
+            assert!(rects[0].width <= w, "row must clamp to the area width");
+            assert!(
+                rects[0].width <= MENU_MAX_WIDTH,
+                "row must never exceed MENU_MAX_WIDTH"
+            );
+        }
+    }
 }
