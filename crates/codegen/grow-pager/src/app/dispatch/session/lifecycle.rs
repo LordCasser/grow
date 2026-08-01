@@ -441,13 +441,6 @@ pub(in crate::app::dispatch) fn finish_trust(app: &mut AppView) -> Vec<Effect> {
         vec![]
     }
 }
-/// Clear EVERY deferred `startup_*` action without replaying any. Used on the
-/// paths that must not run startup at all, so a stash (including an incidental
-/// mid-session `Ctrl+N` that the chokepoint deferred) can never linger and fire
-/// later. Atomic counterpart to `drain_startup_actions`.
-pub(in crate::app::dispatch) fn clear_startup_actions(app: &mut AppView) {
-    let _ = app.deferred_startup.take();
-}
 /// Replay the session-startup actions deferred until trust resolves
 /// (`--resume` / `--worktree` / initial-prompt / `grow dashboard`).
 pub(in crate::app::dispatch) fn drain_startup_actions(app: &mut AppView) -> Vec<Effect> {

@@ -1,11 +1,9 @@
 //! Session loading, session pickers, and deep-search dispatchers.
 use super::fork::build_child_fork_marker;
-use super::lifecycle::{
-    clear_startup_actions, dispatch_new_session_inner, dispatch_new_worktree_session,
-};
+use super::lifecycle::dispatch_new_worktree_session;
 use super::list::dispatch_fetch_session_list;
 use crate::acp::tracker::AcpUpdateTracker;
-use crate::app::actions::{Action, Effect};
+use crate::app::actions::Effect;
 use crate::app::agent::{AgentCommand, AgentId, AgentSession, AgentState};
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::AppView;
@@ -15,7 +13,6 @@ use crate::app::dispatch::ctx::{
 use crate::app::dispatch::modes::inherit_auto_mode;
 use crate::app::dispatch::prompt::defer_to_open_reload_window;
 use crate::app::dispatch::queue::{maybe_drain_queue, note_peek_page_flip};
-use crate::app::dispatch::router::dispatch;
 use crate::app::dispatch::status::notify_session_ready;
 use crate::app::dispatch::transcript::extensions_modal_tab_fetches;
 use crate::scrollback::block::RenderBlock;
@@ -206,7 +203,7 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
             let data = entries
                 .as_ref()
                 .and_then(|s| s.get(index))
-                .map(|e| (e.id.clone(), e.source.clone()));
+                .map(|e| e.id.clone());
             agent.active_modal = None;
             picker_dismissed = true;
             data
@@ -219,7 +216,7 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
     if picker_dismissed {
         invalidate_picker_fetch_on_dismiss(app);
     }
-    let (session_id, source) = match entry_data {
+    let session_id = match entry_data {
         Some(d) => d,
         None => {
             let sessions = match app.session_picker_entries.take() {
@@ -233,14 +230,14 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
                 Some(e) => e,
                 None => return vec![],
             };
-            let d = (entry.id.clone(), entry.source.clone());
+            let id = entry.id.clone();
             app.session_picker_loading = false;
             app.session_picker_state.set_query("");
             app.session_picker_state.search_active = false;
             app.session_picker_state.expanded.clear();
             app.session_picker_content_results = None;
             app.session_picker_content_loading = false;
-            d
+            id
         }
     };
     let local_cwd = app.cwd.to_string_lossy().to_string();
@@ -269,7 +266,7 @@ pub(in crate::app::dispatch) fn dispatch_pick_session_in_worktree(
             let data = entries
                 .as_ref()
                 .and_then(|s| s.get(index))
-                .map(|e| (e.id.clone(), e.source.clone()));
+                .map(|e| e.id.clone());
             agent.active_modal = None;
             picker_dismissed = true;
             data
@@ -282,7 +279,7 @@ pub(in crate::app::dispatch) fn dispatch_pick_session_in_worktree(
     if picker_dismissed {
         invalidate_picker_fetch_on_dismiss(app);
     }
-    let (session_id, _source) = match entry_data {
+    let session_id = match entry_data {
         Some(d) => d,
         None => {
             let sessions = match app.session_picker_entries.take() {
@@ -296,12 +293,12 @@ pub(in crate::app::dispatch) fn dispatch_pick_session_in_worktree(
                 Some(e) => e,
                 None => return vec![],
             };
-            let d = (entry.id.clone(), entry.source.clone());
+            let id = entry.id.clone();
             app.session_picker_loading = false;
             app.session_picker_state.set_query("");
             app.session_picker_state.search_active = false;
             app.session_picker_state.expanded.clear();
-            d
+            id
         }
     };
     dispatch_new_worktree_session(app, Some(session_id), None, None, None, None, None)
@@ -432,9 +429,7 @@ pub(in crate::app::dispatch) fn dispatch_cycle_session_source_filter(
     if let Some(agent) = get_active_agent_mut(app)
         && let Some(ActiveModal::SessionPicker {
             state,
-            content_results,
-            content_loading,
-            deep_search_seq,
+            source_filter,
             pending_delete,
             ..
         }) = agent.active_modal.as_mut()

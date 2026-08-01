@@ -3330,7 +3330,7 @@ mod tests {
               ],
               "properties": {
                 "file_path": {
-                  "description": "The absolute path to the file to write.",
+                  "description": "The path to the file to write, resolved against the current workspace.",
                   "type": "string"
                 },
                 "content": {
