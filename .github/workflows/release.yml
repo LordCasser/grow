@@ -525,14 +525,17 @@ jobs:
         shell: bash
         env:
           GROW_VERSION: ${{ needs.validate.outputs.version }}
-          # `cross` mounts the workspace at /project inside its container and
-          # forwards env via CROSS_CONTAINER_OPTS; remap the host paths.
-          CROSS_CONTAINER_OPTS: >-
-            -e PROTOC=/project/.build-tools/protoc/bin/protoc
-            -e GROW_TOOLS_BUNDLE_RG_PATH=/project/.build-tools/rg/ripgrep-15.0.0-riscv64gc-unknown-linux-gnu/rg
-            -e GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1
         run: |
           set -euo pipefail
+          # `cross` mounts the workspace into the container, but the mount
+          # point is not guaranteed (/project on older cross, host path on
+          # newer), so the tools dir is mounted explicitly at a fixed
+          # container path and referenced from there. Options must stay
+          # single-space separated: cross splits CROSS_CONTAINER_OPTS on ' '.
+          export CROSS_CONTAINER_OPTS="-v ${GITHUB_WORKSPACE}/.build-tools:/opt/grow-tools:ro \
+          -e PROTOC=/opt/grow-tools/protoc/bin/protoc \
+          -e GROW_TOOLS_BUNDLE_RG_PATH=/opt/grow-tools/rg/ripgrep-15.0.0-riscv64gc-unknown-linux-gnu/rg \
+          -e GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1"
           cross build --locked --profile release-dist \
             -p grow-pager-bin --bin grow --target riscv64gc-unknown-linux-gnu
 
