@@ -679,7 +679,10 @@ pub(crate) fn detect_platform() -> Result<(&'static str, &'static str)> {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         return Ok(("linux", "x86_64"));
     }
-    anyhow::bail!("Grow releases currently support macOS arm64 and Linux arm64/amd64")
+    if cfg!(all(target_os = "linux", target_arch = "riscv64")) {
+        return Ok(("linux", "riscv64"));
+    }
+    anyhow::bail!("Grow releases currently support macOS arm64 and Linux arm64/amd64/riscv64")
 }
 
 /// Age past which a leftover `.tmp` download file (or a freshly-renamed
@@ -3448,13 +3451,17 @@ mod tests {
     #[cfg(any(
         all(target_os = "macos", target_arch = "aarch64"),
         all(target_os = "linux", target_arch = "aarch64"),
-        all(target_os = "linux", target_arch = "x86_64")
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "riscv64")
     ))]
     #[test]
     fn test_detect_platform_returns_known_os() {
         let (os, arch) = detect_platform().unwrap();
         assert!(os == "macos" || os == "linux", "got os={os}");
-        assert!(arch == "x86_64" || arch == "aarch64", "got arch={arch}");
+        assert!(
+            arch == "x86_64" || arch == "aarch64" || arch == "riscv64",
+            "got arch={arch}"
+        );
     }
 
     #[cfg(any(
