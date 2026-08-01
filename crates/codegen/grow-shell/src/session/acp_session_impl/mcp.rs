@@ -481,14 +481,17 @@ impl SessionActor {
             crate::util::config::load_mcp_servers_with_oauth(cwd, &self.rebuild_spec.compat);
         let byo_config = oauth_config_map.get(server_name).cloned();
         let event_writer = self.events.writer();
-        let mode = crate::session::mcp_servers::OauthInteractivity::Interactive;
+        let ctx = crate::session::mcp_servers::McpSpawnCtx::for_session(
+            session_id,
+            crate::session::mcp_servers::OauthInteractivity::Interactive,
+            self.tool_context.process_scope.as_ref(),
+        );
         let new_client = crate::session::mcp_servers::start_mcp_server(
             server_config,
-            Some(session_id),
             Some(cwd),
             meta_config.as_ref(),
             byo_config.as_ref(),
-            mode,
+            &ctx,
         )
         .await
         .map_err(|e| format!("Failed to prepare OAuth for '{}': {}", server_name, e))?;
@@ -976,14 +979,17 @@ impl SessionActor {
             crate::util::config::load_mcp_servers_with_oauth(cwd, &self.rebuild_spec.compat);
         let byo_config = oauth_config_map.get(server).cloned();
         let event_writer = self.events.writer();
-        let mode = OauthInteractivity::from_non_interactive(self.startup_hints.non_interactive);
+        let ctx = crate::session::mcp_servers::McpSpawnCtx::for_session(
+            session_id,
+            OauthInteractivity::from_non_interactive(self.startup_hints.non_interactive),
+            self.tool_context.process_scope.as_ref(),
+        );
         let new_client = crate::session::mcp_servers::start_mcp_server(
             server_config.clone(),
-            Some(session_id),
             Some(cwd),
             meta_config.as_ref(),
             byo_config.as_ref(),
-            mode,
+            &ctx,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -1100,10 +1106,9 @@ impl SessionActor {
             // Read-only classification for the plan-mode gate: whole-set
             // replace (no populate-once guard) so config edits that add or
             // clear `read_only` are reflected on the next init.
-            mcp_state.read_only_mcp_servers =
-                crate::util::config::get_read_only_mcp_servers(std::path::Path::new(
-                    &self.session_info.cwd,
-                ));
+            mcp_state.read_only_mcp_servers = crate::util::config::get_read_only_mcp_servers(
+                std::path::Path::new(&self.session_info.cwd),
+            );
             let existing: std::collections::HashSet<String> =
                 mcp_state.owned_clients.keys().cloned().collect();
             (
@@ -1234,16 +1239,18 @@ impl SessionActor {
             &toml_mcp_names,
         );
         let spawn_writer = self.events.writer();
-        let mode = OauthInteractivity::from_non_interactive(self.startup_hints.non_interactive);
+        let ctx = crate::session::mcp_servers::McpSpawnCtx::for_session(
+            session_id,
+            OauthInteractivity::from_non_interactive(self.startup_hints.non_interactive),
+            self.tool_context.process_scope.as_ref(),
+        );
         let mcp_results = build_pending_clients(
             &self.mcp_state,
             configs_to_start,
-            Some(session_id),
             Some(cwd),
             &meta_config_map,
             &oauth_config_map,
-            &spawn_writer,
-            mode,
+            &ctx,
         )
         .await;
         tokio::task::yield_now().await;

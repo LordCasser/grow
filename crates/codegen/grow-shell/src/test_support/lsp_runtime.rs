@@ -20,6 +20,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
     SubagentSpawnContext {
         lsp: None,
         api_key_provider: None,
+        process_scope: None,
         parent_max_turns: None,
         client_hooks: Default::default(),
         sampling_config: grow_sampler::SamplerConfig {

@@ -29,6 +29,7 @@ use crate::types::requirements::{Expr, ToolRequirement};
 #[allow(unused_imports)]
 use crate::types::resources::SharedResources;
 use crate::types::tool::{ToolKind, ToolNamespace};
+
 use xai_tool_types::{SubagentCompletedOutput, SubagentIsolationMode, TaskToolInput};
 
 /// Default max nesting depth when [`MaxSubagentDepth`] is not injected.
@@ -101,7 +102,7 @@ impl xai_tool_runtime::Tool for TaskTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "task",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -385,12 +386,15 @@ impl xai_tool_runtime::Tool for TaskTool {
                 }
             });
 
-            let task_output_name = crate::types::template_renderer::TemplateRenderer::resolve(
-                &resources,
-                "${{ tools.by_kind.background_task_action }}",
-            )
-            .await
-            .unwrap_or_else(|_| "get_command_or_subagent_output".to_string());
+            // `resolve_tool_name` (not a template render): a missing kind
+            // renders as empty-`Ok`, so a `Result` fallback never fires.
+            let task_output_name =
+                crate::types::template_renderer::TemplateRenderer::resolve_tool_name(
+                    &resources,
+                    crate::types::tool::ToolKind::BackgroundTaskAction,
+                )
+                .await
+                .unwrap_or_else(|| "get_task_output".to_string());
 
             return Ok(ToolOutput::Text(
                 xai_tool_types::format_subagent_started_background(
@@ -415,18 +419,32 @@ impl xai_tool_runtime::Tool for TaskTool {
         // still-running child — return a task_id to poll, like the background
         // branch above (the result arrives via auto-wake or a later poll).
         if result.backgrounded {
-            let task_output_name = crate::types::template_renderer::TemplateRenderer::resolve(
-                &resources,
-                "${{ tools.by_kind.background_task_action }}",
-            )
-            .await
-            .unwrap_or_else(|_| "get_command_or_subagent_output".to_string());
+            // `resolve_tool_name` (not a template render): a missing kind
+            // renders as empty-`Ok`, so a `Result` fallback never fires.
+            let task_output_name =
+                crate::types::template_renderer::TemplateRenderer::resolve_tool_name(
+                    &resources,
+                    crate::types::tool::ToolKind::BackgroundTaskAction,
+                )
+                .await
+                .unwrap_or_else(|| "get_task_output".to_string());
+            // Only promise a completion notification when the client
+            // actually delivers system reminders.
+            let notify_clause = if resources
+                .lock()
+                .await
+                .get::<crate::types::resources::SystemRemindersEnabled>()
+                .is_none_or(|e| e.0)
+            {
+                " — you will be notified when it completes"
+            } else {
+                ""
+            };
 
             return Ok(ToolOutput::Text(
                 format!(
                     "Subagent took longer than the foreground budget and was moved to the \
-                 background to keep the conversation responsive. It is still running — you \
-                 will be notified when it completes.\n\
+                 background to keep the conversation responsive. It is still running{notify_clause}.\n\
                  subagent_id: {id}\n\
                  type: {}\n\
                  description: {}\n\n\

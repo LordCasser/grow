@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_hunk_tracker::HunkTrackerHandle;
+use xai_tty_utils::ProcessScope;
 #[derive(Debug, Clone, Default)]
 pub struct TaskOutputTokenBudget {
     inner: Arc<parking_lot::Mutex<TaskOutputTokenBudgetState>>,
@@ -198,6 +199,10 @@ pub struct ToolContext {
     pub blocking_wait_depth: Arc<BlockingWaitState>,
     pub task_output_token_budget: Option<TaskOutputTokenBudget>,
     pub(crate) sampler_retry_only_before_output: bool,
+    /// This session's child-process reaper, set at session spawn; `None` for
+    /// contexts without one (subagents, defaults). Spawn sites enroll children
+    /// into it; enrolled children are killed when the session closes.
+    pub process_scope: Option<ProcessScope>,
 }
 impl ToolContext {
     pub(crate) fn clamp_task_model_request(
@@ -261,6 +266,7 @@ impl ToolContext {
             blocking_wait_depth: Arc::new(BlockingWaitState::new()),
             task_output_token_budget: None,
             sampler_retry_only_before_output: false,
+            process_scope: None,
         }
     }
     pub fn with_preloaded_env(
@@ -299,6 +305,7 @@ impl ToolContext {
             blocking_wait_depth: Arc::new(BlockingWaitState::new()),
             task_output_token_budget: None,
             sampler_retry_only_before_output: false,
+            process_scope: None,
         }
     }
     pub fn with_file_state_handle(mut self, handle: FileStateHandle) -> Self {
@@ -390,6 +397,7 @@ mod tests {
                 blocking_wait_depth: Arc::new(BlockingWaitState::new()),
                 task_output_token_budget: None,
                 sampler_retry_only_before_output: false,
+                process_scope: None,
             }
         }
     }
