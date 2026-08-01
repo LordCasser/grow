@@ -7,10 +7,12 @@ use ratatui::text::Span;
 
 use crate::theme::Theme;
 
-use super::logo::logo_visual_width;
-
 /// Render the welcome menu rows as `label … shortcut`, padded within each row.
 /// Returns the Rect for each item row (for hit-testing clicks and hover).
+///
+/// The menu centers itself at `max(content width, 30, min_width_hint)` within
+/// `area`; the hero passes its text-column width so the menu spans it
+/// (labels flush left, shortcuts flush right, aligned with the text above).
 pub fn render_menu(
     area: Rect,
     buf: &mut Buffer,
@@ -39,10 +41,7 @@ pub fn render_menu(
         .map(|(key, label)| (key.len() + label.len() + 4) as u16)
         .max()
         .unwrap_or(0);
-    let menu_width = logo_visual_width(area.height)
-        .max(30)
-        .max(content_min)
-        .max(min_width_hint);
+    let menu_width = content_min.max(30).max(min_width_hint);
 
     let [_, menu_centered, _] = Layout::horizontal([
         Constraint::Min(0),

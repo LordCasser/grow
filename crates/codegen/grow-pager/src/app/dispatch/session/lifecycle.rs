@@ -311,7 +311,6 @@ pub(in crate::app::dispatch) fn dispatch_exit_session(app: &mut AppView) -> Vec<
     let effects =
         unregister_session_effect(get_active_agent(app).and_then(|a| a.session.session_id.clone()));
     show_welcome(app);
-    app.welcome_prompt_focused = true;
     app.session_picker_entries = None;
     app.session_picker_loading = false;
     app.session_picker_state.selected = 0;
@@ -336,7 +335,6 @@ pub(in crate::app::dispatch) fn dispatch_trust_folder(app: &mut AppView) -> Vec<
 /// `AuthComplete` uses, so whichever gate resolves last drains exactly once.
 pub(in crate::app::dispatch) fn finish_trust(app: &mut AppView) -> Vec<Effect> {
     app.trust_state = TrustState::Done;
-    app.welcome_prompt_focused = !app.is_access_blocked();
     if app.session_startup_allowed() {
         drain_startup_actions(app)
     } else {
@@ -898,7 +896,6 @@ pub(in crate::app::dispatch) fn handle_session_failed(
             }
         } else {
             show_welcome(app);
-            app.welcome_prompt_focused = true;
             app.session_picker_entries = None;
             app.session_picker_loading = false;
             app.session_picker_state.selected = 0;
@@ -942,7 +939,6 @@ pub(in crate::app::dispatch) fn handle_worktree_session_failed(
             switch_to_agent(app, target, SwitchCause::Picker);
         } else {
             show_welcome(app);
-            app.welcome_prompt_focused = true;
             app.session_picker_entries = None;
             app.session_picker_loading = false;
             app.session_picker_state.selected = 0;

@@ -891,8 +891,6 @@ pub(crate) async fn run(
     let force_login = args.force_login && !connection.auth_methods.is_empty();
     let needs_interactive_login = connection.needs_login || force_login;
     if needs_interactive_login {
-        app.welcome_prompt_focused = false;
-
         if connection.needs_login {
             // Normal path: use the metadata from startup_auth_metadata()
             app.login_label = connection.login_label;
@@ -1052,10 +1050,6 @@ pub(crate) async fn run(
                 .as_ref()
                 .and_then(|s| s.scheduler_background_loops),
         );
-
-    if app.is_access_blocked() {
-        app.welcome_prompt_focused = false;
-    }
 
     {
         use grow_shell::util::config::{
@@ -2764,12 +2758,8 @@ async fn drain_and_process(
                         }
                     }
                     ActiveView::Welcome => {
-                        if matches!(app.auth_state, AuthState::Done) && !app.welcome_prompt_focused
-                        {
-                            app.welcome_prompt_focused = true;
-                            needs_draw = true;
-                            had_non_resize_change = true;
-                        }
+                        // The home page has no input box, so regaining focus
+                        // needs no prompt-focus bookkeeping.
                     }
                     // The dashboard manages its own input/overview focus
                     // (`list_focused`); refocusing the terminal must not

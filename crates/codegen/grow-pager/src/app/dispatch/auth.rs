@@ -322,7 +322,6 @@ pub(super) fn handle_auth_complete(
 
         app.auth_state = AuthState::Done;
         app.auth_show_raw_url = false;
-        app.welcome_prompt_focused = !app.is_access_blocked();
         app.auth_code_input.reset();
 
         // Mid-session re-auth (`/login` or a 401 prompt): restore the

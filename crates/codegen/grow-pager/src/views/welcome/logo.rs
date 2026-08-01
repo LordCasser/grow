@@ -1,4 +1,13 @@
-//! Logo component — renders the Braille world tree.
+//! Logo component — renders the Grow Braille wordmark.
+//!
+//! Two assets, measured at compile time by the helpers below:
+//! - [`LOGO`] (`grow-big.txt`): 80 cols × 35 rows — the large wordmark.
+//! - [`LOGO_SMALL`] (`grow-small.txt`): 30 cols × 15 rows — the small wordmark.
+//!
+//! [`pick_logo`] tiers by **both** width and height (the stacked gate screens
+//! need a width dimension too, so a tall-but-narrow terminal no longer gets a
+//! logo that overflows). The side-by-side hero tiers live in [`super::hero`],
+//! which sizes its columns from the same asset extents.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
@@ -9,37 +18,81 @@ use ratatui::widgets::{Paragraph, Widget};
 use crate::render::color::blend_color;
 use crate::theme::Theme;
 
-const LOGO: &str = include_str!("../../../assets/logo/world-tree.txt");
-const LOGO_SMALL: &str = include_str!("../../../assets/logo/world-tree-small.txt");
+pub(crate) const LOGO: &str = include_str!("../../../assets/logo/grow-big.txt");
+pub(crate) const LOGO_SMALL: &str = include_str!("../../../assets/logo/grow-small.txt");
 
-/// Height at or above which the small logo is shown (below it, no logo).
-const SMALL_LOGO_MIN_HEIGHT: u16 = 22;
-/// Height at or above which the full logo is shown.
-const FULL_LOGO_MIN_HEIGHT: u16 = 31;
+/// The two logo tiers (big wordmark / small wordmark), with their measured
+/// asset extents.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LogoSize {
+    Big,
+    Small,
+}
 
-fn pick_logo(window_height: u16) -> Option<&'static str> {
-    if window_height < SMALL_LOGO_MIN_HEIGHT {
-        None
-    } else if window_height < FULL_LOGO_MIN_HEIGHT {
-        Some(LOGO_SMALL)
-    } else {
-        Some(LOGO)
+impl LogoSize {
+    pub(crate) fn art(self) -> &'static str {
+        match self {
+            LogoSize::Big => LOGO,
+            LogoSize::Small => LOGO_SMALL,
+        }
     }
+
+    /// Width (cols) of the art.
+    pub(crate) fn width(self) -> u16 {
+        visual_width(self.art())
+    }
+
+    /// Height (rows) of the art.
+    pub(crate) fn height(self) -> u16 {
+        count_lines(self.art())
+    }
+}
+
+/// Horizontal padding (cols) the layout reserves around the logo.
+pub(super) const H_PAD: u16 = 2;
+/// Vertical padding (rows) the layout reserves around the logo.
+pub(super) const V_PAD: u16 = 2;
+/// Minimum width (cols) of the hero text column (side-by-side layout).
+pub(super) const RIGHT_COL_MIN: u16 = 59;
+/// Minimum slack (rows) the stacked gate screens need below the logo (logo
+/// gap + flex gap + headroom). The full chrome (menu / prompt / version /
+/// error) is accounted for exactly by [`super::WelcomeLayout::compute_stacked`],
+/// which drops the logo when the version row would clip.
+const STACKED_CHROME: u16 = 3;
+
+/// Asset width (cols) — maximum raw line width, matching the renderer's
+/// padding-based centering.
+pub(super) fn visual_width(logo: &str) -> u16 {
+    non_empty_lines(logo)
+        .map(unicode_width::UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(24) as u16
+}
+
+/// Asset height (rows) — number of non-empty lines.
+pub(super) fn count_lines(logo: &str) -> u16 {
+    non_empty_lines(logo).count() as u16
 }
 
 fn non_empty_lines(logo: &str) -> impl Iterator<Item = &str> {
     logo.lines().filter(|l| !l.is_empty())
 }
 
-fn count_lines(logo: &str) -> u16 {
-    non_empty_lines(logo).count() as u16
-}
-
-fn visual_width(logo: &str) -> u16 {
-    non_empty_lines(logo)
-        .map(unicode_width::UnicodeWidthStr::width)
-        .max()
-        .unwrap_or(24) as u16
+/// Pick the largest logo that fits a **stacked** arrangement (the gate
+/// screens). Requires both dimensions; the height gate includes the fixed
+/// chrome below the logo so the version row stays on screen.
+pub fn pick_logo(area_w: u16, area_h: u16) -> Option<&'static str> {
+    if area_w >= visual_width(LOGO) + 2 * H_PAD
+        && area_h >= count_lines(LOGO) + 2 * V_PAD + STACKED_CHROME
+    {
+        Some(LOGO)
+    } else if area_w >= visual_width(LOGO_SMALL) + 2 * H_PAD
+        && area_h >= count_lines(LOGO_SMALL) + 2 * V_PAD + STACKED_CHROME
+    {
+        Some(LOGO_SMALL)
+    } else {
+        None
+    }
 }
 
 /// Animation phase in seconds since the first render. Wall-clock based so the
@@ -141,44 +194,23 @@ fn render_into(area: Rect, buf: &mut Buffer, theme: &Theme, logo: &str) {
     Paragraph::new(logo_lines).render(area, buf);
 }
 
-pub fn logo_line_count(window_height: u16) -> u16 {
-    pick_logo(window_height).map_or(0, count_lines)
+/// Rows the picked logo occupies (0 when the area is too small for any logo).
+pub fn logo_line_count(area_w: u16, area_h: u16) -> u16 {
+    pick_logo(area_w, area_h).map_or(0, count_lines)
 }
 
-pub fn logo_visual_width(window_height: u16) -> u16 {
-    pick_logo(window_height).map_or(24, visual_width)
-}
-
-pub fn render_logo(area: Rect, buf: &mut Buffer, theme: &Theme, window_height: u16) {
-    if let Some(logo) = pick_logo(window_height) {
+/// Render the picked logo (stacked arrangement), centered into `area`.
+pub fn render_logo(area: Rect, buf: &mut Buffer, theme: &Theme, area_w: u16, area_h: u16) {
+    if let Some(logo) = pick_logo(area_w, area_h) {
         render_into(area, buf, theme, logo);
     }
 }
 
-/// The hero box always shows the full logo: it is laid out beside the menu, so
-/// it fits whenever the box does. These report and render that logo directly,
-/// independent of the height-based [`pick_logo`] tiers used by the stacked
-/// layout.
-pub fn full_logo_line_count() -> u16 {
-    count_lines(LOGO)
-}
-
-pub fn full_logo_visual_width() -> u16 {
-    visual_width(LOGO)
-}
-
-pub fn render_full_logo(area: Rect, buf: &mut Buffer, theme: &Theme) {
-    render_into(area, buf, theme, LOGO);
-}
-
-/// Line count of the small logo used in minimal's committed welcome card.
-pub fn compact_logo_line_count() -> u16 {
-    count_lines(LOGO_SMALL)
-}
-
-/// Render the small world tree (centered) into `area` for minimal's welcome card.
-pub fn render_compact_logo(area: Rect, buf: &mut Buffer, theme: &Theme) {
-    render_into(area, buf, theme, LOGO_SMALL);
+/// Render a specific logo art (centered) into `area`. Used by the hero, which
+/// picks the tier itself from its own side-by-side gates, and by the agent
+/// empty-state (Task B), which tiers via the same asset extents.
+pub(crate) fn render_logo_into(area: Rect, buf: &mut Buffer, theme: &Theme, logo: &'static str) {
+    render_into(area, buf, theme, logo);
 }
 
 #[cfg(test)]
@@ -186,35 +218,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn logo_sizes_by_height() {
-        assert!(pick_logo(SMALL_LOGO_MIN_HEIGHT - 1).is_none());
-        assert_eq!(pick_logo(SMALL_LOGO_MIN_HEIGHT), Some(LOGO_SMALL));
-        assert_eq!(pick_logo(FULL_LOGO_MIN_HEIGHT - 1), Some(LOGO_SMALL));
-        assert_eq!(pick_logo(FULL_LOGO_MIN_HEIGHT), Some(LOGO));
+    fn logo_picks_by_width_and_height() {
+        // The stacked gate screens require both dimensions: big needs
+        // w ≥ 84 && h ≥ 42 (35 rows + 2*V_PAD + chrome slack); small needs
+        // w ≥ 34 && h ≥ 22 (15 rows + 2*V_PAD + chrome slack).
+        assert_eq!(pick_logo(33, 50), None, "too narrow for any logo");
+        assert_eq!(pick_logo(34, 21), None, "too short for the small logo");
+        assert_eq!(pick_logo(34, 22), Some(LOGO_SMALL));
+        assert_eq!(pick_logo(83, 50), Some(LOGO_SMALL), "wide but not wide enough for big");
+        assert_eq!(pick_logo(84, 41), Some(LOGO_SMALL), "tall but not tall enough for big");
+        assert_eq!(pick_logo(84, 42), Some(LOGO));
+        assert_eq!(pick_logo(150, 45), Some(LOGO));
     }
 
     #[test]
-    fn hero_box_always_uses_full_logo() {
-        // The box renders the full logo regardless of height (it's laid out
-        // beside the menu), and it's the large variant — never the small one.
-        assert_eq!(full_logo_line_count(), count_lines(LOGO));
-        assert_eq!(full_logo_visual_width(), visual_width(LOGO));
-        assert!(full_logo_line_count() > count_lines(LOGO_SMALL));
-        assert!(full_logo_visual_width() > visual_width(LOGO_SMALL));
-    }
-
-    #[test]
-    fn compact_logo_line_count_matches_small_logo_when_visible() {
-        // The minimal welcome card budgets exactly the small logo's rows. When
-        // the logo isn't hidden, the count equals the small art's line count and
-        // is strictly shorter than the full logo.
-        assert_eq!(compact_logo_line_count(), count_lines(LOGO_SMALL));
-        assert!(compact_logo_line_count() < count_lines(LOGO));
-        assert!(compact_logo_line_count() > 0);
-    }
-
-    #[test]
-    fn logo_assets_are_braille_world_tree_emblems() {
+    fn logo_assets_are_grow_braille_emblems() {
         for logo in [LOGO, LOGO_SMALL] {
             assert!(
                 logo.lines()
@@ -223,11 +241,23 @@ mod tests {
             );
         }
 
-        assert!(LOGO.contains("⣹⣷⣶⣼⣿⣿⣷"));
-        assert_eq!(full_logo_visual_width(), 30);
-        assert_eq!(full_logo_line_count(), 15);
-        assert_eq!(visual_width(LOGO_SMALL), 10);
-        assert_eq!(compact_logo_line_count(), 5);
+        assert!(LOGO.contains("⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣥"));
+        assert!(LOGO_SMALL.contains("⣹⣷⣶⣼⣿⣿⣷"));
+        assert_eq!(visual_width(LOGO), 80);
+        assert_eq!(count_lines(LOGO), 35);
+        assert_eq!(visual_width(LOGO_SMALL), 30);
+        assert_eq!(count_lines(LOGO_SMALL), 15);
+    }
+
+    #[test]
+    fn hero_gate_constants_calibrated_to_assets() {
+        // Side-by-side gates = logo extent + padding + the minimum text column.
+        assert_eq!(visual_width(LOGO) + 2 * H_PAD + RIGHT_COL_MIN, 143);
+        assert_eq!(count_lines(LOGO) + 2 * V_PAD, 39);
+        assert_eq!(visual_width(LOGO_SMALL) + 2 * H_PAD + RIGHT_COL_MIN, 93);
+        assert_eq!(count_lines(LOGO_SMALL) + 2 * V_PAD, 19);
+        // Stacked small-logo gate = logo extent + padding only.
+        assert_eq!(visual_width(LOGO_SMALL) + 2 * H_PAD, 34);
     }
 
     #[test]

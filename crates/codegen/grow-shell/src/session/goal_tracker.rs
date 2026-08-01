@@ -1115,6 +1115,27 @@ impl GoalTracker {
         false
     }
 
+    /// Update the goal's token budget in place (mid-run re-budgeting).
+    /// Unlocks a `BudgetLimited` pause by moving it to `UserPaused` so the
+    /// existing resume path can continue the run. Resets the
+    /// budget-limit-reported latch so a fresh exhaustion reports again.
+    /// Returns `false` when no goal is active.
+    pub fn set_token_budget(&mut self, budget: Option<i64>) -> bool {
+        let Some(o) = self.orchestration.as_mut() else {
+            return false;
+        };
+        o.token_budget = budget;
+        o.budget_limit_reported = false;
+        if o.status == GoalStatus::BudgetLimited {
+            // Both endpoints are paused states without a running timer, so
+            // `active_since` / `elapsed_ms` need no adjustment (matching the
+            // pause<->pause transitions). `budget_limit` already cleared
+            // `pause_message`, and `resume` clears it again on the way out.
+            o.status = GoalStatus::UserPaused;
+        }
+        true
+    }
+
     /// Clear the goal entirely (`GoalClear`). Dropping the whole
     /// orchestration also drops `plan_baseline_file` / `skeptic0_session_id`,
     /// so no per-field reset is needed here — but the on-disk scratch root
@@ -1966,6 +1987,47 @@ mod tests {
         t.budget_limit();
         assert!(!t.resume());
         assert_eq!(t.status(), Some(GoalStatus::BudgetLimited));
+    }
+
+    #[test]
+    fn set_token_budget_updates_and_resets_latch() {
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        // Simulate a budget exhaustion already reported: the re-budget must
+        // reset the latch so a fresh exhaustion reports again.
+        t.snapshot_mut().unwrap().budget_limit_reported = true;
+
+        assert!(t.set_token_budget(Some(200_000)));
+
+        let o = t.snapshot().unwrap();
+        assert_eq!(o.token_budget, Some(200_000));
+        assert!(!o.budget_limit_reported, "latch must reset on re-budget");
+        // An Active goal stays Active — only BudgetLimited is unlocked.
+        assert_eq!(t.status(), Some(GoalStatus::Active));
+    }
+
+    #[test]
+    fn set_token_budget_unlocks_budget_limited() {
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        t.budget_limit();
+        assert_eq!(t.status(), Some(GoalStatus::BudgetLimited));
+        // resume must reject a BudgetLimited goal before re-budgeting.
+        assert!(!t.resume());
+
+        assert!(t.set_token_budget(Some(200_000)));
+        assert_eq!(t.status(), Some(GoalStatus::UserPaused));
+        assert_eq!(t.token_budget(), Some(200_000));
+        // The existing resume path takes over from UserPaused.
+        assert!(t.resume());
+        assert_eq!(t.status(), Some(GoalStatus::Active));
+    }
+
+    #[test]
+    fn set_token_budget_without_goal_returns_false() {
+        let mut t = make_tracker();
+        assert!(!t.set_token_budget(Some(200_000)));
+        assert!(!t.set_token_budget(None));
     }
 
     #[test]

@@ -93,7 +93,7 @@ Run `grow --resume` without a value to resume the most recent session for the cu
 
 ### From the Welcome Screen
 
-When you launch `grow`, the welcome screen lists recent sessions for the current directory. Select one to resume it.
+When you launch `grow`, press `Ctrl+S` on the welcome screen to open the session picker for the current directory. Select a session to resume it.
 
 ---
 

@@ -772,18 +772,6 @@ pub fn build_grouped_picker_entries<'a>(
     )
 }
 
-// ── Welcome logo ─────────────────────────────────────────────────────────────
-
-/// [`crate::views::welcome::logo::compact_logo_line_count`].
-pub fn compact_logo_line_count() -> u16 {
-    crate::views::welcome::logo::compact_logo_line_count()
-}
-
-/// [`crate::views::welcome::logo::render_compact_logo`].
-pub fn render_compact_logo(area: Rect, buf: &mut Buffer, theme: &Theme) {
-    crate::views::welcome::logo::render_compact_logo(area, buf, theme);
-}
-
 // ── Scrollback committed frontier (minimal-mode commit bookkeeping) ──────────
 //
 // The `committed` marker lives on `ScrollbackEntry` so it survives

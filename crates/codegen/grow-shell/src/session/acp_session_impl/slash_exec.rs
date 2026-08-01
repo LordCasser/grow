@@ -930,6 +930,12 @@ impl SessionActor {
                     .await;
                 ok_end_turn(0, None)
             }
+            // GoalBudget is handled directly in handle_prompt (before this
+            // function is called) so the mid-run re-budget is reported and
+            // persisted without ending the goal run.
+            BuiltinAction::GoalBudget { .. } => {
+                unreachable!("GoalBudget is intercepted in handle_prompt")
+            }
         }
     }
 }
