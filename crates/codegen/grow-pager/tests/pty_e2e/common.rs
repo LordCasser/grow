@@ -8,10 +8,7 @@ pub(crate) use grow_pager_pty_harness::{
     wait_for_labels_absent, wait_for_model_via_new_sessions,
 };
 pub(crate) use serde_json::json;
-pub(crate) use serde_json::json;
-pub(crate) use std::path::Path;
 pub(crate) use std::path::{Path, PathBuf};
-pub(crate) use std::time::{Duration, Instant};
 pub(crate) use std::time::{Duration, Instant};
 
 /// Default PTY size used by every e2e test. Large enough to render the
