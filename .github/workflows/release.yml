@@ -2,10 +2,15 @@
 #   macos-aarch64, linux-x86_64, linux-aarch64, linux-riscv64
 # Asset names must stay grow-{version}-{asset_platform} for grow-update.
 #
-# Linux builds run inside an AlmaLinux 8 container (glibc 2.28 baseline) so the
-# shipped binaries work on older distros than the ubuntu-24.04 runner provides.
-# The container only links: the toolchain (rustc) comes from the host rustup
-# install, mounted into the container (official rustc builds run on glibc >= 2.17).
+# Each platform is its own job: a failing target does not block the others
+# (artifacts land per job; publish collects whatever succeeds and can be
+# re-run after fixing a single target).
+#
+# Linux amd64/arm64 builds run inside an AlmaLinux 8 container (glibc 2.28
+# baseline) so the shipped binaries work on older distros than the
+# ubuntu-24.04 runner provides. The container only links: the toolchain
+# (rustc) comes from the host rustup install, mounted into the container
+# (official rustc builds run on glibc >= 2.17).
 name: Build release assets
 
 on:
@@ -86,51 +91,15 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  build:
-    name: Build ${{ matrix.asset_platform }}
+  # ── Linux amd64 ────────────────────────────────────────────────────────
+  build-linux-x86_64:
+    name: Build linux-x86_64
     needs: validate
     timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Linux amd64: glibc 2.28 baseline via the AlmaLinux 8 build container.
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            asset_platform: linux-x86_64
-            binary: grow
-            linux: true
-            rg_target: x86_64-unknown-linux-musl
-            rg_sha256: 253ad0fd5fef0d64cba56c70dccdacc1916d4ed70ad057cc525fcdb0c3bbd2a7
-          # Linux arm64: same glibc 2.28 container. Official ripgrep has no
-          # aarch64-musl asset for 15.0.0, so embed the gnu build (extracted
-          # sidecar; runnable on any distro with glibc >= the rg build baseline).
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            asset_platform: linux-aarch64
-            binary: grow
-            linux: true
-            rg_target: aarch64-unknown-linux-gnu
-            rg_sha256: 15f8cc2fab12d88491c54d49f38589922a9d6a7353c29b0a0856727bcdf80754
-          - runner: macos-15
-            target: aarch64-apple-darwin
-            asset_platform: macos-aarch64
-            binary: grow
-            linux: false
-            rg_target: aarch64-apple-darwin
-            rg_sha256: 98bb2e61e7277ba0ea72d2ae2592497fd8d2940934a16b122448d302a6637e3b
-          # Linux riscv64: cross-compiled on an amd64 runner via `cross`
-          # (no riscv64 GitHub runners, and riscv64-musl C toolchain is not
-          # available). glibc baseline comes from the cross image, not the
-          # AlmaLinux 8 container. Official ripgrep has no riscv64 asset, so
-          # the sidecar is built from source (pure Rust) in CI.
-          - runner: ubuntu-24.04
-            target: riscv64gc-unknown-linux-gnu
-            asset_platform: linux-riscv64
-            binary: grow
-            linux: true
-            cross: true
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
+    env:
+      TARGET_TRIPLE: x86_64-unknown-linux-gnu
+      ASSET_PLATFORM: linux-x86_64
     steps:
       - uses: actions/checkout@v6
         if: ${{ !env.ACT }}
@@ -163,39 +132,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.92.0"
-          targets: ${{ matrix.target }}
-
-      # macOS builds compile directly on the runner and use this PATH protoc.
-      - uses: arduino/setup-protoc@v3
-        if: ${{ !matrix.linux }}
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # `cross` provides the riscv64 cross C toolchain + sysroot via its
-      # container image (ghcr.io/cross-rs/riscv64gc-unknown-linux-gnu).
-      - name: Install cross
-        if: matrix.cross
-        shell: bash
-        run: cargo install cross --locked
+          targets: x86_64-unknown-linux-gnu
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          key: release-linux-x86_64
           shared-key: release-dist
 
       # The Linux build runs inside a container: only the workspace (and the
       # host CARGO_HOME/RUSTUP_HOME mounts in the Build step) is visible, so
       # protoc and the ripgrep sidecar must live under $GITHUB_WORKSPACE.
       - name: Prepare protoc (Linux container build)
-        if: matrix.linux
         shell: bash
         env:
           PROTOC_VERSION: "30.1"
-          # protoc runs on the HOST (build scripts), so pick the host arch:
-          # the arm64 target builds on the arm runner; everything else
-          # (amd64, riscv64-cross) builds on the amd64 runner.
-          PROTOC_ARCH: ${{ matrix.runner == 'ubuntu-24.04-arm' && 'aarch_64' || 'x86_64' }}
-          PROTOC_SHA256: ${{ matrix.runner == 'ubuntu-24.04-arm' && 'e866d3dc4775e8032721915e83e3fb6e1ab4def7199a49b4f95c4d1f6cf4c03a' || '5537e15ab0c0e610f809573948d3ec7d6ef387a07991e1c361a2a0e8cad983e5' }}
+          PROTOC_ARCH: "x86_64"
+          PROTOC_SHA256: "5537e15ab0c0e610f809573948d3ec7d6ef387a07991e1c361a2a0e8cad983e5"
         run: |
           set -euo pipefail
           mkdir -p "${GITHUB_WORKSPACE}/.build-tools/protoc"
@@ -211,12 +163,11 @@ jobs:
           echo "PROTOC=${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" >> "$GITHUB_ENV"
 
       - name: Prepare bundled ripgrep
-        if: ${{ !matrix.cross }}
         shell: bash
         env:
           RG_VERSION: "15.0.0"
-          RG_TARGET: ${{ matrix.rg_target }}
-          RG_SHA256: ${{ matrix.rg_sha256 }}
+          RG_TARGET: "x86_64-unknown-linux-musl"
+          RG_SHA256: "253ad0fd5fef0d64cba56c70dccdacc1916d4ed70ad057cc525fcdb0c3bbd2a7"
         run: |
           set -euo pipefail
           archive="${RUNNER_TEMP}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
@@ -233,35 +184,12 @@ jobs:
           mkdir -p "$bundle_dir"
           tar -xzf "$archive" --strip-components=1 -C "$bundle_dir"
           test -x "$bundle_dir/rg"
-          # Validate runnability on the native runner (the gnu rg sidecar needs
-          # newer glibc than the AlmaLinux 8 build container provides; that is
-          # fine for real deployment targets, see grow-tools build.rs).
           "$bundle_dir/rg" --version >/dev/null
           echo "GROW_TOOLS_BUNDLE_RG_PATH=$bundle_dir/rg" >> "$GITHUB_ENV"
 
-      # Official ripgrep releases have no riscv64 asset, so cross-compile the
-      # sidecar from source on the amd64 runner (rg is pure Rust).
-      - name: Build bundled ripgrep (riscv64)
-        if: matrix.cross
-        shell: bash
-        env:
-          RG_VERSION: "15.0.0"
-        run: |
-          set -euo pipefail
-          bundle_dir="${GITHUB_WORKSPACE}/.build-tools/rg/ripgrep-${RG_VERSION}-riscv64-unknown-linux-gnu"
-          cargo install ripgrep --version "${RG_VERSION}" \
-            --target riscv64gc-unknown-linux-gnu --root "${bundle_dir}" \
-            --locked
-          test -x "${bundle_dir}/bin/rg"
-          # Cannot run the riscv64 binary on the amd64 runner; the build step
-          # sets GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1 accordingly.
-          echo "GROW_TOOLS_BUNDLE_RG_PATH=${bundle_dir}/bin/rg" >> "$GITHUB_ENV"
-
       - name: Build Grow (AlmaLinux 8 container, glibc 2.28 baseline)
-        if: ${{ matrix.linux && !matrix.cross }}
         shell: bash
         env:
-          TARGET_TRIPLE: ${{ matrix.target }}
           GROW_VERSION: ${{ needs.validate.outputs.version }}
           GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK: "1"
         run: |
@@ -287,8 +215,300 @@ jobs:
                 -p grow-pager-bin --bin grow --target "${TARGET_TRIPLE}"
             '
 
+      - name: Smoke-test binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${TARGET_TRIPLE}/release-dist/grow"
+          test -x "$BIN"
+          test -s "$BIN"
+          version_out="$("$BIN" --version)"
+          echo "$version_out"
+          echo "$version_out" | grep -F "${{ needs.validate.outputs.version }}"
+
+      - name: Stage release asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${TARGET_TRIPLE}/release-dist/grow" \
+            "dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: grow-${{ env.ASSET_PLATFORM }}
+          path: dist/grow-*
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Act — restore bind-mounted branch
+        if: ${{ always() && env.ACT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ACT_RESTORE_REF:-}" ]]; then
+            git checkout -f "${ACT_RESTORE_REF}"
+            echo "restored ${ACT_RESTORE_REF}"
+          fi
+
+  # ── Linux arm64 ────────────────────────────────────────────────────────
+  build-linux-aarch64:
+    name: Build linux-aarch64
+    needs: validate
+    timeout-minutes: 180
+    runs-on: ubuntu-24.04-arm
+    env:
+      TARGET_TRIPLE: aarch64-unknown-linux-gnu
+      ASSET_PLATFORM: linux-aarch64
+    steps:
+      - uses: actions/checkout@v6
+        if: ${{ !env.ACT }}
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Act — checkout tagged tree on bind mount
+        if: ${{ env.ACT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "act build requires a clean worktree (bind mount shares the host clone)" >&2
+            git status --short >&2
+            exit 1
+          fi
+          # Remember how to restore after the job (always step below).
+          if branch="$(git symbolic-ref -q --short HEAD 2>/dev/null)"; then
+            echo "ACT_RESTORE_REF=${branch}" >> "$GITHUB_ENV"
+          else
+            echo "ACT_RESTORE_REF=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          fi
+          git checkout --detach "${RELEASE_TAG}"
+          echo "ACT build tree=$(git rev-parse --short HEAD) (${RELEASE_TAG})"
+
+      # Toolchain on the host: rustc/rustup (official builds, glibc >= 2.17) run
+      # fine inside the AlmaLinux 8 container; the container provides the linker
+      # (gcc 8.5) so the binary's glibc baseline is the container's 2.28.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92.0"
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux-aarch64
+          shared-key: release-dist
+
+      # The Linux build runs inside a container: only the workspace (and the
+      # host CARGO_HOME/RUSTUP_HOME mounts in the Build step) is visible, so
+      # protoc and the ripgrep sidecar must live under $GITHUB_WORKSPACE.
+      - name: Prepare protoc (Linux container build)
+        shell: bash
+        env:
+          PROTOC_VERSION: "30.1"
+          PROTOC_ARCH: "aarch_64"
+          PROTOC_SHA256: "e866d3dc4775e8032721915e83e3fb6e1ab4def7199a49b4f95c4d1f6cf4c03a"
+        run: |
+          set -euo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/.build-tools/protoc"
+          archive="${RUNNER_TEMP}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
+          url="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --connect-timeout 30 --max-time 300 \
+            --output "$archive" "$url"
+          echo "${PROTOC_SHA256}  $archive" | sha256sum -c -
+          unzip -q -o "$archive" -d "${GITHUB_WORKSPACE}/.build-tools/protoc"
+          test -x "${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc"
+          "${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" --version
+          echo "PROTOC=${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" >> "$GITHUB_ENV"
+
+      # Official ripgrep has no aarch64-musl asset for 15.0.0, so embed the gnu
+      # build (extracted sidecar; runnable on any distro with glibc >= the rg
+      # build baseline).
+      - name: Prepare bundled ripgrep
+        shell: bash
+        env:
+          RG_VERSION: "15.0.0"
+          RG_TARGET: "aarch64-unknown-linux-gnu"
+          RG_SHA256: "15f8cc2fab12d88491c54d49f38589922a9d6a7353c29b0a0856727bcdf80754"
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
+          # Under $GITHUB_WORKSPACE so the Linux build container sees it.
+          bundle_dir="${GITHUB_WORKSPACE}/.build-tools/rg/ripgrep-${RG_VERSION}-${RG_TARGET}"
+          url="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            --connect-timeout 30 --max-time 300 \
+            --output "$archive" "$url"
+          actual_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          test "$actual_sha256" = "$RG_SHA256"
+
+          mkdir -p "$bundle_dir"
+          tar -xzf "$archive" --strip-components=1 -C "$bundle_dir"
+          test -x "$bundle_dir/rg"
+          # Validate runnability on the native runner (the gnu rg sidecar needs
+          # newer glibc than the AlmaLinux 8 build container provides; that is
+          # fine for real deployment targets, see grow-tools build.rs).
+          "$bundle_dir/rg" --version >/dev/null
+          echo "GROW_TOOLS_BUNDLE_RG_PATH=$bundle_dir/rg" >> "$GITHUB_ENV"
+
+      - name: Build Grow (AlmaLinux 8 container, glibc 2.28 baseline)
+        shell: bash
+        env:
+          GROW_VERSION: ${{ needs.validate.outputs.version }}
+          GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK: "1"
+        run: |
+          set -euo pipefail
+          # rustup/cargo default to $HOME/.cargo and $HOME/.rustup when the
+          # env vars are unset (dtolnay/rust-toolchain does not export them).
+          CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
+          RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
+            -v "${CARGO_HOME}:${CARGO_HOME}" -v "${RUSTUP_HOME}:${RUSTUP_HOME}" \
+            -e "PATH=${CARGO_HOME}/bin:${PATH}" \
+            -e "CARGO_HOME=${CARGO_HOME}" -e "RUSTUP_HOME=${RUSTUP_HOME}" \
+            -e "GROW_VERSION=${GROW_VERSION}" \
+            -e "PROTOC=${PROTOC}" \
+            -e "GROW_TOOLS_BUNDLE_RG_PATH=${GROW_TOOLS_BUNDLE_RG_PATH}" \
+            -e "GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1" \
+            -e "TARGET_TRIPLE=${TARGET_TRIPLE}" \
+            -e "CARGO_INCREMENTAL=0" \
+            almalinux:8 bash -euo pipefail -c '
+              dnf install -y gcc gcc-c++ make cmake git perl pkgconf >/dev/null
+              cargo build --locked --profile release-dist \
+                -p grow-pager-bin --bin grow --target "${TARGET_TRIPLE}"
+            '
+
+      - name: Smoke-test binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${TARGET_TRIPLE}/release-dist/grow"
+          test -x "$BIN"
+          test -s "$BIN"
+          version_out="$("$BIN" --version)"
+          echo "$version_out"
+          echo "$version_out" | grep -F "${{ needs.validate.outputs.version }}"
+
+      - name: Stage release asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${TARGET_TRIPLE}/release-dist/grow" \
+            "dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: grow-${{ env.ASSET_PLATFORM }}
+          path: dist/grow-*
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Act — restore bind-mounted branch
+        if: ${{ always() && env.ACT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ACT_RESTORE_REF:-}" ]]; then
+            git checkout -f "${ACT_RESTORE_REF}"
+            echo "restored ${ACT_RESTORE_REF}"
+          fi
+
+  # ── Linux riscv64 ──────────────────────────────────────────────────────
+  # Cross-compiled on an amd64 runner via `cross` (no riscv64 GitHub runners,
+  # and riscv64-musl C toolchain is not available). The glibc baseline comes
+  # from the cross image, not the AlmaLinux 8 container. Official ripgrep has
+  # no riscv64 asset, so the sidecar is built from source (pure Rust).
+  build-linux-riscv64:
+    name: Build linux-riscv64
+    needs: validate
+    timeout-minutes: 180
+    runs-on: ubuntu-24.04
+    env:
+      TARGET_TRIPLE: riscv64gc-unknown-linux-gnu
+      ASSET_PLATFORM: linux-riscv64
+    steps:
+      - uses: actions/checkout@v6
+        if: ${{ !env.ACT }}
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Act — checkout tagged tree on bind mount
+        if: ${{ env.ACT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "act build requires a clean worktree (bind mount shares the host clone)" >&2
+            git status --short >&2
+            exit 1
+          fi
+          # Remember how to restore after the job (always step below).
+          if branch="$(git symbolic-ref -q --short HEAD 2>/dev/null)"; then
+            echo "ACT_RESTORE_REF=${branch}" >> "$GITHUB_ENV"
+          else
+            echo "ACT_RESTORE_REF=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          fi
+          git checkout --detach "${RELEASE_TAG}"
+          echo "ACT build tree=$(git rev-parse --short HEAD) (${RELEASE_TAG})"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92.0"
+          targets: riscv64gc-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux-riscv64
+          shared-key: release-dist
+
+      # `cross` provides the riscv64 cross C toolchain + sysroot via its
+      # container image (ghcr.io/cross-rs/riscv64gc-unknown-linux-gnu).
+      - name: Install cross
+        shell: bash
+        run: cargo install cross --locked
+
+      # protoc runs on the HOST (build scripts), so use the amd64 build.
+      - name: Prepare protoc (host arch)
+        shell: bash
+        env:
+          PROTOC_VERSION: "30.1"
+          PROTOC_ARCH: "x86_64"
+          PROTOC_SHA256: "5537e15ab0c0e610f809573948d3ec7d6ef387a07991e1c361a2a0e8cad983e5"
+        run: |
+          set -euo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/.build-tools/protoc"
+          archive="${RUNNER_TEMP}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
+          url="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --connect-timeout 30 --max-time 300 \
+            --output "$archive" "$url"
+          echo "${PROTOC_SHA256}  $archive" | sha256sum -c -
+          unzip -q -o "$archive" -d "${GITHUB_WORKSPACE}/.build-tools/protoc"
+          test -x "${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc"
+          "${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" --version
+          echo "PROTOC=${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" >> "$GITHUB_ENV"
+
+      # Official ripgrep releases have no riscv64 asset, so cross-compile the
+      # sidecar from source on the amd64 runner (rg is pure Rust).
+      - name: Build bundled ripgrep (riscv64)
+        shell: bash
+        env:
+          RG_VERSION: "15.0.0"
+        run: |
+          set -euo pipefail
+          bundle_dir="${GITHUB_WORKSPACE}/.build-tools/rg/ripgrep-${RG_VERSION}-riscv64-unknown-linux-gnu"
+          cargo install ripgrep --version "${RG_VERSION}" \
+            --target riscv64gc-unknown-linux-gnu --root "${bundle_dir}" \
+            --locked
+          test -x "${bundle_dir}/bin/rg"
+          # Cannot run the riscv64 binary on the amd64 runner; the build step
+          # sets GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1 accordingly.
+          echo "GROW_TOOLS_BUNDLE_RG_PATH=${bundle_dir}/bin/rg" >> "$GITHUB_ENV"
+
       - name: Build Grow (riscv64 cross-compile)
-        if: matrix.cross
         shell: bash
         env:
           GROW_VERSION: ${{ needs.validate.outputs.version }}
@@ -303,26 +523,121 @@ jobs:
           cross build --locked --profile release-dist \
             -p grow-pager-bin --bin grow --target riscv64gc-unknown-linux-gnu
 
+      # The riscv64 binary cannot execute on the amd64 runner; build success
+      # is the acceptance bar for this target.
+
+      - name: Stage release asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${TARGET_TRIPLE}/release-dist/grow" \
+            "dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: grow-${{ env.ASSET_PLATFORM }}
+          path: dist/grow-*
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Act — restore bind-mounted branch
+        if: ${{ always() && env.ACT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ACT_RESTORE_REF:-}" ]]; then
+            git checkout -f "${ACT_RESTORE_REF}"
+            echo "restored ${ACT_RESTORE_REF}"
+          fi
+
+  # ── macOS ──────────────────────────────────────────────────────────────
+  build-macos:
+    name: Build macos-aarch64
+    needs: validate
+    timeout-minutes: 180
+    runs-on: macos-15
+    env:
+      TARGET_TRIPLE: aarch64-apple-darwin
+      ASSET_PLATFORM: macos-aarch64
+    steps:
+      - uses: actions/checkout@v6
+        if: ${{ !env.ACT }}
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Act — checkout tagged tree on bind mount
+        if: ${{ env.ACT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "act build requires a clean worktree (bind mount shares the host clone)" >&2
+            git status --short >&2
+            exit 1
+          fi
+          # Remember how to restore after the job (always step below).
+          if branch="$(git symbolic-ref -q --short HEAD 2>/dev/null)"; then
+            echo "ACT_RESTORE_REF=${branch}" >> "$GITHUB_ENV"
+          else
+            echo "ACT_RESTORE_REF=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          fi
+          git checkout --detach "${RELEASE_TAG}"
+          echo "ACT build tree=$(git rev-parse --short HEAD) (${RELEASE_TAG})"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92.0"
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-macos-aarch64
+          shared-key: release-dist
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare bundled ripgrep
+        shell: bash
+        env:
+          RG_VERSION: "15.0.0"
+          RG_TARGET: "aarch64-apple-darwin"
+          RG_SHA256: "98bb2e61e7277ba0ea72d2ae2592497fd8d2940934a16b122448d302a6637e3b"
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
+          bundle_dir="${GITHUB_WORKSPACE}/.build-tools/rg/ripgrep-${RG_VERSION}-${RG_TARGET}"
+          url="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            --connect-timeout 30 --max-time 300 \
+            --output "$archive" "$url"
+          actual_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          test "$actual_sha256" = "$RG_SHA256"
+
+          mkdir -p "$bundle_dir"
+          tar -xzf "$archive" --strip-components=1 -C "$bundle_dir"
+          test -x "$bundle_dir/rg"
+          "$bundle_dir/rg" --version >/dev/null
+          echo "GROW_TOOLS_BUNDLE_RG_PATH=$bundle_dir/rg" >> "$GITHUB_ENV"
+
       - name: Build Grow (macOS)
-        if: ${{ !matrix.linux }}
         shell: bash
         env:
           GROW_VERSION: ${{ needs.validate.outputs.version }}
         run: |
           cargo build --locked --profile release-dist \
-            -p grow-pager-bin --bin grow --target "${{ matrix.target }}"
+            -p grow-pager-bin --bin grow --target "${TARGET_TRIPLE}"
 
       - name: Smoke-test binary
-        # The riscv64 binary cannot execute on the amd64 runner; build success
-        # is the acceptance bar for that target.
-        if: ${{ !matrix.cross }}
         shell: bash
         run: |
           set -euo pipefail
-          BIN="target/${{ matrix.target }}/release-dist/${{ matrix.binary }}"
+          BIN="target/${TARGET_TRIPLE}/release-dist/grow"
           test -x "$BIN"
           test -s "$BIN"
-          # Native same-arch runners: the glibc binary runs on the ubuntu/macos host.
           version_out="$("$BIN" --version)"
           echo "$version_out"
           echo "$version_out" | grep -F "${{ needs.validate.outputs.version }}"
@@ -331,12 +646,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release-dist/${{ matrix.binary }}" \
-            "dist/grow-${{ needs.validate.outputs.version }}-${{ matrix.asset_platform }}"
+          cp "target/${TARGET_TRIPLE}/release-dist/grow" \
+            "dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: grow-${{ matrix.asset_platform }}
+          name: grow-${{ env.ASSET_PLATFORM }}
           path: dist/grow-*
           if-no-files-found: error
           retention-days: 3
@@ -355,7 +670,12 @@ jobs:
   # The GitHub Release page only gets final grow binaries for end users.
   publish:
     name: Publish release assets
-    needs: [validate, build]
+    needs:
+      - validate
+      - build-linux-x86_64
+      - build-linux-aarch64
+      - build-linux-riscv64
+      - build-macos
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v8
@@ -369,7 +689,7 @@ jobs:
         run: |
           set -euo pipefail
           # Official CI: exactly four platform assets.
-          # Local act often runs a matrix subset (Linux only) — require ≥1.
+          # Local act often runs a single job (e.g. one build target) — require ≥1.
           mapfile -t assets < <(find . -maxdepth 1 -type f -name 'grow-*' | sort)
           if [[ "${ACT:-}" == "true" ]]; then
             test "${#assets[@]}" -ge 1
