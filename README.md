@@ -424,7 +424,7 @@ Delegate repository discovery to explore and code review to review/backend.
 
 ## 从源码构建
 
-当前支持 macOS arm64、Linux arm64 和 Linux amd64。构建前需要：
+当前支持 macOS arm64、Linux arm64、Linux amd64 和 Linux riscv64。构建前需要：
 
 - Git 和可用的 C/C++ 编译工具链（macOS 使用 Xcode Command Line Tools，Linux 使用对应
   发行版的基础构建工具）
@@ -485,15 +485,18 @@ env GROW_TOOLS_BUNDLE_RG_PATH=/absolute/path/to/rg \
 
 对应产物位于 `target/release-dist/grow`。
 
-当前官方 release 只构建三个目标：macOS arm64、Linux arm64、Linux amd64（无 Windows / x86_64
-macOS / 其他架构）。创建并发布 `v<crate-version>` GitHub Release 后，
-[release workflow](.github/workflows/release.yml) 会构建这些目标。Linux 产物在
+当前官方 release 构建四个目标：macOS arm64、Linux arm64、Linux amd64 和 Linux riscv64
+（无 Windows / x86_64 macOS / 其他架构）。创建并发布 `v<crate-version>` GitHub Release 后，
+[release workflow](.github/workflows/release.yml) 会构建这些目标。Linux amd64/arm64 产物在
 AlmaLinux 8 容器内以 `*-unknown-linux-gnu` 构建，glibc 基线 2.28（覆盖 RHEL 8 / Ubuntu
-20.04+ / Debian 10+ 等），构建成功后对产物做版本烟雾测试（`grow --version`）；protoc 与
-ripgrep sidecar 在构建前 staging 到工作区供容器使用。
+20.04+ / Debian 10+ 等），构建成功后对产物做版本烟雾测试（`grow --version`）；Linux
+riscv64 在 amd64 runner 上通过 `cross` 交叉编译（官方无 riscv64 预编译 protoc/rg，protoc
+用宿主版本，rg sidecar 由 CI 从源码构建），产物不做本机烟雾测试；protoc 与 ripgrep
+sidecar 在构建前 staging 到工作区供容器使用。
 
 GitHub Release 页面**只挂最终 `grow` 二进制**（`grow-{version}-linux-x86_64` /
-`grow-{version}-linux-aarch64` / `grow-{version}-macos-aarch64`），与 auto-update 契约一致；
+`grow-{version}-linux-aarch64` / `grow-{version}-linux-riscv64` /
+`grow-{version}-macos-aarch64`），与 auto-update 契约一致；
 protoc、ripgrep 下载包、Actions artifact 等只出现在 CI 过程中，不会作为 Release 下载项。
 CI 会在构建时把固定版本 ripgrep 嵌入二进制，并跑 `grow --version` 烟雾测试。
 
