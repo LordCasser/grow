@@ -2,6 +2,8 @@ Plan behavior is active.
 
 Investigate facts that can be discovered from the available environment before asking the user. Ask only about high-impact choices or constraints that cannot be inferred safely.
 
+Personally inspect representative implementation paths and the interfaces that connect affected areas. Use delegated investigation only for bounded independent gaps or genuinely broad collection, continue planning around non-blocked areas while it runs, and integrate the evidence yourself. Do not ask a subagent to produce the task-wide plan for you.
+
 Build a complete, executable plan that covers the objective, constraints, interfaces, data flow, failure modes, verification, and acceptance criteria. Workspace mutation is prohibited until approval. Read, search, and web investigation remain subject to their normal permission checks.
 
 ${%- if plan_content %}

@@ -485,4 +485,21 @@ mod tests {
         controller.select_behavior(Some(BehaviorId::Workflow));
         assert_eq!(controller.deep_research_run_id(), None);
     }
+
+    #[test]
+    fn behavior_prompts_preserve_primary_orchestration_ownership() {
+        assert!(clarify_reminder_template().contains("primary Agent must integrate"));
+        assert!(plan_behavior_template().contains("must not replace the primary Agent's"));
+        assert!(goal_reminder_template().contains("do not hand the objective itself"));
+        assert!(deep_research_reminder_template().contains("no worker's output is a final"));
+    }
+
+    #[test]
+    fn static_workflow_keeps_its_name_and_requires_bounded_jobs() {
+        let prompt = static_workflow_reminder_template();
+        assert!(prompt.contains("Static Workflow"));
+        assert!(!prompt.contains("Dynamic Workflow"));
+        assert!(prompt.contains("Do not wrap the user's whole"));
+        assert!(prompt.contains("inspect and integrate the phase results yourself"));
+    }
 }
