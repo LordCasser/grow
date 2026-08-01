@@ -214,7 +214,7 @@ Actions available from any screen.
 | Key | Alt Key | Action | Confirmation |
 |-----|---------|--------|-------------|
 | `Ctrl+N` | | Create a new session (optionally in a git worktree) | Yes (double-press within 1000ms) |
-| `Ctrl+Q` | `Ctrl+D` | Quit the application | Yes (double-press within 1000ms) |
+| `Ctrl+Q` | `Ctrl+D` | Quit the application | Yes, except on the welcome screen (no session to lose — quits on the first press) |
 
 **VS Code family terminal** (VS Code, Cursor, Windsurf, Zed integrated terminals): `Ctrl+Q` is captured by the host, so Grow makes **`Ctrl+D` the sole quit key** (`Ctrl+Q` is not bound). Half-page-down is rebound to bare **`Shift+D`**. Mid-turn interject uses **`Ctrl+L`** (no alternates) because `Ctrl+Enter` / `Ctrl+I` do not reliably reach the PTY; extensions are opened via `/plugins` instead of `Ctrl+L`.
 
@@ -222,7 +222,7 @@ Actions available from any screen.
 
 ### Destructive Action Confirmation
 
-Actions marked with "Yes" in the confirmation column require a double-press within 1000ms. Press the key once to see a confirmation prompt, then press again to confirm. This prevents accidental session loss.
+Actions marked with "Yes" in the confirmation column require a double-press within 1000ms. Press the key once to see a confirmation prompt, then press again to confirm. This prevents accidental session loss. The one exception is **Quit on the welcome screen**, where there is no session to lose — the first press quits immediately.
 
 ---
 
