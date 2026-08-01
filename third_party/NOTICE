@@ -49,6 +49,19 @@ Version:    0.0.3
 crates.io:  https://crates.io/crates/ordered_hashmap/0.0.3
 
 --------------------------------------------------------------------------------
+nono
+--------------------------------------------------------------------------------
+Path:       third_party/nono/
+License:    Apache License 2.0
+License file: third_party/nono/LICENSE
+Upstream:   https://github.com/always-further/nono
+Version:    0.53.0
+crates.io:  https://crates.io/crates/nono/0.53.0
+Local patch: adds the riscv64 SYS_OPENAT/SYS_OPENAT2 syscall table
+             (see Cargo.toml header) — required to build on riscv64;
+             no effect on other targets.
+
+--------------------------------------------------------------------------------
 End of notices for vendored third_party/ crates.
 
 Full product notices (all crates.io / git dependencies shipped with the Grow

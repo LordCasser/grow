@@ -19,6 +19,7 @@ re-vendoring.
 | [`dagre_rust`](./dagre_rust/) | 0.0.5 | Apache-2.0 | [r3alst/dagre-rust](https://github.com/r3alst/dagre-rust) / Warp re-vendor | [`LICENCE`](./dagre_rust/LICENCE) |
 | [`graphlib_rust`](./graphlib_rust/) | 0.0.2 | Apache-2.0 | [r3alst/graphlib-rust](https://github.com/r3alst/graphlib-rust) | [`LICENCE`](./graphlib_rust/LICENCE) |
 | [`ordered_hashmap`](./ordered_hashmap/) | 0.0.3 | Apache-2.0 | [r3alst/ordered-hashmap](https://github.com/r3alst/ordered-hashmap) | [`LICENCE`](./ordered_hashmap/LICENCE) |
+| [`nono`](./nono/) | 0.53.0 | Apache-2.0 | [always-further/nono](https://github.com/always-further/nono) | [`LICENSE`](./nono/LICENSE) |
 
 Dependency shape:
 
@@ -30,6 +31,9 @@ grow-mermaid
         │     └── ordered_hashmap
         └── graphlib_rust     (Apache-2.0)
               └── ordered_hashmap
+
+grow-sandbox
+  └── nono                    (Apache-2.0, riscv64 syscall-table patch)
 ```
 
 ## Notices and ancestry
