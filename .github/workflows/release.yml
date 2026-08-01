@@ -225,14 +225,6 @@ jobs:
       # this pipeline never produces). Full strip removes both for the
       # smallest artifact; RUST_BACKTRACE then shows raw addresses instead of
       # symbol names.
-      - name: Strip for minimal size
-        shell: bash
-        run: |
-          set -euo pipefail
-          BIN="target/${TARGET_TRIPLE}/release-dist/grow"
-          strip --strip-all "$BIN"
-          ls -la "$BIN"
-
       - name: Smoke-test binary
         shell: bash
         run: |
@@ -244,12 +236,19 @@ jobs:
           echo "$version_out"
           echo "$version_out" | grep -F "${{ needs.validate.outputs.version }}"
 
-      - name: Stage release asset
+      - name: Strip and stage release asset
         shell: bash
         run: |
+          set -euo pipefail
+          # The container build runs as root, so target/ is root-owned and not
+          # writable by the runner — strip cannot rewrite the binary in place
+          # (GNU strip needs to create a temp file next to it). Stage a copy
+          # in dist/ (runner-owned) and strip that instead.
           mkdir -p dist
-          cp "target/${TARGET_TRIPLE}/release-dist/grow" \
-            "dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
+          ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
+          cp "target/${TARGET_TRIPLE}/release-dist/grow" "$ASSET"
+          strip --strip-all "$ASSET"
+          ls -la "$ASSET"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -403,14 +402,6 @@ jobs:
       # this pipeline never produces). Full strip removes both for the
       # smallest artifact; RUST_BACKTRACE then shows raw addresses instead of
       # symbol names.
-      - name: Strip for minimal size
-        shell: bash
-        run: |
-          set -euo pipefail
-          BIN="target/${TARGET_TRIPLE}/release-dist/grow"
-          strip --strip-all "$BIN"
-          ls -la "$BIN"
-
       - name: Smoke-test binary
         shell: bash
         run: |
@@ -422,12 +413,19 @@ jobs:
           echo "$version_out"
           echo "$version_out" | grep -F "${{ needs.validate.outputs.version }}"
 
-      - name: Stage release asset
+      - name: Strip and stage release asset
         shell: bash
         run: |
+          set -euo pipefail
+          # The container build runs as root, so target/ is root-owned and not
+          # writable by the runner — strip cannot rewrite the binary in place
+          # (GNU strip needs to create a temp file next to it). Stage a copy
+          # in dist/ (runner-owned) and strip that instead.
           mkdir -p dist
-          cp "target/${TARGET_TRIPLE}/release-dist/grow" \
-            "dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
+          ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
+          cp "target/${TARGET_TRIPLE}/release-dist/grow" "$ASSET"
+          strip --strip-all "$ASSET"
+          ls -la "$ASSET"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -573,23 +571,22 @@ jobs:
       # Full strip, same as the other Linux jobs (release-dist keeps DWARF +
       # symbols; the pipeline ships no debug sidecars). GNU strip handles the
       # cross-arch ELF fine — section rewriting, no target execution needed.
-      - name: Strip for minimal size
-        shell: bash
-        run: |
-          set -euo pipefail
-          BIN="target/${TARGET_TRIPLE}/release-dist/grow"
-          strip --strip-all "$BIN"
-          ls -la "$BIN"
-
       # The riscv64 binary cannot execute on the amd64 runner; build success
       # is the acceptance bar for this target.
 
-      - name: Stage release asset
+      - name: Strip and stage release asset
         shell: bash
         run: |
+          set -euo pipefail
+          # The container build runs as root, so target/ is root-owned and not
+          # writable by the runner — strip cannot rewrite the binary in place
+          # (GNU strip needs to create a temp file next to it). Stage a copy
+          # in dist/ (runner-owned) and strip that instead.
           mkdir -p dist
-          cp "target/${TARGET_TRIPLE}/release-dist/grow" \
-            "dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
+          ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
+          cp "target/${TARGET_TRIPLE}/release-dist/grow" "$ASSET"
+          strip --strip-all "$ASSET"
+          ls -la "$ASSET"
 
       - uses: actions/upload-artifact@v7
         with:
