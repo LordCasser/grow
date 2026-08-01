@@ -22,7 +22,7 @@ Grow 不是 xAI 官方产品，也不内置 Grok 模型、推理端点或推理�
 | Agent 定义 | 上游格式 | 兼容 Harness/OpenCode 常见 Markdown frontmatter；忽略外部权限、mode 和 model 字段 |
 | Agent 关系 | 可包含产品特定模式 | 所有 Agent 定义平级；主/子只是一次 session 中的运行角色，主 Agent 可通过工具策略限制本次可调用的子 Agent |
 | 权限切换 | 上游快捷键/模式 | `Ctrl+X` 后按 `P` 打开 Ask / Auto / Always Approve 选单；`Ctrl+R` 用于 redo |
-| Behavior 切换 | 与权限或 Agent 混合 | `Ctrl+X` 后按 `B` 打开 Normal / Clarify / Plan / Workflow / Deep Research / Goal 选单 |
+| Behavior 切换 | 与权限或 Agent 混合 | `Ctrl+X` 后按 `B` 打开 Normal / Clarify / Plan / Static Workflow / Deep Research / Goal 选单 |
 | Agent/Skill 用户目录 | 产品目录 | 仅 `~/.grow`（项目级 `.grow` + 用户级 `~/.grow`） |
 | 缺少 LLM 配置 | 可落入产品默认模型 | 连接前阻止启动，并引导编辑 `~/.grow/config.toml` |
 
@@ -71,7 +71,7 @@ Permission 决策的交集。Behavior 不会授予工具，Permission 也不会�
 ### Behavior、Role 与运行实例
 
 主 Agent 在一个 session 中只处于一种 Behavior：
-`Normal | Clarify | Plan(phase) | Workflow | Deep Research | Goal`。子 Agent 不继承这些
+`Normal | Clarify | Plan(phase) | Static Workflow | Deep Research | Goal`。子 Agent 不继承这些
 Behavior，只接收明确的 Role、任务和能力边界，也不能递归启动 Workflow。
 
 | 概念 | 负责什么 | 不负责什么 |
@@ -83,9 +83,11 @@ Behavior，只接收明确的 Role、任务和能力边界，也不能递归启�
 | Permission | Ask / Auto / Always Approve 的审批策略 | 规划方式和工具注册 |
 
 六种 Behavior 的边界是：Normal 直接完成当前请求；Clarify 持续询问会实质影响结果的未知
-信息；Plan 先形成完整方案、等待人类批准，再严格执行冻结方案；Workflow 由 Agent 在执行中
-动态生成、并行验证和调整有界子计划，不设整体审批点；Deep Research 严格只读、交叉验证
-证据并保证交付终态报告；Goal 持续推进明确目标，只有独立 verifier 判定 `Achieved` 才能完成。
+信息；Plan 先形成完整方案、等待人类批准，再严格执行冻结方案；Static Workflow 由主 Agent
+分阶段推进——每阶段侦察后编写一个确定性 Rhai 工作流脚本并启动（至多一个运行，运行内可
+`parallel()` 并行扇出子 Agent），然后 yield 等待完成通知，再根据结果决定下一阶段，不设
+整体审批点；Deep Research 严格只读、交叉验证证据并保证交付终态报告；Goal 持续推进明确
+目标，只有独立 verifier 判定 `Achieved` 才能完成。
 
 Plan 的阶段固定为 `Drafting → AwaitingApproval → Executing`，重大偏离进入 `Amending` 并
 重新审批。只有 Executing 可修改工作区；`plan_control` 是唯一生命周期接口。Plan 期间不会
@@ -319,7 +321,7 @@ definition = "/absolute/path/to/my-agent.md"
 主 Agent 始终必须存在，所以没有“关闭主 Agent”开关。停止使用某个自定义主 Agent 时：
 
 - 把 `[agent].name` 或 `definition` 改成另一个定义，或删除 `[agent]` 回到内置默认
-  `grow-build-plan`。
+  `grow`。
 - 删除或重命名对应 Markdown 文件，使它不再被发现。
 - `[subagents.toggle]` 和 `/agents` 中的 Enabled 开关只控制它能否作为子 Agent 启动，
   不会禁止它被选择为主 Agent。
@@ -333,7 +335,7 @@ definition = "/absolute/path/to/my-agent.md"
   `[agent].definition`。
 
 新 session 的主 Agent 解析顺序为：ACP session 配置、`--agent-profile`、`[agent]`、
-`GROW_AGENT`、内置 `grow-build-plan`；恢复已有 session 时，已保存的 Agent 优先于这些全局
+`GROW_AGENT`、内置 `grow`；恢复已有 session 时，已保存的 Agent 优先于这些全局
 默认值。
 
 ### 增加、替换或禁用子 Agent

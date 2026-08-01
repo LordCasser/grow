@@ -295,17 +295,8 @@ pub(super) fn dispatch_show_release_notes(
                 });
             }
         }
-        ActiveView::Welcome => {
-            app.welcome_doc_viewer = Some(crate::views::modal::ActiveModal::DocViewer {
-                title,
-                content,
-                scroll: 0,
-                window: crate::views::modal_window::ModalWindowState::new(),
-                cached_lines: None,
-                previous_palette: None,
-                standalone: true,
-            });
-        }
+        // The welcome screen no longer hosts a doc viewer (release notes open
+        // inside a session via `/release-notes`).
         _ => {}
     }
     vec![]

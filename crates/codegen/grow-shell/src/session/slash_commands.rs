@@ -267,7 +267,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     BuiltinCommand {
         name: "goal",
         description: "[behavior] Set, manage, or check an autonomous goal",
-        argument_hint: Some("<objective> [--budget <tokens>] | status | pause | resume | clear"),
+        argument_hint: Some("set <objective> [--budget <tokens>] | budget <tokens> | status | pause | resume | clear"),
         aliases: &[],
         gate: BuiltinGate::Goal,
         resolve: |args| {
@@ -279,10 +279,51 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
                 "resume" => BuiltinAction::GoalResume,
                 "clear" => BuiltinAction::GoalClear,
                 _ => {
-                    let (objective, token_budget) = parse_goal_budget(trimmed);
-                    BuiltinAction::GoalSet {
-                        objective,
-                        token_budget,
+                    let lower = trimmed.to_lowercase();
+                    if lower.starts_with("set")
+                        && (trimmed.len() == 3 || trimmed[3..].starts_with(char::is_whitespace))
+                    {
+                        // `set` subcommand: whole-word, case-insensitive
+                        // prefix; everything after it is the objective. A
+                        // whitespace-only objective falls back to GoalEnter,
+                        // identical to a bare `/goal set`.
+                        let rest = trimmed[3..].trim_start();
+                        if rest.trim().is_empty() {
+                            BuiltinAction::GoalEnter
+                        } else {
+                            let (objective, token_budget) = parse_goal_budget(rest);
+                            BuiltinAction::GoalSet {
+                                objective,
+                                token_budget,
+                            }
+                        }
+                    } else if lower.starts_with("budget")
+                        && (trimmed.len() == 6 || trimmed[6..].starts_with(char::is_whitespace))
+                    {
+                        // `budget` subcommand: standalone mid-run re-budget.
+                        // Only a pure positive integer is accepted; anything
+                        // missing/invalid resolves with `None` so the handler
+                        // can surface the usage message.
+                        let value = trimmed[6..].trim();
+                        let token_budget = if !value.is_empty()
+                            && !value.contains(char::is_whitespace)
+                            && value.bytes().all(|b| b.is_ascii_digit())
+                            && let Ok(budget) = value.parse::<i64>()
+                            && budget > 0
+                        {
+                            Some(budget)
+                        } else {
+                            None
+                        };
+                        BuiltinAction::GoalBudget { token_budget }
+                    } else {
+                        // Bare objective form (back-compat): anything that is
+                        // not a keyword or subcommand is the goal text itself.
+                        let (objective, token_budget) = parse_goal_budget(trimmed);
+                        BuiltinAction::GoalSet {
+                            objective,
+                            token_budget,
+                        }
                     }
                 }
             }
@@ -843,6 +884,9 @@ pub(super) enum BuiltinAction {
     GoalPause,
     GoalResume,
     GoalClear,
+    GoalBudget {
+        token_budget: Option<i64>,
+    },
     DeepResearch {
         query: String,
     },
@@ -885,7 +929,8 @@ impl BuiltinAction {
             | BuiltinAction::GoalStatus
             | BuiltinAction::GoalPause
             | BuiltinAction::GoalResume
-            | BuiltinAction::GoalClear => "goal",
+            | BuiltinAction::GoalClear
+            | BuiltinAction::GoalBudget { .. } => "goal",
             BuiltinAction::DeepResearch { .. } => "deep-research",
             BuiltinAction::WorkflowManage { .. } => "workflow-run",
             BuiltinAction::WorkflowLaunch { .. } => "workflow-run",
@@ -921,6 +966,7 @@ impl BuiltinAction {
             | BuiltinAction::GoalPause
             | BuiltinAction::GoalResume
             | BuiltinAction::GoalClear => false,
+            BuiltinAction::GoalBudget { token_budget } => token_budget.is_some(),
             BuiltinAction::DeepResearch { .. } => true,
             BuiltinAction::WorkflowManage { .. } => true,
             BuiltinAction::WorkflowLaunch { input, .. } => !input.is_empty(),
@@ -2872,6 +2918,117 @@ mod tests {
     }
 
     #[test]
+    fn goal_set_prefix_resolves_to_set() {
+        match resolve_goal("set implement X") {
+            BuiltinAction::GoalSet {
+                objective,
+                token_budget,
+            } => {
+                assert_eq!(objective, "implement X");
+                assert_eq!(token_budget, None);
+            }
+            other => panic!("expected GoalSet, got {}", other.command_name()),
+        }
+    }
+
+    #[test]
+    fn goal_set_preserves_casing() {
+        match resolve_goal("set Fix BUG") {
+            BuiltinAction::GoalSet { objective, .. } => {
+                assert_eq!(objective, "Fix BUG");
+            }
+            other => panic!("expected GoalSet, got {}", other.command_name()),
+        }
+    }
+
+    #[test]
+    fn goal_set_trailing_budget() {
+        match resolve_goal("set X --budget 500000") {
+            BuiltinAction::GoalSet {
+                objective,
+                token_budget,
+            } => {
+                assert_eq!(objective, "X");
+                assert_eq!(token_budget, Some(500_000));
+            }
+            other => panic!("expected GoalSet, got {}", other.command_name()),
+        }
+    }
+
+    #[test]
+    fn goal_set_whitespace_only_falls_back_to_enter() {
+        // User clarification: `/goal set` with nothing (or only whitespace)
+        // after the keyword behaves exactly like `/goal set <empty>` → enter.
+        for text in ["set", "SET ", "set   "] {
+            assert!(
+                matches!(resolve_goal(text), BuiltinAction::GoalEnter),
+                "{text:?} must resolve to GoalEnter"
+            );
+        }
+    }
+
+    #[test]
+    fn goal_set_word_boundary() {
+        // A word that merely STARTS with "set" is not the subcommand; it
+        // stays a bare objective (back-compat).
+        for text in ["setter x", "setX"] {
+            match resolve_goal(text) {
+                BuiltinAction::GoalSet {
+                    objective,
+                    token_budget,
+                } => {
+                    assert_eq!(objective, text, "objective must be preserved verbatim");
+                    assert_eq!(token_budget, None);
+                }
+                other => panic!("expected GoalSet, got {}", other.command_name()),
+            }
+        }
+    }
+
+    #[test]
+    fn goal_budget_parses_positive_int() {
+        match resolve_goal("budget 500000") {
+            BuiltinAction::GoalBudget { token_budget } => {
+                assert_eq!(token_budget, Some(500_000));
+            }
+            other => panic!("expected GoalBudget, got {}", other.command_name()),
+        }
+    }
+
+    #[test]
+    fn goal_budget_missing_or_invalid_value() {
+        // Missing, non-numeric, zero, negative, or whitespace-containing
+        // values all resolve with `None` so the handler can surface usage.
+        for text in ["budget", "budget abc", "budget 0", "budget -5", "budget 5 5"] {
+            match resolve_goal(text) {
+                BuiltinAction::GoalBudget { token_budget } => {
+                    assert_eq!(
+                        token_budget, None,
+                        "no budget must be parsed from {text:?}"
+                    );
+                }
+                other => panic!("expected GoalBudget, got {}", other.command_name()),
+            }
+        }
+    }
+
+    #[test]
+    fn goal_budget_word_boundary() {
+        // "budgetary" starts with "budget" but is not the subcommand; it
+        // stays a bare objective (back-compat).
+        match resolve_goal("budgetary x") {
+            BuiltinAction::GoalSet {
+                objective,
+                token_budget,
+            } => {
+                assert_eq!(objective, "budgetary x");
+                assert_eq!(token_budget, None);
+            }
+            other => panic!("expected GoalSet, got {}", other.command_name()),
+        }
+    }
+
+    #[test]
     fn goal_command_name_is_goal() {
         assert_eq!(BuiltinAction::GoalStatus.command_name(), "goal");
         assert_eq!(BuiltinAction::GoalPause.command_name(), "goal");
@@ -2880,6 +3037,20 @@ mod tests {
         assert_eq!(
             BuiltinAction::GoalSet {
                 objective: "x".into(),
+                token_budget: None,
+            }
+            .command_name(),
+            "goal"
+        );
+        assert_eq!(
+            BuiltinAction::GoalBudget {
+                token_budget: Some(100),
+            }
+            .command_name(),
+            "goal"
+        );
+        assert_eq!(
+            BuiltinAction::GoalBudget {
                 token_budget: None,
             }
             .command_name(),
@@ -2900,6 +3071,15 @@ mod tests {
         assert!(!BuiltinAction::GoalPause.args_provided());
         assert!(!BuiltinAction::GoalResume.args_provided());
         assert!(!BuiltinAction::GoalClear.args_provided());
+        assert!(
+            BuiltinAction::GoalBudget {
+                token_budget: Some(100),
+            }
+            .args_provided()
+        );
+        assert!(
+            !BuiltinAction::GoalBudget { token_budget: None }.args_provided()
+        );
     }
 
     // ── GoalTracker handler-level interaction tests ──────────────

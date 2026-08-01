@@ -39,6 +39,16 @@ pub(crate) const RESUME_TIMEOUT: Duration = Duration::from_secs(120);
 /// match the lowercase `"quit"` hint line during `AuthState::Authenticating`.
 pub(crate) const WELCOME_SCREEN_SENTINEL: &str = "Quit";
 
+/// Motif from the big logo art (`assets/logo/grow-big.txt`, 80 cols × 35 rows):
+/// an 11-glyph `⣿` run the small art cannot contain (its longest run is 5), so
+/// presence on screen proves the big logo tier is rendering.
+pub(crate) const WELCOME_BIG_LOGO_MOTIF: &str = "⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣥";
+
+/// Motif from the small logo art (`assets/logo/grow-small.txt`, 30 cols × 15
+/// rows). It is absent from the big art, so presence proves the small tier
+/// specifically (and not merely "a logo").
+pub(crate) const WELCOME_SMALL_LOGO_MOTIF: &str = "⣹⣷⣶⣼⣿⣿⣷";
+
 /// Prompt sent to the agent in content-driven tests. Short so it submits
 /// quickly and doesn't wrap.
 pub(crate) const PROMPT: &str = "go";
@@ -54,8 +64,9 @@ pub(crate) const MOCK_RESPONSE_SENTINEL: &str = "MOCKRESPONSE";
 /// suffix keeps the check chord-agnostic regardless.
 pub(crate) const UNDO_TIP_SENTINEL: &str = "to undo";
 
-/// A >= FIRE_PEAK_LEN (20) char draft. The first char promotes the welcome
-/// prompt to a real (routed) agent session; the rest accumulate into the draft.
+/// A >= FIRE_PEAK_LEN (20) char draft. The first char leaves the welcome
+/// screen (which has no input box) and starts a real (routed) agent session;
+/// the rest accumulate into the draft.
 pub(crate) const SUBSTANTIAL_DRAFT: &[u8] = b"aaaaaaaaaaaaaaaaaaaaaaaaa";
 
 /// Type a substantial draft, wait for it to render in the promoted agent

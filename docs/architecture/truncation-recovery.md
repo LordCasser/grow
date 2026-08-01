@@ -1,9 +1,16 @@
 # Truncation Recovery Architecture
 
-> **Status**: Design confirmed, pending implementation
+> **Status**: Implemented（D1–D8 已全部落地；§1 描述的是实现前的行为基线，仅作设计记录）
 > **Date**: 2026-07-31
 > **Scope**: grow-sampler, grow-sampling-types, grow-shell
 > **Author**: software-architect
+
+实现对照（2026-07-31 核验）：
+
+- `StopReason` 新增 `ModelContextWindowExceeded` / `PauseTurn` 变体（grow-sampling-types，`messages.rs` / `conversation.rs`）。
+- `request_task.rs` 中 `StopReason::Length` 映射为 `AttemptOutcome::Truncated { partial_response }`（不再丢弃部分输出）。
+- `SyntheticReason::TruncationContinue` 已加入会话层，持久化部分输出并注入继续提示（见 grow-shell `session/acp_session_tests/truncation_recovery_tests.rs`）。
+- D8 crate 改名 `xai-chat-state` → `grow-chat-state` 已完成，workspace 版本 `1.0.0`。
 
 ## 1. Problem Statement
 

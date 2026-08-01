@@ -23,7 +23,7 @@ use crate::views::plan_approval_view::PlanApprovalFocus;
 use crate::views::prompt_widget::{PromptBg, PromptFlag, PromptInfo, PromptStyle};
 use crate::views::question_view::QUESTION_VIEW_HPAD;
 use crate::views::shortcuts_bar::{HintItem, PendingHint, ShortcutsBar};
-use crate::views::{agent, turn_status};
+use crate::views::{agent, turn_status, welcome::logo::LogoSize};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -1545,6 +1545,38 @@ impl AgentView {
                     scratch,
                 );
             let sb_output = sb_rendered.output;
+            // Empty-state: with no entries yet the scrollback shows only the
+            // centered Grow logo (bare — no version/subtitle/menu), shimmering
+            // like the welcome screen. Painted after the pane so any pane
+            // background lands beneath, and before the selection/search/rail
+            // overlays so they can still paint on top (inactive here: an empty
+            // scrollback has nothing to select or search).
+            if self.scrollback.is_empty() {
+                let empty_area = if layout.scrollback_content.width > 0 {
+                    layout.scrollback_content
+                } else {
+                    layout.scrollback
+                };
+                if let Some(size) = pick_empty_logo(empty_area.width, empty_area.height) {
+                    let logo_h = size.height();
+                    // Horizontal centering comes from the logo lines' own
+                    // `Alignment::Center` across the full scrollback width; the
+                    // rect below just places the art's rows in the vertical
+                    // middle of the area.
+                    let logo_rect = Rect {
+                        x: empty_area.x,
+                        y: empty_area.y + empty_area.height.saturating_sub(logo_h) / 2,
+                        width: empty_area.width,
+                        height: logo_h,
+                    };
+                    crate::views::welcome::logo::render_logo_into(
+                        logo_rect,
+                        buf,
+                        &theme,
+                        size.art(),
+                    );
+                }
+            }
             self.update_scrollback_selection_state(
                 sb_output.selection_model.clone(),
                 sb_rendered.selection_boundaries,
@@ -4205,6 +4237,30 @@ impl AgentView {
         (cursor, prompt_post_flush)
     }
 }
+/// Padding the empty-state logo gates reserve around the art, mirroring the
+/// welcome convention (`H_PAD` / `V_PAD` in `views::welcome::logo`).
+const EMPTY_LOGO_PAD: u16 = 2;
+
+/// Pick the largest logo that fits the agent empty-state scrollback area
+/// (a bare centered logo, no chrome).
+///
+/// Big needs `w ≥ 80 + 2·PAD && h ≥ 35 + 2·PAD` (84×39); small needs
+/// `w ≥ 30 + 2·PAD && h ≥ 15 + 2·PAD` (34×19). Smaller areas render no logo —
+/// a logo that would deform is never shown.
+fn pick_empty_logo(w: u16, h: u16) -> Option<LogoSize> {
+    if w >= LogoSize::Big.width() + 2 * EMPTY_LOGO_PAD
+        && h >= LogoSize::Big.height() + 2 * EMPTY_LOGO_PAD
+    {
+        Some(LogoSize::Big)
+    } else if w >= LogoSize::Small.width() + 2 * EMPTY_LOGO_PAD
+        && h >= LogoSize::Small.height() + 2 * EMPTY_LOGO_PAD
+    {
+        Some(LogoSize::Small)
+    } else {
+        None
+    }
+}
+
 /// Pad `msg` for the toast slot, truncating with a trailing ellipsis when it
 /// cannot fit in `avail_width` columns (long clipboard toasts embed backup
 /// file paths — dropping the whole toast would hide the copy feedback
@@ -4418,5 +4474,134 @@ mod overlay_post_flush_tests {
         post_flush.write_to(&mut Vec::new()).unwrap();
         let after_emit = crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, 42).unwrap();
         assert!(after_emit.as_str().contains("a=t"));
+    }
+}
+#[cfg(test)]
+mod empty_state_logo_tests {
+    use super::super::test_fixtures::make_agent;
+    use super::*;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+
+    /// Long `⣿` run present in the big art (`grow-big.txt`) but not in the
+    /// small art (its longest run is `⣿⣿⣷`) — presence proves the big logo.
+    const BIG_MOTIF: &str = "⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣥";
+    /// Motif from the small art (`grow-small.txt`) — presence proves the
+    /// small logo.
+    const SMALL_MOTIF: &str = "⣹⣷⣶⣼⣿⣿⣷";
+
+    fn draw(agent: &mut AgentView, area: Rect) -> Buffer {
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        buf
+    }
+
+    fn rendered_rows(buf: &Buffer) -> Vec<String> {
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn shows_motif(rows: &[String], motif: &str) -> bool {
+        rows.iter().any(|row| row.contains(motif))
+    }
+
+    #[test]
+    fn empty_scrollback_renders_centered_big_logo() {
+        let mut agent = make_agent();
+        let buf = draw(&mut agent, Rect::new(0, 0, 200, 60));
+        let rows = rendered_rows(&buf);
+        assert!(
+            shows_motif(&rows, BIG_MOTIF),
+            "empty scrollback must show the big logo"
+        );
+        // Horizontal centering: the 80-col art sits at x = (200 - 80) / 2 = 60
+        // on every logo row, flanked by blanks.
+        let motif_row = rows
+            .iter()
+            .find(|row| row.contains(BIG_MOTIF))
+            .expect("logo row");
+        assert_eq!(
+            motif_row.find(|c| c != ' '),
+            Some(60),
+            "logo must be horizontally centered"
+        );
+    }
+
+    #[test]
+    fn any_scrollback_entry_hides_logo() {
+        let mut agent = make_agent();
+        agent
+            .scrollback
+            .push_block(crate::scrollback::RenderBlock::system("boot"));
+        let buf = draw(&mut agent, Rect::new(0, 0, 200, 60));
+        let rows = rendered_rows(&buf);
+        assert!(
+            !shows_motif(&rows, BIG_MOTIF) && !shows_motif(&rows, SMALL_MOTIF),
+            "a system block in the scrollback must hide the empty-state logo"
+        );
+    }
+
+    #[test]
+    fn medium_area_renders_small_logo_only() {
+        let mut agent = make_agent();
+        let buf = draw(&mut agent, Rect::new(0, 0, 40, 30));
+        let rows = rendered_rows(&buf);
+        assert!(
+            shows_motif(&rows, SMALL_MOTIF),
+            "a 40×30 area must fit the small logo"
+        );
+        assert!(
+            !shows_motif(&rows, BIG_MOTIF),
+            "a 40×30 area must not fit the big logo"
+        );
+    }
+
+    #[test]
+    fn tiny_area_renders_no_logo() {
+        let mut agent = make_agent();
+        let buf = draw(&mut agent, Rect::new(0, 0, 30, 20));
+        let rows = rendered_rows(&buf);
+        assert!(
+            !shows_motif(&rows, BIG_MOTIF) && !shows_motif(&rows, SMALL_MOTIF),
+            "a logo that would deform must not be shown"
+        );
+    }
+
+    #[test]
+    fn pick_empty_logo_tiers_by_area() {
+        assert_eq!(pick_empty_logo(33, 50), None, "too narrow for any logo");
+        assert_eq!(pick_empty_logo(34, 18), None, "too short for the small logo");
+        assert_eq!(pick_empty_logo(34, 19), Some(LogoSize::Small));
+        assert_eq!(
+            pick_empty_logo(83, 50),
+            Some(LogoSize::Small),
+            "wide but not wide enough for big"
+        );
+        assert_eq!(
+            pick_empty_logo(84, 38),
+            Some(LogoSize::Small),
+            "tall but not tall enough for big"
+        );
+        assert_eq!(pick_empty_logo(84, 39), Some(LogoSize::Big));
+        assert_eq!(pick_empty_logo(150, 45), Some(LogoSize::Big));
     }
 }

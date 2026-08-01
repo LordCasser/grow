@@ -1070,7 +1070,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             ensure_login_method(app);
             app.auth_clipboard_delivery = None;
             let effects = dispatch_exit_session(app);
-            app.welcome_prompt_focused = false;
             effects
         }
         TaskResult::DeepSearchResults { results, seq } => {

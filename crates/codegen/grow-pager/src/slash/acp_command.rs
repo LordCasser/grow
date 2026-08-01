@@ -12,7 +12,7 @@
 use agent_client_protocol as acp;
 use grow_tools::implementations::skills::types::SkillScope;
 
-use super::command::{CommandExecCtx, CommandResult, SlashCommand};
+use super::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
 
 /// A slash command backed by an ACP `AvailableCommand`.
 ///
@@ -61,6 +61,62 @@ impl SlashCommand for AcpSlashCommand {
 
     fn is_skill(&self) -> bool {
         self.skill_path.is_some() && self.skill_scope.is_some()
+    }
+
+    /// Subcommand completion for the shell's `/goal` builtin.
+    ///
+    /// Non-goal commands return `None` (identical to the trait default).
+    /// `set` and `budget` carry a trailing space in `insert_text` so the
+    /// prompt keeps accepting input (the objective / budget value); the
+    /// other subcommands are leaf words. Once the user has typed `set` and
+    /// moved into the objective, the args are free text and suggestions are
+    /// suppressed entirely.
+    fn suggest_args(&self, _ctx: &AppCtx, args_query: &str) -> Option<Vec<ArgItem>> {
+        if !self.name.eq_ignore_ascii_case("goal") {
+            return None;
+        }
+        let t = args_query.trim_start();
+        if t == "set" || t.starts_with("set ") {
+            return None; // objective entry: free text, no subcommand suggestions
+        }
+        Some(vec![
+            ArgItem {
+                display: "set".into(),
+                match_text: "set".into(),
+                insert_text: "set ".into(),
+                description: "Set the goal objective".into(),
+            },
+            ArgItem {
+                display: "budget".into(),
+                match_text: "budget".into(),
+                insert_text: "budget ".into(),
+                description: "Adjust the goal token budget".into(),
+            },
+            ArgItem {
+                display: "status".into(),
+                match_text: "status".into(),
+                insert_text: "status".into(),
+                description: "Show goal status".into(),
+            },
+            ArgItem {
+                display: "pause".into(),
+                match_text: "pause".into(),
+                insert_text: "pause".into(),
+                description: "Pause the goal".into(),
+            },
+            ArgItem {
+                display: "resume".into(),
+                match_text: "resume".into(),
+                insert_text: "resume".into(),
+                description: "Resume the goal".into(),
+            },
+            ArgItem {
+                display: "clear".into(),
+                match_text: "clear".into(),
+                insert_text: "clear".into(),
+                description: "Clear the goal".into(),
+            },
+        ])
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -538,5 +594,94 @@ mod tests {
             }
             other => panic!("expected InjectSkill, got {:?}", other),
         }
+    }
+
+    // -- suggest_args() tests --
+
+    fn make_ctx() -> AppCtx<'static> {
+        use crate::acp::model_state::ModelState;
+        let models = Box::leak(Box::new(ModelState::default()));
+        AppCtx {
+            models,
+            agents: &[],
+            current_agent: None,
+            behavior_mode: grow_tools::types::SessionMode::Default,
+            deep_research_available: false,
+            goal_available: false,
+            auto_permission_available: false,
+            current_permission: "ask",
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            workflows_available: true,
+            screen_mode: crate::app::ScreenMode::Fullscreen,
+        }
+    }
+
+    #[test]
+    fn goal_suggests_subcommands_with_trailing_space_rule() {
+        let cmd = AcpSlashCommand::from(&make_cmd("goal", None));
+        let ctx = make_ctx();
+        let items = cmd.suggest_args(&ctx, "").expect("goal must suggest subcommands");
+
+        let display: Vec<&str> = items.iter().map(|i| i.display.as_str()).collect();
+        assert_eq!(
+            display,
+            ["set", "budget", "status", "pause", "resume", "clear"]
+        );
+        // `set` / `budget` take a value, so their insert keeps the dropdown
+        // accepting input; the leaf subcommands insert without a space.
+        let insert: Vec<&str> = items.iter().map(|i| i.insert_text.as_str()).collect();
+        assert_eq!(
+            insert,
+            ["set ", "budget ", "status", "pause", "resume", "clear"]
+        );
+        for item in &items {
+            assert_eq!(
+                item.display, item.match_text,
+                "match_text mirrors display for {:?}",
+                item.display
+            );
+            assert!(!item.description.is_empty(), "description required for {:?}", item.display);
+        }
+    }
+
+    #[test]
+    fn goal_set_phase_suppresses_subcommands() {
+        // Once the user has committed to `set`, the args are the goal
+        // objective -- free text, no subcommand suggestions.
+        let cmd = AcpSlashCommand::from(&make_cmd("goal", None));
+        let ctx = make_ctx();
+        for query in ["set", "set ", "set 修复登录模块的bug"] {
+            assert!(
+                cmd.suggest_args(&ctx, query).is_none(),
+                "query {query:?} must suppress subcommand suggestions"
+            );
+        }
+    }
+
+    #[test]
+    fn goal_args_query_prefix_still_suggests() {
+        // Partial subcommand input still returns the FULL candidate set;
+        // fuzzy filtering by `match_text` is the framework's job.
+        let cmd = AcpSlashCommand::from(&make_cmd("goal", None));
+        let ctx = make_ctx();
+        for query in ["s", "b", "st"] {
+            let items = cmd
+                .suggest_args(&ctx, query)
+                .expect("partial subcommand input must still suggest");
+            assert_eq!(items.len(), 6, "full candidate set for {query:?}");
+        }
+    }
+
+    #[test]
+    fn non_goal_commands_return_none() {
+        let cmd = AcpSlashCommand::from(&make_cmd("model", None));
+        let ctx = make_ctx();
+        assert!(cmd.suggest_args(&ctx, "").is_none());
+        assert!(cmd.suggest_args(&ctx, "set").is_none());
+
+        // The goal check is case-insensitive, like the shell's resolver.
+        let cmd = AcpSlashCommand::from(&make_cmd("GOAL", None));
+        assert!(cmd.suggest_args(&ctx, "").is_some());
     }
 }

@@ -3,9 +3,10 @@
 //! Minimal skips the full-screen welcome view entirely, so the start of a
 //! session is otherwise invisible — you land straight at the prompt. To make a
 //! fresh session obvious (and on `/new` / `Ctrl+N`), this commits a compact,
-//! rounded card once into native scrollback: the braille logo, the version, the
-//! cwd, the model, and a one-line hint. It mirrors the full-TUI hero box's style
-//! (rounded dim border + logo) without its menu/onboarding.
+//! rounded card once into native scrollback: the version, the cwd, the model,
+//! and a one-line hint. It mirrors the full-TUI hero's style (rounded dim
+//! border) without its logo, menu, or onboarding — the minimal card stays
+//! strictly informational (the logo was removed by the welcome-page refactor).
 //!
 //! It is printed via [`xai_ratatui_inline::Terminal::insert_before`] — the same
 //! one-shot mechanism the commit pipeline uses — gated on an `AppView` flag set
@@ -68,7 +69,8 @@ pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
         _ => (app.cwd.display().to_string(), None),
     };
 
-    // Info lines below the logo: title + version, cwd, optional model, hint.
+    // Info lines: title + version, cwd, optional model, hint. No logo — the
+    // card is a minimal info strip.
     let mut info: Vec<Line<'static>> = Vec::new();
     info.push(Line::from(vec![
         Span::styled(
@@ -90,11 +92,7 @@ pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
     }
     info.push(Line::from(Span::styled("/help for commands", theme.dim())));
 
-    let logo_lines = minimal_api::compact_logo_line_count();
-    // logo (+ a blank separator row) when present, then the info lines, wrapped
-    // in a border with one row of vertical padding top and bottom.
-    let logo_block = if logo_lines > 0 { logo_lines + 1 } else { 0 };
-    let height = 2 + 1 + logo_block + info.len() as u16 + 1;
+    let height = welcome_card_height(info.len());
 
     // RGB themes: blend a soft border. Terminal-native (both Reset): fall
     // through to Reset so the terminal default fg draws the chrome.
@@ -114,17 +112,6 @@ pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
         // Top border + one row of vertical padding.
         let mut y = area.y + 2;
 
-        if logo_lines > 0 {
-            let logo_area = ratatui::layout::Rect {
-                x: area.x + 1,
-                y,
-                width: area.width.saturating_sub(2),
-                height: logo_lines,
-            };
-            minimal_api::render_compact_logo(logo_area, buf, &Theme::current());
-            y += logo_lines + 1;
-        }
-
         for line in &info {
             buf.set_line(inner_x, y, line, inner_w);
             y += 1;
@@ -139,4 +126,26 @@ pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
     // Trailing gap, matching every committed block, so the first conversation
     // block is separated from the card.
     super::commit::insert_gap(terminal);
+}
+
+/// Card height: 2 border rows + 1 pad row above + the info lines + 1 pad row
+/// below. The logo block was removed by the welcome-page refactor, so the
+/// height derives from the info lines alone.
+fn welcome_card_height(info_lines: usize) -> u16 {
+    2 + 1 + info_lines as u16 + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The card's height derives only from the info lines: 2 border rows +
+    /// 1 pad row above + 1 pad row below. The logo removal shrank the card by
+    /// exactly the old logo block (15 rows + a separator).
+    #[test]
+    fn welcome_card_height_is_info_only() {
+        assert_eq!(welcome_card_height(4), 8); // title + cwd + model + hint
+        assert_eq!(welcome_card_height(2), 6); // title + hint (no cwd/model)
+        assert_eq!(welcome_card_height(0), 4); // 2 border rows + pads only
+    }
 }

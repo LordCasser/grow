@@ -238,19 +238,21 @@ Intervals are `Ns` (seconds, minimum 60), `Nm` (minutes), `Nh` (hours), or `Nd` 
 
 ### `/goal`
 
-Enter Goal Behavior, resume a paused goal, or manage a persistent objective. A bare `/goal` resumes the paused objective when one exists; otherwise the next non-empty message becomes the objective. `/goal <objective>` explicitly creates or replaces it. Later ordinary messages add constraints or evidence and never silently replace the objective.
+Enter Goal Behavior, resume a paused goal, or manage a persistent objective. A bare `/goal` enters Goal Behavior and resumes a paused goal when one exists (except a budget-limited one — re-budget it first with `/goal budget`); otherwise the next non-empty message becomes the objective. `/goal set <objective>` explicitly creates or replaces it. Later ordinary messages add constraints or evidence and never silently replace the objective.
 
 Grow works across rounds and only marks the goal complete after an independent verifier returns `Achieved`. Missing verification, timeout, infrastructure failure, insufficient evidence, exhausted attempts, or exhausted budget pauses the goal; the Agent cannot self-report completion.
 
 ```
-/goal Migrate the auth module to the new API
+/goal set Migrate the auth module to the new API
+/goal set Migrate the auth module to the new API --budget 500000
+/goal budget 800000
 /goal status
 /goal pause
 /goal resume
 /goal clear
 ```
 
-Arguments are `<objective> [--budget <tokens>]`, or one of `status`, `pause`, `resume`, `clear`. The `--budget` here is a **token** budget for the goal run, separate from workflow child-call budgets. `/goal pause` keeps Goal Behavior selected; `/goal clear` removes the tracker and returns to Normal. Goal is only offered when orchestration and an independent verifier are configured.
+Arguments are `set <objective> [--budget <tokens>]`, `budget <tokens>`, or one of `status`, `pause`, `resume`, `clear`. The `--budget` here is a **token** budget for the goal run, separate from workflow child-call budgets. `/goal budget <tokens>` adjusts the budget mid-run and also unlocks a budget-exhausted goal — run `/goal resume` to continue afterwards. The bare `/goal <objective>` form is still supported and equivalent to `/goal set <objective>`; use the explicit `set` form when the objective starts with `set` or `budget`, or is exactly `status`, `pause`, `resume`, or `clear`. `/goal pause` keeps Goal Behavior selected; `/goal clear` removes the tracker and returns to Normal. Goal is only offered when orchestration and an independent verifier are configured.
 
 ### `/deep-research [query]`
 

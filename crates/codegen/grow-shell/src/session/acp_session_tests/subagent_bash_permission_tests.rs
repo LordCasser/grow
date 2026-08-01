@@ -11,20 +11,16 @@
 //! `AcpPrompter` talks to a fake gateway that answers `request_permission`
 //! with `Selected("allow-once")`.
 //!
-//! Two spawn shapes are covered, matching the two ownership modes of the
-//! subagent's `PermissionHandle`:
+//! The tests cover the **inherited-handle** spawn shape, the only production
+//! subagent shape: the mvp-agent coordinator always passes
+//! `parent.permission_handle` (see `subagent_coordinator.rs`, spawn audit in
+//! `docs/known-limitations.md` / goal evidence), so the ACP
+//! `request_permission` must carry the **parent** session id (that is what
+//! the pager routes on), the `PermissionEvent` must still record the
+//! subagent session id, and after approval the bash tool must actually
+//! execute.
 //!
-//! 1. **Own manager** (`owns_permission_manager == true`, e.g. a spawn path
-//!    that did not inherit the parent handle): the ACP `request_permission`
-//!    must carry the **subagent** session id, and after approval the bash
-//!    tool must actually execute.
-//! 2. **Inherited handle** (the mvp-agent coordinator path, which always
-//!    passes `parent.permission_handle`): the ACP `request_permission` must
-//!    carry the **parent** session id (that is what the pager routes on),
-//!    the `PermissionEvent` must still record the subagent session id, and
-//!    after approval the bash tool must actually execute.
-//!
-//! A third test pins the reject path: `reject-once` must not execute the
+//! A second test pins the reject path: `reject-once` must not execute the
 //! command and must surface as `ToolLoop::PermissionReject`.
 
 use std::sync::Arc;
@@ -118,7 +114,6 @@ fn spawn_gateway_responder(
 /// there and must be drained through the `ReplayBuffer` by the caller (see
 /// [`drain_notifications_to_gateway`]) before gateway-side assertions.
 async fn make_subagent_fixture(
-    manager_session_id: &str,
     reply_option: &'static str,
 ) -> (
     SessionActor,
@@ -145,13 +140,16 @@ async fn make_subagent_fixture(
     actor.session_info.id = acp::SessionId::new(SUBAGENT_SID);
 
     // Real permission manager (ask mode) wired to the same gateway the actor
-    // uses. `manager_session_id` decides the ACP request's session id: the
-    // subagent's own id for the own-manager shape, the parent's id for the
-    // inherited-handle shape.
+    // uses. The manager is the shared one the subagent INHERITS from its
+    // parent: `manager_session_id` is the PARENT session id (the id the
+    // pager matches as Root and routes the request on), while the subagent
+    // session id is attributed via `subagent_session_id` in the
+    // PermissionEvent. This is the only production spawn shape — the
+    // coordinator always passes `parent.permission_handle`.
     let cwd = AbsPathBuf::new(std::path::PathBuf::from(actor.session_info.cwd.clone()))
         .unwrap_or_else(|_| AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap());
     let (handle, permission_events) = spawn_permission_manager(
-        acp::SessionId::new(manager_session_id),
+        acp::SessionId::new(PARENT_SID),
         AcpAgentGatewaySender::new(gateway_tx),
         cwd,
         ClientType::GrowPager,
@@ -255,94 +253,6 @@ fn drain_permission_events(
     events
 }
 
-/// Suspicious point 1 (own-manager shape): a subagent that owns its own
-/// permission manager must emit `request_permission` carrying the SUBAGENT
-/// session id, and an allow-once approval must actually execute the bash
-/// tool (Completed ToolCallUpdate + output in the conversation).
-#[tokio::test(flavor = "current_thread")]
-async fn subagent_own_manager_bash_approved_after_prompt_executes() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (actor, mut event_rx, log, mut permission_events) =
-                make_subagent_fixture(SUBAGENT_SID, "allow-once").await;
-
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                actor.execute_tool_calls(vec![bash_call()]),
-            )
-            .await
-            .expect("execute_tool_calls must not hang")
-            .expect("execute_tool_calls must not error");
-
-            assert!(
-                matches!(result, ToolLoop::Continue),
-                "an approved bash call must continue the turn, got {result:?}"
-            );
-
-            // Deliver queued SessionEvents (ToolCall updates, …) to the
-            // gateway exactly as the session loop would.
-            drain_notifications_to_gateway(&actor, &mut event_rx).await;
-
-            // (a) The permission request was emitted and carried the
-            // subagent session id (that is the id the pager must route on).
-            {
-                let log = log.lock().expect("gateway log lock");
-                assert_eq!(
-                    log.permission_requests.len(),
-                    1,
-                    "exactly one request_permission must be emitted"
-                );
-                assert_eq!(
-                    log.permission_requests[0].session_id.0.as_ref(),
-                    SUBAGENT_SID,
-                    "own-manager subagent request must carry the subagent session id"
-                );
-            }
-
-            // (b) The bash tool really executed after the approval. The
-            // responder task on the LocalSet may not have polled the
-            // gateway channel yet, so wait bounded for the Completed update.
-            assert!(
-                wait_for_gateway_log(&log, |l| l
-                    .tool_update_statuses
-                    .iter()
-                    .any(|(id, status)| id == TOOL_CALL_ID
-                        && *status == Some(acp::ToolCallStatus::Completed)))
-                .await,
-                "a Completed ToolCallUpdate must be emitted for the approved bash call; got {:?}",
-                log.lock().expect("gateway log lock").tool_update_statuses,
-            );
-            let conv = actor.chat_state_handle.get_conversation().await;
-            assert!(
-                conv.iter()
-                    .any(|c| c.text_content().contains("repro-ok")),
-                "the bash output must land in the conversation as a tool result"
-            );
-
-            // The manager recorded an interactive allow with prompt outcome.
-            let events = drain_permission_events(&mut permission_events);
-            let event = events
-                .iter()
-                .find(|e| e.tool_id == TOOL_CALL_ID)
-                .expect("a PermissionEvent for the bash call must exist");
-            assert_eq!(event.decision, "allow");
-            assert_eq!(event.prompt_outcome.as_deref(), Some("allow_once"));
-            assert!(event.user_prompted, "the user must have been prompted");
-            assert_eq!(
-                event.decision_reason.as_deref(),
-                Some("opaque_shell"),
-                "`sh -c …` must reach the user via the opaque-shell bash floor"
-            );
-            assert_eq!(
-                event.subagent_session_id.as_deref(),
-                Some(SUBAGENT_SID),
-                "the PermissionEvent must attribute the request to the subagent"
-            );
-        })
-        .await;
-}
-
 /// Suspicious point 1 (inherited-handle shape, the mvp-agent coordinator
 /// path): the ACP request must carry the PARENT session id (the id the pager
 /// matches as Root), the PermissionEvent must still record the subagent id,
@@ -353,7 +263,7 @@ async fn subagent_inherited_handle_bash_approved_after_prompt_executes() {
     local
         .run_until(async {
             let (actor, mut event_rx, log, mut permission_events) =
-                make_subagent_fixture(PARENT_SID, "allow-once").await;
+                make_subagent_fixture("allow-once").await;
 
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(15),
@@ -424,7 +334,7 @@ async fn subagent_bash_rejected_after_prompt_does_not_execute() {
     local
         .run_until(async {
             let (actor, mut event_rx, log, mut permission_events) =
-                make_subagent_fixture(SUBAGENT_SID, "reject-once").await;
+                make_subagent_fixture("reject-once").await;
 
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(15),

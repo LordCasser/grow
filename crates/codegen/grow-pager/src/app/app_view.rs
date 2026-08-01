@@ -17,7 +17,6 @@ use crate::notifications::NotificationService;
 use crate::render::draw::CursorState;
 use crate::scrollback::render::ScratchBuffer;
 use crate::views::prompt_widget::PromptWidget;
-use crate::views::welcome::WelcomePromptFocus;
 use agent_client_protocol as acp;
 use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use indexmap::IndexMap;
@@ -635,7 +634,8 @@ pub struct AppView {
     /// resolved by the shell and advertised on ACP initialize (`sessionRecap`).
     /// When false, the pager must not request recaps (zero `grow/recap` traffic).
     pub session_recap_available: bool,
-    /// Stateful prompt widget rendered on the welcome screen (persists input across frames).
+    /// Prompt widget rendered on the login gate screen (AuthState::Pending).
+    /// The home page has no input box, so this is only used while blocked.
     pub welcome_prompt: PromptWidget,
     /// The single slash-command MRU/recency store. Owned here and injected
     /// into every agent prompt and the dashboard dispatch via
@@ -649,12 +649,6 @@ pub struct AppView {
     /// in place so adopters see refreshes without re-adopting.
     pub(crate) command_tags:
         std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, String>>>,
-    /// Whether the welcome screen prompt is currently capturing focus (user typed in it).
-    /// When true, menu shortcuts like n/w/q are disabled and Escape unfocuses the prompt.
-    pub welcome_prompt_focused: bool,
-    /// Sticky flag: set once the user types in the welcome prompt, hides the
-    /// tip for the rest of the session (even if the input is cleared).
-    pub welcome_tip_typing_dismissed: bool,
     /// Effects queued by notification handlers (drained by the event loop).
     pub pending_effects: Vec<crate::app::actions::Effect>,
     /// Typed `$EDITOR` work consumed by the event loop after the current cycle.
@@ -684,10 +678,6 @@ pub struct AppView {
     pub welcome_menu_index: Option<usize>,
     /// Hit-test rects for welcome menu items (populated during render).
     pub welcome_menu_rects: Vec<ratatui::layout::Rect>,
-    /// Whether the welcome menu currently includes a "Changelog" row (above
-    /// Quit). Set during render; the input handler uses it to size the menu and
-    /// map the extra row to the release-notes action.
-    pub welcome_show_changelog_action: bool,
     /// Hit-test rect for the import-claude banner on the welcome screen.
     pub welcome_import_banner_rect: Option<ratatui::layout::Rect>,
     /// Last known mouse position (column, row), updated on every Mouse event.
@@ -703,14 +693,10 @@ pub struct AppView {
     /// Last off-screen render-cache eviction sweep (see
     /// [`Self::maybe_evict_offscreen_caches`]).
     pub(super) last_cache_evict_at: Option<Instant>,
-    /// Hit-test rect for welcome prompt input (populated during render).
-    pub welcome_prompt_rect: Option<ratatui::layout::Rect>,
     /// Hit-test rect for the auth URL (click-to-open during Authenticating).
     pub welcome_auth_url_rect: Option<ratatui::layout::Rect>,
     /// Whether the mouse pointer was last over the auth URL (for OSC 22 cursor shape).
     pub welcome_on_auth_url: bool,
-    /// Mouse last over the changelog block (drives hover color + redraws).
-    pub welcome_on_changelog_cta: bool,
     /// Per-visit announcement UI state on the welcome screen (expansion, hover,
     /// overflow flag, hit-rect).
     pub welcome_announcement: WelcomeAnnouncementState,
@@ -723,8 +709,6 @@ pub struct AppView {
     pub welcome_toast: Option<(String, std::time::Instant)>,
     /// Sticky hover flag for the welcome promo CTA (redraw on enter/leave).
     pub welcome_on_promo_cta: bool,
-    /// Hit-test rect for the clickable changelog info block (opens release notes).
-    pub welcome_changelog_cta_rect: Option<ratatui::layout::Rect>,
     /// Show the raw auth URL with mouse capture disabled for manual copy.
     pub auth_show_raw_url: bool,
     /// Whether mouse capture is currently disabled for raw URL mode.
@@ -772,8 +756,10 @@ pub struct AppView {
     pub session_picker_entries_query: Option<String>,
     /// Tick counter for welcome screen spinner animation.
     pub welcome_tick: u64,
-    /// Last shimmer frame drawn on the welcome screen. Lets `tick` throttle the
-    /// wall-clock logo animation to a few fps instead of the full tick rate.
+    /// Last shimmer frame drawn for a logo animation — the welcome screen or
+    /// the agent empty-state logo (Task B), which share one wall-clock
+    /// shimmer. Lets `tick` throttle the animation to a few fps instead of
+    /// the full tick rate.
     pub welcome_shimmer_frame: u64,
     /// CLI model override (`-m` / `--model`). Seeded into every new
     /// `AgentSession.deferred_model_switch` so the model is applied once
@@ -943,8 +929,6 @@ pub struct AppView {
     pub has_claude_import: bool,
     /// When set, the welcome screen renders an interactive import modal instead of normal content.
     pub import_claude_modal: Option<crate::views::import_claude_modal::ImportClaudeModalState>,
-    /// Doc viewer overlay for the welcome screen (release notes via Ctrl+L).
-    pub welcome_doc_viewer: Option<crate::views::modal::ActiveModal>,
     /// Whether the pager uses fullscreen (alt-screen) or inline mode.
     /// Set from the resolved terminal state at startup.
     pub(crate) screen_mode: super::ScreenMode,
@@ -998,10 +982,6 @@ fn paint_welcome_toast(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout:
 impl AppView {
     pub fn is_zdr_blocked(&self) -> bool {
         self.is_zdr && !self.zdr_access_enabled
-    }
-    /// True when the user should not see the prompt.
-    pub fn is_access_blocked(&self) -> bool {
-        self.is_zdr_blocked()
     }
     /// Whether deferred session-startup actions may run: both auth AND folder
     /// trust must be resolved. Mirrors the auth gate at the session-creating
@@ -1074,8 +1054,6 @@ impl AppView {
             welcome_prompt,
             slash_mru,
             command_tags,
-            welcome_prompt_focused: true,
-            welcome_tip_typing_dismissed: false,
             pending_effects: Vec::new(),
             pending_editor: None,
             pending_pager_path: None,
@@ -1083,21 +1061,17 @@ impl AppView {
             minimal_state: crate::minimal_api::MinimalState::default(),
             welcome_menu_index: None,
             welcome_menu_rects: Vec::new(),
-            welcome_show_changelog_action: false,
             welcome_import_banner_rect: None,
             last_mouse_pos: None,
             last_scroll_pos: None,
             last_cache_evict_at: None,
-            welcome_prompt_rect: None,
             welcome_auth_url_rect: None,
             welcome_on_auth_url: false,
-            welcome_on_changelog_cta: false,
             welcome_announcement: WelcomeAnnouncementState::default(),
             welcome_auth_fallback_rect: None,
             welcome_promo_cta_rect: None,
             welcome_toast: None,
             welcome_on_promo_cta: false,
-            welcome_changelog_cta_rect: None,
             auth_show_raw_url: false,
             auth_mouse_disabled: false,
             session_picker_entries: None,
@@ -1177,7 +1151,6 @@ impl AppView {
             relaunch: None,
             has_claude_import: false,
             import_claude_modal: None,
-            welcome_doc_viewer: None,
             screen_mode: ScreenMode::Inline,
             show_resolved_model: true,
             plugin_cta_enabled: false,
@@ -1603,13 +1576,7 @@ impl AppView {
                     agent.handle_scroll(lines, column, row);
                 }
             }
-            ActiveView::Welcome => {
-                if let Some(crate::views::modal::ActiveModal::DocViewer { scroll, .. }) =
-                    self.welcome_doc_viewer.as_mut()
-                {
-                    crate::views::modal::apply_doc_scroll_delta(scroll, lines);
-                }
-            }
+            ActiveView::Welcome => {}
             ActiveView::AgentDashboard => {
                 let popup_target = self.dashboard.as_ref().and_then(|d| {
                     d.attached_agent
@@ -1795,8 +1762,6 @@ impl AppView {
                     cwd: &self.cwd,
                     mid_session_login: self.auth_return_view.is_some(),
                     auth_code_input: &mut self.auth_code_input,
-                    prompt: &mut self.welcome_prompt,
-                    prompt_focused: &mut self.welcome_prompt_focused,
                     new_worktree_dialog: &mut self.new_worktree_dialog,
                     menu_index: &mut self.welcome_menu_index,
                     menu_rects: &self.welcome_menu_rects,
@@ -1804,21 +1769,13 @@ impl AppView {
                         2
                     } else {
                         3 + if self.has_claude_import { 1 } else { 0 }
-                            + if self.welcome_show_changelog_action {
-                                1
-                            } else {
-                                0
-                            }
                     },
-                    prompt_rect: self.welcome_prompt_rect.as_ref(),
                     import_banner_rect: self.welcome_import_banner_rect.as_ref(),
                     auth_url_rect: self.welcome_auth_url_rect.as_ref(),
                     auth_fallback_rect: self.welcome_auth_fallback_rect.as_ref(),
                     promo_cta_rect: self.welcome_promo_cta_rect.as_ref(),
                     on_promo_cta: &mut self.welcome_on_promo_cta,
                     promo_cta_keyboard: welcome_pinned_promo_cta,
-                    changelog_cta_rect: self.welcome_changelog_cta_rect.as_ref(),
-                    on_changelog_cta: &mut self.welcome_on_changelog_cta,
                     announcement_truncated: self.welcome_announcement.truncated,
                     announcement_rect: self.welcome_announcement.rect.as_ref(),
                     on_announcement: &mut self.welcome_announcement.on_cta,
@@ -1833,9 +1790,6 @@ impl AppView {
                     sp_entries_query: &self.session_picker_entries_query,
                     has_claude_import: self.has_claude_import,
                     import_claude_modal: &mut self.import_claude_modal,
-                    welcome_doc_viewer: &mut self.welcome_doc_viewer,
-                    changelog_markdown: &self.changelog_markdown,
-                    show_changelog_action: self.welcome_show_changelog_action,
                     has_pending_update: self.pending_update_version.is_some(),
                     has_foreign_resume,
                     cwd_has_git_ancestor: self.cwd_has_git_ancestor,
@@ -2368,13 +2322,10 @@ struct WelcomeInputCtx<'a> {
     /// login and return to the session rather than quitting the app.
     mid_session_login: bool,
     auth_code_input: &'a mut LineEditor,
-    prompt: &'a mut PromptWidget,
-    prompt_focused: &'a mut bool,
     new_worktree_dialog: &'a mut Option<NewWorktreeDialogState>,
     menu_index: &'a mut Option<usize>,
     menu_rects: &'a [ratatui::layout::Rect],
     menu_count: usize,
-    prompt_rect: Option<&'a ratatui::layout::Rect>,
     import_banner_rect: Option<&'a ratatui::layout::Rect>,
     auth_url_rect: Option<&'a ratatui::layout::Rect>,
     auth_fallback_rect: Option<&'a ratatui::layout::Rect>,
@@ -2387,10 +2338,6 @@ struct WelcomeInputCtx<'a> {
     /// A pinned (non-dismissible) promo CTA is live, so `Ctrl+O` opens it
     /// (the welcome screen has no YOLO toggle to preserve).
     promo_cta_keyboard: bool,
-    /// Hit-test rect for the clickable changelog info block (opens release notes).
-    changelog_cta_rect: Option<&'a ratatui::layout::Rect>,
-    /// Sticky hover flag for the changelog block (redraw on enter/leave).
-    on_changelog_cta: &'a mut bool,
     /// Whether the announcement overflowed — the "expandable" signal for click-to-toggle.
     announcement_truncated: bool,
     /// Hit-test rect for the full announcement block (click anywhere to toggle).
@@ -2413,11 +2360,6 @@ struct WelcomeInputCtx<'a> {
     sp_entries_query: &'a Option<String>,
     has_claude_import: bool,
     import_claude_modal: &'a mut Option<crate::views::import_claude_modal::ImportClaudeModalState>,
-    welcome_doc_viewer: &'a mut Option<crate::views::modal::ActiveModal>,
-    changelog_markdown: &'a Option<String>,
-    /// Whether the welcome menu currently includes a "Changelog" row (above
-    /// Quit), so index→action mapping accounts for it.
-    show_changelog_action: bool,
     has_pending_update: bool,
     /// A recent foreign session is available to resume when no update is pending.
     has_foreign_resume: bool,
@@ -2445,54 +2387,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         }
         if let Event::Mouse(mouse) = ev {
             return outcome_to_input(modal.handle_mouse(mouse.kind, mouse.column, mouse.row));
-        }
-        return InputOutcome::Unchanged;
-    }
-    if let Some(modal) = ctx.welcome_doc_viewer {
-        if let Event::Key(key) = ev {
-            if key.kind == crossterm::event::KeyEventKind::Release {
-                return InputOutcome::Unchanged;
-            }
-            use crate::views::modal_window as mw;
-            if let crate::views::modal::ActiveModal::DocViewer { window, scroll, .. } = modal {
-                let chrome_cfg = mw::ModalWindowConfig {
-                    title: "",
-                    tabs: None,
-                    shortcuts: &[],
-                    sizing: mw::ModalSizing::default(),
-                    fold_info: None,
-                };
-                match mw::handle_modal_key(window, key, &chrome_cfg) {
-                    mw::ModalWindowOutcome::CloseRequested => {
-                        *ctx.welcome_doc_viewer = None;
-                        return InputOutcome::Changed;
-                    }
-                    mw::ModalWindowOutcome::Unhandled => {
-                        if crate::views::modal::apply_doc_scroll(key.code, scroll) {
-                            return InputOutcome::Changed;
-                        }
-                        return InputOutcome::Unchanged;
-                    }
-                    _ => return InputOutcome::Changed,
-                }
-            }
-        }
-        if let Event::Mouse(mouse) = ev {
-            use crate::views::modal_window as mw;
-            if let crate::views::modal::ActiveModal::DocViewer { window, scroll, .. } = modal {
-                match mw::handle_modal_mouse(window, mouse.kind, mouse.column, mouse.row) {
-                    mw::ModalWindowOutcome::CloseRequested => {
-                        *ctx.welcome_doc_viewer = None;
-                        return InputOutcome::Changed;
-                    }
-                    mw::ModalWindowOutcome::Unhandled => {
-                        if crate::views::modal::apply_doc_mouse_scroll(mouse.kind, scroll) {
-                            return InputOutcome::Changed;
-                        }
-                    }
-                    _ => return InputOutcome::Changed,
-                }
-            }
         }
         return InputOutcome::Unchanged;
     }
@@ -2773,13 +2667,10 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 dispatch_zdr_menu_action,
             );
         }
-        if matches!(ctx.auth_state, AuthState::Done)
-            && key!(Enter).matches(key)
-            && key.modifiers.is_empty()
-        {
-            return InputOutcome::Action(Action::NewSession);
-        }
         if matches!(ctx.auth_state, AuthState::Done) {
+            // Home page input model (no input box): captured shortcuts first,
+            // then menu navigation / Enter / Esc — any other key starts a new
+            // session and is forwarded into its prompt.
             if ctx.promo_cta_keyboard && key!('o', CONTROL).matches(key) {
                 return InputOutcome::Action(Action::AnnouncementsOpenCta);
             }
@@ -2801,54 +2692,39 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             if ctx.has_claude_import && key!('I', CONTROL | SHIFT).matches(key) {
                 return InputOutcome::Action(Action::DismissClaudeImport);
             }
-        }
-        if *ctx.prompt_focused
-            && matches!(ctx.auth_state, AuthState::Done)
-            && let KeyCode::Char(ch) = key.code
-            && (crate::input::key::is_text_input_key(key)
-                || (ch == 'v' && crate::input::key::is_paste_key(key)))
-        {
-            return InputOutcome::ActionThenForward(Action::NewSession);
-        }
-        if *ctx.prompt_focused {
-            match ctx.prompt.handle_key(key) {
-                crate::views::prompt_widget::PromptEvent::Edited => {
-                    return InputOutcome::Changed;
-                }
-                crate::views::prompt_widget::PromptEvent::Ignored => {
-                    if key!(Esc).matches(key) {
-                        *ctx.prompt_focused = false;
-                        return InputOutcome::Changed;
-                    }
-                }
+            if is_quit_signal(key) {
+                return InputOutcome::Action(Action::Quit);
             }
-        }
-        if !*ctx.prompt_focused && matches!(ctx.auth_state, AuthState::Done) {
+            // Ctrl+Q quits on non-VS Code-family terminals (the VS Code
+            // family quits with Ctrl+D, captured above). Return `Action(Quit)`
+            // so the outer layer runs the double-press confirmation instead
+            // of the catch-all below starting a session.
+            if key!('q', CONTROL).matches(key)
+                && !crate::terminal::terminal_context().brand.is_vscode_family()
+            {
+                return InputOutcome::Action(Action::Quit);
+            }
             if let Some(outcome) = handle_menu_nav(key, ctx.menu_index, ctx.menu_count) {
                 return outcome;
             }
-            if key!(Enter).matches(key)
-                && let Some(idx) = *ctx.menu_index
-            {
-                return dispatch_menu_action(
-                    idx,
-                    ctx.has_claude_import,
-                    ctx.show_changelog_action,
-                    ctx.changelog_markdown.as_deref(),
-                );
+            if key!(Enter).matches(key) {
+                if let Some(idx) = *ctx.menu_index {
+                    return dispatch_menu_action(idx, ctx.has_claude_import);
+                }
+                return InputOutcome::Action(Action::NewSession);
             }
-            if crate::input::key::is_text_input_key(key) {
-                *ctx.prompt_focused = true;
-                *ctx.menu_index = None;
-                return InputOutcome::ActionThenForward(Action::NewSession);
+            if key!(Esc).matches(key) {
+                // Esc clears the menu selection; no-op when nothing selected.
+                if ctx.menu_index.take().is_some() {
+                    return InputOutcome::Changed;
+                }
+                return InputOutcome::Unchanged;
             }
+            // Any uncaught key (text chars, Backspace, Tab, arrows with
+            // modifiers, ...) starts a session and is forwarded to its prompt.
+            return InputOutcome::ActionThenForward(Action::NewSession);
         }
         match ctx.auth_state {
-            AuthState::Done => {
-                if key!('c', CONTROL).matches(key) || key!('d', CONTROL).matches(key) {
-                    return InputOutcome::Action(Action::Quit);
-                }
-            }
             AuthState::Pending { .. } => {
                 if key!('q').matches(key)
                     || key!('c', CONTROL).matches(key)
@@ -2923,6 +2799,10 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     return InputOutcome::Action(Action::QuitConfirmed);
                 }
             }
+            // The home-page (`Done`) key model returns from the branch above,
+            // so this match never sees `Done` — the arm exists only to keep
+            // the match exhaustive over `&AuthState`.
+            AuthState::Done => {}
         }
     }
     if let Event::Paste(text) = ev {
@@ -2969,27 +2849,13 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                         {
                             return InputOutcome::Action(Action::DismissClaudeImport);
                         }
-                        return dispatch_menu_action(
-                            i,
-                            ctx.has_claude_import,
-                            ctx.show_changelog_action,
-                            ctx.changelog_markdown.as_deref(),
-                        );
+                        return dispatch_menu_action(i, ctx.has_claude_import);
                     }
                 }
                 if let Some(rect) = ctx.promo_cta_rect
                     && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
                 {
                     return InputOutcome::Action(Action::AnnouncementsOpenCta);
-                }
-                if let Some(rect) = ctx.changelog_cta_rect
-                    && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
-                    && let Some(md) = ctx.changelog_markdown.as_deref()
-                {
-                    return InputOutcome::Action(Action::ShowReleaseNotes {
-                        title: "Release Notes".to_string(),
-                        content: md.trim().to_string(),
-                    });
                 }
                 if let Some(rect) = ctx.announcement_rect
                     && (ctx.announcement_truncated || *ctx.announcement_expanded)
@@ -3019,16 +2885,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 {
                     return InputOutcome::Action(Action::ImportClaudeSettings);
                 }
-                if let Some(rect) = ctx.prompt_rect
-                    && matches!(ctx.auth_state, AuthState::Done)
-                    && mouse.column >= rect.x
-                    && mouse.column < rect.x + rect.width
-                    && mouse.row >= rect.y
-                    && mouse.row < rect.y + rect.height
-                {
-                    *ctx.prompt_focused = true;
-                    return InputOutcome::Changed;
-                }
             }
             MouseEventKind::Moved => {
                 let mut new_index = None;
@@ -3050,11 +2906,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     return InputOutcome::Changed;
                 }
                 let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
-                let over_cta = ctx.changelog_cta_rect.is_some_and(|r| r.contains(pos));
-                if over_cta != *ctx.on_changelog_cta {
-                    *ctx.on_changelog_cta = over_cta;
-                    return InputOutcome::Changed;
-                }
                 let over_promo_cta = ctx.promo_cta_rect.is_some_and(|r| r.contains(pos));
                 if over_promo_cta != *ctx.on_promo_cta {
                     *ctx.on_promo_cta = over_promo_cta;
@@ -3147,45 +2998,25 @@ fn dispatch_zdr_menu_action(index: usize) -> InputOutcome {
 }
 /// Dispatch an action for a welcome menu item by index.
 ///
-/// Menu order: `[Import]`, New worktree, Resume session, `[Changelog]`, Quit.
-/// `show_changelog_action` is true when the Changelog row is rendered; release
-/// notes open only once `changelog_md` is available.
-fn dispatch_menu_action(
-    index: usize,
-    has_claude_import: bool,
-    show_changelog_action: bool,
-    changelog_md: Option<&str>,
-) -> InputOutcome {
-    let base = if has_claude_import { 1 } else { 0 };
-    let worktree_idx = base;
-    let resume_idx = base + 1;
-    let (changelog_idx, quit_idx) = if show_changelog_action {
-        (Some(base + 2), base + 3)
-    } else {
-        (None, base + 2)
-    };
-    if has_claude_import && index == 0 {
-        return InputOutcome::Action(Action::ImportClaudeSettings);
-    }
-    if index == worktree_idx {
-        return InputOutcome::Action(Action::OpenNewWorktreeDialog);
-    }
-    if index == resume_idx {
-        return InputOutcome::Action(Action::FetchSessionList);
-    }
-    if Some(index) == changelog_idx {
-        if let Some(md) = changelog_md {
-            return InputOutcome::Action(Action::ShowReleaseNotes {
-                title: "Release Notes".to_string(),
-                content: md.trim().to_string(),
-            });
+/// Menu order: `[Import Claude settings]`, New worktree, Resume session, Quit.
+/// `has_claude_import` shifts the indices by one when the import row is shown.
+fn dispatch_menu_action(index: usize, has_claude_import: bool) -> InputOutcome {
+    if has_claude_import {
+        match index {
+            0 => InputOutcome::Action(Action::ImportClaudeSettings),
+            1 => InputOutcome::Action(Action::OpenNewWorktreeDialog),
+            2 => InputOutcome::Action(Action::FetchSessionList),
+            3 => InputOutcome::Action(Action::Quit),
+            _ => InputOutcome::Unchanged,
         }
-        return InputOutcome::Unchanged;
+    } else {
+        match index {
+            0 => InputOutcome::Action(Action::OpenNewWorktreeDialog),
+            1 => InputOutcome::Action(Action::FetchSessionList),
+            2 => InputOutcome::Action(Action::Quit),
+            _ => InputOutcome::Unchanged,
+        }
     }
-    if index == quit_idx {
-        return InputOutcome::Action(Action::Quit);
-    }
-    InputOutcome::Unchanged
 }
 impl AppView {
     /// Merge notification escape sequences with render-produced post-flush
@@ -3472,14 +3303,9 @@ impl AppView {
                                 bold: false,
                             });
                         }
-                        if !self.welcome_prompt.text().is_empty() {
-                            self.welcome_tip_typing_dismissed = true;
-                        }
-                        let tip = if self.welcome_tip_typing_dismissed {
-                            None
-                        } else {
-                            self.tip.as_deref()
-                        };
+                        // The home page has no input box, so the tip is never
+                        // dismissed by typing into a welcome prompt.
+                        let tip = self.tip.as_deref();
                         let model_name_base = self.models.current_model_name().unwrap_or_default();
                         let model_name = match self.models.reasoning_effort {
                             Some(eff) => format!("{model_name_base} ({eff})"),
@@ -3499,11 +3325,6 @@ impl AppView {
                             })
                             .or(self.announcement.as_ref());
                         let welcome_params = crate::views::welcome::WelcomeRenderParams {
-                            prompt_focus: if self.welcome_prompt_focused {
-                                WelcomePromptFocus::Focused
-                            } else {
-                                WelcomePromptFocus::Unfocused
-                            },
                             cwd: &self.cwd,
                             auth_state: &self.auth_state,
                             trust_state: &self.trust_state,
@@ -3544,8 +3365,6 @@ impl AppView {
                             welcome_tick: self.welcome_tick,
                             session_picker_grouped: self.session_picker_grouped,
                             session_picker_source_filter: self.session_picker_source_filter,
-                            changelog_bullets: &self.changelog_bullets,
-                            changelog_has_full_notes: self.changelog_markdown.is_some(),
                             welcome_announcement_expanded: self.welcome_announcement.expanded,
                             promo_cta: hero_cta.map(|(_owner, label, _)| label),
                         };
@@ -3557,13 +3376,10 @@ impl AppView {
                             &mut self.session_picker_state,
                         );
                         self.welcome_menu_rects = result.menu_rects;
-                        self.welcome_show_changelog_action = result.changelog_action_present;
-                        self.welcome_prompt_rect = result.prompt_rect;
                         self.welcome_import_banner_rect = result.import_banner_rect;
                         self.welcome_auth_url_rect = result.auth_url_rect;
                         self.welcome_auth_fallback_rect = result.auth_fallback_rect;
                         self.welcome_promo_cta_rect = result.promo_cta_rect;
-                        self.welcome_changelog_cta_rect = result.changelog_cta_rect;
                         if let Some((ref msg, _)) = self.welcome_toast {
                             paint_welcome_toast(f.buffer_mut(), view_area, msg);
                         }
@@ -3587,28 +3403,6 @@ impl AppView {
                                 dialog,
                             );
                         }
-                        if let Some(crate::views::modal::ActiveModal::DocViewer {
-                            ref title,
-                            ref content,
-                            ref mut scroll,
-                            ref mut window,
-                            ref mut cached_lines,
-                            ..
-                        }) = self.welcome_doc_viewer
-                        {
-                            let theme = crate::theme::Theme::current();
-                            crate::views::modal::render_doc_viewer_overlay(
-                                f.buffer_mut(),
-                                view_area,
-                                window,
-                                title,
-                                content,
-                                scroll,
-                                cached_lines,
-                                compact,
-                                &theme,
-                            );
-                        }
                         if let Some(tutorial) = self.tutorial.as_mut() {
                             crate::views::tutorial::render_tutorial(
                                 f.buffer_mut(),
@@ -3623,12 +3417,10 @@ impl AppView {
                         if let Some(panel) = &scroll_debug_panel {
                             panel.render(full_area, f.buffer_mut());
                         }
-                        let has_cloud_modal = false;
-                        let cursor = if has_cloud_modal || self.tutorial.is_some() {
-                            None
-                        } else {
-                            result.cursor_pos
-                        };
+                        // The welcome screen has no input box on the home page
+                        // (and the gate screens never report a cursor), so the
+                        // terminal cursor stays hidden here.
+                        let cursor: Option<(u16, u16)> = None;
                         let on_url = self.welcome_auth_url_rect.as_ref().is_some_and(|r| {
                             matches!(self.auth_state, AuthState::Authenticating { .. })
                                 && self.last_mouse_pos.is_some_and(|(mx, my)| {
@@ -3976,7 +3768,6 @@ impl AppView {
         matches!(self.active_view, ActiveView::Agent(id) if self.agents.get(&id).is_some_and(|a| a.extensions_modal.is_some() || a.active_modal.is_some()))
             || self.import_claude_modal.is_some()
             || self.new_worktree_dialog.is_some()
-            || self.welcome_doc_viewer.is_some()
             || self.tutorial.is_some()
             || matches!(self.active_view, ActiveView::AgentDashboard
                 if self.dashboard.as_ref().is_some_and(|d| d.shortcuts_modal.is_some()))
@@ -4184,12 +3975,21 @@ impl AppView {
             {
                 needs_redraw = true;
             } else {
-                let frame = crate::views::welcome::shimmer_frame();
-                if frame != self.welcome_shimmer_frame {
-                    self.welcome_shimmer_frame = frame;
-                    needs_redraw = true;
-                }
+                needs_redraw |= self.advance_logo_shimmer();
             }
+        }
+        // The agent empty-state logo (bare centered wordmark over an empty
+        // scrollback) uses the same wall-clock shimmer as the welcome screen,
+        // so keep advancing the shared throttle while it is on screen. Minimal
+        // mode never draws it — grow-pager-minimal renders its own card.
+        if !self.screen_mode.is_minimal()
+            && let ActiveView::Agent(id) = self.active_view
+            && self
+                .agents
+                .get(&id)
+                .is_some_and(|agent| agent.scrollback.is_empty())
+        {
+            needs_redraw |= self.advance_logo_shimmer();
         }
         if matches!(self.active_view, ActiveView::AgentDashboard)
             && let Some(d) = self.dashboard.as_mut()
@@ -4318,6 +4118,20 @@ impl AppView {
         }
         needs_redraw |= self.tick_scroll();
         needs_redraw
+    }
+    /// Advance the shared logo-shimmer throttle (welcome screen and the agent
+    /// empty-state logo). The wall-clock animation is quantized to ~12fps;
+    /// returns true only when the quantized frame advanced, i.e. a redraw is
+    /// due, so an idle logo redraws a few times per second instead of at the
+    /// full tick rate.
+    fn advance_logo_shimmer(&mut self) -> bool {
+        let frame = crate::views::welcome::shimmer_frame();
+        if frame != self.welcome_shimmer_frame {
+            self.welcome_shimmer_frame = frame;
+            true
+        } else {
+            false
+        }
     }
     /// Flush pending scroll lines (stream gap detection, redraw cadence).
     /// Without this, stale streams are never finalized after the user stops
@@ -4564,6 +4378,13 @@ impl AppView {
                 if fast {
                     return TickDemand::Fast;
                 }
+                // The empty-state logo (bare centered wordmark over an empty
+                // scrollback) shimmers like the welcome screen, so keep Slow
+                // ticks alive while it is on screen. Minimal mode never draws
+                // it — grow-pager-minimal renders its own card.
+                if !self.screen_mode.is_minimal() && agent.scrollback.is_empty() {
+                    return TickDemand::Slow;
+                }
                 if cfg!(target_os = "macos")
                     && (agent.needs_link_modifier_poll()
                         || agent
@@ -4777,25 +4598,19 @@ pub(crate) mod tests {
             command_tags: std::rc::Rc::new(std::cell::RefCell::new(
                 std::collections::HashMap::new(),
             )),
-            welcome_prompt_focused: false,
-            welcome_tip_typing_dismissed: false,
             welcome_menu_index: None,
             welcome_menu_rects: Vec::new(),
-            welcome_show_changelog_action: false,
             welcome_import_banner_rect: None,
             last_mouse_pos: None,
             last_scroll_pos: None,
             last_cache_evict_at: None,
-            welcome_prompt_rect: None,
             welcome_auth_url_rect: None,
             welcome_on_auth_url: false,
-            welcome_on_changelog_cta: false,
             welcome_announcement: WelcomeAnnouncementState::default(),
             welcome_auth_fallback_rect: None,
             welcome_promo_cta_rect: None,
             welcome_toast: None,
             welcome_on_promo_cta: false,
-            welcome_changelog_cta_rect: None,
             auth_show_raw_url: false,
             auth_mouse_disabled: false,
             session_picker_entries: None,
@@ -4826,7 +4641,6 @@ pub(crate) mod tests {
             relaunch: None,
             has_claude_import: false,
             import_claude_modal: None,
-            welcome_doc_viewer: None,
             screen_mode: ScreenMode::Inline,
             pending_effects: Vec::new(),
             pending_editor: None,
@@ -4902,6 +4716,16 @@ pub(crate) mod tests {
             super::super::dispatch::SwitchCause::Load,
         );
         app
+    }
+    /// Give the test agent a non-empty scrollback so the empty-state logo
+    /// shimmer does not demand Slow ticks — for tests that exercise other
+    /// overlays on an otherwise-idle agent.
+    fn idle_agent_with_content(app: &mut AppView, id: super::super::agent::AgentId) {
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .scrollback
+            .push_block(crate::scrollback::RenderBlock::system("boot"));
     }
     #[test]
     fn dashboard_x11_primary_provenance_bypasses_unrelated_clipboard_image() {
@@ -5123,6 +4947,8 @@ pub(crate) mod tests {
     #[test]
     fn needs_animation_ignores_tracing_rx_outside_dev_builds() {
         let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
         let (_tx, rx) = tokio::sync::mpsc::channel::<String>(4);
         app.tracing_rx = Some(rx);
         assert!(
@@ -5135,6 +4961,7 @@ pub(crate) mod tests {
     fn needs_animation_gates_prompt_history_tick_delivery() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
         assert!(
             !app.needs_animation(),
             "an idle agent with no history overlay must not request animation ticks"
@@ -5249,6 +5076,80 @@ pub(crate) mod tests {
         app.session_picker_content_loading = true;
         assert_eq!(app.tick_demand(), TickDemand::Fast);
     }
+    /// The agent empty-state logo (bare centered wordmark over an empty
+    /// scrollback) shimmers like the welcome screen, so an empty agent must
+    /// demand Slow ticks; any entry (here a system block) parks again.
+    #[test]
+    fn tick_demand_slow_while_agent_empty_state_logo_shows() {
+        let mut app = test_app_with_agent();
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Slow,
+            "an empty agent scrollback shows the shimmering logo"
+        );
+        assert!(app.needs_animation(), "slow still counts as animating");
+        let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::None,
+            "content in the scrollback hides the logo and parks the agent"
+        );
+    }
+    /// Minimal mode never draws the agent empty-state logo (grow-pager-minimal
+    /// renders its own welcome card), so it must not demand shimmer ticks.
+    #[test]
+    fn tick_demand_agent_empty_state_is_not_slow_in_minimal_mode() {
+        let mut app = test_app_with_agent();
+        app.screen_mode = ScreenMode::Minimal;
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::None,
+            "minimal mode must not tick for an empty-state logo it never draws"
+        );
+    }
+    /// `tick` keeps advancing the shared shimmer throttle while the active
+    /// agent's scrollback is empty (the logo is on screen), redrawing only
+    /// when the ~12fps wall-clock frame advances.
+    #[test]
+    fn tick_advances_shimmer_while_agent_empty_state_shows() {
+        let mut app = test_app_with_agent();
+        // Force the throttle stale: the next tick must advance it.
+        app.welcome_shimmer_frame = crate::views::welcome::shimmer_frame().wrapping_sub(1);
+        assert!(
+            app.tick(),
+            "an empty-state logo must keep shimmer ticks alive"
+        );
+        assert_eq!(
+            app.welcome_shimmer_frame,
+            crate::views::welcome::shimmer_frame(),
+            "tick must advance the shared shimmer throttle"
+        );
+        // A second tick with an already-current frame is a no-op from the
+        // shimmer's perspective (other redraw sources may still fire).
+        app.tick();
+        assert_eq!(
+            app.welcome_shimmer_frame,
+            crate::views::welcome::shimmer_frame(),
+            "the throttle must stay in sync with the wall-clock frame"
+        );
+    }
+    /// With content in the scrollback the empty-state logo is gone, so `tick`
+    /// must not advance the shimmer throttle for it (the welcome-screen branch
+    /// is not active here either).
+    #[test]
+    fn tick_does_not_advance_shimmer_for_content_agent() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
+        app.welcome_shimmer_frame = crate::views::welcome::shimmer_frame().wrapping_sub(1);
+        let stale = app.welcome_shimmer_frame;
+        let _ = app.tick();
+        assert_eq!(
+            app.welcome_shimmer_frame, stale,
+            "a content scrollback must not advance the shimmer throttle"
+        );
+    }
     /// An open modal session picker that is still fetching keeps fast ticks
     /// alive on an otherwise-idle agent (its loading spinner must animate) —
     /// including after the fast foreign scan lands rows the default Grow
@@ -5257,6 +5158,7 @@ pub(crate) mod tests {
     fn tick_demand_fast_while_modal_session_picker_loads() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
         assert_eq!(app.tick_demand(), TickDemand::None, "idle agent parks");
         app.agents.get_mut(&id).unwrap().active_modal =
             Some(crate::views::modal::ActiveModal::SessionPicker {
@@ -5324,6 +5226,7 @@ pub(crate) mod tests {
         use std::sync::Arc;
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
         assert_eq!(app.tick_demand(), TickDemand::None, "idle agent parks");
         {
             let agent = app.agents.get_mut(&id).unwrap();
@@ -5352,6 +5255,7 @@ pub(crate) mod tests {
     fn needs_animation_gates_mode_switch_banner_countdown() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
         assert!(!app.needs_animation(), "idle agent must not request ticks");
         app.agents
             .get_mut(&id)
@@ -5426,6 +5330,7 @@ pub(crate) mod tests {
         use std::collections::HashMap;
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
         {
             let agent = app.agents.get_mut(&id).unwrap();
             let _ = agent.ephemeral_tip.show(
@@ -5510,6 +5415,7 @@ pub(crate) mod tests {
     fn needs_animation_gates_image_viewer_loading() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
         assert!(!app.needs_animation());
         let viewer = crate::prompt_images::ImageViewerState::open_from_path_deferred(
             std::path::Path::new("/nonexistent/image_gate_test.png"),
@@ -5547,6 +5453,7 @@ pub(crate) mod tests {
     fn needs_animation_gates_loading_replay() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
         assert!(!app.needs_animation());
         app.agents.get_mut(&id).unwrap().session.loading_replay = true;
         assert!(
@@ -5561,6 +5468,8 @@ pub(crate) mod tests {
     fn active_scroll_stream_arms_scroll_clock_not_animation_ticks() {
         use crate::input::mouse::{ScrollConfig, ScrollDirection};
         let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
         assert!(!app.needs_animation());
         let _ = app
             .scroll_state
@@ -5716,6 +5625,8 @@ pub(crate) mod tests {
     #[test]
     fn tick_drains_tracing_rx_and_does_not_metronome_on_channel() {
         let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
         let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
         for i in 0..5 {
             tx.try_send(format!("trace line {i}"))
@@ -5746,6 +5657,7 @@ pub(crate) mod tests {
         use crate::views::turn_status::SPINNER_DIVISOR;
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
         assert!(!app.needs_animation());
         app.agents.get_mut(&id).unwrap().btw_state = Some(BtwOverlayState::Loading {
             question: "what is X?".into(),
@@ -5769,6 +5681,7 @@ pub(crate) mod tests {
     fn needs_animation_gates_todo_badge_flash() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
         assert!(!app.needs_animation(), "idle agent must not request ticks");
         app.agents
             .get_mut(&id)
@@ -5807,6 +5720,7 @@ pub(crate) mod tests {
     fn needs_animation_gates_pending_acp_command_sync() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
         assert!(
             !app.needs_animation(),
             "an idle, fully-synced agent must not request ticks"
@@ -5874,6 +5788,10 @@ pub(crate) mod tests {
     fn needs_animation_gates_subagent_image_viewer_loading() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
+        // The idle baseline refers to the ROOT agent (the subagent child
+        // below is inert unless activated); seed content so only the child
+        // fixture is empty.
+        idle_agent_with_content(&mut app, id);
         let child_sid = "child-img-gate";
         let child = idle_child_view(&app, 1, child_sid);
         app.agents
@@ -6438,11 +6356,17 @@ pub(crate) mod tests {
         ));
     }
     #[test]
-    fn welcome_ctrl_w_noop_outside_git_repo() {
+    fn welcome_ctrl_w_outside_git_repo_starts_session() {
+        // Ctrl+W is captured only inside a git repository (the worktree
+        // dialog needs one); outside one it is an uncaught key, so it starts
+        // a session and is forwarded into its prompt.
         let mut app = test_app();
         app.cwd_has_git_ancestor = false;
         let outcome = app.handle_input(&key_event(KeyCode::Char('w'), KeyModifiers::CONTROL));
-        assert!(matches!(outcome, InputOutcome::Unchanged));
+        assert!(matches!(
+            outcome,
+            InputOutcome::ActionThenForward(Action::NewSession)
+        ));
     }
     #[test]
     fn welcome_trust_decline_keys_quit() {
@@ -6504,65 +6428,49 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    fn menu_action_indices_without_changelog() {
+    fn menu_action_indices_without_import() {
+        // Menu order (no import row): New worktree, Resume session, Quit.
         assert!(matches!(
-            dispatch_menu_action(0, false, false, None),
+            dispatch_menu_action(0, false),
             InputOutcome::Action(Action::OpenNewWorktreeDialog)
         ));
         assert!(matches!(
-            dispatch_menu_action(1, false, false, None),
+            dispatch_menu_action(1, false),
             InputOutcome::Action(Action::FetchSessionList)
         ));
         assert!(matches!(
-            dispatch_menu_action(2, false, false, None),
+            dispatch_menu_action(2, false),
             InputOutcome::Action(Action::Quit)
         ));
-    }
-    #[test]
-    fn menu_action_changelog_sits_above_quit() {
-        let md = Some("# notes");
+        // Out-of-range indices are a no-op.
         assert!(matches!(
-            dispatch_menu_action(1, false, true, md),
-            InputOutcome::Action(Action::FetchSessionList)
-        ));
-        assert!(matches!(
-            dispatch_menu_action(2, false, true, md),
-            InputOutcome::Action(Action::ShowReleaseNotes { .. })
-        ));
-        assert!(matches!(
-            dispatch_menu_action(3, false, true, md),
-            InputOutcome::Action(Action::Quit)
-        ));
-    }
-    #[test]
-    fn menu_action_changelog_before_fetch_is_noop() {
-        assert!(matches!(
-            dispatch_menu_action(2, false, true, None),
+            dispatch_menu_action(3, false),
             InputOutcome::Unchanged
         ));
     }
     #[test]
-    fn menu_action_indices_with_import_and_changelog() {
-        let md = Some("# notes");
+    fn menu_action_indices_with_import() {
+        // Menu order (import row present): Import, New worktree, Resume
+        // session, Quit. The Changelog row is gone, so Quit is index 3.
         assert!(matches!(
-            dispatch_menu_action(0, true, true, md),
+            dispatch_menu_action(0, true),
             InputOutcome::Action(Action::ImportClaudeSettings)
         ));
         assert!(matches!(
-            dispatch_menu_action(1, true, true, md),
+            dispatch_menu_action(1, true),
             InputOutcome::Action(Action::OpenNewWorktreeDialog)
         ));
         assert!(matches!(
-            dispatch_menu_action(2, true, true, md),
+            dispatch_menu_action(2, true),
             InputOutcome::Action(Action::FetchSessionList)
         ));
         assert!(matches!(
-            dispatch_menu_action(3, true, true, md),
-            InputOutcome::Action(Action::ShowReleaseNotes { .. })
+            dispatch_menu_action(3, true),
+            InputOutcome::Action(Action::Quit)
         ));
         assert!(matches!(
-            dispatch_menu_action(4, true, true, md),
-            InputOutcome::Action(Action::Quit)
+            dispatch_menu_action(4, true),
+            InputOutcome::Unchanged
         ));
     }
     #[test]
@@ -7889,7 +7797,6 @@ pub(crate) mod tests {
     fn welcome_pending_l_triggers_login() {
         let mut app = test_app();
         app.auth_state = AuthState::Pending { error: None };
-        app.welcome_prompt_focused = false;
         let outcome = app.handle_input(&key_event(KeyCode::Char('l'), KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Action(Action::Login)));
     }
@@ -7897,7 +7804,6 @@ pub(crate) mod tests {
     fn welcome_pending_enter_triggers_login() {
         let mut app = test_app();
         app.auth_state = AuthState::Pending { error: None };
-        app.welcome_prompt_focused = false;
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Action(Action::Login)));
     }
@@ -7905,7 +7811,6 @@ pub(crate) mod tests {
     fn welcome_pending_n_is_unchanged() {
         let mut app = test_app();
         app.auth_state = AuthState::Pending { error: None };
-        app.welcome_prompt_focused = false;
         let outcome = app.handle_input(&key_event(KeyCode::Char('n'), KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Unchanged));
     }
@@ -7920,13 +7825,202 @@ pub(crate) mod tests {
         ));
     }
     #[test]
-    fn welcome_shift_tab_does_not_create_a_session() {
+    fn welcome_shift_tab_starts_session_and_forwards() {
+        // Shift+Tab is not captured by the home page, so it starts a session
+        // and is forwarded into its prompt (it switches panes there).
         let mut app = test_app();
         app.auth_state = AuthState::Done;
         for shortcut in crate::input::key::shift_tab_keys() {
             let outcome = app.handle_input(&key_event(shortcut.code, shortcut.modifiers));
-            assert!(matches!(outcome, InputOutcome::Unchanged));
+            assert!(matches!(
+                outcome,
+                InputOutcome::ActionThenForward(Action::NewSession)
+            ));
         }
+    }
+    #[test]
+    fn welcome_backspace_starts_session_and_forwards() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        let outcome = app.handle_input(&key_event(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(matches!(
+            outcome,
+            InputOutcome::ActionThenForward(Action::NewSession)
+        ));
+    }
+    #[test]
+    fn welcome_done_enter_without_selection_starts_session() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Action(Action::NewSession)));
+    }
+    #[test]
+    fn welcome_done_enter_with_selection_dispatches_menu_action() {
+        // No import row: 0 = New worktree, 1 = Resume session, 2 = Quit.
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        app.welcome_menu_index = Some(0);
+        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::OpenNewWorktreeDialog)
+        ));
+        app.welcome_menu_index = Some(1);
+        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Action(Action::FetchSessionList)));
+        // Quit (index 2) goes through the double-press confirmation: the
+        // first Enter arms it, the second Enter confirms.
+        app.welcome_menu_index = Some(2);
+        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "first Enter on Quit must arm the confirmation, got {outcome:?}"
+        );
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("quit confirmation must be armed");
+        assert!(matches!(pending.action, Action::Quit));
+        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+    }
+    #[test]
+    fn welcome_done_enter_with_import_row_dispatches_menu_action() {
+        // With the import row: 0 = Import, 1 = New worktree, 2 = Resume, 3 = Quit.
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        app.has_claude_import = true;
+        app.welcome_menu_index = Some(0);
+        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::ImportClaudeSettings)
+        ));
+        app.welcome_menu_index = Some(2);
+        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Action(Action::FetchSessionList)));
+        // Quit (index 3) goes through the double-press confirmation.
+        app.welcome_menu_index = Some(3);
+        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "first Enter on Quit must arm the confirmation, got {outcome:?}"
+        );
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("quit confirmation must be armed");
+        assert!(matches!(pending.action, Action::Quit));
+        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+    }
+    #[test]
+    fn welcome_esc_clears_menu_selection() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        app.welcome_menu_index = Some(1);
+        let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(app.welcome_menu_index, None);
+        // Esc with nothing selected is a no-op (no redraw).
+        let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Unchanged));
+    }
+    #[test]
+    fn welcome_arrows_cycle_menu_selection() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        let outcome = app.handle_input(&key_event(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(app.welcome_menu_index, Some(0));
+        let _ = app.handle_input(&key_event(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.welcome_menu_index, Some(1));
+        let outcome = app.handle_input(&key_event(KeyCode::Up, KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(app.welcome_menu_index, Some(0));
+        // Up from the first row wraps to the last (3 items, no import).
+        let _ = app.handle_input(&key_event(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.welcome_menu_index, Some(2));
+    }
+    #[test]
+    fn welcome_done_ctrl_s_opens_session_picker() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        let outcome = app.handle_input(&key_event(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(matches!(outcome, InputOutcome::Action(Action::FetchSessionList)));
+    }
+    #[test]
+    fn welcome_done_ctrl_i_opens_import_modal() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        app.has_claude_import = true;
+        let outcome = app.handle_input(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::ImportClaudeSettings)
+        ));
+    }
+    #[test]
+    fn welcome_done_ctrl_shift_i_dismisses_import() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        app.has_claude_import = true;
+        let outcome = app.handle_input(&key_event(
+            KeyCode::Char('I'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::DismissClaudeImport)
+        ));
+    }
+    #[test]
+    fn welcome_mouse_click_menu_row_dispatches_action() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        // 3 rows (no import) at y = 10..13, x = 0..40.
+        app.welcome_menu_rects = vec![
+            ratatui::layout::Rect::new(0, 10, 40, 1),
+            ratatui::layout::Rect::new(0, 11, 40, 1),
+            ratatui::layout::Rect::new(0, 12, 40, 1),
+        ];
+        // Row 1 (Resume session).
+        let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 5, 11));
+        assert!(matches!(outcome, InputOutcome::Action(Action::FetchSessionList)));
+        // Row 2 (Quit).
+        let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 5, 12));
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+    }
+    #[test]
+    fn welcome_mouse_click_import_row_dismiss_region() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        app.has_claude_import = true;
+        // Import row spans x 0..40; the `[x]` affordance is the last 3 cols.
+        app.welcome_menu_rects = vec![ratatui::layout::Rect::new(0, 10, 40, 1)];
+        let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 38, 10));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::DismissClaudeImport)
+        ));
+        // Clicking the label region (not the dismiss affordance) opens import.
+        let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 10, 10));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::ImportClaudeSettings)
+        ));
+    }
+    #[test]
+    fn welcome_mouse_click_import_banner_opens_import() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        app.welcome_import_banner_rect = Some(ratatui::layout::Rect::new(0, 5, 40, 1));
+        let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 10, 5));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::ImportClaudeSettings)
+        ));
     }
     #[test]
     fn welcome_done_ctrl_w_opens_new_worktree_dialog() {
@@ -7943,7 +8037,6 @@ pub(crate) mod tests {
     fn welcome_ctrl_v_creates_normal_session() {
         let mut app = test_app();
         app.auth_state = AuthState::Done;
-        app.welcome_prompt_focused = true;
         let outcome = app.handle_input(&key_event(KeyCode::Char('v'), KeyModifiers::CONTROL));
         assert!(matches!(
             outcome,
@@ -7954,7 +8047,6 @@ pub(crate) mod tests {
     fn welcome_cmd_v_creates_normal_session() {
         let mut app = test_app();
         app.auth_state = AuthState::Done;
-        app.welcome_prompt_focused = true;
         let outcome = app.handle_input(&key_event(KeyCode::Char('v'), KeyModifiers::SUPER));
         assert!(matches!(
             outcome,
@@ -8450,7 +8542,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_d_starts_session_when_no_warnings() {
         let mut app = test_app();
-        app.welcome_prompt_focused = true;
         app.startup_warnings = vec![];
         let outcome = app.handle_input(&key_event(KeyCode::Char('d'), KeyModifiers::NONE));
         assert!(
@@ -8461,7 +8552,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_other_char_starts_session_even_with_warnings() {
         let mut app = test_app();
-        app.welcome_prompt_focused = true;
         app.startup_warnings = vec![make_test_warning()];
         let outcome = app.handle_input(&key_event(KeyCode::Char('a'), KeyModifiers::NONE));
         assert!(
@@ -8779,38 +8869,6 @@ pub(crate) mod tests {
             app.last_scroll_pos.is_none(),
             "scroll events must be ignored while a scroll-blocking modal is open",
         );
-    }
-    #[test]
-    fn welcome_doc_viewer_is_scroll_blocking_and_wheel_scrolls_content() {
-        let mut app = test_app();
-        app.active_view = ActiveView::Welcome;
-        app.welcome_doc_viewer = Some(crate::views::modal::ActiveModal::DocViewer {
-            title: "Release Notes".into(),
-            content: "line\n".repeat(80),
-            scroll: 0,
-            window: crate::views::modal_window::ModalWindowState::new(),
-            cached_lines: None,
-            previous_palette: None,
-            standalone: true,
-        });
-        assert!(
-            app.is_scroll_blocking_modal_open(),
-            "welcome release-notes overlay must block background scroll",
-        );
-        let outcome = app.handle_input(&scroll_event(MouseEventKind::ScrollDown, 40, 12));
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "wheel must be handled by the doc viewer",
-        );
-        assert!(
-            app.last_scroll_pos.is_none(),
-            "wheel must not reach the background scroll path while release notes are open",
-        );
-        let scroll = match app.welcome_doc_viewer.as_ref() {
-            Some(crate::views::modal::ActiveModal::DocViewer { scroll, .. }) => *scroll,
-            _ => panic!("expected DocViewer"),
-        };
-        assert!(scroll > 0, "wheel must advance doc scroll, got {scroll}");
     }
     #[test]
     fn tutorial_is_scroll_blocking_and_wheel_scrolls_topic() {
