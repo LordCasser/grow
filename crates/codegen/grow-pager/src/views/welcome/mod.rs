@@ -484,13 +484,7 @@ pub fn render_welcome(
                     params.compact,
                 )
             } else {
-                render_welcome_done(
-                    content_area,
-                    buf,
-                    &theme,
-                    params,
-                    session_picker_state,
-                )
+                render_welcome_done(content_area, buf, &theme, params, session_picker_state)
             }
         }
     };
@@ -1076,12 +1070,12 @@ fn render_welcome_authenticating(
             .areas(content_area);
 
             render_logo(
-        logo_area,
-        buf,
-        theme,
-        content_area.width,
-        content_area.height,
-    );
+                logo_area,
+                buf,
+                theme,
+                content_area.width,
+                content_area.height,
+            );
 
             // Instruction text
             let mut lines: Vec<Line> = Vec::new();
@@ -1186,12 +1180,12 @@ fn render_welcome_authenticating(
             .areas(content_area);
 
             render_logo(
-        logo_area,
-        buf,
-        theme,
-        content_area.width,
-        content_area.height,
-    );
+                logo_area,
+                buf,
+                theme,
+                content_area.width,
+                content_area.height,
+            );
 
             let msg = Line::from(Span::styled(
                 "Connecting...",

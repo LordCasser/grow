@@ -1141,6 +1141,11 @@ pub struct TerminalDiagnostic {
     pub hyperlink_skip_reason: String,
     pub clipboard_route: String,
     pub clipboard_native_tool: String,
+    /// The Kitty protocol was negotiated *without* `REPORT_EVENT_TYPES` because
+    /// `term_version` identified a build that mis-encodes key releases
+    /// (Alacritty ≤ 0.14.x). A field rather than its own event so the affected
+    /// population always has a denominator.
+    pub kitty_event_types_withheld: bool,
     /// Wayland data-control protocol availability: "yes" | "no" | "n/a"
     /// (n/a off Wayland).
     pub clipboard_data_control: String,
@@ -1535,6 +1540,7 @@ mod tests {
             hyperlink_skip_reason: "none".into(),
             clipboard_route: "native+osc52".into(),
             clipboard_native_tool: "arboard".into(),
+            kitty_event_types_withheld: false,
             clipboard_data_control: "n/a".into(),
         }
     }

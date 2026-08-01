@@ -37,6 +37,11 @@ pub enum Action {
     ExitSession,
     /// Exit session without double-press confirmation (e.g., from command palette).
     ExitSessionConfirmed,
+    /// `/delete`: confirm, then delete history and return home.
+    DeleteCurrentSession,
+    DeleteCurrentSessionAnswered {
+        confirmed: bool,
+    },
     /// Open an arbitrary URL in the system browser (with scheme validation).
     OpenUrl(String),
     /// Open a semantic scrollback link.
@@ -749,9 +754,21 @@ pub enum Action {
     DashboardCommitRename,
     /// Cancel an in-progress rename without committing.
     DashboardCancelRename,
-    /// Stop / kill the selected row (top-level: cancel turn → close;
-    /// subagent: kill). Double-press protected for top-level rows.
+    /// Ctrl+X on the selected row. Top-level: cancels a running turn on a
+    /// busy row, else double-press permanently deletes an idle row.
+    /// Subagent: kills the subagent.
     DashboardStop,
+    /// Confirm permanent delete of the armed dashboard row.
+    DashboardDelete,
+    /// Cycle the dispatch input's mode for the next spawned agent
+    /// (Normal → Plan → Always-Approve → Normal). Bound to Shift+Tab.
+    DashboardCycleMode,
+    /// Cycle the PEEKED agent's live mode (Normal → Plan → Always-Approve
+    /// → Normal) — the peek-panel counterpart to [`Self::DashboardCycleMode`].
+    /// Unlike that staged dispatch mode, this changes the existing agent
+    /// directly (same effect as Shift+Tab inside the agent's chat view).
+    /// Emitted when Shift+Tab fires while the peek panel is open.
+    DashboardPeekCycleMode,
     /// Toggle grouping (State ↔ Directory).
     DashboardToggleGrouping,
     /// Set the live filter (typically driven by the dispatch input).
@@ -1256,6 +1273,16 @@ pub struct DoctorFixTarget {
     pub session_binding_epoch: u32,
     pub cwd: std::path::PathBuf,
 }
+/// Aftermath of a successful session delete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterSessionDelete {
+    /// Picker delete — stay put.
+    Stay,
+    /// `/delete` — return to welcome.
+    Welcome,
+    /// Stay on the dashboard.
+    Dashboard,
+}
 #[derive(Debug)]
 pub enum Effect {
     /// Create a new ACP session.
@@ -1333,6 +1360,10 @@ pub enum Effect {
         /// the response is dropped when no longer current, so out-of-order
         /// completions can't clobber newer results.
         seq: u64,
+        /// Optional unified-list `kind` facet filter (`"chat"` / `"build"`).
+        /// When set, stamped as `_meta["grow/facetFilters"].kind` so the shell
+        /// honors multi-source history under `--chat` instead of forcing chat-only.
+        kind_filter: Option<Vec<String>>,
     },
     /// Coalesce picker search keystrokes: fires
     /// [`TaskResult::SessionSearchDebounceExpired`] after a short sleep; the
@@ -1855,6 +1886,7 @@ pub enum Effect {
         source: String,
         session_id: String,
         cwd: String,
+        after: AfterSessionDelete,
     },
     /// Deep-search sessions by content (FTS via ACP).
     DeepSearchSessions { query: String, seq: u64 },
@@ -2394,6 +2426,7 @@ pub enum TaskResult {
     DeleteSessionComplete {
         source: String,
         session_id: String,
+        after: AfterSessionDelete,
     },
     /// Session delete failed.
     DeleteSessionFailed {

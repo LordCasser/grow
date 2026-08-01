@@ -115,7 +115,7 @@ impl AgentView {
                     ]
                 } else {
                     vec![
-                        HintItem::new(key!(Enter), "approve"),
+                        HintItem::new(key!('a'), "approve"),
                         HintItem::new(key!(Tab), "plan"),
                         HintItem::new(key!(Esc), "back"),
                     ]
@@ -641,10 +641,7 @@ impl AgentView {
             buf.set_span_safe(
                 inner.x,
                 inner.y,
-                &Span::styled(
-                    banner,
-                    Style::default().fg(theme.warning).bg(theme.bg_base),
-                ),
+                &Span::styled(banner, Style::default().fg(theme.warning).bg(theme.bg_base)),
                 inner.width,
             );
             Rect {
@@ -714,6 +711,7 @@ impl AgentView {
         let AppRenderParams {
             esc_owned_before_agent,
         } = app_params;
+        self.scrollback.begin_frame();
         self.in_dashboard_overlay = in_dashboard_overlay;
         let super::BannerSlotParams {
             height: banner_height,
@@ -4589,7 +4587,11 @@ mod empty_state_logo_tests {
     #[test]
     fn pick_empty_logo_tiers_by_area() {
         assert_eq!(pick_empty_logo(33, 50), None, "too narrow for any logo");
-        assert_eq!(pick_empty_logo(34, 18), None, "too short for the small logo");
+        assert_eq!(
+            pick_empty_logo(34, 18),
+            None,
+            "too short for the small logo"
+        );
         assert_eq!(pick_empty_logo(34, 19), Some(LogoSize::Small));
         assert_eq!(
             pick_empty_logo(83, 50),

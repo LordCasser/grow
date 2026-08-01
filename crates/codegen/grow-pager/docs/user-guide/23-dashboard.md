@@ -1,10 +1,14 @@
 # Agent Dashboard
 
-The Agent Dashboard is a centralised, agent-native overview of every
-top-level session you have in flight — your local sessions and forks
-— grouped by state, with peek, attach, and dispatch from one screen.
-Subagents are not listed here: they run under their parent session,
-which already shows when work is in flight.
+The Agent Dashboard lists every top-level session in this pager process —
+local sessions and forks — grouped by state. From one screen you can peek,
+reply, attach, pin, rename, stop, or dispatch a new agent. Subagents are not
+listed; they run under their parent, which already shows when work is in
+flight.
+
+Not the agents modal (`/config-agents` / `/agents` — definitions and
+personas), the session picker (`/resume` / `Ctrl+S` — past conversations on
+disk), or the workflows run UI (`/workflows`).
 
 ---
 
@@ -55,25 +59,20 @@ The state icon matches Grow's sibling views (
 
 - `⋅`/`:`/`⸬`/`⁙` — animated spinner for **Working** rows.
 - `●` — filled circle for **Needs input**, **Completed**, **Failed**,
-  **Blocked**. Colour communicates the state (yellow / green / red /
-  amber).
-- `○` — hollow circle for **Idle** and **Inactive** rows.
+  **Blocked** (color: yellow / green / red / amber)
+- `○` — hollow circle for **Idle** and **Inactive**
 
-A row stays in **Working** while it has live background work even if its
-turn has finished — a running background task, a `monitor`, or an active
-scheduled `/loop`. The activity line says what's running (e.g.
-`1 monitor · 2 loops still running`), since each can wake the agent for a
-new turn.
+A row stays **Working** while it has live background work even if its turn
+has finished — a background task, a `monitor`, or an active scheduled
+`/loop`. The activity line says what is still running (for example
+`1 monitor · 2 loops still running`).
 
-There are no inline group headers — the sort order keeps same-state
-rows adjacent and the per-row dot+colour communicates which group
-each row belongs to (matching other session lists).
+There are no inline group headers; sort order keeps same-state rows adjacent,
+and the per-row dot + color shows the group.
 
-The dispatch input shares the same `PromptWidget` chrome as the
-agent view's prompt (rounded box, `❯` prefix, accent border, info
-line). Pressing `Ctrl+/` flips it into **search mode**: the `❯`
-prefix becomes a yellow `Search:` and whatever you type live-filters
-the row list instead of being dispatched.
+The dispatch input uses the same prompt chrome as the agent view. Press
+`Ctrl+/` to flip it into **search mode**: the `❯` prefix becomes a yellow
+`Search:` and typing live-filters the list instead of dispatching.
 
 ---
 
@@ -81,20 +80,21 @@ the row list instead of being dispatched.
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓`, `j` / `k` | Navigate rows AND section titles (selecting a row opens its peek panel) |
-| `→` / `←` (on a section title) | Expand / collapse the section (shows / hides its rows); `l` / `h` in vim mode |
+| `↑` / `↓`, `j` / `k` | Navigate rows and section titles (selecting a row opens peek) |
+| `→` / `←` (on a section title) | Expand / collapse the section (`l` / `h` in vim mode) |
 | `Enter` (on a section title) | Toggle the section collapsed / expanded |
-| `Enter` (empty reply) | Open the selected agent's conversation full-screen (details view) |
-| `Ctrl+S` | Send the peek reply AND open the agent (or dispatch + attach a new session) |
-| `Shift+Enter` / `Alt+Enter` | Insert a newline in the reply / dispatch input (multiline compose) |
-| `1`–`9` | Answer a pending permission / ask question (when the peek shows options) |
+| `Enter` (empty reply) | Open the selected agent full-screen (details view) |
+| `Ctrl+S` | Send the peek reply and open the agent (or dispatch and attach a new session) |
+| `Shift+Enter` / `Alt+Enter` | Newline in the reply / dispatch input |
+| `1`–`9` | Answer a pending permission / ask question when peek shows options |
 | `Enter` (typed reply) | Send / queue the reply to the selected agent |
-| `/` | Types a literal `/` into the prompt |
-| `Ctrl+/` | Toggle search mode (live-filter the rows) |
+| `/` | Literal `/` into the prompt |
+| `Ctrl+/` | Toggle search mode (live-filter rows) |
 | `Ctrl+R` | Rename selected row |
 | `Ctrl+T` | Pin / unpin |
 | `Ctrl+G` | Toggle grouping (state ↔ directory) |
-| `Ctrl+X` | Stop / kill (two presses within 2s to close a session) |
+| `Ctrl+X` | Cancel a running turn, or press twice within 2s to permanently delete |
+| Hover + click `[✗]` | Permanently delete an idle/done row (click again to confirm) |
 | `Shift+↑` / `Shift+↓` | Reorder pinned rows |
 | `Esc` | Step back one level: cancel search → close peek (clear reply draft, then unselect) → clear filter → **unfocus the dispatch input** (so `↑`/`↓`, `j`/`k` navigate the list) → unselect row (→ `[+ New Agent]`) → exit dashboard. Esc never clears your typed dispatch draft — use `Ctrl+U` / `Ctrl+C` for that |
 | `Ctrl+\` | Return to the dashboard from the details view, or exit dashboard |
@@ -140,74 +140,75 @@ rebound via `~/.grow/config.toml`.
 
 ---
 
+## Completing or closing a session
+
+There is **no** “mark completed” command. Row state is derived from the agent:
+
+- **Completed** / **Failed** when work ends on its own (turn finished and no
+  background task / monitor / `/loop` still running).
+- **`Ctrl+X` once** while a turn is running cancels the turn.
+- **`Ctrl+X` twice** (within 2s) **permanently deletes** the session
+  (same as `/delete`). Hover an idle/done row to swap age for `[✗]` and
+  click twice to confirm.
+- In the details view, `/exit` also closes the session (Esc only returns).
+  `/delete` inside an attached agent wipes that session and returns home.
+
+There is no manual complete flag. Use `/exit` to leave a session without
+deleting history.
+
+---
+
 ## Dispatch input
 
-The bottom textarea **always spawns a NEW session** — it is never a
-reply target. A selected row is the overview's navigation cursor, not a
-reply destination; to talk to an existing agent, open it (navigate +
-`Enter`, or click) and reply inside its own view.
+The bottom textarea **always spawns a new session**. A selected row is the
+navigation cursor, not a reply target — open an agent to talk to it.
 
-Enter handler:
+- Free text → new top-level session seeded with the prompt. Text is never
+  treated as a filter (even if it starts with `/`, `s:`, `a:`, or `#`);
+  filtering is `Ctrl+/` search mode. A leading `/` runs a pager-global slash
+  command.
+- Empty input → open the selected row, or create a new agent when
+  `[+ New Agent]` is focused.
 
-- Free text → creates a new top-level session, seeded with the prompt.
-  Text is **never** reinterpreted as a filter — a prompt may start with
-  `/`, `s:`, `a:`, or `#` and still dispatches verbatim (filtering is
-  the explicit `Ctrl+/` search mode). A leading `/` runs a pager-global
-  slash command.
-- Empty input → opens the selected row (`Attach`), or creates a new
-  agent when the `[+ New Agent]` button is focused.
+`Ctrl+S` after typing dispatches **and** attaches; plain `Enter` stays on the
+dashboard so you can dispatch several sessions. `Shift+Enter` / `Alt+Enter`
+insert a newline; the box grows with the draft (up to a cap, then scrolls).
 
-Press `Ctrl+S` after typing a prompt to dispatch AND attach
-(jump into the new session); plain `Enter` stays on the dashboard so
-you can dispatch several sessions in a row. `Shift+Enter` / `Alt+Enter`
-insert a newline for a multi-line prompt — the box **grows in height**
-as you add lines (up to a cap, after which it scrolls), so the whole
-draft stays visible.
-
-The dispatch input accepts any non-empty prompt; an empty /
-whitespace-only prompt is ignored. Prompts above 64 KiB are rejected
-with a toast.
+Empty or whitespace-only prompts are ignored. Prompts above 64 KiB are
+rejected with a toast.
 
 ### Focus: input bar ↔ overview list (`Tab`)
 
-The dashboard has two focus areas — the **dispatch input bar** (typing)
-and the **overview list** (navigating). `Tab` toggles between them; the
-inactive input dims its border and hides its caret.
+Two focus areas: the **dispatch input** and the **overview list**. `Tab`
+toggles between them; the inactive input dims its border and hides its caret.
 
 On open, focus defaults to the **overview list** when at least one agent
-exists (so `↑`/`↓` / vim `j`/`k` navigate immediately). With **no**
-agents, focus stays on the **dispatch input** so you can type a first
-prompt right away. Either way, the `[+ New Agent]` button is the cursor
-target (no agent row is pre-selected).
+exists (so `↑`/`↓` / vim `j`/`k` navigate immediately). With **no** agents,
+focus stays on the **dispatch input**. Either way, the cursor starts on
+`[+ New Agent]` (no agent row pre-selected).
 
-- **Input focused**: type to compose a new-session prompt. `↑`/`↓`
-  navigate the row list when the prompt is empty (a convenience),
-  otherwise move the caret. `Esc` unfocuses the input → overview list
-  (your typed draft is kept) so you can navigate straight away.
-- **Overview focused**: `↑`/`↓` — and, in **vim mode**, `j`/`k` — move
-  between agent rows. `Enter` opens the highlighted agent (on
-  `[+ New Agent]`, it sends a typed draft, else creates a new session).
-  `Esc` **stays on the list** and steps back — clearing an active filter,
-  then unselecting the row (→ `[+ New Agent]`), then exiting the
-  dashboard. `Tab` or `i` (vim) — or any other printable key — return to
-  the input.
+- **Input focused**: type a new-session prompt. Empty prompt: `↑`/`↓`
+  navigate rows; non-empty: move the caret. `Esc` unfocuses to the list
+  (draft kept).
+- **Overview focused**: `↑`/`↓` (and vim `j`/`k`) move between rows. `Enter`
+  opens the highlighted agent (on `[+ New Agent]`, sends a typed draft or
+  creates a new session). `Esc` stays on the list and steps back — clear
+  filter, then unselect (→ `[+ New Agent]`), then exit. `Tab`, `i` (vim), or
+  any printable key returns to the input.
 
 ---
 
 ## Peek panel
 
-The peek panel is shown **by default whenever an agent row is
-selected** — it **replaces** the new-session dispatch box. With no row
-selected (the `[+ New Agent]` button focused, or after `Esc`), the
-dispatch box returns for starting a new session. So selecting a row is
-how you talk to an existing agent; deselecting is how you start a new
+Selecting an agent row shows the **peek panel** in place of the dispatch box.
+With no row selected (`[+ New Agent]`, or after `Esc`), the dispatch box
+returns. Select a row to talk to an existing agent; deselect to start a new
 one.
 
-The panel shows, top to bottom, a header (the **last response type** —
-`Thinking` / `Thought` / `Response` / `Edit` / `Read` / `Bash` / … — on
-the left, **time** on the far right), the most recent response
-(**word-wrapped** to fit, up to ~3 rows), and a live `❯ reply` input. A
-`…` marker appears on the last row only when there's more than fits.
+Top to bottom: header (**last response type** — `Thinking` / `Thought` /
+`Response` / `Edit` / `Read` / `Bash` / … — and **time**), the most recent
+response (word-wrapped, up to ~3 rows; `…` when truncated), and a live
+`❯ reply` input.
 
 The selected agent's **model**, **Behavior**, and **Permission** are shown on
 the panel's **bottom border** (bottom-right), in the same
@@ -284,29 +285,20 @@ terminals the dispatch box shows even with a row selected.
 
 ## Search / filter (`Ctrl+/`)
 
-Filtering lives behind an explicit **search mode** so normal typing
-always dispatches. Press `Ctrl+/` to toggle it: the prompt prefix
-flips from `❯` to a yellow `Search:` and every keystroke live-filters
-the row list.
+`Ctrl+/` toggles search mode so normal typing always dispatches. Prefix
+flips from `❯` to yellow `Search:`; every keystroke live-filters the list.
 
-Inside search mode:
+- `Enter` — confirm: keep the filter and return to the dispatch prompt.
+- `Esc` or `Ctrl+/` — cancel: clear the filter and exit search.
+- `↑` / `↓` — navigate filtered rows.
 
-- `Enter` — **confirm**: keep the filter applied and return to the
-  dispatch prompt (rows stay filtered; `Esc` later clears them).
-- `Esc` or `Ctrl+/` — **cancel**: clear the filter and exit search.
-- `↑` / `↓` — navigate the filtered rows.
+Prefixes (only inside search mode):
 
-The query supports the same prefixes as before (they are only honoured
-*inside* search mode now):
-
-- `a:<name>` — filter by agent label (case-insensitive substring,
-  matches persona / role).
-- `s:<state>` — filter by row state. Accepts `working`, `idle`,
-  `completed`, `failed`, `needs-input`, `blocked` and synonyms
-  (`busy`/`running`/`done`/etc.).
-- `#<text>` — substring match on `#<text>` (matches the literal
-  `#` in labels; reserved for future PR filtering).
-- anything else — plain substring match over label + working dir.
+- `a:<name>` — agent label (case-insensitive substring; persona / role).
+- `s:<state>` — row state: `working`, `idle`, `completed`, `failed`,
+  `needs-input`, `blocked` and synonyms (`busy`/`running`/`done`/etc.).
+- `#<text>` — substring match on `#<text>` (literal `#` in labels).
+- anything else — substring over label + working dir.
 
 ---
 

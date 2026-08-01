@@ -328,6 +328,7 @@ pub enum ProtectedEditReason {
     StartupFile,
     Etc,
     GrowConfig,
+    GrowSandbox,
     ClaudeSettings,
     CursorHooks,
     /// Fail-closed / unclassified sensitive path; no user copy yet.
@@ -343,6 +344,7 @@ impl ProtectedEditReason {
             Self::StartupFile => "startup_file",
             Self::Etc => "etc",
             Self::GrowConfig => "grow_config",
+            Self::GrowSandbox => "grow_sandbox",
             Self::ClaudeSettings => "claude_settings",
             Self::CursorHooks => "cursor_hooks",
             Self::Sensitive => "sensitive",
@@ -368,6 +370,9 @@ impl ProtectedEditReason {
             ),
             Self::GrowConfig => Some(
                 "Note: This edit contains changes to Grow config, which can alter permissions, tools, and other behavior in later sessions.",
+            ),
+            Self::GrowSandbox => Some(
+                "Note: This edit contains changes to the Grow sandbox config, which can loosen filesystem and network restrictions on commands.",
             ),
             Self::ClaudeSettings => Some(
                 "Note: This edit contains changes to Claude-compatible settings, which can install hooks or change permission mode without a separate execution approval.",
@@ -471,13 +476,55 @@ fn protected_edit_reason(path: &Path) -> Option<ProtectedEditReason> {
     if STARTUP_FILES.contains(&file) {
         return Some(ProtectedEditReason::StartupFile);
     }
-    if string_components.ends_with(&[".grow", "config.toml"]) {
-        return Some(ProtectedEditReason::GrowConfig);
+    if let Some(reason) = protected_grow_config_file(path, &string_components) {
+        return Some(reason);
     }
     if path == Path::new("/etc") || path.starts_with(Path::new("/etc")) {
         return Some(ProtectedEditReason::Etc);
     }
     None
+}
+
+/// Grow config files that alter permissions (`config.toml`, the
+/// `managed_config.toml` defaults tier, the user `requirements.toml` layer) or
+/// sandbox restrictions (`sandbox.toml`) in the running and later sessions; a
+/// silent edit would let the agent loosen its own guardrails. Matched directly
+/// inside any `.grow` dir (user-global default and workspace overlays) and
+/// directly under a custom `$GROW_HOME`, which the component match cannot see.
+fn protected_grow_config_file(path: &Path, components: &[&str]) -> Option<ProtectedEditReason> {
+    protected_grow_config_file_with_home(path, components, grow_config::user_grow_home().as_deref())
+}
+
+fn protected_grow_config_file_with_home(
+    path: &Path,
+    components: &[&str],
+    user_grow_home: Option<&Path>,
+) -> Option<ProtectedEditReason> {
+    let reason = match components.last().copied() {
+        Some(
+            grow_config::USER_CONFIG_FILENAME
+            | grow_config::MANAGED_CONFIG_FILENAME
+            | grow_config::REQUIREMENTS_FILENAME,
+        ) => ProtectedEditReason::GrowConfig,
+        Some("sandbox.toml") => ProtectedEditReason::GrowSandbox,
+        _ => return None,
+    };
+    let in_dot_grow = components.len() >= 2 && components[components.len() - 2] == ".grow";
+    let in_grow_home = || grow_home_matches(user_grow_home, |home| path.parent() == Some(home));
+    (in_dot_grow || in_grow_home()).then_some(reason)
+}
+
+/// True when `pred` holds for the user grow home in either its lexical or
+/// physically-resolved form. Both forms are checked because callers hold a
+/// lexical and a resolved candidate path, and the home itself may sit behind a
+/// symlink. The comparison is byte-exact (no case folding), like every other
+/// resolved-path check in this module.
+fn grow_home_matches(home: Option<&Path>, pred: impl Fn(&Path) -> bool) -> bool {
+    home.is_some_and(|home| {
+        let lexical = grow_paths::normalize_lexically(home);
+        pred(&lexical)
+            || resolve_following_symlinks(&lexical, 0).is_some_and(|resolved| pred(&resolved))
+    })
 }
 
 fn path_is_under_user_grow_hook_root(path: &Path, grow_home: &Path) -> bool {
@@ -487,12 +534,8 @@ fn path_is_under_user_grow_hook_root(path: &Path, grow_home: &Path) -> bool {
 fn protected_grow_hook_root(path: &Path, components: &[&str]) -> bool {
     components.windows(2).any(|pair| pair == [".grow", "hooks"])
         || components.ends_with(&[".grow", "hooks-paths"])
-        || grow_config::user_grow_home().is_some_and(|grow_home| {
-            let lexical_home = grow_paths::normalize_lexically(&grow_home);
-            path_is_under_user_grow_hook_root(path, &lexical_home)
-                || resolve_following_symlinks(&lexical_home, 0).is_some_and(|resolved_home| {
-                    path_is_under_user_grow_hook_root(path, &resolved_home)
-                })
+        || grow_home_matches(grow_config::user_grow_home().as_deref(), |home| {
+            path_is_under_user_grow_hook_root(path, home)
         })
 }
 
@@ -1369,6 +1412,8 @@ mod tests {
             "/etc",
             "/etc/grow-test",
             "/work/subdir/../.git/hooks/pre-commit",
+            "/home/user/.grow/sandbox.toml",
+            "/work/project/.grow/sandbox.toml",
         ] {
             assert!(
                 edit_target_protection(Path::new(path)).is_some(),
@@ -1378,6 +1423,9 @@ mod tests {
         for path in [
             "/work/src/main.rs",
             "/work/project/.grow/config.toml/backup",
+            "/work/project/sandbox.toml",
+            "/work/project/requirements.toml",
+            "/work/project/managed_config.toml",
         ] {
             assert!(
                 edit_target_protection(Path::new(path)).is_none(),
@@ -1426,6 +1474,22 @@ mod tests {
             ("/etc/hosts", ProtectedEditReason::Etc),
             (
                 "/home/user/.grow/config.toml",
+                ProtectedEditReason::GrowConfig,
+            ),
+            (
+                "/home/user/.grow/sandbox.toml",
+                ProtectedEditReason::GrowSandbox,
+            ),
+            (
+                "/work/project/.grow/sandbox.toml",
+                ProtectedEditReason::GrowSandbox,
+            ),
+            (
+                "/home/user/.grow/managed_config.toml",
+                ProtectedEditReason::GrowConfig,
+            ),
+            (
+                "/home/user/.grow/requirements.toml",
                 ProtectedEditReason::GrowConfig,
             ),
             (
@@ -1548,6 +1612,85 @@ mod tests {
                 "symlinked protected edit target must prompt: {}",
                 path.display()
             );
+        }
+    }
+
+    /// A custom `$GROW_HOME` has no `.grow` path component, so the live
+    /// `config.toml` / `sandbox.toml` must be caught by the home-prefix branch.
+    #[test]
+    fn grow_config_files_under_custom_grow_home_are_protected() {
+        let home = tempfile::tempdir().unwrap();
+        let home_path = home.path();
+        for (file, reason) in [
+            ("config.toml", ProtectedEditReason::GrowConfig),
+            ("managed_config.toml", ProtectedEditReason::GrowConfig),
+            ("requirements.toml", ProtectedEditReason::GrowConfig),
+            ("sandbox.toml", ProtectedEditReason::GrowSandbox),
+        ] {
+            let path = home_path.join(file);
+            let components = [file];
+            assert_eq!(
+                protected_grow_config_file_with_home(&path, &components, Some(home_path)),
+                Some(reason),
+                "{file} directly under $GROW_HOME must be protected"
+            );
+        }
+        // Same file names elsewhere (or with no resolvable home) stay ordinary.
+        let elsewhere = home_path.join("sub").join("sandbox.toml");
+        assert_eq!(
+            protected_grow_config_file_with_home(
+                &elsewhere,
+                &["sub", "sandbox.toml"],
+                Some(home_path)
+            ),
+            None
+        );
+        assert_eq!(
+            protected_grow_config_file_with_home(
+                &home_path.join("sandbox.toml"),
+                &["sandbox.toml"],
+                None
+            ),
+            None
+        );
+    }
+
+    /// The resolved-symlink arm of the grow-home match must decide: `$GROW_HOME`
+    /// points at a symlink while the edit targets the physical home directory,
+    /// so the lexical parent-equality arm cannot fire.
+    #[test]
+    #[cfg(unix)]
+    fn grow_config_under_symlinked_grow_home_is_protected() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let real_home = tmp.path().join("real-home");
+        std::fs::create_dir(&real_home).unwrap();
+        let link = tmp.path().join("home-link");
+        symlink(&real_home, &link).unwrap();
+        // tempdir paths can themselves contain symlinks (macOS /var -> /private/var);
+        // compare against the physical home the production resolver will produce.
+        let physical_home = resolve_following_symlinks(&real_home, 0).unwrap();
+        assert_eq!(
+            protected_grow_config_file_with_home(
+                &physical_home.join("sandbox.toml"),
+                &["sandbox.toml"],
+                Some(&link)
+            ),
+            Some(ProtectedEditReason::GrowSandbox)
+        );
+    }
+
+    /// `protected_edit_reason` lowercases path components before matching, so
+    /// the canonical filename constants must stay lowercase or the const
+    /// patterns silently stop firing.
+    #[test]
+    fn protected_config_filename_constants_are_lowercase() {
+        for name in [
+            grow_config::USER_CONFIG_FILENAME,
+            grow_config::MANAGED_CONFIG_FILENAME,
+            grow_config::REQUIREMENTS_FILENAME,
+        ] {
+            assert_eq!(name, name.to_ascii_lowercase(), "{name}");
         }
     }
 

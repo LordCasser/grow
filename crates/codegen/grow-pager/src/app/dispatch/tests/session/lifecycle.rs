@@ -1524,6 +1524,7 @@ fn translate_local_submit_never_returns_persist_never_for_new_session() {
 }
 #[test]
 fn delete_session_action_emits_delete_effect() {
+    use crate::app::actions::AfterSessionDelete;
     let mut app = test_app_with_agent();
     open_session_picker_with(&mut app, vec![make_picker_entry("s1", "/repo")]);
     let effects = dispatch(
@@ -1534,17 +1535,108 @@ fn delete_session_action_emits_delete_effect() {
         },
         &mut app,
     );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::DeleteSession {
+            source,
+            session_id,
+            cwd,
+            after: AfterSessionDelete::Stay,
+        }] if source == "local" && session_id == "s1" && cwd == "/repo"
+    ));
+}
+#[test]
+fn delete_current_session_confirm_emits_effect() {
+    use crate::app::actions::AfterSessionDelete;
+    let mut app = test_app_with_agent();
+    {
+        let a = app.agents.get_mut(&AgentId(0)).unwrap();
+        a.session.session_id = Some(acp::SessionId::new("sess-current"));
+        a.session.cwd = std::path::PathBuf::from("/repo");
+    }
+    assert!(dispatch(Action::DeleteCurrentSession, &mut app).is_empty());
+    assert!(matches!(
+        app.agents[&AgentId(0)]
+            .question_view
+            .as_ref()
+            .unwrap()
+            .local_kind,
+        Some(crate::views::question_view::LocalQuestionKind::DeleteCurrentSession)
+    ));
+    assert!(
+        dispatch(
+            Action::DeleteCurrentSessionAnswered { confirmed: false },
+            &mut app,
+        )
+        .is_empty()
+    );
+    let effects = dispatch(
+        Action::DeleteCurrentSessionAnswered { confirmed: true },
+        &mut app,
+    );
     assert!(
         matches!(
-            effects.as_slice(),
-            [Effect::DeleteSession {
-                source,
-                session_id,
-                cwd,
-            }] if source == "local" && session_id == "s1" && cwd == "/repo"
+            effects.first(),
+            Some(Effect::CancelTurn {
+                cancel_subagents: true,
+                ..
+            })
         ),
-        "DeleteSession action must emit exactly one matching DeleteSession effect"
+        "must cancel the turn/subagents before delete, got {effects:?}"
     );
+    assert!(
+        matches!(
+            effects.last(),
+            Some(Effect::DeleteSession {
+                session_id,
+                after: AfterSessionDelete::Welcome,
+                ..
+            }) if session_id == "sess-current"
+        ),
+        "got {effects:?}"
+    );
+}
+#[test]
+fn delete_current_session_complete_welcome_and_guard() {
+    use crate::app::actions::{AfterSessionDelete, TaskResult};
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().session.session_id =
+        Some(acp::SessionId::new("sess-a"));
+    let effects = dispatch_task_result(
+        TaskResult::DeleteSessionComplete {
+            source: "current".into(),
+            session_id: "sess-a".into(),
+            after: AfterSessionDelete::Welcome,
+        },
+        &mut app,
+    );
+    assert!(matches!(app.active_view, ActiveView::Welcome));
+    assert!(app.agents.is_empty());
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::UnregisterActiveSession { .. }))
+    );
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().session.session_id =
+        Some(acp::SessionId::new("sess-a"));
+    let other = AgentId(1);
+    let session = make_test_agent_session(&app, other, "unused");
+    app.agents
+        .insert(other, AgentView::new(session, ScrollbackState::new()));
+    app.agents.get_mut(&other).unwrap().session.session_id = Some(acp::SessionId::new("sess-b"));
+    app.active_view = ActiveView::Agent(other);
+    let effects = dispatch_task_result(
+        TaskResult::DeleteSessionComplete {
+            source: "current".into(),
+            session_id: "sess-a".into(),
+            after: AfterSessionDelete::Welcome,
+        },
+        &mut app,
+    );
+    assert!(matches!(app.active_view, ActiveView::Agent(id) if id == other));
+    assert!(!app.agents.contains_key(&AgentId(0)));
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Quit)));
 }
 #[test]
 fn entry_title_falls_back_to_short_session_id_when_no_prompt() {
@@ -1709,6 +1801,7 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
     let _ = dispatch_new_session_inner(&mut app, None);
     for (i, agent) in app.agents.values_mut().enumerate() {
         agent.display_name = Some(format!("agent-{i}"));
+        agent.session.session_id = Some(acp::SessionId::new(format!("s{i}")));
     }
     open_dashboard(&mut app);
     let order = dashboard_row_order(&app);
@@ -1753,11 +1846,25 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
             other => panic!("Ctrl+X must produce DashboardStop, got {other:?}"),
         }
     }
-    let crate::views::dashboard::DashboardRowId::TopLevel(first_id) = first else {
+    let crate::views::dashboard::DashboardRowId::TopLevel(first_id) = &first else {
         panic!("first row should be top-level");
     };
+    let session_id = app.agents[first_id]
+        .session
+        .session_id
+        .as_ref()
+        .expect("session id")
+        .to_string();
+    let _ = dispatch_task_result(
+        crate::app::actions::TaskResult::DeleteSessionComplete {
+            source: "current".into(),
+            session_id,
+            after: crate::app::actions::AfterSessionDelete::Dashboard,
+        },
+        &mut app,
+    );
     assert!(
-        !app.agents.contains_key(&first_id),
+        !app.agents.contains_key(first_id),
         "closed agent must be gone"
     );
     assert_eq!(
@@ -1790,13 +1897,14 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
 /// no matter how many times the user presses Ctrl+X.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_stop_double_press_via_handle_key_closes_top_level() {
+fn dashboard_stop_double_press_via_handle_key_deletes_top_level() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app();
     let _ = dispatch_new_session_inner(&mut app, None);
     let _ = dispatch_new_session_inner(&mut app, None);
     open_dashboard(&mut app);
     let target = *app.agents.keys().next().unwrap();
+    app.agents.get_mut(&target).unwrap().session.session_id = Some(acp::SessionId::new("s-target"));
     if let Some(d) = app.dashboard.as_mut() {
         d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
     }
@@ -1813,8 +1921,8 @@ fn dashboard_stop_double_press_via_handle_key_closes_top_level() {
         other => panic!("first Ctrl+X must produce DashboardStop, got {other:?}"),
     }
     assert!(
-        app.dashboard.as_ref().unwrap().stop_confirm.is_some(),
-        "first Ctrl+X must arm stop_confirm"
+        app.dashboard.as_ref().unwrap().delete_confirm.is_some(),
+        "first Ctrl+X must arm delete_confirm"
     );
     let outcome2 = app
         .dashboard
@@ -1823,14 +1931,27 @@ fn dashboard_stop_double_press_via_handle_key_closes_top_level() {
         .handle_input(&ctrl_x, &app.registry);
     match outcome2 {
         crate::app::app_view::InputOutcome::Action(crate::app::actions::Action::DashboardStop) => {
-            let _ = dispatch(crate::app::actions::Action::DashboardStop, &mut app);
+            let effects = dispatch(crate::app::actions::Action::DashboardStop, &mut app);
+            assert!(matches!(effects.last(), Some(Effect::DeleteSession { .. })));
         }
         other => panic!("second Ctrl+X must produce DashboardStop, got {other:?}"),
     }
-    assert!(
-        !app.agents.contains_key(&target),
-        "second Ctrl+X via handle_input must close the target agent (Issue 300 regression)",
+    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_none());
+    let session_id = app.agents[&target]
+        .session
+        .session_id
+        .as_ref()
+        .expect("session id")
+        .to_string();
+    let _ = dispatch_task_result(
+        crate::app::actions::TaskResult::DeleteSessionComplete {
+            source: "current".into(),
+            session_id,
+            after: crate::app::actions::AfterSessionDelete::Dashboard,
+        },
+        &mut app,
     );
+    assert!(!app.agents.contains_key(&target));
 }
 /// Top-level resolver round-trip via real AgentView.
 #[test]

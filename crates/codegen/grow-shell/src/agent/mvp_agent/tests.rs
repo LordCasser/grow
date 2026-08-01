@@ -249,8 +249,24 @@ async fn broadcast_refresh_skill_baseline_tolerates_dropped_receiver() {
         Ok(crate::session::SessionCommand::RefreshSkillBaseline)
     ));
 }
-/// After allocating a turn number, `session_turn_numbers` holds the next
-/// value (current + 1) for process-local structured diagnostic ordering.
+/// The monotonic turn counter must never wrap on the DB-bound i32 path.
+/// `allocate_turn_number` returns u64; the AB submission casts to i32.
+/// Verify we saturate instead of wrapping.
+#[test]
+fn trace_turn_to_i32_saturates_at_max() {
+    let small: u64 = 42;
+    let result = i32::try_from(small).unwrap_or(i32::MAX);
+    assert_eq!(result, 42);
+    let huge: u64 = (i32::MAX as u64) + 100;
+    let result = i32::try_from(huge).unwrap_or(i32::MAX);
+    assert_eq!(result, i32::MAX);
+    let boundary: u64 = i32::MAX as u64;
+    let result = i32::try_from(boundary).unwrap_or(i32::MAX);
+    assert_eq!(result, i32::MAX);
+}
+/// After allocating a turn number, the retained (in-memory) turn counter holds
+/// the next value (current + 1). This is the value that must be persisted via
+/// `SetNextTraceTurn` so the counter survives restarts.
 #[test]
 fn allocate_turn_number_advances_counter() {
     use std::cell::RefCell;
@@ -1202,6 +1218,8 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
         "repeat call must keep the populated snapshot"
     );
 }
+#[cfg(unix)]
+mod process_scope_reclaim;
 mod subagent_spawn_context_tests;
 /// No load in flight and no session → the wait returns immediately
 /// (the caller then surfaces "unknown session id" exactly as before).
@@ -1949,16 +1967,21 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
         sid.0.to_string(),
         acp::ModelId::new(std::sync::Arc::from("gone-model")),
     );
-    agent
-        .session_turn_numbers
-        .borrow_mut()
-        .insert(sid.clone(), 3);
+    agent.set_turn_number(&sid, 3);
     let (_permission_tx, permission_rx) =
         tokio::sync::mpsc::unbounded_channel::<grow_workspace::permission::PermissionEvent>();
     agent
-        .permission_event_receivers
+        .retained_resources
         .borrow_mut()
-        .insert(sid.clone(), permission_rx);
+        .entry(sid.clone())
+        .or_default()
+        .permission_event_receiver = Some(permission_rx);
+    agent
+        .resident_resources
+        .borrow_mut()
+        .entry(sid.clone())
+        .or_default()
+        .require_gateway = true;
     agent.remove_session(&sid);
     assert!(
         toolset_weak.upgrade().is_none(),
@@ -1970,8 +1993,11 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
             .borrow()
             .contains_key(sid.0.as_ref())
     );
-    assert!(!agent.session_turn_numbers.borrow().contains_key(&sid));
-    assert!(!agent.permission_event_receivers.borrow().contains_key(&sid));
+    assert!(!agent.resident_resources.borrow().contains_key(&sid));
+    assert!(
+        !agent.retained_resources.borrow().contains_key(&sid),
+        "retained per-session resources must be reclaimed on removal"
+    );
 }
 /// Without a bridge, `ext_method` falls through to the unchanged local
 /// dispatch (`rewind::handle`), which reports the missing session — proving
@@ -2018,7 +2044,7 @@ fn cancel_does_not_forward_to_bridge_in_local_mode() {
     });
 }
 /// Regression (post-cancel slot hang, first bad release 0.2.101; see
-/// `dispatch_locks`). SDK e2e shape:
+/// `dispatch_lock`). SDK e2e shape:
 /// `test_cancel_ends_in_flight_turn_and_frees_slot` (grow-agent-sdk).
 #[test]
 fn cancel_never_overtakes_in_flight_prompt_intake() {

@@ -264,7 +264,7 @@ pub enum TickDemand {
 pub const SLOW_TICK_INTERVAL: Duration = Duration::from_millis(83);
 /// Welcome toast lifetime (wall clock, so the duration holds whether the
 /// event loop is ticking Slow or Fast).
-const WELCOME_TOAST_DURATION: Duration = Duration::from_secs(4);
+const WELCOME_TOAST_DURATION: Duration = Duration::from_secs(2);
 /// Entry in the session picker list on the welcome screen.
 #[derive(Debug, Clone)]
 pub struct SessionPickerEntry {
@@ -416,7 +416,7 @@ impl PendingAction {
     }
     /// Like [`Self::new`] but with an explicit confirm window. Used by
     /// the dashboard-overlay stop (Ctrl+X), which mirrors the
-    /// dashboard's [`crate::views::dashboard::state::STOP_CONFIRM_WINDOW`]
+    /// dashboard's [`crate::views::dashboard::state::CONFIRM_WINDOW`]
     /// rather than the default double-press TTL.
     pub fn with_ttl(
         action: Action,
@@ -1651,7 +1651,9 @@ impl AppView {
     /// 3. Global actions (quit with confirmation)
     ///
     /// Quit always goes through double-press confirmation, even when
-    /// escalated from agent-level (e.g., Ctrl-C while cancelling).
+    /// escalated from agent-level (e.g., Ctrl-C while cancelling) — except
+    /// on the welcome screen, which has no session or input state to lose
+    /// and quits on the first press.
     pub fn handle_input(&mut self, ev: &Event) -> InputOutcome {
         self.handle_input_at_with_paste_provenance(ev, Instant::now(), PasteProvenance::Terminal)
     }
@@ -1757,6 +1759,7 @@ impl AppView {
             ActiveView::Welcome => handle_welcome_input(
                 ev,
                 &mut WelcomeInputCtx {
+                    registry: &self.registry,
                     auth_state: &self.auth_state,
                     trust_state: &self.trust_state,
                     cwd: &self.cwd,
@@ -1850,7 +1853,7 @@ impl AppView {
                                     Action::DashboardOverlayStop,
                                     KeyShortcut::from(*key),
                                     Some("close this session"),
-                                    crate::views::dashboard::state::STOP_CONFIRM_WINDOW,
+                                    crate::views::dashboard::state::CONFIRM_WINDOW,
                                 ));
                                 return InputOutcome::Changed;
                             }
@@ -2134,6 +2137,13 @@ impl AppView {
             }
         };
         if let InputOutcome::Action(Action::Quit) = &outcome {
+            if self.active_view == ActiveView::Welcome {
+                // The welcome screen has no session or input state to lose,
+                // so quit on the first press; double-press confirmation
+                // would only add friction. Agent and dashboard views keep
+                // the double-press confirmation below.
+                return InputOutcome::Action(Action::Quit);
+            }
             return self.apply_quit_confirmation(key_event);
         }
         if let InputOutcome::Action(Action::QuitConfirmed) = &outcome {
@@ -2246,6 +2256,13 @@ impl AppView {
             _ => return InputOutcome::Unchanged,
         };
         if def.requires_confirmation {
+            if action_id == ActionId::Quit && self.active_view == ActiveView::Welcome {
+                // Welcome fallback path: quit keys that reach the When::Always
+                // global layer (e.g. Ctrl+Q on the ZDR screen) must also quit
+                // on the first press — no session state to lose. Do not arm a
+                // pending action here.
+                return InputOutcome::Action(Action::Quit);
+            }
             let shortcut = KeyShortcut::from(*key);
             let action = if action_id == ActionId::NewSession
                 && matches!(self.active_view, ActiveView::Agent(_))
@@ -2310,6 +2327,7 @@ use crate::views::session_picker::{
 };
 /// Context for welcome-view input handling.
 struct WelcomeInputCtx<'a> {
+    registry: &'a ActionRegistry,
     auth_state: &'a AuthState,
     /// Folder-trust state. When `Pending` (and auth is `Done`), the trust
     /// question intercepts keys and swallows the rest so no session starts.
@@ -2718,6 +2736,11 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 if ctx.menu_index.take().is_some() {
                     return InputOutcome::Changed;
                 }
+                return InputOutcome::Unchanged;
+            }
+            // Global shortcuts are resolved by the outer input layer after a
+            // view returns `Unchanged`. Do not turn them into prompt input.
+            if ctx.registry.lookup(key, When::Always).is_some() {
                 return InputOutcome::Unchanged;
             }
             // Any uncaught key (text chars, Backspace, Tab, arrows with
@@ -5924,19 +5947,11 @@ pub(crate) mod tests {
         assert_eq!(counts.get("t_seen"), Some(&2));
     }
     #[test]
-    fn welcome_ctrl_q_requires_confirmation() {
+    fn welcome_ctrl_q_quits_immediately() {
         let mut app = test_app();
         let outcome = app.handle_input(&key_event(KeyCode::Char('q'), KeyModifiers::CONTROL));
-        assert!(matches!(outcome, InputOutcome::Changed));
-        let pending = app
-            .pending_action
-            .as_ref()
-            .expect("expected pending action");
-        assert!(matches!(pending.action, Action::Quit));
-        assert_eq!(
-            pending.shortcut,
-            KeyShortcut::from(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL))
-        );
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        assert!(app.pending_action.is_none());
     }
     #[test]
     fn welcome_ctrl_u_update_keeps_priority_over_foreign_resume() {
@@ -6310,16 +6325,16 @@ pub(crate) mod tests {
         assert_eq!(app.session_picker_state.query(), "session");
     }
     #[test]
-    fn welcome_session_picker_ctrl_d_keeps_global_quit_precedence() {
+    fn welcome_session_picker_ctrl_d_quits_immediately() {
+        // Ctrl+D keeps global quit precedence over the picker's search even
+        // while the session picker is open, and on the welcome screen it
+        // quits on the first press instead of arming a double-press pending.
         let mut app = test_app();
         open_welcome_session_picker(&mut app);
         app.session_picker_state.set_query("session");
         let outcome = app.handle_input(&ctrl_d());
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert!(matches!(
-            app.pending_action.as_ref().map(|pending| &pending.action),
-            Some(Action::Quit)
-        ));
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        assert!(app.pending_action.is_none());
         assert_eq!(app.session_picker_state.query(), "session");
     }
     #[test]
@@ -6389,43 +6404,29 @@ pub(crate) mod tests {
         assert!(matches!(outcome, InputOutcome::Action(Action::TrustFolder)));
     }
     #[test]
-    fn welcome_ctrl_c_requires_confirmation() {
+    fn welcome_ctrl_c_quits_immediately() {
         let mut app = test_app();
-        let outcome = app.handle_input(&ctrl_c());
-        assert!(matches!(outcome, InputOutcome::Changed));
-        let pending = app
-            .pending_action
-            .as_ref()
-            .expect("expected pending action");
-        assert!(matches!(pending.action, Action::Quit));
-        assert_eq!(
-            pending.shortcut,
-            KeyShortcut::from(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
-        );
-    }
-    #[test]
-    fn welcome_ctrl_c_double_press_quits() {
-        let mut app = test_app();
-        let _ = app.handle_input(&ctrl_c());
-        assert!(app.pending_action.is_some());
         let outcome = app.handle_input(&ctrl_c());
         assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
         assert!(app.pending_action.is_none());
     }
     #[test]
-    fn welcome_ctrl_d_requires_confirmation() {
+    fn welcome_ctrl_c_quits_on_first_press() {
+        let mut app = test_app();
+        let outcome = app.handle_input(&ctrl_c());
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        assert!(app.pending_action.is_none());
+        // A second press also quits and must not arm a pending action.
+        let outcome = app.handle_input(&ctrl_c());
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        assert!(app.pending_action.is_none());
+    }
+    #[test]
+    fn welcome_ctrl_d_quits_immediately() {
         let mut app = test_app();
         let outcome = app.handle_input(&ctrl_d());
-        assert!(matches!(outcome, InputOutcome::Changed));
-        let pending = app
-            .pending_action
-            .as_ref()
-            .expect("expected pending action");
-        assert!(matches!(pending.action, Action::Quit));
-        assert_eq!(
-            pending.shortcut,
-            KeyShortcut::from(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
-        );
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        assert!(app.pending_action.is_none());
     }
     #[test]
     fn menu_action_indices_without_import() {
@@ -7825,6 +7826,17 @@ pub(crate) mod tests {
         ));
     }
     #[test]
+    fn welcome_ctrl_backslash_opens_dashboard_without_starting_session() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        let outcome = app.handle_input(&key_event(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::OpenDashboard)
+        ));
+        assert!(app.agents.is_empty());
+    }
+    #[test]
     fn welcome_shift_tab_starts_session_and_forwards() {
         // Shift+Tab is not captured by the home page, so it starts a session
         // and is forwarded into its prompt (it switches panes there).
@@ -7868,22 +7880,23 @@ pub(crate) mod tests {
         ));
         app.welcome_menu_index = Some(1);
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Action(Action::FetchSessionList)));
-        // Quit (index 2) goes through the double-press confirmation: the
-        // first Enter arms it, the second Enter confirms.
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::FetchSessionList)
+        ));
+        // Quit (index 2) on the welcome screen quits on the first press:
+        // no session to lose, so no double-press confirmation. A second
+        // Enter also quits and must not arm a pending action.
         app.welcome_menu_index = Some(2);
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "first Enter on Quit must arm the confirmation, got {outcome:?}"
+            matches!(outcome, InputOutcome::Action(Action::Quit)),
+            "first Enter on Quit must quit immediately, got {outcome:?}"
         );
-        let pending = app
-            .pending_action
-            .as_ref()
-            .expect("quit confirmation must be armed");
-        assert!(matches!(pending.action, Action::Quit));
+        assert!(app.pending_action.is_none());
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        assert!(app.pending_action.is_none());
     }
     #[test]
     fn welcome_done_enter_with_import_row_dispatches_menu_action() {
@@ -7899,21 +7912,23 @@ pub(crate) mod tests {
         ));
         app.welcome_menu_index = Some(2);
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Action(Action::FetchSessionList)));
-        // Quit (index 3) goes through the double-press confirmation.
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::FetchSessionList)
+        ));
+        // Quit (index 3) on the welcome screen quits on the first press:
+        // no session to lose, so no double-press confirmation. A second
+        // Enter also quits and must not arm a pending action.
         app.welcome_menu_index = Some(3);
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "first Enter on Quit must arm the confirmation, got {outcome:?}"
+            matches!(outcome, InputOutcome::Action(Action::Quit)),
+            "first Enter on Quit must quit immediately, got {outcome:?}"
         );
-        let pending = app
-            .pending_action
-            .as_ref()
-            .expect("quit confirmation must be armed");
-        assert!(matches!(pending.action, Action::Quit));
+        assert!(app.pending_action.is_none());
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        assert!(app.pending_action.is_none());
     }
     #[test]
     fn welcome_esc_clears_menu_selection() {
@@ -7948,7 +7963,10 @@ pub(crate) mod tests {
         let mut app = test_app();
         app.auth_state = AuthState::Done;
         let outcome = app.handle_input(&key_event(KeyCode::Char('s'), KeyModifiers::CONTROL));
-        assert!(matches!(outcome, InputOutcome::Action(Action::FetchSessionList)));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::FetchSessionList)
+        ));
     }
     #[test]
     fn welcome_done_ctrl_i_opens_import_modal() {
@@ -7987,7 +8005,10 @@ pub(crate) mod tests {
         ];
         // Row 1 (Resume session).
         let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 5, 11));
-        assert!(matches!(outcome, InputOutcome::Action(Action::FetchSessionList)));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::FetchSessionList)
+        ));
         // Row 2 (Quit).
         let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 5, 12));
         assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
@@ -7999,13 +8020,15 @@ pub(crate) mod tests {
         app.has_claude_import = true;
         // Import row spans x 0..40; the `[x]` affordance is the last 3 cols.
         app.welcome_menu_rects = vec![ratatui::layout::Rect::new(0, 10, 40, 1)];
-        let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 38, 10));
+        let outcome =
+            app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 38, 10));
         assert!(matches!(
             outcome,
             InputOutcome::Action(Action::DismissClaudeImport)
         ));
         // Clicking the label region (not the dismiss affordance) opens import.
-        let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 10, 10));
+        let outcome =
+            app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 10, 10));
         assert!(matches!(
             outcome,
             InputOutcome::Action(Action::ImportClaudeSettings)
@@ -10145,6 +10168,38 @@ pub(crate) mod tests {
             matches!(o2, InputOutcome::Action(crate::app::actions::Action::Quit)),
             "second Ctrl+C should quit (o2={o2:?})"
         );
+    }
+    #[test]
+    fn agent_idle_ctrl_c_arms_quit_pending() {
+        // Regression guard: the welcome screen now quits on the first press,
+        // but the agent view must keep the two-press quit confirmation.
+        let mut app = test_app_with_agent();
+        if let ActiveView::Agent(id) = app.active_view {
+            app.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;
+        }
+        let outcome = app.handle_input(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("first Ctrl+C on the agent view must arm quit pending");
+        assert!(matches!(pending.action, Action::Quit));
+    }
+    #[test]
+    fn agent_idle_ctrl_q_arms_quit_pending() {
+        // Regression guard: Ctrl+Q on the agent view must keep the two-press
+        // quit confirmation (see agent_idle_ctrl_c_arms_quit_pending).
+        let mut app = test_app_with_agent();
+        if let ActiveView::Agent(id) = app.active_view {
+            app.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;
+        }
+        let outcome = app.handle_input(&key_event(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("first Ctrl+Q on the agent view must arm quit pending");
+        assert!(matches!(pending.action, Action::Quit));
     }
     #[test]
     fn handle_input_clears_stale_attached_agent_on_input() {

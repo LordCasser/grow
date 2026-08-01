@@ -229,11 +229,9 @@ pub enum ActiveModal {
         entries_query: Option<String>,
         /// Source filter for the modal session picker.
         source_filter: crate::views::session_picker::SourceFilter,
-        /// Session armed for delete, captured as `(source, session_id, cwd)` when
-        /// `d` is pressed so the `y` confirm always has a valid cwd even if
-        /// the picker lists change underneath it. `Some` only while the
-        /// focused row is armed; cleared on cancel / completion.
-        pending_delete: Option<(String, String, String)>,
+        /// Session armed for delete via `d` (see
+        /// [`crate::views::session_picker::PendingDelete`]).
+        pending_delete: Option<crate::views::session_picker::PendingDelete>,
     },
     /// How-to documentation list modal (wider picker style).
     DocPicker {
@@ -363,9 +361,8 @@ pub enum PaletteCommand {
     OpenAgentsModal,
 }
 /// Build the default set of palette entries with section grouping.
-///
-/// `screen_mode` exposes the draft-preserving external-editor row only in minimal mode.
-pub(crate) fn default_palette_entries(screen_mode: crate::app::ScreenMode) -> Vec<PaletteEntry> {
+pub(crate) fn default_palette_entries(slash: &crate::slash::SlashController) -> Vec<PaletteEntry> {
+    let screen_mode = slash.screen_mode();
     let mut entries = vec![
         // ── Session ──
         PaletteEntry {
@@ -392,6 +389,11 @@ pub(crate) fn default_palette_entries(screen_mode: crate::app::ScreenMode) -> Ve
             label: "Back to Home".into(),
             shortcut: "/home".into(),
             command: PaletteCommand::Home,
+        },
+        PaletteEntry {
+            label: "Delete This Session".into(),
+            shortcut: "/delete".into(),
+            command: PaletteCommand::SlashCommand("/delete".into()),
         },
         PaletteEntry {
             label: "Resume Session".into(),
@@ -544,6 +546,15 @@ pub(crate) fn default_palette_entries(screen_mode: crate::app::ScreenMode) -> Ve
         },
     ];
     entries.retain(|entry| {
+        if let PaletteCommand::SlashCommand(text) = &entry.command
+            && let Some(invocation) = crate::slash::parse_invocation(text.trim())
+            && !slash
+                .registry()
+                .mode_support(invocation.token)
+                .supports(screen_mode)
+        {
+            return false;
+        }
         screen_mode.is_minimal() || !matches!(entry.command, PaletteCommand::EditPromptExternal)
     });
     entries
@@ -552,9 +563,9 @@ pub(crate) fn default_palette_entries(screen_mode: crate::app::ScreenMode) -> Ve
 /// Filter palette entries for search, preserving section headers when any item in the section matches.
 pub(crate) fn filter_palette_entries(
     query: &str,
-    screen_mode: crate::app::ScreenMode,
+    slash: &crate::slash::SlashController,
 ) -> Vec<PaletteEntry> {
-    let all = default_palette_entries(screen_mode);
+    let all = default_palette_entries(slash);
     let query_lower = query.to_lowercase();
     if query_lower.is_empty() {
         return all;
@@ -1274,9 +1285,16 @@ mod doc_viewer_scroll_tests {
 #[cfg(test)]
 mod palette_tests {
     use super::*;
+    fn slash(mode: crate::app::ScreenMode) -> crate::slash::SlashController {
+        let mut controller =
+            crate::slash::SlashController::with_builtins(std::path::PathBuf::from("."));
+        controller.set_screen_mode(mode);
+        controller
+    }
+    #[test]
     #[test]
     fn default_palette_includes_dashboard() {
-        let entries = default_palette_entries(crate::app::ScreenMode::Fullscreen);
+        let entries = default_palette_entries(&slash(crate::app::ScreenMode::Fullscreen));
         let has_dashboard = entries.iter().any(
             |e| matches!(&e.command, PaletteCommand::SlashCommand(s) if s.trim() == "/agents"),
         );
@@ -1290,15 +1308,57 @@ mod palette_tests {
             "palette entry must use the 'Agent Dashboard' label"
         );
     }
+    fn slash_rows(mode: crate::app::ScreenMode) -> Vec<String> {
+        default_palette_entries(&slash(mode))
+            .into_iter()
+            .filter_map(|entry| match entry.command {
+                PaletteCommand::SlashCommand(text) => Some(text.trim().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+    #[test]
+    fn palette_drops_slash_rows_the_mode_cannot_run() {
+        let minimal = slash_rows(crate::app::ScreenMode::Minimal);
+        for gated in ["/theme", "/agents", "/tutorial"] {
+            assert!(!minimal.contains(&gated.to_string()), "{gated} in minimal");
+        }
+        assert!(
+            minimal.contains(&"/compact".to_string()),
+            "mode-agnostic rows stay: {minimal:?}"
+        );
+        let fullscreen = slash_rows(crate::app::ScreenMode::Fullscreen);
+        for offered in ["/theme", "/agents", "/tutorial"] {
+            assert!(
+                fullscreen.contains(&offered.to_string()),
+                "{offered} missing in fullscreen"
+            );
+        }
+    }
+    #[test]
+    fn every_palette_slash_row_resolves_to_a_registered_command() {
+        let builtins = crate::slash::commands::builtin_commands();
+        for row in slash_rows(crate::app::ScreenMode::Fullscreen) {
+            let invocation = crate::slash::parse_invocation(&row)
+                .unwrap_or_else(|| panic!("palette row {row:?} is not a slash invocation"));
+            assert!(
+                builtins
+                    .iter()
+                    .any(|command| command.name() == invocation.token
+                        || command.aliases().contains(&invocation.token)),
+                "palette row {row:?} names no builtin command"
+            );
+        }
+    }
     #[test]
     fn edit_prompt_palette_entry_is_minimal_only() {
-        let minimal = default_palette_entries(crate::app::ScreenMode::Minimal);
+        let minimal = default_palette_entries(&slash(crate::app::ScreenMode::Minimal));
         assert!(
             minimal
                 .iter()
                 .any(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
         );
-        let fullscreen = default_palette_entries(crate::app::ScreenMode::Fullscreen);
+        let fullscreen = default_palette_entries(&slash(crate::app::ScreenMode::Fullscreen));
         assert!(
             !fullscreen
                 .iter()
@@ -1306,9 +1366,11 @@ mod palette_tests {
         );
     }
     #[test]
+    #[test]
+    #[test]
     fn palette_tools_section_routes_each_tab_to_itself() {
         use crate::views::extensions_modal::ExtensionsTab;
-        let entries = default_palette_entries(crate::app::ScreenMode::Fullscreen);
+        let entries = default_palette_entries(&slash(crate::app::ScreenMode::Fullscreen));
         for (label, expected) in [
             ("Hooks", ExtensionsTab::Hooks),
             ("Plugins", ExtensionsTab::Plugins),

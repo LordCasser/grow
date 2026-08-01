@@ -116,6 +116,7 @@ async fn create_test_actor(
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            cancel: Default::default(),
         },
         memory: crate::session::memory_state::SessionMemory {
             flush_config: crate::config::MemoryFlushConfig::default(),
@@ -583,6 +584,7 @@ async fn create_test_actor_with_memory(
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            cancel: Default::default(),
         },
         memory: crate::session::memory_state::SessionMemory {
             flush_config: memory_config
@@ -1129,6 +1131,7 @@ fn api_error_with_context_window(context_window: u64) -> grow_sampler::SamplingE
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
+        credential: grow_sampling_types::SentCredential::Unknown,
     }
 }
 /// Primary scenario: remote settings shrinks the context window mid-session.
@@ -1180,6 +1183,7 @@ async fn test_compact_on_error_noop_without_model_metadata() {
                 empty_response_context: None,
                 doom_loop_triggers: None,
                 doom_loop_aborted_at_chunk: None,
+                credential: grow_sampling_types::SentCredential::Unknown,
             };
             assert!(!actor.should_compact_on_error(&err).await);
         })

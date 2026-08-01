@@ -61,6 +61,14 @@ End the session and quit Grow:
 
 Alias: `/exit`. To leave the current session but stay in Grow, use `/home` to return to the welcome screen.
 
+### Delete the current session
+
+```
+/delete
+```
+
+Confirms, then permanently removes the session history and returns to the welcome screen. From `/resume` or the welcome session list, press `d` then `y`. On the [Agent Dashboard](23-dashboard.md), `Ctrl+X` twice (or hover `[✗]`) permanently deletes.
+
 ---
 
 ## Resuming Sessions
@@ -123,13 +131,14 @@ Alias: `/title`.
 
 ## The /rewind Command
 
-`/rewind` undoes recent changes by restoring files to their state at an earlier point in the conversation. Use it to recover from mistakes.
+`/rewind` (alias `/undo`) undoes recent changes by restoring files to their state at an earlier point in the conversation. Use it to recover from mistakes.
 
 ```
 /rewind
+/undo
 ```
 
-When you run `/rewind` (or press **Esc Esc** within 800ms while idle with an empty prompt and conversation messages), Grow:
+When you run `/rewind` or `/undo` (or press **Esc Esc** within 800ms while idle with an empty prompt and conversation messages), Grow:
 
 1. Shows a list of rewind points (one per user prompt)
 2. Lets you select which point to rewind to
