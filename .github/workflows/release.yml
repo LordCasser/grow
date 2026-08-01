@@ -419,7 +419,8 @@ jobs:
   # Cross-compiled on an amd64 runner via `cross` (no riscv64 GitHub runners,
   # and riscv64-musl C toolchain is not available). The glibc baseline comes
   # from the cross image, not the AlmaLinux 8 container. Official ripgrep has
-  # no riscv64 asset, so the sidecar is built from source (pure Rust).
+  # no riscv64 asset, so the sidecar is pulled from the riscv64 prebuilt
+  # builds in microsoft/ripgrep-prebuilt (same v15.0.0 as the other platforms).
   build-linux-riscv64:
     name: Build linux-riscv64
     needs: validate
@@ -491,22 +492,34 @@ jobs:
           "${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" --version
           echo "PROTOC=${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" >> "$GITHUB_ENV"
 
-      # Official ripgrep releases have no riscv64 asset, so cross-compile the
-      # sidecar from source on the amd64 runner (rg is pure Rust).
-      - name: Build bundled ripgrep (riscv64)
+      # Official ripgrep releases have no riscv64 asset, so use the riscv64
+      # prebuilt from microsoft/ripgrep-prebuilt (pinned v15.0.0, the same
+      # version embedded on the other platforms). The tarball holds a single
+      # top-level `rg`; it cannot be executed on the amd64 runner, so the
+      # build step sets GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1.
+      - name: Prepare bundled ripgrep (riscv64)
         shell: bash
         env:
           RG_VERSION: "15.0.0"
+          RG_TARGET: "riscv64gc-unknown-linux-gnu"
+          RG_SHA256: "49d7a681e4d22ffc523185682719332763ae182256e7360b9f621dc3268e7d08"
         run: |
           set -euo pipefail
-          bundle_dir="${GITHUB_WORKSPACE}/.build-tools/rg/ripgrep-${RG_VERSION}-riscv64-unknown-linux-gnu"
-          cargo install ripgrep --version "${RG_VERSION}" \
-            --target riscv64gc-unknown-linux-gnu --root "${bundle_dir}" \
-            --locked
-          test -x "${bundle_dir}/bin/rg"
-          # Cannot run the riscv64 binary on the amd64 runner; the build step
-          # sets GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1 accordingly.
-          echo "GROW_TOOLS_BUNDLE_RG_PATH=${bundle_dir}/bin/rg" >> "$GITHUB_ENV"
+          archive="${RUNNER_TEMP}/ripgrep-v${RG_VERSION}-${RG_TARGET}.tar.gz"
+          # Under $GITHUB_WORKSPACE so the Linux build container sees it.
+          bundle_dir="${GITHUB_WORKSPACE}/.build-tools/rg/ripgrep-${RG_VERSION}-${RG_TARGET}"
+          url="https://github.com/microsoft/ripgrep-prebuilt/releases/download/v${RG_VERSION}/ripgrep-v${RG_VERSION}-${RG_TARGET}.tar.gz"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            --connect-timeout 30 --max-time 300 \
+            --output "$archive" "$url"
+          actual_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          test "$actual_sha256" = "$RG_SHA256"
+
+          mkdir -p "$bundle_dir"
+          tar -xzf "$archive" -C "$bundle_dir"
+          test -x "$bundle_dir/rg"
+          echo "GROW_TOOLS_BUNDLE_RG_PATH=$bundle_dir/rg" >> "$GITHUB_ENV"
 
       - name: Build Grow (riscv64 cross-compile)
         shell: bash
@@ -516,7 +529,7 @@ jobs:
           # forwards env via CROSS_CONTAINER_OPTS; remap the host paths.
           CROSS_CONTAINER_OPTS: >-
             -e PROTOC=/project/.build-tools/protoc/bin/protoc
-            -e GROW_TOOLS_BUNDLE_RG_PATH=/project/.build-tools/rg/ripgrep-15.0.0-riscv64-unknown-linux-gnu/bin/rg
+            -e GROW_TOOLS_BUNDLE_RG_PATH=/project/.build-tools/rg/ripgrep-15.0.0-riscv64gc-unknown-linux-gnu/rg
             -e GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1
         run: |
           set -euo pipefail
