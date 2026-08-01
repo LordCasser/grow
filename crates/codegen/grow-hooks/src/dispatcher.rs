@@ -520,6 +520,7 @@ mod tests {
         RunContext {
             session_id: "test-session",
             workspace_root: "/tmp",
+            process_scope: None,
         }
     }
 
