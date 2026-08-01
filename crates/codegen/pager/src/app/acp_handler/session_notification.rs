@@ -165,14 +165,14 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         && !meta.is_replay
         && meta.event_seq.is_some_and(|seq| {
             agent
-                .last_applied_xai_event_seq
+                .last_applied_grow_event_seq
                 .is_some_and(|last| seq <= last)
         })
     {
         tracing::debug!(
             session_id = session_notif.session_id.0.as_ref(),
             event_seq = meta.event_seq,
-            last_applied = agent.last_applied_xai_event_seq,
+            last_applied = agent.last_applied_grow_event_seq,
             "grow/session update DROPPED by dedup highwater (event_seq <= last_applied)"
         );
         return false;
@@ -1028,7 +1028,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             && !meta.is_replay
             && !is_workflow_update
         {
-            agent.last_applied_xai_event_seq = Some(seq);
+            agent.last_applied_grow_event_seq = Some(seq);
         }
         if let Some(id) = meta.event_id {
             agent.last_seen_event_id = Some(id);

@@ -884,7 +884,7 @@ mod tests {
             version: Some("1.2.3".into()),
             description: Some("A demo plugin".into()),
             category: Some("development".into()),
-            author: Some("xai".into()),
+            author: Some("grow".into()),
             tags: vec!["cli".into()],
             keywords: vec!["search".into(), "index".into()],
             domains: vec!["example.com".into()],

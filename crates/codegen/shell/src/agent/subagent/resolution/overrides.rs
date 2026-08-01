@@ -9,8 +9,8 @@ use serde::de::DeserializeOwned;
 use tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
 use tools::implementations::grow_build::task::types::SubagentRuntimeOverrides;
 
-use crate::config::{SubagentPersona, SubagentRole};
-use crate::types::EffectiveRuntimeConfig;
+use super::config::{SubagentPersona, SubagentRole};
+use super::types::EffectiveRuntimeConfig;
 
 /// Parse a serde-deserializable enum from a plain string value.
 ///

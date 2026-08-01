@@ -10,7 +10,6 @@ edition.workspace = true
 test-support = []
 
 [dependencies]
-anyhow = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }

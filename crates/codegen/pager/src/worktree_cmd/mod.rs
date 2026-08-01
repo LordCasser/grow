@@ -321,7 +321,7 @@ mod tests {
         let req = ext_request(
             "grow/git/worktree/list",
             &serde_json::json!({
-                "repo": "xai",
+                "repo": "grow",
                 "type": ["session"],
                 "includeAll": true,
             }),
@@ -329,7 +329,7 @@ mod tests {
         .unwrap();
         assert_eq!(req.method.as_ref(), "grow/git/worktree/list");
         let params: serde_json::Value = serde_json::from_str(req.params.get()).unwrap();
-        assert_eq!(params["repo"], "xai");
+        assert_eq!(params["repo"], "grow");
         assert_eq!(params["includeAll"], true);
     }
 

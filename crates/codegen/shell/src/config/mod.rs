@@ -277,7 +277,9 @@ pub struct SubagentsConfig {
     #[serde(default)]
     pub personas: std::collections::HashMap<String, SubagentPersona>,
 }
-use subagent_resolution::config::{SubagentPersona, SubagentRole};
+pub use crate::agent::subagent::resolution::config::{
+    PersonaIOField, SubagentPersona, SubagentRole,
+};
 impl SubagentsConfig {
     fn discover_personas_in_dir(&mut self, dir: &std::path::Path) {
         if !dir.is_dir() {

@@ -1563,7 +1563,7 @@ pub(crate) async fn spawn_session_actor(
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
         laziness_debug_log: laziness_debug_log.map(|p| std::sync::Arc::from(p.as_path())),
         deferred_prefix: TaskSlot::new(),
-        extension_registry: session_extension_registry(weak.clone()),
+        idle_prompt_extension: Some(IdlePromptExtension::new(weak.clone())),
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
         prefix_carries_fallback_date: std::cell::Cell::new(initial_prefix_carries_fallback_date),
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),

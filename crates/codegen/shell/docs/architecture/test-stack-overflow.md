@@ -101,7 +101,7 @@ fn foo() {
 - 共享 `CARGO_TARGET_DIR` 时，**不同 worktree（不同源码版本）编译同一包会互相
   覆盖 fingerprint**，导致"源码 A 编译、源码 B 链接到 A 的 rlib"（症状如
   `cannot find function max_wait_block_ms in crate tool_types`）。此时
-  `cargo clean -p <被污染包>`（必要时清所有 `grow-*`/`xai-*`）后重编。
+  `cargo clean -p <被污染包>`（必要时清所有 `grow-*`/`grow-*`）后重编。
 - 深链测试的候选：任何走完整 prompt turn（含 model auth / 配置加载）的
   `#[tokio::test(flavor = "current_thread")]` 测试。上游合入后优先跑
   `shell --lib` 全量确认。

@@ -1093,8 +1093,8 @@ mod tests {
     #[test]
     fn grouped_entries_insert_headers() {
         let entries = vec![
-            make_entry("s1", "Fix auth", "xai"),
-            make_entry("s2", "Add streaming", "xai"),
+            make_entry("s1", "Fix auth", "grow"),
+            make_entry("s2", "Add streaming", "grow"),
             make_entry("s3", "Nuke tables", "fw-1"),
         ];
         let indices: Vec<usize> = (0..entries.len()).collect();
@@ -1108,8 +1108,8 @@ mod tests {
 
         // 2 headers + 3 rows = 5 entries
         assert_eq!(result.len(), 5);
-        // Groups are sorted alphabetically: fw-1 before xai.
-        // Header positions: 0 (fw-1), 2 (xai)
+        // Groups are sorted alphabetically: fw-1 before grow.
+        // Header positions: 0 (fw-1), 2 (grow)
         assert_eq!(non_sel.len(), 5);
         assert!(non_sel[0], "first entry should be header (non-selectable)");
         assert!(!non_sel[1], "second entry should be selectable row");
@@ -1122,7 +1122,7 @@ mod tests {
             matches!(&result[0], crate::views::picker::PickerEntry::Header { label } if label == &"fw-1")
         );
         assert!(
-            matches!(&result[2], crate::views::picker::PickerEntry::Header { label } if label == &"xai")
+            matches!(&result[2], crate::views::picker::PickerEntry::Header { label } if label == &"grow")
         );
     }
 
@@ -1163,8 +1163,8 @@ mod tests {
     #[test]
     fn grouped_entries_single_group_has_one_header() {
         let entries = vec![
-            make_entry("s1", "Fix auth", "xai"),
-            make_entry("s2", "Add streaming", "xai"),
+            make_entry("s1", "Fix auth", "grow"),
+            make_entry("s2", "Add streaming", "grow"),
         ];
         let indices: Vec<usize> = (0..entries.len()).collect();
         let state = PickerState::default();
@@ -1198,7 +1198,7 @@ mod tests {
 
     #[test]
     fn grouped_entries_rows_are_indented() {
-        let entries = vec![make_entry("s1", "Fix auth", "xai")];
+        let entries = vec![make_entry("s1", "Fix auth", "grow")];
         let indices: Vec<usize> = vec![0];
         let state = PickerState::default();
         let built = build_session_entry_data(&entries, &indices, &state, 80);

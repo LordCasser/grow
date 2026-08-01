@@ -559,7 +559,7 @@ pub(crate) struct SessionReload {
     /// Live dedup highwaters (ACP + Grow) as of window open (same restore
     /// rationale).
     last_applied_event_seq: Option<u64>,
-    last_applied_xai_event_seq: Option<u64>,
+    last_applied_grow_event_seq: Option<u64>,
     /// Whether any `isReplay` update applied during this window. False means
     /// the agent resolved the cursor and sent only a live post-cursor tail.
     saw_replay: bool,
@@ -736,7 +736,7 @@ pub struct AgentView {
     /// `eventId`-bearing update.
     ///
     /// ACP stream only — the Grow stream keeps its own highwater
-    /// ([`Self::last_applied_xai_event_seq`]) because the two streams are not
+    /// ([`Self::last_applied_grow_event_seq`]) because the two streams are not
     /// delivered in one id order: ACP lines ride the agent's FIFO event
     /// pipeline while Grow lines are emitted direct-to-gateway, so a fresh Grow
     /// id arriving ahead of queued lower-id ACP chunks must not make the
@@ -744,7 +744,7 @@ pub struct AgentView {
     pub last_applied_event_seq: Option<u64>,
     /// Grow-stream sibling of [`Self::last_applied_event_seq`] (see there for
     /// why the highwaters are split). Same drop rule, replay-exempt.
-    pub last_applied_xai_event_seq: Option<u64>,
+    pub last_applied_grow_event_seq: Option<u64>,
     /// Raw `eventId` of the most recent update APPLIED to this root session —
     /// replay or live, on both the ACP and Grow paths; dropped updates (dedup,
     /// promptId gate, unexpected replay) don't move it. Sent as `_meta.cursor`

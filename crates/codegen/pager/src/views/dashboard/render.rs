@@ -2130,7 +2130,7 @@ fn row_bg(theme: &Theme, state: &DashboardState, row: &DashboardRow) -> Color {
 /// Visual:
 ///
 /// ```text
-///   ◆ Add responsiveness to /context · xai my-branch-2 worktree       4 mins
+///   ◆ Add responsiveness to /context · grow my-branch-2 worktree       4 mins
 ///     Pending: plan approval plan.md
 /// ```
 ///
@@ -2378,7 +2378,7 @@ fn render_row(
             cx += label_w;
         }
 
-        // Subtitle: ` · xai my-branch-2 worktree`.
+        // Subtitle: ` · grow my-branch-2 worktree`.
         if let Some(sub) = row.subtitle.as_deref()
             && cx + 4 < right_x
         {
@@ -4538,7 +4538,7 @@ mod tests {
             DashboardRow {
                 id: DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),
                 label: "Add responsiveness to /context".to_string(),
-                subtitle: Some("xai my-branch-2 worktree".to_string()),
+                subtitle: Some("grow my-branch-2 worktree".to_string()),
                 state: RowState::NeedsInput,
                 activity: Some("Awaiting your input".to_string()),
                 secondary_line: Some("Pending: plan approval plan.md".to_string()),
@@ -4557,7 +4557,7 @@ mod tests {
             DashboardRow {
                 id: DashboardRowId::TopLevel(crate::app::agent::AgentId(2)),
                 label: "Add buttons for /models".to_string(),
-                subtitle: Some("xai my-branch-3 worktree".to_string()),
+                subtitle: Some("grow my-branch-3 worktree".to_string()),
                 state: RowState::Completed,
                 activity: None,
                 secondary_line: Some("all tests completed, should I push?".to_string()),
@@ -4576,7 +4576,7 @@ mod tests {
             DashboardRow {
                 id: DashboardRowId::TopLevel(crate::app::agent::AgentId(3)),
                 label: "Investigate bug".to_string(),
-                subtitle: Some("xai main".to_string()),
+                subtitle: Some("grow main".to_string()),
                 state: RowState::Working,
                 activity: Some("read somefile.md".to_string()),
                 secondary_line: Some("read somefile.md".to_string()),
@@ -4595,7 +4595,7 @@ mod tests {
             DashboardRow {
                 id: DashboardRowId::TopLevel(crate::app::agent::AgentId(4)),
                 label: "Add responsiveness to /context".to_string(),
-                subtitle: Some("xai my-branch-2 worktree".to_string()),
+                subtitle: Some("grow my-branch-2 worktree".to_string()),
                 state: RowState::Working,
                 activity: Some("edit somefile.md".to_string()),
                 secondary_line: Some("edit somefile.md".to_string()),
@@ -4614,7 +4614,7 @@ mod tests {
             DashboardRow {
                 id: DashboardRowId::TopLevel(crate::app::agent::AgentId(5)),
                 label: "Add buttons for /models".to_string(),
-                subtitle: Some("xai mybranch worktree".to_string()),
+                subtitle: Some("grow mybranch worktree".to_string()),
                 state: RowState::Working,
                 activity: Some("thinking about life".to_string()),
                 secondary_line: Some("thinking about life".to_string()),

@@ -38,7 +38,7 @@ pub enum AcpChannelFailure {
 impl AcpChannelFailure {
     /// `data` object key under which [`acp_send`](crate::acp_send) records the
     /// kind. Namespaced so it can never collide with other `with_data` payloads.
-    const DATA_KEY: &'static str = "xaiAcpChannelFailure";
+    const DATA_KEY: &'static str = "growAcpChannelFailure";
 
     const fn tag(self) -> &'static str {
         match self {

@@ -43,7 +43,6 @@ regex = { workspace = true }
 # in this crate uses workspace reqwest 0.12.
 mcp = { workspace = true }
 reqwest = { workspace = true, features = ["stream", "blocking"] }
-reqwest-middleware = { workspace = true }
 # rusqlite 0.37 + bundled = self-contained SQLite (>= 3.50.2) with FTS5.
 # Bumped from 0.32 to resolve CVE-2025-29087, CVE-2025-3277, CVE-2025-6965.
 # sqlite-vec is C ABI, not Rust-version dependent — any rusqlite with `bundled` works.
@@ -56,7 +55,6 @@ thiserror = { workspace = true }
 clap = { workspace = true }
 dirs = "6"
 tokio-stream = { workspace = true }
-tower-http = { workspace = true, features = ["cors"] }
 toml = { workspace = true, features = ["preserve_order"] }
 toml_edit = { workspace = true }
 tokio = { workspace = true, features = [
@@ -75,24 +73,17 @@ tracing-subscriber = { workspace = true, features = [
     "json",
     "time",
 ] }
-obfstr = { workspace = true }
 tokio-util = { workspace = true, features = ["compat"] }
 uuid = { workspace = true, features = ["v4", "v5", "v7"] }
 acp-transport = { workspace = true }
 axum = { workspace = true, features = ["ws", "multipart"] }
 backon = { workspace = true }
-tokio-rustls = { version = "0.26", default-features = false, features = [
-    "ring",
-    "logging",
-    "tls12",
-] }
 rustls = { version = "0.23", default-features = false, features = [
     "ring",
     "logging",
     "std",
     "tls12",
 ] }
-rustls-native-certs = "0.8"
 futures-util = { workspace = true }
 urlencoding = { workspace = true }
 gethostname = { workspace = true }
@@ -109,20 +100,17 @@ moka = { workspace = true, features = ["future"] }
 dhat = { workspace = true, optional = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
-rand = { workspace = true }
 shlex = { workspace = true }
 strum = { workspace = true }
 fast-worktree = { path = "../fast-worktree", features = ["metadata"] }
 
 paths = { path = "../paths" }
 shell-base = { workspace = true }
-shell-session-support = { workspace = true }
 client-support = { workspace = true }
 tracing-macros = { path = "../tracing-macros" }
 fsnotify = { path = "../fsnotify" }
 codebase-graph = { path = "../codebase-graph" }
 hunk-tracker = { path = "../hunk-tracker" }
-agent-lifecycle = { workspace = true }
 sandbox = { path = "../sandbox", default-features = false }
 chat-state = { path = "../chat-state" }
 compaction = { path = "../../common/compaction" }
@@ -134,7 +122,6 @@ tools = { path = "../tools" }
 tty-utils = { workspace = true }
 workflow = { path = "../workflow" }
 workspace = { workspace = true }
-subagent-resolution = { path = "../subagent-resolution" }
 agent = { path = "../agent" }
 config = { workspace = true }
 config-types = { workspace = true }
@@ -147,7 +134,6 @@ grow-http = { workspace = true }
 prod-mc-cli-chat-proxy-types = { path = "../../../prod/mc/cli-chat-proxy-types" }
 flate2 = { workspace = true }
 fs2 = { workspace = true }
-zstd = { workspace = true }
 tar = { workspace = true }
 url = { workspace = true }
 walkdir = { workspace = true }
@@ -156,7 +142,6 @@ semver = { workspace = true }
 process-wrap = { version = "9.0.0", features = ["tokio1", "job-object", "creation-flags"] }
 portable-pty = "0.9"
 parking_lot.workspace = true
-dashmap.workspace = true
 
 # Unified local tool dispatch shared by ACP sessions and MCP servers.
 tool-runtime = { workspace = true }
@@ -182,7 +167,6 @@ config = { workspace = true, features = [] }
 ring = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }
-rsa = { workspace = true }
 semver = { workspace = true }
 serial_test = { workspace = true }
 # Pre-main unified-log redirect (`test_support::redirect_unified_log_for_tests`).

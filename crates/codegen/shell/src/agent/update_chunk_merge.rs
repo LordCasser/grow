@@ -215,7 +215,7 @@ impl ReplayBuffer {
                 )
             }
             (Some(SessionNotification::Grow(prev)), SessionNotification::Grow(new)) => {
-                let (force, first, second) = merge_xai_chunks(*prev, *new);
+                let (force, first, second) = merge_grow_chunks(*prev, *new);
                 (
                     force,
                     SessionNotification::Grow(Box::new(first)),
@@ -452,7 +452,7 @@ fn merge_acp_chunks(
 }
 
 /// Merge two consecutive Grow notifications.
-fn merge_xai_chunks(
+fn merge_grow_chunks(
     prev: crate::extensions::notification::SessionNotification,
     new: crate::extensions::notification::SessionNotification,
 ) -> (

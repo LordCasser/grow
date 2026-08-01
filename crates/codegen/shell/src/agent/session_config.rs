@@ -202,14 +202,14 @@ mod tests {
     fn grow_session_detail_serializes_camel_case() {
         let detail = GrowSessionDetail::build(
             "sess-1".to_string(),
-            "/Users/me/xai".to_string(),
+            "/Users/me/grow".to_string(),
             "grow-build".to_string(),
             None,
         );
         let v = serde_json::to_value(&detail).expect("serialize");
         assert_eq!(v["sessionId"], "sess-1");
         assert_eq!(v["kind"], "build");
-        assert_eq!(v["cwd"], "/Users/me/xai");
+        assert_eq!(v["cwd"], "/Users/me/grow");
         assert_eq!(v["currentModelId"], "grow-build");
         assert!(v.get("title").is_none());
     }

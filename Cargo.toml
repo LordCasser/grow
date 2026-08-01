@@ -13,7 +13,6 @@ members = [
     "crates/codegen/ptyctl",
     "crates/codegen/ptyctl-cli",
     "crates/codegen/acp-transport",
-    "crates/codegen/agent-lifecycle",
     "crates/codegen/chat-state",
     "crates/codegen/codebase-graph",
     "crates/codegen/crash-handler",
@@ -28,7 +27,6 @@ members = [
     "crates/codegen/hooks",
     "crates/codegen/grow-http",
     "crates/codegen/markdown",
-    "crates/codegen/markdown-core",
     "crates/codegen/mcp",
     "crates/codegen/memory",
     "crates/codegen/mermaid",
@@ -45,8 +43,6 @@ members = [
     "crates/codegen/client-support",
     "crates/codegen/shell",
     "crates/codegen/shell-base",
-    "crates/codegen/shell-session-support",
-    "crates/codegen/subagent-resolution",
     "crates/codegen/diagnostics",
     "crates/codegen/test-support",
     "crates/codegen/tools",
@@ -153,7 +149,6 @@ libc = "0.2"
 linkify = "0.10"
 lipsum = "0.9"
 log = { version = "0.4", features = ["kv", "kv_unstable"] }
-md5 = "0.8"
 mermaid-to-svg = { path = "third_party/mermaid-to-svg" }
 minijinja = "2.9"
 mockito = "1"
@@ -163,7 +158,6 @@ notify = "8"
 notify-debouncer-mini = "0.6"
 nucleo = { git = "https://github.com/helix-editor/nucleo.git", rev = "5b74652" }
 num_cpus = "1"
-obfstr = "0.4"
 once_cell = "1"
 parking_lot = "0.12.4"
 pdf_oxide = { version = "0.3.43", features = ["rendering"] }
@@ -185,7 +179,6 @@ reqwest-middleware = { version = "0.4.1", features = ["json", "multipart"] }
 resvg = { version = "0.47", default-features = false, features = ["text"] }
 rhai = { version = "1.25", features = ["serde"] }
 ring = "0.17"
-rsa = "0.9"
 runfiles = "0.1"
 rustc-hash = "2"
 schemars = "1"
@@ -219,7 +212,6 @@ time = "0.3"
 tiny-skia = "0.12"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-tokio-tungstenite = "0.27"
 tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.9"
 toml_edit = "0.22"
@@ -242,7 +234,6 @@ windows = { version = "0.61", features = ["Win32_Security", "Win32_Security_Auth
 wiremock = "0.6"
 wl-clipboard-rs = "0.9"
 acp-transport = { path = "crates/codegen/acp-transport" }
-agent-lifecycle = { path = "crates/codegen/agent-lifecycle" }
 grow-gix-status = { path = "crates/codegen/grow-gix-status" }
 agent = { path = "crates/codegen/agent" }
 announcements = { path = "crates/codegen/announcements" }
@@ -251,15 +242,12 @@ config = { path = "crates/codegen/config" }
 config-types = { path = "crates/codegen/config-types" }
 grow-http = { path = "crates/codegen/grow-http" }
 markdown = { path = "crates/codegen/markdown" }
-markdown-core = { path = "crates/codegen/markdown-core" }
 mcp = { path = "crates/codegen/mcp" }
 memory = { path = "crates/codegen/memory" }
 mermaid = { path = "crates/codegen/mermaid" }
-sampler = { path = "crates/codegen/sampler" }
 client-support = { path = "crates/codegen/client-support" }
 shell = { path = "crates/codegen/shell" }
 shell-base = { path = "crates/codegen/shell-base" }
-shell-session-support = { path = "crates/codegen/shell-session-support" }
 diagnostics = { path = "crates/codegen/diagnostics" }
 test-support = { path = "crates/codegen/test-support" }
 tools = { path = "crates/codegen/tools" }
@@ -277,7 +265,6 @@ tool-protocol = { path = "crates/common/tool-protocol" }
 tool-runtime = { path = "crates/common/tool-runtime" }
 tool-types = { path = "crates/common/tool-types" }
 tty-utils = { path = "crates/codegen/tty-utils" }
-zip = "3"
 zstd = "0.13"
 
 [profile.release]

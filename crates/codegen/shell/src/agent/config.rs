@@ -1053,12 +1053,10 @@ pub struct Config {
     pub subagent_toggle: std::collections::HashMap<String, bool>,
     /// Trust-independent roles from inline, user, and bundled sources.
     #[serde(skip)]
-    pub subagent_roles:
-        std::collections::HashMap<String, subagent_resolution::config::SubagentRole>,
+    pub subagent_roles: std::collections::HashMap<String, crate::config::SubagentRole>,
     /// Trust-independent personas from inline, user, and bundled sources.
     #[serde(skip)]
-    pub subagent_personas:
-        std::collections::HashMap<String, subagent_resolution::config::SubagentPersona>,
+    pub subagent_personas: std::collections::HashMap<String, crate::config::SubagentPersona>,
     /// Whether the runtime turn-end TodoGate is force-enabled via the
     /// `--todo-gate` CLI flag. Session-scoped — not persisted. When
     /// true, flips the runtime policy's `enabled` bit on regardless of
@@ -3122,7 +3120,7 @@ fn default_true() -> bool {
 /// ```toml
 /// codebase_indexing = false                                          # disable
 /// codebase_indexing = true                                           # any git repo (default)
-/// codebase_indexing = ["/Users/*/xai*", "!/Users/*/old-*"]           # globs, ! to exclude
+/// codebase_indexing = ["/Users/*/grow*", "!/Users/*/old-*"]           # globs, ! to exclude
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]

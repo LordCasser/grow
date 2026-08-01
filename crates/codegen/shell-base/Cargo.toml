@@ -12,7 +12,6 @@ test-support = []
 default-bazel = ["test-support"]
 
 [dependencies]
-anyhow = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 serde = { workspace = true }

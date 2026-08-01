@@ -1000,7 +1000,7 @@ fn is_orchestration_projection_update(update: &super::SessionUpdate) -> bool {
 ///
 /// NOTE: this is one of two reasoning-aware turn-boundary scanners that must move
 /// together — the other is `count_complete_turns` in
-/// `subagent-resolution/src/context.rs` (it counts turns in the same
+/// `agent/subagent/resolution/context.rs` (it counts turns in the same
 /// filtered list during summarization). Keep their notions of a "complete turn"
 /// in sync if the turn item model changes.
 pub(crate) fn fork_filter_chat(items: &mut Vec<ConversationItem>) {

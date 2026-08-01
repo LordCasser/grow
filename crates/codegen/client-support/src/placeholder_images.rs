@@ -80,7 +80,7 @@ pub const MAX_PLACEHOLDER_AGGREGATE_BYTES: usize = 200 * 1024 * 1024;
 /// is recorded on its ACP image block, so the server can resolve
 /// `[Image #N]` tokens to the right attachment by number rather than list
 /// position (the two diverge — see `AttachedImages` in `tools`).
-pub const IMAGE_DISPLAY_NUMBER_META_KEY: &str = "xai.dev/imageDisplayNumber";
+pub const IMAGE_DISPLAY_NUMBER_META_KEY: &str = "grow.dev/imageDisplayNumber";
 
 /// Build an ACP image-block `_meta` value carrying `display_number` under
 /// [`IMAGE_DISPLAY_NUMBER_META_KEY`].

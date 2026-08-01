@@ -1480,7 +1480,7 @@ mod conversion_tests {
             version: Some("1.0.0".into()),
             description: Some("demo".into()),
             category: Some("dev".into()),
-            author: Some("xai".into()),
+            author: Some("grow".into()),
             tags: vec!["cli".into()],
             keywords: vec!["search".into(), "rank".into()],
             domains: vec!["example.com".into()],

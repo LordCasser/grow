@@ -11,7 +11,7 @@ fn normalize_forked_context_strips_project_layout() {
             ConversationItem::user(big_layout),
             ConversationItem::assistant("ack"),
         ];
-    let (conv, _) = subagent_resolution::context::normalize_forked_context(
+    let (conv, _) = crate::agent::subagent::resolution::context::normalize_forked_context(
         items,
     );
     if let ConversationItem::User(u) = &conv[1] {
@@ -43,7 +43,7 @@ fn normalize_forked_context_consecutive_users() {
             ConversationItem::user("query"),
             ConversationItem::assistant("response"),
         ];
-    let (conv, prefix_len) = subagent_resolution::context::normalize_forked_context(
+    let (conv, prefix_len) = crate::agent::subagent::resolution::context::normalize_forked_context(
         items,
     );
     assert_eq!(prefix_len, 2);
@@ -87,7 +87,7 @@ fn end_to_end_normalized_conversation_shape() {
             ConversationItem::user("implement quicksort"),
             ConversationItem::assistant("here is quicksort"),
         ];
-    let (mut conv, prefix_len) = subagent_resolution::context::normalize_forked_context(
+    let (mut conv, prefix_len) = crate::agent::subagent::resolution::context::normalize_forked_context(
         parent_conv,
     );
     assert_eq!(prefix_len, 2);
@@ -151,7 +151,7 @@ fn cached_prompt_text_is_task_not_background() {
             ConversationItem::user("parent query"),
             ConversationItem::assistant("parent answer"),
         ];
-    let (conv, _) = subagent_resolution::context::normalize_forked_context(
+    let (conv, _) = crate::agent::subagent::resolution::context::normalize_forked_context(
         parent_conv,
     );
     let background_text = if let ConversationItem::User(ref u) = conv[1] {
@@ -187,7 +187,7 @@ fn last_user_message_is_task_after_normalization() {
             ConversationItem::user("parent context"),
             ConversationItem::assistant("ack"),
         ];
-    let (mut conv, _) = subagent_resolution::context::normalize_forked_context(
+    let (mut conv, _) = crate::agent::subagent::resolution::context::normalize_forked_context(
         parent_conv,
     );
     let task = "deploy the service to staging";
@@ -231,7 +231,7 @@ fn compaction_preserves_inherited_prefix() {
             ConversationItem::user("parent question"),
             ConversationItem::assistant("parent answer"),
         ];
-    let (conv, prefix_len) = subagent_resolution::context::normalize_forked_context(
+    let (conv, prefix_len) = crate::agent::subagent::resolution::context::normalize_forked_context(
         parent_conv,
     );
     assert_eq!(prefix_len, 2);
@@ -1588,7 +1588,7 @@ fn resume_identity_does_not_gate_on_model() {
         model_id: Some("grow-3".into()),
     };
     assert!(
-            subagent_resolution::validate_resume_identity(
+            crate::agent::subagent::resolution::validate_resume_identity(
                 "general-purpose",
                 None,
                 &source,

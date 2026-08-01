@@ -200,13 +200,13 @@ mod tests {
 
     #[test]
     fn gh_pr_view_json_parses_after_stripping_forced_color() {
-        let stdout = b"\x1b[1;37m{\x1b[m\n  \x1b[1;34m\"isDraft\"\x1b[m\x1b[1;37m:\x1b[m \x1b[33mfalse\x1b[m\x1b[1;37m,\x1b[m\n  \x1b[1;34m\"number\"\x1b[m\x1b[1;37m:\x1b[m 242682\x1b[1;37m,\x1b[m\n  \x1b[1;34m\"state\"\x1b[m\x1b[1;37m:\x1b[m \x1b[32m\"OPEN\"\x1b[m\x1b[1;37m,\x1b[m\n  \x1b[1;34m\"title\"\x1b[m\x1b[1;37m:\x1b[m \x1b[32m\"t\"\x1b[m\x1b[1;37m,\x1b[m\n  \x1b[1;34m\"url\"\x1b[m\x1b[1;37m:\x1b[m \x1b[32m\"https://github.com/xai-org/xai/pull/242682\"\x1b[m\n\x1b[1;37m}\x1b[m\n";
+        let stdout = b"\x1b[1;37m{\x1b[m\n  \x1b[1;34m\"isDraft\"\x1b[m\x1b[1;37m:\x1b[m \x1b[33mfalse\x1b[m\x1b[1;37m,\x1b[m\n  \x1b[1;34m\"number\"\x1b[m\x1b[1;37m:\x1b[m 242682\x1b[1;37m,\x1b[m\n  \x1b[1;34m\"state\"\x1b[m\x1b[1;37m:\x1b[m \x1b[32m\"OPEN\"\x1b[m\x1b[1;37m,\x1b[m\n  \x1b[1;34m\"title\"\x1b[m\x1b[1;37m:\x1b[m \x1b[32m\"t\"\x1b[m\x1b[1;37m,\x1b[m\n  \x1b[1;34m\"url\"\x1b[m\x1b[1;37m:\x1b[m \x1b[32m\"https://github.com/grow-org/grow/pull/242682\"\x1b[m\n\x1b[1;37m}\x1b[m\n";
         let parsed = serde_json::from_slice::<GhPrViewResponse>(&strip_ansi_csi(stdout)).unwrap();
         assert_eq!(parsed.number, Some(242682));
         assert_eq!(parsed.state.as_deref(), Some("OPEN"));
         assert_eq!(
             parsed.url.as_deref(),
-            Some("https://github.com/xai-org/xai/pull/242682")
+            Some("https://github.com/grow-org/grow/pull/242682")
         );
     }
 

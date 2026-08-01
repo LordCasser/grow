@@ -8,7 +8,6 @@ description = "Agent builder, definition parsing, and system prompt assembly"
 [dependencies]
 dunce = { workspace = true }
 hooks = { path = "../hooks" }
-sampling-types = { path = "../sampling-types" }
 tools = { path = "../tools" }
 tty-utils = { workspace = true }
 token-estimation = { workspace = true }

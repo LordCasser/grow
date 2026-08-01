@@ -2426,7 +2426,7 @@ fn subagent_spawn_context_reloads_project_definitions_after_trust_changes() {
             let mut cfg = agent.cfg.borrow_mut();
             cfg.subagent_roles.insert(
                 "refreshed".into(),
-                subagent_resolution::config::SubagentRole {
+                crate::agent::subagent::resolution::config::SubagentRole {
                     description: "Refreshed user role".into(),
                     source_dir: Some(repo.path().join("user-roles")),
                     ..Default::default()

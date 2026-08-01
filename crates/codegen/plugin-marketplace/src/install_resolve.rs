@@ -533,7 +533,7 @@ mod tests {
             ),
             git_source(
                 "example-org/plugin-marketplace",
-                "git@github.example.com:mirror/xai.git",
+                "git@github.example.com:mirror/grow.git",
             ),
         ];
         assert_eq!(

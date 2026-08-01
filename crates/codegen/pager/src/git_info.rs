@@ -370,7 +370,7 @@ mod tests {
     /// tests.
     #[test]
     fn cwd_git_info_lazy_non_repo_is_none() {
-        let p = Path::new("/nonexistent-xai-git-info-lazy-test-zzz");
+        let p = Path::new("/nonexistent-grow-git-info-lazy-test-zzz");
         assert!(cwd_git_info_lazy(p).is_none());
         // Second call hits the reserved (None) entry — still None.
         assert!(cwd_git_info_lazy(p).is_none());

@@ -551,7 +551,7 @@
         // the next replay window).
         app.agents.get_mut(&id).unwrap().session.loading_replay = true;
         let _ = handle_ext_notification(
-            &xai_turn_completed_notif("sess-1", "p-run", "end_turn", true),
+            &grow_turn_completed_notif("sess-1", "p-run", "end_turn", true),
             &mut app,
         );
         app.agents.get_mut(&id).unwrap().session.loading_replay = false;
@@ -589,7 +589,7 @@
         // A DIFFERENT turn's terminal is recorded in replay.
         app.agents.get_mut(&id).unwrap().session.loading_replay = true;
         let _ = handle_ext_notification(
-            &xai_turn_completed_notif("sess-1", "p-old", "end_turn", true),
+            &grow_turn_completed_notif("sess-1", "p-old", "end_turn", true),
             &mut app,
         );
         app.agents.get_mut(&id).unwrap().session.loading_replay = false;
@@ -1976,14 +1976,14 @@
         let mut agent = make_agent(Some("sess-a"));
         agent.last_seen_event_id = Some("sess-a-7".into());
         agent.last_applied_event_seq = Some(7);
-        agent.last_applied_xai_event_seq = Some(8);
+        agent.last_applied_grow_event_seq = Some(8);
 
         let epoch = agent.session_binding_epoch;
         agent.bind_session_id(acp::SessionId::new("sess-a"));
         assert_eq!(agent.session_binding_epoch, epoch);
         assert_eq!(agent.last_seen_event_id.as_deref(), Some("sess-a-7"));
         assert_eq!(agent.last_applied_event_seq, Some(7));
-        assert_eq!(agent.last_applied_xai_event_seq, Some(8));
+        assert_eq!(agent.last_applied_grow_event_seq, Some(8));
 
         agent.bind_session_id(acp::SessionId::new("sess-b"));
         assert_eq!(agent.session_binding_epoch, epoch.wrapping_add(1));
@@ -1996,7 +1996,7 @@
             "another session's cursor must not survive a rebind"
         );
         assert!(agent.last_applied_event_seq.is_none());
-        assert!(agent.last_applied_xai_event_seq.is_none());
+        assert!(agent.last_applied_grow_event_seq.is_none());
     }
 
     #[test]
@@ -2433,7 +2433,7 @@
             &mut app,
         );
         let _ = handle_ext_notification(
-            &xai_turn_completed_notif("sess-view-hooks", "pid-v", "end_turn", false),
+            &grow_turn_completed_notif("sess-view-hooks", "pid-v", "end_turn", false),
             &mut app,
         );
         assert_eq!(
@@ -2443,7 +2443,7 @@
         );
 
         let _ = handle_ext_notification(
-            &xai_hook_execution_notif("sess-view-hooks", "stop", false),
+            &grow_hook_execution_notif("sess-view-hooks", "stop", false),
             &mut app,
         );
 
@@ -2462,7 +2462,7 @@
         // A second, differently-named batch of the same turn (stop_failure +
         // stop on error turns) merges too…
         let _ = handle_ext_notification(
-            &xai_hook_execution_notif("sess-view-hooks", "stop_failure", false),
+            &grow_hook_execution_notif("sess-view-hooks", "stop_failure", false),
             &mut app,
         );
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -2476,7 +2476,7 @@
         // …but a same-name repeat (e.g. the session-end `stop` batch) does
         // not belong to this marker and stays standalone.
         let _ = handle_ext_notification(
-            &xai_hook_execution_notif("sess-view-hooks", "stop", false),
+            &grow_hook_execution_notif("sess-view-hooks", "stop", false),
             &mut app,
         );
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -2500,7 +2500,7 @@
         app.agents.get_mut(&id).unwrap().session.loading_replay = true;
         // A DIFFERENT turn's terminal arrives in replay.
         let _ = handle_ext_notification(
-            &xai_turn_completed_notif("sess-1", "p-old", "end_turn", true),
+            &grow_turn_completed_notif("sess-1", "p-old", "end_turn", true),
             &mut app,
         );
 

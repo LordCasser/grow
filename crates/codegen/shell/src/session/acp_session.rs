@@ -678,8 +678,9 @@ pub(crate) struct SessionActor {
     pub(crate) mcp_handshakes_done: Arc<tokio::sync::Notify>,
     /// Background-computed user-message prefix, injected before the first prompt.
     pub(crate) deferred_prefix: TaskSlot<String>,
-    /// Extensions to notify at turn and session lifecycle edges. Built once by `session_extension_registry` at actor construction and frozen after.
-    pub(crate) extension_registry: agent_lifecycle::LocalExtensionRegistry,
+    /// Debounced idle notification state. Tests that construct the actor
+    /// directly leave this disabled.
+    pub(crate) idle_prompt_extension: Option<IdlePromptExtension>,
     /// Local date last surfaced to the model, via the `<user_info>` prefix (session start,
     /// compaction, model switch) or a date-rollover `<system-reminder>`. Plain resume reuses the
     /// cached prefix. Drives [`SessionActor::maybe_inject_date_rollover_reminder`].

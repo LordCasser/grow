@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn format_cwd_plain_repo() {
-        assert_eq!(format_cwd_parts("~/xai", None), "~/xai");
+        assert_eq!(format_cwd_parts("~/grow", None), "~/grow");
     }
 
     /// A linked worktree shows the `(worktree of …)` suffix — matching the
@@ -138,8 +138,8 @@ mod tests {
     #[test]
     fn format_cwd_worktree_shows_main_repo() {
         assert_eq!(
-            format_cwd_parts("~/wt/session-1", Some("~/xai")),
-            "~/wt/session-1 (worktree of ~/xai)"
+            format_cwd_parts("~/wt/session-1", Some("~/grow")),
+            "~/wt/session-1 (worktree of ~/grow)"
         );
     }
 
@@ -155,8 +155,8 @@ mod tests {
             worktree_label: None,
         };
         assert_eq!(
-            format_cwd_display(Path::new("/work/xai/frontend/apps"), Some(&info)),
-            "/work/xai/frontend/apps",
+            format_cwd_display(Path::new("/work/grow/frontend/apps"), Some(&info)),
+            "/work/grow/frontend/apps",
         );
     }
 
@@ -167,12 +167,12 @@ mod tests {
         let info = git_info::CwdGitInfo {
             branch: Some("kevin/x".into()),
             is_worktree: true,
-            main_repo: Some("~/xai".into()),
+            main_repo: Some("~/grow".into()),
             worktree_label: Some("location-picker".into()),
         };
         assert_eq!(
             format_cwd_display(Path::new("/work/wt/location-picker/frontend"), Some(&info)),
-            "/work/wt/location-picker/frontend (worktree of ~/xai)",
+            "/work/wt/location-picker/frontend (worktree of ~/grow)",
         );
     }
 
@@ -180,8 +180,8 @@ mod tests {
     #[test]
     fn format_cwd_display_cache_miss_shows_raw_cwd() {
         assert_eq!(
-            format_cwd_display(Path::new("/work/xai/frontend/apps"), None),
-            "/work/xai/frontend/apps",
+            format_cwd_display(Path::new("/work/grow/frontend/apps"), None),
+            "/work/grow/frontend/apps",
         );
     }
 }

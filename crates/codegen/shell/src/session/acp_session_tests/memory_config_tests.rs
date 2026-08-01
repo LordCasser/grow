@@ -266,7 +266,7 @@ async fn create_test_actor_with_memory(
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
         laziness_debug_log: None,
         deferred_prefix: TaskSlot::new(),
-        extension_registry: agent_lifecycle::LocalExtensionRegistry::default(),
+        idle_prompt_extension: None,
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
         prefix_carries_fallback_date: std::cell::Cell::new(false),
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),

@@ -312,11 +312,8 @@ impl SessionActor {
         let _turn_active_guard =
             TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());
         let _session_turn_active_guard = TurnActiveGuard::activate(Some(&self.session_turn_active));
-        let turn_start_input = agent_lifecycle::TurnStartInput::new(
-            super::super::PromptOrigin::from_prompt_id(prompt_id).is_synthetic(),
-        );
-        for contributor in self.extension_registry.turn_lifecycle_contributors() {
-            contributor.on_turn_start(&turn_start_input).await;
+        if let Some(extension) = &self.idle_prompt_extension {
+            extension.on_turn_start();
         }
         if let Ok(mut pending) = self.rewind_pending_prompt.lock()
             && let Some(prev_text) = pending.take()
@@ -1245,25 +1242,18 @@ impl SessionActor {
         }
         match &result {
             Ok(TurnOutcome::Completed { .. }) | Ok(TurnOutcome::StationarityEnded { .. }) => {
-                for contributor in self.extension_registry.turn_lifecycle_contributors() {
-                    contributor
-                        .on_turn_done(&agent_lifecycle::TurnDoneInput)
-                        .await;
+                if let Some(extension) = &self.idle_prompt_extension {
+                    extension.on_turn_done();
                 }
             }
             Ok(TurnOutcome::Cancelled { .. }) | Ok(TurnOutcome::MaxTurnsReached { .. }) => {
-                let input = agent_lifecycle::TurnAbortInput::new(
-                    agent_lifecycle::TurnAbortReason::Interrupted,
-                );
-                for contributor in self.extension_registry.turn_lifecycle_contributors() {
-                    contributor.on_turn_abort(&input).await;
+                if let Some(extension) = &self.idle_prompt_extension {
+                    extension.on_turn_failed();
                 }
             }
-            Err(err) => {
-                let message = err.to_string();
-                let input = agent_lifecycle::TurnErrorInput { message: &message };
-                for contributor in self.extension_registry.turn_lifecycle_contributors() {
-                    contributor.on_turn_error(&input).await;
+            Err(_) => {
+                if let Some(extension) = &self.idle_prompt_extension {
+                    extension.on_turn_failed();
                 }
             }
         }
@@ -2533,7 +2523,7 @@ impl SessionActor {
                 }
                 _ => {}
             }
-            self.send_buffered_xai_update(response_completed).await;
+            self.send_buffered_grow_update(response_completed).await;
             if tool_calls.is_empty() {
                 if !schema_ok
                     && !turn_refused

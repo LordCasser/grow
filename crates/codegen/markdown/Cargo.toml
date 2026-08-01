@@ -23,7 +23,6 @@ two-face = { workspace = true }
 textwrap = { workspace = true }
 unicode-width = { workspace = true }
 url = { workspace = true }
-markdown-core = { workspace = true }
 
 [dependencies.crossterm]
 workspace = true

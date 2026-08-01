@@ -1407,8 +1407,8 @@ mod tests {
         let ops = WorkspaceOps::for_test();
         let handle = ops.workspace_handle();
         let workspace_root = handle.root_cwd().unwrap();
-        let window_a = std::path::PathBuf::from("/repos/xai-main");
-        let window_b = std::path::PathBuf::from("/repos/xai-main-2");
+        let window_a = std::path::PathBuf::from("/repos/grow-main");
+        let window_b = std::path::PathBuf::from("/repos/grow-main-2");
         assert_eq!(
             git_op_cwd(handle, &Some(window_a.clone())).unwrap(),
             window_a

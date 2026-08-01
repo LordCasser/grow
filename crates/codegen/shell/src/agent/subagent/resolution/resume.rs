@@ -6,7 +6,7 @@
 //!
 //! Extracted from `shell/src/agent/subagent/` resume validation block.
 
-use crate::types::ResumeSourceData;
+use super::types::ResumeSourceData;
 
 /// Error type for resume validation failures.
 ///

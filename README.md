@@ -78,8 +78,9 @@ Grow 只在存在独立复用契约、依赖倒置、可部署产物或明确编
 跨进程协议也遵循同一标准：只有实际存在独立进程、稳定 wire contract 或多语言消费者时才引入
 protobuf/gRPC。纯 Rust 进程内边界直接使用 Rust 类型，需要落盘或外部交换时使用已有 Serde
 协议。workspace 依赖必须有生产代码或测试消费者；失去消费者的生成器、转换层和依赖应一并删除。
-目前保留的单消费者 crate（例如 headless Markdown core、session-support 和 workflow engine）分别
-承担轻依赖复用、增量编译隔离和独立执行语义，不因“只有一个调用方”机械合并。
+目前保留的单消费者 crate 仅限有明确收益的边界：`workflow` 提供独立执行语义，`memory`
+隔离存储与向量依赖，`mermaid` 隔离不可信渲染和 vendored layout 栈，`pager-render` 隔离
+大体量渲染编译单元。单一调用方本身不是建立 crate 的理由。
 
 ### Behavior、Role 与运行实例
 

@@ -10,7 +10,6 @@ chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
-tracing = { workspace = true }
 tools = { workspace = true }
 
 [dev-dependencies]

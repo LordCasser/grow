@@ -942,7 +942,7 @@ mod tests {
         // Duplicate key: the message names the key; the secret-bearing source line is only in Display.
         std::fs::write(
             &path,
-            "api_key = \"xai-secretmustnotleak\"\napi_key = \"xai-secretmustnotleak2\"\n",
+            "api_key = \"grow-secretmustnotleak\"\napi_key = \"grow-secretmustnotleak2\"\n",
         )
         .unwrap();
 
@@ -953,7 +953,7 @@ mod tests {
         );
         assert!(msg.contains("duplicate key"), "want parser kind: {msg}");
         assert!(
-            !msg.contains("xai-secretmustnotleak"),
+            !msg.contains("grow-secretmustnotleak"),
             "leaked the secret value: {msg}"
         );
         assert!(

@@ -19,7 +19,7 @@ pub struct DashboardRow {
     /// Display label (e.g. `"implementer · fix login bug"`).
     pub label: String,
     /// Right-of-label subtitle painted after a ` · ` separator in
-    /// dim text (e.g. `"xai my-branch-2 worktree"`). `None` when the
+    /// dim text (e.g. `"grow my-branch-2 worktree"`). `None` when the
     /// row has no repo / branch context worth surfacing.
     pub subtitle: Option<String>,
     /// Coarse state used for grouping.
@@ -1797,7 +1797,7 @@ mod tests {
     #[test]
     fn subtitle_non_worktree_shows_branch_and_folder() {
         let mut agent = make_idle_agent_with_model(None);
-        agent.session.cwd = PathBuf::from("/home/me/xai/crates/foo");
+        agent.session.cwd = PathBuf::from("/home/me/grow/crates/foo");
         agent.is_worktree = false;
         agent.current_branch = Some("main".to_string());
         assert_eq!(top_level_subtitle(&agent).as_deref(), Some("main foo"));

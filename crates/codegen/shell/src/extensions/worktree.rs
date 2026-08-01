@@ -422,9 +422,9 @@ mod tests {
 
     #[test]
     fn list_request_with_filters() {
-        let json = r#"{"repo": "xai", "type": ["session", "fork"], "includeAll": true}"#;
+        let json = r#"{"repo": "grow", "type": ["session", "fork"], "includeAll": true}"#;
         let req: ListWorktreeRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.repo.as_deref(), Some("xai"));
+        assert_eq!(req.repo.as_deref(), Some("grow"));
         assert_eq!(req.r#type, vec!["session", "fork"]);
         assert!(req.include_all);
     }

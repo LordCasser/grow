@@ -2757,28 +2757,28 @@ mod tests {
     use super::*;
     #[test]
     fn strip_url_credentials_removes_token() {
-        let url_with_token = "https://x-access-token:secret-token@github.com/xai-org/example.git";
+        let url_with_token = "https://x-access-token:secret-token@github.com/grow-org/example.git";
         assert_eq!(
             strip_url_credentials(url_with_token),
-            "https://github.com/xai-org/example.git"
+            "https://github.com/grow-org/example.git"
         );
     }
     #[test]
     fn strip_url_credentials_preserves_clean_https_url() {
-        let clean_url = "https://github.com/xai-org/example.git";
+        let clean_url = "https://github.com/grow-org/example.git";
         assert_eq!(strip_url_credentials(clean_url), clean_url);
     }
     #[test]
     fn strip_url_credentials_preserves_ssh_url() {
-        let ssh_url = "git@github.com:xai-org/example.git";
+        let ssh_url = "git@github.com:grow-org/example.git";
         assert_eq!(strip_url_credentials(ssh_url), ssh_url);
     }
     #[test]
     fn strip_url_credentials_removes_username_password() {
-        let url_with_creds = "https://alice:secret@github.com/xai-org/example.git";
+        let url_with_creds = "https://alice:secret@github.com/grow-org/example.git";
         assert_eq!(
             strip_url_credentials(url_with_creds),
-            "https://github.com/xai-org/example.git"
+            "https://github.com/grow-org/example.git"
         );
     }
     #[test]
@@ -2787,12 +2787,12 @@ mod tests {
         let repo = git2::Repository::init(tmp.path()).unwrap();
         repo.remote(
             "origin",
-            "https://x-access-token:secret-token@github.com/xai-org/example.git",
+            "https://x-access-token:secret-token@github.com/grow-org/example.git",
         )
         .unwrap();
-        repo.remote("backup", "https://gitlab.com/xai-org/example.git")
+        repo.remote("backup", "https://gitlab.com/grow-org/example.git")
             .unwrap();
-        repo.remote("duplicate", "https://github.com/xai-org/example.git")
+        repo.remote("duplicate", "https://github.com/grow-org/example.git")
             .unwrap();
         let metadata = resolve_persisted_session_git_metadata_sync(tmp.path());
         assert_eq!(
@@ -2802,8 +2802,8 @@ mod tests {
         assert_eq!(
             metadata.git_remotes,
             vec![
-                "https://github.com/xai-org/example.git".to_string(),
-                "https://gitlab.com/xai-org/example.git".to_string(),
+                "https://github.com/grow-org/example.git".to_string(),
+                "https://gitlab.com/grow-org/example.git".to_string(),
             ]
         );
     }
@@ -2811,7 +2811,7 @@ mod tests {
     fn test_resolve_persisted_session_git_metadata_captures_head() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = git2::Repository::init(tmp.path()).unwrap();
-        repo.remote("origin", "https://github.com/xai-org/example.git")
+        repo.remote("origin", "https://github.com/grow-org/example.git")
             .unwrap();
         let metadata = resolve_persisted_session_git_metadata_sync(tmp.path());
         assert!(metadata.head_commit.is_none());
@@ -2865,7 +2865,7 @@ mod tests {
         let main_path = tmp.path().join("main-repo");
         std::fs::create_dir_all(&main_path).unwrap();
         let repo = git2::Repository::init(&main_path).unwrap();
-        repo.remote("origin", "https://github.com/xai-org/example.git")
+        repo.remote("origin", "https://github.com/grow-org/example.git")
             .unwrap();
         {
             let mut index = repo.index().unwrap();
@@ -2898,7 +2898,7 @@ mod tests {
         );
         assert_eq!(
             metadata.git_remotes,
-            vec!["https://github.com/xai-org/example.git".to_string()],
+            vec!["https://github.com/grow-org/example.git".to_string()],
         );
     }
     #[test]
@@ -3401,84 +3401,84 @@ mod tests {
     #[test]
     fn normalize_ssh_scp_url() {
         assert_eq!(
-            normalize_repo_url("git@github.com:xai-org/example.git"),
-            Some("github.com/xai-org/example".into()),
+            normalize_repo_url("git@github.com:grow-org/example.git"),
+            Some("github.com/grow-org/example".into()),
         );
     }
     #[test]
     fn normalize_https_url() {
         assert_eq!(
-            normalize_repo_url("https://github.com/xai-org/example.git"),
-            Some("github.com/xai-org/example".into()),
+            normalize_repo_url("https://github.com/grow-org/example.git"),
+            Some("github.com/grow-org/example".into()),
         );
     }
     #[test]
     fn normalize_ssh_and_https_produce_same_result() {
-        let ssh = normalize_repo_url("git@github.com:xai-org/example.git");
-        let https = normalize_repo_url("https://github.com/xai-org/example.git");
+        let ssh = normalize_repo_url("git@github.com:grow-org/example.git");
+        let https = normalize_repo_url("https://github.com/grow-org/example.git");
         assert_eq!(ssh, https);
     }
     #[test]
     fn normalize_https_without_git_suffix() {
         assert_eq!(
-            normalize_repo_url("https://github.com/xai-org/example"),
-            Some("github.com/xai-org/example".into()),
+            normalize_repo_url("https://github.com/grow-org/example"),
+            Some("github.com/grow-org/example".into()),
         );
     }
     #[test]
     fn normalize_https_with_credentials() {
         assert_eq!(
-            normalize_repo_url("https://x-access-token:secret@github.com/xai-org/example.git"),
-            Some("github.com/xai-org/example".into()),
+            normalize_repo_url("https://x-access-token:secret@github.com/grow-org/example.git"),
+            Some("github.com/grow-org/example".into()),
         );
     }
     #[test]
     fn normalize_ssh_scheme_url() {
         assert_eq!(
-            normalize_repo_url("ssh://git@github.com/xai-org/example.git"),
-            Some("github.com/xai-org/example".into()),
+            normalize_repo_url("ssh://git@github.com/grow-org/example.git"),
+            Some("github.com/grow-org/example".into()),
         );
     }
     #[test]
     fn normalize_ssh_scheme_with_port() {
         assert_eq!(
-            normalize_repo_url("ssh://git@github.com:22/xai-org/example.git"),
-            Some("github.com/xai-org/example".into()),
+            normalize_repo_url("ssh://git@github.com:22/grow-org/example.git"),
+            Some("github.com/grow-org/example".into()),
         );
     }
     #[test]
     fn normalize_git_scheme_url() {
         assert_eq!(
-            normalize_repo_url("git://github.com/xai-org/example.git"),
-            Some("github.com/xai-org/example".into()),
+            normalize_repo_url("git://github.com/grow-org/example.git"),
+            Some("github.com/grow-org/example".into()),
         );
     }
     #[test]
     fn normalize_http_url() {
         assert_eq!(
-            normalize_repo_url("http://github.com/xai-org/example.git"),
-            Some("github.com/xai-org/example".into()),
+            normalize_repo_url("http://github.com/grow-org/example.git"),
+            Some("github.com/grow-org/example".into()),
         );
     }
     #[test]
     fn normalize_strips_trailing_slash() {
         assert_eq!(
-            normalize_repo_url("https://github.com/xai-org/example/"),
-            Some("github.com/xai-org/example".into()),
+            normalize_repo_url("https://github.com/grow-org/example/"),
+            Some("github.com/grow-org/example".into()),
         );
     }
     #[test]
     fn normalize_strips_dot_git_with_trailing_slash() {
         assert_eq!(
-            normalize_repo_url("https://github.com/xai-org/example.git/"),
-            Some("github.com/xai-org/example".into()),
+            normalize_repo_url("https://github.com/grow-org/example.git/"),
+            Some("github.com/grow-org/example".into()),
         );
     }
     #[test]
     fn normalize_lowercases_host() {
         assert_eq!(
-            normalize_repo_url("git@GitHub.COM:xai-org/example.git"),
-            Some("github.com/xai-org/example".into()),
+            normalize_repo_url("git@GitHub.COM:grow-org/example.git"),
+            Some("github.com/grow-org/example".into()),
         );
     }
     #[test]
@@ -3496,22 +3496,22 @@ mod tests {
     #[test]
     fn normalize_git_plus_ssh_scheme() {
         assert_eq!(
-            normalize_repo_url("git+ssh://git@github.com/xai-org/example.git"),
-            Some("github.com/xai-org/example".into()),
+            normalize_repo_url("git+ssh://git@github.com/grow-org/example.git"),
+            Some("github.com/grow-org/example".into()),
         );
     }
     #[test]
     fn normalize_git_plus_https_scheme() {
         assert_eq!(
-            normalize_repo_url("git+https://github.com/xai-org/example.git"),
-            Some("github.com/xai-org/example".into()),
+            normalize_repo_url("git+https://github.com/grow-org/example.git"),
+            Some("github.com/grow-org/example".into()),
         );
     }
     #[test]
     fn normalize_scp_no_user() {
         assert_eq!(
-            normalize_repo_url("github.com:xai-org/example.git"),
-            Some("github.com/xai-org/example".into()),
+            normalize_repo_url("github.com:grow-org/example.git"),
+            Some("github.com/grow-org/example".into()),
         );
     }
     #[test]
@@ -3554,12 +3554,12 @@ mod tests {
     fn resolve_normalized_remote_urls_deduplicates_across_transports() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = git2::Repository::init(tmp.path()).unwrap();
-        repo.remote("origin", "git@github.com:xai-org/example.git")
+        repo.remote("origin", "git@github.com:grow-org/example.git")
             .unwrap();
-        repo.remote("https-mirror", "https://github.com/xai-org/example.git")
+        repo.remote("https-mirror", "https://github.com/grow-org/example.git")
             .unwrap();
         let urls = resolve_normalized_remote_urls(tmp.path());
-        assert_eq!(urls, vec!["github.com/xai-org/example"]);
+        assert_eq!(urls, vec!["github.com/grow-org/example"]);
     }
 }
 #[cfg(test)]

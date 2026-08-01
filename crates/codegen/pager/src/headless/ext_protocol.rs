@@ -159,7 +159,7 @@ fn decode_task_completed(method: &str, params: &str) -> ExtEvent {
 fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "snake_case", tag = "sessionUpdate")]
-    enum XaiUpdate {
+    enum GrowUpdate {
         AutoCompactStarted {
             percentage: u8,
         },
@@ -215,11 +215,11 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         Other,
     }
     #[derive(serde::Deserialize)]
-    struct XaiNotif {
-        update: XaiUpdate,
+    struct GrowNotif {
+        update: GrowUpdate,
     }
 
-    let xai_notif = match serde_json::from_str::<XaiNotif>(params) {
+    let grow_notif = match serde_json::from_str::<GrowNotif>(params) {
         Ok(n) => n,
         Err(e) => {
             tracing::warn!(
@@ -231,30 +231,30 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         }
     };
 
-    match xai_notif.update {
-        XaiUpdate::AutoCompactStarted { percentage } => {
+    match grow_notif.update {
+        GrowUpdate::AutoCompactStarted { percentage } => {
             ExtEvent::Lifecycle(Lifecycle::CompactStarted { percentage })
         }
-        XaiUpdate::AutoCompactCompleted { tokens_before } => {
+        GrowUpdate::AutoCompactCompleted { tokens_before } => {
             ExtEvent::Lifecycle(Lifecycle::CompactCompleted {
                 pre_tokens: tokens_before.unwrap_or(0),
             })
         }
-        XaiUpdate::AutoCompactFailed { error } => {
+        GrowUpdate::AutoCompactFailed { error } => {
             ExtEvent::Lifecycle(Lifecycle::CompactFailed { error })
         }
-        XaiUpdate::AutoCompactCancelled {} => ExtEvent::Lifecycle(Lifecycle::CompactCancelled),
-        XaiUpdate::AutoContinueCompleted { total_tokens } => {
+        GrowUpdate::AutoCompactCancelled {} => ExtEvent::Lifecycle(Lifecycle::CompactCancelled),
+        GrowUpdate::AutoContinueCompleted { total_tokens } => {
             ExtEvent::Lifecycle(Lifecycle::AutoContinue { total_tokens })
         }
-        XaiUpdate::ImageCompressed { message } => {
+        GrowUpdate::ImageCompressed { message } => {
             ExtEvent::Lifecycle(Lifecycle::ImageCompressed { message })
         }
-        XaiUpdate::SubagentSpawned { subagent_id } => ExtEvent::SubagentSpawned { subagent_id },
-        XaiUpdate::SubagentFinished { subagent_id, .. } => {
+        GrowUpdate::SubagentSpawned { subagent_id } => ExtEvent::SubagentSpawned { subagent_id },
+        GrowUpdate::SubagentFinished { subagent_id, .. } => {
             ExtEvent::SubagentFinished { subagent_id }
         }
-        XaiUpdate::ResponseStarted {
+        GrowUpdate::ResponseStarted {
             message_id,
             model,
             input_tokens,
@@ -267,10 +267,10 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
             cache_read_input_tokens,
             cache_creation_input_tokens,
         })),
-        XaiUpdate::ReasoningCompleted { signature } => {
+        GrowUpdate::ReasoningCompleted { signature } => {
             ExtEvent::Stream(Box::new(StreamEvent::ReasoningCompleted { signature }))
         }
-        XaiUpdate::ResponseCompleted {
+        GrowUpdate::ResponseCompleted {
             message_id,
             stop_reason,
             usage,
@@ -285,7 +285,7 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         })),
         // Background lifecycle tag on the wrong carrier: log loudly, but a
         // genuinely unknown display tag stays a clean ignore.
-        XaiUpdate::Other => {
+        GrowUpdate::Other => {
             if let Some(tag) = session_update_tag(params)
                 && matches!(tag.as_str(), "task_backgrounded" | "task_completed")
             {

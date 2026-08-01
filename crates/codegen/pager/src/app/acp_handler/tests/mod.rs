@@ -761,7 +761,7 @@ pub(super) fn plan_update_msg(
 pub(super) fn todo_contents(app: &AppView, id: AgentId) -> Vec<String> {
     app.agents[&id].todo.todos().iter().map(|t| t.content.clone()).collect()
 }
-pub(super) fn xai_model_switch_notif(
+pub(super) fn grow_model_switch_notif(
     session_id: &str,
     event_id: &str,
 ) -> acp::ExtNotification {
@@ -779,7 +779,7 @@ pub(super) fn xai_model_switch_notif(
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
-pub(super) fn xai_unhandled_notif(
+pub(super) fn grow_unhandled_notif(
     session_id: &str,
     event_id: &str,
 ) -> acp::ExtNotification {
@@ -911,7 +911,7 @@ pub(super) fn make_viewer_chunk_with_turn_start(
 /// Build a durable `TurnCompleted` update on the `grow/session/update` rail,
 /// optionally stamped `isReplay`. Built through the typed `SessionNotification`
 /// so the wire shape can't drift from what the dispatch parses.
-pub(super) fn xai_turn_completed_notif(
+pub(super) fn grow_turn_completed_notif(
     session_id: &str,
     prompt_id: &str,
     stop_reason: &str,
@@ -933,7 +933,7 @@ pub(super) fn xai_turn_completed_notif(
     )
 }
 /// Live `TurnCompleted` stamped with `_meta.cancelTrigger` (send-now / ctrl_c).
-pub(super) fn xai_turn_completed_notif_with_cancel_trigger(
+pub(super) fn grow_turn_completed_notif_with_cancel_trigger(
     session_id: &str,
     prompt_id: &str,
     stop_reason: &str,
@@ -961,7 +961,7 @@ pub(super) fn xai_turn_completed_notif_with_cancel_trigger(
 }
 /// A live durable `TurnCompleted`, optionally stamped with the shell
 /// completion clock (`agentTimestampMs`) the wake marker's elapsed reads.
-pub(super) fn xai_wake_turn_completed_notif(
+pub(super) fn grow_wake_turn_completed_notif(
     session_id: &str,
     prompt_id: &str,
     agent_timestamp_ms: Option<i64>,
@@ -988,14 +988,14 @@ pub(super) fn xai_wake_turn_completed_notif(
 /// Build a `HookExecution` update (one successful run) on the
 /// `grow/session/update` rail, optionally stamped `isReplay`.
 /// `prompt_id == None` models pre-attribution shells.
-pub(super) fn xai_hook_execution_notif_for_prompt(
+pub(super) fn grow_hook_execution_notif_for_prompt(
     session_id: &str,
     event_name: &str,
     prompt_id: Option<&str>,
     is_replay: bool,
 ) -> acp::ExtNotification {
     use shell::extensions::notification::{HookRunEntryDto, HookRunStatusDto};
-    xai_hook_execution_notif_with_runs(
+    grow_hook_execution_notif_with_runs(
         session_id,
         event_name,
         prompt_id,
@@ -1007,7 +1007,7 @@ pub(super) fn xai_hook_execution_notif_for_prompt(
             }],
     )
 }
-pub(super) fn xai_hook_execution_notif_with_runs(
+pub(super) fn grow_hook_execution_notif_with_runs(
     session_id: &str,
     event_name: &str,
     prompt_id: Option<&str>,
@@ -1029,12 +1029,12 @@ pub(super) fn xai_hook_execution_notif_with_runs(
         serde_json::value::to_raw_value(&payload).unwrap().into(),
     )
 }
-pub(super) fn xai_hook_execution_notif(
+pub(super) fn grow_hook_execution_notif(
     session_id: &str,
     event_name: &str,
     is_replay: bool,
 ) -> acp::ExtNotification {
-    xai_hook_execution_notif_for_prompt(session_id, event_name, None, is_replay)
+    grow_hook_execution_notif_for_prompt(session_id, event_name, None, is_replay)
 }
 pub(super) fn count_lifecycle_blocks(
     sb: &crate::scrollback::state::ScrollbackState,

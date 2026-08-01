@@ -267,8 +267,8 @@ mod tests {
     #[test]
     fn test_abbreviate_home() {
         if let Ok(home) = std::env::var("HOME") {
-            let path = std::path::PathBuf::from(format!("{home}/work/xai"));
-            assert_eq!(abbreviate_home(&path), "~/work/xai");
+            let path = std::path::PathBuf::from(format!("{home}/work/grow"));
+            assert_eq!(abbreviate_home(&path), "~/work/grow");
         }
     }
 

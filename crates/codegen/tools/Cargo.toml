@@ -13,10 +13,8 @@ derive_more = { workspace = true, features = ["from", "try_into"] }
 dunce = { workspace = true }
 fs2 = { workspace = true }
 educe = { workspace = true, features = ["Debug"] }
-async-openai = { workspace = true }
 tty-utils = { workspace = true }
 config = { path = "../config" }
-workspace-types = { path = "../workspace-types" }
 version = { workspace = true }
 token-estimation = { workspace = true }
 async-lsp = { workspace = true }
@@ -98,7 +96,6 @@ dirs = { workspace = true }
 pretty_assertions = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
-wiremock = { workspace = true }
 test-support = { workspace = true }
 test-utils = { workspace = true }
 

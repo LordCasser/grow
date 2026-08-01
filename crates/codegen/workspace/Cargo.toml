@@ -10,7 +10,6 @@ anyhow = { workspace = true }
 arc-swap = { workspace = true }
 dunce = { workspace = true }
 version = { workspace = true }
-async-stream = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 fs2 = { workspace = true }
@@ -18,9 +17,7 @@ dirs = "6"
 parking_lot = { workspace = true }
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
 ignore = { workspace = true }
-md5 = { workspace = true }
 regex = { workspace = true }
-rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -69,7 +66,6 @@ hunk-tracker = { path = "../hunk-tracker" }
 mcp = { path = "../mcp" }
 diagnostics = { workspace = true }
 tty-utils = { workspace = true }
-sqlite-journal = { workspace = true }
 tool-protocol = { workspace = true }
 tool-runtime = { workspace = true }
 tool-types = { workspace = true }
@@ -98,7 +94,6 @@ default-bazel = [
     ]
 
 [dev-dependencies]
-filetime = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 test-utils = { path = "../../common/test-utils" }

@@ -867,7 +867,7 @@ mod tests {
     /// Env marker dispatching the re-exec'd test binary into the
     /// intermediate-parent logic.
     #[cfg(target_os = "linux")]
-    const PDEATHSIG_INTERMEDIATE_ENV: &str = "__XAI_TTY_UTILS_PDEATHSIG_INTERMEDIATE";
+    const PDEATHSIG_INTERMEDIATE_ENV: &str = "__GROW_TTY_UTILS_PDEATHSIG_INTERMEDIATE";
 
     /// Intermediate parent: spawn the armed grandchild, report its pid on
     /// stdout, linger briefly so the driver can observe it alive, then exit
@@ -1141,7 +1141,7 @@ mod tests {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("tests::stderr_redirect_roundtrip_body")
-            .env("__XAI_STDERR_REDIRECT_SUBPROCESS", "1")
+            .env("__GROW_STDERR_REDIRECT_SUBPROCESS", "1")
             .status()
             .expect("failed to spawn test subprocess");
         assert!(status.success(), "subprocess integration test failed");
@@ -1151,7 +1151,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stderr_redirect_roundtrip_body() {
-        if std::env::var("__XAI_STDERR_REDIRECT_SUBPROCESS").is_err() {
+        if std::env::var("__GROW_STDERR_REDIRECT_SUBPROCESS").is_err() {
             return; // skip when not invoked as subprocess
         }
 

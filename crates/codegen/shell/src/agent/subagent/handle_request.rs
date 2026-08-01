@@ -114,7 +114,7 @@ pub(crate) async fn run_shell_child(
         .parent_session_info
         .as_ref()
         .map(|i| std::path::Path::new(&i.cwd));
-    let mut effective_runtime = subagent_resolution::resolve_runtime_config(
+    let mut effective_runtime = crate::agent::subagent::resolution::resolve_runtime_config(
         &request.subagent_type,
         &request.runtime_overrides,
         &ctx.subagent_roles,
@@ -193,7 +193,7 @@ pub(crate) async fn run_shell_child(
             );
         }
         effective_runtime.model = None;
-        if let Err(e) = subagent_resolution::validate_resume_identity(
+        if let Err(e) = crate::agent::subagent::resolution::validate_resume_identity(
             &request.subagent_type,
             request.runtime_overrides.persona.as_deref(),
             source,
@@ -362,17 +362,18 @@ pub(crate) async fn run_shell_child(
             "Resolved runtime overrides for subagent"
         );
     }
-    effective_runtime.capability_mode = subagent_resolution::intersect_capability_modes(
-        effective_runtime.capability_mode,
-        definition.capability_mode,
-    );
+    effective_runtime.capability_mode =
+        crate::agent::subagent::resolution::intersect_capability_modes(
+            effective_runtime.capability_mode,
+            definition.capability_mode,
+        );
     let child_depth = request
         .runtime_overrides
         .spawn_depth
         .unwrap_or(ctx.parent_depth + 1);
     let tools_before_policy = definition.tool_config.tools.len();
     let allow_nested_subagents = child_depth < ctx.subagents_max_depth;
-    subagent_resolution::apply_child_tool_policy(
+    crate::agent::subagent::resolution::apply_child_tool_policy(
         &mut definition,
         effective_runtime.capability_mode,
         allow_nested_subagents,

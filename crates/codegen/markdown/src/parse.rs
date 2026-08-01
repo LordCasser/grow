@@ -486,7 +486,9 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
         self.last_checkpoint = None;
         self.pending_code_block = None;
 
-        for (event, range) in TextMergeWithOffset::new(markdown_core::offset_events(self.text)) {
+        for (event, range) in
+            TextMergeWithOffset::new(crate::parser_policy::offset_events(self.text))
+        {
             self.on_event(event, range);
         }
 

@@ -8634,7 +8634,7 @@ mod tests {
         let completion = state.complete_clipboard_attachment_paste(
             completion_ctx(None, false),
             crate::app::actions::ProbedAttachment::NoRaster,
-            Some("file:///definitely/missing/xai-primary-paste.png".to_owned()),
+            Some("file:///definitely/missing/grow-primary-paste.png".to_owned()),
         );
 
         assert_eq!(

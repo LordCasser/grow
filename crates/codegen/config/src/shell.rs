@@ -528,7 +528,7 @@ mod tests {
         let present = "sh";
         assert!(is_command_available(present));
         assert!(!is_command_available(
-            "xai-definitely-not-a-real-command-xyz"
+            "grow-definitely-not-a-real-command-xyz"
         ));
     }
 

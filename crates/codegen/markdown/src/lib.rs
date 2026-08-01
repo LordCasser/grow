@@ -36,6 +36,7 @@ mod mermaid;
 mod open_fence_highlighter;
 mod output;
 mod parse;
+mod parser_policy;
 mod render;
 mod source_map;
 pub mod streaming;

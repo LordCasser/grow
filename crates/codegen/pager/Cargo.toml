@@ -72,7 +72,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # Binary hardening: compile-time string obfuscation.
-obfstr = { workspace = true }
 
 # Fuzzy matching (history search daemon)
 nucleo = { workspace = true }
@@ -94,7 +93,6 @@ workspace = { workspace = true }
 token-estimation = { workspace = true }
 diagnostics = { workspace = true }
 fast-worktree = { path = "../fast-worktree", features = ["metadata"] }
-backon = { workspace = true }
 chrono = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }

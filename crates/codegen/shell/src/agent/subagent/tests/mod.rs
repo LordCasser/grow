@@ -6,7 +6,7 @@ use super::handle_request::{
 use crate::test_support::lsp_runtime::{
     DummyLspDispatch, ctx_with_toggle, test_gateway_with_receiver,
 };
-use subagent_resolution::resolve_effective_overrides;
+use crate::agent::subagent::resolution::resolve_effective_overrides;
 use tools::implementations::grow_build::task::coordinator::{
     ChildCompletion, CompletionDisposition,
 };
@@ -423,7 +423,7 @@ fn explicit_override_takes_precedence_over_role() {
         capability_mode: Some(tool_types::SubagentCapabilityMode::All),
         ..Default::default()
     };
-    let role = subagent_resolution::config::SubagentRole {
+    let role = crate::agent::subagent::resolution::config::SubagentRole {
         description: "test role".into(),
         model: Some("role-model".into()),
         default_capability_mode: Some("read-only".into()),
@@ -445,7 +445,7 @@ fn explicit_override_takes_precedence_over_role() {
 #[test]
 fn role_default_used_when_no_explicit_override() {
     let overrides = SubagentRuntimeOverrides::default();
-    let role = subagent_resolution::config::SubagentRole {
+    let role = crate::agent::subagent::resolution::config::SubagentRole {
         description: "test role".into(),
         model: Some("role-model".into()),
         default_capability_mode: Some("read-only".into()),
@@ -484,7 +484,7 @@ fn partial_override_fills_from_role() {
         model: Some("explicit-model".into()),
         ..Default::default()
     };
-    let role = subagent_resolution::config::SubagentRole {
+    let role = crate::agent::subagent::resolution::config::SubagentRole {
         description: "test".into(),
         default_capability_mode: Some("execute".into()),
         ..Default::default()
@@ -508,7 +508,7 @@ fn reasoning_effort_explicit_overrides_role() {
         reasoning_effort: Some("high".into()),
         ..Default::default()
     };
-    let role = subagent_resolution::config::SubagentRole {
+    let role = crate::agent::subagent::resolution::config::SubagentRole {
         description: "test".into(),
         reasoning_effort: Some("low".into()),
         ..Default::default()
@@ -525,7 +525,7 @@ fn reasoning_effort_explicit_overrides_role() {
 #[test]
 fn reasoning_effort_falls_back_to_role() {
     let overrides = SubagentRuntimeOverrides::default();
-    let role = subagent_resolution::config::SubagentRole {
+    let role = crate::agent::subagent::resolution::config::SubagentRole {
         description: "test".into(),
         reasoning_effort: Some("medium".into()),
         ..Default::default()
@@ -542,7 +542,7 @@ fn reasoning_effort_falls_back_to_role() {
 #[test]
 fn invalid_role_capability_mode_ignored() {
     let overrides = SubagentRuntimeOverrides::default();
-    let role = subagent_resolution::config::SubagentRole {
+    let role = crate::agent::subagent::resolution::config::SubagentRole {
         description: "test".into(),
         default_capability_mode: Some("invalid-mode".into()),
         ..Default::default()
@@ -569,7 +569,7 @@ fn persona_resolved_from_config() {
     personas
         .insert(
             "researcher".to_string(),
-            subagent_resolution::config::SubagentPersona {
+            crate::agent::subagent::resolution::config::SubagentPersona {
                 instructions: Some("Be thorough.".into()),
                 ..Default::default()
             },
@@ -609,7 +609,7 @@ fn persona_inline_plus_file_merged_in_order() {
     personas
         .insert(
             "combo".to_string(),
-            subagent_resolution::config::SubagentPersona {
+            crate::agent::subagent::resolution::config::SubagentPersona {
                 instructions: Some("Inline first.".into()),
                 instructions_file: Some("extra.md".into()),
                 ..Default::default()
@@ -638,12 +638,12 @@ fn model_precedence_explicit_over_role_over_persona() {
     personas
         .insert(
             "dev".to_string(),
-            subagent_resolution::config::SubagentPersona {
+            crate::agent::subagent::resolution::config::SubagentPersona {
                 model: Some("persona-model".into()),
                 ..Default::default()
             },
         );
-    let role = subagent_resolution::config::SubagentRole {
+    let role = crate::agent::subagent::resolution::config::SubagentRole {
         description: "test".into(),
         model: Some("role-model".into()),
         ..Default::default()
@@ -661,7 +661,7 @@ fn model_precedence_explicit_over_role_over_persona() {
     };
     let r = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
     assert_eq!(r.model.as_deref(), Some("role-model"));
-    let role_no_model = subagent_resolution::config::SubagentRole {
+    let role_no_model = crate::agent::subagent::resolution::config::SubagentRole {
         description: "test".into(),
         ..Default::default()
     };
@@ -683,12 +683,12 @@ fn reasoning_effort_precedence_explicit_over_role_over_persona() {
     personas
         .insert(
             "dev".to_string(),
-            subagent_resolution::config::SubagentPersona {
+            crate::agent::subagent::resolution::config::SubagentPersona {
                 reasoning_effort: Some("low".into()),
                 ..Default::default()
             },
         );
-    let role = subagent_resolution::config::SubagentRole {
+    let role = crate::agent::subagent::resolution::config::SubagentRole {
         description: "test".into(),
         reasoning_effort: Some("medium".into()),
         ..Default::default()
@@ -706,7 +706,7 @@ fn reasoning_effort_precedence_explicit_over_role_over_persona() {
     };
     let r = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
     assert_eq!(r.reasoning_effort.as_deref(), Some("medium"));
-    let role_no_re = subagent_resolution::config::SubagentRole {
+    let role_no_re = crate::agent::subagent::resolution::config::SubagentRole {
         description: "test".into(),
         ..Default::default()
     };
@@ -1941,7 +1941,7 @@ fn harness_model_override_keeps_internal_fallback_behavior() {
 fn normalize_forked_context_empty_parent() {
     use sampling_types::conversation::ConversationItem;
     let items = vec![ConversationItem::system("sys prompt")];
-    let (conv, prefix_len) = subagent_resolution::context::normalize_forked_context(
+    let (conv, prefix_len) = crate::agent::subagent::resolution::context::normalize_forked_context(
         items,
     );
     assert_eq!(conv.len(), 1);
@@ -1956,7 +1956,7 @@ fn normalize_forked_context_short_conversation() {
             ConversationItem::user("hello"),
             ConversationItem::assistant("hi back"),
         ];
-    let (conv, prefix_len) = subagent_resolution::context::normalize_forked_context(
+    let (conv, prefix_len) = crate::agent::subagent::resolution::context::normalize_forked_context(
         items,
     );
     assert_eq!(prefix_len, 2);

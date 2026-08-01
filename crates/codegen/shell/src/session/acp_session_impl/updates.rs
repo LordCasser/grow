@@ -163,10 +163,10 @@ impl SessionActor {
     /// For one-shot Grow events (RetryState, ImageCompressed, HookExecution,
     /// AutoCompactCompleted, etc.), use `send_grow_notification` instead.
     ///
-    /// The frequency-based split (`send_buffered_xai_update` vs `send_grow_notification`)
+    /// The frequency-based split (`send_buffered_grow_update` vs `send_grow_notification`)
     /// mirrors the ACP-side split between `send_update` (high-frequency,
     /// buffered) and `emit_notification_direct` (low-frequency, direct).
-    pub(super) async fn send_buffered_xai_update(&self, update: GrowSessionUpdate) {
+    pub(super) async fn send_buffered_grow_update(&self, update: GrowSessionUpdate) {
         self.close_rewind_window().await;
         let notification = GrowSessionNotification {
             session_id: self.session_info.id.clone(),
@@ -738,7 +738,7 @@ impl SessionActor {
             stop_sequence: response.stop_sequence.clone(),
         }
     }
-    /// [`Self::send_xai_notification`] with caller-supplied `_meta` keys merged
+    /// [`Self::send_grow_notification`] with caller-supplied `_meta` keys merged
     /// into the standard eventId/timestamp meta. Caller keys win on collision.
     #[tracing::instrument(skip_all)]
     pub(super) async fn send_grow_notification_with_extra_meta(
@@ -787,7 +787,7 @@ impl SessionActor {
 mod grow_event_id_stamping_tests {
     use super::support::create_test_actor;
     use super::*;
-    fn persisted_xai_event_id(
+    fn persisted_grow_event_id(
         prx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
     ) -> String {
         loop {
@@ -811,7 +811,7 @@ mod grow_event_id_stamping_tests {
     /// must put an `eventId` on the persisted line. An id-less line degrades
     /// every later cursor reconnect of the session to a full replay.
     #[tokio::test]
-    async fn actor_persisted_xai_lines_carry_event_id() {
+    async fn actor_persisted_grow_lines_carry_event_id() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -825,7 +825,7 @@ mod grow_event_id_stamping_tests {
                         message: "own emission".into(),
                     })
                     .await;
-                let own_id = persisted_xai_event_id(&mut prx);
+                let own_id = persisted_grow_event_id(&mut prx);
                 assert!(own_id.starts_with("test-actor-"));
                 actor
                     .handle_grow_session_notification(GrowSessionNotification {
@@ -836,13 +836,13 @@ mod grow_event_id_stamping_tests {
                         meta: None,
                     })
                     .await;
-                let inbound_id = persisted_xai_event_id(&mut prx);
+                let inbound_id = persisted_grow_event_id(&mut prx);
                 assert!(inbound_id.starts_with("test-actor-"));
                 assert_ne!(own_id, inbound_id);
                 actor.persist_update_only(GrowSessionUpdate::HookAnnotation {
                     message: "persist-only".into(),
                 });
-                let persist_only_id = persisted_xai_event_id(&mut prx);
+                let persist_only_id = persisted_grow_event_id(&mut prx);
                 assert!(persist_only_id.starts_with("test-actor-"));
                 assert_ne!(inbound_id, persist_only_id);
             })

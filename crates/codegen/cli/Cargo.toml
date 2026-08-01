@@ -57,9 +57,6 @@ rustls = { version = "0.23", default-features = false, features = [
     "tls12",
 ] }
 
-# Binary hardening: compile-time string obfuscation.
-obfstr = { workspace = true }
-
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 # Default allocator on Unix; gated by the `jemalloc` feature (see main.rs

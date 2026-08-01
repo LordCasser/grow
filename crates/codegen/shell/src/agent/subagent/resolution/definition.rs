@@ -1,9 +1,8 @@
 //! Production subagent definition discovery and tool-policy resolution.
-use crate::config::{SubagentPersona, SubagentRole};
-use crate::types::{EffectiveRuntimeConfig, ResolutionError};
+use super::config::{SubagentPersona, SubagentRole};
+use super::types::{EffectiveRuntimeConfig, ResolutionError};
 use agent::config::{AgentDefinition, IsolationMode};
 use agent::plugins::PluginRegistry;
-use agent::prompt::context::{PromptAudience, PromptContext};
 use std::collections::HashMap;
 use std::path::Path;
 use tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
@@ -11,8 +10,6 @@ use tools::implementations::grow_build::task::types::{
     SubagentCapabilityModeExt, SubagentRuntimeOverrides, prune_orphaned_background_task_tools,
 };
 use tools::registry::types::ToolConfig;
-use tools::types::compat::CompatConfig;
-use tools::types::template_renderer::TemplateRenderer;
 use tools::types::tool::ToolKind;
 /// Inputs that affect definition discovery and global enablement.
 pub struct DefinitionResolutionContext<'a> {
@@ -225,60 +222,10 @@ pub fn resolve_runtime_config(
     definition: &AgentDefinition,
 ) -> EffectiveRuntimeConfig {
     let (role, role_name) = select_role(subagent_type, overrides, roles);
-    let mut runtime = crate::resolve_effective_overrides(overrides, role, personas, cwd, role_name);
+    let mut runtime =
+        super::overrides::resolve_effective_overrides(overrides, role, personas, cwd, role_name);
     apply_definition_runtime_defaults(&mut runtime, definition);
     runtime
-}
-/// Render the same full subagent base template + definition body used by the
-/// production `AgentBuilder`, for runtimes that expose only finalized tool
-/// names rather than a complete `ToolBridge`.
-pub fn render_subagent_system_prompt(
-    definition: &AgentDefinition,
-    runtime: &EffectiveRuntimeConfig,
-    renderer: &TemplateRenderer,
-    working_directory: &Path,
-) -> Option<String> {
-    let context = PromptContext {
-        prompt_composition: definition.prompt_composition.clone(),
-        audience: PromptAudience::Subagent,
-        prompt_body: definition.prompt_body.clone(),
-        system_prompt: definition.system_prompt.clone(),
-        role_instructions: runtime.role_prompt.clone(),
-        persona_instructions: runtime.persona_instructions.clone(),
-        os_name: Some(format!(
-            "{} {}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        )),
-        shell_path: std::env::var("SHELL").ok(),
-        working_directory: Some(working_directory.to_string_lossy().into_owned()),
-        current_date: Some(chrono::Local::now().format("%Y-%m-%d").to_string()),
-        is_non_interactive: true,
-        ..Default::default()
-    };
-    context.render_with_renderer(renderer)
-}
-/// Render project instructions as the child's prepended user message.
-pub async fn render_subagent_initial_user_message(
-    definition: &AgentDefinition,
-    working_directory: &Path,
-    compat: CompatConfig,
-) -> Option<String> {
-    if !definition.agents_md {
-        return None;
-    }
-    let agents_md_files = agent::prompt::agents_md::read_agents_config_with_paths(
-        &working_directory.to_string_lossy(),
-        compat,
-    )
-    .await;
-    PromptContext {
-        audience: PromptAudience::Subagent,
-        system_prompt: definition.system_prompt.clone(),
-        agents_md_files,
-        ..Default::default()
-    }
-    .agents_md_user_reminder()
 }
 #[cfg(test)]
 mod tests {
@@ -332,44 +279,5 @@ mod tests {
         let mut runtime = EffectiveRuntimeConfig::default();
         apply_definition_runtime_defaults(&mut runtime, &definition);
         assert_eq!(runtime.isolation, SubagentIsolationMode::Worktree);
-    }
-    #[test]
-    fn full_prompt_uses_production_subagent_template_and_body() {
-        let cwd = tempfile::tempdir().unwrap();
-        let toggles = HashMap::new();
-        let definition =
-            resolve_agent_definition("explore", &context(cwd.path(), &toggles)).unwrap();
-        let renderer = TemplateRenderer::new(
-            HashMap::from([
-                (ToolKind::Read, "read_x".to_string()),
-                (ToolKind::List, "list_x".to_string()),
-                (ToolKind::Search, "search_x".to_string()),
-            ]),
-            HashMap::new(),
-        );
-        let prompt = render_subagent_system_prompt(
-            &definition,
-            &EffectiveRuntimeConfig::default(),
-            &renderer,
-            cwd.path(),
-        )
-        .unwrap();
-        assert!(prompt.contains("<project_instructions_spec>"));
-        assert!(prompt.contains("Investigate the assigned question"));
-        assert!(prompt.contains(&format!("Workspace: {}", cwd.path().display())));
-        assert!(!prompt.contains("${{"));
-    }
-    #[tokio::test]
-    async fn initial_user_message_contains_project_instructions() {
-        let cwd = tempfile::tempdir().unwrap();
-        std::fs::write(cwd.path().join("AGENTS.md"), "Use the project contract.").unwrap();
-        let toggles = HashMap::new();
-        let definition =
-            resolve_agent_definition("explore", &context(cwd.path(), &toggles)).unwrap();
-        let message =
-            render_subagent_initial_user_message(&definition, cwd.path(), CompatConfig::default())
-                .await
-                .unwrap();
-        assert!(message.contains("Use the project contract."));
     }
 }

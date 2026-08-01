@@ -1278,7 +1278,7 @@ mod tests {
         // fragment on the first row matched and became clickable.
         let row0 =
             make_line("Image generated and saved to /Users/alice/.grow/sessions/%2FUsers%2Fali");
-        let row1 = make_line("ce%2Fcode%2Fxai/00000000-0000-0000-0000-000000000001/images/1.jpg");
+        let row1 = make_line("ce%2Fcode%2Fgrow/00000000-0000-0000-0000-000000000001/images/1.jpg");
         let rows: Vec<(u16, &Line<'static>, Option<&str>)> =
             vec![(3, &row0, None), (4, &row1, Some(""))];
         let mut overlay = LinkOverlay::new();
@@ -1286,7 +1286,7 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 2, "one overlay region per row");
         let expected_url = "file:///Users/alice/.grow/sessions/%252FUsers%252Fali\
-                            ce%252Fcode%252Fxai/00000000-0000-0000-0000-000000000001/images/1.jpg";
+                            ce%252Fcode%252Fgrow/00000000-0000-0000-0000-000000000001/images/1.jpg";
         for link in overlay.links() {
             assert_eq!(
                 &*resolve_link_target(&link.target)
@@ -1313,7 +1313,7 @@ mod tests {
         assert_eq!(
             l1.col_end,
             2 + UnicodeWidthStr::width(
-                "ce%2Fcode%2Fxai/00000000-0000-0000-0000-000000000001/images/1.jpg"
+                "ce%2Fcode%2Fgrow/00000000-0000-0000-0000-000000000001/images/1.jpg"
             ) as u16
         );
     }

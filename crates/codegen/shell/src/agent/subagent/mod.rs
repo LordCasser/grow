@@ -11,6 +11,7 @@
 //! - Child sessions share the parent's hunk tracker, filesystem, terminal, and env
 //!   so that edits, bash commands, and file reads go through the same backends.
 use crate::agent::config::{resolve_credentials, sampling_config_for_model};
+use crate::agent::subagent::resolution::ResumeSourceData;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use crate::session::events::CancellationCategory;
 use crate::session::{
@@ -29,7 +30,6 @@ use sampling_types::conversation::ConversationItem;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use subagent_resolution::ResumeSourceData;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tools::implementations::grow_build::monitor::types::MonitorEventBuffer;
@@ -41,6 +41,7 @@ use tools::implementations::grow_build::task::types::*;
 use tools::types::tool::ToolKind;
 use workspace::file_system::AsyncFileSystem;
 mod handle_request;
+pub(crate) mod resolution;
 pub(crate) use handle_request::run_shell_child;
 /// How the child session's initial context was bootstrapped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,10 +190,12 @@ pub(crate) struct SubagentSpawnContext {
     pub parent_session_info: Option<SessionInfo>,
     /// Subagent roles config for role-based config layering.
     pub subagent_roles:
-        std::collections::HashMap<String, subagent_resolution::config::SubagentRole>,
+        std::collections::HashMap<String, crate::agent::subagent::resolution::config::SubagentRole>,
     /// Subagent personas config for persona/SOUL layering.
-    pub subagent_personas:
-        std::collections::HashMap<String, subagent_resolution::config::SubagentPersona>,
+    pub subagent_personas: std::collections::HashMap<
+        String,
+        crate::agent::subagent::resolution::config::SubagentPersona,
+    >,
     /// Parent session's ChatStateHandle — used to read the actual live
     /// sampling config and credentials from the parent session actor (async).
     /// Cheap Clone (mpsc sender). `None` when parent SessionHandle not found.
@@ -815,7 +818,8 @@ fn forked_initial_context(
             verbatim_fork: false,
         };
     }
-    let (conversation, prefix_len) = subagent_resolution::context::normalize_forked_context(items);
+    let (conversation, prefix_len) =
+        crate::agent::subagent::resolution::context::normalize_forked_context(items);
     if prefix_len < 2 {
         return InitialContext {
             source: InitialContextSource::New,
@@ -907,7 +911,7 @@ fn verbatim_or_normalize_fork(
         };
     }
     let (conversation, prefix_len) =
-        subagent_resolution::context::normalize_forked_context(filtered);
+        crate::agent::subagent::resolution::context::normalize_forked_context(filtered);
     InitialContext {
         source: InitialContextSource::Forked,
         copy_error: None,
@@ -1316,14 +1320,16 @@ fn resolve_agent_definition(
         .as_ref()
         .map(|config| config.cli_agents.as_slice())
         .unwrap_or_default();
-    let resolution_context = subagent_resolution::DefinitionResolutionContext {
+    let resolution_context = crate::agent::subagent::resolution::DefinitionResolutionContext {
         cwd: &ctx.parent_cwd,
         plugins: ctx.plugin_registry.as_deref(),
         cli_agents,
         toggles: &ctx.subagent_toggle,
     };
-    let mut def =
-        subagent_resolution::discover_agent_definition(subagent_type, &resolution_context)?;
+    let mut def = crate::agent::subagent::resolution::discover_agent_definition(
+        subagent_type,
+        &resolution_context,
+    )?;
     ctx.apply_session_cli_overrides(&mut def);
     Some(def)
 }
@@ -1333,12 +1339,14 @@ fn available_agent_names(ctx: &SubagentSpawnContext) -> Vec<String> {
         .as_ref()
         .map(|config| config.cli_agents.as_slice())
         .unwrap_or_default();
-    subagent_resolution::available_agent_names(&subagent_resolution::DefinitionResolutionContext {
-        cwd: &ctx.parent_cwd,
-        plugins: ctx.plugin_registry.as_deref(),
-        cli_agents,
-        toggles: &ctx.subagent_toggle,
-    })
+    crate::agent::subagent::resolution::available_agent_names(
+        &crate::agent::subagent::resolution::DefinitionResolutionContext {
+            cwd: &ctx.parent_cwd,
+            plugins: ctx.plugin_registry.as_deref(),
+            cli_agents,
+            toggles: &ctx.subagent_toggle,
+        },
+    )
     .into_iter()
     .filter(|name| ctx.subagent_filter.allows(name))
     .collect()
@@ -1362,15 +1370,15 @@ pub(crate) fn validate_subagent_type(
     if !ctx.subagent_filter.allows(subagent_type) {
         return SubagentValidateTypeOutcome::Disabled;
     }
-    let context = subagent_resolution::DefinitionValidationContext {
+    let context = crate::agent::subagent::resolution::DefinitionValidationContext {
         cwd: &ctx.parent_cwd,
         plugins: ctx.plugin_registry.as_deref(),
         cli_agent_names: &ctx.cli_agent_names,
         toggles: &ctx.subagent_toggle,
     };
-    match subagent_resolution::validate_agent_name(subagent_type, &context) {
+    match crate::agent::subagent::resolution::validate_agent_name(subagent_type, &context) {
         Ok(()) => SubagentValidateTypeOutcome::Ok,
-        Err(subagent_resolution::ResolutionError::Unknown { available, .. }) => {
+        Err(crate::agent::subagent::resolution::ResolutionError::Unknown { available, .. }) => {
             SubagentValidateTypeOutcome::Unknown {
                 available: available
                     .into_iter()
@@ -1378,13 +1386,12 @@ pub(crate) fn validate_subagent_type(
                     .collect(),
             }
         }
-        Err(subagent_resolution::ResolutionError::Disabled { .. }) => {
+        Err(crate::agent::subagent::resolution::ResolutionError::Disabled { .. }) => {
             SubagentValidateTypeOutcome::Disabled
         }
-        Err(
-            subagent_resolution::ResolutionError::PersonaResolution(_)
-            | subagent_resolution::ResolutionError::ResumeValidation(_),
-        ) => SubagentValidateTypeOutcome::ValidationUnavailable,
+        Err(crate::agent::subagent::resolution::ResolutionError::PersonaResolution(_)) => {
+            SubagentValidateTypeOutcome::ValidationUnavailable
+        }
     }
 }
 /// Gate an already-resolved subagent type against the `[subagents.toggle]`
@@ -1407,26 +1414,28 @@ fn gate_subagent_type(
         .as_ref()
         .map(|config| config.cli_agents.as_slice())
         .unwrap_or_default();
-    let resolution_context = subagent_resolution::DefinitionResolutionContext {
+    let resolution_context = crate::agent::subagent::resolution::DefinitionResolutionContext {
         cwd: &ctx.parent_cwd,
         plugins: ctx.plugin_registry.as_deref(),
         cli_agents,
         toggles: &ctx.subagent_toggle,
     };
-    match subagent_resolution::gate_agent_definition(subagent_type, &resolution_context) {
+    match crate::agent::subagent::resolution::gate_agent_definition(
+        subagent_type,
+        &resolution_context,
+    ) {
         Ok(()) => SubagentValidateTypeOutcome::Ok,
-        Err(subagent_resolution::ResolutionError::Disabled { .. }) => {
+        Err(crate::agent::subagent::resolution::ResolutionError::Disabled { .. }) => {
             SubagentValidateTypeOutcome::Disabled
         }
         Err(
-            subagent_resolution::ResolutionError::Unknown { .. }
-            | subagent_resolution::ResolutionError::PersonaResolution(_)
-            | subagent_resolution::ResolutionError::ResumeValidation(_),
+            crate::agent::subagent::resolution::ResolutionError::Unknown { .. }
+            | crate::agent::subagent::resolution::ResolutionError::PersonaResolution(_),
         ) => SubagentValidateTypeOutcome::ValidationUnavailable,
     }
 }
 pub(crate) fn subagent_harness_flavor_is_representable(agent_type: &str) -> bool {
-    subagent_resolution::subagent_harness_flavor_is_representable(agent_type)
+    crate::agent::subagent::resolution::subagent_harness_flavor_is_representable(agent_type)
 }
 /// Apply the harness-dependent toolset/prompt re-selection to a resolved
 /// agent definition.
@@ -1445,12 +1454,16 @@ fn resolve_subagent_toolset(
     ctx: &SubagentSpawnContext,
     definition: &mut agent::config::AgentDefinition,
 ) {
-    let resolution_context = subagent_resolution::HarnessToolsetContext {
+    let resolution_context = crate::agent::subagent::resolution::HarnessToolsetContext {
         harness_override: harness_agent_type,
         parent_agent_name: ctx.parent_agent_name.as_deref(),
         file_tool_overrides: ctx.file_tool_overrides.as_deref(),
     };
-    subagent_resolution::apply_harness_toolset(subagent_type, &resolution_context, definition);
+    crate::agent::subagent::resolution::apply_harness_toolset(
+        subagent_type,
+        &resolution_context,
+        definition,
+    );
 }
 /// Map a resolved `ToolServerConfig` into a [`SubagentTypeSummary`].
 ///

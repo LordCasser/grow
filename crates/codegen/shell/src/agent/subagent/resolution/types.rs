@@ -2,19 +2,6 @@
 
 use std::path::PathBuf;
 
-use crate::resume::ResumeValidationError;
-
-/// How the child session's initial context was bootstrapped.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContextSource {
-    /// Fresh session with no inherited history.
-    New,
-    /// Resumed from a previously completed peer subagent. The child inherits
-    /// the source's raw transcript, tool state, and model. System prompt and
-    /// prompt context are freshly rendered.
-    Resumed,
-}
-
 /// Resolved effective runtime configuration for a child agent.
 ///
 /// Precedence: explicit spawn-time override > role default > persona default > parent inheritance (None).
@@ -96,10 +83,6 @@ pub enum ResolutionError {
     /// Persona was explicitly requested but could not be resolved.
     #[error("persona resolution failed: {0}")]
     PersonaResolution(String),
-
-    /// Resume identity validation failed.
-    #[error("resume validation failed: {0}")]
-    ResumeValidation(#[from] ResumeValidationError),
 }
 
 #[cfg(test)]
@@ -129,24 +112,5 @@ mod tests {
             err.to_string(),
             "persona resolution failed: persona \"x\" not found",
         );
-    }
-
-    #[test]
-    fn resolution_error_resume_from_typed_error() {
-        let typed = ResumeValidationError::TypeMismatch {
-            requested: "explore".into(),
-            source_value: "general-purpose".into(),
-        };
-        let err = ResolutionError::from(typed);
-        let msg = err.to_string();
-        assert!(msg.contains("resume validation failed"));
-        assert!(msg.contains("explore"));
-        assert!(msg.contains("general-purpose"));
-    }
-
-    #[test]
-    fn context_source_equality() {
-        assert_eq!(ContextSource::New, ContextSource::New);
-        assert_ne!(ContextSource::New, ContextSource::Resumed);
     }
 }

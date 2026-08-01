@@ -502,10 +502,10 @@
     }
 
     #[test]
-    fn workflow_updates_bypass_global_xai_highwater_and_use_run_revision() {
+    fn workflow_updates_bypass_global_grow_highwater_and_use_run_revision() {
         let mut app = make_app_with_agent("sess-A");
         let id = AgentId(0);
-        app.agents.get_mut(&id).unwrap().last_applied_xai_event_seq = Some(100);
+        app.agents.get_mut(&id).unwrap().last_applied_grow_event_seq = Some(100);
 
         let mut update = workflow_update_value("wf", "deep-research", "active", false);
         update["revision"] = serde_json::json!(1);
@@ -526,7 +526,7 @@
 
         assert!(affected, "per-run workflow revision must win over the global highwater");
         assert_eq!(app.agents[&id].workflow_runs[0].run_id, "wf");
-        assert_eq!(app.agents[&id].last_applied_xai_event_seq, Some(100));
+        assert_eq!(app.agents[&id].last_applied_grow_event_seq, Some(100));
         assert_eq!(app.agents[&id].last_seen_event_id.as_deref(), Some("sess-A-5"));
     }
 

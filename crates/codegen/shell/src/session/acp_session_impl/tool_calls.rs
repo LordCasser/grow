@@ -2539,7 +2539,7 @@ impl SessionActor {
                 arguments_delta,
                 ..
             } => {
-                self.send_buffered_xai_update(GrowSessionUpdate::ToolCallDeltaChunk {
+                self.send_buffered_grow_update(GrowSessionUpdate::ToolCallDeltaChunk {
                     tool_call_id: id,
                     tool_index,
                     name,
@@ -2555,7 +2555,7 @@ impl SessionActor {
                 cache_creation_input_tokens,
                 ..
             } => {
-                self.send_buffered_xai_update(GrowSessionUpdate::ResponseStarted {
+                self.send_buffered_grow_update(GrowSessionUpdate::ResponseStarted {
                     message_id: Some(message_id),
                     model: Some(model),
                     input_tokens,
@@ -2565,7 +2565,7 @@ impl SessionActor {
                 .await;
             }
             SamplingEvent::ReasoningCompleted { signature, .. } => {
-                self.send_buffered_xai_update(GrowSessionUpdate::ReasoningCompleted {
+                self.send_buffered_grow_update(GrowSessionUpdate::ReasoningCompleted {
                     signature: Some(signature),
                 })
                 .await;

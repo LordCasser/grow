@@ -111,7 +111,7 @@ fn picker_drops_local_with_missing_updated_at() {
     let payload = serde_json::json!({
             "sessions": [{
                 "sessionId": "local_no_ts",
-                "cwd": "/Users/me/xai",
+                "cwd": "/Users/me/grow",
                 "summary": "no timestamp",
                 "source": "local"
             }]

@@ -10,11 +10,11 @@
 //!   - Client         — `insert` (always wins)
 //!   - Managed        — header injection + auto-create missing connectors
 //!
-//! The transport/cache/injection core lives in
-//! `shell_session_support::managed_mcp` and is re-exported here so
-//! `crate::session::managed_mcp::…` paths keep resolving unchanged.
+//! Transport/cache/injection details live in the private `core` module; this
+//! module owns the complete shell-side managed MCP boundary.
 
-pub use shell_session_support::managed_mcp::*;
+mod core;
+pub use core::*;
 
 use agent_client_protocol as acp;
 use std::collections::HashMap;

@@ -7634,34 +7634,6 @@ Additional requirements / notices:
   Upstream license expression: MIT OR Apache-2.0. For this distribution, obligations are satisfied under: MIT.
 
 --------------------------------------------------------------------------------
-md5 0.7.0
---------------------------------------------------------------------------------
-Source:  https://github.com/stainless-steel/md5
-License: MIT  (upstream declares: Apache-2.0/MIT)
-
-Copyright notice:
-  Copyright 2015–2019 The md5 Developers
-
-License text: see Part II — MIT
-
-Additional requirements / notices:
-  Upstream license expression: Apache-2.0/MIT. For this distribution, obligations are satisfied under: MIT.
-
---------------------------------------------------------------------------------
-md5 0.8.0
---------------------------------------------------------------------------------
-Source:  https://github.com/stainless-steel/md5
-License: MIT  (upstream declares: Apache-2.0/MIT)
-
-Copyright notice:
-  Copyright 2015–2025 The md5 Developers
-
-License text: see Part II — MIT
-
-Additional requirements / notices:
-  Upstream license expression: Apache-2.0/MIT. For this distribution, obligations are satisfied under: MIT.
-
---------------------------------------------------------------------------------
 memchr 2.8.2
 --------------------------------------------------------------------------------
 Source:  https://github.com/BurntSushi/memchr
@@ -8511,17 +8483,6 @@ Additional requirements / notices:
   Upstream license expression: MIT OR Apache-2.0. For this distribution, obligations are satisfied under: MIT.
 
 --------------------------------------------------------------------------------
-obfstr 0.4.4
---------------------------------------------------------------------------------
-Source:  https://github.com/CasualX/obfstr
-License: MIT
-
-Copyright notice:
-  Copyright (c) 2019-2020 Casper <CasualX@users.noreply.github.com>
-
-License text: see Part II — MIT
-
---------------------------------------------------------------------------------
 objc-sys 0.3.5
 --------------------------------------------------------------------------------
 Source:  https://github.com/madsmtm/objc2
@@ -9048,39 +9009,6 @@ License text: see Part II — MIT
 
 Additional requirements / notices:
   Upstream license expression: MIT OR Apache-2.0. For this distribution, obligations are satisfied under: MIT.
-
---------------------------------------------------------------------------------
-pbjson 0.9.0
---------------------------------------------------------------------------------
-Source:  https://github.com/influxdata/pbjson
-License: MIT
-
-Copyright notice:
-  Copyright (c) the package authors. See the package repository for details.
-
-License text: see Part II — MIT
-
---------------------------------------------------------------------------------
-pbjson-build 0.9.0
---------------------------------------------------------------------------------
-Source:  https://github.com/influxdata/pbjson
-License: MIT
-
-Copyright notice:
-  Copyright (c) the package authors. See the package repository for details.
-
-License text: see Part II — MIT
-
---------------------------------------------------------------------------------
-pbjson-types 0.9.0
---------------------------------------------------------------------------------
-Source:  https://github.com/influxdata/pbjson
-License: MIT
-
-Copyright notice:
-  Copyright (c) the package authors. See the package repository for details.
-
-License text: see Part II — MIT
 
 --------------------------------------------------------------------------------
 pbkdf2 0.11.0
@@ -10005,114 +9933,6 @@ Additional requirements / notices:
   Upstream license expression: Apache-2.0 OR MIT. For this distribution, obligations are satisfied under: MIT.
 
 --------------------------------------------------------------------------------
-prost 0.14.3
---------------------------------------------------------------------------------
-Source:  https://github.com/tokio-rs/prost
-License: Apache-2.0
-
-Copyright notice:
-  Copyright holders / authors (from package metadata):
-    - Dan Burkert <dan@danburkert.com>
-    - Lucio Franco <luciofranco14@gmail.com>
-    - Casper Meijn <casper@meijn.net>
-    - Tokio Contributors <team@tokio.rs>
-
-License text: see Part II — Apache-2.0
-
-Additional requirements / notices:
-  Apache-2.0 additional terms: this package is used unmodified from its upstream source/crates.io (or git) release for this product build. Any NOTICE file shipped with the package (if present) is reproduced below.
-
---------------------------------------------------------------------------------
-prost-build 0.14.1
---------------------------------------------------------------------------------
-Source:  https://github.com/tokio-rs/prost
-License: Apache-2.0
-
-Copyright notice:
-  Copyright 2017 Dan Burkert
-
-License text: see Part II — Apache-2.0
-
-Additional requirements / notices:
-  Apache-2.0 additional terms: this package is used unmodified from its upstream source/crates.io (or git) release for this product build. Any NOTICE file shipped with the package (if present) is reproduced below.
-
---------------------------------------------------------------------------------
-prost-derive 0.14.3
---------------------------------------------------------------------------------
-Source:  https://github.com/tokio-rs/prost
-License: Apache-2.0
-
-Copyright notice:
-  Copyright 2017 Dan Burkert
-
-License text: see Part II — Apache-2.0
-
-Additional requirements / notices:
-  Apache-2.0 additional terms: this package is used unmodified from its upstream source/crates.io (or git) release for this product build. Any NOTICE file shipped with the package (if present) is reproduced below.
-
---------------------------------------------------------------------------------
-prost-reflect 0.16.4
---------------------------------------------------------------------------------
-Source:  https://github.com/andrewhickman/prost-reflect
-License: MIT  (upstream declares: MIT OR Apache-2.0)
-
-Copyright notice:
-  Copyright holders / authors (from package metadata):
-    - Andrew Hickman <andrew.hickman1@sky.com>
-
-License text: see Part II — MIT
-
-Additional requirements / notices:
-  Upstream license expression: MIT OR Apache-2.0. For this distribution, obligations are satisfied under: MIT.
-
---------------------------------------------------------------------------------
-prost-types 0.14.3
---------------------------------------------------------------------------------
-Source:  https://github.com/tokio-rs/prost
-License: Apache-2.0
-
-Copyright notice:
-  Copyright 2017 Dan Burkert
-
-License text: see Part II — Apache-2.0
-
-Additional requirements / notices:
-  Apache-2.0 additional terms: this package is used unmodified from its upstream source/crates.io (or git) release for this product build. Any NOTICE file shipped with the package (if present) is reproduced below.
-
---------------------------------------------------------------------------------
-protobuf 2.28.0
---------------------------------------------------------------------------------
-Source:  https://github.com/stepancheg/rust-protobuf
-License: MIT
-
-Copyright notice:
-  Copyright (c) 2019 Stepan Koltsov
-
-License text: see Part II — MIT
-
---------------------------------------------------------------------------------
-protobuf 3.7.2
---------------------------------------------------------------------------------
-Source:  https://github.com/stepancheg/rust-protobuf
-License: MIT
-
-Copyright notice:
-  Copyright (c) 2019 Stepan Koltsov
-
-License text: see Part II — MIT
-
---------------------------------------------------------------------------------
-protobuf-support 3.7.2
---------------------------------------------------------------------------------
-Source:  https://github.com/stepancheg/rust-protobuf
-License: MIT
-
-Copyright notice:
-  Copyright (c) 2019 Stepan Koltsov
-
-License text: see Part II — MIT
-
---------------------------------------------------------------------------------
 pulldown-cmark 0.13.0
 --------------------------------------------------------------------------------
 Source:  https://github.com/raphlinus/pulldown-cmark
@@ -10823,22 +10643,6 @@ License: MIT  (upstream declares: MIT OR Apache-2.0)
 
 Copyright notice:
   Copyright (c) 2018 Yevhenii Reizner
-
-License text: see Part II — MIT
-
-Additional requirements / notices:
-  Upstream license expression: MIT OR Apache-2.0. For this distribution, obligations are satisfied under: MIT.
-
---------------------------------------------------------------------------------
-rsa 0.9.10
---------------------------------------------------------------------------------
-Source:  https://github.com/RustCrypto/RSA
-License: MIT  (upstream declares: MIT OR Apache-2.0)
-
-Copyright notice:
-  Copyright holders / authors (from package metadata):
-    - RustCrypto Developers
-    - dignifiedquire <dignifiedquire@gmail.com>
 
 License text: see Part II — MIT
 
@@ -13932,85 +13736,6 @@ License text: see Part II — MIT
 
 Additional requirements / notices:
   Upstream license expression: MIT OR Apache-2.0. For this distribution, obligations are satisfied under: MIT.
-
---------------------------------------------------------------------------------
-tonic 0.14.3
---------------------------------------------------------------------------------
-Source:  https://github.com/hyperium/tonic
-License: MIT
-
-Copyright notice:
-  Copyright (c) 2025 Lucio Franco
-
-License text: see Part II — MIT
-
---------------------------------------------------------------------------------
-tonic-build 0.14.3
---------------------------------------------------------------------------------
-Source:  https://github.com/hyperium/tonic
-License: MIT
-
-Copyright notice:
-  Copyright (c) 2025 Lucio Franco
-
-License text: see Part II — MIT
-
---------------------------------------------------------------------------------
-tonic-prost 0.14.3
---------------------------------------------------------------------------------
-Source:  https://github.com/hyperium/tonic
-License: MIT
-
-Copyright notice:
-  Copyright holders / authors (from package metadata):
-    - Lucio Franco <luciofranco14@gmail.com>
-
-License text: see Part II — MIT
-
---------------------------------------------------------------------------------
-tonic-prost-build 0.14.3
---------------------------------------------------------------------------------
-Source:  https://github.com/hyperium/tonic
-License: MIT
-
-Copyright notice:
-  Copyright holders / authors (from package metadata):
-    - Lucio Franco <luciofranco14@gmail.com>
-
-License text: see Part II — MIT
-
---------------------------------------------------------------------------------
-tonic-reflection 0.14.5
---------------------------------------------------------------------------------
-Source:  https://github.com/hyperium/tonic
-License: MIT
-
-Copyright notice:
-  Copyright (c) 2025 Lucio Franco
-
-License text: see Part II — MIT
-
---------------------------------------------------------------------------------
-tonic-types 0.14.5
---------------------------------------------------------------------------------
-Source:  https://github.com/hyperium/tonic
-License: MIT
-
-Copyright notice:
-  Copyright (c) 2025 Lucio Franco
-
-License text: see Part II — MIT
-
---------------------------------------------------------------------------------
-tonic-web 0.14.5
---------------------------------------------------------------------------------
-Source:  https://github.com/hyperium/tonic
-License: MIT
-
-Copyright notice:
-  Copyright (c) 2025 Lucio Franco
-
-License text: see Part II — MIT
 
 --------------------------------------------------------------------------------
 tower 0.5.2

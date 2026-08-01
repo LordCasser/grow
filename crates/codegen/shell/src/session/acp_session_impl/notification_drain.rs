@@ -419,10 +419,8 @@ impl SessionActor {
                 return;
             }
         }
-        for contributor in self.extension_registry.session_lifecycle_contributors() {
-            contributor
-                .on_session_idle(&agent_lifecycle::SessionIdleInput)
-                .await;
+        if let Some(extension) = &self.idle_prompt_extension {
+            extension.on_session_idle();
         }
     }
 

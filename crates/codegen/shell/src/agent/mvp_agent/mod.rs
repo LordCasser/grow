@@ -869,8 +869,8 @@ impl MvpAgent {
             tracing::debug!("replay: skipping JSONL line with no params");
             return;
         };
-        let is_xai = method == "_grow/session/update";
-        if is_xai {
+        let is_grow = method == "_grow/session/update";
+        if is_grow {
             if target_client_id.is_none() && !mark_replay {
                 if let Ok(owned) = serde_json::value::RawValue::from_string(
                     raw_params.get().to_owned(),

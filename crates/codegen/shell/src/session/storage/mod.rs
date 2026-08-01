@@ -3328,8 +3328,8 @@ mod tests {
             r#"{"eventId":"ev1"}"#,
         );
         // Grow-style line persisted by an older binary: no _meta at all.
-        let old_xai = r#"{"timestamp":2,"method":"_grow/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"hook_annotation","message":"trailing"}}}"#;
-        let raw = format!("{a1}\n{old_xai}\n");
+        let old_grow = r#"{"timestamp":2,"method":"_grow/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"hook_annotation","message":"trailing"}}}"#;
+        let raw = format!("{a1}\n{old_grow}\n");
 
         let prepared = prepare_replay_lines(&raw, Some("ev1"));
         assert!(
@@ -3339,8 +3339,8 @@ mod tests {
         assert_eq!(prepared.lines.len(), 2, "full history is replayed");
 
         // Same history with the trailing line stamped resolves incrementally.
-        let new_xai = r#"{"timestamp":2,"method":"_grow/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"hook_annotation","message":"trailing"},"_meta":{"eventId":"ev2"}}}"#;
-        let raw = format!("{a1}\n{new_xai}\n");
+        let new_grow = r#"{"timestamp":2,"method":"_grow/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"hook_annotation","message":"trailing"},"_meta":{"eventId":"ev2"}}}"#;
+        let raw = format!("{a1}\n{new_grow}\n");
         let prepared = prepare_replay_lines(&raw, Some("ev1"));
         assert!(!prepared.mark_replay);
         assert_eq!(prepared.lines.len(), 1);
@@ -3958,7 +3958,7 @@ mod tests {
     }
 
     #[test]
-    fn from_str_unknown_xai_variant_deserializes_via_envelope() {
+    fn from_str_unknown_grow_variant_deserializes_via_envelope() {
         // Simulates an updates.jsonl line containing a removed variant (e.g. git_branch_update).
         // SessionUpdateEnvelope::from_str must not error — the Unknown catch-all absorbs it.
         let line = grow_envelope(r#"{"sessionUpdate":"git_branch_update","branch":"main"}"#);
@@ -3975,7 +3975,7 @@ mod tests {
     }
 
     #[test]
-    fn from_str_known_xai_variant_still_works() {
+    fn from_str_known_grow_variant_still_works() {
         let line = grow_envelope(r#"{"sessionUpdate":"memory_flush_started"}"#);
         let update = SessionUpdateEnvelope::from_str(&line).unwrap();
         match update {

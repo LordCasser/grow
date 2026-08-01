@@ -294,7 +294,7 @@ fn create_same_repo_cwds(home: &Path) -> SameRepoTopology {
     let repo = git2::Repository::init(&repo_dir).expect("initialize main git repository");
     repo.remote(
         "origin",
-        "https://github.com/xai-org/session-list-benchmark.git",
+        "https://github.com/grow-org/session-list-benchmark.git",
     )
     .expect("create benchmark git remote");
 
@@ -507,7 +507,7 @@ fn write_summary(
         hidden: None,
         source_workspace_dir: None,
         git_root_dir: Some(cwd.to_owned()),
-        git_remotes: vec!["git@github.com:xai-org/benchmark.git".to_owned()],
+        git_remotes: vec!["git@github.com:grow-org/benchmark.git".to_owned()],
         head_commit: Some(format!("{ordinal:040x}")),
         head_branch: Some("main".to_owned()),
         grow_home: None,
