@@ -6,18 +6,18 @@ first connection, configure at least one provider model and select a global defa
 
 ```toml
 [models]
-default = "zuozuo/claude-opus-5"
+default = "deepseek/deepseek-chat"
 
-[provider.zuozuo]
-api_backend = "messages"
+[provider.deepseek]
+api_backend = "chat_completions"
 
-[provider.zuozuo.options]
-base_url = "https://cyber.85466110.xyz/v1"
-env_key = "ZUOZUO_API_KEY"
+[provider.deepseek.options]
+base_url = "https://api.deepseek.com/v1"
+env_key = "DEEPSEEK_API_KEY"
 
-[provider.zuozuo.models.claude-opus-5]
-name = "Claude Opus 5"
-context_window = 200000
+[provider.deepseek.models.deepseek-chat]
+name = "DeepSeek Chat"
+context_window = 128000
 ```
 
 `provider/model` is the stable catalog ID. The model table key is also the routing model sent to

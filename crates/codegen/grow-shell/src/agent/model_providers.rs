@@ -321,17 +321,17 @@ mod tests {
         let raw: toml::Value = toml::from_str(
             r#"
             [models]
-            default = "zuozuo/claude-opus-5"
+            default = "deepseek/deepseek-chat"
 
-            [provider.zuozuo]
-            api_backend = "messages"
+            [provider.deepseek]
+            api_backend = "chat_completions"
 
-            [provider.zuozuo.options]
+            [provider.deepseek.options]
             base_url = "https://gateway.example/v1"
             api_key = "secret"
 
-            [provider.zuozuo.models.claude-opus-5]
-            name = "Claude Opus 5"
+            [provider.deepseek.models.deepseek-chat]
+            name = "DeepSeek Chat"
             context_window = 200000
             "#,
         )
@@ -342,13 +342,13 @@ mod tests {
             .expect("provider config should be complete");
         let models = resolve_model_list(&cfg);
         let model = models
-            .get("zuozuo/claude-opus-5")
+            .get("deepseek/deepseek-chat")
             .expect("canonical provider/model id should exist");
-        assert_eq!(model.info.model, "claude-opus-5");
+        assert_eq!(model.info.model, "deepseek-chat");
         assert_eq!(model.info.base_url, "https://gateway.example/v1");
         assert_eq!(
             model.info.api_backend,
-            crate::sampling::ApiBackend::Messages
+            crate::sampling::ApiBackend::ChatCompletions
         );
         assert_eq!(
             resolve_credentials(model, Some("product-session-token"))

@@ -141,20 +141,20 @@ Grow 不包含遥测、产品分析、Sentry、OTLP exporter 或 trace upload。
 
 ```toml
 [models]
-default = "zuozuo/claude-opus-5"
+default = "deepseek/deepseek-chat"
 output_limit = 65536
 
-[provider.zuozuo]
-api_backend = "messages"
+[provider.deepseek]
+api_backend = "chat_completions"
 
-[provider.zuozuo.options]
-base_url = "https://cyber.85466110.xyz/v1"
-env_key = "ZUOZUO_API_KEY"
+[provider.deepseek.options]
+base_url = "https://api.deepseek.com/v1"
+env_key = "DEEPSEEK_API_KEY"
 
-[provider.zuozuo.models.claude-opus-5]
-name = "Claude Opus 5"
-context_window = 200000
-output_limit = 131072
+[provider.deepseek.models.deepseek-chat]
+name = "DeepSeek Chat"
+context_window = 128000
+output_limit = 65536
 ```
 
 `api_backend` 描述端点协议，而不是厂商名称：
