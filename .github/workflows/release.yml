@@ -613,7 +613,11 @@ jobs:
     name: Build macos-aarch64
     needs: validate
     # Skip on explicit workflow_dispatch request; release events always build.
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.skip-macos != 'true' }}
+    # Use github.event.inputs (raw event payload): the `inputs` context is not
+    # hydrated in job-level `if` for workflow_dispatch, so `inputs.skip-macos`
+    # evaluates empty there. Guard both string ('true') and boolean (true)
+    # forms — gh CLI and the raw API deliver the boolean input differently.
+    if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.skip-macos != 'true' && github.event.inputs.skip-macos != true) }}
     timeout-minutes: 180
     runs-on: macos-15
     env:
