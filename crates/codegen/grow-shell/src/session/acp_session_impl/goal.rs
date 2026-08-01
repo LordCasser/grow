@@ -977,7 +977,8 @@ impl SessionActor {
             }
             ResumeTransition::BudgetLimited => {
                 return GoalResumeOutcome::Message(
-                    "Goal is budget-limited. Use /goal clear, then /goal <objective>.".to_string(),
+                    "Goal is budget-limited. Use /goal budget <tokens>, then /goal resume."
+                        .to_string(),
                 );
             }
             ResumeTransition::NoGoal => {
@@ -1141,7 +1142,7 @@ impl SessionActor {
         );
         self.send_slash_command_output(&format!(
             "Goal token budget reached ({tokens_used} of {budget} tokens) — goal \
-             stopped. Use /goal clear, then /goal <objective> to start a new one."
+             paused. Use /goal budget <tokens>, then /goal resume to continue."
         ))
         .await;
         true

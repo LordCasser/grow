@@ -504,21 +504,29 @@ impl SessionActor {
                             if tracker.snapshot().is_none() {
                                 "当前没有活跃目标。使用 /goal set <objective> 开始。".to_string()
                             } else if let Some(b) = token_budget {
-                                let was_budget_limited = tracker.status()
-                                    == Some(
-                                        crate::session::goal_tracker::GoalStatus::BudgetLimited,
-                                    );
-                                tracker.set_token_budget(Some(b));
-                                // `persist_goal_state` is synchronous (sends a
-                                // snapshot clone into the persistence channel),
-                                // so it can run under the tracker lock.
-                                self.goal_notify_sender().persist_goal_state(&tracker);
-                                if was_budget_limited {
-                                    format!(
-                                        "Goal token budget updated to {b} tokens. 使用 /goal resume 继续。"
-                                    )
+                                if tracker.status()
+                                    == Some(crate::session::goal_tracker::GoalStatus::Complete)
+                                {
+                                    "Goal is already complete. Use /goal set <objective> to start a new one."
+                                        .to_string()
                                 } else {
-                                    format!("Goal token budget updated to {b} tokens.")
+                                    let was_budget_limited = tracker.status()
+                                        == Some(
+                                            crate::session::goal_tracker::GoalStatus::BudgetLimited,
+                                        );
+                                    let updated = tracker.set_token_budget(Some(b));
+                                    debug_assert!(updated);
+                                    // `persist_goal_state` is synchronous (sends a
+                                    // snapshot clone into the persistence channel),
+                                    // so it can run under the tracker lock.
+                                    self.goal_notify_sender().persist_goal_state(&tracker);
+                                    if was_budget_limited {
+                                        format!(
+                                            "Goal token budget updated to {b} tokens. 使用 /goal resume 继续。"
+                                        )
+                                    } else {
+                                        format!("Goal token budget updated to {b} tokens.")
+                                    }
                                 }
                             } else {
                                 "Usage: /goal budget <tokens>".to_string()

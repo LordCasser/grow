@@ -1757,6 +1757,7 @@ impl AppView {
             ActiveView::Welcome => handle_welcome_input(
                 ev,
                 &mut WelcomeInputCtx {
+                    registry: &self.registry,
                     auth_state: &self.auth_state,
                     trust_state: &self.trust_state,
                     cwd: &self.cwd,
@@ -2310,6 +2311,7 @@ use crate::views::session_picker::{
 };
 /// Context for welcome-view input handling.
 struct WelcomeInputCtx<'a> {
+    registry: &'a ActionRegistry,
     auth_state: &'a AuthState,
     /// Folder-trust state. When `Pending` (and auth is `Done`), the trust
     /// question intercepts keys and swallows the rest so no session starts.
@@ -2718,6 +2720,11 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 if ctx.menu_index.take().is_some() {
                     return InputOutcome::Changed;
                 }
+                return InputOutcome::Unchanged;
+            }
+            // Global shortcuts are resolved by the outer input layer after a
+            // view returns `Unchanged`. Do not turn them into prompt input.
+            if ctx.registry.lookup(key, When::Always).is_some() {
                 return InputOutcome::Unchanged;
             }
             // Any uncaught key (text chars, Backspace, Tab, arrows with
@@ -7823,6 +7830,17 @@ pub(crate) mod tests {
             outcome,
             InputOutcome::ActionThenForward(Action::NewSession)
         ));
+    }
+    #[test]
+    fn welcome_ctrl_backslash_opens_dashboard_without_starting_session() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Done;
+        let outcome = app.handle_input(&key_event(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::OpenDashboard)
+        ));
+        assert!(app.agents.is_empty());
     }
     #[test]
     fn welcome_shift_tab_starts_session_and_forwards() {

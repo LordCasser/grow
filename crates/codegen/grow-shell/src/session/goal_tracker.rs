@@ -707,12 +707,10 @@ impl GoalTracker {
             snapshot.verifier_id = generate_verifier_id();
         }
         // Best-effort like `create_goal`: scratch rarely survives a restart
-        // but the skeptics expect it. Terminal snapshots had theirs removed
-        // deliberately — don't resurrect.
-        if !matches!(
-            snapshot.status,
-            GoalStatus::Complete | GoalStatus::BudgetLimited
-        ) {
+        // but the skeptics expect it. Completed snapshots had theirs removed
+        // deliberately — don't resurrect. BudgetLimited remains recoverable,
+        // so its scratch directory must be rebuilt like every other pause.
+        if snapshot.status != GoalStatus::Complete {
             // Subdirs only under a verified root — a squatted root must
             // not receive writes through `create_dir_all`. Recompute readiness
             // so a resumed prompt only claims the dir exists when it does.
@@ -729,7 +727,7 @@ impl GoalTracker {
                 }
             };
         } else {
-            // The prompt must not claim a dir the terminal transition removed.
+            // The prompt must not claim a dir the completed transition removed.
             snapshot.scratch_dir_ready = false;
         }
         let active_since = if snapshot.status == GoalStatus::Active {
@@ -1098,17 +1096,11 @@ impl GoalTracker {
             o.current_subagent_id = None;
             o.current_subagent_role = None;
             o.pause_message = None;
-            // Symmetric with `complete`: drop the resumed reject-gatekeeper,
-            // the frozen per-index model assignment, and the plan baseline on
-            // every terminal goal-ending transition.
-            o.skeptic0_session_id = None;
-            o.skeptic_model_assignment.clear();
-            o.plan_baseline_file = None;
+            // Budget exhaustion is recoverable after an explicit re-budget.
+            // Keep the verifier session, frozen model assignment, plan baseline,
+            // and scratch files so resume can continue the same goal faithfully.
             o.reset_strategist_fields();
             o.reset_evaluator_blocker_fields();
-            // Symmetric with `complete`.
-            self.rescue_classifier_details();
-            self.remove_scratch_root();
             self.record_event(GoalEvent::BudgetExceeded, None);
             return true;
         }
@@ -1119,11 +1111,14 @@ impl GoalTracker {
     /// Unlocks a `BudgetLimited` pause by moving it to `UserPaused` so the
     /// existing resume path can continue the run. Resets the
     /// budget-limit-reported latch so a fresh exhaustion reports again.
-    /// Returns `false` when no goal is active.
+    /// Returns `false` when there is no goal or the goal is already complete.
     pub fn set_token_budget(&mut self, budget: Option<i64>) -> bool {
         let Some(o) = self.orchestration.as_mut() else {
             return false;
         };
+        if o.status == GoalStatus::Complete {
+            return false;
+        }
         o.token_budget = budget;
         o.budget_limit_reported = false;
         if o.status == GoalStatus::BudgetLimited {
@@ -1140,8 +1135,7 @@ impl GoalTracker {
     /// orchestration also drops `plan_baseline_file` / `skeptic0_session_id`,
     /// so no per-field reset is needed here — but the on-disk scratch root
     /// outlives the struct, so rescue the surfaced details file and remove
-    /// the root explicitly first (mirrors the `complete` / `budget_limit`
-    /// cleanup).
+    /// the root explicitly first (mirrors the `complete` cleanup).
     pub fn clear(&mut self) {
         self.rescue_classifier_details();
         self.remove_scratch_root();
@@ -2010,8 +2004,30 @@ mod tests {
     fn set_token_budget_unlocks_budget_limited() {
         let mut t = make_tracker();
         activate_tracker(&mut t);
+        let vid = t.snapshot().unwrap().verifier_id.clone();
+        let scratch_root = goal_scratch_root(&vid);
+        let plan_baseline = PathBuf::from("/tmp/sess/goal/plan.baseline.md");
+        let skeptic_assignment = crate::util::config::GoalRoleModel {
+            model: "grow-4".to_string(),
+            agent_type: "general-purpose".to_string(),
+        };
+        {
+            let o = t.snapshot_mut().unwrap();
+            o.plan_baseline_file = Some(plan_baseline.clone());
+            o.skeptic0_session_id = Some("prior-child".to_string());
+            o.skeptic_model_assignment = vec![skeptic_assignment.clone()];
+        }
         t.budget_limit();
         assert_eq!(t.status(), Some(GoalStatus::BudgetLimited));
+        let o = t.snapshot().unwrap();
+        assert!(
+            scratch_root.is_dir(),
+            "recoverable pause keeps scratch files"
+        );
+        assert!(o.scratch_dir_ready);
+        assert_eq!(o.plan_baseline_file.as_ref(), Some(&plan_baseline));
+        assert_eq!(o.skeptic0_session_id.as_deref(), Some("prior-child"));
+        assert_eq!(o.skeptic_model_assignment, vec![skeptic_assignment]);
         // resume must reject a BudgetLimited goal before re-budgeting.
         assert!(!t.resume());
 
@@ -2021,6 +2037,8 @@ mod tests {
         // The existing resume path takes over from UserPaused.
         assert!(t.resume());
         assert_eq!(t.status(), Some(GoalStatus::Active));
+        assert!(scratch_root.is_dir());
+        let _ = std::fs::remove_dir_all(scratch_root);
     }
 
     #[test]
@@ -2028,6 +2046,16 @@ mod tests {
         let mut t = make_tracker();
         assert!(!t.set_token_budget(Some(200_000)));
         assert!(!t.set_token_budget(None));
+    }
+
+    #[test]
+    fn set_token_budget_on_completed_goal_returns_false() {
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        let original_budget = t.token_budget();
+        assert!(t.complete_verified());
+        assert!(!t.set_token_budget(Some(200_000)));
+        assert_eq!(t.token_budget(), original_budget);
     }
 
     #[test]
@@ -2729,26 +2757,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(goal_scratch_root(&t.snapshot().unwrap().verifier_id));
     }
 
-    /// A terminal snapshot's scratch root was deliberately removed by its
+    /// A completed snapshot's scratch root was deliberately removed by its
     /// transition; restore must not resurrect it.
     #[test]
-    fn from_snapshot_skips_scratch_recreation_for_terminal_status() {
-        for status in [GoalStatus::Complete, GoalStatus::BudgetLimited] {
-            let mut orchestration = make_base_orchestration();
-            orchestration.status = status;
-            let scratch = implementer_scratch_dir(&orchestration.verifier_id);
+    fn from_snapshot_skips_scratch_recreation_for_completed_goal() {
+        let mut orchestration = make_base_orchestration();
+        orchestration.status = GoalStatus::Complete;
+        let scratch = implementer_scratch_dir(&orchestration.verifier_id);
 
-            let t = GoalTracker::from_snapshot(PathBuf::from("/tmp"), orchestration);
-            assert!(
-                !scratch.exists(),
-                "terminal status {status:?} must not recreate {}",
-                scratch.display(),
-            );
-            assert!(
-                !t.snapshot().unwrap().scratch_dir_ready,
-                "terminal status {status:?} must leave scratch_dir_ready false",
-            );
-        }
+        let t = GoalTracker::from_snapshot(PathBuf::from("/tmp"), orchestration);
+        assert!(
+            !scratch.exists(),
+            "completed goal must not recreate scratch"
+        );
+        assert!(!t.snapshot().unwrap().scratch_dir_ready);
+    }
+
+    #[test]
+    fn from_snapshot_recreates_scratch_for_budget_limited_goal() {
+        let mut orchestration = make_base_orchestration();
+        orchestration.status = GoalStatus::BudgetLimited;
+        let scratch = implementer_scratch_dir(&orchestration.verifier_id);
+
+        let t = GoalTracker::from_snapshot(PathBuf::from("/tmp"), orchestration);
+        assert!(scratch.is_dir(), "recoverable goal must recreate scratch");
+        assert!(t.snapshot().unwrap().scratch_dir_ready);
+        let _ = std::fs::remove_dir_all(goal_scratch_root(&t.snapshot().unwrap().verifier_id));
     }
 
     /// Anything off the pinned 12-hex `verifier_id` form must be
@@ -3054,25 +3088,15 @@ mod tests {
         );
     }
 
-    /// Every terminal goal-ending transition (`complete`, `budget_limit`)
-    /// clears the resumed skeptic-0 id so a later goal starts verification
-    /// with a fresh, cold skeptic 0.
+    /// Completion clears the resumed skeptic-0 id so a later goal starts
+    /// verification with a fresh, cold skeptic 0.
     #[test]
-    fn terminal_transitions_clear_skeptic0_session_id() {
-        for ending in ["complete", "budget_limit"] {
-            let mut t = make_tracker();
-            activate_tracker(&mut t);
-            t.snapshot_mut().unwrap().skeptic0_session_id = Some("prior-child".to_string());
-            let applied = match ending {
-                "complete" => t.complete_verified(),
-                _ => t.budget_limit(),
-            };
-            assert!(applied, "{ending} transition must apply");
-            assert!(
-                t.snapshot().unwrap().skeptic0_session_id.is_none(),
-                "{ending}() must clear skeptic0_session_id",
-            );
-        }
+    fn completion_clears_skeptic0_session_id() {
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        t.snapshot_mut().unwrap().skeptic0_session_id = Some("prior-child".to_string());
+        assert!(t.complete_verified());
+        assert!(t.snapshot().unwrap().skeptic0_session_id.is_none());
     }
 
     /// `skeptic_model_assignment` (the frozen per-index pool) round-trips
@@ -3124,51 +3148,31 @@ mod tests {
         assert!(restored.skeptic_model_assignment.is_empty());
     }
 
-    /// Sibling of `skeptic0_session_id`: every terminal goal-ending
-    /// transition (`complete`, `budget_limit`) clears the frozen per-index
+    /// Sibling of `skeptic0_session_id`: completion clears the frozen per-index
     /// model assignment so a later goal re-resolves its own panel.
     #[test]
-    fn terminal_transitions_clear_skeptic_model_assignment() {
-        for ending in ["complete", "budget_limit"] {
-            let mut t = make_tracker();
-            activate_tracker(&mut t);
-            t.snapshot_mut().unwrap().skeptic_model_assignment =
-                vec![crate::util::config::GoalRoleModel {
-                    model: "grow-4".to_string(),
-                    agent_type: "general-purpose".to_string(),
-                }];
-            let applied = match ending {
-                "complete" => t.complete_verified(),
-                _ => t.budget_limit(),
-            };
-            assert!(applied, "{ending} transition must apply");
-            assert!(
-                t.snapshot().unwrap().skeptic_model_assignment.is_empty(),
-                "{ending}() must clear skeptic_model_assignment",
-            );
-        }
+    fn completion_clears_skeptic_model_assignment() {
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        t.snapshot_mut().unwrap().skeptic_model_assignment =
+            vec![crate::util::config::GoalRoleModel {
+                model: "grow-4".to_string(),
+                agent_type: "general-purpose".to_string(),
+            }];
+        assert!(t.complete_verified());
+        assert!(t.snapshot().unwrap().skeptic_model_assignment.is_empty());
     }
 
-    /// `plan_baseline_file` is a sibling of `skeptic0_session_id` and must
-    /// be cleared by the SAME terminal transitions so a later goal
-    /// re-snapshots its own planner's original plan.
+    /// `plan_baseline_file` is a sibling of `skeptic0_session_id` and must be
+    /// cleared on completion so a later goal re-snapshots its own original plan.
     #[test]
-    fn terminal_transitions_clear_plan_baseline_file() {
-        for ending in ["complete", "budget_limit"] {
-            let mut t = make_tracker();
-            activate_tracker(&mut t);
-            t.snapshot_mut().unwrap().plan_baseline_file =
-                Some(PathBuf::from("/tmp/sess/goal/plan.baseline.md"));
-            let applied = match ending {
-                "complete" => t.complete_verified(),
-                _ => t.budget_limit(),
-            };
-            assert!(applied, "{ending} transition must apply");
-            assert!(
-                t.snapshot().unwrap().plan_baseline_file.is_none(),
-                "{ending}() must clear plan_baseline_file",
-            );
-        }
+    fn completion_clears_plan_baseline_file() {
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        t.snapshot_mut().unwrap().plan_baseline_file =
+            Some(PathBuf::from("/tmp/sess/goal/plan.baseline.md"));
+        assert!(t.complete_verified());
+        assert!(t.snapshot().unwrap().plan_baseline_file.is_none());
     }
 
     /// The scratch path helpers derive the pinned layout from
@@ -3313,13 +3317,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(goal_scratch_root(&new_vid));
     }
 
-    /// All three terminal transitions rescue the details file (the
-    /// achieved ack surfaces its path AFTER `complete()`): pins the
-    /// rescued location, the updated stored path, and the inlined
-    /// per-skeptic reports (numeric order; see `append_skeptic_reports`).
+    /// The destructive transitions rescue the details file (the achieved ack
+    /// surfaces its path AFTER `complete()`): pins the rescued location, the
+    /// updated stored path, and the inlined per-skeptic reports (numeric order;
+    /// see `append_skeptic_reports`).
     #[test]
     fn terminal_transitions_rescue_classifier_details_file() {
-        for ending in ["complete", "budget_limit", "clear"] {
+        for ending in ["complete", "clear"] {
             let session = tempfile::tempdir().unwrap();
             let mut t = GoalTracker::new(session.path().to_path_buf());
             activate_tracker(&mut t);
@@ -3342,7 +3346,6 @@ mod tests {
 
             match ending {
                 "complete" => assert!(t.complete_verified()),
-                "budget_limit" => assert!(t.budget_limit()),
                 _ => t.clear(),
             }
 
@@ -3577,12 +3580,11 @@ mod tests {
         );
     }
 
-    /// Every terminal goal-ending transition (`complete`, `budget_limit`,
-    /// `clear`) removes the private scratch root from disk — mirrors
-    /// `terminal_transitions_clear_plan_baseline_file`.
+    /// Every destructive goal-ending transition (`complete`, `clear`) removes
+    /// the private scratch root from disk.
     #[test]
     fn terminal_transitions_remove_scratch_root() {
-        for ending in ["complete", "budget_limit", "clear"] {
+        for ending in ["complete", "clear"] {
             let mut t = make_tracker();
             activate_tracker(&mut t);
             let vid = t.snapshot().unwrap().verifier_id.clone();
@@ -3595,9 +3597,6 @@ mod tests {
             match ending {
                 "complete" => {
                     assert!(t.complete_verified());
-                }
-                "budget_limit" => {
-                    assert!(t.budget_limit());
                 }
                 _ => t.clear(),
             }
