@@ -793,7 +793,7 @@ Workspace boundary:
 pub const GENERAL_PURPOSE_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     name: "general-purpose",
     description: "General purpose agent for multi-step tasks.",
-    tools_template: "Has access to: \
+    tools_template: "Has access to all tools: \
          ${{ tools.by_kind.execute }}, ${{ tools.by_kind.read }}, ${{ tools.by_kind.edit }}, \
          ${{ tools.by_kind.list }}, ${{ tools.by_kind.search }}, and ${{ tools.by_kind.plan }}.",
     prompt_template: GENERAL_PURPOSE_PROMPT,
