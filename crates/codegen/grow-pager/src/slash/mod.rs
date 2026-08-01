@@ -317,7 +317,7 @@ impl SlashController {
             cwd,
             hide_session_scoped: false,
             has_session_announcements: false,
-            billing_surface_visible: true,
+            billing_surface_visible: false,
             usage_command_visible: true,
             workflows_available: false,
             agent_catalog: Vec::new(),

@@ -492,7 +492,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 session_id: agent.session.session_id.as_ref(),
                 bundle_state: &app.bundle_state,
                 screen_mode: app.screen_mode,
-                billing_surface_visible: true,
+                billing_surface_visible: false,
                 usage_command_visible: true,
                 // PAGER-owned snapshot for slash commands.
                 pager_state: crate::settings::PagerLocalSnapshot {

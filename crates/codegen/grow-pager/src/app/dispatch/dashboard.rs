@@ -52,7 +52,7 @@ pub(super) fn ensure_dashboard_state(app: &mut AppView) {
     state.adopt_command_tags(app.command_tags.clone());
     state.set_screen_mode(app.screen_mode);
     state.set_recap_visible(app.session_recap_available);
-    let billing = true;
+    let billing = false;
     let usage_cmd = true;
     state
         .dispatch
@@ -1338,7 +1338,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             session_id: None,
             bundle_state: &app.bundle_state,
             screen_mode: app.screen_mode,
-            billing_surface_visible: true,
+            billing_surface_visible: false,
             usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: dashboard_multiline,
