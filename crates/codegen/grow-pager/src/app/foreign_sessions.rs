@@ -790,7 +790,6 @@ mod tests {
             assert_eq!(source.resume_prompt("native-id"), prompt);
             assert_eq!(ForeignPickerSource::from_picker_source(wire), Some(source));
         }
-        assert_eq!(badge_for_picker_source("conversation"), "");
         assert_eq!(badge_for_picker_source("local"), "");
     }
 

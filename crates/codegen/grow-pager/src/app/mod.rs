@@ -1904,25 +1904,6 @@ mod tests {
         assert!(try_parse_pager(&["grow-pager", "--chat"]).is_err());
     }
     #[test]
-    fn cli_local_workspace_flags_rejected_without_feature() {
-        assert!(try_parse_pager(&["grow-pager", "--local-workspace-attach=srv"]).is_err());
-        assert!(try_parse_pager(&["grow-pager", "--local-workspace"]).is_err());
-        assert!(try_parse_pager(&["grow-pager", "--local-workspace-cwd=/tmp"]).is_err());
-    }
-    #[test]
-    fn chat_mode_leader_guard_truth_table() {
-        assert!(session_startup::chat_mode_conflicts_with_leader(true, true));
-        assert!(!session_startup::chat_mode_conflicts_with_leader(
-            true, false
-        ));
-        assert!(!session_startup::chat_mode_conflicts_with_leader(
-            false, true
-        ));
-        assert!(!session_startup::chat_mode_conflicts_with_leader(
-            false, false
-        ));
-    }
-    #[test]
     fn cli_worktree_flag_parses() {
         let args = try_parse_pager(&["grow-pager", "--worktree"]).unwrap();
         assert_eq!(args.worktree.as_deref(), Some(""));

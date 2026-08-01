@@ -8,7 +8,7 @@ use crate::headless::attach_result_usage;
 use crate::headless::reducer::to_line;
 
 use super::MessagesReducer;
-use super::wire::{MessageUsage, ModelUsage, ServerToolUse};
+use super::wire::{MessageUsage, ModelUsage};
 
 /// The reshaped terminal usage: `message.usage`, `modelUsage`, turn count, cost, and API duration.
 pub(super) struct ResultUsage {
@@ -54,9 +54,6 @@ impl MessagesReducer {
             output_tokens: field(u, "output_tokens"),
             cache_read_input_tokens: field(u, "cache_read_input_tokens"),
             cache_creation_input_tokens: field(u, "cache_creation_input_tokens"),
-            server_tool_use: Some(ServerToolUse {
-                web_search_requests: self.web_search_requests,
-            }),
         };
         let num_turns = scratch
             .get("num_turns")
@@ -68,11 +65,9 @@ impl MessagesReducer {
             .unwrap_or(0.0);
         // `apiDurationMs` is dropped by the projection, so read it from `end_usage`.
         let duration_api_ms = end_usage.map_or(0, |u| field(Some(u), "apiDurationMs"));
-        // Attribute the whole web-search count to the current model (only a global count is tracked).
         let model_usage = messages_model_usage(
             scratch.get("modelUsage"),
             self.session.as_ref().and_then(|s| s.model.as_deref()),
-            self.web_search_requests,
             self.session.as_ref().and_then(|s| s.context_window),
         );
         ResultUsage {
@@ -85,12 +80,11 @@ impl MessagesReducer {
     }
 }
 
-/// Map the ledger's per-model rows into `ModelUsage` entries; the web-search count
-/// and `context_window` go to `current_model` only. `{}` when there is no breakdown.
+/// Map the ledger's per-model rows into `ModelUsage` entries; `context_window`
+/// goes to `current_model` only. `{}` when there is no breakdown.
 pub(super) fn messages_model_usage(
     rows: Option<&Value>,
     current_model: Option<&str>,
-    web_search_requests: u64,
     context_window: Option<u64>,
 ) -> Value {
     let Some(Value::Object(map)) = rows else {
@@ -108,7 +102,6 @@ pub(super) fn messages_model_usage(
                     output_tokens: n("outputTokens"),
                     cache_read_input_tokens: n("cacheReadInputTokens"),
                     cache_creation_input_tokens: n("cacheCreationInputTokens"),
-                    web_search_requests: if is_current { web_search_requests } else { 0 },
                     cost_usd: row.get("costUSD").and_then(Value::as_f64).unwrap_or(0.0),
                     context_window: if is_current { context_window } else { None },
                 }),

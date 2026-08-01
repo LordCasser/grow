@@ -265,10 +265,6 @@ pub struct SlashController {
     hide_session_scoped: bool,
     /// Offer `/announcements` when session announcements (critical or promo) exist.
     has_session_announcements: bool,
-    /// Consumer billing surface — gates `/usage` subcommands. Default `true`.
-    billing_surface_visible: bool,
-    /// Whether `/usage` is offered. Default `true`; cleared for external auth.
-    usage_command_visible: bool,
     workflows_available: bool,
     agent_catalog: Vec<command::AgentArg>,
     current_agent: Option<String>,
@@ -317,8 +313,6 @@ impl SlashController {
             cwd,
             hide_session_scoped: false,
             has_session_announcements: false,
-            billing_surface_visible: false,
-            usage_command_visible: true,
             workflows_available: false,
             agent_catalog: Vec::new(),
             current_agent: None,
@@ -358,22 +352,6 @@ impl SlashController {
 
     pub fn has_session_announcements(&self) -> bool {
         self.has_session_announcements
-    }
-
-    pub fn set_billing_surface_visible(&mut self, visible: bool) {
-        self.billing_surface_visible = visible;
-    }
-
-    pub fn billing_surface_visible(&self) -> bool {
-        self.billing_surface_visible
-    }
-
-    pub fn set_usage_command_visible(&mut self, visible: bool) {
-        self.usage_command_visible = visible;
-    }
-
-    pub fn usage_command_visible(&self) -> bool {
-        self.usage_command_visible
     }
 
     pub fn set_workflows_available(&mut self, available: bool) {
@@ -426,8 +404,6 @@ impl SlashController {
             current_permission: &self.current_permission,
             cwd: &self.cwd,
             has_session_announcements: self.has_session_announcements,
-            billing_surface_visible: self.billing_surface_visible,
-            usage_command_visible: self.usage_command_visible,
             workflows_available: self.workflows_available,
             screen_mode: self.screen_mode,
         }

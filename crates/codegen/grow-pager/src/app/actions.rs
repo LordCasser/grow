@@ -1362,7 +1362,7 @@ pub enum Effect {
         seq: u64,
         /// Optional unified-list `kind` facet filter (`"chat"` / `"build"`).
         /// When set, stamped as `_meta["grow/facetFilters"].kind` so the shell
-        /// honors multi-source history under `--chat` instead of forcing chat-only.
+        /// applies the picker's explicit source facet.
         kind_filter: Option<Vec<String>>,
     },
     /// Coalesce picker search keystrokes: fires

@@ -4192,29 +4192,6 @@ fn dashboard_delete_confirm_rechecks_settled_row() {
         Some("Stop the session before deleting"),
     );
 }
-/// A settled chat-conversation roster row must not arm on Ctrl+X — delete
-/// isn't supported for conversations, so a confirm could never succeed.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_stop_conversation_row_does_not_arm() {
-    let mut app = test_app();
-    let mut entry = idle_roster_entry("conv-1", "Chat row");
-    entry.origin.kind = "conversation".into();
-    app.dashboard_local_sessions = vec![entry];
-    open_dashboard(&mut app);
-    if let Some(d) = app.dashboard.as_mut() {
-        d.selected = Some(crate::views::dashboard::DashboardRowId::Roster {
-            session_id: "conv-1".into(),
-        });
-    }
-    assert!(dispatch_dashboard_stop(&mut app).is_empty());
-    let d = app.dashboard.as_ref().unwrap();
-    assert!(d.delete_confirm.is_none(), "conversation row must not arm");
-    assert_eq!(
-        d.error_toast.as_deref(),
-        Some("Deleting chat conversations isn't supported yet"),
-    );
-}
 /// A row with no session id toasts instead of emitting a delete.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]

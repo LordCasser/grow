@@ -284,11 +284,6 @@ default-bazel = [
 jemalloc = []
 sandbox-enforce = ["grow-sandbox/enforce"]
 release-dist = []
-# Local workspace mode (own/attach): run tools on this machine instead of the
-# chat sandbox. Pager-side implementation only in this tree (constants, CLI
-# flags, startup banner) -- the shell-side counterpart was not merged, so this
-# stays an empty feature enabled explicitly via `--features local-workspace`.
-local-workspace = []
 # Exposes test-only view-model constructors/setters (e.g. `test_agent_view`,
 # `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds — used
 # by `grow-pager-minimal`'s unit tests. Never enabled in production builds.

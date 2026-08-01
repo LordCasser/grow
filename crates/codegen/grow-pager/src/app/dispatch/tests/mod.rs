@@ -105,16 +105,6 @@ fn test_app() -> AppView {
         screen_mode_switch_hint: None,
         require_plan_approval: false,
         plan_mode: false,
-        #[cfg(feature = "local-workspace")]
-        welcome_workspace_mode: crate::views::welcome::WelcomeWorkspaceMode::Sandbox,
-        #[cfg(feature = "local-workspace")]
-        local_workspace_startup_locked: false,
-        #[cfg(feature = "local-workspace")]
-        welcome_session_local_workspace: None,
-        #[cfg(feature = "local-workspace")]
-        welcome_local_workspace_ack_pending: false,
-        #[cfg(feature = "local-workspace")]
-        welcome_history_load_as_build: false,
         subagents: false,
         ask_user: false,
         mouse_captured: true,
@@ -174,10 +164,6 @@ fn test_app() -> AppView {
         welcome_on_auth_url: false,
         welcome_announcement: WelcomeAnnouncementState::default(),
         welcome_auth_fallback_rect: None,
-        #[cfg(feature = "local-workspace")]
-        welcome_workspace_mode_rects: Default::default(),
-        #[cfg(feature = "local-workspace")]
-        welcome_on_workspace_mode: false,
         welcome_toast: None,
         welcome_on_promo_cta: false,
         welcome_promo_cta_rect: None,

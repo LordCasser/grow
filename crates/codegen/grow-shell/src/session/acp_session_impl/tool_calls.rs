@@ -2764,51 +2764,6 @@ impl SessionActor {
                     );
                 }
             }
-            SamplingEvent::BackendToolCallStarted { call_id, name, .. } => {
-                self.signals_handle().record_tool_call(&name);
-                let (title, kind, raw_input) = backend_tool_display(&name);
-                self.send_update(
-                    acp::SessionUpdate::ToolCall(
-                        acp::ToolCall::new(
-                            acp::ToolCallId::new(Arc::from(call_id.as_str())),
-                            title,
-                        )
-                        .kind(kind)
-                        .status(acp::ToolCallStatus::InProgress)
-                        .content(vec![])
-                        .locations(vec![])
-                        .raw_input(Some(raw_input))
-                        .meta(serde_json::json!({"backend": true}).as_object().cloned()),
-                    ),
-                    None,
-                )
-                .await;
-            }
-            SamplingEvent::BackendToolCallCompleted {
-                call_id,
-                name,
-                result,
-                ..
-            } => {
-                let status = backend_tool_call_status(result.as_ref());
-                if status == acp::ToolCallStatus::Failed {
-                    self.signals_handle().record_tool_failure(&name);
-                } else {
-                    self.signals_handle().record_tool_success(&name);
-                }
-                let (title, _kind, _raw_input) = backend_tool_display(&name);
-                self.send_update(
-                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
-                        acp::ToolCallId::new(Arc::from(call_id.as_str())),
-                        acp::ToolCallUpdateFields::new()
-                            .status(Some(status))
-                            .title(Some(title))
-                            .raw_output(result),
-                    )),
-                    None,
-                )
-                .await;
-            }
         }
     }
     /// Model-facing rejection for an ordinary file edit while Plan is active.

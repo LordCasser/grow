@@ -2174,7 +2174,6 @@ mod tests {
     #[test]
     fn build_entries_overlay_stop_wins_dedup() {
         let registry = ActionRegistry::defaults();
-        let ctrl_x = crate::key!('x', CONTROL);
         // Match the two Ctrl+X rows by ActionId: the list and overlay
         // stops carry different labels ("delete" vs "stop").
         let is_stop = |action_id: &Option<ActionId>| {

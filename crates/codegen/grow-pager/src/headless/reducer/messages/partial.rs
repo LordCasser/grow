@@ -2,7 +2,7 @@
 //! the raw Messages API `stream_event` mechanics and their interaction with the
 //! typed [`PartialFraming`] state. Only reachable when partial messages are on.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::headless::reducer::to_line;
 
@@ -108,51 +108,6 @@ impl MessagesReducer {
             index,
             delta: PartialDelta::InputJson {
                 partial_json: input.to_string(),
-            },
-        }));
-        out.push(self.partial_wrap(StreamEventBody::ContentBlockStop { index }));
-    }
-
-    /// Emit the partial framing for a `server_tool_use` block (start, `input_json_delta`, stop).
-    pub(super) fn partial_server_tool_use(
-        &mut self,
-        out: &mut Vec<Value>,
-        index: usize,
-        id: &str,
-        query: &str,
-    ) {
-        self.partial_open_message(out);
-        out.push(self.partial_wrap(StreamEventBody::ContentBlockStart {
-            index,
-            content_block: PartialBlock::ServerToolUse {
-                id: id.to_string(),
-                name: "web_search",
-                input: EmptyObject {},
-            },
-        }));
-        out.push(self.partial_wrap(StreamEventBody::ContentBlockDelta {
-            index,
-            delta: PartialDelta::InputJson {
-                partial_json: json!({ "query": query }).to_string(),
-            },
-        }));
-        out.push(self.partial_wrap(StreamEventBody::ContentBlockStop { index }));
-    }
-
-    /// Emit the partial framing for a `web_search_tool_result` block (hits ride `content_block_start`).
-    pub(super) fn partial_web_search_result(
-        &mut self,
-        out: &mut Vec<Value>,
-        index: usize,
-        tool_use_id: &str,
-        hits: &Value,
-    ) {
-        self.partial_open_message(out);
-        out.push(self.partial_wrap(StreamEventBody::ContentBlockStart {
-            index,
-            content_block: PartialBlock::WebSearchToolResult {
-                tool_use_id: tool_use_id.to_string(),
-                content: hits.clone(),
             },
         }));
         out.push(self.partial_wrap(StreamEventBody::ContentBlockStop { index }));

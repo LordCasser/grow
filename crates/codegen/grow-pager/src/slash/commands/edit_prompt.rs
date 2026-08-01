@@ -56,8 +56,6 @@ mod tests {
             session_id,
             bundle_state: bundle,
             screen_mode: mode,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             pager_state: PagerLocalSnapshot::default(),
         }
     }

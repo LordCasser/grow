@@ -292,8 +292,6 @@ impl AgentView {
             is_subagent_view: false,
             hit_subagent_frame_close: Default::default(),
             scheduler_background_loops: None,
-            billing_surface_visible: false,
-            usage_command_visible: true,
             input_log: crate::input_log::InputRingBuffer::new(),
             esc_pressed_at: None,
             leader_key_started_at: None,

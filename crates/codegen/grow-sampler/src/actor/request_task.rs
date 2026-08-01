@@ -727,8 +727,6 @@ async fn drive_l2(
                         SamplingEvent::FirstToken { .. }
                             | SamplingEvent::ChannelToken { .. }
                             | SamplingEvent::ToolCallDelta { .. }
-                            | SamplingEvent::BackendToolCallStarted { .. }
-                            | SamplingEvent::BackendToolCallCompleted { .. }
                     ) {
                         output_observed.store(true, Ordering::Relaxed);
                     }

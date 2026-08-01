@@ -63,8 +63,6 @@ mod tests {
             session_id: None,
             bundle_state: &bundle,
             screen_mode: crate::app::ScreenMode::Inline,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: false,
                 yolo_mode: false,
@@ -98,8 +96,6 @@ mod tests {
             current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             workflows_available: true,
             screen_mode,
         };

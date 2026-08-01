@@ -431,7 +431,7 @@ The turn ends as if the model finished naturally.
 
 ### 9.2 Correct Behavior
 
-`PauseTurn` means the server-side tool loop (e.g., web search) hit its iteration limit.
+`PauseTurn` means the provider's server-side tool loop hit its iteration limit.
 The assistant content is complete -- the model just needs to be re-prompted to continue
 the turn.
 

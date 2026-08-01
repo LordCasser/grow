@@ -198,8 +198,6 @@ mod tests {
             session_id: None,
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Inline,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: false,
                 yolo_mode: false,
@@ -562,8 +560,6 @@ mod tests {
             current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
@@ -595,8 +591,6 @@ mod tests {
             current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
@@ -638,78 +632,20 @@ mod tests {
             CommandResult::Action(Action::EnterRememberMode)
         ));
     }
-    fn run_usage(args: &str, billing: bool) -> CommandResult {
-        run_usage_gated(args, billing, true)
-    }
-    fn run_usage_gated(args: &str, billing: bool, usage_cmd: bool) -> CommandResult {
+    fn run_usage(args: &str) -> CommandResult {
         let models = ModelState::default();
         let mut ctx = make_ctx(&models);
-        ctx.billing_surface_visible = billing;
-        ctx.usage_command_visible = usage_cmd;
         usage::UsageCommand.run(&mut ctx, args)
     }
     #[test]
     fn usage_is_local_and_takes_no_arguments() {
+        assert!(!usage::UsageCommand.takes_args());
         assert!(matches!(
-            run_usage("", true),
+            run_usage(""),
             CommandResult::Action(Action::ShowUsage)
         ));
-        assert!(matches!(
-            run_usage("manage", false),
-            CommandResult::Error(_)
-        ));
-        assert!(matches!(run_usage("show", false), CommandResult::Error(_)));
-    }
-    #[test]
-    fn usage_takes_args_only_for_consumer() {
-        let models = ModelState::default();
-        let mut ctx = crate::slash::command::AppCtx {
-            models: &models,
-            agents: &[],
-            current_agent: None,
-            behavior_mode: grow_tools::types::SessionMode::Default,
-            deep_research_available: false,
-            goal_available: false,
-            auto_permission_available: false,
-            current_permission: "ask",
-            cwd: std::path::Path::new("."),
-            has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: true,
-            workflows_available: true,
-            screen_mode: crate::app::ScreenMode::Fullscreen,
-        };
-        let cmd = usage::UsageCommand;
-        assert!(cmd.takes_args_now(&ctx));
-        ctx.billing_surface_visible = false;
-        assert!(!cmd.takes_args_now(&ctx));
-    }
-    #[test]
-    fn usage_suggest_args_consumer_only() {
-        let models = ModelState::default();
-        let mut ctx = crate::slash::command::AppCtx {
-            models: &models,
-            agents: &[],
-            current_agent: None,
-            behavior_mode: grow_tools::types::SessionMode::Default,
-            deep_research_available: false,
-            goal_available: false,
-            auto_permission_available: false,
-            current_permission: "ask",
-            cwd: std::path::Path::new("."),
-            has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: true,
-            workflows_available: false,
-            screen_mode: crate::app::ScreenMode::Fullscreen,
-        };
-        let items = usage::UsageCommand.suggest_args(&ctx, "").unwrap();
-        assert_eq!(
-            items.iter().map(|i| i.display.as_str()).collect::<Vec<_>>(),
-            ["show", "manage"]
-        );
-        ctx.billing_surface_visible = false;
-        assert!(usage::UsageCommand.suggest_args(&ctx, "").is_none());
+        assert!(matches!(run_usage("manage"), CommandResult::Error(_)));
+        assert!(matches!(run_usage("show"), CommandResult::Error(_)));
     }
     #[test]
     fn usage_registered_in_builtin_commands() {
@@ -718,33 +654,6 @@ mod tests {
                 .get("usage")
                 .is_some()
         );
-    }
-    #[test]
-    fn usage_hidden_when_command_not_visible() {
-        let models = ModelState::default();
-        let ctx = crate::slash::command::AppCtx {
-            models: &models,
-            agents: &[],
-            current_agent: None,
-            behavior_mode: grow_tools::types::SessionMode::Default,
-            deep_research_available: false,
-            goal_available: false,
-            auto_permission_available: false,
-            current_permission: "ask",
-            cwd: std::path::Path::new("."),
-            has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: false,
-            workflows_available: false,
-            screen_mode: crate::app::ScreenMode::Fullscreen,
-        };
-        assert!(!usage::UsageCommand.visible(&ctx));
-        assert!(!usage::UsageCommand.takes_args_now(&ctx));
-        assert!(usage::UsageCommand.suggest_args(&ctx, "").is_none());
-        assert!(matches!(
-            run_usage_gated("", true, false),
-            CommandResult::Error(msg) if msg.contains("not available")
-        ));
     }
     #[test]
     fn cd_registered_in_builtin_commands() {
@@ -799,8 +708,6 @@ mod tests {
             current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };

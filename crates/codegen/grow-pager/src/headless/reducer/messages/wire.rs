@@ -47,17 +47,6 @@ pub(super) enum ContentBlock {
         name: String,
         input: Value,
     },
-    /// A backend `web_search` folded inline as Messages API `server_tool_use`.
-    ServerToolUse {
-        id: String,
-        name: &'static str,
-        input: Value,
-    },
-    /// The results of an inline web search (`web_search_tool_result`); `content` is the hit array.
-    WebSearchToolResult {
-        tool_use_id: String,
-        content: Value,
-    },
 }
 
 /// The wire fields of Messages API `message.usage` (reasoning tokens folded into `output_tokens`).
@@ -71,15 +60,6 @@ pub(super) struct MessageUsage {
     pub(super) cache_read_input_tokens: u64,
     #[serde(default)]
     pub(super) cache_creation_input_tokens: u64,
-    /// The `usage.server_tool_use` counter; populated only on the terminal `result` usage.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) server_tool_use: Option<ServerToolUse>,
-}
-
-/// The `usage.server_tool_use` sub-object (Grow counts backend `web_search` only).
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub(super) struct ServerToolUse {
-    pub(super) web_search_requests: u64,
 }
 
 impl From<&ResponseUsage> for MessageUsage {
@@ -90,8 +70,6 @@ impl From<&ResponseUsage> for MessageUsage {
             output_tokens: u.output_tokens,
             cache_read_input_tokens: u.cache_read_input_tokens,
             cache_creation_input_tokens: u.cache_creation_input_tokens,
-            // Server-tool counts ride the terminal `result` usage only.
-            server_tool_use: None,
         }
     }
 }
@@ -213,8 +191,6 @@ pub(super) struct ModelUsage {
     pub(super) cache_read_input_tokens: u64,
     #[serde(rename = "cacheCreationInputTokens")]
     pub(super) cache_creation_input_tokens: u64,
-    #[serde(rename = "webSearchRequests")]
-    pub(super) web_search_requests: u64,
     #[serde(rename = "costUSD", serialize_with = "serialize_finite_cost")]
     pub(super) cost_usd: f64,
     #[serde(rename = "contextWindow", skip_serializing_if = "Option::is_none")]
@@ -300,17 +276,6 @@ pub(super) enum PartialBlock {
         id: String,
         name: String,
         input: EmptyObject,
-    },
-    /// Partial-stream open for a `server_tool_use` block; input rides a following `input_json_delta`.
-    ServerToolUse {
-        id: String,
-        name: &'static str,
-        input: EmptyObject,
-    },
-    /// Partial-stream `web_search_tool_result` block; carries its full `content` at start.
-    WebSearchToolResult {
-        tool_use_id: String,
-        content: Value,
     },
 }
 

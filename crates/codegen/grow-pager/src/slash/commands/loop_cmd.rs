@@ -270,8 +270,6 @@ mod tests {
             session_id: None,
             bundle_state: &bundle,
             screen_mode: crate::app::ScreenMode::Inline,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot {
                 scheduler_background_loops: background_loops,
                 ..Default::default()

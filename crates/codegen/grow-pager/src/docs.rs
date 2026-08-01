@@ -163,8 +163,8 @@ pub static USER_GUIDE: &[Doc] = &[
     ),
     guide!(
         "24-monitoring-usage.md",
-        "Monitoring Usage (External OpenTelemetry)",
-        "Export usage metrics to a customer OpenTelemetry collector"
+        "Local Diagnostics and Usage",
+        "Inspect local logs and usage without telemetry uploads"
     ),
 ];
 

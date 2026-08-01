@@ -71,8 +71,6 @@ mod tests {
             session_id: None,
             bundle_state: bundle,
             screen_mode: crate::app::ScreenMode::Inline,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             pager_state: PagerLocalSnapshot {
                 behavior_mode: grow_tools::types::SessionMode::Default,
                 ..PagerLocalSnapshot::default()
@@ -89,8 +87,6 @@ mod tests {
             session_id: None,
             bundle_state: bundle,
             screen_mode: crate::app::ScreenMode::Inline,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             pager_state: PagerLocalSnapshot {
                 behavior_mode: grow_tools::types::SessionMode::Plan,
                 ..PagerLocalSnapshot::default()

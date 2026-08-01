@@ -1,6 +1,6 @@
 //! The `streaming-messages-json` reducer (Anthropic Messages API wire format).
 //! The coordinator: owns [`MessagesReducer`] and its [`Reducer`] impl; cohesive
-//! pieces live in the `wire`/`state`/`partial`/`usage`/`web_search` submodules.
+//! pieces live in the `wire`/`state`/`partial`/`usage` submodules.
 
 use agent_client_protocol as acp;
 use serde_json::{Value, json};
@@ -13,7 +13,6 @@ use super::{
 mod partial;
 mod state;
 mod usage;
-mod web_search;
 mod wire;
 
 #[cfg(test)]
@@ -58,11 +57,6 @@ pub(crate) struct MessagesReducer {
     /// Unmatched client `tool_use` blocks (id -> emission order); leftovers at turn
     /// end get an `is_error` `tool_result` to keep the transcript valid.
     pending_client_tool_uses: std::collections::HashMap<String, u64>,
-    /// In-flight backend `web_search` calls (id -> order + call); query and results
-    /// arrive only at completion, so the `ToolCall` defers here.
-    backend_web_search_calls: std::collections::HashMap<String, (u64, ToolCallEvent)>,
-    /// Count of successful inline backend `web_search` invocations (errored ones excluded, not billed).
-    web_search_requests: u64,
     /// Text of the most recently flushed assistant frame (the `result.result` value).
     last_text: String,
     /// Typed partial-stream framing sub-state; only with `--include-partial-messages`.
@@ -91,8 +85,6 @@ impl MessagesReducer {
             pending_tool_results: Vec::new(),
             next_tool_use_order: 0,
             pending_client_tool_uses: std::collections::HashMap::new(),
-            backend_web_search_calls: std::collections::HashMap::new(),
-            web_search_requests: 0,
             last_text: String::new(),
             framing: PartialFraming::Idle,
             partial_msg_seq: 0,
@@ -321,38 +313,15 @@ impl MessagesReducer {
         }
     }
 
-    /// Shared terminal preamble for `finish`/`error`: init, reconcile deferred web
-    /// searches, close+flush the open frame, then flush grouped tool results.
+    /// Shared terminal preamble for `finish`/`error`: init, close+flush the open
+    /// frame, then flush grouped tool results.
     fn flush_terminal_preamble(&mut self, out: &mut Vec<Value>, default_stop_reason: Option<&str>) {
         if let Some(init) = self.ensure_init() {
             out.push(init);
         }
-        self.flush_unresolved_web_searches(out);
         self.close_and_flush(out, default_stop_reason);
         self.reconcile_unmatched_client_tools();
         self.flush_tool_results(out);
-    }
-
-    /// Reconcile deferred `web_search` calls that never terminated: emit each as a
-    /// `server_tool_use` + `web_search_tool_result_error` pair, in invocation order.
-    fn flush_unresolved_web_searches(&mut self, out: &mut Vec<Value>) {
-        if self.backend_web_search_calls.is_empty() {
-            return;
-        }
-        let mut leftovers: Vec<(u64, String)> = self
-            .backend_web_search_calls
-            .drain()
-            .map(|(id, (order, _tc))| (order, id))
-            .collect();
-        leftovers.sort_by_key(|(order, _)| *order);
-        let error = json!({
-            "type": "web_search_tool_result_error",
-            "error_code": "unavailable",
-        });
-        for (_order, id) in leftovers {
-            // Query never arrived, so empty; the error result reflects an unresolved search.
-            self.append_web_search_result(out, &id, "", &error);
-        }
     }
 
     /// The session model for the `init` line and `result` `modelUsage`, or `"unknown"`.
@@ -562,12 +531,6 @@ impl Reducer for MessagesReducer {
                     );
                 }
             }
-            StreamEvent::ToolCall(tc) if tc.backend_web_search => {
-                // Query and results are unknown until completion, so defer; stamp invocation order.
-                let order = self.take_tool_use_order();
-                self.backend_web_search_calls
-                    .insert(tc.tool_call_id.clone(), (order, tc));
-            }
             StreamEvent::ToolCall(tc) => {
                 // Flush a prior tool round's results so rounds interleave on backends without `ResponseStarted`.
                 self.flush_tool_results(&mut out);
@@ -579,14 +542,8 @@ impl Reducer for MessagesReducer {
                     Some(acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed)
                 );
                 if terminal {
-                    if let Some((_order, tc)) =
-                        self.backend_web_search_calls.remove(&u.tool_call_id)
-                    {
-                        self.finish_web_search(&mut out, tc, u);
-                    } else {
-                        self.close_and_flush(&mut out, Some("tool_use"));
-                        self.buffer_tool_result(u);
-                    }
+                    self.close_and_flush(&mut out, Some("tool_use"));
+                    self.buffer_tool_result(u);
                 }
             }
             StreamEvent::Lifecycle(Lifecycle::CompactCompleted { pre_tokens }) => {

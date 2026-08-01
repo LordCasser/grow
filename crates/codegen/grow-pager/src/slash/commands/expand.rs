@@ -73,8 +73,6 @@ mod tests {
             models,
             session_id,
             bundle_state: &DEFAULT_BUNDLE_STATE,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             screen_mode,
             pager_state: PagerLocalSnapshot::default(),
         }

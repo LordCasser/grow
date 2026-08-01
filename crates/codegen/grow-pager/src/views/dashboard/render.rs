@@ -153,13 +153,6 @@ pub fn render_dashboard(
         home,
         roster,
     );
-    // Chat-conversation roster rows can't be deleted from the dashboard
-    // yet — record them so the `[✗]` and Ctrl+X arm both skip them.
-    state.conversation_row_ids = roster
-        .iter()
-        .filter(|e| e.origin.kind == "conversation")
-        .map(|e| e.session_id.clone())
-        .collect();
     state.reanchor_selection(&rows);
 
     // DO NOT GC pinned/reorder at render time. The old
@@ -2300,7 +2293,6 @@ fn render_row(
     let show_delete = !row.is_more_placeholder
         && !row.id.is_subagent()
         && row.state.allows_delete()
-        && !state.row_is_conversation(&row.id)
         && (state.hovered_row.as_ref() == Some(&row.id) || armed_delete == Some(&row.id));
     let delete_label = crate::glyphs::ballot_x_button();
     let delete_w = UnicodeWidthStr::width(delete_label) as u16;
@@ -2659,7 +2651,6 @@ fn render_narrow_rows(
             let show_delete = !row.is_more_placeholder
                 && !row.id.is_subagent()
                 && row.state.allows_delete()
-                && !state.row_is_conversation(&row.id)
                 && (hovered || armed_here);
             let delete_label = crate::glyphs::ballot_x_button();
             let delete_w = UnicodeWidthStr::width(delete_label) as u16;

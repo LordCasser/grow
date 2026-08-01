@@ -129,8 +129,6 @@ mod tests {
             session_id: None,
             bundle_state: &bundle,
             screen_mode: crate::app::ScreenMode::Inline,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot::default(),
         };
         DoctorCommand.run(&mut context, args)
@@ -196,8 +194,6 @@ mod tests {
             current_permission: "ask",
             cwd: std::path::Path::new("/tmp"),
             has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             workflows_available: false,
             screen_mode: crate::app::ScreenMode::Inline,
         };

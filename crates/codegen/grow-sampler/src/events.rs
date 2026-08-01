@@ -120,25 +120,6 @@ pub enum SamplingEvent {
         request_id: RequestId,
         metadata: ResponseModelMetadata,
     },
-
-    /// A backend-hosted tool call has started execution on the server
-    /// (e.g., web search is in progress). The client does NOT execute
-    /// these — the backend's agentic sampler handles them.
-    BackendToolCallStarted {
-        request_id: RequestId,
-        call_id: String,
-        name: String,
-    },
-
-    /// A backend-hosted tool call has completed execution on the server.
-    BackendToolCallCompleted {
-        request_id: RequestId,
-        call_id: String,
-        name: String,
-        /// Structured result data from the backend tool (tool-specific).
-        /// For web search: `{"query": "...", "sources": [{"url": "..."}, ...]}`
-        result: Option<serde_json::Value>,
-    },
 }
 
 /// Serializable mirror of [`SamplingError`].

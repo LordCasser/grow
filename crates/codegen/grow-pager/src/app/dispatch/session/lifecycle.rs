@@ -471,7 +471,6 @@ pub(in crate::app::dispatch) fn drain_startup_actions(app: &mut AppView) -> Vec<
         new_session,
         prompt,
         open_dashboard,
-        pending_chat: _,
     } = app.deferred_startup.take();
     let mut effects = Vec::new();
     match deferred {

@@ -52,24 +52,6 @@ pub(super) fn ensure_dashboard_state(app: &mut AppView) {
     state.adopt_command_tags(app.command_tags.clone());
     state.set_screen_mode(app.screen_mode);
     state.set_recap_visible(app.session_recap_available);
-    let billing = false;
-    let usage_cmd = true;
-    state
-        .dispatch
-        .slash_controller
-        .set_billing_surface_visible(billing);
-    state
-        .dispatch
-        .slash_controller
-        .set_usage_command_visible(usage_cmd);
-    state
-        .peek_reply
-        .slash_controller
-        .set_billing_surface_visible(billing);
-    state
-        .peek_reply
-        .slash_controller
-        .set_usage_command_visible(usage_cmd);
     app.dashboard = Some(state);
 }
 
@@ -1338,8 +1320,6 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             session_id: None,
             bundle_state: &app.bundle_state,
             screen_mode: app.screen_mode,
-            billing_surface_visible: false,
-            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: dashboard_multiline,
                 yolo_mode: pending_permission.is_always_approve(),
@@ -1916,12 +1896,6 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
                     app.show_toast("Session is no longer in the list");
                     vec![]
                 }
-                // Chat conversations can't be deleted from here yet, so
-                // don't arm a confirm that could never succeed.
-                Some(e) if e.origin.kind == "conversation" => {
-                    app.show_toast("Deleting chat conversations isn't supported yet");
-                    vec![]
-                }
                 // No local turn to cancel, so a busy roster row can't delete.
                 Some(e)
                     if !crate::views::dashboard::roster_activity_to_state(e.activity)
@@ -2083,10 +2057,6 @@ fn delete_dashboard_row(
                 app.show_toast("Session is no longer in the list");
                 return vec![];
             };
-            if entry.origin.kind == "conversation" {
-                app.show_toast("Deleting chat conversations isn't supported yet");
-                return vec![];
-            }
             if !crate::views::dashboard::roster_activity_to_state(entry.activity).allows_delete() {
                 app.show_toast("Stop the session before deleting");
                 return vec![];

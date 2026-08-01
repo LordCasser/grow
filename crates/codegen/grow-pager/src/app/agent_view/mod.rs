@@ -1328,10 +1328,6 @@ pub struct AgentView {
     /// refreshed by `grow/settings/update`: the fire side is pinned for the
     /// session's lifetime, so a live mirror would drift out of agreement.
     pub scheduler_background_loops: Option<bool>,
-    /// Mirrors `AppView::usage_visible` (credit warning + `/usage manage`).
-    pub billing_surface_visible: bool,
-    /// Whether `/usage` is offered. Mirrors `!AppView::has_external_auth_provider`.
-    pub usage_command_visible: bool,
     /// Input flight recorder — rolling buffer of recent key events.
     /// Dumped to file via Esc→d combo for debugging.
     pub(crate) input_log: crate::input_log::InputRingBuffer,

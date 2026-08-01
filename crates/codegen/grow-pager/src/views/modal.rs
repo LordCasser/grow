@@ -1292,7 +1292,6 @@ mod palette_tests {
         controller
     }
     #[test]
-    #[test]
     fn default_palette_includes_dashboard() {
         let entries = default_palette_entries(&slash(crate::app::ScreenMode::Fullscreen));
         let has_dashboard = entries.iter().any(
@@ -1365,8 +1364,6 @@ mod palette_tests {
                 .any(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
         );
     }
-    #[test]
-    #[test]
     #[test]
     fn palette_tools_section_routes_each_tab_to_itself() {
         use crate::views::extensions_modal::ExtensionsTab;

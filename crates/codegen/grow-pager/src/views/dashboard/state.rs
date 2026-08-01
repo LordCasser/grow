@@ -522,10 +522,6 @@ pub struct DashboardState {
     pub row_delete_rects: Vec<(DashboardRowId, Rect)>,
     /// Row whose `[✗]` the mouse is over, so the renderer can tint it.
     pub hovered_delete: Option<DashboardRowId>,
-    /// Roster session ids whose origin is a chat `conversation` — those
-    /// can't be deleted from the dashboard yet, so they get no `[✗]` and
-    /// don't arm. Rebuilt each render from the roster.
-    pub conversation_row_ids: std::collections::HashSet<String>,
     /// Last frame's section-header hit areas keyed by [`SectionKey`].
     /// Used by mouse handling to map (col, row) → section for
     /// click-to-toggle and hover. Rebuilt every render.
@@ -1349,7 +1345,6 @@ impl DashboardState {
             row_rects: Vec::new(),
             row_delete_rects: Vec::new(),
             hovered_delete: None,
-            conversation_row_ids: std::collections::HashSet::new(),
             section_rects: Vec::new(),
             idle_overflow_rect: None,
             last_area: Rect::default(),
@@ -1538,13 +1533,6 @@ impl DashboardState {
 
     pub fn arm_delete(&mut self, id: DashboardRowId) {
         self.delete_confirm = Some((id, Instant::now()));
-    }
-
-    /// Whether `id` is a chat-conversation roster row, which the dashboard
-    /// can't delete yet (see [`Self::conversation_row_ids`]).
-    pub fn row_is_conversation(&self, id: &DashboardRowId) -> bool {
-        matches!(id, DashboardRowId::Roster { session_id }
-            if self.conversation_row_ids.contains(session_id))
     }
 
     /// Enforce the invariant that a delete arm belongs to the selected

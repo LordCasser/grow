@@ -125,30 +125,16 @@ fn messages_model_usage_maps_and_zero_fills() {
     let rows = json!({
         "grow-4": {"inputTokens": 90, "outputTokens": 7, "cacheReadInputTokens": 10, "cacheCreationInputTokens": 25, "costUSD": 0.02},
     });
-    let out = messages_model_usage(Some(&rows), Some("grow-4"), 0, Some(131_072));
+    let out = messages_model_usage(Some(&rows), Some("grow-4"), Some(131_072));
     let mu = &out["grow-4"];
     assert_eq!(mu["inputTokens"], 90);
     assert_eq!(mu["outputTokens"], 7);
     assert_eq!(mu["cacheReadInputTokens"], 10);
     assert_eq!(mu["cacheCreationInputTokens"], 25);
-    assert_eq!(mu["webSearchRequests"], 0);
     assert_eq!(mu["contextWindow"], 131_072);
     assert!(mu["maxOutputTokens"].is_null());
     assert!((mu["costUSD"].as_f64().unwrap() - 0.02).abs() < 1e-9);
-    assert_eq!(messages_model_usage(None, None, 0, None), json!({}));
-}
-
-#[test]
-fn messages_model_usage_attributes_web_search_to_current_model() {
-    let rows = json!({
-        "grow-4": {"inputTokens": 90, "outputTokens": 7, "costUSD": 0.02},
-        "grow-mini": {"inputTokens": 5, "outputTokens": 1},
-    });
-    let out = messages_model_usage(Some(&rows), Some("grow-4"), 3, Some(131_072));
-    assert_eq!(out["grow-4"]["webSearchRequests"], 3);
-    assert_eq!(out["grow-mini"]["webSearchRequests"], 0);
-    assert_eq!(out["grow-4"]["contextWindow"], 131_072);
-    assert!(out["grow-mini"]["contextWindow"].is_null());
+    assert_eq!(messages_model_usage(None, None, None), json!({}));
 }
 
 #[test]
@@ -385,7 +371,6 @@ fn non_finite_cost_serializes_to_finite_result_frame() {
         output_tokens: 0,
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
-        web_search_requests: 0,
         cost_usd: f64::NAN,
         context_window: None,
     });

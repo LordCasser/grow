@@ -7,7 +7,7 @@ use super::usage::messages_model_usage;
 use super::wire::ModelUsage;
 use super::*;
 use crate::headless::reducer::acp::AcpReducer;
-use crate::headless::reducer::{McpServer, skill_names, tool_call_event};
+use crate::headless::reducer::{McpServer, skill_names};
 use grow_shell::extensions::notification::ResponseUsage;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -21,47 +21,6 @@ fn tool_call_ev() -> ToolCallEvent {
         tool_name: "bash".into(),
         raw_input: json!({"command": "ls"}),
         content: json!([]),
-        locations: json!([]),
-        backend_web_search: false,
-    }
-}
-
-/// A backend `web_search` `ToolCall`, as `tool_call_event` classifies it from
-/// the shell's `_meta.backend == true` + `raw_input.variant == "WebSearch"`.
-fn web_search_call(id: &str) -> ToolCallEvent {
-    ToolCallEvent {
-        tool_call_id: id.into(),
-        title: "Web search:".into(),
-        tool_kind: Some("search".into()),
-        status: Some(acp::ToolCallStatus::InProgress),
-        tool_name: "web_search".into(),
-        raw_input: json!({"variant": "WebSearch", "backend": true}),
-        content: json!([]),
-        locations: json!([]),
-        backend_web_search: true,
-    }
-}
-
-/// A terminal backend `web_search` `ToolCallUpdate` carrying Grow's nested
-/// `WebSearchCall` `raw_output` (`action.query` + `action.sources[].url`).
-fn web_search_done(id: &str) -> ToolCallUpdateEvent {
-    ToolCallUpdateEvent {
-        tool_call_id: id.into(),
-        status: Some(acp::ToolCallStatus::Completed),
-        content: json!([]),
-        raw_output: json!({
-            "id": id,
-            "type": "web_search_call",
-            "status": "completed",
-            "action": {
-                "type": "search",
-                "query": "rust async runtime",
-                "sources": [
-                    {"type": "url", "url": "https://tokio.rs", "title": "Tokio"},
-                    {"type": "url", "url": "https://async.rs"},
-                ],
-            },
-        }),
         locations: json!([]),
     }
 }
@@ -121,34 +80,6 @@ fn stream_delta(out: &[Value]) -> &Value {
         .expect("a content_block_delta stream_event")
 }
 
-/// A `Failed` terminal backend `web_search` update carrying no results.
-fn web_search_failed(id: &str) -> ToolCallUpdateEvent {
-    ToolCallUpdateEvent {
-        tool_call_id: id.into(),
-        status: Some(acp::ToolCallStatus::Failed),
-        content: json!([]),
-        raw_output: json!({"id": id, "type": "web_search_call", "status": "failed"}),
-        locations: json!([]),
-    }
-}
-
-/// A completed backend `WebSearch` update for a NON-search action (e.g.
-/// open_page): the `raw_output` carries no `action.query`/`action.sources`.
-fn web_search_non_search(id: &str) -> ToolCallUpdateEvent {
-    ToolCallUpdateEvent {
-        tool_call_id: id.into(),
-        status: Some(acp::ToolCallStatus::Completed),
-        content: json!([]),
-        raw_output: json!({
-            "id": id,
-            "type": "web_search_call",
-            "status": "completed",
-            "action": {"type": "open_page", "url": "https://example.com"},
-        }),
-        locations: json!([]),
-    }
-}
-
 /// A small `TurnEnd` for a clean end-of-turn flush at `sess-1`.
 fn end_turn() -> TurnEnd<'static> {
     TurnEnd {
@@ -203,4 +134,3 @@ mod init;
 mod partial;
 mod result_usage;
 mod tool_calls;
-mod web_search;
