@@ -134,12 +134,13 @@ With `promptComposition: full`, the body replaces the optional standard/role
 guidance and is rendered through MiniJinja. Mandatory foundation, audience,
 and runtime context remain in force.
 
-### With completion requirement (orchestrated mode)
+### With a completion requirement
 
 ```markdown
 ---
-name: orchestrator-worker
+name: completion-worker
 description: Worker agent that must signal completion before ending a turn
+subagentOnly: true
 completionRequirement:
   tool: complete_task
   reminder: >
@@ -151,7 +152,7 @@ completionRequirement:
     maxDelayMs: 60000
 ---
 
-You are a worker agent in an orchestrated multi-agent workflow.
+You are a worker agent in a multi-agent workflow.
 You MUST call `complete_task` before ending your response.
 ```
 

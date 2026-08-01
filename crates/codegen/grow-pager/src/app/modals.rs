@@ -976,8 +976,6 @@ impl AgentView {
                                         content_loading: false,
                                         deep_search_seq: 0,
                                         entries_query: None,
-                                        source_filter:
-                                            crate::views::session_picker::SourceFilter::default(),
                                         pending_delete: None,
                                     });
                                     return InputOutcome::Action(Action::FetchSessionList);
@@ -1058,7 +1056,6 @@ impl AgentView {
                 content_results,
                 content_loading,
                 entries_query,
-                source_filter,
                 pending_delete,
                 ..
             } => {
@@ -1079,7 +1076,6 @@ impl AgentView {
                     effective_filter_query(state.query(), entries_query.as_deref()),
                     true,
                     *content_loading,
-                    *source_filter,
                     Some(current_repo.as_str()),
                 );
                 let entry_count = entry_map.len();
@@ -1096,9 +1092,9 @@ impl AgentView {
                     shortcuts_area: None,
                     tabs: None,
                     active_tab: 0,
-                    filter_label: Some(source_filter.label()),
-                    filter_key_hint: Some("f"),
-                    filter_active: source_filter.is_active(),
+                    filter_label: None,
+                    filter_key_hint: None,
+                    filter_active: false,
                     header_note: None,
                     action_keys: &[('d', "delete")],
                     disable_search: false,
@@ -1110,7 +1106,6 @@ impl AgentView {
                 match crate::views::session_picker::handle_pending_delete_key(pending_delete, ev) {
                     crate::views::session_picker::PendingDeleteKey::Confirm(pd) => {
                         return InputOutcome::Action(Action::DeleteSession {
-                            source: pd.source,
                             session_id: pd.session_id,
                             cwd: pd.cwd,
                         });
@@ -1204,7 +1199,6 @@ impl AgentView {
                                 && !state.expanded.contains(original_index)
                             {
                                 InputOutcome::Action(Action::ExpandSessionCard {
-                                    source: entry.source.clone(),
                                     session_id: entry.id.clone(),
                                 })
                             } else {
@@ -1216,7 +1210,6 @@ impl AgentView {
                                 && let Some(hit) = hits.get(*hit_index)
                             {
                                 InputOutcome::Action(Action::ExpandSessionCard {
-                                    source: "local".into(),
                                     session_id: hit.session_id.clone(),
                                 })
                             } else {
@@ -1232,7 +1225,6 @@ impl AgentView {
                                 && state.expanded.contains(original_index)
                             {
                                 InputOutcome::Action(Action::ExpandSessionCard {
-                                    source: entry.source.clone(),
                                     session_id: entry.id.clone(),
                                 })
                             } else {
@@ -1246,7 +1238,6 @@ impl AgentView {
                                 && let Some(hit) = hits.get(*hit_index)
                             {
                                 InputOutcome::Action(Action::ExpandSessionCard {
-                                    source: "local".into(),
                                     session_id: hit.session_id.clone(),
                                 })
                             } else {
@@ -1270,7 +1261,6 @@ impl AgentView {
                             state,
                             true,
                             *content_loading,
-                            *source_filter,
                             Some(current_repo.as_str()),
                         );
                         InputOutcome::Action(Action::TriggerDeepSearch)
@@ -1286,9 +1276,7 @@ impl AgentView {
                         }
                         InputOutcome::Unchanged
                     }
-                    PickerOutcome::FilterCycled => {
-                        InputOutcome::Action(Action::CycleSessionSourceFilter)
-                    }
+                    PickerOutcome::FilterCycled => InputOutcome::Changed,
                     PickerOutcome::Action('d') => {
                         *pending_delete =
                             crate::views::session_picker::pending_delete_from_selection(
@@ -1942,7 +1930,6 @@ impl AgentView {
                 content_results,
                 content_loading,
                 entries_query,
-                source_filter,
                 pending_delete,
                 ..
             } = active_modal
@@ -1988,11 +1975,6 @@ impl AgentView {
                         },
                     ]);
                     shortcuts.push(Shortcut {
-                        label: "f filter",
-                        clickable: false,
-                        id: 0,
-                    });
-                    shortcuts.push(Shortcut {
                         label: "d delete",
                         clickable: false,
                         id: 0,
@@ -2034,18 +2016,7 @@ impl AgentView {
                         true,
                         Some(theme.bg_base),
                     );
-                    let filter_rect = picker::render_filter_indicator(
-                        buf,
-                        content_area.x,
-                        content_area.y,
-                        content_area.width,
-                        &theme,
-                        source_filter.label(),
-                        "f",
-                        source_filter.is_active(),
-                        state.filter_hovered,
-                    );
-                    state.filter_area = Some(filter_rect);
+                    state.filter_area = None;
                     // Divider — spans full inner width.
                     let sep_y = content_area.y + 1;
                     if sep_y < content_area.y + content_area.height {
@@ -2072,8 +2043,7 @@ impl AgentView {
                         entries_query.as_deref(),
                     );
                     let entries_data = entries.as_deref().unwrap_or(&[]);
-                    let filtered_indices =
-                        filter_session_entries(entries.as_deref(), filter_query, *source_filter);
+                    let filtered_indices = filter_session_entries(entries.as_deref(), filter_query);
                     let built = crate::views::session_picker::build_session_entry_data(
                         entries_data,
                         &filtered_indices,
@@ -2193,7 +2163,6 @@ impl AgentView {
                         Some(theme.bg_base),
                         crate::views::session_picker::loading_spinner_active(
                             entries.as_deref(),
-                            *source_filter,
                             *loading,
                         ),
                         self.scrollback.tick_count(),
@@ -2449,7 +2418,6 @@ mod session_picker_delete_tests {
             created_at: chrono::Utc::now(),
             cwd: "/repo".into(),
             hostname: None,
-            source: "local".into(),
             model_id: None,
             num_messages: 0,
             last_active_at: None,
@@ -2471,7 +2439,6 @@ mod session_picker_delete_tests {
             content_loading: false,
             deep_search_seq: 0,
             entries_query: None,
-            source_filter: crate::views::session_picker::SourceFilter::default(),
             pending_delete: None,
         });
     }
@@ -2505,10 +2472,9 @@ mod session_picker_delete_tests {
             matches!(
                 out,
                 InputOutcome::Action(Action::DeleteSession {
-                    ref source,
                     ref session_id,
                     ref cwd,
-                }) if source == "local" && session_id == "s0" && cwd == "/repo"
+                }) if session_id == "s0" && cwd == "/repo"
             ),
             "y must confirm deletion of the armed session"
         );

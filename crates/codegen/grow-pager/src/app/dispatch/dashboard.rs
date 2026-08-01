@@ -2026,7 +2026,6 @@ fn delete_dashboard_row(
             let cwd = agent.session.cwd.display().to_string();
             app.show_toast("Deleting session\u{2026}");
             vec![Effect::DeleteSession {
-                source: "current".into(),
                 session_id: session_id.to_string(),
                 cwd,
                 after: crate::app::actions::AfterSessionDelete::Dashboard,
@@ -2053,7 +2052,6 @@ fn delete_dashboard_row(
             }
             app.show_toast("Deleting session\u{2026}");
             vec![Effect::DeleteSession {
-                source: "local".into(),
                 session_id,
                 cwd: entry.cwd,
                 after: crate::app::actions::AfterSessionDelete::Dashboard,

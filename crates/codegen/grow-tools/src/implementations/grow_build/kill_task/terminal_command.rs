@@ -56,8 +56,7 @@ impl xai_tool_runtime::Tool for KillTerminalCommandTool {
 
     fn capabilities(&self) -> xai_tool_protocol::ToolCapabilities {
         xai_tool_protocol::ToolCapabilities {
-            is_read_only: false,
-            tool_scope: Some(xai_tool_protocol::ToolScope::Write),
+            tool_scope: xai_tool_protocol::ToolScope::Write,
             ..Default::default()
         }
     }

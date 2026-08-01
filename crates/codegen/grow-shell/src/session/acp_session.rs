@@ -388,8 +388,9 @@ pub(crate) struct PreparedToolCall {
     /// Resolved target for meta-dispatch tools (`use_tool`, `CallMcpTool`);
     /// `None` for ordinary tools. See [`ToolInput::dispatch_target_name`].
     dispatch_target_name: Option<String>,
-    /// Read-only per `ToolKind`; decides whether the call takes the per-file lock.
-    is_read_only: bool,
+    /// Authoritative side-effect scope; decides whether the call takes the
+    /// per-file write lock.
+    tool_scope: xai_tool_protocol::ToolScope,
 }
 impl PreparedToolCall {
     /// The tool name hooks see: the resolved dispatch target, else the wire name.

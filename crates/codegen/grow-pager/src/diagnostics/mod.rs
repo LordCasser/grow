@@ -651,6 +651,46 @@ pub(crate) fn merge_tui_runtime_findings(
     }
 }
 
+/// Diagnose file-defined Agents that would otherwise look like primary
+/// profiles but cannot inspect, modify, and verify workspace work.
+pub(crate) fn collect_agent_definition_findings(workspace: &Path) -> Vec<DiagnosticFinding> {
+    let invalid = grow_agent::discovery::invalid_primary_agent_definitions(workspace);
+    if invalid.is_empty() {
+        return Vec::new();
+    }
+    let details = invalid
+        .iter()
+        .map(|definition| {
+            let reasons = definition
+                .primary_agent_issues()
+                .into_iter()
+                .map(|issue| issue.message())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let path = definition
+                .source_path
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| definition.name.clone());
+            format!("{path}: {reasons}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    vec![DiagnosticFinding {
+        id: DiagnosticId::new("agents", "primary-capability"),
+        disposition: FindingDisposition::Recommendation,
+        message: format!(
+            "{} Agent definition(s) are hidden from the primary Agent picker",
+            invalid.len()
+        ),
+        remediation: None,
+        automatic_remediation: None,
+        note: Some(format!(
+            "Add `subagentOnly: true` for worker-only definitions, or restore primary read, write, and execution tools. {details}"
+        )),
+    }]
+}
+
 fn tmux_reload_note(config_path: &str) -> String {
     format!("Reload tmux with `tmux source-file {config_path}`, or detach and reattach.")
 }
@@ -971,6 +1011,28 @@ mod tests {
     use crate::terminal::{
         ByobuBackend, MultiplexerKind, TerminalContext, TerminalName, TmuxClientMeta,
     };
+
+    #[test]
+    fn doctor_recommends_marking_restricted_primary_definition_subagent_only() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let agents = workspace.path().join(".grow/agents");
+        std::fs::create_dir_all(&agents).expect("agents dir");
+        std::fs::write(
+            agents.join("reader.md"),
+            "---\nname: reader\ndescription: read only\ntoolPreset: explore\n---\n\nRead only.\n",
+        )
+        .expect("agent definition");
+
+        let findings = collect_agent_definition_findings(workspace.path());
+        let finding = findings
+            .iter()
+            .find(|finding| finding.id == DiagnosticId::new("agents", "primary-capability"))
+            .expect("primary capability finding");
+        let note = finding.note.as_deref().expect("recommendation note");
+        assert!(note.contains("subagentOnly: true"));
+        assert!(note.contains("reader.md"));
+        assert!(note.contains("no workspace edit/write capability"));
+    }
 
     struct FakeTmuxQuery {
         set_clipboard: Option<String>,

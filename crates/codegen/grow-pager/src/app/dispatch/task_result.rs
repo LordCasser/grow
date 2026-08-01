@@ -380,11 +380,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             vec![]
         }
         TaskResult::CardDetailLoaded {
-            source,
             session_id,
             generation,
             detail,
-        } => handle_card_detail_loaded(app, source, session_id, generation, detail),
+        } => handle_card_detail_loaded(app, session_id, generation, detail),
         TaskResult::PromptResponse {
             agent_id,
             result,
@@ -839,18 +838,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::DeleteSessionComplete {
-            source,
-            session_id,
-            after,
-        } => {
+        TaskResult::DeleteSessionComplete { session_id, after } => {
             use crate::app::actions::AfterSessionDelete;
-            remove_session_from_pickers(
-                app,
-                &source,
-                &session_id,
-                after != AfterSessionDelete::Stay,
-            );
+            remove_session_from_pickers(app, &session_id);
             if after == AfterSessionDelete::Stay {
                 app.dashboard_local_sessions
                     .retain(|entry| entry.session_id != session_id);
@@ -916,12 +906,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.show_toast("Session deleted");
             effects
         }
-        TaskResult::DeleteSessionFailed {
-            source,
-            session_id,
-            error,
-        } => {
-            tracing::warn!(source, session_id = %session_id, error = %error, "session delete failed");
+        TaskResult::DeleteSessionFailed { session_id, error } => {
+            tracing::warn!(session_id = %session_id, error = %error, "session delete failed");
             app.show_toast(&format!("Couldn't delete session: {error}"));
             vec![]
         }

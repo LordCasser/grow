@@ -9,6 +9,7 @@
 use crate::types::tool::{ToolKind, ToolNamespace};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use xai_tool_protocol::ToolScope;
 /// Canonical input field names — the one vocabulary every harness normalizes
 /// onto. Emit canonical keys through these so the wire contract has one source.
 pub mod field {
@@ -27,7 +28,7 @@ pub mod field {
 pub const TOOL_META_KEY: &str = "grow/tool";
 /// Version of the canonical tool `_meta` contract. Bump on any breaking change
 /// to keys or value shapes so consumers can adapt.
-pub const TOOL_META_VERSION: u32 = 2;
+pub const TOOL_META_VERSION: u32 = 3;
 impl ToolKind {
     /// Unified, harness-independent display label for this semantic kind. A pure
     /// function of the kind, so equivalent tools across toolsets share it
@@ -67,10 +68,10 @@ impl ToolKind {
         }
     }
     /// Whether this kind only reads (no workspace or external mutation) by
-    /// default. The kind-level default for `ToolMetadata::is_read_only`, which
+    /// default. The kind-level default for `ToolMetadata::tool_scope`, which
     /// individual tools may override. Exhaustive (no `_`) so a new kind must
     /// classify itself rather than silently defaulting to "mutating".
-    pub fn is_read_only(self) -> bool {
+    pub fn default_scope(self) -> ToolScope {
         match self {
             ToolKind::Read
             | ToolKind::Search
@@ -81,7 +82,7 @@ impl ToolKind {
             | ToolKind::MemoryGet
             | ToolKind::WebFetch
             | ToolKind::PlanControl
-            | ToolKind::AskUser => true,
+            | ToolKind::AskUser => ToolScope::Read,
             ToolKind::Edit
             | ToolKind::Delete
             | ToolKind::Write
@@ -99,7 +100,7 @@ impl ToolKind {
             | ToolKind::Monitor
             | ToolKind::GoalUpdate
             | ToolKind::Workflow
-            | ToolKind::Other => false,
+            | ToolKind::Other => ToolScope::Write,
         }
     }
 }
@@ -133,19 +134,19 @@ pub struct ToolIdentity {
     pub tool_kind: ToolKind,
     pub namespace: ToolNamespace,
     pub presentation_name: &'static str,
-    pub read_only: bool,
+    pub scope: ToolScope,
 }
 /// The canonical tool-identity envelope, attached to a tool-call event `_meta`
 /// as one nested object under [`TOOL_META_KEY`].
 ///
 /// ```json
 /// "grow/tool": {
-///   "version": 2,
+///   "version": 3,
 ///   "name": "read_file",
 ///   "kind": "read",
 ///   "namespace": "grow",
 ///   "label": "Read",
-///   "read_only": true,
+///   "scope": "read",
 ///   "input": { "path": "..." }
 /// }
 /// ```
@@ -185,7 +186,7 @@ pub struct CanonicalToolMeta {
     pub kind: ToolKind,
     pub namespace: ToolNamespace,
     pub label: Cow<'static, str>,
-    pub read_only: bool,
+    pub scope: ToolScope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<serde_json::Value>,
 }
@@ -203,7 +204,7 @@ impl CanonicalToolMeta {
             kind: identity.tool_kind,
             namespace: identity.namespace,
             label: Cow::Borrowed(identity.presentation_name),
-            read_only: identity.read_only,
+            scope: identity.scope,
             input,
         }
     }
@@ -238,17 +239,17 @@ mod tests {
             tool_kind: kind,
             namespace: ToolNamespace::Grow,
             presentation_name: kind.presentation_name(),
-            read_only: kind.is_read_only(),
+            scope: kind.default_scope(),
         }
     }
     #[test]
-    fn is_read_only_classifies_kinds() {
-        assert!(ToolKind::Read.is_read_only());
-        assert!(ToolKind::Search.is_read_only());
-        assert!(ToolKind::List.is_read_only());
-        assert!(!ToolKind::Edit.is_read_only());
-        assert!(!ToolKind::Execute.is_read_only());
-        assert!(!ToolKind::Delete.is_read_only());
+    fn default_scope_classifies_kinds() {
+        assert_eq!(ToolKind::Read.default_scope(), ToolScope::Read);
+        assert_eq!(ToolKind::Search.default_scope(), ToolScope::Read);
+        assert_eq!(ToolKind::List.default_scope(), ToolScope::Read);
+        assert_eq!(ToolKind::Edit.default_scope(), ToolScope::Write);
+        assert_eq!(ToolKind::Execute.default_scope(), ToolScope::Write);
+        assert_eq!(ToolKind::Delete.default_scope(), ToolScope::Write);
     }
     #[test]
     fn namespace_round_trips_canonical_wire_values() {
@@ -304,7 +305,7 @@ mod tests {
         assert_eq!(t["kind"], "read");
         assert_eq!(t["namespace"], "grow");
         assert_eq!(t["label"], "Read");
-        assert_eq!(t["read_only"], true);
+        assert_eq!(t["scope"], "read");
         assert_eq!(t["input"]["path"], "/a");
         assert_eq!(
             serde_json::from_value::<CanonicalToolMeta>(t).unwrap(),

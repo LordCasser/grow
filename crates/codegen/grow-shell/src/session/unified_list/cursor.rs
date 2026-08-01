@@ -96,7 +96,6 @@ mod tests {
                 updated_at: timestamp.to_owned(),
                 created_at: timestamp.to_owned(),
                 cwd: "/repo".to_owned(),
-                source: "local".to_owned(),
                 num_messages: 1,
                 last_active_at: Some(timestamp.to_owned()),
                 ..MergedSession::default()

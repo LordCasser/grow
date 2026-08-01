@@ -197,8 +197,8 @@ impl SessionActor {
         // Keep the plan-mode gate's read-only classification in sync with the
         // config on every snapshot refresh (whole-set replace, same source as
         // the init-time load below).
-        let read_only_servers = crate::util::config::get_read_only_mcp_servers(cwd);
-        self.mcp_state.lock().await.read_only_mcp_servers = read_only_servers;
+        let server_scopes = crate::util::config::get_mcp_server_scopes(cwd);
+        self.mcp_state.lock().await.mcp_server_scopes = server_scopes;
         self.refresh_mcp_snapshot_and_schedule_reminder_with_disabled(&disabled_gateway_tools)
             .await;
     }
@@ -694,10 +694,10 @@ impl SessionActor {
                     mcp_state.disabled_tools = dt;
                 }
             }
-            // Read-only classification for the plan-mode gate: whole-set
+            // Tool-scope classification for the plan-mode gate: whole-set
             // replace (no populate-once guard) so config edits that add or
-            // clear `read_only` are reflected on the next init.
-            mcp_state.read_only_mcp_servers = crate::util::config::get_read_only_mcp_servers(
+            // scope changes are reflected on the next init.
+            mcp_state.mcp_server_scopes = crate::util::config::get_mcp_server_scopes(
                 std::path::Path::new(&self.session_info.cwd),
             );
             let existing: std::collections::HashSet<String> =
@@ -904,9 +904,9 @@ impl SessionActor {
         let disabled_gateway_tools_bg = crate::util::config::get_all_mcp_disabled_tools(
             std::path::Path::new(&self.session_info.cwd),
         );
-        let read_only_servers_bg = crate::util::config::get_read_only_mcp_servers(
-            std::path::Path::new(&self.session_info.cwd),
-        );
+        let server_scopes_bg = crate::util::config::get_mcp_server_scopes(std::path::Path::new(
+            &self.session_info.cwd,
+        ));
         let server_transport_map: std::collections::HashMap<String, &'static str> =
             mcp_server_configs
                 .iter()
@@ -1318,7 +1318,7 @@ impl SessionActor {
             // launched against.
             {
                 let mut mcp_state = mcp_state_bg.lock().await;
-                mcp_state.read_only_mcp_servers = read_only_servers_bg;
+                mcp_state.mcp_server_scopes = server_scopes_bg;
             }
             refresh_mcp_snapshot_and_schedule_reminder_with(
                 tool_bridge.clone(),

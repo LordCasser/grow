@@ -1436,16 +1436,9 @@ pub(crate) fn subagent_harness_flavor_is_representable(agent_type: &str) -> bool
 /// Apply the harness-dependent toolset/prompt re-selection to a resolved
 /// agent definition.
 ///
-/// The harness flavor (alternate vs grow-build) normally follows the PARENT
-/// agent: `GrowOrchestrator` parents give children
-/// the alternate harness; the orchestrator keeps children lean, and other parents
-/// inherit the file-tool override (hashline vs standard). A `/goal` role may
-/// pass `harness_agent_type` to OVERRIDE that flavor regardless of the parent
-/// (so a grow-build session can run an alternate-harness verifier and vice-versa);
-/// `None` for every non-goal spawn ⇒ the parent decides (unchanged). The base
-/// toolset stays role-dependent on `subagent_type` (general-purpose →
-/// implementer, else explorer), so the role keeps a capable toolset on the
-/// chosen harness.
+/// The child keeps the selected agent definition and inherits any configured
+/// file-tool override. A `/goal` role may also supply a harness definition;
+/// when no alternate harness is compiled in, that value is validation-only.
 ///
 /// Extracted so both [`run_shell_child`] (real spawn) and
 /// [`describe_subagent_type`] (read-only probe) build the SAME `tool_config`

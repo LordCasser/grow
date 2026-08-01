@@ -214,8 +214,7 @@ impl xai_tool_runtime::Tool for HashlineGrepTool {
 
     fn capabilities(&self) -> xai_tool_protocol::ToolCapabilities {
         xai_tool_protocol::ToolCapabilities {
-            is_read_only: true,
-            tool_scope: Some(xai_tool_protocol::ToolScope::Read),
+            tool_scope: xai_tool_protocol::ToolScope::Read,
             ..Default::default()
         }
     }
@@ -337,7 +336,10 @@ mod tests {
         let tool = HashlineGrepTool;
         assert_eq!(xai_tool_runtime::Tool::id(&tool).as_str(), "hashline_grep");
         assert_eq!(ToolMetadata::kind(&tool), ToolKind::Search);
-        assert!(xai_tool_runtime::Tool::capabilities(&tool).is_read_only);
+        assert_eq!(
+            xai_tool_runtime::Tool::capabilities(&tool).tool_scope,
+            xai_tool_protocol::ToolScope::Read
+        );
         assert!(matches!(
             ToolMetadata::tool_namespace(&tool),
             ToolNamespace::GrowHashline

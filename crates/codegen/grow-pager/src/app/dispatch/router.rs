@@ -58,7 +58,7 @@ use super::session::lifecycle::{
 };
 use super::session::list::dispatch_fetch_session_list;
 use super::session::load::{
-    dispatch_cycle_session_source_filter, dispatch_load_session, dispatch_pick_content_session,
+    dispatch_load_session, dispatch_pick_content_session,
     dispatch_pick_content_session_in_worktree, dispatch_pick_session,
     dispatch_pick_session_in_worktree, dispatch_session_picker_closed,
     dispatch_show_session_picker, dispatch_trigger_deep_search, session_picker_entry_matches,
@@ -170,17 +170,12 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             new_session_id,
         } => dispatch_startup_fork_session(app, parent_session_id, parent_cwd, new_session_id),
         Action::FetchSessionList => dispatch_fetch_session_list(app),
-        Action::CycleSessionSourceFilter => dispatch_cycle_session_source_filter(app),
         Action::ShowSessionPicker => dispatch_show_session_picker(app),
         Action::SessionPickerClosed => dispatch_session_picker_closed(app),
         Action::PickSession(index) => dispatch_pick_session(app, index),
         Action::PickSessionInWorktree(index) => dispatch_pick_session_in_worktree(app, index),
         Action::CopySessionId(index) => dispatch_copy_session_id(app, index),
-        Action::ExpandSessionCard { source, session_id } => {
-            let native_source = source == "local";
-            if !native_source {
-                return vec![];
-            }
+        Action::ExpandSessionCard { session_id } => {
             use crate::views::modal::ActiveModal;
             let detail_generation = app.session_picker_detail_generation;
             let from_modal = if let Some(agent) = get_active_agent_mut(app) {
@@ -191,9 +186,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                     ..
                 }) = agent.active_modal
                 {
-                    let expanded_idx = entries
-                        .iter()
-                        .position(|entry| entry.source == source && entry.id == session_id);
+                    let expanded_idx = entries.iter().position(|entry| entry.id == session_id);
                     if let Some(idx) = expanded_idx {
                         if state.expanded.contains(&idx) {
                             state.expanded.remove(&idx);
@@ -201,17 +194,15 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                         }
                         state.expanded.insert(idx);
                         let entry = &entries[idx];
-                        if native_source && entry.card_detail.is_none() {
+                        if entry.card_detail.is_none() {
                             return vec![Effect::LoadCardDetail {
-                                source: entry.source.clone(),
                                 session_id: entry.id.clone(),
                                 cwd: entry.cwd.clone(),
                                 generation: detail_generation,
                             }];
                         }
                         return vec![];
-                    } else if native_source
-                        && let Some(hits) = content_results.as_ref()
+                    } else if let Some(hits) = content_results.as_ref()
                         && let Some(hit_idx) = hits.iter().position(|h| h.session_id == session_id)
                     {
                         let key = CONTENT_EXPAND_OFFSET + hit_idx;
@@ -232,33 +223,29 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             if from_modal {
                 return vec![];
             }
-            let expanded_idx = app.session_picker_entries.as_ref().and_then(|entries| {
-                entries
-                    .iter()
-                    .position(|entry| entry.source == source && entry.id == session_id)
-            });
+            let expanded_idx = app
+                .session_picker_entries
+                .as_ref()
+                .and_then(|entries| entries.iter().position(|entry| entry.id == session_id));
             if let Some(idx) = expanded_idx {
                 if app.session_picker_state.expanded.contains(&idx) {
                     app.session_picker_state.expanded.remove(&idx);
                     return vec![];
                 }
                 app.session_picker_state.expanded.insert(idx);
-                if native_source
-                    && let Some(entry) = app
-                        .session_picker_entries
-                        .as_ref()
-                        .and_then(|entries| entries.get(idx))
+                if let Some(entry) = app
+                    .session_picker_entries
+                    .as_ref()
+                    .and_then(|entries| entries.get(idx))
                     && entry.card_detail.is_none()
                 {
                     return vec![Effect::LoadCardDetail {
-                        source: entry.source.clone(),
                         session_id: entry.id.clone(),
                         cwd: entry.cwd.clone(),
                         generation: detail_generation,
                     }];
                 }
-            } else if native_source
-                && let Some(hits) = app.session_picker_content_results.as_ref()
+            } else if let Some(hits) = app.session_picker_content_results.as_ref()
                 && let Some(hit_idx) = hits.iter().position(|h| h.session_id == session_id)
             {
                 let key = CONTENT_EXPAND_OFFSET + hit_idx;
@@ -1023,17 +1010,12 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PickContentSessionInWorktree { session_id, cwd } => {
             dispatch_pick_content_session_in_worktree(app, session_id, cwd)
         }
-        Action::DeleteSession {
-            source,
-            session_id,
-            cwd,
-        } => {
-            if source != "local" || !session_picker_entry_matches(app, &source, &session_id) {
+        Action::DeleteSession { session_id, cwd } => {
+            if !session_picker_entry_matches(app, &session_id) {
                 return vec![];
             }
             app.show_toast("Deleting session\u{2026}");
             vec![Effect::DeleteSession {
-                source,
                 session_id,
                 cwd,
                 after: crate::app::actions::AfterSessionDelete::Stay,

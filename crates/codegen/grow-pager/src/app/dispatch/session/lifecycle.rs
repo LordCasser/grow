@@ -414,7 +414,6 @@ pub(in crate::app::dispatch) fn dispatch_delete_current_session_answered(
     );
     app.show_toast("Deleting session\u{2026}");
     effects.push(Effect::DeleteSession {
-        source: "current".into(),
         session_id: session_id.to_string(),
         cwd,
         after: crate::app::actions::AfterSessionDelete::Welcome,

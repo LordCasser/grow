@@ -4033,6 +4033,7 @@ dependencies = [
  "serde_json",
  "strum 0.27.2",
  "tracing",
+ "xai-tool-protocol",
 ]
 
 [[package]]
@@ -4294,6 +4295,7 @@ dependencies = [
  "xai-ratatui-inline",
  "xai-ratatui-textarea",
  "xai-token-estimation",
+ "xai-tool-protocol",
  "xai-tty-utils",
 ]
 
@@ -12385,6 +12387,7 @@ version = "0.1.0"
 name = "xai-tool-protocol"
 version = "0.1.0"
 dependencies = [
+ "schemars 1.0.4",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

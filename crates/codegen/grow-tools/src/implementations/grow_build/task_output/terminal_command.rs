@@ -38,8 +38,8 @@ Usage notes:
         terminal_command_output_requires_expr()
     }
 
-    fn is_read_only(&self) -> bool {
-        true
+    fn tool_scope(&self) -> xai_tool_protocol::ToolScope {
+        xai_tool_protocol::ToolScope::Read
     }
 }
 
@@ -63,8 +63,7 @@ impl xai_tool_runtime::Tool for GetTerminalCommandOutputTool {
 
     fn capabilities(&self) -> xai_tool_protocol::ToolCapabilities {
         xai_tool_protocol::ToolCapabilities {
-            is_read_only: true,
-            tool_scope: Some(xai_tool_protocol::ToolScope::Read),
+            tool_scope: xai_tool_protocol::ToolScope::Read,
             ..Default::default()
         }
     }
@@ -108,9 +107,12 @@ mod tests {
     }
 
     #[test]
-    fn is_read_only() {
+    fn tool_scope_is_read() {
         let tool = GetTerminalCommandOutputTool;
-        assert!(ToolMetadata::is_read_only(&tool));
+        assert_eq!(
+            ToolMetadata::tool_scope(&tool),
+            xai_tool_protocol::ToolScope::Read
+        );
     }
 
     #[tokio::test]

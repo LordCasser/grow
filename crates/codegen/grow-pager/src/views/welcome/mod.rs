@@ -274,8 +274,6 @@ pub struct WelcomeRenderParams<'a> {
     pub session_picker_entries_query: Option<&'a str>,
     pub welcome_tick: u64,
     pub session_picker_grouped: bool,
-    /// Source filter for the session picker.
-    pub session_picker_source_filter: crate::views::session_picker::SourceFilter,
     /// Live working directory (tracks `Effect::SetWorkingDir`), used to pin
     /// the current repo's session group to the top of the picker.
     pub cwd: &'a std::path::Path,
@@ -549,7 +547,6 @@ fn render_welcome_done(
                 entries_query: p.session_picker_entries_query,
                 tick: p.welcome_tick,
                 grouped: p.session_picker_grouped,
-                source_filter: p.session_picker_source_filter,
                 cwd: p.cwd,
             },
         );
@@ -645,8 +642,6 @@ pub(crate) struct SessionPickerRenderCtx<'a> {
     pub(crate) tick: u64,
     /// When true, entries are grouped by `repo_name` with non-selectable headers.
     pub(crate) grouped: bool,
-    /// Source filter for filtering session entries.
-    pub(crate) source_filter: crate::views::session_picker::SourceFilter,
 }
 
 /// Render the session picker list on the welcome screen.
@@ -669,14 +664,13 @@ pub(crate) fn render_session_picker(
         None => &[],
     };
 
-    // Filter entries by query and source (shared helper). The same effective
+    // Filter entries by query (shared helper). The same effective
     // query must drive filtering AND the content header/rows gates below, or
     // this render disagrees with `handle_welcome_input`'s `build_entry_map`
     // (which receives the effective query) on row indices.
     let filter_query =
         crate::views::session_picker::effective_filter_query(ctx.state.query(), ctx.entries_query);
-    let filtered_indices =
-        crate::app::app_view::filter_session_entries(ctx.sessions, filter_query, ctx.source_filter);
+    let filtered_indices = crate::app::app_view::filter_session_entries(ctx.sessions, filter_query);
 
     let content_width = area.width; // approximate for truncation
     let built = build_session_entry_data(entries_data, &filtered_indices, ctx.state, content_width);
@@ -849,9 +843,9 @@ pub(crate) fn render_session_picker(
         shortcuts_area: ctx.shortcuts_area,
         tabs: None,
         active_tab: 0,
-        filter_label: Some(ctx.source_filter.label()),
-        filter_key_hint: Some("f"),
-        filter_active: ctx.source_filter.is_active(),
+        filter_label: None,
+        filter_key_hint: None,
+        filter_active: false,
         header_note: None,
         action_keys: &[],
         disable_search: false,
@@ -932,7 +926,6 @@ mod tests {
             created_at: chrono::Utc::now(),
             cwd: format!("/home/user/{repo_name}"),
             hostname: None,
-            source: "local".into(),
             model_id: None,
             num_messages: 1,
             last_active_at: None,
@@ -967,7 +960,6 @@ mod tests {
             session_picker_entries_query: None,
             welcome_tick: 0,
             session_picker_grouped: false,
-            session_picker_source_filter: crate::views::session_picker::SourceFilter::default(),
             cwd: std::path::Path::new("/repo"),
             welcome_announcement_expanded: false,
             promo_cta: None,
@@ -1065,7 +1057,6 @@ mod tests {
                     entries_query,
                     tick: 0,
                     grouped: false,
-                    source_filter: crate::views::session_picker::SourceFilter::default(),
                 },
             );
             (0..area.height)

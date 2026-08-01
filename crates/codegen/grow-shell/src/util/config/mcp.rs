@@ -928,7 +928,7 @@ pub fn get_all_mcp_disabled_tools(
         .collect()
 }
 
-/// Load server names declared `read_only = true` in `[mcp_servers.<name>]`.
+/// Load the declared scope for every `[mcp_servers.<name>]` entry.
 ///
 /// Single source of truth for the plan-mode read-only MCP classification:
 /// while a Plan is in a non-executing phase, tools from a listed server are
@@ -936,19 +936,20 @@ pub fn get_all_mcp_disabled_tools(
 /// `annotations`/`readOnlyHint` are never consulted. Mirrors
 /// `get_all_mcp_disabled_tools` (whole-set, config-derived; the session caches
 /// the result in `McpState` at init instead of re-reading per tool call).
-pub fn get_read_only_mcp_servers(_cwd: &std::path::Path) -> std::collections::HashSet<String> {
-    read_only_mcp_servers_from_config(&load_mcp_server_configs())
+pub fn get_mcp_server_scopes(
+    _cwd: &std::path::Path,
+) -> std::collections::HashMap<String, xai_tool_protocol::ToolScope> {
+    mcp_server_scopes_from_config(&load_mcp_server_configs())
 }
 
 /// Pure filter over parsed server configs; split out so the classification
 /// rule is unit-testable without the process-cached config home.
-fn read_only_mcp_servers_from_config(
+fn mcp_server_scopes_from_config(
     servers: &IndexMap<String, McpServerConfig>,
-) -> std::collections::HashSet<String> {
+) -> std::collections::HashMap<String, xai_tool_protocol::ToolScope> {
     servers
         .iter()
-        .filter(|(_, config)| config.read_only)
-        .map(|(name, _)| name.clone())
+        .map(|(name, config)| (name.clone(), config.tool_scope))
         .collect()
 }
 
@@ -1818,28 +1819,26 @@ command = ""
     }
 
     #[test]
-    fn read_only_mcp_servers_filter_matches_config_flag() {
+    fn mcp_server_scopes_match_config() {
         let mut servers = IndexMap::new();
-        for (name, read_only) in [
-            ("docs", true),
-            ("search", true),
-            ("linear", false),
-            ("defaults", false),
+        for (name, tool_scope) in [
+            ("docs", "read"),
+            ("search", "read"),
+            ("linear", "write"),
+            ("defaults", "write"),
         ] {
             let config: McpServerConfig = serde_json::from_value(serde_json::json!({
                 "command": "npx",
-                "read_only": read_only,
+                "tool_scope": tool_scope,
             }))
             .unwrap();
             servers.insert(name.to_string(), config);
         }
-        // `get_read_only_mcp_servers` itself reads the process-cached config
+        // `get_mcp_server_scopes` itself reads the process-cached config
         // home (`grow_home()` OnceLock), so the pure filter is tested here.
-        let read_only = read_only_mcp_servers_from_config(&servers);
-        assert_eq!(
-            read_only,
-            std::collections::HashSet::from(["docs".to_string(), "search".to_string()])
-        );
+        let scopes = mcp_server_scopes_from_config(&servers);
+        assert_eq!(scopes["docs"], xai_tool_protocol::ToolScope::Read);
+        assert_eq!(scopes["linear"], xai_tool_protocol::ToolScope::Write);
     }
 
     #[test]

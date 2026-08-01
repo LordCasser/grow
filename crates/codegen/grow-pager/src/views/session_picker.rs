@@ -79,11 +79,10 @@ pub enum PickerItem {
 }
 
 /// A session armed for deletion, captured on `d` so the `y` confirm keeps
-/// a valid `(source, session_id, cwd)` even if the lists shift. Shared by
+/// a valid `(session_id, cwd)` even if the lists shift. Shared by
 /// the welcome and modal `/resume` pickers so they can't drift apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingDelete {
-    pub source: String,
     pub session_id: String,
     pub cwd: String,
 }
@@ -113,7 +112,6 @@ pub(crate) fn pending_delete_from_selection(
             entries
                 .and_then(|e| e.get(*original_index))
                 .map(|e| PendingDelete {
-                    source: e.source.clone(),
                     session_id: e.id.clone(),
                     cwd: e.cwd.clone(),
                 })
@@ -122,7 +120,6 @@ pub(crate) fn pending_delete_from_selection(
             content_results
                 .and_then(|h| h.get(*hit_index))
                 .map(|h| PendingDelete {
-                    source: "local".into(),
                     session_id: h.session_id.clone(),
                     cwd: h.cwd.clone(),
                 })
@@ -181,57 +178,10 @@ pub struct SessionEntryData {
 /// Loading gate shared by rendering, redraw forcing, and tick demand.
 pub(crate) fn loading_spinner_active(
     entries: Option<&[SessionPickerEntry]>,
-    source_filter: SourceFilter,
     loading: bool,
 ) -> bool {
-    let nothing_visible = entries.is_none_or(|entries| {
-        !entries
-            .iter()
-            .any(|entry| source_filter.matches(&entry.source))
-    });
+    let nothing_visible = entries.is_none_or(<[_]>::is_empty);
     nothing_visible && loading
-}
-
-// ---------------------------------------------------------------------------
-// Source filter
-// ---------------------------------------------------------------------------
-
-/// Filter Grow sessions by storage locality.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SourceFilter {
-    #[default]
-    Grow,
-    Local,
-}
-
-impl SourceFilter {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Grow => "Grow",
-            Self::Local => "Local",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            Self::Local => Self::Grow,
-            Self::Grow => Self::Local,
-        }
-    }
-
-    /// Returns `true` when a non-default filter is selected.
-    pub fn is_active(self) -> bool {
-        self != Self::Grow
-    }
-
-    /// Returns `true` if a session with the given `source` string passes the filter.
-    ///
-    pub fn matches(self, source: &str) -> bool {
-        match self {
-            Self::Grow => true,
-            Self::Local => source == "local",
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -243,7 +193,7 @@ pub(crate) struct PickerSelectionAnchor {
 
 #[derive(Debug, Clone)]
 enum PickerSelectionKey {
-    Fuzzy { source: String, id: String },
+    Fuzzy { id: String },
     Content { id: String },
 }
 
@@ -255,7 +205,6 @@ pub(crate) fn capture_picker_selection(
     query: &str,
     grouped: bool,
     content_loading: bool,
-    source_filter: SourceFilter,
     current_repo: Option<&str>,
 ) -> PickerSelectionAnchor {
     let map = build_entry_map(
@@ -264,7 +213,6 @@ pub(crate) fn capture_picker_selection(
         query,
         grouped,
         content_loading,
-        source_filter,
         current_repo,
     );
     let key = map
@@ -274,7 +222,6 @@ pub(crate) fn capture_picker_selection(
             PickerItem::Fuzzy { original_index } => entries
                 .and_then(|entries| entries.get(*original_index))
                 .map(|entry| PickerSelectionKey::Fuzzy {
-                    source: entry.source.clone(),
                     id: entry.id.clone(),
                 }),
             PickerItem::Content { hit_index } => content_results
@@ -301,7 +248,6 @@ pub(crate) fn restore_picker_selection(
     query: &str,
     grouped: bool,
     content_loading: bool,
-    source_filter: SourceFilter,
     current_repo: Option<&str>,
 ) {
     let map = build_entry_map(
@@ -310,7 +256,6 @@ pub(crate) fn restore_picker_selection(
         query,
         grouped,
         content_loading,
-        source_filter,
         current_repo,
     );
     let selected = anchor
@@ -318,12 +263,11 @@ pub(crate) fn restore_picker_selection(
         .as_ref()
         .and_then(|key| {
             map.iter().position(|item| match (key, item.as_ref()) {
-                (
-                    PickerSelectionKey::Fuzzy { source, id },
-                    Some(PickerItem::Fuzzy { original_index }),
-                ) => entries
-                    .and_then(|entries| entries.get(*original_index))
-                    .is_some_and(|entry| &entry.source == source && &entry.id == id),
+                (PickerSelectionKey::Fuzzy { id }, Some(PickerItem::Fuzzy { original_index })) => {
+                    entries
+                        .and_then(|entries| entries.get(*original_index))
+                        .is_some_and(|entry| &entry.id == id)
+                }
                 (PickerSelectionKey::Content { id }, Some(PickerItem::Content { hit_index })) => {
                     content_results
                         .and_then(|results| results.get(*hit_index))
@@ -386,15 +330,12 @@ pub(crate) fn effective_filter_query<'a>(
     }
 }
 
-/// Filter session entries by query and source filter, returning indices of matching entries.
+/// Filter session entries by query, returning indices of matching entries.
 ///
-/// When the query is empty, all entries match the text filter. The
-/// `source_filter` is always applied (entries whose `source` field
-/// does not pass [`SourceFilter::matches`] are excluded).
+/// When the query is empty, all local entries match.
 pub(crate) fn filter_session_entries(
     entries: Option<&[SessionPickerEntry]>,
     query: &str,
-    source_filter: SourceFilter,
 ) -> Vec<usize> {
     let Some(entries) = entries else {
         return vec![];
@@ -404,10 +345,9 @@ pub(crate) fn filter_session_entries(
         .iter()
         .enumerate()
         .filter(|(_, e)| {
-            source_filter.matches(&e.source)
-                && (query.is_empty()
-                    || fuzzy_matches_session(&e.id, &q)
-                    || fuzzy_matches_session(&e.summary, &q))
+            query.is_empty()
+                || fuzzy_matches_session(&e.id, &q)
+                || fuzzy_matches_session(&e.summary, &q)
         })
         .map(|(i, _)| i)
         .collect()
@@ -423,9 +363,8 @@ pub(crate) fn build_virtual_list(
     entries: Option<&[SessionPickerEntry]>,
     content_results: Option<&[grow_shell::extensions::session_search::SearchSessionHit]>,
     query: &str,
-    source_filter: SourceFilter,
 ) -> Vec<PickerItem> {
-    let fuzzy_indices = filter_session_entries(entries, query, source_filter);
+    let fuzzy_indices = filter_session_entries(entries, query);
     let fuzzy_ids: HashSet<&str> = entries
         .map(|ents| {
             fuzzy_indices
@@ -473,12 +412,11 @@ pub(crate) fn build_entry_map(
     query: &str,
     grouped: bool,
     content_loading: bool,
-    source_filter: SourceFilter,
     current_repo: Option<&str>,
 ) -> Vec<Option<PickerItem>> {
     if grouped {
         let entries_data = entries.unwrap_or(&[]);
-        let filtered = filter_session_entries(entries, query, source_filter);
+        let filtered = filter_session_entries(entries, query);
         let mut map: Vec<Option<PickerItem>> = Vec::new();
         {
             let mut groups: IndexMap<&str, Vec<usize>> = IndexMap::new();
@@ -529,7 +467,7 @@ pub(crate) fn build_entry_map(
         } else {
             content_results
         };
-        let virtual_list = build_virtual_list(entries, content_for_flat, query, source_filter);
+        let virtual_list = build_virtual_list(entries, content_for_flat, query);
         let fuzzy_count = virtual_list
             .iter()
             .filter(|i| matches!(i, PickerItem::Fuzzy { .. }))
@@ -606,7 +544,6 @@ pub(crate) fn sync_session_picker_query_expansion(
     state: &mut PickerState,
     grouped: bool,
     content_loading: bool,
-    source_filter: SourceFilter,
     current_repo: Option<&str>,
 ) {
     let entry_map = build_entry_map(
@@ -615,7 +552,6 @@ pub(crate) fn sync_session_picker_query_expansion(
         effective_filter_query(state.query(), entries_query),
         grouped,
         content_loading,
-        source_filter,
         current_repo,
     );
     expand_all_mapped_session_items(state, &entry_map);
@@ -667,7 +603,6 @@ pub(crate) fn build_session_entry_data(
                 };
                 field_data.push(("Created".into(), fmt_time(entry.created_at)));
                 field_data.push(("Updated".into(), fmt_time(entry.updated_at)));
-                field_data.push(("Source".into(), entry.source.clone()));
                 if let Some(ref host) = entry.hostname {
                     field_data.push(("Host".into(), host.clone()));
                 }
@@ -952,19 +887,13 @@ mod tests {
 
         // Without the stamp (plain fetch / stale stamp): fuzzy filter hides it.
         assert!(
-            filter_session_entries(
-                Some(&entries),
-                effective_filter_query("hit", None),
-                SourceFilter::Grow,
-            )
-            .is_empty(),
+            filter_session_entries(Some(&entries), effective_filter_query("hit", None)).is_empty(),
             "unstamped entries keep the local fuzzy filter"
         );
         assert!(
             filter_session_entries(
                 Some(&entries),
                 effective_filter_query("hit", Some("older query")),
-                SourceFilter::Grow,
             )
             .is_empty(),
             "a stale stamp (newer fetch in flight) keeps the local filter"
@@ -972,11 +901,7 @@ mod tests {
 
         // Stamped with the live query: server already filtered — row visible.
         assert_eq!(
-            filter_session_entries(
-                Some(&entries),
-                effective_filter_query("hit", Some("hit")),
-                SourceFilter::Grow,
-            ),
+            filter_session_entries(Some(&entries), effective_filter_query("hit", Some("hit"))),
             vec![0],
             "server search results must render even with an unrelated title"
         );
@@ -994,7 +919,6 @@ mod tests {
             created_at: chrono::Utc::now(),
             cwd: format!("/{repo}"),
             hostname: None,
-            source: String::new(),
             model_id: None,
             num_messages: 0,
             last_active_at: None,
@@ -1029,15 +953,7 @@ mod tests {
             make_entry("s2", "repo-a"),
         ];
 
-        let map = build_entry_map(
-            Some(&entries),
-            None,
-            "",
-            true,
-            false,
-            SourceFilter::Grow,
-            None,
-        );
+        let map = build_entry_map(Some(&entries), None, "", true, false, None);
 
         // Expected layout (sorted by repo_name):
         //   0: None          (header "repo-a")
@@ -1091,15 +1007,7 @@ mod tests {
 
         // query must be non-empty for content results to be included.
         // Use a query that matches all entries so fuzzy list is preserved.
-        let map = build_entry_map(
-            Some(&entries),
-            Some(&content_hits),
-            "s",
-            true,
-            false,
-            SourceFilter::Grow,
-            None,
-        );
+        let map = build_entry_map(Some(&entries), Some(&content_hits), "s", true, false, None);
 
         // Expected:
         //   0: None            (header "repo-a")
@@ -1138,7 +1046,6 @@ mod tests {
             "",
             true,
             /* content_loading */ true,
-            SourceFilter::Grow,
             None,
         );
         assert_eq!(map.len(), 2, "repo header + row only, no content header");
@@ -1156,15 +1063,7 @@ mod tests {
         let entries = vec![make_entry("s0", "r")];
         let content_hits = vec![make_content_hit("s_new")];
 
-        let map = build_entry_map(
-            Some(&entries),
-            Some(&content_hits),
-            "",
-            true,
-            false,
-            SourceFilter::Grow,
-            None,
-        );
+        let map = build_entry_map(Some(&entries), Some(&content_hits), "", true, false, None);
 
         // Only the repo header + fuzzy entry; no content header/items.
         assert_eq!(map.len(), 2);
@@ -1183,15 +1082,7 @@ mod tests {
         let content_hits = vec![make_content_hit("s_content")];
 
         // Empty query: content results excluded (matches renderer guard).
-        let map = build_entry_map(
-            Some(&entries),
-            Some(&content_hits),
-            "",
-            false,
-            false,
-            SourceFilter::Grow,
-            None,
-        );
+        let map = build_entry_map(Some(&entries), Some(&content_hits), "", false, false, None);
         assert_eq!(map.len(), 2);
         assert!(matches!(
             map[0],
@@ -1203,15 +1094,7 @@ mod tests {
         ));
 
         // Non-empty query: content results included with header.
-        let map = build_entry_map(
-            Some(&entries),
-            Some(&content_hits),
-            "s",
-            false,
-            false,
-            SourceFilter::Grow,
-            None,
-        );
+        let map = build_entry_map(Some(&entries), Some(&content_hits), "s", false, false, None);
         assert_eq!(map.len(), 4);
         assert!(matches!(
             map[0],
@@ -1229,15 +1112,7 @@ mod tests {
     fn expand_all_mapped_session_items_uses_backing_indices() {
         let entries = vec![make_entry("zero", "repo-a"), make_entry("needle", "repo-b")];
         let hits = vec![make_content_hit("content")];
-        let map = build_entry_map(
-            Some(&entries),
-            Some(&hits),
-            "needle",
-            true,
-            false,
-            SourceFilter::Grow,
-            None,
-        );
+        let map = build_entry_map(Some(&entries), Some(&hits), "needle", true, false, None);
         let mut state = PickerState::default();
         state.set_query("needle");
 
@@ -1268,120 +1143,11 @@ mod tests {
     /// Empty entries list produces empty map.
     #[test]
     fn empty_entries_produces_empty_map() {
-        let map = build_entry_map(None, None, "", true, false, SourceFilter::Grow, None);
+        let map = build_entry_map(None, None, "", true, false, None);
         assert!(map.is_empty());
 
-        let map = build_entry_map(Some(&[]), None, "", false, false, SourceFilter::Grow, None);
+        let map = build_entry_map(Some(&[]), None, "", false, false, None);
         assert!(map.is_empty());
-    }
-
-    #[test]
-    fn source_filter_matches() {
-        assert!(SourceFilter::Grow.matches("local"));
-        assert!(SourceFilter::Grow.matches("remote"));
-
-        assert!(SourceFilter::Local.matches("local"));
-        assert!(!SourceFilter::Local.matches("remote"));
-    }
-
-    #[test]
-    fn source_filter_cycles() {
-        assert_eq!(SourceFilter::Grow.next(), SourceFilter::Local);
-        assert_eq!(SourceFilter::Local.next(), SourceFilter::Grow);
-        assert_eq!(SourceFilter::Grow.label(), "Grow");
-        assert_eq!(SourceFilter::default(), SourceFilter::Grow);
-    }
-
-    #[test]
-    fn source_filter_filters_entries() {
-        fn entry_with_source(id: &str, source: &str) -> SessionPickerEntry {
-            let mut e = make_entry(id, "r");
-            e.source = source.into();
-            e
-        }
-        let entries = vec![
-            entry_with_source("s0", "local"),
-            entry_with_source("s1", "remote"),
-        ];
-
-        let grow = filter_session_entries(Some(&entries), "", SourceFilter::Grow);
-        assert_eq!(grow, vec![0, 1]);
-
-        let local = filter_session_entries(Some(&entries), "", SourceFilter::Local);
-        assert_eq!(local, vec![0]);
-    }
-
-    #[test]
-    fn source_filter_empty_and_unknown_source() {
-        // Empty / unknown source passes Grow but not the stricter Local view.
-        assert!(SourceFilter::Grow.matches(""));
-        assert!(!SourceFilter::Local.matches(""));
-
-        assert!(SourceFilter::Grow.matches("unknown"));
-        assert!(!SourceFilter::Local.matches("unknown"));
-    }
-
-    #[test]
-    fn source_filter_is_active() {
-        assert!(!SourceFilter::Grow.is_active());
-        assert!(SourceFilter::Local.is_active());
-    }
-
-    #[test]
-    fn source_filter_combined_with_text_query() {
-        fn entry_with_source(id: &str, source: &str) -> SessionPickerEntry {
-            let mut e = make_entry(id, "r");
-            e.source = source.into();
-            e
-        }
-        let entries = vec![
-            entry_with_source("alpha", "local"),
-            entry_with_source("beta", "remote"),
-        ];
-
-        // Text query "alpha" + Local filter: only alpha matches both criteria.
-        let result = filter_session_entries(Some(&entries), "alpha", SourceFilter::Local);
-        assert_eq!(result, vec![0]);
-
-        // Text query matching all + Local filter: only local rows pass.
-        let result = filter_session_entries(Some(&entries), "", SourceFilter::Local);
-        assert_eq!(result, vec![0]);
-    }
-
-    #[test]
-    fn grouped_entry_map_with_source_filter() {
-        fn entry_with_source(id: &str, repo: &str, source: &str) -> SessionPickerEntry {
-            let mut e = make_entry(id, repo);
-            e.source = source.into();
-            e
-        }
-        let entries = vec![
-            entry_with_source("s0", "repo-a", "local"),
-            entry_with_source("s1", "repo-b", "local"),
-        ];
-
-        // Local rows are grouped by repo.
-        let map = build_entry_map(
-            Some(&entries),
-            None,
-            "",
-            true,
-            false,
-            SourceFilter::Local,
-            None,
-        );
-        // repo-a header + s0 + repo-b header + s1 = 4
-        assert_eq!(map.len(), 4);
-        assert!(map[0].is_none()); // repo-a header
-        assert!(matches!(
-            map[1],
-            Some(PickerItem::Fuzzy { original_index: 0 })
-        ));
-        assert!(map[2].is_none()); // repo-b header
-        assert!(matches!(
-            map[3],
-            Some(PickerItem::Fuzzy { original_index: 1 })
-        ));
     }
 
     /// `current_repo` pins the matching group to the top; remaining groups
@@ -1395,15 +1161,7 @@ mod tests {
         ];
 
         // Pin repo-c: its group leads, then repo-a, repo-b alphabetically.
-        let map = build_entry_map(
-            Some(&entries),
-            None,
-            "",
-            true,
-            false,
-            SourceFilter::Grow,
-            Some("repo-c"),
-        );
+        let map = build_entry_map(Some(&entries), None, "", true, false, Some("repo-c"));
         // [repo-c hdr, s2, repo-a hdr, s0, repo-b hdr, s1]
         assert_eq!(map.len(), 6);
         assert!(map[0].is_none(), "repo-c header pinned first");
@@ -1423,15 +1181,7 @@ mod tests {
         ));
 
         // A current_repo with no matching group is a no-op (pure alphabetical).
-        let map = build_entry_map(
-            Some(&entries),
-            None,
-            "",
-            true,
-            false,
-            SourceFilter::Grow,
-            Some("repo-zzz"),
-        );
+        let map = build_entry_map(Some(&entries), None, "", true, false, Some("repo-zzz"));
         assert!(map[0].is_none(), "repo-a header");
         assert!(matches!(
             map[1],

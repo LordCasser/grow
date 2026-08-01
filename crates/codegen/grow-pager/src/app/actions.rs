@@ -50,8 +50,6 @@ pub enum Action {
     OpenPrevLink,
     /// Fetch the session list for the session picker on the welcome screen.
     FetchSessionList,
-    /// Cycle the active session picker's source filter.
-    CycleSessionSourceFilter,
     /// Load a selected session from the session picker.
     PickSession(usize),
     /// Load a selected session from the session picker into a new worktree.
@@ -60,7 +58,6 @@ pub enum Action {
     CopySessionId(usize),
     /// Toggle expanded card view for a session in the picker.
     ExpandSessionCard {
-        source: String,
         session_id: String,
     },
     /// Open the session picker overlay (from within an active session via /resume).
@@ -649,11 +646,10 @@ pub enum Action {
         session_id: String,
         cwd: String,
     },
-    /// Delete a session from history (local + remote). Fired from the
+    /// Delete a session from local history. Fired from the
     /// session picker: `d` arms delete confirmation on the focused row,
     /// then `y` confirms (or `n`/other cancels).
     DeleteSession {
-        source: String,
         session_id: String,
         cwd: String,
     },
@@ -1336,7 +1332,6 @@ pub enum Effect {
     FetchDashboardSessions,
     /// Load card detail for a specific session (lazy, reads chat history from disk).
     LoadCardDetail {
-        source: String,
         session_id: String,
         cwd: String,
         generation: u64,
@@ -1803,10 +1798,9 @@ pub enum Effect {
         title: String,
         cwd: std::path::PathBuf,
     },
-    /// Delete a session's stored data (local + remote) via
+    /// Delete a session's stored local data via
     /// `grow/session/delete`.
     DeleteSession {
-        source: String,
         session_id: String,
         cwd: String,
         after: AfterSessionDelete,
@@ -2068,7 +2062,6 @@ pub enum TaskResult {
     },
     /// Card detail loaded for a session in the picker.
     CardDetailLoaded {
-        source: String,
         session_id: String,
         generation: u64,
         detail: crate::app::app_view::CardDetail,
@@ -2295,13 +2288,11 @@ pub enum TaskResult {
     },
     /// Session delete completed successfully.
     DeleteSessionComplete {
-        source: String,
         session_id: String,
         after: AfterSessionDelete,
     },
     /// Session delete failed.
     DeleteSessionFailed {
-        source: String,
         session_id: String,
         error: String,
     },

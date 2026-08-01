@@ -75,8 +75,7 @@ const MAX_PROGRESS_DELTA_BYTES: usize = 16 * 1024;
 /// capped per frame at [`MAX_PROGRESS_DELTA_BYTES`].
 static BASH_CAPABILITIES: LazyLock<xai_tool_protocol::ToolCapabilities> =
     LazyLock::new(|| xai_tool_protocol::ToolCapabilities {
-        is_read_only: false,
-        tool_scope: Some(xai_tool_protocol::ToolScope::Write),
+        tool_scope: xai_tool_protocol::ToolScope::Write,
         streaming: Some(xai_tool_protocol::StreamingSpec {
             subkind: "bash_output_chunk".to_owned(),
             max_delta_bytes: Some(MAX_PROGRESS_DELTA_BYTES as u32),

@@ -1,6 +1,7 @@
 ---
 name: general-purpose
 description: General-purpose Agent for bounded multi-step work.
+subagentOnly: true
 promptComposition: extend
 toolPreset: grow-build
 additionalTools: []

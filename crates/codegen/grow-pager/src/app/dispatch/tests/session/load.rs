@@ -1389,9 +1389,9 @@ fn build_mode_modal_close_drops_armed_debounce_despite_seq_collision() {
         "modal-armed expiry must not search after the modal closed, got {effects:?}"
     );
 }
-/// Build-mode sibling of the chat Esc test, pinning Esc-during-load: with the
-/// fast foreign lane landed (hidden by the Grow default → CTA) and the native
-/// fetch still in flight, Esc must really dismiss the picker — drop the
+/// Build-mode sibling of the chat Esc test, pinning Esc-during-load: with a
+/// partial local list landed and the fetch still in flight, Esc must really
+/// dismiss the picker — drop the
 /// loading flag (a lingering flag holds `show_picker` in a spinner limbo that
 /// ignores input) and stale the fetch so its late response cannot resurrect
 /// the picker.
@@ -1402,9 +1402,7 @@ fn build_welcome_esc_during_load_dismisses_without_resurrection() {
     let _ = dispatch(Action::FetchSessionList, &mut app);
     let seq = app.session_picker_list_seq;
     assert!(app.session_picker_loading);
-    let mut foreign = make_picker_entry("claude-1", "/repo");
-    foreign.source = "claude".into();
-    app.session_picker_entries = Some(vec![foreign]);
+    app.session_picker_entries = Some(vec![make_picker_entry("local-1", "/repo")]);
     let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     let out = app.handle_input(&esc);
     assert!(

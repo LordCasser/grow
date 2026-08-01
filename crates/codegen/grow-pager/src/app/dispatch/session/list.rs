@@ -4,8 +4,8 @@ use crate::app::dispatch::ctx::get_active_agent_mut;
 use crate::views::modal::ActiveModal;
 use crate::views::picker::PickerState;
 use crate::views::session_picker::{
-    PickerSelectionAnchor, SourceFilter, capture_picker_selection, effective_filter_query,
-    repo_name_from_cwd, restore_picker_selection,
+    PickerSelectionAnchor, capture_picker_selection, effective_filter_query, repo_name_from_cwd,
+    restore_picker_selection,
 };
 
 use grow_shell::session::unified_list::ListScope;
@@ -19,7 +19,6 @@ struct PickerSurface<'a> {
     content_results: &'a mut Option<Vec<SearchHit>>,
     content_loading: &'a mut bool,
     entries_query: &'a mut Option<String>,
-    source_filter: SourceFilter,
     grouped: bool,
     current_repo: String,
 }
@@ -33,7 +32,6 @@ impl PickerSurface<'_> {
             effective_filter_query(self.state.query(), self.entries_query.as_deref()),
             self.grouped,
             *self.content_loading,
-            self.source_filter,
             Some(&self.current_repo),
         )
     }
@@ -49,7 +47,6 @@ impl PickerSurface<'_> {
             &filter_query,
             self.grouped,
             *self.content_loading,
-            self.source_filter,
             Some(&self.current_repo),
         );
         self.state.expanded.clear();
@@ -130,7 +127,6 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
             content_results,
             content_loading,
             entries_query,
-            source_filter,
             ..
         }) = agent.active_modal.as_mut()
         {
@@ -141,7 +137,6 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
                 content_results,
                 content_loading,
                 entries_query,
-                source_filter: *source_filter,
                 grouped: true,
                 current_repo,
             }
@@ -161,7 +156,6 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
             content_results: &mut app.session_picker_content_results,
             content_loading: &mut app.session_picker_content_loading,
             entries_query: &mut app.session_picker_entries_query,
-            source_filter: app.session_picker_source_filter,
             grouped: app.session_picker_grouped,
             current_repo,
         }
@@ -218,7 +212,6 @@ pub(in crate::app::dispatch) fn handle_session_list_failed(
             content_results,
             content_loading,
             entries_query,
-            source_filter,
             ..
         }) = agent.active_modal.as_mut()
         {
@@ -229,7 +222,6 @@ pub(in crate::app::dispatch) fn handle_session_list_failed(
                 content_results,
                 content_loading,
                 entries_query,
-                source_filter: *source_filter,
                 grouped: true,
                 current_repo,
             }
@@ -246,7 +238,6 @@ pub(in crate::app::dispatch) fn handle_session_list_failed(
             content_results: &mut app.session_picker_content_results,
             content_loading: &mut app.session_picker_content_loading,
             entries_query: &mut app.session_picker_entries_query,
-            source_filter: app.session_picker_source_filter,
             grouped: app.session_picker_grouped,
             current_repo,
         }

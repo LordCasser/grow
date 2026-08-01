@@ -273,10 +273,9 @@ pub struct SessionPickerEntry {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub cwd: String,
     pub hostname: Option<String>,
-    pub source: String,
     pub model_id: Option<String>,
     pub num_messages: usize,
-    /// When the session last had content added (most recent of local and remote).
+    /// When the local session last had content added.
     pub last_active_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Git branch associated with the session (if available from the server response).
     pub branch: Option<String>,
@@ -660,8 +659,6 @@ pub struct AppView {
     pub session_picker_loading: bool,
     /// Unified picker state for the session picker.
     pub session_picker_state: crate::views::picker::PickerState,
-    /// Source filter for the welcome-screen session picker.
-    pub session_picker_source_filter: crate::views::session_picker::SourceFilter,
     /// Directory whose relaxed-scope notice has fired, keyed by the browse cwd
     /// (`app.cwd`); a cwd-scoped browse clears it so a later relax re-notifies.
     pub session_picker_relaxed_notified_for: Option<std::path::PathBuf>,
@@ -945,7 +942,6 @@ impl AppView {
             session_picker_state: crate::views::picker::PickerState::with_mode(
                 crate::views::picker::PickerMode::FullScreen,
             ),
-            session_picker_source_filter: crate::views::session_picker::SourceFilter::default(),
             session_picker_relaxed_notified_for: None,
             session_picker_content_results: None,
             session_picker_content_loading: false,
@@ -1590,7 +1586,6 @@ impl AppView {
         .is_some_and(|(owner, _, _)| !crate::views::announcements::is_dismissible(owner));
         let sp_loading = crate::views::session_picker::loading_spinner_active(
             self.session_picker_entries.as_deref(),
-            self.session_picker_source_filter,
             self.session_picker_loading,
         );
         let outcome = match self.active_view {
@@ -1623,7 +1618,6 @@ impl AppView {
                     has_pending_update: self.pending_update_version.is_some(),
                     cwd_has_git_ancestor: self.cwd_has_git_ancestor,
                     session_picker_grouped: self.session_picker_grouped,
-                    sp_source_filter: &mut self.session_picker_source_filter,
                 },
             ),
             ActiveView::Agent(id) => {
@@ -2197,7 +2191,6 @@ struct WelcomeInputCtx<'a> {
     has_pending_update: bool,
     cwd_has_git_ancestor: bool,
     session_picker_grouped: bool,
-    sp_source_filter: &'a mut crate::views::session_picker::SourceFilter,
 }
 /// Welcome view input -- auth-state-aware routing.
 fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutcome {
@@ -2288,7 +2281,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
     }
     if ctx.sp_entries.is_some() || ctx.sp_loading {
         use crate::views::picker::{PickerConfig, PickerOutcome, handle_picker_input};
-        let source_filter = *ctx.sp_source_filter;
         let current_repo =
             crate::views::session_picker::repo_name_from_cwd(&ctx.cwd.to_string_lossy());
         let entry_map = build_entry_map(
@@ -2300,7 +2292,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             ),
             ctx.session_picker_grouped,
             ctx.sp_content_loading,
-            source_filter,
             Some(current_repo.as_str()),
         );
         let entry_count = entry_map.len();
@@ -2317,9 +2308,9 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             shortcuts_area: None,
             tabs: None,
             active_tab: 0,
-            filter_label: Some(source_filter.label()),
-            filter_key_hint: Some("f"),
-            filter_active: source_filter.is_active(),
+            filter_label: None,
+            filter_key_hint: None,
+            filter_active: false,
             header_note: None,
             action_keys: &[],
             disable_search: false,
@@ -2383,7 +2374,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             PickerOutcome::Closed => {
                 *ctx.sp_entries = None;
                 ctx.sp_state.reset();
-                *ctx.sp_source_filter = crate::views::session_picker::SourceFilter::default();
                 return InputOutcome::Action(Action::SessionPickerClosed);
             }
             PickerOutcome::Expand(i) => {
@@ -2393,7 +2383,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                             && let Some(entry) = ents.get(*original_index)
                         {
                             return InputOutcome::Action(Action::ExpandSessionCard {
-                                source: entry.source.clone(),
                                 session_id: entry.id.clone(),
                             });
                         }
@@ -2403,7 +2392,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                             && let Some(hit) = hits.get(*hit_index)
                         {
                             return InputOutcome::Action(Action::ExpandSessionCard {
-                                source: "local".into(),
                                 session_id: hit.session_id.clone(),
                             });
                         }
@@ -2420,7 +2408,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                             && let Some(entry) = ents.get(*original_index)
                         {
                             return InputOutcome::Action(Action::ExpandSessionCard {
-                                source: entry.source.clone(),
                                 session_id: entry.id.clone(),
                             });
                         }
@@ -2432,7 +2419,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                             && let Some(hit) = hits.get(*hit_index)
                         {
                             return InputOutcome::Action(Action::ExpandSessionCard {
-                                source: "local".into(),
                                 session_id: hit.session_id.clone(),
                             });
                         }
@@ -2455,7 +2441,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     ctx.sp_state,
                     ctx.session_picker_grouped,
                     ctx.sp_content_loading,
-                    source_filter,
                     Some(current_repo.as_str()),
                 );
                 return InputOutcome::Action(Action::TriggerDeepSearch);
@@ -2471,9 +2456,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 }
                 return InputOutcome::Unchanged;
             }
-            PickerOutcome::FilterCycled => {
-                return InputOutcome::Action(Action::CycleSessionSourceFilter);
-            }
+            PickerOutcome::FilterCycled => return InputOutcome::Changed,
             PickerOutcome::NonSelectableClick(_)
             | PickerOutcome::TabChanged(_)
             | PickerOutcome::Action(_) => {
@@ -2959,7 +2942,6 @@ impl AppView {
                             session_picker_loading:
                                 crate::views::session_picker::loading_spinner_active(
                                     self.session_picker_entries.as_deref(),
-                                    self.session_picker_source_filter,
                                     self.session_picker_loading,
                                 ),
                             compact,
@@ -2975,7 +2957,6 @@ impl AppView {
                                 .as_deref(),
                             welcome_tick: self.welcome_tick,
                             session_picker_grouped: self.session_picker_grouped,
-                            session_picker_source_filter: self.session_picker_source_filter,
                             welcome_announcement_expanded: self.welcome_announcement.expanded,
                             promo_cta: hero_cta.map(|(_owner, label, _)| label),
                         };
@@ -3545,7 +3526,6 @@ impl AppView {
             if self.session_picker_content_loading
                 || crate::views::session_picker::loading_spinner_active(
                     self.session_picker_entries.as_deref(),
-                    self.session_picker_source_filter,
                     self.session_picker_loading,
                 )
             {
@@ -3629,11 +3609,9 @@ impl AppView {
                 Some(crate::views::modal::ActiveModal::SessionPicker {
                     entries,
                     loading,
-                    source_filter,
                     ..
                 }) if crate::views::session_picker::loading_spinner_active(
                     entries.as_deref(),
-                    *source_filter,
                     *loading,
                 )
             ) && spinner_frame_tick;
@@ -3923,11 +3901,9 @@ impl AppView {
                         Some(crate::views::modal::ActiveModal::SessionPicker {
                             entries,
                             loading,
-                            source_filter,
                             ..
                         }) if crate::views::session_picker::loading_spinner_active(
                             entries.as_deref(),
-                            *source_filter,
                             *loading,
                         )
                     )
@@ -4165,7 +4141,6 @@ pub(crate) mod tests {
             session_picker_state: crate::views::picker::PickerState::with_mode(
                 crate::views::picker::PickerMode::FullScreen,
             ),
-            session_picker_source_filter: crate::views::session_picker::SourceFilter::default(),
             session_picker_relaxed_notified_for: None,
             session_picker_content_results: None,
             session_picker_content_loading: false,
@@ -4709,7 +4684,6 @@ pub(crate) mod tests {
                 content_loading: false,
                 deep_search_seq: 0,
                 entries_query: None,
-                source_filter: crate::views::session_picker::SourceFilter::default(),
                 pending_delete: None,
             });
         assert_eq!(
@@ -5744,7 +5718,6 @@ pub(crate) mod tests {
             created_at: chrono::Utc::now(),
             cwd: "/tmp/repo".into(),
             hostname: None,
-            source: "local".into(),
             model_id: None,
             num_messages: 0,
             last_active_at: None,

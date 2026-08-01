@@ -114,8 +114,8 @@ fn print_sessions_grouped(sessions: &[MergedSession]) {
     }
 
     let header = format!(
-        "{:<36}  {:<10}  {:<10}  {:<10}  {}",
-        "SESSION ID", "CREATED", "UPDATED", "STATUS", "SUMMARY"
+        "{:<36}  {:<10}  {:<10}  {}",
+        "SESSION ID", "CREATED", "UPDATED", "SUMMARY"
     );
 
     // Labeled groups first (alphabetical), then unlabeled last.
@@ -138,10 +138,7 @@ fn print_sessions_grouped(sessions: &[MergedSession]) {
             let truncated: String = summary.chars().take(50).collect();
             let created = &s.created_at[..s.created_at.len().min(10)];
             let updated = &s.updated_at[..s.updated_at.len().min(10)];
-            println!(
-                "{}  {}  {}  {}  {}",
-                s.session_id, created, updated, s.source, truncated
-            );
+            println!("{}  {}  {}  {}", s.session_id, created, updated, truncated);
         }
     };
 

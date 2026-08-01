@@ -21,8 +21,8 @@ use strum::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
 ///   [`preset_names`] / [`all_toolset_presets`] (so they appear in the
 ///   workspace manifest, preset sets, etc.) *and* resolvable via
 ///   [`toolset_for_preset`].
-/// - **Internal** presets are resolved by name at runtime by the shell /
-///   orchestrator spawn path via [`toolset_for_preset`], but are deliberately
+/// - **Internal** presets are resolved by name at runtime by the shell's Agent
+///   spawn path via [`toolset_for_preset`], but are deliberately
 ///   NOT enumerated, so a harness-internal preset never leaks into public
 ///   preset enumeration.
 ///
@@ -58,8 +58,8 @@ pub fn register_toolset_preset(name: &str, builder: ToolsetPresetBuilder) {
         .insert(name.to_string(), (builder, PresetVisibility::Public));
 }
 /// Register an out-of-tree **internal** toolset preset by name. Internal presets
-/// are resolvable via [`toolset_for_preset`] (the shell / orchestrator spawn
-/// path resolves them by name) but are deliberately NOT enumerated by
+/// are resolvable via [`toolset_for_preset`] (the shell's Agent spawn path
+/// resolves them by name) but are deliberately NOT enumerated by
 /// [`preset_names`] / [`all_toolset_presets`], so they never leak into public
 /// preset enumeration (manifest generation, product preset sets, …). See
 /// [`TOOLSET_PRESETS`].
@@ -168,7 +168,6 @@ fn native_toolset_presets() -> Vec<(&'static str, ToolServerConfig)> {
         ("grow-build", default_grow_build_toolset()),
         ("grow-build-concise", grow_build_concise_toolset()),
         ("explore", explore_toolset()),
-        ("grow-build-orchestrator", orchestrator_toolset()),
         ("grow-computer", grow_computer_toolset()),
     ]
 }
@@ -299,55 +298,11 @@ fn explore_toolset() -> ToolServerConfig {
         behavior_preset: None,
     }
 }
-/// Orchestrator toolset: read/search/orchestration tools only.
-///
-/// No terminal execution, no file editing. The orchestrator delegates
-/// all execution and file modification to subagents. Retains read_file,
-/// grep, list_dir for research, plus the full subagent/skill/MCP/plan
-/// stack for orchestration.
-fn orchestrator_toolset() -> ToolServerConfig {
-    ToolServerConfig {
-        tools: vec![
-            // Research tools
-            bash_tool_config(),
-            (&grow_build::ReadFileTool).into(),
-            (&grow_build::ListDirTool).into(),
-            (&grow_build::GrepTool).into(),
-            // Subagent orchestration
-            task_tool_config(),
-            task_output_tool_config(),
-            wait_tasks_tool_config(),
-            kill_task_tool_config(),
-            // Skills and MCP
-            (&search_tool::SearchTool).into(),
-            (&use_tool::UseTool).into(),
-            // Planning and user interaction
-            (&grow_build::TodoWriteTool).into(),
-            (&grow_build::PlanControlTool).into(),
-            (&grow_build::AskUserQuestionTool).into(),
-            (&grow_build::UpdateGoalTool).into(),
-            (&grow_build::WorkflowTool).into(),
-            // Scheduling and monitoring
-            (&grow_build::SchedulerCreateTool).into(),
-            (&grow_build::SchedulerDeleteTool).into(),
-            (&grow_build::SchedulerListTool).into(),
-            (&grow_build::MonitorTool).into(),
-            // Web fetch
-            (&grow_build::WebFetchTool).into(),
-            // Memory
-            (&memory::MemorySearchImpl).into(),
-            (&memory::MemoryGetImpl).into(),
-            // Intentionally excluded:
-            // - SearchReplaceTool (no file editing — delegate to subagents)
-            // - WriteTool (no file writing — delegate to subagents)
-        ],
-        behavior_preset: None,
-    }
-}
 /// Per-Agent restriction on which peer definitions may be launched through
 /// the task tool. This is a tool capability, not an Agent hierarchy: the same
-/// definition remains selectable as a primary Agent and launchable anywhere
-/// another Agent permits it.
+/// definition may be launched anywhere another Agent permits it; primary
+/// visibility is decided independently by `subagentOnly` and the capability
+/// floor.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubagentFilter {
     allow: Option<HashSet<String>>,
@@ -423,9 +378,8 @@ where
 /// are defined in exactly one place. The enum covers all built-in
 /// agents for centralized name management and `by_name()` dispatch.
 ///
-/// `subagent_variants()` returns only the 2 that are exposed to the LLM
-/// via the `TaskTool` description. The remaining 4 are top-level agent
-/// profiles resolvable by name but not advertised as subagent types.
+/// Subagent-only status is declared by each definition's `subagentOnly`
+/// frontmatter rather than duplicated in this enum.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter, AsRefStr, IntoStaticStr,
 )]
@@ -438,8 +392,6 @@ pub enum BuiltinAgentName {
     GeneralPurpose,
     Explore,
     BrowserUse,
-    #[strum(serialize = "grow-build-orchestrator")]
-    GrowOrchestrator,
 }
 /// Strict-harness predicate by name. Resolves via `BuiltinAgentName` and
 /// delegates to [`AgentDefinition::is_strict_harness`]; unknown names
@@ -461,12 +413,14 @@ impl BuiltinAgentName {
             Self::GeneralPurpose => AgentDefinition::general_purpose(),
             Self::Explore => AgentDefinition::explore(),
             Self::BrowserUse => AgentDefinition::browser_use(),
-            Self::GrowOrchestrator => AgentDefinition::grow_build_orchestrator(),
         }
     }
-    /// Built-in agents available as subagents via the Task tool.
-    pub fn subagent_variants() -> &'static [Self] {
-        &[Self::GeneralPurpose, Self::Explore]
+    /// Built-in definitions explicitly marked as subagent-only.
+    pub fn subagent_variants() -> Vec<Self> {
+        use strum::IntoEnumIterator;
+        Self::iter()
+            .filter(|name| name.definition().subagent_only)
+            .collect()
     }
 }
 /// Portable agent identity — parsed from .grow/agents/*.md.
@@ -481,6 +435,10 @@ pub struct AgentDefinition {
     #[serde(default)]
     pub name: String,
     pub description: String,
+    /// This definition may be launched by another Agent but is not a valid
+    /// primary-session profile and must not appear in the primary Agent picker.
+    #[serde(default)]
+    pub subagent_only: bool,
     /// Plugin namespace for plugin-backed agents only.
     #[serde(skip)]
     pub plugin_name: Option<String>,
@@ -656,6 +614,26 @@ impl AgentScope {
             Self::User => "user",
             Self::Bundled => "bundled",
             Self::BuiltIn => "built-in",
+        }
+    }
+}
+
+/// Why an Agent definition cannot own a primary session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrimaryAgentIssue {
+    SubagentOnly,
+    MissingWorkspaceRead,
+    MissingWorkspaceWrite,
+    MissingExecution,
+}
+
+impl PrimaryAgentIssue {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::SubagentOnly => "declared subagentOnly",
+            Self::MissingWorkspaceRead => "no workspace read/search capability",
+            Self::MissingWorkspaceWrite => "no workspace edit/write capability",
+            Self::MissingExecution => "no command execution capability",
         }
     }
 }
@@ -1174,6 +1152,110 @@ fn file_stem_agent_id(path: &Path) -> Result<String, AgentBuildError> {
         })
 }
 impl AgentDefinition {
+    /// Validate the definition's declared primary-session capability floor.
+    ///
+    /// A primary Agent must be able to inspect the workspace, make necessary
+    /// changes, and execute verification. This is intentionally a definition
+    /// check: runtime permission prompts may narrow individual calls, but they
+    /// do not turn a worker-only definition into a primary Agent.
+    pub fn primary_agent_issues(&self) -> Vec<PrimaryAgentIssue> {
+        if self.subagent_only {
+            return vec![PrimaryAgentIssue::SubagentOnly];
+        }
+
+        let kinds = self.effective_authored_tool_kinds();
+        let has = |candidates: &[grow_tools::types::tool::ToolKind]| {
+            kinds.iter().any(|kind| candidates.contains(kind))
+        };
+        use grow_tools::types::tool::ToolKind;
+        let mut issues = Vec::new();
+        if !has(&[
+            ToolKind::Read,
+            ToolKind::Search,
+            ToolKind::List,
+            ToolKind::ListDir,
+            ToolKind::Lsp,
+        ]) {
+            issues.push(PrimaryAgentIssue::MissingWorkspaceRead);
+        }
+        if !has(&[
+            ToolKind::Edit,
+            ToolKind::Write,
+            ToolKind::Delete,
+            ToolKind::Move,
+        ]) {
+            issues.push(PrimaryAgentIssue::MissingWorkspaceWrite);
+        }
+        if !has(&[ToolKind::Execute]) {
+            issues.push(PrimaryAgentIssue::MissingExecution);
+        }
+        issues
+    }
+
+    pub fn is_primary_agent_eligible(&self) -> bool {
+        self.primary_agent_issues().is_empty()
+    }
+
+    /// Apply the Agent-authored portion of the tool assembly order for static
+    /// eligibility checks. Unknown allowlist entries fail open, matching the
+    /// runtime builder's behavior.
+    fn effective_authored_tool_kinds(&self) -> Vec<grow_tools::types::tool::ToolKind> {
+        use grow_tools::implementations::grow_build::task::types::SubagentCapabilityModeExt;
+        let mut tools = self.tool_config.tools.clone();
+        if self.inject_default_tools
+            && !tools.iter().any(|tool| {
+                matches!(
+                    tool.kind,
+                    Some(
+                        grow_tools::types::tool::ToolKind::Edit
+                            | grow_tools::types::tool::ToolKind::Write
+                    )
+                )
+            })
+        {
+            tools.push((&grow_build::WriteTool).into());
+        }
+        tools.retain(|tool| !tool_id_matches(&self.disallowed_tools, &tool.id));
+
+        if !self.tools.is_empty() {
+            let present_kinds: HashSet<_> = tools.iter().filter_map(|tool| tool.kind).collect();
+            let mut allowed_kinds = HashSet::new();
+            let mut unresolved = false;
+            for entry in &self.tools {
+                if tools.iter().any(|tool| tool_id_eq(entry, &tool.id)) {
+                    continue;
+                }
+                match grow_tools::types::kind_for(entry) {
+                    Some(kind) if present_kinds.contains(&kind) => {
+                        allowed_kinds.insert(kind);
+                    }
+                    Some(_) => {}
+                    None => unresolved = true,
+                }
+            }
+            if !unresolved {
+                tools.retain(|tool| {
+                    tool_id_matches(&self.tools, &tool.id)
+                        || tool.kind.is_some_and(|kind| allowed_kinds.contains(&kind))
+                        || matches!(
+                            tool.kind,
+                            Some(
+                                grow_tools::types::tool::ToolKind::SearchTool
+                                    | grow_tools::types::tool::ToolKind::UseTool
+                            )
+                        )
+                });
+            }
+        }
+
+        if let Some(mode) = self.capability_mode {
+            let allowed = mode.allowed_tool_kinds();
+            tools.retain(|tool| tool.kind.is_none_or(|kind| allowed.contains(&kind)));
+        }
+
+        tools.into_iter().filter_map(|tool| tool.kind).collect()
+    }
+
     /// Whether `id` passes the session-operator clamp: denylist wins, then an
     /// unset allowlist allows all.
     pub(crate) fn session_tools_allowed(&self, id: &str) -> bool {
@@ -1250,6 +1332,7 @@ impl AgentDefinition {
         Self {
             name: name.to_owned(),
             description: description.to_string(),
+            subagent_only: false,
             plugin_name: None,
             prompt_composition: PromptComposition::Extend,
             tool_preset: default_tool_preset(),
@@ -1313,17 +1396,6 @@ impl AgentDefinition {
     pub fn browser_use() -> Self {
         Self::embedded_builtin(include_str!("../prompts/agents/browser-use.md"))
     }
-    /// Grow Orchestrator — GBL model with full Grow tools
-    /// (skills, MCPs, plan mode) that delegates coding/exploration to
-    /// subagents.
-    ///
-    /// Subagent overrides are applied in `handle_subagent_request`:
-    /// general-purpose children get `implementer_toolset()` and explore
-    /// children get `explorer_toolset()`, both with the subagent model.
-    pub fn grow_build_orchestrator() -> Self {
-        Self::embedded_builtin(include_str!("../prompts/agents/grow-build-orchestrator.md"))
-    }
-
     fn embedded_builtin(source: &'static str) -> Self {
         let mut definition = Self::parse(source).expect("embedded Agent definition must be valid");
         definition.scope = AgentScope::BuiltIn;
@@ -1402,9 +1474,7 @@ mod tests {
     fn presets_select_distinct_toolsets_by_size() {
         let gb = toolset_for_preset("grow-build").unwrap();
         let explore = toolset_for_preset("explore").unwrap();
-        let orchestrator = toolset_for_preset("grow-build-orchestrator").unwrap();
         assert!(explore.tools.len() < gb.tools.len());
-        assert_ne!(orchestrator.tools.len(), explore.tools.len());
     }
     fn grow_computer_exclusive_ids() -> Vec<String> {
         #[allow(unused_mut)]
@@ -1510,7 +1580,6 @@ mod tests {
     /// until classified.
     fn expected_strict_harness(name: BuiltinAgentName) -> bool {
         match name {
-            BuiltinAgentName::GrowOrchestrator => true,
             BuiltinAgentName::Grow
             | BuiltinAgentName::GrowConcise
             | BuiltinAgentName::GeneralPurpose
@@ -1536,12 +1605,6 @@ mod tests {
     }
     #[test]
     fn is_strict_harness_agent_type_classifies_by_name() {
-        for strict in ["grow-build-orchestrator"] {
-            assert!(
-                is_strict_harness_agent_type(strict),
-                "{strict} should be strict"
-            );
-        }
         for non_strict in [
             "grow",
             "grow-build-concise",
@@ -1569,6 +1632,7 @@ tools:
   - grep
 permissionMode: dontAsk
 agentsMd: false
+subagentOnly: true
 ---
 
 You are a test agent.
@@ -1579,6 +1643,7 @@ You are a test agent.
         assert_eq!(def.prompt_composition, PromptComposition::Full);
         assert_eq!(def.permission_mode, PermissionMode::Default);
         assert!(!def.agents_md);
+        assert!(def.subagent_only);
         assert_eq!(def.prompt_body.as_deref(), Some("You are a test agent."));
         assert_eq!(
             def.tools,
@@ -1607,6 +1672,7 @@ You are a test agent.
         assert!(def.discover_skills);
         assert!(def.inherit_skills);
         assert!(def.agents_md);
+        assert!(def.subagent_only);
         assert!(def.inject_default_tools);
         assert!(!def.tools.is_empty());
         assert_eq!(def.disallowed_tools, ["deploy_app"]);
@@ -1636,6 +1702,38 @@ You are a test agent.
             def.permission_mode,
             PermissionMode::Default,
             "Agent files must not override session permission state"
+        );
+    }
+    #[test]
+    fn primary_eligibility_requires_read_write_and_execute() {
+        let primary = AgentDefinition::default_grow_build();
+        assert!(primary.is_primary_agent_eligible());
+
+        let mut read_only = AgentDefinition::explore();
+        read_only.subagent_only = false;
+        assert_eq!(
+            read_only.primary_agent_issues(),
+            vec![
+                PrimaryAgentIssue::MissingWorkspaceWrite,
+                PrimaryAgentIssue::MissingExecution,
+            ]
+        );
+
+        let worker = AgentDefinition::general_purpose();
+        assert_eq!(
+            worker.primary_agent_issues(),
+            vec![PrimaryAgentIssue::SubagentOnly]
+        );
+    }
+
+    #[test]
+    fn primary_eligibility_applies_agent_tool_denials() {
+        let mut definition = AgentDefinition::default_grow_build();
+        definition.disallowed_tools.push("run_terminal_cmd".into());
+        assert!(
+            definition
+                .primary_agent_issues()
+                .contains(&PrimaryAgentIssue::MissingExecution)
         );
     }
     #[test]
@@ -2237,7 +2335,7 @@ description: Test default tool config
         assert!(variants.contains(&BuiltinAgentName::Explore));
         assert_eq!(
             variants,
-            &[BuiltinAgentName::GeneralPurpose, BuiltinAgentName::Explore]
+            vec![BuiltinAgentName::GeneralPurpose, BuiltinAgentName::Explore]
         );
     }
     #[test]

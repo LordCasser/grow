@@ -123,6 +123,13 @@ impl ToolBridge {
         self.registry.get_tool_metadata(tool_name).map(|m| m.kind())
     }
 
+    /// Side-effect scope for a registered tool by client-facing name.
+    pub fn tool_scope(&self, tool_name: &str) -> Option<xai_tool_protocol::ToolScope> {
+        self.registry
+            .get_tool_metadata(tool_name)
+            .map(|metadata| metadata.tool_scope())
+    }
+
     /// Get only built-in tool definitions (exclude MCP tools).
     pub async fn tool_definitions_builtins_only(&self) -> Vec<ToolDefinition> {
         self.registry.tool_definitions_builtins_only()

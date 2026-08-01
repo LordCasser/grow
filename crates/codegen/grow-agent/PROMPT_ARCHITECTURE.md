@@ -21,10 +21,18 @@ promptComposition: extend
 toolPreset: grow-build
 additionalTools: []
 disallowedTools: []
+subagentOnly: false
 subagents:
   allow: []
   deny: []
 ```
+
+`subagentOnly` is the definition-owned usage boundary. Such definitions remain
+available to the Task tool but never appear in the primary Agent picker. Other
+file-defined Agents must declare enough tools to read the workspace, edit or
+write it, and execute verification; the picker and `/doctor` consume the same
+eligibility result. The Agents settings UI only enables or disables definitions
+and does not rewrite this architectural purpose.
 
 `toolPreset` is resolved first, followed by `additionalTools`, fixed runtime injection, availability/depth/capability filtering, Agent denies and subagent policy, session clamps, and ToolBridge finalization. `ToolKind`, `ToolMetadata`, registry finalization, template name resolution, and `ToolServerConfig.behavior_preset` retain their existing responsibilities.
 

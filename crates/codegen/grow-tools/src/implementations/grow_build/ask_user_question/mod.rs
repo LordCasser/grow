@@ -335,8 +335,7 @@ impl xai_tool_runtime::Tool for AskUserQuestionTool {
 
     fn capabilities(&self) -> xai_tool_protocol::ToolCapabilities {
         xai_tool_protocol::ToolCapabilities {
-            is_read_only: true,
-            tool_scope: Some(xai_tool_protocol::ToolScope::Read),
+            tool_scope: xai_tool_protocol::ToolScope::Read,
             ..Default::default()
         }
     }
@@ -592,8 +591,11 @@ mod tests {
     }
 
     #[test]
-    fn tool_is_read_only() {
-        assert!(xai_tool_runtime::Tool::capabilities(&AskUserQuestionTool).is_read_only);
+    fn tool_scope_is_read() {
+        assert_eq!(
+            xai_tool_runtime::Tool::capabilities(&AskUserQuestionTool).tool_scope,
+            xai_tool_protocol::ToolScope::Read
+        );
     }
 
     #[test]

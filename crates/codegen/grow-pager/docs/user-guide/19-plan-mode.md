@@ -123,7 +123,7 @@ Transitions:
 
 During Drafting, AwaitingApproval, and Amending, **all workspace mutation is rejected before permission evaluation**, including attempts to edit the session artifact path. Static Workflow is not advertised and stale Static Workflow calls are rejected. During Executing, edits are allowed only through the ordinary intersection of registered tools, Agent policy, permissions, and the Behavior gate.
 
-MCP servers declared read-only are the one exception to the mutation gate: every tool of a server with `[mcp_servers.<name>] read_only = true` is classified as read-only and may pass the gate, but still goes through the normal permission policy; all other MCP tools remain rejected. The flag is coarse server-level granularity — be cautious with servers that mix read and write tools (consider splitting the server, or leave the flag off).
+MCP servers declared with `[mcp_servers.<name>] tool_scope = "read"` are the one exception to the mutation gate: every tool of that server may pass the gate, but still goes through the normal permission policy; all `write` or unclassified MCP tools remain rejected. The scope is server-wide — split servers that mix read and write tools, or leave the conservative `write` default.
 
 This enforcement is independent of the permission mode:
 

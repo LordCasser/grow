@@ -379,6 +379,9 @@ pub fn build_switch_agent_catalog(cwd: &Path) -> Vec<crate::slash::command::Agen
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for entry in build_agent_list(cwd, &HashMap::new()) {
+        if !entry.definition.is_primary_agent_eligible() {
+            continue;
+        }
         if !seen.insert(entry.name.clone()) {
             continue;
         }
@@ -436,6 +439,9 @@ fn append_plugin_switch_agents(
                     AgentDefinition::from_file_frontmatter_only(&path).ok()
                 };
                 let Some(def) = def else { continue };
+                if !def.is_primary_agent_eligible() {
+                    continue;
+                }
                 let qualified = format!("{}:{}", plugin.name, def.name);
                 if !seen.insert(qualified.clone()) {
                     continue;
@@ -2678,6 +2684,18 @@ mod tests {
         for tab in AgentsTab::ALL {
             assert!(!tab.label().is_empty());
         }
+    }
+    #[test]
+    fn primary_picker_hides_subagent_only_builtins_but_settings_keeps_them() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let settings = build_agent_list(cwd.path(), &HashMap::new());
+        assert!(settings.iter().any(|entry| entry.name == "general-purpose"));
+        assert!(settings.iter().any(|entry| entry.name == "explore"));
+
+        let primary = build_switch_agent_catalog(cwd.path());
+        assert!(primary.iter().any(|entry| entry.name == DEFAULT_AGENT_TYPE));
+        assert!(!primary.iter().any(|entry| entry.name == "general-purpose"));
+        assert!(!primary.iter().any(|entry| entry.name == "explore"));
     }
     #[test]
     fn agents_tab_next_prev_roundtrip() {

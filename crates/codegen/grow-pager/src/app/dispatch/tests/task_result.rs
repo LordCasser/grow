@@ -1432,103 +1432,18 @@ fn available_commands_refreshed_empty_is_noop() {
 // -- Session deletion from the /resume picker -----------------------
 
 #[test]
-fn delete_session_complete_removes_only_matching_source_and_id() {
+fn delete_session_complete_clears_local_picker_entries_and_content_hits() {
     use crate::views::modal::ActiveModal;
+    use crate::views::session_picker::{PickerItem, build_entry_map};
+
     let mut app = test_app_with_agent();
-    let mut peer_same_id = make_picker_entry("s1", "/r");
-    peer_same_id.source = "remote-a".into();
-    let mut remote_same_id = make_picker_entry("s1", "/r");
-    remote_same_id.source = "remote".into();
     open_session_picker_with(
         &mut app,
         vec![
-            make_picker_entry("s0", "/r"),
-            peer_same_id,
-            make_picker_entry("s1", "/r"),
-            remote_same_id,
-            make_picker_entry("s2", "/r"),
+            make_picker_entry("shared", "/r"),
+            make_picker_entry("keep", "/r"),
         ],
     );
-    let mut welcome_peer = make_picker_entry("s1", "/r");
-    welcome_peer.source = "remote-a".into();
-    let mut welcome_remote = make_picker_entry("s1", "/r");
-    welcome_remote.source = "remote".into();
-    app.session_picker_entries = Some(vec![
-        welcome_peer,
-        make_picker_entry("s1", "/r"),
-        welcome_remote,
-    ]);
-    if let Some(ActiveModal::SessionPicker { pending_delete, .. }) = get_active_agent_mut(&mut app)
-        .unwrap()
-        .active_modal
-        .as_mut()
-    {
-        *pending_delete = Some(crate::views::session_picker::PendingDelete {
-            source: "local".into(),
-            session_id: "s1".into(),
-            cwd: "/r".into(),
-        });
-    }
-
-    let _ = dispatch_task_result(
-        TaskResult::DeleteSessionComplete {
-            source: "local".into(),
-            session_id: "s1".into(),
-            after: crate::app::actions::AfterSessionDelete::Stay,
-        },
-        &mut app,
-    );
-
-    let agent = get_active_agent(&app).expect("active agent");
-    let Some(ActiveModal::SessionPicker {
-        entries: Some(list),
-        pending_delete,
-        ..
-    }) = agent.active_modal.as_ref()
-    else {
-        panic!("expected SessionPicker modal");
-    };
-    let identities: Vec<_> = list
-        .iter()
-        .map(|entry| (entry.source.as_str(), entry.id.as_str()))
-        .collect();
-    assert_eq!(
-        identities,
-        vec![
-            ("local", "s0"),
-            ("remote-a", "s1"),
-            ("remote", "s1"),
-            ("local", "s2"),
-        ]
-    );
-    assert!(
-        pending_delete.is_none(),
-        "pending_delete must be cleared after deletion completes"
-    );
-    let welcome_identities: Vec<_> = app
-        .session_picker_entries
-        .as_ref()
-        .unwrap()
-        .iter()
-        .map(|entry| (entry.source.as_str(), entry.id.as_str()))
-        .collect();
-    assert_eq!(
-        welcome_identities,
-        vec![("remote-a", "s1"), ("remote", "s1")]
-    );
-}
-
-#[test]
-fn delete_both_session_clears_modal_and_welcome_content_hits() {
-    use crate::views::modal::ActiveModal;
-    use crate::views::session_picker::{PickerItem, SourceFilter, build_entry_map};
-
-    let mut app = test_app_with_agent();
-    let mut both = make_picker_entry("shared", "/r");
-    both.source = "both".into();
-    let mut peer = make_picker_entry("shared", "/r");
-    peer.source = "remote".into();
-    open_session_picker_with(&mut app, vec![both.clone(), peer.clone()]);
     let hit = grow_shell::extensions::session_search::SearchSessionHit {
         session_id: "shared".into(),
         summary: "shared".into(),
@@ -1550,13 +1465,15 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
         state.set_query("shared");
         *content_results = Some(vec![hit.clone()]);
     }
-    app.session_picker_entries = Some(vec![both, peer]);
+    app.session_picker_entries = Some(vec![
+        make_picker_entry("shared", "/r"),
+        make_picker_entry("keep", "/r"),
+    ]);
     app.session_picker_state.set_query("shared");
     app.session_picker_content_results = Some(vec![hit]);
 
     let _ = dispatch_task_result(
         TaskResult::DeleteSessionComplete {
-            source: "both".into(),
             session_id: "shared".into(),
             after: crate::app::actions::AfterSessionDelete::Stay,
         },
@@ -1576,9 +1493,9 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
     assert_eq!(
         modal_entries
             .iter()
-            .map(|entry| (entry.source.as_str(), entry.id.as_str()))
+            .map(|entry| entry.id.as_str())
             .collect::<Vec<_>>(),
-        vec![("remote", "shared")]
+        vec!["keep"]
     );
     assert!(modal_hits.is_empty());
     let modal_map = build_entry_map(
@@ -1587,7 +1504,6 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
         "shared",
         true,
         false,
-        SourceFilter::Grow,
         None,
     );
     assert!(
@@ -1602,9 +1518,9 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
     assert_eq!(
         welcome_entries
             .iter()
-            .map(|entry| (entry.source.as_str(), entry.id.as_str()))
+            .map(|entry| entry.id.as_str())
             .collect::<Vec<_>>(),
-        vec![("remote", "shared")]
+        vec!["keep"]
     );
     assert!(welcome_hits.is_empty());
     let welcome_map = build_entry_map(
@@ -1613,70 +1529,12 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
         "shared",
         false,
         false,
-        SourceFilter::Grow,
         None,
     );
     assert!(
         !welcome_map
             .iter()
             .any(|item| matches!(item, Some(PickerItem::Content { .. })))
-    );
-}
-
-#[test]
-fn delete_remote_session_clears_modal_and_welcome_content_hits() {
-    use crate::views::modal::ActiveModal;
-
-    let mut app = test_app_with_agent();
-    let mut remote = make_picker_entry("remote-only", "/r");
-    remote.source = "remote".into();
-    open_session_picker_with(&mut app, vec![remote.clone()]);
-    let hit = grow_shell::extensions::session_search::SearchSessionHit {
-        session_id: "remote-only".into(),
-        summary: "remote-only".into(),
-        cwd: "/r".into(),
-        updated_at: chrono::Utc::now().to_rfc3339(),
-        snippet: Some("stale deleted content".into()),
-        score: 1.0,
-        matched_fields: vec![],
-    };
-    if let Some(ActiveModal::SessionPicker {
-        content_results, ..
-    }) = get_active_agent_mut(&mut app)
-        .unwrap()
-        .active_modal
-        .as_mut()
-    {
-        *content_results = Some(vec![hit.clone()]);
-    }
-    app.session_picker_entries = Some(vec![remote]);
-    app.session_picker_content_results = Some(vec![hit]);
-
-    let _ = dispatch_task_result(
-        TaskResult::DeleteSessionComplete {
-            source: "remote".into(),
-            session_id: "remote-only".into(),
-            after: crate::app::actions::AfterSessionDelete::Stay,
-        },
-        &mut app,
-    );
-
-    let Some(ActiveModal::SessionPicker {
-        entries: Some(modal_entries),
-        content_results: Some(modal_hits),
-        ..
-    }) = app.agents[&AgentId(0)].active_modal.as_ref()
-    else {
-        panic!("expected modal picker");
-    };
-    assert!(modal_entries.is_empty());
-    assert!(modal_hits.is_empty());
-    assert!(app.session_picker_entries.as_ref().unwrap().is_empty());
-    assert!(
-        app.session_picker_content_results
-            .as_ref()
-            .unwrap()
-            .is_empty()
     );
 }
 
@@ -1691,7 +1549,6 @@ fn delete_session_failed_keeps_all_entries() {
 
     let _ = dispatch_task_result(
         TaskResult::DeleteSessionFailed {
-            source: "local".into(),
             session_id: "s1".into(),
             error: "boom".into(),
         },

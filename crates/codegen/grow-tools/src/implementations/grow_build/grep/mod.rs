@@ -214,8 +214,7 @@ pub fn max_head_limit(output_mode: &OutputMode) -> usize {
 /// terminal-only footer, so the stream is a faithful prefix of the card body.
 static GREP_CAPABILITIES: LazyLock<xai_tool_protocol::ToolCapabilities> =
     LazyLock::new(|| xai_tool_protocol::ToolCapabilities {
-        is_read_only: true,
-        tool_scope: Some(xai_tool_protocol::ToolScope::Read),
+        tool_scope: xai_tool_protocol::ToolScope::Read,
         streaming: Some(xai_tool_protocol::StreamingSpec {
             subkind: "grep_match_chunk".to_owned(),
             max_delta_bytes: None,

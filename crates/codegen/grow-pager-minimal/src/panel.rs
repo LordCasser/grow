@@ -160,19 +160,12 @@ fn render_divider(buf: &mut Buffer, row: Rect, theme: &Theme) {
 
 /// Exact body height (display rows) for the session-picker list.
 fn resume_body_rows(agent: &AgentView, width: u16) -> u16 {
-    let Some(ActiveModal::SessionPicker {
-        entries,
-        state,
-        source_filter,
-        ..
-    }) = &agent.active_modal
-    else {
+    let Some(ActiveModal::SessionPicker { entries, state, .. }) = &agent.active_modal else {
         return 0;
     };
     let entries_data = entries.as_deref().unwrap_or(&[]);
     let content_width = width.saturating_sub(2);
-    let filtered =
-        minimal_api::filter_session_entries(entries.as_deref(), state.query(), *source_filter);
+    let filtered = minimal_api::filter_session_entries(entries.as_deref(), state.query());
     let built =
         minimal_api::build_session_entry_data(entries_data, &filtered, state, content_width);
     let fields_vecs: Vec<Vec<PickerField>> = built
@@ -203,21 +196,14 @@ fn render_resume(
     theme: &Theme,
 ) -> Option<(u16, u16)> {
     let cwd = agent.session.cwd.to_string_lossy().to_string();
-    let Some(ActiveModal::SessionPicker {
-        entries,
-        state,
-        source_filter,
-        ..
-    }) = &mut agent.active_modal
-    else {
+    let Some(ActiveModal::SessionPicker { entries, state, .. }) = &mut agent.active_modal else {
         return None;
     };
     let (title_row, search_row, divider_row, list_area, footer_row) = chrome_layout(area);
 
     let entries_data = entries.as_deref().unwrap_or(&[]);
     let content_width = area.width.saturating_sub(2);
-    let filtered =
-        minimal_api::filter_session_entries(entries.as_deref(), state.query(), *source_filter);
+    let filtered = minimal_api::filter_session_entries(entries.as_deref(), state.query());
     let built =
         minimal_api::build_session_entry_data(entries_data, &filtered, state, content_width);
     let fields_vecs: Vec<Vec<PickerField>> = built
@@ -570,7 +556,6 @@ mod tests {
             created_at: chrono::Utc::now(),
             cwd: "/tmp/repo".into(),
             hostname: None,
-            source: String::new(),
             model_id: None,
             num_messages: 0,
             last_active_at: None,
@@ -587,13 +572,11 @@ mod tests {
             state: picker::PickerState::default(),
             entries: Some(entries),
             loading: false,
-            lanes: Default::default(),
             previous_palette: None,
             window: grow_pager::views::modal_window::ModalWindowState::new(),
             content_results: None,
             content_loading: false,
             deep_search_seq: 0,
-            source_filter: grow_pager::views::session_picker::SourceFilter::default(),
             pending_delete: None,
             entries_query: None,
         });

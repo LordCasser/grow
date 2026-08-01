@@ -253,7 +253,7 @@ async fn run_add(args: AddArgs) -> Result<()> {
     let config = McpServerConfig {
         transport: resolved.transport,
         enabled: true,
-        read_only: false,
+        tool_scope: xai_tool_protocol::ToolScope::Write,
         setup: None,
         startup_timeout_sec: None,
         tool_timeout_sec: None,

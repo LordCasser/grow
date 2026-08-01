@@ -13,6 +13,7 @@ serde_json = { workspace = true }
 strum = { workspace = true }
 tracing = { workspace = true }
 grow-config = { workspace = true }
+xai-tool-protocol = { workspace = true }
 
 [features]
 default-bazel = []

@@ -1975,7 +1975,6 @@ fn expand_build_card_still_loads_detail() {
     open_session_picker_with(&mut app, vec![make_picker_entry("local-exp-1", "/r")]);
     let effects = dispatch(
         Action::ExpandSessionCard {
-            source: "local".into(),
             session_id: "local-exp-1".into(),
         },
         &mut app,

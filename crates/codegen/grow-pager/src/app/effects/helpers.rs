@@ -434,7 +434,6 @@ pub(super) fn parse_session_picker_entries(
                 .unwrap_or_default()
                 .to_string();
             let hostname = v.get("hostname").and_then(|s| s.as_str()).map(String::from);
-            let source = v.get("source").and_then(|s| s.as_str()).unwrap_or("local").to_string();
             let model_id = v
                 .get("modelId")
                 .or_else(|| v.get("model_id"))
@@ -464,7 +463,6 @@ pub(super) fn parse_session_picker_entries(
                 created_at,
                 cwd: cwd_str,
                 hostname,
-                source,
                 model_id,
                 num_messages,
                 last_active_at,
@@ -499,7 +497,7 @@ pub(super) fn session_picker_entry_to_roster(
         resident: false,
         last_change_unix_ms: last_change.timestamp_millis(),
         origin: RosterOrigin {
-            kind: e.source.clone(),
+            kind: "local".into(),
             host: e.hostname.clone(),
         },
     }

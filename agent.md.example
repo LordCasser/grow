@@ -14,6 +14,10 @@ name: example-agent
 description: >-
   A complete Grow Agent definition showing every supported frontmatter feature.
 
+# Worker-only definitions remain available to parent Agents but are hidden from
+# the primary-session Agent picker. This is definition metadata, not a TUI setting.
+subagentOnly: true
+
 # How the Markdown body below contributes to the system prompt:
 #   extend (default): append it to Grow's built-in prompt.
 #   full:             replace only the optional standard/role guidance.

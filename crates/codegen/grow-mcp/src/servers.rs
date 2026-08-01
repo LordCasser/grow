@@ -369,12 +369,12 @@ pub struct McpState {
     /// Per-server set of unqualified tool names that the user has disabled.
     /// Persisted to `~/.grow/config.toml` under `[mcp_servers.<name>].disabled_tools`.
     pub disabled_tools: HashMap<McpServerName, std::collections::HashSet<ToolName>>,
-    /// Server names declared `read_only = true` in `[mcp_servers.<name>]` —
-    /// the single source of truth for the plan-mode gate's read-only MCP
-    /// classification. Mirrors `disabled_tools` lifecycle: NOT cleared by
+    /// Config-declared scope for every MCP server's tools. This is the single
+    /// source of truth for the plan-mode MCP classification. Mirrors
+    /// `disabled_tools` lifecycle: NOT cleared by
     /// `update_configs`/`update_configs_diff`; the shell refreshes the whole
     /// set at init and on config re-reads.
-    pub read_only_mcp_servers: std::collections::HashSet<String>,
+    pub mcp_server_scopes: std::collections::HashMap<String, xai_tool_protocol::ToolScope>,
     /// Stashed registrations for disabled tools so they can be re-enabled
     /// without a full MCP re-init (no need to call `list_tools` again).
     pub disabled_tool_registrations: HashMap<String, McpToolRegistration>,
@@ -422,7 +422,7 @@ impl McpState {
             mcp_tool_meta: HashMap::new(),
             init_failed: HashMap::new(),
             disabled_tools: HashMap::new(),
-            read_only_mcp_servers: std::collections::HashSet::new(),
+            mcp_server_scopes: std::collections::HashMap::new(),
             disabled_tool_registrations: HashMap::new(),
             client_event_tx: None,
         }

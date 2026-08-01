@@ -25,7 +25,6 @@ pub struct MergedSession {
     pub cwd: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
-    pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
     #[serde(default)]
@@ -143,7 +142,6 @@ fn summary_to_session(summary: Summary) -> MergedSession {
         created_at: summary.created_at.to_rfc3339(),
         cwd: summary.info.cwd,
         hostname: None,
-        source: "local".to_owned(),
         model_id: Some(summary.current_model_id.to_string()),
         num_messages: summary.num_messages,
         last_active_at: summary.last_active_at.map(|time| time.to_rfc3339()),
@@ -242,6 +240,5 @@ mod tests {
             10,
         );
         assert_eq!(sessions.len(), 2);
-        assert!(sessions.iter().all(|session| session.source == "local"));
     }
 }

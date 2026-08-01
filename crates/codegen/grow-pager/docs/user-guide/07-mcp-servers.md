@@ -30,10 +30,15 @@ command = "/path/to/server"           # Server executable
 args = ["--flag", "value"]            # Command arguments
 env = { API_KEY = "sk-..." }          # Environment variables
 enabled = true                        # Enable or disable the server (default: true)
+tool_scope = "write"                  # "read" only when every tool is side-effect free
 startup_timeout_sec = 30              # Server startup timeout, seconds (default: 30)
 tool_timeout_sec = 6000               # Per-tool-call timeout fallback, seconds (default: 6000)
 tool_timeouts = { slow_op = 120 }     # Per-tool timeout overrides, seconds
 ```
+
+`tool_scope` is server-wide and defaults conservatively to `"write"`. Set it
+to `"read"` only when every tool exposed by that server is side-effect free;
+Plan mode uses this same classification before execution approval.
 
 > **Global startup-timeout override:** instead of setting `startup_timeout_sec`
 > per server, you can change the default for all servers via the `MCP_TIMEOUT`

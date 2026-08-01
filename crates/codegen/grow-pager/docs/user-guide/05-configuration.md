@@ -270,6 +270,7 @@ command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
 env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp_xxx" }
 enabled = true                        # enable/disable (default: true)
+tool_scope = "write"                 # use "read" only for an entirely read-only server
 startup_timeout_sec = 30              # init timeout in seconds (default: 30)
 tool_timeout_sec = 6000              # tool call timeout in seconds (default: 6000)
 tool_timeouts = { create_issue = 120 }  # per-tool timeout overrides

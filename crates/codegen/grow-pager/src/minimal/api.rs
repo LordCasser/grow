@@ -50,7 +50,7 @@ use crate::views::plan_approval_view::PlanApprovalViewState;
 use crate::views::prompt_widget::PromptWidget;
 use crate::views::question_view::QuestionViewState;
 use crate::views::rewind::RewindState;
-use crate::views::session_picker::{SessionEntryData, SourceFilter};
+use crate::views::session_picker::SessionEntryData;
 use crate::views::suggestion_controller::SuggestionController;
 
 /// The shared renderer's minimum `/btw` panel dimensions.
@@ -729,12 +729,8 @@ pub fn repo_name_from_cwd(cwd: &str) -> String {
 }
 
 /// [`crate::views::session_picker::filter_session_entries`].
-pub fn filter_session_entries(
-    entries: Option<&[SessionPickerEntry]>,
-    query: &str,
-    source_filter: SourceFilter,
-) -> Vec<usize> {
-    crate::views::session_picker::filter_session_entries(entries, query, source_filter)
+pub fn filter_session_entries(entries: Option<&[SessionPickerEntry]>, query: &str) -> Vec<usize> {
+    crate::views::session_picker::filter_session_entries(entries, query)
 }
 
 /// [`crate::views::session_picker::build_session_entry_data`].

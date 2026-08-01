@@ -3408,7 +3408,6 @@ fn dashboard_stop_moves_selection_down_one() {
     );
     let _ = dispatch_task_result(
         crate::app::actions::TaskResult::DeleteSessionComplete {
-            source: "current".into(),
             session_id,
             after: crate::app::actions::AfterSessionDelete::Dashboard,
         },
@@ -3455,7 +3454,6 @@ fn dashboard_stop_last_row_falls_back_to_previous() {
     ));
     let _ = dispatch_task_result(
         crate::app::actions::TaskResult::DeleteSessionComplete {
-            source: "current".into(),
             session_id,
             after: crate::app::actions::AfterSessionDelete::Dashboard,
         },
@@ -3894,7 +3892,6 @@ fn dashboard_delete_complete_returns_from_foreground_agent() {
     app.active_view = ActiveView::Agent(id);
     let _ = dispatch_task_result(
         crate::app::actions::TaskResult::DeleteSessionComplete {
-            source: "current".into(),
             session_id: "sess-dash".into(),
             after: crate::app::actions::AfterSessionDelete::Dashboard,
         },

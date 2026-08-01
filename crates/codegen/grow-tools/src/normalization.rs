@@ -16,7 +16,7 @@ pub fn tool_identity_of(metadata: &dyn ToolMetadata) -> ToolIdentity {
         tool_kind: kind,
         namespace: metadata.tool_namespace(),
         presentation_name: kind.presentation_name(),
-        read_only: metadata.is_read_only(),
+        scope: metadata.tool_scope(),
     }
 }
 /// Resolve `wire_name` in `toolset` and merge the canonical `grow/tool` object

@@ -1498,7 +1498,6 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
         created_at: updated,
         cwd: "/repo/app".to_string(),
         hostname: Some("box".to_string()),
-        source: "local".to_string(),
         model_id: Some("grow-4".to_string()),
         num_messages: 3,
         last_active_at: Some(updated),

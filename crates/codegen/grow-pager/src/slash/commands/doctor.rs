@@ -35,8 +35,11 @@ impl DoctorCommand {
             runtime.notification_condition,
             runtime.workspace,
         );
+        let agent_findings =
+            crate::diagnostics::collect_agent_definition_findings(runtime.workspace);
         let mut report = crate::diagnostics::view(snapshot.into());
         crate::diagnostics::merge_tui_runtime_findings(&mut report, runtime_findings);
+        crate::diagnostics::merge_tui_runtime_findings(&mut report, agent_findings);
         report
     }
 }

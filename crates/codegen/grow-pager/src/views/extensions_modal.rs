@@ -1627,7 +1627,7 @@ fn parse_mcp_add_fields(name: &str, url_or_cmd: &str) -> Option<ButtonAction> {
         config: Box::new(McpServerConfig {
             transport,
             enabled: true,
-            read_only: false,
+            tool_scope: xai_tool_protocol::ToolScope::Write,
             setup: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,

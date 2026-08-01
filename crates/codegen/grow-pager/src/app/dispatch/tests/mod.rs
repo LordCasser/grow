@@ -145,7 +145,6 @@ fn test_app() -> AppView {
         session_picker_state: crate::views::picker::PickerState::with_mode(
             crate::views::picker::PickerMode::FullScreen,
         ),
-        session_picker_source_filter: crate::views::session_picker::SourceFilter::default(),
         session_picker_relaxed_notified_for: None,
         session_picker_content_results: None,
         session_picker_content_loading: false,
@@ -640,7 +639,6 @@ fn make_picker_entry(id: &str, cwd: &str) -> crate::app::app_view::SessionPicker
         created_at: chrono::Utc::now(),
         cwd: cwd.into(),
         hostname: None,
-        source: "local".into(),
         model_id: None,
         num_messages: 0,
         last_active_at: None,
@@ -667,7 +665,6 @@ fn open_session_picker_with(
         content_loading: false,
         deep_search_seq: 0,
         entries_query: None,
-        source_filter: crate::views::session_picker::SourceFilter::default(),
         pending_delete: None,
     });
 }

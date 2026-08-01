@@ -52,7 +52,6 @@ impl Tool for BlockingEcho {
 
     fn capabilities(&self) -> ToolCapabilities {
         ToolCapabilities {
-            is_read_only: true,
             ..Default::default()
         }
     }
@@ -224,7 +223,10 @@ async fn tool_dyn_delegates_id_description_capabilities() {
             .name,
         "blocking_echo"
     );
-    assert!(tool.capabilities().is_read_only);
+    assert_eq!(
+        tool.capabilities().tool_scope,
+        xai_tool_protocol::ToolScope::Read
+    );
 }
 
 #[tokio::test]

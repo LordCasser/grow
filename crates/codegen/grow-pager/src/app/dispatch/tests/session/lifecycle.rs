@@ -1305,7 +1305,6 @@ fn delete_session_action_emits_delete_effect() {
     open_session_picker_with(&mut app, vec![make_picker_entry("s1", "/repo")]);
     let effects = dispatch(
         Action::DeleteSession {
-            source: "local".into(),
             session_id: "s1".into(),
             cwd: "/repo".into(),
         },
@@ -1314,11 +1313,10 @@ fn delete_session_action_emits_delete_effect() {
     assert!(matches!(
         effects.as_slice(),
         [Effect::DeleteSession {
-            source,
             session_id,
             cwd,
             after: AfterSessionDelete::Stay,
-        }] if source == "local" && session_id == "s1" && cwd == "/repo"
+        }] if session_id == "s1" && cwd == "/repo"
     ));
 }
 #[test]
@@ -1380,7 +1378,6 @@ fn delete_current_session_complete_welcome_and_guard() {
         Some(acp::SessionId::new("sess-a"));
     let effects = dispatch_task_result(
         TaskResult::DeleteSessionComplete {
-            source: "current".into(),
             session_id: "sess-a".into(),
             after: AfterSessionDelete::Welcome,
         },
@@ -1404,7 +1401,6 @@ fn delete_current_session_complete_welcome_and_guard() {
     app.active_view = ActiveView::Agent(other);
     let effects = dispatch_task_result(
         TaskResult::DeleteSessionComplete {
-            source: "current".into(),
             session_id: "sess-a".into(),
             after: AfterSessionDelete::Welcome,
         },
@@ -1633,7 +1629,6 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
         .to_string();
     let _ = dispatch_task_result(
         crate::app::actions::TaskResult::DeleteSessionComplete {
-            source: "current".into(),
             session_id,
             after: crate::app::actions::AfterSessionDelete::Dashboard,
         },
@@ -1721,7 +1716,6 @@ fn dashboard_stop_double_press_via_handle_key_deletes_top_level() {
         .to_string();
     let _ = dispatch_task_result(
         crate::app::actions::TaskResult::DeleteSessionComplete {
-            source: "current".into(),
             session_id,
             after: crate::app::actions::AfterSessionDelete::Dashboard,
         },

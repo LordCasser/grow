@@ -87,6 +87,7 @@ grow-update = { path = "../grow-update" }
 # ACP
 agent-client-protocol = { workspace = true }
 xai-acp-lib = { workspace = true }
+xai-tool-protocol = { workspace = true }
 xai-file-utils = { path = "../xai-file-utils" }
 grow-config = { workspace = true }
 grow-shell = { workspace = true }

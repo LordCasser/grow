@@ -670,7 +670,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-       Effect::LoadCardDetail { source, session_id, cwd, generation } => {
+       Effect::LoadCardDetail { session_id, cwd, generation } => {
             tasks
                 .spawn(async move {
                     use crate::app::app_view::CardDetail;
@@ -702,7 +702,6 @@ pub(crate) fn execute(
                             first_prompt_preview: String::new(),
                         });
                     TaskResult::CardDetailLoaded {
-                        source,
                         session_id: result_session_id,
                         generation,
                         detail,
@@ -2739,7 +2738,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::DeleteSession { source, session_id, cwd, after } => {
+        Effect::DeleteSession { session_id, cwd, after } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -2775,20 +2774,17 @@ pub(crate) fn execute(
                                     .map(String::from)
                                     .unwrap_or_else(|| err.to_string());
                                 return TaskResult::DeleteSessionFailed {
-                                    source,
                                     session_id,
                                     error: msg,
                                 };
                             }
                             TaskResult::DeleteSessionComplete {
-                                source,
                                 session_id,
                                 after,
                             }
                         }
                         Err(e) => {
                             TaskResult::DeleteSessionFailed {
-                                source,
                                 session_id,
                                 error: sanitize_user_error(
                                     &format!("couldn't delete session: {e}"),

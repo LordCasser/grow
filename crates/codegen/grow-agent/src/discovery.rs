@@ -104,13 +104,13 @@ fn merge_subagents(
 
     // 1. Seed with built-in subagents
     let mut entries: Vec<SubagentEntry> = BuiltinAgentName::subagent_variants()
-        .iter()
+        .into_iter()
         .map(|b| {
             let def = b.definition();
             SubagentEntry {
                 name: def.name,
                 description: def.description,
-                source: SubagentSource::Builtin(*b),
+                source: SubagentSource::Builtin(b),
                 shadows_builtin: None,
                 config_source: ConfigSource::Builtin,
             }
@@ -133,7 +133,7 @@ fn merge_subagents(
 
         let is_builtin_name = BuiltinAgentName::from_str(&def.name)
             .ok()
-            .filter(|b| BuiltinAgentName::subagent_variants().contains(b));
+            .filter(|b| b.definition().subagent_only);
 
         if is_builtin_name.is_some() && def.scope != AgentScope::Project {
             // User-level agent has same name as built-in subagent — skip it.
@@ -203,6 +203,17 @@ pub(crate) fn user_agent_dirs(
 pub fn discover(cwd: &Path) -> Vec<AgentDefinition> {
     let grow = grow_config::user_grow_home();
     discover_with_home(cwd, dirs::home_dir().as_deref(), grow.as_deref())
+}
+
+/// File-defined Agents that are implicitly presented as primary profiles but
+/// do not satisfy the primary capability floor. Explicit `subagentOnly`
+/// definitions are intentionally omitted: their restricted capability is
+/// valid and already reflected in picker visibility.
+pub fn invalid_primary_agent_definitions(cwd: &Path) -> Vec<AgentDefinition> {
+    discover(cwd)
+        .into_iter()
+        .filter(|definition| !definition.subagent_only && !definition.is_primary_agent_eligible())
+        .collect()
 }
 
 fn discover_with_home(
@@ -291,7 +302,7 @@ fn by_name_in_cwd_with_home(
 /// - `explore` — focused read-only workspace investigation
 pub fn builtin_subagents() -> Vec<AgentDefinition> {
     BuiltinAgentName::subagent_variants()
-        .iter()
+        .into_iter()
         .map(|name| name.definition())
         .collect()
 }
@@ -977,34 +988,6 @@ mod tests {
             agents_md: false,
             ..AgentDefinition::general_purpose()
         }
-    }
-
-    #[test]
-    fn test_orchestrator_from_str_resolves() {
-        use std::str::FromStr;
-        let variant = BuiltinAgentName::from_str("grow-build-orchestrator")
-            .expect("from_str must resolve grow-build-orchestrator");
-        assert_eq!(variant, BuiltinAgentName::GrowOrchestrator);
-        let def = variant.definition();
-        assert_eq!(def.name, "grow-build-orchestrator");
-        assert!(
-            def.prompt_body.is_some(),
-            "orchestrator must have prompt_body"
-        );
-        let body = def.prompt_body.as_deref().unwrap();
-        assert!(
-            body.contains("Coordinate the requested work"),
-            "prompt_body must contain the embedded orchestrator role"
-        );
-    }
-
-    #[test]
-    fn test_orchestrator_by_name_in_cwd() {
-        let tmp = tempfile::tempdir().unwrap();
-        let def = by_name_in_cwd("grow-build-orchestrator", tmp.path())
-            .expect("by_name_in_cwd must find grow-build-orchestrator");
-        assert_eq!(def.name, "grow-build-orchestrator");
-        assert!(def.prompt_body.is_some());
     }
 
     #[test]

@@ -23,6 +23,7 @@ use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::SharedResources;
 use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::{ToolKind, ToolNamespace};
+use xai_tool_protocol::ToolScope;
 
 /// Grow-tools-specific metadata trait.
 ///
@@ -36,7 +37,7 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 pub trait ToolMetadata: Send + Sync {
     /// High-level category (Read, Edit, Search, Execute, ...).
     /// Drives template rendering (`${{ tools.by_kind.search }}`) and the
-    /// default `is_read_only()` derivation.
+    /// default `tool_scope()` derivation.
     fn kind(&self) -> ToolKind;
 
     /// Namespace grouping (Grow, Cursor, BrowserUse, ...).
@@ -53,10 +54,10 @@ pub trait ToolMetadata: Send + Sync {
     // Defaults — override only when needed
     // -----------------------------------------------------------------------
 
-    /// Whether the tool is read-only (no filesystem / external side-effects).
-    /// Default: derived from `kind()`.
-    fn is_read_only(&self) -> bool {
-        self.kind().is_read_only()
+    /// Side-effect scope. Default: derived from `kind()`; action-like tools
+    /// that only observe state override this to `Read`.
+    fn tool_scope(&self) -> ToolScope {
+        self.kind().default_scope()
     }
 
     /// Notification variant tags this tool may emit during execution.

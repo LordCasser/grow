@@ -1,5 +1,6 @@
 //! Capabilities used by the in-process tool runtime.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Per-tool capabilities. Defaults conservatively (no
@@ -20,10 +21,6 @@ pub struct ToolCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<u32>,
 
-    /// Mirrors `Tool::is_read_only`; used by doom-loop detection.
-    #[serde(default)]
-    pub is_read_only: bool,
-
     /// Lifecycle hooks the tool opts in to receive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<HookKind>,
@@ -40,9 +37,9 @@ pub struct ToolCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 
-    /// Multi-agent write-coordination scope. Absence is treated as `Read`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_scope: Option<ToolScope>,
+    /// Side-effect scope used by coordination, locking, and diagnostics.
+    #[serde(default)]
+    pub tool_scope: ToolScope,
 }
 
 /// How a tool streams partial results. Declared once in
@@ -77,12 +74,20 @@ pub enum HookKind {
 /// Multi-agent write-coordination scope.
 ///
 /// Tools that mutate external state declare `Write`; absence is treated as
-/// `Read`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// `Write` so unknown tools fail closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolScope {
     /// Tool does not mutate external state.
     Read,
     /// Tool mutates external state.
     Write,
+}
+
+impl Default for ToolScope {
+    /// Unknown tools fail closed as mutating until they explicitly declare
+    /// `Read`.
+    fn default() -> Self {
+        Self::Write
+    }
 }

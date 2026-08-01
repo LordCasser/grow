@@ -468,8 +468,7 @@ impl xai_tool_runtime::Tool for ListDirTool {
     }
     fn capabilities(&self) -> xai_tool_protocol::ToolCapabilities {
         xai_tool_protocol::ToolCapabilities {
-            is_read_only: true,
-            tool_scope: Some(xai_tool_protocol::ToolScope::Read),
+            tool_scope: xai_tool_protocol::ToolScope::Read,
             ..Default::default()
         }
     }

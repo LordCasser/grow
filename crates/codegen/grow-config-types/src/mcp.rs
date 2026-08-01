@@ -72,7 +72,7 @@ pub const KNOWN_MCP_SERVER_FIELDS: &[&str] = &[
     "env",
     "expose_image_base64",
     "headers",
-    "read_only",
+    "tool_scope",
     "setup",
     "startup_timeout_sec",
     "tool_timeout_sec",
@@ -174,13 +174,11 @@ pub struct McpServerConfig {
     pub transport: McpServerTransportConfig,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Declares the server's tools read-only for the plan-mode gate: while a
-    /// Plan is in a non-executing phase (Drafting / AwaitingApproval /
-    /// Amending), tools from a `read_only = true` server are allowed, all
-    /// other MCP tools are rejected. Single source of truth for that
-    /// classification — MCP `annotations`/`readOnlyHint` are never consulted.
+    /// Declares the side-effect scope shared by every tool from this server.
+    /// The plan-mode gate permits only `read`; unknown/default is `write` so
+    /// unclassified MCP tools fail closed. MCP annotations are not consulted.
     #[serde(default)]
-    pub read_only: bool,
+    pub tool_scope: xai_tool_protocol::ToolScope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<McpSetupConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -529,7 +527,7 @@ mod tests {
                 cwd: Some("/tmp".into()),
             },
             enabled: true,
-            read_only: false,
+            tool_scope: xai_tool_protocol::ToolScope::Write,
             setup: None,
             startup_timeout_sec: Some(10),
             tool_timeout_sec: Some(20),
@@ -544,7 +542,7 @@ mod tests {
                 headers: Some(HashMap::from([("H".into(), "v".into())])),
             },
             enabled: true,
-            read_only: false,
+            tool_scope: xai_tool_protocol::ToolScope::Write,
             setup: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -587,20 +585,23 @@ mod tests {
     }
 
     #[test]
-    fn read_only_defaults_to_false_and_parses_explicit_values() {
+    fn tool_scope_defaults_to_write_and_parses_explicit_values() {
         let plain: McpServerConfig =
             serde_json::from_value(serde_json::json!({ "command": "npx" })).unwrap();
-        assert!(!plain.read_only, "read_only must default to false");
+        assert_eq!(plain.tool_scope, xai_tool_protocol::ToolScope::Write);
 
         let flagged: McpServerConfig =
-            serde_json::from_value(serde_json::json!({ "command": "npx", "read_only": true }))
+            serde_json::from_value(serde_json::json!({ "command": "npx", "tool_scope": "read" }))
                 .unwrap();
-        assert!(flagged.read_only, "read_only = true must parse");
+        assert_eq!(flagged.tool_scope, xai_tool_protocol::ToolScope::Read);
 
         let explicit_false: McpServerConfig =
-            serde_json::from_value(serde_json::json!({ "command": "npx", "read_only": false }))
+            serde_json::from_value(serde_json::json!({ "command": "npx", "tool_scope": "write" }))
                 .unwrap();
-        assert!(!explicit_false.read_only);
+        assert_eq!(
+            explicit_false.tool_scope,
+            xai_tool_protocol::ToolScope::Write
+        );
     }
 
     #[test]
@@ -665,7 +666,7 @@ mod tests {
                 headers: None,
             },
             enabled: true,
-            read_only: false,
+            tool_scope: xai_tool_protocol::ToolScope::Write,
             setup: Some(setup),
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -720,7 +721,7 @@ mod tests {
                 headers: None,
             },
             enabled: true,
-            read_only: false,
+            tool_scope: xai_tool_protocol::ToolScope::Write,
             setup: Some(setup),
             startup_timeout_sec: None,
             tool_timeout_sec: None,

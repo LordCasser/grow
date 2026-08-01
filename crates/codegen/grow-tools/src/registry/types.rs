@@ -2371,11 +2371,11 @@ mod tests {
         assert_eq!(unchanged["backend"], true);
         assert!(unchanged.get(TOOL_META_KEY).is_none());
     }
-    /// `read_only` must come from the per-tool override, not the kind default:
+    /// `scope` must come from the per-tool override, not the kind default:
     /// `get_task_output` is `BackgroundTaskAction` (default mutating) but
     /// overrides to read-only.
     #[tokio::test]
-    async fn identity_read_only_honors_per_tool_override() {
+    async fn identity_scope_honors_per_tool_override() {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig::from_id("Grow:run_terminal_cmd".to_string()),
@@ -2392,8 +2392,8 @@ mod tests {
             .tool_identity("get_task_output")
             .expect("get_task_output resolves");
         assert!(
-            identity.read_only,
-            "get_task_output overrides is_read_only to true despite its action kind"
+            identity.scope == xai_tool_protocol::ToolScope::Read,
+            "get_task_output overrides its action kind with read scope"
         );
     }
     /// `ToolConfig::kind` parsing: known kinds map, unknown strings sink into

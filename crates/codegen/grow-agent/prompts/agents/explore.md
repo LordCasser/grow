@@ -1,6 +1,7 @@
 ---
 name: explore
 description: Read-only Agent for focused workspace investigation.
+subagentOnly: true
 promptComposition: extend
 toolPreset: explore
 additionalTools: []

@@ -82,10 +82,6 @@ impl crate::types::tool_metadata::ToolMetadata for TaskTool {
             Expr::Value(ToolRequirement::tool_kind(ToolKind::KillTaskAction)),
         ])
     }
-
-    fn is_read_only(&self) -> bool {
-        false
-    }
 }
 
 impl xai_tool_runtime::Tool for TaskTool {
@@ -108,8 +104,7 @@ impl xai_tool_runtime::Tool for TaskTool {
 
     fn capabilities(&self) -> xai_tool_protocol::ToolCapabilities {
         xai_tool_protocol::ToolCapabilities {
-            is_read_only: false,
-            tool_scope: Some(xai_tool_protocol::ToolScope::Write),
+            tool_scope: xai_tool_protocol::ToolScope::Write,
             ..Default::default()
         }
     }
