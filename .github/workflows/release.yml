@@ -569,12 +569,15 @@ jobs:
             -p grow-pager-bin --bin grow --target riscv64gc-unknown-linux-gnu
 
       # Full strip, same as the other Linux jobs (release-dist keeps DWARF +
-      # symbols; the pipeline ships no debug sidecars). GNU strip handles the
-      # cross-arch ELF fine — section rewriting, no target execution needed.
+      # symbols; the pipeline ships no debug sidecars). The amd64 runner's
+      # GNU strip (binutils) has no riscv64 BFD target — it fails with
+      # "Unable to recognise the format of the input file" — so use
+      # llvm-strip (ships with the LLVM 18 toolchain on ubuntu-24.04
+      # runners), which is architecture-agnostic.
       # The riscv64 binary cannot execute on the amd64 runner; build success
       # is the acceptance bar for this target.
 
-      - name: Strip and stage release asset
+      - name: Strip and stage release asset (llvm-strip)
         shell: bash
         run: |
           set -euo pipefail
@@ -585,7 +588,9 @@ jobs:
           mkdir -p dist
           ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
           cp "target/${TARGET_TRIPLE}/release-dist/grow" "$ASSET"
-          strip --strip-all "$ASSET"
+          STRIP="$(command -v llvm-strip || command -v llvm-strip-18 || true)"
+          test -n "$STRIP" || { echo "llvm-strip not found on runner" >&2; exit 1; }
+          "$STRIP" --strip-all "$ASSET"
           ls -la "$ASSET"
 
       - uses: actions/upload-artifact@v7
