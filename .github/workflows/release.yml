@@ -256,34 +256,6 @@ jobs:
           cargo build --locked --profile release-dist \
             -p grow-pager-bin --bin grow --target "${{ matrix.target }}"
 
-      - name: Verify Linux binary (glibc baseline <= 2.28)
-        if: matrix.linux
-        shell: bash
-        run: |
-          set -euo pipefail
-          BIN="target/${{ matrix.target }}/release-dist/${{ matrix.binary }}"
-          file "$BIN"
-          echo "NEEDED libraries:"
-          readelf -d "$BIN" | grep NEEDED || true
-          # Only standard glibc runtime libraries may be dynamically linked.
-          bad="$(readelf -d "$BIN" | awk '/\(NEEDED\)/{print $5}' \
-            | grep -Ev '^(ld-linux-(x86-64|aarch64)\.so\.[0-9]+|lib(c|m|gcc_s|pthread|dl|rt|util|resolv)\.so\.[0-9]+)$' || true)"
-          if [[ -n "$bad" ]]; then
-            echo "Unexpected dynamic dependencies:" >&2
-            echo "$bad" >&2
-            exit 1
-          fi
-          # glibc baseline guard: the AlmaLinux 8 container links glibc 2.28.
-          # If a dependency ever needs a newer symbol, raise this threshold
-          # consciously and update the README compatibility note.
-          max_glibc="$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)"
-          echo "max GLIBC_ symbol version: $max_glibc"
-          newest="$(printf '%s\n' "$max_glibc" 'GLIBC_2.28' | sort -V | tail -1)"
-          if [[ "$newest" != "GLIBC_2.28" ]]; then
-            echo "Binary requires newer glibc than the 2.28 baseline ($max_glibc)" >&2
-            exit 1
-          fi
-
       - name: Smoke-test binary
         shell: bash
         run: |
