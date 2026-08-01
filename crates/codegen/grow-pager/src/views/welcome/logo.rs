@@ -225,8 +225,16 @@ mod tests {
         assert_eq!(pick_logo(33, 50), None, "too narrow for any logo");
         assert_eq!(pick_logo(34, 21), None, "too short for the small logo");
         assert_eq!(pick_logo(34, 22), Some(LOGO_SMALL));
-        assert_eq!(pick_logo(83, 50), Some(LOGO_SMALL), "wide but not wide enough for big");
-        assert_eq!(pick_logo(84, 41), Some(LOGO_SMALL), "tall but not tall enough for big");
+        assert_eq!(
+            pick_logo(83, 50),
+            Some(LOGO_SMALL),
+            "wide but not wide enough for big"
+        );
+        assert_eq!(
+            pick_logo(84, 41),
+            Some(LOGO_SMALL),
+            "tall but not tall enough for big"
+        );
         assert_eq!(pick_logo(84, 42), Some(LOGO));
         assert_eq!(pick_logo(150, 45), Some(LOGO));
     }

@@ -9,11 +9,11 @@ use crate::tools::todo::TodoState;
 use agent_client_protocol as acp;
 use async_trait::async_trait;
 use fs2::FileExt;
+use grow_chat_state::StrictAppendAck;
 use grow_workspace::session::file_state::RewindPoint;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
-use grow_chat_state::StrictAppendAck;
 #[derive(Clone)]
 enum SessionDirMode {
     FromRoot(PathBuf),
@@ -1922,11 +1922,11 @@ impl StorageAdapter for JsonlStorageAdapter {
         info: &Info,
         segment: &crate::extensions::notification::CompactionSegmentFile,
     ) -> io::Result<()> {
-        use tokio::io::AsyncWriteExt;
         use grow_chat_state::compaction_transcript::{
             COMPACTION_DIR, INDEX_FILE, INDEX_HEADER, extract_keywords, render_index_row,
             render_segment_md, segment_filename,
         };
+        use tokio::io::AsyncWriteExt;
         let base = self.session_dir(info).join(COMPACTION_DIR);
         tokio::fs::create_dir_all(&base).await?;
         let index = next_compaction_segment_index(&base).await;

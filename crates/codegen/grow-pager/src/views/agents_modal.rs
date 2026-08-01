@@ -412,8 +412,11 @@ fn append_plugin_switch_agents(
         return;
     }
     plugin_config.populate_plugin_lists(&discovered);
-    let registry =
-        PluginRegistry::from_discovered(discovered, &plugin_config.disabled, &plugin_config.enabled);
+    let registry = PluginRegistry::from_discovered(
+        discovered,
+        &plugin_config.disabled,
+        &plugin_config.enabled,
+    );
     for plugin in registry.enabled_plugins() {
         for agent_dir in &plugin.agent_dirs {
             if !agent_dir.is_dir() {
@@ -1377,7 +1380,8 @@ fn render_agents_tab(
     // child subagent spawn — main-session `/agent` can still select any
     // discovered definition (including path-style ids).
     let blurb_style = Style::default().fg(theme.gray_dim);
-    let blurb = "t toggles child-subagent spawn only; main session can still /agent to any definition.";
+    let blurb =
+        "t toggles child-subagent spawn only; main session can still /agent to any definition.";
     let blurb_display: String = blurb.chars().take(w).collect();
     buf.set_string(content_area.x, y, &blurb_display, blurb_style);
     y += 1;

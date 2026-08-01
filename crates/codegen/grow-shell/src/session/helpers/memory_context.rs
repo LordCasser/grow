@@ -4,9 +4,9 @@
 //! - Session start: inject relevant past context on the first turn
 //! - Post-compaction: recover relevant memory after context is lost
 
+use grow_chat_state::{MEMORY_CONTEXT_CLOSE_TAG, MEMORY_CONTEXT_OPEN_TAG};
 use grow_sampling_types::ConversationItem;
 use grow_tools::types::memory_backend::{MemorySearchResult, format_staleness_note};
-use grow_chat_state::{MEMORY_CONTEXT_CLOSE_TAG, MEMORY_CONTEXT_OPEN_TAG};
 
 /// Maximum characters to include per snippet in the injection.
 const SNIPPET_MAX_CHARS: usize = 500;

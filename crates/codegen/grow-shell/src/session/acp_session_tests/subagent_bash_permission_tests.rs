@@ -29,7 +29,7 @@ use agent_client_protocol as acp;
 use grow_paths::AbsPathBuf;
 use grow_tools::implementations::grow_build::bash::BashTool;
 use grow_tools::registry::types::ToolConfig;
-use grow_workspace::permission::{spawn_permission_manager, ClientType, PermissionEvent};
+use grow_workspace::permission::{ClientType, PermissionEvent, spawn_permission_manager};
 use xai_acp_lib::{AcpAgentGatewaySender, AcpClientMessage};
 
 use super::support::{create_test_actor_ex, test_agent_with_tools};
@@ -86,10 +86,7 @@ fn spawn_gateway_responder(
                         log.lock()
                             .expect("gateway log lock")
                             .tool_update_statuses
-                            .push((
-                                update.tool_call_id.0.to_string(),
-                                update.fields.status,
-                            ));
+                            .push((update.tool_call_id.0.to_string(), update.fields.status));
                     }
                     let _ = args.response_tx.send(Ok(()));
                 }
@@ -128,14 +125,8 @@ async fn make_subagent_fixture(
     let log = Arc::new(std::sync::Mutex::new(GatewayLog::default()));
     spawn_gateway_responder(gateway_rx, reply_option, Arc::clone(&log));
 
-    let (mut actor, event_rx) = create_test_actor_ex(
-        0,
-        256_000,
-        85,
-        gateway_tx.clone(),
-        persistence_tx,
-    )
-    .await;
+    let (mut actor, event_rx) =
+        create_test_actor_ex(0, 256_000, 85, gateway_tx.clone(), persistence_tx).await;
     actor.startup_hints.is_subagent = true;
     actor.session_info.id = acp::SessionId::new(SUBAGENT_SID);
 
@@ -304,8 +295,7 @@ async fn subagent_inherited_handle_bash_approved_after_prompt_executes() {
             );
             let conv = actor.chat_state_handle.get_conversation().await;
             assert!(
-                conv.iter()
-                    .any(|c| c.text_content().contains("repro-ok")),
+                conv.iter().any(|c| c.text_content().contains("repro-ok")),
                 "the bash output must land in the conversation as a tool result"
             );
 
@@ -373,8 +363,7 @@ async fn subagent_bash_rejected_after_prompt_does_not_execute() {
             {
                 let log = log.lock().expect("gateway log lock");
                 assert!(
-                    !log
-                        .tool_update_statuses
+                    !log.tool_update_statuses
                         .iter()
                         .any(|(id, status)| id == TOOL_CALL_ID
                             && *status == Some(acp::ToolCallStatus::Completed)),
@@ -385,9 +374,7 @@ async fn subagent_bash_rejected_after_prompt_does_not_execute() {
 
             let conv = actor.chat_state_handle.get_conversation().await;
             assert!(
-                !conv
-                    .iter()
-                    .any(|c| c.text_content().contains("repro-ok")),
+                !conv.iter().any(|c| c.text_content().contains("repro-ok")),
                 "a rejected bash call must not produce output"
             );
 

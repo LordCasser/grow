@@ -133,9 +133,9 @@ pub(super) fn dispatch_permission_select(
     respond_permission(
         agent,
         perm.request,
-        acp::RequestPermissionResponse::new(
-            acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
-        )
+        acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(
+            acp::SelectedPermissionOutcome::new(option_id),
+        ))
         .meta(meta),
     );
 
@@ -211,9 +211,9 @@ pub(super) fn dispatch_permission_followup(app: &mut AppView, text: String) -> V
     respond_permission(
         agent,
         perm.request,
-        acp::RequestPermissionResponse::new(
-            acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
-        )
+        acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(
+            acp::SelectedPermissionOutcome::new(option_id),
+        ))
         .meta(meta),
     );
 

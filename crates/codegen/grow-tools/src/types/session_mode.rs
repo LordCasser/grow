@@ -76,14 +76,7 @@ mod tests {
 
     #[test]
     fn round_trip_known_ids() {
-        for &id in &[
-            "normal",
-            "plan",
-            "ask",
-            "workflow",
-            "deep_research",
-            "goal",
-        ] {
+        for &id in &["normal", "plan", "ask", "workflow", "deep_research", "goal"] {
             let mode = SessionMode::from_id(id);
             assert_eq!(mode.as_id(), id, "round-trip failed for {id}");
         }

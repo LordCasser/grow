@@ -1562,7 +1562,8 @@ fn build_mode_rapid_plain_fetches_keep_last_write_wins() {
                 &effects[..],
                 [Effect::FetchSessionList {
                     query: None,
-                    seq: 0
+                    seq: 0,
+                    kind_filter: None,
                 }]
             ),
             "Build-mode plain fetch must not bump the seq, got {effects:?}"

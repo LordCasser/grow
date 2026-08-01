@@ -334,7 +334,9 @@ impl PagerLocalSnapshot {
     /// Iterate over catalog id labels. Convenience helper for validator paths
     /// that don't need the `ModelId` handles.
     pub fn available_model_names(&self) -> impl Iterator<Item = &str> {
-        self.available_models.iter().map(|(label, _)| label.as_str())
+        self.available_models
+            .iter()
+            .map(|(label, _)| label.as_str())
     }
 
     /// Resolve a user-supplied catalog id (`provider/model`) to a `ModelId`.

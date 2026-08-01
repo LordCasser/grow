@@ -4,8 +4,8 @@
 //! Pass2 rewrites NOTE₁ + the ~5% tail into the successor-visible NOTE₂.
 //! Sampling lives in [`super::compaction`]; this module has no I/O.
 
-use grow_sampling_types::ConversationItem;
 use grow_chat_state::estimate_item_tokens;
+use grow_sampling_types::ConversationItem;
 
 /// Default history fraction covered by pass1; the remainder is the blocking
 /// pass2 tail, so keep it small (prod pass2 latency is dominated by tail prefill).

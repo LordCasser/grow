@@ -9,6 +9,9 @@ description = "General utilities: SHA-256 hashing and workspace classification"
 dirs = { workspace = true }
 sha2 = { workspace = true, features = ["force-soft"] }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [features]
 default-bazel = []
 
