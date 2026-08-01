@@ -130,7 +130,6 @@ pub(super) fn resolve_inspect_compat_with_env(
     let defaults = CompatConfig::default();
     let cells = COMPAT_CELLS
         .into_iter()
-        .filter(|cell| cell.is_runtime_supported())
         .map(|cell| {
             let config = crate::agent::config::compat_config_cell(effective_config, cell);
             resolve_compat_entry(cell, env_value(cell), config, defaults.value(cell))
@@ -200,36 +199,15 @@ mod tests {
         let report = resolve_without_env(Ok(&effective_config));
 
         assert!(!report.remote_settings_loaded);
-        assert_eq!(report.cells.len(), 13);
+        assert_eq!(report.cells.len(), 10);
         assert!(
             report
                 .cells
                 .iter()
                 .all(|cell| cell.enabled && cell.source == CompatSource::Default)
         );
-        assert_eq!(
-            report
-                .cells
-                .iter()
-                .filter(|entry| entry.vendor == "codex")
-                .map(|entry| entry.surface.as_str())
-                .collect::<Vec<_>>(),
-            vec!["sessions"]
-        );
-        let session = entry(&report, "codex", "sessions");
-        assert_eq!(session.enabled, CompatConfig::default().codex.sessions);
-        assert_eq!(session.source, CompatSource::Default);
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["remoteSettingsLoaded"], false);
-        assert_eq!(
-            serde_json::to_value(session).unwrap(),
-            serde_json::json!({
-                "vendor": "codex",
-                "surface": "sessions",
-                "enabled": true,
-                "source": "default"
-            })
-        );
     }
 
     #[test]

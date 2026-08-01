@@ -11,10 +11,6 @@
 //! - `ToolOutput` — one variant per built-in tool + `Dynamic(Value)`.
 //!   `From` derive generates `From<TypedOutput>` for each inner type.
 use crate::implementations::BashToolInput;
-use crate::implementations::codex::apply_patch::tool::ApplyPatchInput;
-use crate::implementations::codex::grep_files::tool::CodexGrepFilesInput;
-use crate::implementations::codex::list_dir::tool::CodexListDirInput;
-use crate::implementations::codex::read_file::tool::CodexReadFileInput;
 use crate::implementations::grow_build::ask_user_question::AskUserQuestionInput;
 use crate::implementations::grow_build::grep::GrepSearchInput;
 use crate::implementations::grow_build::list_dir::ListDirInput;
@@ -24,9 +20,9 @@ use crate::implementations::grow_build::search_replace::SearchReplaceInput;
 use crate::implementations::grow_build::todo::TodoWriteInput;
 use crate::implementations::grow_build::update_goal::UpdateGoalInput;
 use crate::implementations::grow_build::web_fetch::WebFetchInput;
+use crate::implementations::grow_build::write::WriteInput;
 use crate::implementations::lsp::LspToolInput;
 use crate::implementations::memory::types::{MemoryGetInput, MemorySearchInput};
-use crate::implementations::opencode::write::WriteInput;
 use crate::implementations::search_tool::SearchToolInput;
 use crate::implementations::skills::skill::SkillInput;
 use crate::implementations::use_tool::UseToolInput;
@@ -67,11 +63,7 @@ pub enum ToolInput {
     Task(TaskToolInput),
     WebFetch(WebFetchInput),
     Write(WriteInput),
-    ApplyPatch(ApplyPatchInput),
     HashlineEdit(crate::implementations::grow_build_hashline::edit::types::HashlineEditInput),
-    CodexListDir(CodexListDirInput),
-    CodexGrepFiles(CodexGrepFilesInput),
-    CodexReadFile(CodexReadFileInput),
     MemorySearch(MemorySearchInput),
     MemoryGet(MemoryGetInput),
     SearchTool(SearchToolInput),

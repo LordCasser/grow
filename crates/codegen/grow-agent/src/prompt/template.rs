@@ -12,7 +12,6 @@ pub(crate) const SUBAGENT_AUDIENCE_PROMPT: &str =
 pub(crate) const RUNTIME_CONTEXT_PROMPT: &str = include_str!("../../prompts/runtime/context.md");
 #[cfg(test)]
 pub(crate) const DEFAULT_SYSTEM_PROMPT: &str = MANDATORY_CORE_PROMPT;
-pub(crate) const APPLY_PATCH_SYSTEM_PROMPT: &str = include_str!("../../prompts/apply_patch.md");
 #[cfg(test)]
 pub(crate) const SUBAGENT_SYSTEM_PROMPT: &str = SUBAGENT_AUDIENCE_PROMPT;
 
@@ -70,12 +69,6 @@ mod tests {
         renderer
             .render_with_extra(SUBAGENT_SYSTEM_PROMPT, placeholders)
             .expect("subagent template render failed")
-    }
-
-    fn render_apply_patch(renderer: &TemplateRenderer, placeholders: &serde_json::Value) -> String {
-        renderer
-            .render_with_extra(APPLY_PATCH_SYSTEM_PROMPT, placeholders)
-            .expect("codex template render failed")
     }
 
     // ── Variable substitution ───────────────────────────────────────
@@ -355,6 +348,22 @@ mod tests {
         );
     }
 
+    // ── Audience ownership contract ────────────────────────────────
+
+    #[test]
+    fn primary_audience_retains_task_wide_synthesis() {
+        assert!(PRIMARY_AUDIENCE_PROMPT.contains("task-wide understanding"));
+        assert!(PRIMARY_AUDIENCE_PROMPT.contains("not to hand off the problem as a whole"));
+        assert!(PRIMARY_AUDIENCE_PROMPT.contains("While delegated work runs"));
+        assert!(PRIMARY_AUDIENCE_PROMPT.contains("Wait only when"));
+    }
+
+    #[test]
+    fn subagent_audience_returns_evidence_without_expanding_scope() {
+        assert!(SUBAGENT_AUDIENCE_PROMPT.contains("supporting evidence and paths"));
+        assert!(SUBAGENT_AUDIENCE_PROMPT.contains("instead of silently expanding"));
+    }
+
     // ── Determinism ─────────────────────────────────────────────────
 
     #[test]
@@ -455,97 +464,6 @@ mod tests {
             "Must render without crash: {:?}",
             result.err()
         );
-    }
-
-    // ── Apply-patch template rendering ───────────────────────────────────
-
-    #[test]
-    fn test_apply_patch_template_renders() {
-        let prompt = render_apply_patch(&default_renderer(), &default_placeholders());
-        assert!(prompt.contains("coding agent"));
-    }
-
-    #[test]
-    fn test_apply_patch_template_contains_resolved_tool_names() {
-        let prompt = render_apply_patch(&default_renderer(), &default_placeholders());
-        assert!(prompt.contains("todo_write"), "Should contain 'todo_write'");
-        // apply_patch is hardcoded, not resolved via ${{ tools.by_kind.edit }}
-        assert!(
-            prompt.contains("apply_patch"),
-            "Should contain hardcoded 'apply_patch'"
-        );
-        assert!(!prompt.contains("${{"), "No unresolved template variables");
-        assert!(!prompt.contains("${%"), "No unresolved template blocks");
-    }
-
-    #[test]
-    fn test_apply_patch_template_plan_absent_omits_planning() {
-        // Renderer without Plan tool
-        let tools: HashMap<ToolKind, String> = [
-            (ToolKind::Read, "read_file".to_string()),
-            (ToolKind::Edit, "search_replace".to_string()),
-            (ToolKind::Execute, "run_terminal_cmd".to_string()),
-        ]
-        .into();
-        let r = TemplateRenderer::new(tools, HashMap::new());
-        let prompt = render_apply_patch(&r, &default_placeholders());
-        assert!(
-            !prompt.contains("## Planning"),
-            "Planning section should be omitted when plan tool absent"
-        );
-        assert!(
-            !prompt.contains("update_plan"),
-            "update_plan references should be omitted"
-        );
-    }
-
-    #[test]
-    fn test_apply_patch_template_plan_present_includes_planning() {
-        let prompt = render_apply_patch(&default_renderer(), &default_placeholders());
-        assert!(
-            prompt.contains("## Planning"),
-            "Planning section should be present when plan tool exists"
-        );
-    }
-
-    #[test]
-    fn test_apply_patch_template_with_overridden_tool_names() {
-        let tools: HashMap<ToolKind, String> = [
-            (ToolKind::Read, "view_file".to_string()),
-            (ToolKind::Edit, "some_other_edit".to_string()),
-            (ToolKind::Execute, "run_terminal_cmd".to_string()),
-            (ToolKind::Plan, "update_plan".to_string()),
-            (
-                ToolKind::BackgroundTaskAction,
-                "get_task_output".to_string(),
-            ),
-        ]
-        .into();
-        let r = TemplateRenderer::new(tools, HashMap::new());
-        let prompt = render_apply_patch(&r, &default_placeholders());
-        // apply_patch is hardcoded — NOT affected by Edit tool override
-        assert!(
-            prompt.contains("`apply_patch`"),
-            "apply_patch must remain hardcoded regardless of edit override"
-        );
-        assert!(
-            !prompt.contains("some_other_edit"),
-            "Edit override must NOT leak into apply-patch prompt"
-        );
-        // Plan tool IS resolved via template
-        assert!(
-            prompt.contains("`update_plan`"),
-            "Should use overridden 'update_plan'"
-        );
-    }
-
-    #[test]
-    fn test_apply_patch_template_deterministic_across_renders() {
-        let r = default_renderer();
-        let p = default_placeholders();
-        let a = render_apply_patch(&r, &p);
-        let b = render_apply_patch(&r, &p);
-        assert_eq!(a, b, "Apply-patch template rendering must be deterministic");
     }
 
     #[test]
@@ -690,7 +608,6 @@ mod tests {
     fn test_template_vars_are_always_guarded() {
         assert_guards(DEFAULT_SYSTEM_PROMPT, "foundation/mandatory-core.md");
         assert_guards(SUBAGENT_SYSTEM_PROMPT, "audience/subagent.md");
-        assert_guards(APPLY_PATCH_SYSTEM_PROMPT, "apply_patch.md");
     }
 
     // ── Combination sweep ───────────────────────────────────────────

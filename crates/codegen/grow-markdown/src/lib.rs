@@ -33,7 +33,7 @@ mod hyperlinks;
 mod latex;
 mod latex_delimiters;
 mod mermaid;
-mod open_code_highlighter;
+mod open_fence_highlighter;
 mod output;
 mod parse;
 mod render;
@@ -126,12 +126,12 @@ pub fn render_markdown_ratatui_with_buffers_width(
 /// Render markdown to ratatui Lines and provide `next_link_id` so the
 /// streaming renderer can resume link ID assignment across tail re-renders.
 ///
-/// `open_code` threads an optional incremental highlighter for the trailing
+/// `open_fence` threads an optional incremental highlighter for the trailing
 /// still-open fenced code block: only the streaming tail re-render passes
 /// `Some(cache)`; `finish()` and non-streaming callers pass `None`. Everything
 /// other than that one open block (closed code blocks, HTML, math, tables,
 /// inline) always goes through the unchanged batch highlighter, so output is
-/// byte-for-byte identical to the cache-less path. See [`open_code_highlighter`].
+/// byte-for-byte identical to the cache-less path. See [`open_fence_highlighter`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_markdown_ratatui_with_link_id(
     text: &str,
@@ -142,13 +142,13 @@ pub(crate) fn render_markdown_ratatui_with_link_id(
     max_table_width: Option<usize>,
     link_id_start: u32,
     collapse_soft_breaks: bool,
-    open_code: Option<&mut open_code_highlighter::OpenCodeHighlighter>,
+    open_fence: Option<&mut open_fence_highlighter::OpenFenceHighlighter>,
 ) -> (MarkdownRenderOutput, Option<Checkpoint>, u32) {
     let mut parsed = MarkdownParser::new(text, ms, buffers, syntect)
         .max_table_width(max_table_width)
         .link_id_start(link_id_start)
         .collapse_soft_breaks(collapse_soft_breaks)
-        .open_code(open_code)
+        .open_fence(open_fence)
         .parse();
 
     // NOTE: There can be multiple links in a tail, hence next_link_id is the return.

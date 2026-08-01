@@ -643,7 +643,7 @@ impl AgentBuilder {
             if self.write_file_enabled && !has_write_tool {
                 tool_config
                     .tools
-                    .push((&grow_tools::implementations::opencode::OpenCodeWriteTool).into());
+                    .push((&grow_tools::implementations::grow_build::WriteTool).into());
             }
             ensure_plan_tools(&mut tool_config);
         }
@@ -723,7 +723,6 @@ impl AgentBuilder {
             };
             if !has_satisfier(ToolNamespace::Grow, "run_terminal_cmd", true)
                 && !has_satisfier(ToolNamespace::GrowConcise, "run_terminal_cmd", true)
-                && !has_satisfier(ToolNamespace::OpenCode, "bash", false)
             {
                 let lifecycle = ["get_task_output", "wait_tasks", "kill_task"];
                 tool_config

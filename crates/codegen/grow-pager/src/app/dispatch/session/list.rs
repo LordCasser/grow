@@ -4,8 +4,8 @@ use crate::app::dispatch::ctx::get_active_agent_mut;
 use crate::views::modal::ActiveModal;
 use crate::views::picker::PickerState;
 use crate::views::session_picker::{
-    PickerSelectionAnchor, SessionPickerLanes, SessionPickerPendingNotice, SourceFilter,
-    capture_picker_selection, effective_filter_query, repo_name_from_cwd, restore_picker_selection,
+    PickerSelectionAnchor, SourceFilter, capture_picker_selection, effective_filter_query,
+    repo_name_from_cwd, restore_picker_selection,
 };
 
 use grow_shell::session::unified_list::ListScope;
@@ -15,7 +15,6 @@ type SearchHit = grow_shell::extensions::session_search::SearchSessionHit;
 struct PickerSurface<'a> {
     entries: &'a mut Option<Vec<SessionPickerEntry>>,
     loading: &'a mut bool,
-    lanes: &'a mut SessionPickerLanes,
     state: &'a mut PickerState,
     content_results: &'a mut Option<Vec<SearchHit>>,
     content_loading: &'a mut bool,
@@ -69,22 +68,9 @@ impl PickerSurface<'_> {
             *self.content_loading = false;
         }
         *self.entries_query = query;
-        crate::app::foreign_sessions::replace_native_entries(self.entries, sessions);
-        if is_search && self.entries.is_none() {
-            *self.entries = Some(Vec::new());
-        }
-        let notice = if self.entries.is_none() && !is_search {
-            if self.lanes.foreign_loading {
-                self.lanes.pending_notice = Some(SessionPickerPendingNotice::Empty(empty_notice));
-                None
-            } else {
-                self.lanes.pending_notice = None;
-                Some(empty_notice)
-            }
-        } else {
-            self.lanes.pending_notice = None;
-            None
-        };
+        *self.entries = Some(sessions);
+        let notice = (!is_search && self.entries.as_ref().is_some_and(Vec::is_empty))
+            .then_some(empty_notice);
         self.restore_selection(anchor);
         notice
     }
@@ -95,26 +81,10 @@ impl PickerSurface<'_> {
         if is_search {
             *self.content_loading = false;
         }
-        crate::app::foreign_sessions::replace_native_entries(self.entries, Vec::new());
+        *self.entries = Some(Vec::new());
         *self.entries_query = None;
-        let notice = if self.lanes.foreign_loading {
-            self.lanes.pending_notice = Some(SessionPickerPendingNotice::Error(error_notice));
-            None
-        } else {
-            self.lanes.pending_notice = None;
-            Some(error_notice)
-        };
         self.restore_selection(anchor);
-        notice
-    }
-
-    fn foreign_loaded(&mut self, scanned: Vec<SessionPickerEntry>) -> Option<String> {
-        let anchor = self.capture_selection();
-        crate::app::foreign_sessions::replace_foreign_entries(self.entries, scanned);
-        self.lanes.foreign_loading = false;
-        let notice = self.lanes.take_ready_notice(self.entries.is_some());
-        self.restore_selection(anchor);
-        notice
+        Some(error_notice)
     }
 }
 
@@ -129,34 +99,11 @@ pub(in crate::app::dispatch) fn dispatch_fetch_session_list(app: &mut AppView) -
     app.session_picker_content_results = None;
     app.session_picker_content_loading = false;
     app.session_picker_entries_query = None;
-    app.foreign_session_scan_seq += 1;
-    let foreign_seq = app.foreign_session_scan_seq;
-    let mut effects = vec![Effect::FetchSessionList {
+    vec![Effect::FetchSessionList {
         query: None,
         seq: app.session_picker_list_seq,
         kind_filter: None,
-    }];
-    let grow_home = grow_tools::util::grow_home::grow_home();
-    let foreign_effect = crate::app::foreign_sessions::scan_effect(
-        &app.cwd,
-        app.foreign_session_compat,
-        &grow_home,
-        app.foreign_scan_coordinator.clone(),
-        foreign_seq,
-    );
-    let foreign_loading = foreign_effect.is_some();
-    let mut modal_lanes_set = false;
-    if let Some(agent) = get_active_agent_mut(app)
-        && let Some(ActiveModal::SessionPicker { lanes, .. }) = agent.active_modal.as_mut()
-    {
-        lanes.foreign_loading = foreign_loading;
-        lanes.pending_notice = None;
-        modal_lanes_set = true;
-    }
-    app.session_picker_lanes.foreign_loading = foreign_loading && !modal_lanes_set;
-    app.session_picker_lanes.pending_notice = None;
-    effects.extend(foreign_effect);
-    effects
+    }]
 }
 
 pub(in crate::app::dispatch) fn handle_session_list_loaded(
@@ -179,7 +126,6 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
         if let Some(ActiveModal::SessionPicker {
             entries,
             loading,
-            lanes,
             state,
             content_results,
             content_loading,
@@ -191,7 +137,6 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
             notice = PickerSurface {
                 entries,
                 loading,
-                lanes,
                 state,
                 content_results,
                 content_loading,
@@ -212,7 +157,6 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
         notice = PickerSurface {
             entries: &mut app.session_picker_entries,
             loading: &mut app.session_picker_loading,
-            lanes: &mut app.session_picker_lanes,
             state: &mut app.session_picker_state,
             content_results: &mut app.session_picker_content_results,
             content_loading: &mut app.session_picker_content_loading,
@@ -270,7 +214,6 @@ pub(in crate::app::dispatch) fn handle_session_list_failed(
         if let Some(ActiveModal::SessionPicker {
             entries,
             loading,
-            lanes,
             state,
             content_results,
             content_loading,
@@ -282,7 +225,6 @@ pub(in crate::app::dispatch) fn handle_session_list_failed(
             notice = PickerSurface {
                 entries,
                 loading,
-                lanes,
                 state,
                 content_results,
                 content_loading,
@@ -300,7 +242,6 @@ pub(in crate::app::dispatch) fn handle_session_list_failed(
         notice = PickerSurface {
             entries: &mut app.session_picker_entries,
             loading: &mut app.session_picker_loading,
-            lanes: &mut app.session_picker_lanes,
             state: &mut app.session_picker_state,
             content_results: &mut app.session_picker_content_results,
             content_loading: &mut app.session_picker_content_loading,
@@ -315,77 +256,4 @@ pub(in crate::app::dispatch) fn handle_session_list_failed(
         app.show_toast(&notice);
     }
     vec![]
-}
-
-pub(in crate::app::dispatch) fn handle_foreign_sessions_scanned(
-    app: &mut AppView,
-    scanned: Vec<SessionPickerEntry>,
-    seq: u64,
-) -> Vec<Effect> {
-    if seq != app.foreign_session_scan_seq {
-        return vec![];
-    }
-    app.session_picker_detail_generation += 1;
-    let mut scanned = Some(scanned);
-    let mut notice = None;
-    let mut handled = false;
-    if let Some(agent) = get_active_agent_mut(app) {
-        let current_repo = repo_name_from_cwd(&agent.session.cwd.to_string_lossy());
-        if let Some(ActiveModal::SessionPicker {
-            entries,
-            loading,
-            lanes,
-            state,
-            content_results,
-            content_loading,
-            entries_query,
-            source_filter,
-            ..
-        }) = agent.active_modal.as_mut()
-            && lanes.foreign_loading
-        {
-            handled = true;
-            notice = PickerSurface {
-                entries,
-                loading,
-                lanes,
-                state,
-                content_results,
-                content_loading,
-                entries_query,
-                source_filter: *source_filter,
-                grouped: true,
-                current_repo,
-            }
-            .foreign_loaded(scanned.take().unwrap_or_default());
-        }
-    }
-    if !handled && app.session_picker_lanes.foreign_loading {
-        let current_repo = repo_name_from_cwd(&app.cwd.to_string_lossy());
-        notice = PickerSurface {
-            entries: &mut app.session_picker_entries,
-            loading: &mut app.session_picker_loading,
-            lanes: &mut app.session_picker_lanes,
-            state: &mut app.session_picker_state,
-            content_results: &mut app.session_picker_content_results,
-            content_loading: &mut app.session_picker_content_loading,
-            entries_query: &mut app.session_picker_entries_query,
-            source_filter: app.session_picker_source_filter,
-            grouped: app.session_picker_grouped,
-            current_repo,
-        }
-        .foreign_loaded(scanned.unwrap_or_default());
-    }
-    if let Some(notice) = notice {
-        app.show_toast(&notice);
-    }
-    vec![]
-}
-
-pub(in crate::app::dispatch) fn invalidate_foreign_picker(app: &mut AppView) {
-    app.foreign_session_scan_seq += 1;
-    app.foreign_scan_coordinator
-        .begin_request(app.foreign_session_scan_seq);
-    app.session_picker_lanes = Default::default();
-    app.session_picker_detail_generation += 1;
 }

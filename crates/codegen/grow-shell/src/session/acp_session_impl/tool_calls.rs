@@ -1862,12 +1862,6 @@ impl SessionActor {
                     vec![],
                 )
             }
-            ToolInput::ApplyPatch(_) => (
-                "Apply patch".to_string(),
-                acp::ToolKind::Edit,
-                vec![],
-                vec![],
-            ),
             ToolInput::Dynamic(_) => (
                 "Dynamic tool call".to_string(),
                 acp::ToolKind::Other,
@@ -2870,7 +2864,7 @@ mod plan_mode_edit_gate_tests {
         })
     }
     fn write(path: &str) -> ToolInput {
-        use grow_tools::implementations::opencode::write::WriteInput;
+        use grow_tools::implementations::grow_build::write::WriteInput;
         ToolInput::Write(WriteInput {
             file_path: path.into(),
             content: "x".into(),
@@ -2896,22 +2890,6 @@ mod plan_mode_edit_gate_tests {
         );
         assert_eq!(
             gate(&t, &write("/tmp/gate-session/plan.md")),
-            PlanEditGate::RejectEdit
-        );
-    }
-    /// `apply_patch` carries a placeholder access path, never the plan file:
-    /// always rejected in plan mode (conservative).
-    #[test]
-    fn apply_patch_rejected_in_plan_mode() {
-        use grow_tools::implementations::codex::apply_patch::ApplyPatchInput;
-        let t = active_tracker();
-        assert_eq!(
-            gate(
-                &t,
-                &ToolInput::ApplyPatch(ApplyPatchInput {
-                    patch: String::new()
-                })
-            ),
             PlanEditGate::RejectEdit
         );
     }

@@ -211,8 +211,6 @@ pub enum ActiveModal {
         entries: Option<Vec<crate::app::app_view::SessionPickerEntry>>,
         /// Whether the session list is being fetched.
         loading: bool,
-        /// Foreign lane completion and deferred native-lane notice.
-        lanes: crate::views::session_picker::SessionPickerLanes,
         /// Previous command palette state (if opened from palette). Restored on Esc.
         previous_palette: Option<PaletteSnapshot>,
         /// Shared modal window chrome state.

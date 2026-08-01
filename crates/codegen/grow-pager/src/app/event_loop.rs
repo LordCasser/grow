@@ -899,16 +899,6 @@ pub(crate) async fn run(
             None
         }
     };
-    let compat = grow_shell::agent::config::resolve_compat_sessions_from_raw(
-        effective_config.as_ref().ok_or(()),
-        remote_settings.as_ref(),
-    );
-    app.foreign_session_compat = grow_workspace::foreign_sessions::EnabledForeignSessionSources {
-        claude: compat.claude.sessions,
-        codex: compat.codex.sessions,
-        cursor: compat.cursor.sessions,
-    };
-
     // Load notification config from [ui.notifications] in config.toml.
     if let Some(ref raw) = effective_config {
         app.notification_service = crate::notifications::NotificationService::new(
@@ -1468,13 +1458,6 @@ pub(crate) async fn run(
             // startup-action drain runs.
             app.deferred_startup.new_session = true;
         }
-    }
-
-    // Startup intents are now fully classified; only an untouched welcome can nudge.
-    if let Some(effect) = app.begin_foreign_resume_detection()
-        && process_effects(vec![effect], &mut tasks, &mut app)
-    {
-        return Ok(make_run_result(&app));
     }
 
     // Schedule the first animation tick so live updates start immediately

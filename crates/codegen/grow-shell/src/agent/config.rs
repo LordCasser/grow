@@ -389,14 +389,11 @@ fn remote_compat_value(
         CompatRemoteKey::CursorAgents => remote.cursor_agents_enabled,
         CompatRemoteKey::CursorMcps => remote.cursor_mcps_enabled,
         CompatRemoteKey::CursorHooks => remote.cursor_hooks_enabled,
-        CompatRemoteKey::CursorSessions => remote.cursor_sessions_enabled,
         CompatRemoteKey::ClaudeSkills => remote.claude_skills_enabled,
         CompatRemoteKey::ClaudeRules => remote.claude_rules_enabled,
         CompatRemoteKey::ClaudeAgents => remote.claude_agents_enabled,
         CompatRemoteKey::ClaudeMcps => remote.claude_mcps_enabled,
         CompatRemoteKey::ClaudeHooks => remote.claude_hooks_enabled,
-        CompatRemoteKey::ClaudeSessions => remote.claude_sessions_enabled,
-        CompatRemoteKey::CodexSessions => remote.codex_sessions_enabled,
     }
 }
 /// Resolve vendor compatibility cells from TOML and remote settings.
@@ -445,35 +442,6 @@ pub(crate) fn compat_config_cell(
         .as_bool()
         .map(Some)
         .ok_or(CompatConfigCellError::Malformed)
-}
-/// Resolve only picker-facing session cells from raw config independently.
-pub fn resolve_compat_sessions_from_raw(
-    raw_config: Result<&toml::Value, ()>,
-    remote: Option<&crate::util::config::RemoteSettings>,
-) -> CompatConfig {
-    let mut config = CompatConfigToml::default();
-    for cell in COMPAT_CELLS
-        .into_iter()
-        .filter(|cell| cell.surface() == CompatSurface::Sessions)
-    {
-        let value = match compat_config_cell(raw_config, cell) {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::warn!(
-                    vendor = cell.vendor().as_str(),
-                    ?error,
-                    "invalid compat config; disabling foreign sessions"
-                );
-                Some(false)
-            }
-        };
-        match cell.vendor() {
-            CompatVendor::Cursor => config.cursor.sessions = value,
-            CompatVendor::Claude => config.claude.sessions = value,
-            CompatVendor::Codex => config.codex.sessions = value,
-        }
-    }
-    resolve_compat_config(&config, remote)
 }
 /// Resolve a string setting: cli > env > config > feature flag. `None` if no source provides a value.
 pub(crate) fn resolve_string_flag(
@@ -2722,7 +2690,7 @@ pub struct ModelEntryConfig {
     #[serde(default, skip_serializing_if = "is_false")]
     pub use_concise: bool,
     /// The type of system prompt to use for this model.
-    /// e.g. "grow-build", "codex".
+    /// e.g. "grow-build", "browser-use".
     #[serde(default = "default_agent_type")]
     pub agent_type: String,
     /// Maximum seconds to wait between SSE chunks during inference streaming.
@@ -5062,7 +5030,7 @@ reasoning_effort = "low"
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
             use_concise: false,
-            agent_type: "codex".to_string(),
+            agent_type: "custom-harness".to_string(),
             inference_idle_timeout_secs: None,
             max_retries: None,
             hidden: false,
@@ -5076,7 +5044,7 @@ reasoning_effort = "low"
             laziness_detector: LazinessDetectorPerModelConfig::default(),
         };
         let info = ModelInfo::from_config(&entry);
-        assert_eq!(info.agent_type, "codex");
+        assert_eq!(info.agent_type, "custom-harness");
     }
     #[test]
     fn acp_model_meta_includes_agent_type_when_present() {
@@ -5084,12 +5052,12 @@ reasoning_effort = "low"
         let mut entry = test_model_entry("test-model", "https://test.api/v1", None, None, None);
         entry.info.name = Some("Test Model".to_string());
         entry.info.context_window = NonZeroU64::new(256_000).unwrap();
-        entry.info.agent_type = "codex".to_string();
+        entry.info.agent_type = "custom-harness".to_string();
         models.insert("test-model".to_string(), entry);
         let acp_models = to_acp_model_info(&models);
         let acp_model = acp_models.values().next().expect("should have one model");
         let meta = acp_model.meta.as_ref().expect("meta should be present");
-        assert_eq!(meta["agentType"], "codex");
+        assert_eq!(meta["agentType"], "custom-harness");
         assert_eq!(meta["totalContextTokens"], 256_000);
     }
     #[test]
@@ -6928,18 +6896,6 @@ agent_type = "cursor"
         let raw: toml::Value = toml::from_str(source).unwrap();
         raw.get("compat").unwrap().clone().try_into().unwrap()
     }
-    fn assert_session_one_disabled(config: CompatConfig, expected: CompatVendor) {
-        for cell in COMPAT_CELLS {
-            if cell.surface() == CompatSurface::Sessions {
-                assert_eq!(
-                    config.value(cell),
-                    cell.vendor() != expected,
-                    "{}.sessions",
-                    cell.vendor().as_str()
-                );
-            }
-        }
-    }
     fn remote_settings_with(
         key: CompatRemoteKey,
         value: bool,
@@ -6951,18 +6907,11 @@ agent_type = "cursor"
             CompatRemoteKey::CursorAgents => remote.cursor_agents_enabled = Some(value),
             CompatRemoteKey::CursorMcps => remote.cursor_mcps_enabled = Some(value),
             CompatRemoteKey::CursorHooks => remote.cursor_hooks_enabled = Some(value),
-            CompatRemoteKey::CursorSessions => {
-                remote.cursor_sessions_enabled = Some(value);
-            }
             CompatRemoteKey::ClaudeSkills => remote.claude_skills_enabled = Some(value),
             CompatRemoteKey::ClaudeRules => remote.claude_rules_enabled = Some(value),
             CompatRemoteKey::ClaudeAgents => remote.claude_agents_enabled = Some(value),
             CompatRemoteKey::ClaudeMcps => remote.claude_mcps_enabled = Some(value),
             CompatRemoteKey::ClaudeHooks => remote.claude_hooks_enabled = Some(value),
-            CompatRemoteKey::ClaudeSessions => {
-                remote.claude_sessions_enabled = Some(value);
-            }
-            CompatRemoteKey::CodexSessions => remote.codex_sessions_enabled = Some(value),
         }
         remote
     }
@@ -6974,62 +6923,6 @@ agent_type = "cursor"
             resolve_compat_config(&CompatConfigToml::default(), None),
             CompatConfig::default()
         );
-    }
-    #[test]
-    #[serial]
-    fn resolve_compat_toml_sessions_disable_independently() {
-        let _env = isolate_compat_env();
-        for (vendor, section) in [
-            (CompatVendor::Cursor, "cursor"),
-            (CompatVendor::Claude, "claude"),
-            (CompatVendor::Codex, "codex"),
-        ] {
-            let config = parse_compat(&format!("[compat.{section}]\nsessions = false"));
-            assert_session_one_disabled(resolve_compat_config(&config, None), vendor);
-        }
-    }
-    #[test]
-    #[serial]
-    fn resolve_raw_compat_sessions_fails_closed_per_vendor() {
-        let _env = isolate_compat_env();
-        let raw: toml::Value = toml::from_str(
-            r#"
-[compat.cursor]
-sessions = "malformed"
-[compat.claude]
-sessions = false
-[compat.codex]
-hooks = "unrelated malformed field"
-"#,
-        )
-        .unwrap();
-        let resolved = resolve_compat_sessions_from_raw(Ok(&raw), None);
-        assert!(!resolved.cursor.sessions);
-        assert!(!resolved.claude.sessions);
-        assert!(resolved.codex.sessions);
-    }
-    #[test]
-    #[serial]
-    fn resolve_raw_compat_sessions_keeps_absent_and_valid_cells_independent() {
-        let _env = isolate_compat_env();
-        let raw: toml::Value = toml::from_str(
-            r#"
-[compat.cursor]
-sessions = false
-hooks = "malformed but irrelevant"
-[compat.claude]
-sessions = true
-"#,
-        )
-        .unwrap();
-        let remote = crate::util::config::RemoteSettings {
-            codex_sessions_enabled: Some(false),
-            ..Default::default()
-        };
-        let resolved = resolve_compat_sessions_from_raw(Ok(&raw), Some(&remote));
-        assert!(!resolved.cursor.sessions);
-        assert!(resolved.claude.sessions);
-        assert!(!resolved.codex.sessions);
     }
     #[test]
     fn compat_config_cell_is_tolerant_and_fail_closed_per_cell() {
@@ -7062,46 +6955,9 @@ hooks = true
             Ok(Some(true))
         );
         assert_eq!(
-            compat_config_cell(Ok(&raw), cell(CompatVendor::Codex, CompatSurface::Sessions)),
-            Ok(None)
-        );
-        assert_eq!(
-            compat_config_cell(Err(()), cell(CompatVendor::Claude, CompatSurface::Sessions)),
+            compat_config_cell(Err(()), cell(CompatVendor::Claude, CompatSurface::Hooks)),
             Err(CompatConfigCellError::Unavailable)
         );
-    }
-    #[test]
-    #[serial]
-    fn resolve_raw_compat_sessions_load_failure_fails_closed() {
-        let _env = isolate_compat_env();
-        let resolved = resolve_compat_sessions_from_raw(Err(()), None);
-        assert!(!resolved.cursor.sessions);
-        assert!(!resolved.claude.sessions);
-        assert!(!resolved.codex.sessions);
-    }
-    #[test]
-    #[serial]
-    fn resolve_raw_compat_sessions_load_failure_allows_env_override() {
-        let _env = isolate_compat_env();
-        let _codex = EnvGuard::set("GROW_CODEX_SESSIONS_ENABLED", "true");
-        let resolved = resolve_compat_sessions_from_raw(Err(()), None);
-        assert!(!resolved.cursor.sessions);
-        assert!(!resolved.claude.sessions);
-        assert!(resolved.codex.sessions);
-    }
-    #[test]
-    #[serial]
-    fn resolve_raw_compat_sessions_valid_empty_uses_remote_and_defaults() {
-        let _env = isolate_compat_env();
-        let raw = toml::Value::Table(Default::default());
-        let remote = crate::util::config::RemoteSettings {
-            claude_sessions_enabled: Some(false),
-            ..Default::default()
-        };
-        let resolved = resolve_compat_sessions_from_raw(Ok(&raw), Some(&remote));
-        assert!(resolved.cursor.sessions);
-        assert!(!resolved.claude.sessions);
-        assert!(resolved.codex.sessions);
     }
     #[test]
     #[serial]
@@ -7129,73 +6985,6 @@ hooks = true
                 .cursor
                 .skills
         );
-    }
-    #[test]
-    #[serial]
-    fn resolve_compat_env_sessions_disable_independently() {
-        let _env = isolate_compat_env();
-        for (vendor, env_var) in [
-            (CompatVendor::Cursor, "GROW_CURSOR_SESSIONS_ENABLED"),
-            (CompatVendor::Claude, "GROW_CLAUDE_SESSIONS_ENABLED"),
-            (CompatVendor::Codex, "GROW_CODEX_SESSIONS_ENABLED"),
-        ] {
-            let _disabled = EnvGuard::set(env_var, "false");
-            assert_session_one_disabled(
-                resolve_compat_config(&CompatConfigToml::default(), None),
-                vendor,
-            );
-        }
-    }
-    #[test]
-    #[serial]
-    fn resolve_compat_precedence_and_reserved_codex_hook() {
-        let _env = isolate_compat_env();
-        let config =
-            parse_compat("[compat.cursor]\nsessions = false\n[compat.codex]\nhooks = false");
-        let remote = crate::util::config::RemoteSettings {
-            cursor_sessions_enabled: Some(true),
-            ..Default::default()
-        };
-        let resolved = resolve_compat_config(&config, Some(&remote));
-        assert!(!resolved.cursor.sessions);
-        assert!(!resolved.codex.hooks);
-        assert!(resolved.cursor.hooks);
-        assert!(resolved.claude.hooks);
-        let _session = EnvGuard::set("GROW_CURSOR_SESSIONS_ENABLED", "true");
-        let _hook = EnvGuard::set("GROW_CODEX_HOOKS_ENABLED", "true");
-        let resolved = resolve_compat_config(&config, Some(&remote));
-        assert!(resolved.cursor.sessions);
-        assert!(resolved.codex.hooks);
-    }
-    #[test]
-    #[serial]
-    fn resolve_runtime_fields_compat_asymmetric_sources() {
-        let _env = isolate_compat_env();
-        let _cursor = EnvGuard::set("GROW_CURSOR_SESSIONS_ENABLED", "false");
-        let raw: toml::Value =
-            toml::from_str("[compat.cursor]\nsessions = true\n[compat.claude]\nsessions = false")
-                .unwrap();
-        let remote = crate::util::config::RemoteSettings {
-            cursor_sessions_enabled: Some(true),
-            claude_sessions_enabled: Some(true),
-            codex_sessions_enabled: Some(false),
-            ..Default::default()
-        };
-        let mut config = Config::new_from_toml_cfg(&raw).unwrap();
-        config.resolve_runtime_fields(&RuntimeResolutionContext {
-            raw_config: &raw,
-            remote_settings: Some(&remote),
-            is_headless: false,
-            cli_subagents: None,
-            cli_session_summary_model: None,
-            cli_experimental_memory: false,
-            cli_no_memory: false,
-            todo_gate: false,
-            laziness_debug_log: None,
-        });
-        assert!(!config.compat_resolved.cursor.sessions);
-        assert!(!config.compat_resolved.claude.sessions);
-        assert!(!config.compat_resolved.codex.sessions);
     }
     #[test]
     #[serial]

@@ -10,8 +10,8 @@
 use crate::config::PromptComposition;
 use crate::prompt::agents_md::{self, AgentConfigFile};
 use crate::prompt::template::{
-    APPLY_PATCH_SYSTEM_PROMPT, MANDATORY_CORE_PROMPT, PRIMARY_AUDIENCE_PROMPT,
-    RUNTIME_CONTEXT_PROMPT, STANDARD_PROMPT, SUBAGENT_AUDIENCE_PROMPT,
+    MANDATORY_CORE_PROMPT, PRIMARY_AUDIENCE_PROMPT, RUNTIME_CONTEXT_PROMPT, STANDARD_PROMPT,
+    SUBAGENT_AUDIENCE_PROMPT,
 };
 use serde::de;
 use serde::{Deserialize, Serialize};
@@ -24,13 +24,11 @@ pub enum TemplateOverride {
     /// Use the standard base template (or subagent template based on audience).
     #[default]
     None,
-    /// Use the apply-patch profile prompt template.
-    Codex,
     /// A caller-provided custom template string.
     Custom(String),
 }
-/// Backward-compatible deserialization: accepts both the new tagged format
-/// (`"none"`, `"codex"`, `{"custom": "..."}`) and the legacy format where
+/// Deserialization accepts the tagged format (`"none"`,
+/// `{"custom": "..."}`) and a raw custom template string.
 /// `system_prompt` was `Option<String>` (a raw template string).
 impl<'de> Deserialize<'de> for TemplateOverride {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -41,12 +39,11 @@ impl<'de> Deserialize<'de> for TemplateOverride {
         impl<'de> de::Visitor<'de> for Visitor {
             type Value = TemplateOverride;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str(r#""none", "codex", "cursor", {"custom": "..."}, or a template string"#)
+                f.write_str(r#""none", {"custom": "..."}, or a template string"#)
             }
             fn visit_str<E: de::Error>(self, v: &str) -> Result<TemplateOverride, E> {
                 match v {
                     "none" => Ok(TemplateOverride::None),
-                    "codex" => Ok(TemplateOverride::Codex),
                     other => Ok(TemplateOverride::Custom(other.to_owned())),
                 }
             }
@@ -104,7 +101,6 @@ pub struct PromptContext {
     pub behavior_instructions: Option<String>,
     /// Which base template to use for `Extend` mode.
     /// `TemplateOverride::None` = standard base/subagent template.
-    /// `TemplateOverride::Codex` = apply-patch profile template.
     /// `TemplateOverride::Custom` = caller-provided template string.
     #[serde(default, skip_serializing_if = "is_template_override_none")]
     pub system_prompt: TemplateOverride,
@@ -286,7 +282,6 @@ impl PromptContext {
         if self.prompt_composition == PromptComposition::Extend {
             let standard = match &self.system_prompt {
                 TemplateOverride::Custom(template) => template.as_str(),
-                TemplateOverride::Codex => APPLY_PATCH_SYSTEM_PROMPT,
                 TemplateOverride::None => STANDARD_PROMPT,
             };
             sections.push(render(standard)?);
@@ -369,8 +364,6 @@ mod tests {
     fn test_template_override_deserialize_new_format() {
         let v: TemplateOverride = serde_json::from_str(r#""none""#).unwrap();
         assert_eq!(v, TemplateOverride::None);
-        let v: TemplateOverride = serde_json::from_str(r#""codex""#).unwrap();
-        assert_eq!(v, TemplateOverride::Codex);
         let v: TemplateOverride = serde_json::from_str(r#"{"custom": "my template"}"#).unwrap();
         assert_eq!(v, TemplateOverride::Custom("my template".to_string()));
     }
@@ -386,7 +379,6 @@ mod tests {
     fn test_template_override_round_trip() {
         for original in [
             TemplateOverride::None,
-            TemplateOverride::Codex,
             TemplateOverride::Custom("my custom prompt".to_string()),
         ] {
             let json = serde_json::to_string(&original).unwrap();

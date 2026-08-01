@@ -16,9 +16,7 @@ pub const SKILL_CONFIG_DIRS: &[&str] = &[".grow", ".agents", ".claude", ".cursor
 
 use crate::implementations::skills::discovery;
 use crate::implementations::skills::types::SkillScope;
-use crate::types::output::{
-    ApplyPatchOutput, ListDirOutput, ReadFileOutput, SearchReplaceOutput, ToolOutput,
-};
+use crate::types::output::{ListDirOutput, ReadFileOutput, SearchReplaceOutput, ToolOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::SharedResources;
 use crate::types::skill_discovery_tracker::SkillManager;
@@ -62,20 +60,13 @@ impl SkillDiscoveryReminder {
         }
     }
 
-    /// Files the tool touched, for activating `paths:`-gated skills — including
-    /// every file of a multi-file `apply_patch`. Bash/grep paths are excluded
-    /// (unparseable / incidental).
+    /// Files the tool touched, for activating `paths:`-gated skills. Bash/grep
+    /// paths are excluded (unparseable / incidental).
     fn extract_activation_paths(tool_output: &ToolOutput) -> Vec<PathBuf> {
-        match tool_output {
-            ToolOutput::ApplyPatch(ApplyPatchOutput::Success { files, .. }) => files
-                .iter()
-                .flat_map(|f| std::iter::once(f.path.clone()).chain(f.move_to.clone()))
-                .collect(),
-            other => Self::extract_target_path(other)
-                .map(Path::to_path_buf)
-                .into_iter()
-                .collect(),
-        }
+        Self::extract_target_path(tool_output)
+            .map(Path::to_path_buf)
+            .into_iter()
+            .collect()
     }
 
     /// Check whether a SKILL.md path is inside a supported skills directory
@@ -112,7 +103,6 @@ impl Reminder for SkillDiscoveryReminder {
         tool_output: &ToolOutput,
     ) -> Vec<String> {
         // 1. Activate `paths:`-gated skills matching any file the tool touched
-        //    (includes multi-file `apply_patch` edits).
         let activation_paths = Self::extract_activation_paths(tool_output);
         if !activation_paths.is_empty() {
             let path_refs: Vec<&Path> = activation_paths.iter().map(PathBuf::as_path).collect();
@@ -216,39 +206,5 @@ impl Reminder for SkillDiscoveryReminder {
         // Return empty -- announcement delivery is handled by the session
         // via take_pending_reconciliation(), NOT by this reminder.
         vec![]
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::output::ApplyPatchFileResult;
-
-    fn edited(path: &str, move_to: Option<&str>) -> ApplyPatchFileResult {
-        ApplyPatchFileResult {
-            path: PathBuf::from(path),
-            action: "modified".into(),
-            old_text: None,
-            new_text: String::new(),
-            move_to: move_to.map(PathBuf::from),
-        }
-    }
-
-    #[test]
-    fn apply_patch_activation_paths_cover_every_edited_file() {
-        let multi_file_patch = ToolOutput::ApplyPatch(ApplyPatchOutput::Success {
-            files: vec![edited("/r/a.rs", None), edited("/r/b.rs", Some("/r/c.rs"))],
-            tool_output_for_prompt: String::new(),
-        });
-        assert_eq!(
-            SkillDiscoveryReminder::extract_activation_paths(&multi_file_patch),
-            vec![
-                PathBuf::from("/r/a.rs"),
-                PathBuf::from("/r/b.rs"),
-                PathBuf::from("/r/c.rs"),
-            ],
-        );
-        let failed_patch = ToolOutput::ApplyPatch(ApplyPatchOutput::ParseError("x".into()));
-        assert!(SkillDiscoveryReminder::extract_activation_paths(&failed_patch).is_empty());
     }
 }

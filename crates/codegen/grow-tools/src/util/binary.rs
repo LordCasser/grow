@@ -1,7 +1,5 @@
 /// Known binary file extensions — skip content reading for these.
 /// PDF is intentionally excluded since it has dedicated handling.
-///
-/// NOTE: opencode has its own local copy of this list.
 pub const BINARY_EXTENSIONS: &[&str] = &[
     "7z", "a", "avi", "avif", "bin", "bmp", "class", "dat", "dll", "doc", "docx", "dylib", "exe",
     "gif", "gz", "ico", "jar", "jpeg", "jpg", "lib", "mov", "mp3", "mp4", "o", "obj", "odp", "ods",

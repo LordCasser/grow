@@ -756,7 +756,7 @@ message ToolInfo {
   /// "legacy-0.4.10"). Empty for unmanaged tools.
   string contract_version = 18;
 
-  /// Tool namespace (e.g. "Grow", "Codex", "OpenCode").
+  /// Tool namespace (e.g. "Grow", "Cursor", "BrowserUse").
   /// Populated by ListTools pre-finalization from the fully-qualified
   /// registry key (e.g. "Grow:grep" → namespace="Grow").
   string namespace = 19;

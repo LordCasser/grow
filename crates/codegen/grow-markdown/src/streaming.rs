@@ -28,7 +28,7 @@
 
 #[cfg(test)]
 use crate::HyperlinkTarget;
-use crate::open_code_highlighter::OpenCodeHighlighter;
+use crate::open_fence_highlighter::OpenFenceHighlighter;
 #[cfg(test)]
 use crate::render_markdown_ratatui_full;
 use crate::{
@@ -151,11 +151,11 @@ pub struct StreamingMarkdownRenderer {
     /// Incremental highlighter for the trailing still-open fenced code block.
     ///
     /// Persists syntect's resumable per-line state across `rerender_tail` calls
-    /// so a large open code block is highlighted in O(N) total instead of O(N²).
+    /// so a large open fenced code block is highlighted in O(N) total instead of O(N²).
     /// Created lazily on the first render with syntect, and cleared (so it
     /// rebuilds) on any state reset that would change output — theme/style,
     /// pretty mode, table width, soft-break mode, or `clear()`.
-    open_code: Option<OpenCodeHighlighter>,
+    open_fence: Option<OpenFenceHighlighter>,
 
     /// Streaming LaTeX delimiter normalizer. Rewrites `\(…\)` / `\[…\]` /
     /// `\begin{equation}` into the canonical `$` / `$$` forms before text is
@@ -213,7 +213,7 @@ impl StreamingMarkdownRenderer {
             pretty,
             max_table_width: None,
             collapse_soft_breaks: true,
-            open_code: None,
+            open_fence: None,
             normalizer: LatexDelimiterNormalizer::new(),
         }
     }
@@ -227,7 +227,7 @@ impl StreamingMarkdownRenderer {
         self.frozen = FrozenState::default();
         self.output.clear();
         // Theme/style change alters colors, so any cached highlight is stale.
-        self.open_code = None;
+        self.open_fence = None;
     }
 
     /// Set the maximum width for rendered tables.
@@ -241,7 +241,7 @@ impl StreamingMarkdownRenderer {
             // Reset frozen state since table formatting may change
             self.frozen = FrozenState::default();
             self.output.clear();
-            self.open_code = None;
+            self.open_fence = None;
         }
     }
 
@@ -255,7 +255,7 @@ impl StreamingMarkdownRenderer {
             self.collapse_soft_breaks = collapse;
             self.frozen = FrozenState::default();
             self.output.clear();
-            self.open_code = None;
+            self.open_fence = None;
         }
     }
 
@@ -335,13 +335,13 @@ impl StreamingMarkdownRenderer {
             tail_start += 1;
         }
         let tail = &self.source[tail_start..];
-        // Lazily create the incremental open-code cache once syntect is present.
+        // Lazily create the incremental open-fence cache once syntect is present.
         // It rebuilds itself on fence/offset change, so a stale cache from a
         // previous tail (e.g. after a checkpoint advanced) is self-correcting.
-        let open_code = match syntect {
+        let open_fence = match syntect {
             Some(syn) => Some(
-                self.open_code
-                    .get_or_insert_with(|| OpenCodeHighlighter::new(syn)),
+                self.open_fence
+                    .get_or_insert_with(|| OpenFenceHighlighter::new(syn)),
             ),
             None => None,
         };
@@ -354,7 +354,7 @@ impl StreamingMarkdownRenderer {
             self.max_table_width,
             self.frozen.next_link_id,
             self.collapse_soft_breaks,
-            open_code,
+            open_fence,
         );
 
         // Append tail to output
@@ -465,7 +465,7 @@ impl StreamingMarkdownRenderer {
         self.output.clear();
         self.frozen = FrozenState::default();
         self.max_table_width = None;
-        self.open_code = None;
+        self.open_fence = None;
         self.normalizer.reset();
     }
 
@@ -478,7 +478,7 @@ impl StreamingMarkdownRenderer {
             // Reset frozen state - need to re-render everything with new mode
             self.frozen = FrozenState::default();
             self.output.clear();
-            self.open_code = None;
+            self.open_fence = None;
         }
     }
 
@@ -563,7 +563,7 @@ impl StreamingMarkdownRenderer {
         // Streaming is over: release the highlighter caches (open-block state
         // + closed-fence memo) instead of retaining them for the lifetime of
         // the rendered block. Lazily rebuilt if rendering ever resumes.
-        self.open_code = None;
+        self.open_fence = None;
 
         self.output.as_view()
     }
@@ -2483,7 +2483,7 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
     }
 
     // ----------------------------------------------------------------------
-    // Syntect-enabled streaming equivalence (incremental open-code highlighter)
+    // Syntect-enabled streaming equivalence (incremental open-fence highlighter)
     // ----------------------------------------------------------------------
 
     /// Build a nested YAML body of at least `num_lines` lines (no fences).
@@ -2516,7 +2516,7 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
     }
 
     /// Stream `text` in `chunk`-byte pieces (char-boundary aware), rendering
-    /// after every chunk so the incremental open-code cache is exercised, then
+    /// after every chunk so the incremental open-fence cache is exercised, then
     /// assert the final view matches a one-shot full render byte-for-byte
     /// (both `lines` and `line_source_map`).
     #[track_caller]
@@ -2698,15 +2698,15 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
             .unwrap_or(text.len());
         renderer.push_and_render(&text[..mid], Some(syntect));
         assert!(
-            renderer.open_code.is_some(),
+            renderer.open_fence.is_some(),
             "cache should exist after rendering an open block with syntect",
         );
 
         // Theme change must drop the cache.
         renderer.set_style(style2);
         assert!(
-            renderer.open_code.is_none(),
-            "set_style must clear the open-code cache",
+            renderer.open_fence.is_none(),
+            "set_style must clear the open-fence cache",
         );
 
         // Finish streaming under the new style and compare to a full render

@@ -24,11 +24,6 @@ pub enum DeferredSessionStartup {
         parent_cwd: Option<PathBuf>,
         new_session_id: Option<String>,
     },
-    /// Fresh plain Grow session whose first prompt resumes a foreign tool session.
-    ForeignResume {
-        tool: grow_workspace::foreign_sessions::ForeignSessionTool,
-        native_id: String,
-    },
 }
 /// One owner for every action deferred behind auth/folder-trust startup gates.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -563,9 +558,8 @@ mod tests {
     #[test]
     fn deferred_startup_owner_take_is_atomic() {
         let mut actions = DeferredStartupActions {
-            session: Some(DeferredSessionStartup::ForeignResume {
-                tool: grow_workspace::foreign_sessions::ForeignSessionTool::Cursor,
-                native_id: "cursor-id".into(),
+            session: Some(DeferredSessionStartup::NewWithId {
+                session_id: "session-id".into(),
             }),
             prompt: Some("prompt".into()),
             ..Default::default()

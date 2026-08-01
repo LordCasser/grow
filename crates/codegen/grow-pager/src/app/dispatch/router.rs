@@ -47,7 +47,6 @@ use super::rewind::{
     dispatch_rewind_dismiss_error, dispatch_rewind_picker_select, dispatch_rewind_select_mode,
     dispatch_rewind_show_picker,
 };
-use super::session::foreign::dispatch_fetch_session_list;
 use super::session::fork::{
     apply_persist_worktree_mode, dispatch_fork, dispatch_fork_resolved, dispatch_project_selected,
     dispatch_startup_fork_session,
@@ -58,12 +57,12 @@ use super::session::lifecycle::{
     dispatch_new_worktree_session, dispatch_trust_folder, open_delete_current_session_question,
     open_new_session_question,
 };
+use super::session::list::dispatch_fetch_session_list;
 use super::session::load::{
     dispatch_cycle_session_source_filter, dispatch_load_session, dispatch_pick_content_session,
     dispatch_pick_content_session_in_worktree, dispatch_pick_session,
     dispatch_pick_session_in_worktree, dispatch_session_picker_closed,
     dispatch_show_session_picker, dispatch_trigger_deep_search, session_picker_entry_matches,
-    session_picker_external_filter_active,
 };
 use super::session::modal::dispatch_rename_session;
 use super::settings::setters::{
@@ -119,7 +118,6 @@ use crate::views::session_picker::CONTENT_EXPAND_OFFSET;
 /// and start flowing through the tail. The fat inline arms stayed inline for
 /// this reason; audit an arm's `return`s before moving it.
 pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
-    app.reconcile_foreign_resume_launch();
     let effects = match action {
         Action::Quit | Action::QuitConfirmed => {
             let mut effects = unregister_all_active_sessions(app);
@@ -131,24 +129,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             app.quit_for_update = true;
             effects.push(Effect::Quit);
             effects
-        }
-        Action::ResumeForeignSession => {
-            let Some(hint) = app.take_foreign_resume_hint() else {
-                return vec![];
-            };
-            clear_startup_actions(app);
-            let source = crate::app::foreign_sessions::ForeignPickerSource::from_tool(hint.tool);
-            tracing::info!(
-                tool = source.picker_source(),
-                age_secs = hint.age.as_secs(),
-                "foreign_resume accepted"
-            );
-            let prompt = source.resume_prompt(&hint.native_id);
-            if !app.session_startup_allowed() {
-                app.deferred_startup.prompt = Some(prompt);
-                return vec![];
-            }
-            super::dispatch_initial_prompt(app, prompt)
         }
         Action::RelaunchInScreenMode { minimal } => {
             if let Some(session_id) = app.active_session_id().map(str::to_owned) {
@@ -199,10 +179,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::CopySessionId(index) => dispatch_copy_session_id(app, index),
         Action::ExpandSessionCard { source, session_id } => {
             let native_source = source == "local";
-            if session_picker_external_filter_active(app)
-                || crate::app::foreign_sessions::is_foreign_picker_source(&source)
-                || !native_source
-            {
+            if !native_source {
                 return vec![];
             }
             use crate::views::modal::ActiveModal;
@@ -1052,13 +1029,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             session_id,
             cwd,
         } => {
-            if session_picker_external_filter_active(app) {
-                return vec![];
-            }
-            if crate::app::foreign_sessions::is_foreign_picker_source(&source) {
-                app.show_toast("External sessions can't be deleted");
-                return vec![];
-            }
             if source != "local" || !session_picker_entry_matches(app, &source, &session_id) {
                 return vec![];
             }
@@ -1315,7 +1285,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::JumpPickerSelect(turn_idx) => dispatch_jump_picker_select(app, turn_idx),
         Action::JumpDismiss => dispatch_jump_dismiss(app),
     };
-    app.reconcile_foreign_resume_launch();
     sync_sleep_inhibitor(app);
     effects
 }

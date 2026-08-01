@@ -53,7 +53,7 @@ inheritSkills: true
 agentsMd: true
 
 # When true, Grow may add session capabilities such as memory, web_fetch, LSP,
-# OpenCode write fallback, and plan-mode tools. Set false for an exact toolset.
+# the Grow write fallback, and plan-mode tools. Set false for an exact toolset.
 injectDefaultTools: true
 
 # Final Agent-authored filters. Omit/empty `tools` to allow every assembled

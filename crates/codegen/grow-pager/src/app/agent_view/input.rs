@@ -1181,7 +1181,6 @@ impl AgentView {
                 state: crate::views::picker::PickerState::default(),
                 entries: None,
                 loading: true,
-                lanes: Default::default(),
                 previous_palette: None,
                 window: crate::views::modal_window::ModalWindowState::new(),
                 content_results: None,

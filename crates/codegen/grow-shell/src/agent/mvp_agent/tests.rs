@@ -285,9 +285,9 @@ fn resolve_agent_definition_restores_persisted_agent() {
         None,
         &config::AgentSelectionConfig::default(),
         None,
-        Some("codex"),
+        Some("browser-use"),
     );
-    assert_eq!(def.name, "codex");
+    assert_eq!(def.name, "browser-use");
     if let Some(v) = prev {
         unsafe { std::env::set_var("GROW_AGENT", v) }
     }
@@ -608,7 +608,7 @@ async fn lookup_session_model_returns_per_session_model() {
     let default_model = acp::ModelId::new("default-model");
     let sessions: HashMap<acp::SessionId, crate::session::SessionHandle> = [
         (sid_a.clone(), make_test_handle("grow-3-fast", false, None)),
-        (sid_b.clone(), make_test_handle("codex-mini", false, None)),
+        (sid_b.clone(), make_test_handle("grow-mini", false, None)),
     ]
     .into();
     assert_eq!(
@@ -621,7 +621,7 @@ async fn lookup_session_model_returns_per_session_model() {
         lookup_session_model(&sessions, Some(&sid_b), &default_model)
             .0
             .as_ref(),
-        "codex-mini"
+        "grow-mini"
     );
 }
 /// lookup_session_model falls back to the default when session_id is None.
@@ -647,12 +647,12 @@ async fn set_session_model_does_not_cross_contaminate() {
         (sid_b.clone(), make_test_handle("grow-3", false, None)),
     ]
     .into();
-    sessions.get_mut(&sid_a).unwrap().model_id = acp::ModelId::new("codex-mini");
+    sessions.get_mut(&sid_a).unwrap().model_id = acp::ModelId::new("grow-mini");
     assert_eq!(
         lookup_session_model(&sessions, Some(&sid_a), &default_model)
             .0
             .as_ref(),
-        "codex-mini"
+        "grow-mini"
     );
     assert_eq!(
         lookup_session_model(&sessions, Some(&sid_b), &default_model)

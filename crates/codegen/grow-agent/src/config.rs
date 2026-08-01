@@ -2,11 +2,9 @@
 use crate::error::AgentBuildError;
 use crate::prompt::context::TemplateOverride;
 use crate::prompt::user_message::UserMessageTemplate;
-use grow_tools::implementations::codex;
 use grow_tools::implementations::grow_build;
 use grow_tools::implementations::grow_build_concise;
 use grow_tools::implementations::memory;
-use grow_tools::implementations::opencode;
 use grow_tools::implementations::search_tool;
 use grow_tools::implementations::use_tool;
 use grow_tools::registry::types::{ToolConfig, ToolServerConfig};
@@ -125,7 +123,7 @@ fn kill_task_tool_config() -> ToolConfig {
 /// This includes tools dynamically injected by the agent builder.
 pub fn workspace_grow_build_toolset() -> ToolServerConfig {
     let mut tools = default_grow_build_toolset().tools;
-    tools.push((&opencode::OpenCodeWriteTool).into());
+    tools.push((&grow_build::WriteTool).into());
     tools.push((&grow_build::PlanControlTool).into());
     tools.push((&grow_build::AskUserQuestionTool).into());
     tools.push((&grow_build::WebFetchTool).into());
@@ -144,7 +142,7 @@ fn grow_computer_toolset() -> ToolServerConfig {
         bash_tool_config(),
         (&grow_build::ReadFileTool).into(),
         (&grow_build::SearchReplaceTool).into(),
-        (&opencode::OpenCodeWriteTool).into(),
+        (&grow_build::WriteTool).into(),
         (&grow_build::ListDirTool).into(),
         (&grow_build::GrepTool).into(),
         (&grow_build::KillTerminalCommandTool).into(),
@@ -169,8 +167,6 @@ fn native_toolset_presets() -> Vec<(&'static str, ToolServerConfig)> {
         // those fixed runtime additions.
         ("grow-build", default_grow_build_toolset()),
         ("grow-build-concise", grow_build_concise_toolset()),
-        ("codex", codex_toolset()),
-        ("opencode", opencode_toolset()),
         ("explore", explore_toolset()),
         ("grow-build-orchestrator", orchestrator_toolset()),
         ("grow-computer", grow_computer_toolset()),
@@ -286,23 +282,6 @@ pub fn grow_build_hashline_toolset(
         behavior_preset: None,
     }
 }
-fn codex_toolset() -> ToolServerConfig {
-    ToolServerConfig {
-        tools: vec![
-            bash_tool_config(),
-            (&codex::CodexReadFileTool).into(),
-            (&codex::ApplyPatchTool).into(),
-            (&codex::CodexListDirTool).into(),
-            (&codex::CodexGrepFilesTool).into(),
-            kill_task_tool_config(),
-            (&grow_build::TodoWriteTool).into(),
-            task_output_tool_config(),
-            (&search_tool::SearchTool).into(),
-            (&use_tool::UseTool).into(),
-        ],
-        behavior_preset: None,
-    }
-}
 /// Read-only toolset for the **explore** subagent.
 ///
 /// Genuinely read-only: `read_file` (Read), `list_dir` (Glob), `grep` (Grep).
@@ -360,24 +339,7 @@ fn orchestrator_toolset() -> ToolServerConfig {
             (&memory::MemoryGetImpl).into(),
             // Intentionally excluded:
             // - SearchReplaceTool (no file editing — delegate to subagents)
-            // - OpenCodeWriteTool (no file writing — delegate to subagents)
-        ],
-        behavior_preset: None,
-    }
-}
-fn opencode_toolset() -> ToolServerConfig {
-    ToolServerConfig {
-        tools: vec![
-            (&opencode::OpenCodeBashTool).into(),
-            (&opencode::OpenCodeReadTool).into(),
-            (&opencode::OpenCodeEditTool).into(),
-            (&opencode::OpenCodeWriteTool).into(),
-            (&opencode::OpenCodeGrepTool).into(),
-            (&opencode::OpenCodeGlobTool).into(),
-            (&opencode::OpenCodeTodoWriteTool).into(),
-            (&opencode::OpenCodeSkillTool).into(),
-            kill_task_tool_config(),
-            task_output_tool_config(),
+            // - WriteTool (no file writing — delegate to subagents)
         ],
         behavior_preset: None,
     }
@@ -462,7 +424,7 @@ where
 /// agents for centralized name management and `by_name()` dispatch.
 ///
 /// `subagent_variants()` returns only the 2 that are exposed to the LLM
-/// via the `TaskTool` description. The remaining 6 are top-level agent
+/// via the `TaskTool` description. The remaining 4 are top-level agent
 /// profiles resolvable by name but not advertised as subagent types.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter, AsRefStr, IntoStaticStr,
@@ -473,8 +435,6 @@ pub enum BuiltinAgentName {
     Grow,
     #[strum(serialize = "grow-build-concise")]
     GrowConcise,
-    Codex,
-    Opencode,
     GeneralPurpose,
     Explore,
     BrowserUse,
@@ -498,8 +458,6 @@ impl BuiltinAgentName {
         match self {
             Self::Grow => AgentDefinition::default_grow_build(),
             Self::GrowConcise => AgentDefinition::grow_build_concise(),
-            Self::Codex => AgentDefinition::codex(),
-            Self::Opencode => AgentDefinition::opencode(),
             Self::GeneralPurpose => AgentDefinition::general_purpose(),
             Self::Explore => AgentDefinition::explore(),
             Self::BrowserUse => AgentDefinition::browser_use(),
@@ -560,8 +518,7 @@ pub struct AgentDefinition {
     pub agents_md: bool,
     /// When true (the default), the AgentBuilder layers session-level optional
     /// tools on top of the agent's declared `tool_config`: memory_search/get,
-    /// web_fetch, lsp, and OpenCode write
-    /// fallback, and the plan-mode tools.
+    /// web_fetch, lsp, the Grow write fallback, and the plan-mode tools.
     ///
     /// Set this to `false` for harnesses that need an exact, minimal toolset
     /// (e.g. the compat harness, where every advertised tool must match the
@@ -627,20 +584,6 @@ pub struct AgentDefinition {
     /// Discovery scope (project vs user).
     #[serde(skip)]
     pub scope: AgentScope,
-    /// OpenCode/Harness frontmatter accepted only for file-format
-    /// interoperability. Grow keeps these concerns outside Agent definitions.
-    #[serde(default, rename = "model", skip_serializing)]
-    pub(crate) _ignored_model: Option<serde_yaml::Value>,
-    #[serde(default, rename = "mode", skip_serializing)]
-    pub(crate) _ignored_mode: Option<serde_yaml::Value>,
-    #[serde(default, rename = "permission", skip_serializing)]
-    pub(crate) _ignored_permission: Option<serde_yaml::Value>,
-    #[serde(default, rename = "permissions", skip_serializing)]
-    pub(crate) _ignored_permissions: Option<serde_yaml::Value>,
-    #[serde(default, rename = "variant", skip_serializing)]
-    pub(crate) _ignored_variant: Option<serde_yaml::Value>,
-    #[serde(default, rename = "request", skip_serializing)]
-    pub(crate) _ignored_request: Option<serde_yaml::Value>,
 }
 /// Declares that the agent must call a specific tool before the turn ends.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -1340,12 +1283,6 @@ impl AgentDefinition {
             source_path: None,
             user_message_template: UserMessageTemplate::Default,
             scope: AgentScope::BuiltIn,
-            _ignored_model: None,
-            _ignored_mode: None,
-            _ignored_permission: None,
-            _ignored_permissions: None,
-            _ignored_variant: None,
-            _ignored_request: None,
         }
     }
     pub fn default_grow_build() -> Self {
@@ -1357,14 +1294,6 @@ impl AgentDefinition {
     /// Grow Concise agent definition — concise output format for SFT/RL.
     pub fn grow_build_concise() -> Self {
         Self::embedded_builtin(include_str!("../prompts/agents/grow-build-concise.md"))
-    }
-    pub fn codex() -> Self {
-        let mut definition = Self::embedded_builtin(include_str!("../prompts/agents/codex.md"));
-        definition.system_prompt = TemplateOverride::Codex;
-        definition
-    }
-    pub fn opencode() -> Self {
-        Self::embedded_builtin(include_str!("../prompts/agents/opencode.md"))
     }
     /// General-purpose subagent definition.
     pub fn general_purpose() -> Self {
@@ -1458,7 +1387,6 @@ mod tests {
             "grow-build",
             "grow_build",
             "grow-build-concise",
-            "codex",
             "explore",
             "grow-computer",
             "grow_computer",
@@ -1538,15 +1466,14 @@ mod tests {
             }
         }
     }
-    /// The grow-computer preset must ship a full-file write tool (legacy
-    /// `write_file` parity) — the same OpenCode `write` tool the grow-build
-    /// preset uses. Guards against `search_replace` being the only
+    /// The grow-computer preset must ship a full-file write tool. Guards
+    /// against `search_replace` being the only
     /// file-mutation path, which has no single-tool full-rewrite when the
     /// empty-old_string overwrite guard is enabled.
     #[test]
     fn grow_computer_preset_includes_write_tool() {
         let gc = toolset_for_preset("grow-computer").unwrap();
-        let write_id = ToolConfig::from(&opencode::OpenCodeWriteTool).id;
+        let write_id = ToolConfig::from(&grow_build::WriteTool).id;
         assert!(
             gc.tools.iter().any(|t| t.id == write_id),
             "grow-computer preset must include the `{write_id}` tool"
@@ -1583,12 +1510,11 @@ mod tests {
     /// until classified.
     fn expected_strict_harness(name: BuiltinAgentName) -> bool {
         match name {
-            BuiltinAgentName::Codex | BuiltinAgentName::GrowOrchestrator => true,
+            BuiltinAgentName::GrowOrchestrator => true,
             BuiltinAgentName::Grow
             | BuiltinAgentName::GrowConcise
             | BuiltinAgentName::GeneralPurpose
             | BuiltinAgentName::Explore
-            | BuiltinAgentName::Opencode
             | BuiltinAgentName::BrowserUse => false,
         }
     }
@@ -1610,7 +1536,7 @@ mod tests {
     }
     #[test]
     fn is_strict_harness_agent_type_classifies_by_name() {
-        for strict in ["codex", "grow-build-orchestrator"] {
+        for strict in ["grow-build-orchestrator"] {
             assert!(
                 is_strict_harness_agent_type(strict),
                 "{strict} should be strict"
@@ -1619,7 +1545,8 @@ mod tests {
         for non_strict in [
             "grow",
             "grow-build-concise",
-            "opencode",
+            "unknown-a",
+            "unknown-b",
             "browser-use",
             "custom-user-agent",
             "",
@@ -1849,7 +1776,7 @@ Agent.
         assert!(def.hooks.is_none());
     }
     #[test]
-    fn test_parse_profile_fields_and_ignore_model() {
+    fn test_parse_profile_fields() {
         let content = r#"---
 name: full-fields
 description: All new fields
@@ -1859,7 +1786,6 @@ isolation: worktree
 background: true
 color: blue
 initialPrompt: "hello world"
-model: grow-3
 ---
 
 Agent body.
@@ -1871,7 +1797,6 @@ Agent body.
         assert_eq!(def.background, Some(true));
         assert_eq!(def.color, Some(AgentColor::Blue));
         assert_eq!(def.initial_prompt.as_deref(), Some("hello world"));
-        assert!(def.to_json_value().get("model").is_none());
     }
     #[test]
     fn test_parse_minimal_definition() {
@@ -2030,25 +1955,21 @@ unknownField: value
         assert!(AgentDefinition::parse(content).is_err());
     }
     #[test]
-    fn test_parse_known_foreign_fields_are_ignored() {
-        let content = r#"---
-description: Harness-compatible profile
-mode: primary
-model: anthropic/claude
-variant: high
-permission:
-  edit: allow
-permissions:
-  bash: ask
-request: false
----
-Prompt body.
-"#;
-        let def = AgentDefinition::parse(content).unwrap();
-        assert!(def.name.is_empty());
-        assert!(def.to_json_value().get("model").is_none());
-        assert_eq!(def.permission_mode, PermissionMode::Default);
-        assert_eq!(def.prompt_body.as_deref(), Some("Prompt body."));
+    fn test_unsupported_frontmatter_fields_are_rejected() {
+        for field in [
+            "mode",
+            "model",
+            "variant",
+            "permission",
+            "permissions",
+            "request",
+        ] {
+            let content = format!("---\nname: test\ndescription: Test\n{field}: value\n---\n");
+            assert!(
+                AgentDefinition::parse(&content).is_err(),
+                "unsupported field `{field}` must be rejected",
+            );
+        }
     }
     #[test]
     fn test_parse_completion_requirement() {
@@ -2261,20 +2182,18 @@ description: Test default tool config
         assert_eq!(recovered.disallowed_tools, vec!["custom_tool"]);
     }
     #[test]
-    fn test_model_frontmatter_is_accepted_but_ignored() {
+    fn test_model_frontmatter_is_rejected() {
         let content = "---\nname: test\ndescription: Test\nmodel: grow-3-fast\n---\n";
-        let def = AgentDefinition::parse(content).unwrap();
-        assert!(def.to_json_value().get("model").is_none());
+        assert!(AgentDefinition::parse(content).is_err());
     }
     #[test]
-    fn test_model_override_in_json_is_ignored() {
+    fn test_model_override_in_json_is_rejected() {
         let json = serde_json::json!({
             "name": "test",
             "description": "Test",
             "model": "grow-code-fast-1"
         });
-        let def = AgentDefinition::from_json(&json).unwrap();
-        assert!(def.to_json_value().get("model").is_none());
+        assert!(AgentDefinition::from_json(&json).is_err());
     }
     #[test]
     fn test_builtin_agent_name_strum_round_trip() {
@@ -2282,8 +2201,6 @@ description: Test default tool config
         for (s, expected) in [
             ("grow", BuiltinAgentName::Grow),
             ("grow-build-concise", BuiltinAgentName::GrowConcise),
-            ("codex", BuiltinAgentName::Codex),
-            ("opencode", BuiltinAgentName::Opencode),
             ("general-purpose", BuiltinAgentName::GeneralPurpose),
             ("explore", BuiltinAgentName::Explore),
             ("browser-use", BuiltinAgentName::BrowserUse),
@@ -2386,7 +2303,6 @@ description: Test default tool config
     fn carries_discipline_false_for_every_template_and_audience() {
         for tpl in [
             crate::prompt::context::TemplateOverride::None,
-            crate::prompt::context::TemplateOverride::Codex,
             crate::prompt::context::TemplateOverride::Custom("fake".to_string()),
         ] {
             let def = def_with_template(tpl.clone());

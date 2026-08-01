@@ -249,7 +249,6 @@ fn is_background_capable_bash_tool(tc: &crate::registry::types::ToolConfig) -> b
             .and_then(|params| params.get("enabled_background"))
             .and_then(|value| value.as_bool())
             .unwrap_or(true),
-        "OpenCode:bash" => true,
         _ => false,
     }
 }

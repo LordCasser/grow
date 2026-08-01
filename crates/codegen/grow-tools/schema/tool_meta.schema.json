@@ -46,8 +46,6 @@
         "grow",
         "grow_concise",
         "grow_hashline",
-        "codex",
-        "opencode",
         "mcp"
       ]
     }

@@ -1,6 +1,6 @@
 //! Streaming-render syntect caches for fenced code blocks in the unfrozen
 //! tail. Two complementary strategies behind one entry point
-//! ([`OpenCodeHighlighter::highlight_block`]):
+//! ([`OpenFenceHighlighter::highlight_block`]):
 //!
 //! - **Still-open trailing block** (closing ``` not arrived): persists
 //!   syntect's *resumable* per-line state ([`ParseState`]/[`HighlightState`])
@@ -54,7 +54,7 @@ const CLOSED_MEMO_CAP_BYTES: usize = 256 * 1024;
 /// for closed blocks the tail re-parses every pass (see module docs).
 ///
 /// Owns all the low-level syntect state so the parser/renderer don't have to.
-pub(crate) struct OpenCodeHighlighter {
+pub(crate) struct OpenFenceHighlighter {
     /// Language/info token of the block currently cached. A change means a
     /// different syntax (and colors), so the cache must be rebuilt.
     fence_info: String,
@@ -79,7 +79,7 @@ pub(crate) struct OpenCodeHighlighter {
     closed_memo_bytes: usize,
 }
 
-impl OpenCodeHighlighter {
+impl OpenFenceHighlighter {
     /// Create an empty cache. The `parse_state`/`highlight_state` are seeded
     /// with the plain-text syntax purely as placeholders: the empty
     /// `fence_info` sentinel guarantees the first real
@@ -318,7 +318,7 @@ mod tests {
     fn append_only_growth_matches_fresh_full_highlight() {
         let syn = test_syntect();
         let full = "foo: 1\nbar:\n  - a\n  - b\nbaz: true\n";
-        let mut cache = OpenCodeHighlighter::new(syn);
+        let mut cache = OpenFenceHighlighter::new(syn);
         // Grow one byte at a time; every prefix must equal a one-shot batch
         // highlight of that same prefix (incremental == batch, byte-for-byte).
         for end in 1..=full.len() {
@@ -334,7 +334,7 @@ mod tests {
     fn fence_change_invalidates() {
         let syn = test_syntect();
         let text = "let x = 1;\nfn main() {}\n";
-        let mut cache = OpenCodeHighlighter::new(syn);
+        let mut cache = OpenFenceHighlighter::new(syn);
         // Prime with yaml, then re-key to rust: output must match a fresh rust
         // batch, proving the persisted yaml state was discarded.
         let _ = cache.highlight(syn, "yaml", 0, text).expect("hl yaml");
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn start_offset_change_invalidates() {
         let syn = test_syntect();
-        let mut cache = OpenCodeHighlighter::new(syn);
+        let mut cache = OpenFenceHighlighter::new(syn);
         let a = "alpha: 1\nbeta: 2\n";
         let _ = cache.highlight(syn, "yaml", 0, a).expect("hl a");
         // Same language, different block position and body: the new body must
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn unknown_fence_returns_none() {
         let syn = test_syntect();
-        let mut cache = OpenCodeHighlighter::new(syn);
+        let mut cache = OpenFenceHighlighter::new(syn);
         assert!(
             cache
                 .highlight(syn, "definitely-not-a-language-xyz", 0, "data\n")
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn closed_memo_matches_batch_and_is_idempotent() {
         let syn = test_syntect();
-        let mut cache = OpenCodeHighlighter::new(syn);
+        let mut cache = OpenFenceHighlighter::new(syn);
         let body = "fn answer(x: u64) -> u64 {\n    x.wrapping_mul(42)\n}\n";
 
         // First call computes; must equal the batch reference exactly.
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn closed_memo_distinguishes_fence_info_and_body() {
         let syn = test_syntect();
-        let mut cache = OpenCodeHighlighter::new(syn);
+        let mut cache = OpenFenceHighlighter::new(syn);
         let body_a = "key: value\n";
         let body_b = "other: thing\n";
 
@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn closed_memo_does_not_disturb_open_block_state() {
         let syn = test_syntect();
-        let mut cache = OpenCodeHighlighter::new(syn);
+        let mut cache = OpenFenceHighlighter::new(syn);
         // Interleave closed-memo calls with open-block incremental growth
         // (a tail with one closed fence above an open one); open-block
         // output must stay batch-identical throughout.
@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn closed_memo_cap_overflow_keeps_output_correct() {
         let syn = test_syntect();
-        let mut cache = OpenCodeHighlighter::new(syn);
+        let mut cache = OpenFenceHighlighter::new(syn);
         // Bodies sized so a handful of distinct ones cross the byte budget
         // and trigger the wholesale clear; output must stay batch-identical
         // before, at, and after the eviction.

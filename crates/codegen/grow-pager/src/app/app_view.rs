@@ -679,15 +679,6 @@ pub struct AppView {
     /// stays 0 so plain list responses keep their pre-existing
     /// last-write-wins behavior.
     pub session_picker_list_seq: u64,
-    /// Resolved compat-session cells used before checking resume-skill paths.
-    pub(crate) foreign_session_compat:
-        grow_workspace::foreign_sessions::EnabledForeignSessionSources,
-    /// Monotonic picker scan sequence, bumped on every open and close.
-    pub(crate) foreign_session_scan_seq: u64,
-    /// Coalesces obsolete foreign scans across welcome and modal pickers.
-    pub(crate) foreign_scan_coordinator: crate::app::ForeignScanCoordinator,
-    /// Foreign lane completion and deferred native-lane notice.
-    pub(crate) session_picker_lanes: crate::views::session_picker::SessionPickerLanes,
     /// Invalidates detail reads when picker rows or filters change.
     pub(crate) session_picker_detail_generation: u64,
     /// The search query `session_picker_entries` were server-fetched with
@@ -823,9 +814,6 @@ pub struct AppView {
     /// When true, the event loop should exit so the user can relaunch
     /// to pick up the downloaded update.
     pub quit_for_update: bool,
-    /// Generation and state for the one launch-scoped foreign resume detection.
-    pub(crate) foreign_resume_launch_generation: u64,
-    pub(crate) foreign_resume_launch: Option<crate::app::foreign_sessions::ForeignResumeLaunch>,
     /// When set, the event loop should exit and the process re-exec into the
     /// other screen mode. Driven by `/minimal` and `/fullscreen`. Captures the
     /// session id at action time so a later teardown cannot drop `--resume`.
@@ -963,10 +951,6 @@ impl AppView {
             session_picker_content_loading: false,
             session_picker_deep_search_seq: 0,
             session_picker_list_seq: 0,
-            foreign_session_compat: Default::default(),
-            foreign_session_scan_seq: 0,
-            foreign_scan_coordinator: Default::default(),
-            session_picker_lanes: Default::default(),
             session_picker_detail_generation: 0,
             session_picker_entries_query: None,
             welcome_tick: 0,
@@ -1006,8 +990,6 @@ impl AppView {
             reconnect_pending: false,
             startup_warnings: Vec::new(),
             pending_update_version: None,
-            foreign_resume_launch_generation: 0,
-            foreign_resume_launch: None,
             quit_for_update: false,
             relaunch: None,
             has_claude_import: false,
@@ -1606,12 +1588,10 @@ impl AppView {
             &self.hidden_announcement_ids,
         )
         .is_some_and(|(owner, _, _)| !crate::views::announcements::is_dismissible(owner));
-        let has_foreign_resume = self.foreign_resume_hint().is_some();
         let sp_loading = crate::views::session_picker::loading_spinner_active(
             self.session_picker_entries.as_deref(),
             self.session_picker_source_filter,
             self.session_picker_loading,
-            &self.session_picker_lanes,
         );
         let outcome = match self.active_view {
             ActiveView::Welcome => handle_welcome_input(
@@ -1641,7 +1621,6 @@ impl AppView {
                     has_claude_import: self.has_claude_import,
                     import_claude_modal: &mut self.import_claude_modal,
                     has_pending_update: self.pending_update_version.is_some(),
-                    has_foreign_resume,
                     cwd_has_git_ancestor: self.cwd_has_git_ancestor,
                     session_picker_grouped: self.session_picker_grouped,
                     sp_source_filter: &mut self.session_picker_source_filter,
@@ -2216,8 +2195,6 @@ struct WelcomeInputCtx<'a> {
     has_claude_import: bool,
     import_claude_modal: &'a mut Option<crate::views::import_claude_modal::ImportClaudeModalState>,
     has_pending_update: bool,
-    /// A recent foreign session is available to resume when no update is pending.
-    has_foreign_resume: bool,
     cwd_has_git_ancestor: bool,
     session_picker_grouped: bool,
     sp_source_filter: &'a mut crate::views::session_picker::SourceFilter,
@@ -2414,9 +2391,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     Some(PickerItem::Fuzzy { original_index }) => {
                         if let Some(ents) = ctx.sp_entries.as_ref()
                             && let Some(entry) = ents.get(*original_index)
-                            && !crate::app::foreign_sessions::is_foreign_picker_source(
-                                &entry.source,
-                            )
                         {
                             return InputOutcome::Action(Action::ExpandSessionCard {
                                 source: entry.source.clone(),
@@ -2526,9 +2500,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             }
             if ctx.has_pending_update && key!('u', CONTROL).matches(key) {
                 return InputOutcome::Action(Action::QuitForUpdate);
-            }
-            if ctx.has_foreign_resume && key!('u', CONTROL).matches(key) {
-                return InputOutcome::Action(Action::ResumeForeignSession);
             }
             if ctx.has_claude_import && key!('i', CONTROL).matches(key) {
                 return InputOutcome::Action(Action::ImportClaudeSettings);
@@ -2894,7 +2865,6 @@ impl AppView {
         let scroll_debug_panel = self.scroll_debug_panel();
         let dev_fps_rows = self.dev_fps_rows();
         let fps_overlay = self.fps_hud.overlay(dev_fps_rows);
-        let foreign_resume_hint = self.foreign_resume_hint().cloned();
         let Self {
             active_view,
             agents,
@@ -2991,13 +2961,11 @@ impl AppView {
                                     self.session_picker_entries.as_deref(),
                                     self.session_picker_source_filter,
                                     self.session_picker_loading,
-                                    &self.session_picker_lanes,
                                 ),
                             compact,
                             pending_hint,
                             startup_warnings: &self.startup_warnings,
                             pending_update_version: self.pending_update_version.as_deref(),
-                            foreign_resume_hint: foreign_resume_hint.as_ref(),
                             session_picker_content_results: self
                                 .session_picker_content_results
                                 .as_deref(),
@@ -3579,7 +3547,6 @@ impl AppView {
                     self.session_picker_entries.as_deref(),
                     self.session_picker_source_filter,
                     self.session_picker_loading,
-                    &self.session_picker_lanes,
                 )
             {
                 needs_redraw = true;
@@ -3662,14 +3629,12 @@ impl AppView {
                 Some(crate::views::modal::ActiveModal::SessionPicker {
                     entries,
                     loading,
-                    lanes,
                     source_filter,
                     ..
                 }) if crate::views::session_picker::loading_spinner_active(
                     entries.as_deref(),
                     *source_filter,
                     *loading,
-                    lanes,
                 )
             ) && spinner_frame_tick;
             needs_redraw |= agent.drain_blocked();
@@ -3958,14 +3923,12 @@ impl AppView {
                         Some(crate::views::modal::ActiveModal::SessionPicker {
                             entries,
                             loading,
-                            lanes,
                             source_filter,
                             ..
                         }) if crate::views::session_picker::loading_spinner_active(
                             entries.as_deref(),
                             *source_filter,
                             *loading,
-                            lanes,
                         )
                     )
                     || agent.subagent_views.iter().any(|(sid, child)| {
@@ -4208,18 +4171,12 @@ pub(crate) mod tests {
             session_picker_content_loading: false,
             session_picker_deep_search_seq: 0,
             session_picker_list_seq: 0,
-            foreign_session_compat: Default::default(),
-            foreign_session_scan_seq: 0,
-            foreign_scan_coordinator: Default::default(),
-            session_picker_lanes: Default::default(),
             session_picker_detail_generation: 0,
             session_picker_entries_query: None,
             welcome_tick: 0,
             welcome_shimmer_frame: 0,
             startup_warnings: Vec::new(),
             pending_update_version: None,
-            foreign_resume_launch_generation: 0,
-            foreign_resume_launch: None,
             quit_for_update: false,
             relaunch: None,
             has_claude_import: false,
@@ -4734,9 +4691,7 @@ pub(crate) mod tests {
         );
     }
     /// An open modal session picker that is still fetching keeps fast ticks
-    /// alive on an otherwise-idle agent (its loading spinner must animate) —
-    /// including after the fast foreign scan lands rows the default Grow
-    /// filter hides; once the native list settles the demand parks again.
+    /// alive on an otherwise-idle agent so its loading spinner can animate.
     #[test]
     fn tick_demand_fast_while_modal_session_picker_loads() {
         let mut app = test_app_with_agent();
@@ -4748,7 +4703,6 @@ pub(crate) mod tests {
                 state: crate::views::picker::PickerState::default(),
                 entries: None,
                 loading: true,
-                lanes: Default::default(),
                 previous_palette: None,
                 window: crate::views::modal_window::ModalWindowState::new(),
                 content_results: None,
@@ -4762,32 +4716,6 @@ pub(crate) mod tests {
             app.tick_demand(),
             TickDemand::Fast,
             "loading modal picker must keep the spinner animating"
-        );
-        let foreign_entry = SessionPickerEntry {
-            id: "claude-1".into(),
-            summary: "claude".into(),
-            updated_at: chrono::Utc::now(),
-            created_at: chrono::Utc::now(),
-            cwd: String::new(),
-            hostname: None,
-            source: "claude".into(),
-            model_id: None,
-            num_messages: 0,
-            last_active_at: None,
-            branch: None,
-            repo_name: "r".into(),
-            worktree_label: None,
-            card_detail: None,
-        };
-        if let Some(crate::views::modal::ActiveModal::SessionPicker { entries, .. }) =
-            app.agents.get_mut(&id).unwrap().active_modal.as_mut()
-        {
-            *entries = Some(vec![foreign_entry]);
-        }
-        assert_eq!(
-            app.tick_demand(),
-            TickDemand::Fast,
-            "foreign rows hidden by the Grow filter must not end the loading spinner"
         );
         if let Some(crate::views::modal::ActiveModal::SessionPicker { loading, .. }) =
             app.agents.get_mut(&id).unwrap().active_modal.as_mut()
@@ -5512,47 +5440,6 @@ pub(crate) mod tests {
         let outcome = app.handle_input(&key_event(KeyCode::Char('q'), KeyModifiers::CONTROL));
         assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
         assert!(app.pending_action.is_none());
-    }
-    #[test]
-    fn welcome_ctrl_u_update_keeps_priority_over_foreign_resume() {
-        let mut app = test_app();
-        app.foreign_session_compat =
-            grow_workspace::foreign_sessions::EnabledForeignSessionSources {
-                cursor: true,
-                ..Default::default()
-            };
-        let crate::app::actions::Effect::CanonicalizeForeignResumeCwd {
-            requested_cwd,
-            launch_token,
-        } = app.begin_foreign_resume_detection().unwrap()
-        else {
-            panic!("expected canonicalization effect");
-        };
-        let canonical_cwd = dunce::canonicalize(&requested_cwd).unwrap();
-        assert!(app.accept_foreign_resume_canonical_cwd(
-            launch_token,
-            &requested_cwd,
-            Some(canonical_cwd.clone()),
-        ));
-        app.apply_foreign_resume_detection(
-            launch_token,
-            &canonical_cwd,
-            Some(grow_workspace::foreign_sessions::RecentForeignSession {
-                tool: grow_workspace::foreign_sessions::ForeignSessionTool::Cursor,
-                native_id: "cursor-session".into(),
-                age: std::time::Duration::from_secs(30),
-            }),
-        );
-        let key = key_event(KeyCode::Char('u'), KeyModifiers::CONTROL);
-        assert!(matches!(
-            app.handle_input(&key),
-            InputOutcome::Action(Action::ResumeForeignSession)
-        ));
-        app.pending_update_version = Some("9.9.9".into());
-        assert!(matches!(
-            app.handle_input(&key),
-            InputOutcome::Action(Action::QuitForUpdate)
-        ));
     }
     #[test]
     fn minimal_ctrl_g_edits_prompt_while_full_tui_keeps_tasks() {

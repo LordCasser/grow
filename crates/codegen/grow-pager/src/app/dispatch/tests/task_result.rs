@@ -293,137 +293,6 @@ fn stale_workflows_result_does_not_repaint_replaced_session_modal() {
     ));
 }
 
-fn foreign_resume_hint(
-    tool: grow_workspace::foreign_sessions::ForeignSessionTool,
-) -> grow_workspace::foreign_sessions::RecentForeignSession {
-    grow_workspace::foreign_sessions::RecentForeignSession {
-        tool,
-        native_id: "native-session".into(),
-        age: std::time::Duration::from_secs(30),
-    }
-}
-
-#[test]
-fn foreign_resume_results_require_launch_token_and_canonical_cwd() {
-    let mut launch = test_app();
-    launch.foreign_session_compat =
-        grow_workspace::foreign_sessions::EnabledForeignSessionSources {
-            cursor: true,
-            ..Default::default()
-        };
-    let Effect::CanonicalizeForeignResumeCwd {
-        requested_cwd,
-        launch_token,
-    } = launch
-        .begin_foreign_resume_detection()
-        .expect("pristine launch schedules canonicalization")
-    else {
-        panic!("expected canonicalization effect");
-    };
-    let canonical_cwd = dunce::canonicalize(&requested_cwd).unwrap();
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::ForeignResumeCwdCanonicalized {
-            requested_cwd: requested_cwd.clone(),
-            canonical_cwd: Some(canonical_cwd.clone()),
-            launch_token,
-        }),
-        &mut launch,
-    );
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::DetectForeignResumeHint {
-            canonical_cwd: effect_cwd,
-            launch_token: effect_token,
-            ..
-        }] if effect_cwd == &canonical_cwd && *effect_token == launch_token
-    ));
-    assert!(launch.foreign_resume_hint().is_none());
-
-    dispatch(
-        Action::TaskComplete(TaskResult::ForeignResumeHintDetected {
-            canonical_cwd: canonical_cwd.clone(),
-            launch_token,
-            hint: Some(foreign_resume_hint(
-                grow_workspace::foreign_sessions::ForeignSessionTool::Cursor,
-            )),
-        }),
-        &mut launch,
-    );
-    assert_eq!(
-        launch.foreign_resume_hint().map(|hint| hint.tool),
-        Some(grow_workspace::foreign_sessions::ForeignSessionTool::Cursor)
-    );
-
-    let mut stale = test_app();
-    stale.foreign_session_compat = launch.foreign_session_compat;
-    let Effect::CanonicalizeForeignResumeCwd {
-        requested_cwd,
-        launch_token,
-    } = stale.begin_foreign_resume_detection().unwrap()
-    else {
-        panic!("expected canonicalization effect");
-    };
-    let canonical_cwd = dunce::canonicalize(&requested_cwd).unwrap();
-    dispatch(
-        Action::TaskComplete(TaskResult::ForeignResumeHintDetected {
-            canonical_cwd: canonical_cwd.clone(),
-            launch_token: launch_token + 1,
-            hint: Some(foreign_resume_hint(
-                grow_workspace::foreign_sessions::ForeignSessionTool::Codex,
-            )),
-        }),
-        &mut stale,
-    );
-    assert!(stale.foreign_resume_hint().is_none());
-
-    stale.cwd = tempfile::tempdir().unwrap().path().to_path_buf();
-    dispatch(
-        Action::TaskComplete(TaskResult::ForeignResumeCwdCanonicalized {
-            requested_cwd,
-            canonical_cwd: Some(canonical_cwd),
-            launch_token,
-        }),
-        &mut stale,
-    );
-    assert!(stale.foreign_resume_hint().is_none());
-}
-
-#[test]
-fn foreign_resume_result_rejects_startup_conflict_before_completion() {
-    let mut app = test_app();
-    app.foreign_session_compat = grow_workspace::foreign_sessions::EnabledForeignSessionSources {
-        cursor: true,
-        ..Default::default()
-    };
-    let Effect::CanonicalizeForeignResumeCwd {
-        requested_cwd,
-        launch_token,
-    } = app.begin_foreign_resume_detection().unwrap()
-    else {
-        panic!("expected canonicalization effect");
-    };
-    let canonical_cwd = dunce::canonicalize(&requested_cwd).unwrap();
-    assert!(app.accept_foreign_resume_canonical_cwd(
-        launch_token,
-        &requested_cwd,
-        Some(canonical_cwd.clone()),
-    ));
-    app.deferred_startup.new_session = true;
-
-    dispatch(
-        Action::TaskComplete(TaskResult::ForeignResumeHintDetected {
-            canonical_cwd,
-            launch_token,
-            hint: Some(foreign_resume_hint(
-                grow_workspace::foreign_sessions::ForeignSessionTool::Cursor,
-            )),
-        }),
-        &mut app,
-    );
-
-    assert!(app.foreign_resume_hint().is_none());
-}
-
 #[test]
 fn x11_primary_hint_requires_canonical_full_miss_outcome() {
     use crate::app::actions::{ClipboardPasteCompletion, ClipboardPasteTarget};
@@ -1566,26 +1435,26 @@ fn available_commands_refreshed_empty_is_noop() {
 fn delete_session_complete_removes_only_matching_source_and_id() {
     use crate::views::modal::ActiveModal;
     let mut app = test_app_with_agent();
-    let mut foreign_same_id = make_picker_entry("s1", "/r");
-    foreign_same_id.source = "codex".into();
+    let mut peer_same_id = make_picker_entry("s1", "/r");
+    peer_same_id.source = "remote-a".into();
     let mut remote_same_id = make_picker_entry("s1", "/r");
     remote_same_id.source = "remote".into();
     open_session_picker_with(
         &mut app,
         vec![
             make_picker_entry("s0", "/r"),
-            foreign_same_id,
+            peer_same_id,
             make_picker_entry("s1", "/r"),
             remote_same_id,
             make_picker_entry("s2", "/r"),
         ],
     );
-    let mut welcome_foreign = make_picker_entry("s1", "/r");
-    welcome_foreign.source = "codex".into();
+    let mut welcome_peer = make_picker_entry("s1", "/r");
+    welcome_peer.source = "remote-a".into();
     let mut welcome_remote = make_picker_entry("s1", "/r");
     welcome_remote.source = "remote".into();
     app.session_picker_entries = Some(vec![
-        welcome_foreign,
+        welcome_peer,
         make_picker_entry("s1", "/r"),
         welcome_remote,
     ]);
@@ -1627,7 +1496,7 @@ fn delete_session_complete_removes_only_matching_source_and_id() {
         identities,
         vec![
             ("local", "s0"),
-            ("codex", "s1"),
+            ("remote-a", "s1"),
             ("remote", "s1"),
             ("local", "s2"),
         ]
@@ -1643,7 +1512,10 @@ fn delete_session_complete_removes_only_matching_source_and_id() {
         .iter()
         .map(|entry| (entry.source.as_str(), entry.id.as_str()))
         .collect();
-    assert_eq!(welcome_identities, vec![("codex", "s1"), ("remote", "s1")]);
+    assert_eq!(
+        welcome_identities,
+        vec![("remote-a", "s1"), ("remote", "s1")]
+    );
 }
 
 #[test]
@@ -1654,9 +1526,9 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
     let mut app = test_app_with_agent();
     let mut both = make_picker_entry("shared", "/r");
     both.source = "both".into();
-    let mut foreign = make_picker_entry("shared", "/r");
-    foreign.source = "codex".into();
-    open_session_picker_with(&mut app, vec![both.clone(), foreign.clone()]);
+    let mut peer = make_picker_entry("shared", "/r");
+    peer.source = "remote".into();
+    open_session_picker_with(&mut app, vec![both.clone(), peer.clone()]);
     let hit = grow_shell::extensions::session_search::SearchSessionHit {
         session_id: "shared".into(),
         summary: "shared".into(),
@@ -1678,7 +1550,7 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
         state.set_query("shared");
         *content_results = Some(vec![hit.clone()]);
     }
-    app.session_picker_entries = Some(vec![both, foreign]);
+    app.session_picker_entries = Some(vec![both, peer]);
     app.session_picker_state.set_query("shared");
     app.session_picker_content_results = Some(vec![hit]);
 
@@ -1706,7 +1578,7 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
             .iter()
             .map(|entry| (entry.source.as_str(), entry.id.as_str()))
             .collect::<Vec<_>>(),
-        vec![("codex", "shared")]
+        vec![("remote", "shared")]
     );
     assert!(modal_hits.is_empty());
     let modal_map = build_entry_map(
@@ -1715,7 +1587,7 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
         "shared",
         true,
         false,
-        SourceFilter::All,
+        SourceFilter::Grow,
         None,
     );
     assert!(
@@ -1732,7 +1604,7 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
             .iter()
             .map(|entry| (entry.source.as_str(), entry.id.as_str()))
             .collect::<Vec<_>>(),
-        vec![("codex", "shared")]
+        vec![("remote", "shared")]
     );
     assert!(welcome_hits.is_empty());
     let welcome_map = build_entry_map(
@@ -1741,7 +1613,7 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
         "shared",
         false,
         false,
-        SourceFilter::All,
+        SourceFilter::Grow,
         None,
     );
     assert!(

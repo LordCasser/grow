@@ -193,10 +193,7 @@ fn resume_body_rows(agent: &AgentView, width: u16) -> u16 {
         state,
         Some(current_repo.as_str()),
     );
-    // Reserve a row for the pinned hidden-external hint when shown.
-    let hint_row =
-        u16::from(minimal_api::hidden_external_hint(entries.as_deref(), *source_filter).is_some());
-    measure_entries(&picker_entries).saturating_add(hint_row)
+    measure_entries(&picker_entries)
 }
 
 fn render_resume(
@@ -215,7 +212,7 @@ fn render_resume(
     else {
         return None;
     };
-    let (title_row, search_row, divider_row, mut list_area, footer_row) = chrome_layout(area);
+    let (title_row, search_row, divider_row, list_area, footer_row) = chrome_layout(area);
 
     let entries_data = entries.as_deref().unwrap_or(&[]);
     let content_width = area.width.saturating_sub(2);
@@ -241,8 +238,6 @@ fn render_resume(
         state,
         Some(current_repo.as_str()),
     );
-    let hidden_hint = minimal_api::hidden_external_hint(entries.as_deref(), *source_filter);
-
     render_title(buf, title_row, theme, "Resume session");
     // Focus-aware search bar (cursor only when search is focused).
     minimal_api::render_picker_search_bar(
@@ -259,21 +254,6 @@ fn render_resume(
         None,
     );
     render_divider(buf, divider_row, theme);
-
-    // Pinned above the list so it stays visible regardless of list scroll.
-    if let Some(hint) = hidden_hint.as_deref() {
-        render_dim_line(
-            buf,
-            Rect {
-                height: 1,
-                ..list_area
-            },
-            theme,
-            hint,
-        );
-        list_area.y += 1;
-        list_area.height = list_area.height.saturating_sub(1);
-    }
 
     let nsc = vec![false; picker_entries.len()];
     let hit = picker::render_picker_content(
@@ -701,37 +681,6 @@ mod tests {
         assert!(
             !text.contains("r refresh"),
             "resume footer must stay session-picker copy:\n{text}"
-        );
-    }
-
-    #[test]
-    fn resume_panel_pins_hidden_external_hint_above_scrolling_list() {
-        // More native rows than the panel fits: the hint must stay pinned
-        // above the list instead of scrolling away with it.
-        let mut entries: Vec<_> = (0..20)
-            .map(|i| session_entry(&format!("native-{i}")))
-            .collect();
-        let mut foreign = session_entry("claude-session");
-        foreign.source = "claude".into();
-        entries.push(foreign);
-        let mut a = with_resume(entries);
-        let theme = Theme::current();
-        let area = Rect::new(0, 0, 80, 10);
-        let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut a, ListPanel::Resume, &theme);
-
-        let text = buffer_text(&buf);
-        assert!(
-            text.contains("1 external session hidden \u{b7} f to show"),
-            "hidden foreign rows must stay explained while the list scrolls:\n{text}"
-        );
-        assert!(
-            text.find("external session hidden") < text.find("native-"),
-            "the hint must be pinned above the first list row:\n{text}"
-        );
-        assert!(
-            !text.contains("claude-session"),
-            "foreign row stays hidden under the default filter:\n{text}"
         );
     }
 

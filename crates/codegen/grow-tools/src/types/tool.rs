@@ -33,9 +33,6 @@ pub enum ToolNamespace {
     Grow,
     GrowConcise,
     GrowHashline,
-    Codex,
-    #[serde(rename = "opencode")]
-    OpenCode,
     #[serde(rename = "mcp")]
     MCP,
 }

@@ -2,7 +2,6 @@
 
 use super::*;
 
-mod foreign;
 mod fork;
 mod lifecycle;
 mod load;

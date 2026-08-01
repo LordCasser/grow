@@ -513,16 +513,6 @@ pub(in crate::app::dispatch) fn drain_startup_actions(app: &mut AppView) -> Vec<
                 effects.extend(dispatch_new_session_with_id(app, session_id));
             }
         }
-        Some(DeferredSessionStartup::ForeignResume { tool, native_id }) => {
-            effects.extend(dispatch_new_session_inner(app, None));
-            effects.extend(dispatch(
-                Action::SendPrompt(
-                    crate::app::foreign_sessions::ForeignPickerSource::from_tool(tool)
-                        .resume_prompt(&native_id),
-                ),
-                app,
-            ));
-        }
         None => {
             if let Some(sid) = preferred_id {
                 if worktree {

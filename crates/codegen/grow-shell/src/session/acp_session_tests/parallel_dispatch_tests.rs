@@ -180,8 +180,8 @@ async fn incremental_dispatch_surfaces_fast_tool_before_slow_sibling() {
 /// `execute_tool_calls` Phase 2. The original implementation hardcoded
 /// `parsed_args.get("file_path")`, which silently bypassed serialization
 /// for any toolset whose edit input declared the path under a different
-/// JSON key. The compat toolset input types use `path`, and grow_build's
-/// `read_file` uses `target_file`, so all of
+/// JSON key. Some tool input types use `path`, and grow_build's `read_file`
+/// uses `target_file`, so all of
 /// those calls fell through to fully concurrent dispatch and could lose
 /// edits via TOCTOU on the same workspace file.
 ///
@@ -189,7 +189,7 @@ async fn incremental_dispatch_surfaces_fast_tool_before_slow_sibling() {
 /// every toolset's actual schema.
 #[test]
 fn lock_path_for_args_matches_grow_build_file_path() {
-    // grow_build search_replace / opencode EditTool / WriteTool / etc.
+    // grow_build search_replace / write.
     let args = serde_json::json!({
         "file_path": "/repo/src/main.rs",
         "old_string": "foo",

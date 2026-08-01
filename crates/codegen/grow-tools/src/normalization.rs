@@ -55,7 +55,7 @@ pub fn norm_offset_i64(offset: Option<i64>) -> Option<u64> {
 /// same keys with the same meaning (a harness may add an extra key).
 ///
 /// Returns `None` for tools with no stable cross-harness shape (MCP / dynamic /
-/// codex / hashline / media / control-flow); the caller then omits `input`.
+/// hashline / media / control-flow); the caller then omits `input`.
 /// Absent optional fields are omitted (never `null`). Bulky payload fields
 /// (edit `old_string`/`new_string`, full write contents) are never projected —
 /// consumers read them from `raw_input`. Keys come from [`field`]; the match is
@@ -105,11 +105,7 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::KillTask(_)
         | ToolInput::Task(_)
         | ToolInput::WebFetch(_)
-        | ToolInput::ApplyPatch(_)
         | ToolInput::HashlineEdit(_)
-        | ToolInput::CodexReadFile(_)
-        | ToolInput::CodexListDir(_)
-        | ToolInput::CodexGrepFiles(_)
         | ToolInput::MemorySearch(_)
         | ToolInput::MemoryGet(_)
         | ToolInput::SearchTool(_)

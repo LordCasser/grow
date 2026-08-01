@@ -13,8 +13,7 @@ use std::sync::Arc;
 
 use agent_client_protocol as acp;
 use grow_tools::types::output::{
-    ApplyPatchOutput, CodexGrepFilesOutput, ListDirOutput, MCPOutputDetails, ReadFileOutput,
-    SearchReplaceEditContextInformation, SearchReplaceEditDetail, SearchReplaceOutput, ToolOutput,
+    ListDirOutput, MCPOutputDetails, ReadFileOutput, SearchReplaceOutput, ToolOutput,
 };
 use xai_tool_types::{KillTaskOutput, TaskOutputOutput};
 
@@ -450,65 +449,6 @@ pub fn acp_tool_update(
                     .title(Some(title)),
             ))
         }
-        ToolOutput::ApplyPatch(apply_patch_output) => {
-            let (content, status) = match apply_patch_output {
-                ApplyPatchOutput::Success { files, .. } => {
-                    // Send one acp::Diff per affected file — mirrors the
-                    // SearchReplace pattern so the TUI can render inline diffs.
-                    let content: Vec<acp::ToolCallContent> = files
-                        .iter()
-                        .map(|f| {
-                            let old = f.old_text.as_deref().unwrap_or("");
-                            let new = f.new_text.as_str();
-                            let edits = build_apply_patch_edit_details(old, new);
-                            let diff_path = maybe_rewrite_path(
-                                rewriter,
-                                f.move_to.clone().unwrap_or_else(|| f.path.clone()),
-                            );
-                            acp::ToolCallContent::from(
-                                acp::Diff::new(diff_path, f.new_text.clone())
-                                    .old_text(f.old_text.clone())
-                                    .meta(
-                                        serde_json::to_value(&edits)
-                                            .ok()
-                                            .and_then(|v| v.as_object().cloned()),
-                                    ),
-                            )
-                        })
-                        .collect();
-                    (Some(content), acp::ToolCallStatus::Completed)
-                }
-                ApplyPatchOutput::ParseError(msg)
-                | ApplyPatchOutput::ApplicationError(msg)
-                | ApplyPatchOutput::EmptyPatch(msg) => {
-                    let content = Some(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
-                        acp::TextContent::new(msg.clone()),
-                    ))]);
-                    (content, acp::ToolCallStatus::Failed)
-                }
-            };
-            Some(acp::ToolCallUpdate::new(
-                acp::ToolCallId::new(Arc::from(tool_call_id)),
-                acp::ToolCallUpdateFields::new()
-                    .status(Some(status))
-                    .content(content)
-                    .raw_output(raw_output_json(output, rewriter)),
-            ))
-        }
-        ToolOutput::CodexGrepFiles(grep_files_output) => {
-            let status = match grep_files_output {
-                CodexGrepFilesOutput::Matches { .. } | CodexGrepFilesOutput::NoMatches(_) => {
-                    acp::ToolCallStatus::Completed
-                }
-                CodexGrepFilesOutput::Error(_) => acp::ToolCallStatus::Failed,
-            };
-            Some(acp::ToolCallUpdate::new(
-                acp::ToolCallId::new(Arc::from(tool_call_id)),
-                acp::ToolCallUpdateFields::new()
-                    .status(Some(status))
-                    .raw_output(raw_output_json(output, rewriter)),
-            ))
-        }
         ToolOutput::SearchTool(out) => Some(acp::ToolCallUpdate::new(
             acp::ToolCallId::new(Arc::from(tool_call_id)),
             acp::ToolCallUpdateFields::new()
@@ -616,90 +556,6 @@ pub fn acp_plan_update(output: &ToolOutput) -> Option<acp::Plan> {
         // Error variants (DuplicateId, etc.) don't produce Plan updates.
         _ => None,
     }
-}
-
-/// Build `SearchReplaceEditContextInformation` from full old/new file content
-/// for an apply_patch file result. Extracts contiguous changed regions so the
-/// renderer gets accurate line numbers, old/new strings, and surrounding context.
-fn build_apply_patch_edit_details(
-    old_content: &str,
-    new_content: &str,
-) -> SearchReplaceEditContextInformation {
-    const CONTEXT_LINES: usize = 3;
-
-    let old_lines: Vec<&str> = old_content.lines().collect();
-    let new_lines: Vec<&str> = new_content.lines().collect();
-
-    // Walk both line arrays to find contiguous changed regions.
-    let mut details = Vec::new();
-    let max_len = old_lines.len().max(new_lines.len());
-    let mut i = 0;
-    while i < max_len {
-        let old_line = old_lines.get(i).copied();
-        let new_line = new_lines.get(i).copied();
-
-        if old_line != new_line {
-            // Found start of a changed region. Scan forward to find the end.
-            let region_start = i;
-            let mut old_end = i;
-            let mut new_end = i;
-
-            while old_end < old_lines.len() || new_end < new_lines.len() {
-                let ol = old_lines.get(old_end).copied();
-                let nl = new_lines.get(new_end).copied();
-                if ol == nl {
-                    break;
-                }
-                if old_end < old_lines.len() {
-                    old_end += 1;
-                }
-                if new_end < new_lines.len() {
-                    new_end += 1;
-                }
-            }
-
-            let old_string = old_lines[region_start..old_end].join("\n");
-            let new_string = new_lines[region_start..new_end].join("\n");
-
-            // Context before: up to CONTEXT_LINES lines before the change.
-            let ctx_before_start = region_start.saturating_sub(CONTEXT_LINES);
-            let context_before = old_lines[ctx_before_start..region_start].join("\n");
-
-            // Context after: up to CONTEXT_LINES lines after the change.
-            let ctx_after_end = (old_end + CONTEXT_LINES).min(old_lines.len());
-            let context_after = old_lines[old_end..ctx_after_end].join("\n");
-
-            details.push(SearchReplaceEditDetail {
-                old_string,
-                old_line: region_start + 1, // 1-based
-                new_string,
-                new_line: region_start + 1, // 1-based
-                context_before,
-                context_after,
-                line_prefix: String::new(),
-            });
-
-            i = old_end.max(new_end);
-        } else {
-            i += 1;
-        }
-    }
-
-    // If no differences found (e.g., add or delete), create a single entry
-    // covering the whole content.
-    if details.is_empty() {
-        details.push(SearchReplaceEditDetail {
-            old_string: old_content.to_string(),
-            old_line: 1,
-            new_string: new_content.to_string(),
-            new_line: 1,
-            context_before: String::new(),
-            context_after: String::new(),
-            line_prefix: String::new(),
-        });
-    }
-
-    SearchReplaceEditContextInformation { details }
 }
 
 #[cfg(test)]

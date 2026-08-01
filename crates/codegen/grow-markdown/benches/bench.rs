@@ -455,7 +455,7 @@ fn generate_yaml_lines(num_lines: usize) -> Vec<String> {
 ///
 /// This reproduces the UI-freeze pathology: while the fence is open the block
 /// never checkpoints, so every `push_and_render` re-highlights the whole tail.
-/// With the incremental open-code cache, per-line cost should stay roughly flat
+/// With the incremental open-fence cache, per-line cost should stay roughly flat
 /// in block size instead of growing linearly (overall O(N) instead of O(N²)).
 fn bench_streaming_open_yaml_incremental(c: &mut Criterion) {
     let mut group = c.benchmark_group("streaming_open_yaml");

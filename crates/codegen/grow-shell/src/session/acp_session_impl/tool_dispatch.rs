@@ -41,10 +41,9 @@ fn str_arg<'a>(args: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
 /// Extract the workspace path that a tool call targets, for the purpose of
 /// serializing concurrent same-file edits inside `execute_tool_calls`.
 ///
-/// Different toolsets advertise the path under different JSON keys:
-/// - `file_path` — grow_build (`search_replace`), opencode (`EditTool`,
-///   `WriteTool`, `ReadTool`), codex (`read_file`), grow_build_hashline
-///   (`hashline_edit`)
+/// Different tools advertise the path under different JSON keys:
+/// - `file_path` — grow_build (`search_replace`, `write`) and
+///   grow_build_hashline (`hashline_edit`)
 /// - `path` — alternate edit/read tools
 /// - `target_file` — grow_build (`read_file`, via `#[serde(rename)]`)
 ///

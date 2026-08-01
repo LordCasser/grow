@@ -35,7 +35,6 @@ pub mod subagent;
 pub(crate) use effects::sanitize_user_error;
 mod event_loop;
 pub(crate) mod external_editor;
-mod foreign_sessions;
 mod inline_edit;
 #[cfg(all(test, unix))]
 mod leader_cluster;
@@ -56,10 +55,6 @@ use crossterm::event;
 use crossterm::execute;
 use crossterm::terminal::{
     self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
-};
-pub use foreign_sessions::ForeignScanCoordinator;
-pub(crate) use foreign_sessions::{
-    badge_for_picker_source, foreign_tool_display_label, is_foreign_picker_source,
 };
 use grow_shell::util::config;
 use ratatui::backend::CrosstermBackend;

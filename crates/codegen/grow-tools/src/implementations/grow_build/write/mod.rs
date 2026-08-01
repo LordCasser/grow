@@ -1,4 +1,4 @@
-//! OpenCode `write` tool — writes entire file contents to disk.
+//! Grow `write` tool — writes entire file contents to disk.
 //!
 //! Creates parent directories as needed and emits `FileWritten` notifications.
 
@@ -9,10 +9,7 @@ use crate::types::output::{
     SearchReplaceOutput,
 };
 use crate::types::requirements::Expr;
-#[allow(unused_imports)]
-use crate::types::resources::{
-    Cwd, DisplayCwd, FileSystem, NotificationHandle, SharedResources, resolve_model_path,
-};
+use crate::types::resources::{DisplayCwd, FileSystem, NotificationHandle, resolve_model_path};
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 // ─── Description ─────────────────────────────────────────────────────
@@ -27,7 +24,7 @@ const DESCRIPTION: &str = r#"Create or overwrite a file.
 /// Input for the `write` tool.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct WriteInput {
-    /// The absolute path to the file to write.
+    /// The path to the file to write, resolved against the current workspace.
     pub file_path: String,
 
     /// The full file content to write.
@@ -36,7 +33,7 @@ pub struct WriteInput {
 
 // ─── Tool ────────────────────────────────────────────────────────────
 
-/// OpenCode write tool — writes entire file contents to disk.
+/// Grow write tool — writes entire file contents to disk.
 #[derive(Debug, Default)]
 pub struct WriteTool;
 
@@ -48,7 +45,7 @@ impl crate::types::tool_metadata::ToolMetadata for WriteTool {
     }
 
     fn tool_namespace(&self) -> ToolNamespace {
-        ToolNamespace::OpenCode
+        ToolNamespace::Grow
     }
 
     fn description_template(&self) -> &str {
@@ -205,7 +202,7 @@ mod tests {
     use super::*;
     use crate::computer::local::LocalFs;
     use crate::notification::types::ToolNotificationHandle;
-    use crate::types::resources::Resources;
+    use crate::types::resources::{Cwd, Resources};
     use tempfile::TempDir;
 
     /// Set up Resources with real filesystem for tests.
@@ -303,7 +300,7 @@ mod tests {
         let tool = WriteTool;
         assert_eq!(xai_tool_runtime::Tool::id(&tool).as_str(), "write");
         assert!(matches!(tool.kind(), ToolKind::Write));
-        assert!(matches!(tool.tool_namespace(), ToolNamespace::OpenCode));
+        assert!(matches!(tool.tool_namespace(), ToolNamespace::Grow));
     }
 
     // ── Serde roundtrip ────────────────────────────────────────

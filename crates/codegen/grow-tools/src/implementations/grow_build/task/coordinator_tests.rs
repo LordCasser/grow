@@ -1057,9 +1057,9 @@ async fn cancel_parent_session_kills_prior_turn_background() {
     harness.actor.abort();
 }
 
-/// A foreign session's children must not die when this session Stop fires.
+/// Another session's children must not die when this session Stop fires.
 #[tokio::test]
-async fn cancel_parent_session_does_not_touch_foreign_session() {
+async fn cancel_parent_session_does_not_touch_other_session() {
     let mut harness = harness(true, std::time::Duration::from_secs(60));
     let mut foreign = request("foreign-child", true);
     foreign.parent_session_id = "other-session".into();

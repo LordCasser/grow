@@ -14,9 +14,6 @@ use super::rewind::{
     handle_rewind_preview_complete, handle_rewind_preview_failed,
 };
 use super::router::{dispatch, dispatch_action_result};
-use super::session::foreign::{
-    handle_foreign_sessions_scanned, handle_session_list_failed, handle_session_list_loaded,
-};
 use super::session::fork::{
     handle_fork_session_failed, handle_fork_session_ready, handle_worktree_forked,
 };
@@ -24,6 +21,7 @@ use super::session::lifecycle::{
     dispatch_exit_session, handle_session_created, handle_session_failed,
     handle_switch_model_complete, handle_worktree_session_created, handle_worktree_session_failed,
 };
+use super::session::list::{handle_session_list_failed, handle_session_list_loaded};
 use super::session::load::{
     handle_card_detail_loaded, handle_deep_search_results, handle_session_load_failed,
     handle_session_loaded, handle_session_search_debounce_expired, remove_session_from_pickers,
@@ -360,36 +358,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             seq,
             query,
         } => handle_session_list_loaded(app, sessions, scope, seq, query),
-        TaskResult::ForeignSessionsScanned { entries, seq } => {
-            handle_foreign_sessions_scanned(app, entries, seq)
-        }
-        TaskResult::ForeignResumeCwdCanonicalized {
-            requested_cwd,
-            canonical_cwd,
-            launch_token,
-        } => {
-            let accepted_cwd = canonical_cwd.clone();
-            if app.accept_foreign_resume_canonical_cwd(launch_token, &requested_cwd, canonical_cwd)
-                && let Some(canonical_cwd) = accepted_cwd
-            {
-                vec![Effect::DetectForeignResumeHint {
-                    canonical_cwd,
-                    compat: app.foreign_session_compat,
-                    grow_home: grow_tools::util::grow_home::grow_home(),
-                    launch_token,
-                }]
-            } else {
-                vec![]
-            }
-        }
-        TaskResult::ForeignResumeHintDetected {
-            canonical_cwd,
-            launch_token,
-            hint,
-        } => {
-            app.apply_foreign_resume_detection(launch_token, &canonical_cwd, hint);
-            vec![]
-        }
         TaskResult::SessionListFailed { error, seq, query } => {
             handle_session_list_failed(app, error, seq, query)
         }

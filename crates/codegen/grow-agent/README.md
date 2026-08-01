@@ -170,15 +170,12 @@ Top-level frontmatter keys use **camelCase**. The records nested below
 plus `disallowedTools` later filter the assembled result. `subagents.allow`
 and `subagents.deny` independently control delegation targets.
 
-### Harness and OpenCode compatibility
+### Grow schema boundary
 
-Grow accepts the common Markdown shape used by Harness and OpenCode. The
-foreign frontmatter keys `mode`, `permission`, `permissions`, `model`,
-`variant`, and `request` are intentionally ignored: an Agent never selects a
-provider/model, changes the permission mode, or declares a parent/child Agent
-relationship. Unknown keys still fail parsing so misspellings do not silently
-change behavior. `permissionMode` and model fields from older Grow Agent files
-are likewise not applied to session state.
+Grow accepts only the documented camelCase Agent frontmatter. Unknown fields,
+including vendor-style `mode`, `permission`, `permissions`, `model`, `variant`,
+and `request`, fail parsing. An Agent never selects a provider/model, changes
+the session permission mode, or declares a parent/child Agent relationship.
 
 All enabled Agent definitions are peers. Switching Agent changes the prompt
 profile and tool assembly only; switching model changes the model only. A new
@@ -287,9 +284,8 @@ user-level definition with the same ID.
 | `IoError` | File read error during AGENTS.md/skills discovery |
 | `MiniJinjaError` | Template rendering failure |
 
-Unknown frontmatter fields are rejected so misspellings cannot silently change
-Agent behavior. Only the explicitly documented Harness/OpenCode compatibility
-fields are accepted and ignored.
+Unknown frontmatter fields are rejected so misspellings or foreign Agent
+schemas cannot silently change Agent behavior.
 
 ## Development
 

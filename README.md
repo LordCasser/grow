@@ -19,7 +19,7 @@ Grow 不是 xAI 官方产品，也不内置 Grok 模型、推理端点或推理�
 | 模型切换 | slash command / 旧式选择流程 | `Ctrl+X` 后按 `M` 打开已配置模型选单，同时保留 `/model` |
 | 思考强度 | 依赖产品模型能力 | 每个 BYOK 模型显式声明 `reasoning_efforts`；`Ctrl+X` 后按 `E` 打开选单 |
 | Agent 切换 | 上游内置 Agent 流程 | `Ctrl+X` 后按 `A` 打开平级 Agent 选单，同时保留 `/agent` |
-| Agent 定义 | 上游格式 | 兼容 Harness/OpenCode 常见 Markdown frontmatter；忽略外部权限、mode 和 model 字段 |
+| Agent 定义 | 上游格式 | 使用严格的 Grow Markdown frontmatter；未知字段以及 provider/model/mode/permission 字段均拒绝解析 |
 | Agent 关系 | 可包含产品特定模式 | 所有 Agent 定义平级；主/子只是一次 session 中的运行角色，主 Agent 可通过工具策略限制本次可调用的子 Agent |
 | 权限切换 | 上游快捷键/模式 | `Ctrl+X` 后按 `P` 打开 Ask / Auto / Always Approve 选单；`Ctrl+R` 用于 redo |
 | Behavior 切换 | 与权限或 Agent 混合 | `Ctrl+X` 后按 `B` 打开 Normal / Clarify / Plan / Static Workflow / Deep Research / Goal 选单 |
@@ -267,8 +267,8 @@ path = "~/projects/plugins"
 ## Agent 与 Skill
 
 Grow 只有一套平级的 Agent 定义。一个 Markdown 定义既可以被选作当前 session 的主 Agent，
-也可以被其他 Agent 通过 `task` 工具启动为子 Agent；Agent 不绑定 provider/model，也不声明
-OpenCode 式的 `mode`、父 Agent 或子 Agent 身份。主/子只是运行时角色。
+也可以被其他 Agent 通过 `task` 工具启动为子 Agent；Agent 不绑定 provider/model/permission，
+也不声明 mode、父 Agent 或子 Agent 身份。主/子只是运行时角色。
 
 ### 增加 Agent
 

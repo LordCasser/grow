@@ -561,7 +561,7 @@ pub const GOAL_ROLE_MODEL_FAIL_OPEN_TOOLSET_INCAPABLE: &str = "toolset_incapable
 pub const GOAL_ROLE_MODEL_FAIL_OPEN_SPAWN_FAILED: &str = "spawn_failed";
 
 /// Fail-open — the configured `agent_type` resolves as a STRICT harness whose
-/// subagent flavor `resolve_subagent_toolset` can't represent (e.g. `codex`):
+/// subagent flavor `resolve_subagent_toolset` can't represent:
 /// committing it would silently run grow-build flavor. Distinct from
 /// `toolset_unknown` (a name that doesn't resolve at all).
 pub const GOAL_ROLE_MODEL_FAIL_OPEN_HARNESS_FLAVOR_UNSUPPORTED: &str = "harness_flavor_unsupported";

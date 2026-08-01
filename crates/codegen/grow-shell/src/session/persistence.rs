@@ -2488,7 +2488,7 @@ mod agent_name_persistence_tests {
 
     #[test]
     fn summary_round_trips_various_agent_names() {
-        for name in ["cursor", "grow-build", "grow", "codex", "browser-use"] {
+        for name in ["grow", "grow-build-concise", "browser-use", "custom-agent"] {
             let mut summary = Summary::new(
                 &Info {
                     id: acp::SessionId::new("test"),

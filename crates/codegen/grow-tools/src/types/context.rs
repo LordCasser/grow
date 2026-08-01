@@ -24,8 +24,7 @@ pub struct TruncationConfig {
     /// truncation path (`mcp_max_output_bytes_for`) between the per-tool map
     /// and `default_max_output_bytes`. Deliberately separate from
     /// `default_max_output_bytes` so an MCP-specific override (e.g. a repo's
-    /// `[mcp] max_output_bytes`) never changes non-MCP readers like the
-    /// opencode bash cap.
+    /// `[mcp] max_output_bytes`) never changes non-MCP readers.
     pub mcp_max_output_bytes: Option<usize>,
 }
 
@@ -68,10 +67,8 @@ impl TruncationConfig {
     /// - `{max_lines_read}` — from `max_lines_read` (default 1000)
     /// - `{max_wait_ms}` — the blocking-wait ceiling, as `600000 (~10 min)`
     /// - `{max_output_bytes}` — resolved via `max_output_bytes_for(tool_name, builtin_default)`
-    /// - `{max_chars_per_line}` — fixed display value for opencode-compat
-    ///   descriptions only; the opencode `read` tool clips at its own
-    ///   hardcoded `MAX_LINE_LENGTH` (2000), independent of this config.
-    ///   grow_build `read_file` never clips lines.
+    /// - `{max_chars_per_line}` — deprecated fixed display value retained by
+    ///   the template renderer; Grow's `read_file` never clips lines.
     ///
     /// Returns the original string unchanged if no placeholders are present.
     pub fn interpolate_description(
@@ -292,7 +289,7 @@ mod tests {
     #[test]
     fn mcp_override_does_not_bleed_into_non_mcp_lookup() {
         // Regression: the MCP-specific cap must not change what non-MCP
-        // readers (e.g. opencode bash via `max_output_bytes_for("bash", ..)`)
+        // readers using `max_output_bytes_for`.
         // resolve.
         let cfg = TruncationConfig {
             mcp_max_output_bytes: Some(123),

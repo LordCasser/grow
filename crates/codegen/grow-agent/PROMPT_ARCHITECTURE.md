@@ -12,7 +12,7 @@ Mandatory Core
 
 Mandatory Core contains instruction priority, action safety, tool-use rules, project-instruction scoping, output rules, and Grow client context. It is always rendered. `promptComposition: full` replaces the standard role foundation; it does not replace Mandatory Core, Audience, an active Behavior, or Runtime Context.
 
-Audience describes only ownership: the primary Agent owns the user-facing result, while a subagent owns only its delegated task. Audience never declares a role, toolset, or Behavior.
+Audience defines ownership boundaries: the primary Agent owns the user-facing result, the task-wide understanding needed to produce it, and the integration of delegated results, while a subagent owns only its delegated task. Primary ownership cannot be transferred wholesale: delegation may extend coverage or isolate bounded work, but the primary Agent directly examines central evidence, retains cross-cutting synthesis, and continues independent work while children run whenever useful work remains. Audience never declares a role, toolset, or Behavior.
 
 Built-in and user-defined Agents are Markdown files with YAML frontmatter. The Markdown body is the role and use-case prompt. Tool configuration is explicit and independent:
 
@@ -27,6 +27,8 @@ subagents:
 ```
 
 `toolPreset` is resolved first, followed by `additionalTools`, fixed runtime injection, availability/depth/capability filtering, Agent denies and subagent policy, session clamps, and ToolBridge finalization. `ToolKind`, `ToolMetadata`, registry finalization, template name resolution, and `ToolServerConfig.behavior_preset` retain their existing responsibilities.
+
+The built-in Agent, tool, and session surface is Grow-native. External vendor schemas are not exposed as Agent profiles, tool presets, namespaces, ignored frontmatter fields, or session scanners. Agent files use the documented Grow schema and reject unknown keys; source provenance does not create a vendor execution mode.
 
 Behavior is mutually-exclusive primary-session state, not part of `AgentDefinition`. The state is exactly `Normal | Clarify | Plan(phase) | Workflow | DeepResearch { run_id } | Goal`. ACP maps these to `default`, `ask`, `plan`, `workflow`, `deep_research`, and `goal`. Every mode request, including prompt metadata and slash-command shortcuts, passes through the same Behavior transition gateway. Delegated Agents receive an explicit role and task; they never inherit or select a user-facing Behavior. A Behavior never adds a tool, changes which Agent may be delegated to, changes capability mode, or bypasses permission checks.
 
@@ -53,7 +55,7 @@ Plan is a human-governed contract with Drafting, AwaitingApproval, Executing, an
 
 `plan_control` owns Plan transitions: `submit` and `amend` atomically persist a complete candidate before requesting approval, while `complete` and `cancel` terminate the contract. The artifact is control-plane state, never an editable workspace target and never an implied Agent file capability.
 
-Static Workflow is agent-governed per-phase scripted sub-planning. The primary Agent scouts a bounded phase, launches at most one suitable workflow run for that phase, yields instead of polling, and decides the next phase from the completion result. WorkflowRun remains an independent runtime/journal entity and never changes Behavior. Static Workflow is offered only when the finalized ToolBridge contains the Workflow tool; each run has independent cumulative (`agent_budget`) and simultaneous (`max_concurrency`) child limits.
+Static Workflow is agent-governed per-phase scripted sub-planning. The primary Agent personally scouts the phase's central evidence, translates that understanding into independent bounded jobs, launches at most one suitable workflow run for that phase, yields instead of polling, and decides the next phase from the completion result. A workflow must not merely wrap the user's whole request in one coarse child task. WorkflowRun remains an independent runtime/journal entity and never changes Behavior. Static Workflow is offered only when the finalized ToolBridge contains the Workflow tool; each run has independent cumulative (`agent_budget`) and simultaneous (`max_concurrency`) child limits.
 
 Deep Research is read-only evidence work with a mandatory terminal report. It uses a private Workflow definition and runtime, but the report contract and Behavior-owned run lifecycle are not public Workflow semantics. A terminal report is delivered for success, partial completion, verification failure, budget exhaustion, infrastructure failure, cancellation, and restart interruption. Natural completion delivers the report before returning to Normal; an interrupting Behavior switch delivers a cancellation report before applying the target Behavior.
 

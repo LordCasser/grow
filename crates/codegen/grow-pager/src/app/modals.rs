@@ -970,7 +970,6 @@ impl AgentView {
                                         state: crate::views::picker::PickerState::default(),
                                         entries: None,
                                         loading: true,
-                                        lanes: Default::default(),
                                         previous_palette: prev,
                                         window: crate::views::modal_window::ModalWindowState::new(),
                                         content_results: None,
@@ -1085,19 +1084,6 @@ impl AgentView {
                 );
                 let entry_count = entry_map.len();
                 let non_sel: Vec<bool> = entry_map.iter().map(|e| e.is_none()).collect();
-                let focused_is_foreign = match entry_map
-                    .get(state.selected)
-                    .and_then(|entry| entry.as_ref())
-                {
-                    Some(PickerItem::Fuzzy { original_index }) => entries
-                        .as_ref()
-                        .and_then(|entries| entries.get(*original_index))
-                        .is_some_and(|entry| {
-                            crate::app::foreign_sessions::is_foreign_picker_source(&entry.source)
-                        }),
-                    _ => false,
-                };
-
                 let config = PickerConfig {
                     title: Some("Resume session"),
                     show_search_hint: true,
@@ -1114,11 +1100,7 @@ impl AgentView {
                     filter_key_hint: Some("f"),
                     filter_active: source_filter.is_active(),
                     header_note: None,
-                    action_keys: if focused_is_foreign {
-                        &[]
-                    } else {
-                        &[('d', "delete")]
-                    },
+                    action_keys: &[('d', "delete")],
                     disable_search: false,
                     compact_bottom_bar: false,
                     search_only_on_slash: false,
@@ -1219,9 +1201,6 @@ impl AgentView {
                         Some(PickerItem::Fuzzy { original_index }) => {
                             if let Some(ents) = entries.as_ref()
                                 && let Some(entry) = ents.get(*original_index)
-                                && !crate::app::foreign_sessions::is_foreign_picker_source(
-                                    &entry.source,
-                                )
                                 && !state.expanded.contains(original_index)
                             {
                                 InputOutcome::Action(Action::ExpandSessionCard {
@@ -1959,7 +1938,6 @@ impl AgentView {
                 entries,
                 state,
                 loading,
-                lanes,
                 window,
                 content_results,
                 content_loading,
@@ -1992,39 +1970,33 @@ impl AgentView {
                         },
                     ]
                 } else {
-                    let external =
-                        *source_filter == crate::views::session_picker::SourceFilter::External;
                     let mut shortcuts = vec![Shortcut {
                         label: "\u{2191}\u{2193} nav",
                         clickable: false,
                         id: 0,
                     }];
-                    if !external {
-                        shortcuts.extend([
-                            Shortcut {
-                                label: "e expand",
-                                clickable: false,
-                                id: 0,
-                            },
-                            Shortcut {
-                                label: "/ search",
-                                clickable: false,
-                                id: 0,
-                            },
-                        ]);
-                    }
+                    shortcuts.extend([
+                        Shortcut {
+                            label: "e expand",
+                            clickable: false,
+                            id: 0,
+                        },
+                        Shortcut {
+                            label: "/ search",
+                            clickable: false,
+                            id: 0,
+                        },
+                    ]);
                     shortcuts.push(Shortcut {
                         label: "f filter",
                         clickable: false,
                         id: 0,
                     });
-                    if !external {
-                        shortcuts.push(Shortcut {
-                            label: "d delete",
-                            clickable: false,
-                            id: 0,
-                        });
-                    }
+                    shortcuts.push(Shortcut {
+                        label: "d delete",
+                        clickable: false,
+                        id: 0,
+                    });
                     shortcuts
                 };
                 // Surface `i search` in the footer when vim nav mode is active.
@@ -2133,7 +2105,6 @@ impl AgentView {
                     // Append content search result rows (same pattern as welcome).
                     let content_start = picker_entries.len() + 1;
                     let content_entry_data = if let Some(hits) = content_results.as_deref()
-                        && *source_filter != crate::views::session_picker::SourceFilter::External
                         && !filter_query.is_empty()
                     {
                         build_content_entry_data(
@@ -2147,8 +2118,7 @@ impl AgentView {
                         Vec::new()
                     };
                     let has_content_rows = !content_entry_data.is_empty();
-                    let effective_content_loading = *content_loading
-                        && *source_filter != crate::views::session_picker::SourceFilter::External;
+                    let effective_content_loading = *content_loading;
                     let spinner_label = build_content_header_label(
                         effective_content_loading,
                         has_content_rows,
@@ -2204,12 +2174,7 @@ impl AgentView {
                         non_sel_flags.push(false);
                     }
 
-                    let hidden_hint = crate::views::session_picker::hidden_external_hint(
-                        entries.as_deref(),
-                        *source_filter,
-                    );
-
-                    let mut entries_area = Rect {
+                    let entries_area = Rect {
                         x: content_area.x,
                         y: entries_start_y,
                         width: content_area.width,
@@ -2217,22 +2182,6 @@ impl AgentView {
                             .height
                             .saturating_sub(entries_start_y.saturating_sub(content_area.y)),
                     };
-                    // Pinned above the list so it stays visible regardless of scroll.
-                    if let Some(hint) = hidden_hint.as_deref()
-                        && entries_area.height > 0
-                    {
-                        buf.set_stringn(
-                            entries_area.x + 1,
-                            entries_area.y,
-                            hint,
-                            entries_area.width.saturating_sub(1) as usize,
-                            ratatui::style::Style::default()
-                                .fg(theme.gray_dim)
-                                .bg(theme.bg_base),
-                        );
-                        entries_area.y += 1;
-                        entries_area.height -= 1;
-                    }
                     let content_hit = picker::render_picker_content_with_scrollbar_x(
                         buf,
                         entries_area,
@@ -2246,7 +2195,6 @@ impl AgentView {
                             entries.as_deref(),
                             *source_filter,
                             *loading,
-                            lanes,
                         ),
                         self.scrollback.tick_count(),
                         mca.inner_x + mca.inner_width - 1,
@@ -2517,7 +2465,6 @@ mod session_picker_delete_tests {
             state: crate::views::picker::PickerState::default(),
             entries: Some(entries),
             loading: false,
-            lanes: Default::default(),
             previous_palette: None,
             window: crate::views::modal_window::ModalWindowState::new(),
             content_results: None,
@@ -2657,46 +2604,6 @@ mod session_picker_delete_tests {
             outcome,
             InputOutcome::Action(Action::PickSessionInWorktree(0))
         ));
-    }
-
-    #[test]
-    fn foreign_row_refuses_delete_detail_and_worktree_actions() {
-        let mut agent = make_agent();
-        let mut foreign = entry("codex-session");
-        foreign.source = "codex".into();
-        open_picker(&mut agent, vec![foreign]);
-        // Pin All: the refusals only fire when the foreign row is focusable.
-        if let Some(ActiveModal::SessionPicker { source_filter, .. }) = agent.active_modal.as_mut()
-        {
-            *source_filter = crate::views::session_picker::SourceFilter::All;
-        }
-
-        let delete = agent.handle_palette_or_arg_input(&key('d'));
-        assert!(matches!(delete, InputOutcome::Changed));
-        assert!(pending(&agent).is_none(), "foreign delete must not arm");
-
-        let expand = agent.handle_palette_or_arg_input(&key('e'));
-        assert!(
-            !matches!(
-                expand,
-                InputOutcome::Action(Action::ExpandSessionCard { .. })
-            ),
-            "foreign rows have no transcript detail"
-        );
-
-        let worktree = Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
-        let outcome = agent.handle_palette_or_arg_input(&worktree);
-        assert!(
-            !matches!(
-                outcome,
-                InputOutcome::Action(Action::PickSessionInWorktree(_))
-            ),
-            "foreign rows cannot be resumed in worktrees"
-        );
-        assert!(
-            agent.active_modal.is_some(),
-            "refused actions keep picker open"
-        );
     }
 
     /// A session search matches transcript content too: a hit whose title

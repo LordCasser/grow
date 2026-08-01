@@ -37,7 +37,7 @@ macro_rules! topic {
 pub static TUTORIAL_TOPICS: &[TutorialTopic] = &[
     topic!(
         "01-coming-from-another-tool.md",
-        "Coming from Claude, Cursor, or Codex?",
+        "Bringing existing project context",
         "your settings, rules & skills carry over",
         Some("Project Rules (AGENTS.md)")
     ),

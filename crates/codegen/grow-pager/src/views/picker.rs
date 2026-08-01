@@ -1762,7 +1762,7 @@ pub struct PickerConfig<'a> {
     /// Whether the filter is active (not in its default state).
     pub filter_active: bool,
     /// Pinned single-line note rendered between the search/filter chrome and
-    /// the first entry (e.g. the hidden-external sessions hint). Render-only:
+    /// the first entry (for example a contextual picker hint). Render-only:
     /// never part of the entry list, hit areas, or scrolling.
     pub header_note: Option<&'a str>,
     /// Custom action keys that produce `PickerOutcome::Action`.

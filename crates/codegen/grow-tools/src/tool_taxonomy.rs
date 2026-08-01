@@ -258,8 +258,6 @@ mod tests {
                 ToolNamespace::Grow => "grow",
                 ToolNamespace::GrowConcise => "grow_concise",
                 ToolNamespace::GrowHashline => "grow_hashline",
-                ToolNamespace::Codex => "codex",
-                ToolNamespace::OpenCode => "opencode",
                 ToolNamespace::MCP => "mcp",
             }
         }

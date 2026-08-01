@@ -101,7 +101,7 @@ pub(crate) enum PendingDeleteKey {
 }
 
 /// Arm a [`PendingDelete`] from the selected row, or `None` if it can't be
-/// deleted (foreign source or non-selectable position).
+/// deleted (non-selectable position).
 pub(crate) fn pending_delete_from_selection(
     selected: usize,
     entry_map: &[Option<PickerItem>],
@@ -109,14 +109,15 @@ pub(crate) fn pending_delete_from_selection(
     content_results: Option<&[grow_shell::extensions::session_search::SearchSessionHit]>,
 ) -> Option<PendingDelete> {
     match entry_map.get(selected).and_then(|e| e.as_ref())? {
-        PickerItem::Fuzzy { original_index } => entries
-            .and_then(|e| e.get(*original_index))
-            .filter(|entry| !crate::app::is_foreign_picker_source(&entry.source))
-            .map(|e| PendingDelete {
-                source: e.source.clone(),
-                session_id: e.id.clone(),
-                cwd: e.cwd.clone(),
-            }),
+        PickerItem::Fuzzy { original_index } => {
+            entries
+                .and_then(|e| e.get(*original_index))
+                .map(|e| PendingDelete {
+                    source: e.source.clone(),
+                    session_id: e.id.clone(),
+                    cwd: e.cwd.clone(),
+                })
+        }
         PickerItem::Content { hit_index } => {
             content_results
                 .and_then(|h| h.get(*hit_index))
@@ -177,68 +178,30 @@ pub struct SessionEntryData {
     pub collapsible: bool,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum SessionPickerPendingNotice {
-    Empty(String),
-    Error(String),
-}
-
-/// Native/foreign completion state shared by session picker surfaces.
-#[derive(Debug, Clone, Default)]
-pub struct SessionPickerLanes {
-    pub(crate) foreign_loading: bool,
-    pub(crate) pending_notice: Option<SessionPickerPendingNotice>,
-}
-
-impl SessionPickerLanes {
-    pub(crate) fn take_ready_notice(&mut self, has_entries: bool) -> Option<String> {
-        match self.pending_notice.take() {
-            Some(SessionPickerPendingNotice::Empty(message)) if !has_entries => Some(message),
-            Some(SessionPickerPendingNotice::Error(message)) => Some(message),
-            _ => None,
-        }
-    }
-}
-
-/// Loading gate for a session picker surface's spinner: nothing to show yet —
-/// no loaded entry passes the source filter — while the native fetch or
-/// foreign scan is still in flight. The filter check (not `entries.is_none()`)
-/// matters because the fast foreign scan can land rows the default Grow view
-/// hides before the native list arrives; the empty state must wait until both
-/// lanes settle. Shared by rendering, redraw forcing, and tick demand so the
-/// three cannot drift (a spinner that renders without demanding ticks parks
-/// on its first frame).
+/// Loading gate shared by rendering, redraw forcing, and tick demand.
 pub(crate) fn loading_spinner_active(
     entries: Option<&[SessionPickerEntry]>,
     source_filter: SourceFilter,
     loading: bool,
-    lanes: &SessionPickerLanes,
 ) -> bool {
     let nothing_visible = entries.is_none_or(|entries| {
         !entries
             .iter()
             .any(|entry| source_filter.matches(&entry.source))
     });
-    nothing_visible && (loading || lanes.foreign_loading)
+    nothing_visible && loading
 }
 
 // ---------------------------------------------------------------------------
 // Source filter
 // ---------------------------------------------------------------------------
 
-/// Filter session entries by native or external source.
-///
-/// Default is [`Self::Grow`]: native Grow sessions only, so `/resume` does not
-/// mix Claude/Codex/Cursor sessions into the list.
+/// Filter Grow sessions by storage locality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceFilter {
-    /// Native Grow sessions only — excludes Claude/Codex/Cursor foreign rows.
     #[default]
     Grow,
     Local,
-    External,
-    /// Every source, including foreign agent sessions.
-    All,
 }
 
 impl SourceFilter {
@@ -246,17 +209,13 @@ impl SourceFilter {
         match self {
             Self::Grow => "Grow",
             Self::Local => "Local",
-            Self::External => "External",
-            Self::All => "All",
         }
     }
 
     pub fn next(self) -> Self {
         match self {
-            Self::Grow => Self::External,
-            Self::External => Self::All,
-            Self::All => Self::Local,
             Self::Local => Self::Grow,
+            Self::Grow => Self::Local,
         }
     }
 
@@ -267,13 +226,10 @@ impl SourceFilter {
 
     /// Returns `true` if a session with the given `source` string passes the filter.
     ///
-    /// Foreign sources (`claude` / `codex` / `cursor`) only pass `External` and `All`.
     pub fn matches(self, source: &str) -> bool {
         match self {
-            Self::Grow => !crate::app::is_foreign_picker_source(source),
+            Self::Grow => true,
             Self::Local => source == "local",
-            Self::External => crate::app::is_foreign_picker_source(source),
-            Self::All => true,
         }
     }
 }
@@ -474,11 +430,7 @@ pub(crate) fn build_virtual_list(
         .map(|ents| {
             fuzzy_indices
                 .iter()
-                .filter_map(|&i| {
-                    ents.get(i)
-                        .filter(|entry| !crate::app::is_foreign_picker_source(&entry.source))
-                        .map(|entry| entry.id.as_str())
-                })
+                .filter_map(|&i| ents.get(i).map(|entry| entry.id.as_str()))
                 .collect()
         })
         .unwrap_or_default();
@@ -486,9 +438,7 @@ pub(crate) fn build_virtual_list(
         .into_iter()
         .map(|i| PickerItem::Fuzzy { original_index: i })
         .collect();
-    if source_filter != SourceFilter::External
-        && let Some(hits) = content_results
-    {
+    if let Some(hits) = content_results {
         for (hit_idx, hit) in hits.iter().enumerate() {
             if !fuzzy_ids.contains(hit.session_id.as_str()) {
                 items.push(PickerItem::Content { hit_index: hit_idx });
@@ -551,15 +501,9 @@ pub(crate) fn build_entry_map(
         // Append deduplicated content results (only when searching).
         let fuzzy_ids: HashSet<&str> = filtered
             .iter()
-            .filter_map(|&i| {
-                entries_data
-                    .get(i)
-                    .filter(|entry| !crate::app::is_foreign_picker_source(&entry.source))
-                    .map(|entry| entry.id.as_str())
-            })
+            .filter_map(|&i| entries_data.get(i).map(|entry| entry.id.as_str()))
             .collect();
-        let content_items: Vec<usize> = if source_filter != SourceFilter::External
-            && let Some(hits) = content_results
+        let content_items: Vec<usize> = if let Some(hits) = content_results
             && !query.is_empty()
         {
             hits.iter()
@@ -570,10 +514,8 @@ pub(crate) fn build_entry_map(
         } else {
             Vec::new()
         };
-        let show_content_header = !content_items.is_empty()
-            || (source_filter != SourceFilter::External
-                && content_loading
-                && !query.trim().is_empty());
+        let show_content_header =
+            !content_items.is_empty() || (content_loading && !query.trim().is_empty());
         if show_content_header {
             map.push(None); // content header
         }
@@ -582,7 +524,7 @@ pub(crate) fn build_entry_map(
         }
         map
     } else {
-        let content_for_flat = if query.is_empty() || source_filter == SourceFilter::External {
+        let content_for_flat = if query.is_empty() {
             None
         } else {
             content_results
@@ -593,10 +535,7 @@ pub(crate) fn build_entry_map(
             .filter(|i| matches!(i, PickerItem::Fuzzy { .. }))
             .count();
         let content_count = virtual_list.len() - fuzzy_count;
-        let has_header = content_count > 0
-            || (source_filter != SourceFilter::External
-                && content_loading
-                && !query.trim().is_empty());
+        let has_header = content_count > 0 || (content_loading && !query.trim().is_empty());
         let mut map = Vec::with_capacity(virtual_list.len() + usize::from(has_header));
         for (i, item) in virtual_list.into_iter().enumerate() {
             if has_header && i == fuzzy_count {
@@ -642,7 +581,6 @@ pub(crate) fn session_picker_worktree_selection(
         {
             Some(PickerItem::Fuzzy { original_index }) => entries
                 .and_then(|entries| entries.get(*original_index))
-                .filter(|entry| !crate::app::is_foreign_picker_source(&entry.source))
                 .map_or(SessionPickerWorktreeSelection::Unavailable, |_| {
                     SessionPickerWorktreeSelection::Fuzzy(*original_index)
                 }),
@@ -713,8 +651,7 @@ pub(crate) fn build_session_entry_data(
             // so pre-migration sessions don't jump to their creation date.
             let right_text = format_time_ago(entry.last_active_at.unwrap_or(entry.updated_at));
             let is_selected = !state.selection_hidden && fi == state.selected;
-            let is_foreign = crate::app::is_foreign_picker_source(&entry.source);
-            let is_expanded = !is_foreign && state.expanded.contains(&orig_idx);
+            let is_expanded = state.expanded.contains(&orig_idx);
 
             let mut field_data: Vec<(String, String)> = Vec::new();
             if is_expanded {
@@ -757,8 +694,8 @@ pub(crate) fn build_session_entry_data(
                 is_expanded,
                 field_data,
                 snippet_preview: None,
-                badge: crate::app::badge_for_picker_source(&entry.source),
-                collapsible: !is_foreign,
+                badge: "",
+                collapsible: true,
             }
         })
         .collect()
@@ -843,9 +780,7 @@ pub(crate) fn build_content_entry_data(
     let fuzzy_ids: HashSet<&str> = entries_data
         .iter()
         .enumerate()
-        .filter(|(i, entry)| {
-            filtered_indices.contains(i) && !crate::app::is_foreign_picker_source(&entry.source)
-        })
+        .filter(|(i, _)| filtered_indices.contains(i))
         .map(|(_, e)| e.id.as_str())
         .collect();
     let mut row_offset = 0usize;
@@ -921,32 +856,10 @@ pub(crate) fn build_content_header_label(
             spinner_frames[frame_idx]
         )
     } else if has_content_rows {
-        "Extended search results (Grow, local, and external sessions)".to_string()
+        "Extended search results".to_string()
     } else {
         String::new()
     }
-}
-
-/// Hint shown on the default `Grow` view when the foreign-session scan loaded
-/// Claude/Codex/Cursor entries it hides. Grow-only: `next(Grow) == External`
-/// makes the copy literally true, and reaching Local/External already cycles
-/// through External/All, so the discovery hint is only needed on the default
-/// state.
-pub(crate) fn hidden_external_hint(
-    entries: Option<&[SessionPickerEntry]>,
-    source_filter: SourceFilter,
-) -> Option<String> {
-    if source_filter != SourceFilter::Grow {
-        return None;
-    }
-    let hidden = entries?
-        .iter()
-        .filter(|entry| crate::app::is_foreign_picker_source(&entry.source))
-        .count();
-    (hidden > 0).then(|| {
-        let plural = if hidden == 1 { "" } else { "s" };
-        format!("{hidden} external session{plural} hidden \u{b7} f to show")
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,7 +955,7 @@ mod tests {
             filter_session_entries(
                 Some(&entries),
                 effective_filter_query("hit", None),
-                SourceFilter::All,
+                SourceFilter::Grow,
             )
             .is_empty(),
             "unstamped entries keep the local fuzzy filter"
@@ -1051,7 +964,7 @@ mod tests {
             filter_session_entries(
                 Some(&entries),
                 effective_filter_query("hit", Some("older query")),
-                SourceFilter::All,
+                SourceFilter::Grow,
             )
             .is_empty(),
             "a stale stamp (newer fetch in flight) keeps the local filter"
@@ -1062,7 +975,7 @@ mod tests {
             filter_session_entries(
                 Some(&entries),
                 effective_filter_query("hit", Some("hit")),
-                SourceFilter::All,
+                SourceFilter::Grow,
             ),
             vec![0],
             "server search results must render even with an unrelated title"
@@ -1122,7 +1035,7 @@ mod tests {
             "",
             true,
             false,
-            SourceFilter::All,
+            SourceFilter::Grow,
             None,
         );
 
@@ -1184,7 +1097,7 @@ mod tests {
             "s",
             true,
             false,
-            SourceFilter::All,
+            SourceFilter::Grow,
             None,
         );
 
@@ -1225,7 +1138,7 @@ mod tests {
             "",
             true,
             /* content_loading */ true,
-            SourceFilter::All,
+            SourceFilter::Grow,
             None,
         );
         assert_eq!(map.len(), 2, "repo header + row only, no content header");
@@ -1249,7 +1162,7 @@ mod tests {
             "",
             true,
             false,
-            SourceFilter::All,
+            SourceFilter::Grow,
             None,
         );
 
@@ -1276,7 +1189,7 @@ mod tests {
             "",
             false,
             false,
-            SourceFilter::All,
+            SourceFilter::Grow,
             None,
         );
         assert_eq!(map.len(), 2);
@@ -1296,7 +1209,7 @@ mod tests {
             "s",
             false,
             false,
-            SourceFilter::All,
+            SourceFilter::Grow,
             None,
         );
         assert_eq!(map.len(), 4);
@@ -1322,7 +1235,7 @@ mod tests {
             "needle",
             true,
             false,
-            SourceFilter::All,
+            SourceFilter::Grow,
             None,
         );
         let mut state = PickerState::default();
@@ -1335,56 +1248,6 @@ mod tests {
     }
 
     #[test]
-    fn foreign_id_does_not_suppress_native_content_result() {
-        let mut foreign = make_entry("shared", "repo");
-        foreign.source = "codex".into();
-        let entries = vec![foreign];
-        let hits = vec![make_content_hit("shared")];
-
-        let flat = build_entry_map(
-            Some(&entries),
-            Some(&hits),
-            "shared",
-            false,
-            false,
-            SourceFilter::All,
-            None,
-        );
-        assert!(matches!(
-            flat.as_slice(),
-            [
-                Some(PickerItem::Fuzzy { original_index: 0 }),
-                None,
-                Some(PickerItem::Content { hit_index: 0 }),
-            ]
-        ));
-
-        let grouped = build_entry_map(
-            Some(&entries),
-            Some(&hits),
-            "shared",
-            true,
-            false,
-            SourceFilter::All,
-            None,
-        );
-        assert!(matches!(
-            grouped.as_slice(),
-            [
-                None,
-                Some(PickerItem::Fuzzy { original_index: 0 }),
-                None,
-                Some(PickerItem::Content { hit_index: 0 }),
-            ]
-        ));
-
-        let state = PickerState::default();
-        let content = build_content_entry_data(&hits, &entries, &[0], &state, 2);
-        assert_eq!(content.len(), 1);
-        assert_eq!(content[0].summary, "shared");
-    }
-
-    #[test]
     fn content_header_label_loading() {
         let label = build_content_header_label(true, false, 0);
         assert!(label.contains("Searching"));
@@ -1393,10 +1256,7 @@ mod tests {
     #[test]
     fn content_header_label_has_rows() {
         let label = build_content_header_label(false, true, 0);
-        assert_eq!(
-            label,
-            "Extended search results (Grow, local, and external sessions)"
-        );
+        assert_eq!(label, "Extended search results");
     }
 
     #[test]
@@ -1408,44 +1268,27 @@ mod tests {
     /// Empty entries list produces empty map.
     #[test]
     fn empty_entries_produces_empty_map() {
-        let map = build_entry_map(None, None, "", true, false, SourceFilter::All, None);
+        let map = build_entry_map(None, None, "", true, false, SourceFilter::Grow, None);
         assert!(map.is_empty());
 
-        let map = build_entry_map(Some(&[]), None, "", false, false, SourceFilter::All, None);
+        let map = build_entry_map(Some(&[]), None, "", false, false, SourceFilter::Grow, None);
         assert!(map.is_empty());
     }
 
     #[test]
     fn source_filter_matches() {
-        // Default Grow filter: native only (not Claude/Codex/Cursor).
         assert!(SourceFilter::Grow.matches("local"));
-        assert!(!SourceFilter::Grow.matches("claude"));
-        assert!(!SourceFilter::Grow.matches("codex"));
-        assert!(!SourceFilter::Grow.matches("cursor"));
-
-        assert!(SourceFilter::All.matches("local"));
-        assert!(SourceFilter::All.matches("claude"));
-        assert!(SourceFilter::All.matches("codex"));
-        assert!(SourceFilter::All.matches("cursor"));
+        assert!(SourceFilter::Grow.matches("remote"));
 
         assert!(SourceFilter::Local.matches("local"));
-        assert!(!SourceFilter::Local.matches("claude"));
-
-        assert!(SourceFilter::External.matches("claude"));
-        assert!(SourceFilter::External.matches("codex"));
-        assert!(SourceFilter::External.matches("cursor"));
-        assert!(!SourceFilter::External.matches("local"));
+        assert!(!SourceFilter::Local.matches("remote"));
     }
 
     #[test]
     fn source_filter_cycles() {
-        // External first: one press from the default reveals foreign sessions.
-        assert_eq!(SourceFilter::Grow.next(), SourceFilter::External);
-        assert_eq!(SourceFilter::External.next(), SourceFilter::All);
-        assert_eq!(SourceFilter::All.next(), SourceFilter::Local);
+        assert_eq!(SourceFilter::Grow.next(), SourceFilter::Local);
         assert_eq!(SourceFilter::Local.next(), SourceFilter::Grow);
         assert_eq!(SourceFilter::Grow.label(), "Grow");
-        assert_eq!(SourceFilter::External.label(), "External");
         assert_eq!(SourceFilter::default(), SourceFilter::Grow);
     }
 
@@ -1458,100 +1301,30 @@ mod tests {
         }
         let entries = vec![
             entry_with_source("s0", "local"),
-            entry_with_source("s1", "claude"),
-            entry_with_source("s2", "codex"),
-            entry_with_source("s3", "cursor"),
+            entry_with_source("s1", "remote"),
         ];
 
         let grow = filter_session_entries(Some(&entries), "", SourceFilter::Grow);
-        assert_eq!(grow, vec![0]);
-
-        let all = filter_session_entries(Some(&entries), "", SourceFilter::All);
-        assert_eq!(all, vec![0, 1, 2, 3]);
+        assert_eq!(grow, vec![0, 1]);
 
         let local = filter_session_entries(Some(&entries), "", SourceFilter::Local);
         assert_eq!(local, vec![0]);
-
-        let external = filter_session_entries(Some(&entries), "", SourceFilter::External);
-        assert_eq!(external, vec![1, 2, 3]);
     }
 
     #[test]
     fn source_filter_empty_and_unknown_source() {
-        // Empty / unknown source (e.g. from old data or test fixtures) is not
-        // foreign, so it passes Grow + All but never Local or External.
+        // Empty / unknown source passes Grow but not the stricter Local view.
         assert!(SourceFilter::Grow.matches(""));
-        assert!(SourceFilter::All.matches(""));
         assert!(!SourceFilter::Local.matches(""));
-        assert!(!SourceFilter::External.matches(""));
 
         assert!(SourceFilter::Grow.matches("unknown"));
-        assert!(SourceFilter::All.matches("unknown"));
         assert!(!SourceFilter::Local.matches("unknown"));
-        assert!(!SourceFilter::External.matches("unknown"));
     }
 
     #[test]
     fn source_filter_is_active() {
         assert!(!SourceFilter::Grow.is_active());
         assert!(SourceFilter::Local.is_active());
-        assert!(SourceFilter::External.is_active());
-        assert!(SourceFilter::All.is_active());
-    }
-
-    #[test]
-    fn hidden_external_hint_visibility() {
-        fn entry_with_source(id: &str, source: &str) -> SessionPickerEntry {
-            let mut e = make_entry(id, "r");
-            e.source = source.into();
-            e
-        }
-        let entries = vec![
-            entry_with_source("s0", "local"),
-            entry_with_source("s1", "claude"),
-            entry_with_source("s2", "codex"),
-        ];
-
-        // Only the default Grow view surfaces the hint (with the count).
-        assert_eq!(
-            hidden_external_hint(Some(&entries), SourceFilter::Grow).as_deref(),
-            Some("2 external sessions hidden \u{b7} f to show")
-        );
-        assert!(hidden_external_hint(Some(&entries), SourceFilter::Local).is_none());
-
-        // Singular count.
-        let one = vec![
-            entry_with_source("s0", "local"),
-            entry_with_source("s1", "cursor"),
-        ];
-        assert_eq!(
-            hidden_external_hint(Some(&one), SourceFilter::Grow).as_deref(),
-            Some("1 external session hidden \u{b7} f to show")
-        );
-
-        // External / All show foreign rows — no hint.
-        assert!(hidden_external_hint(Some(&entries), SourceFilter::External).is_none());
-        assert!(hidden_external_hint(Some(&entries), SourceFilter::All).is_none());
-
-        // No foreign entries loaded (native-only or no scan) — no hint.
-        let native = vec![entry_with_source("s0", "local")];
-        assert!(hidden_external_hint(Some(&native), SourceFilter::Grow).is_none());
-        assert!(hidden_external_hint(None, SourceFilter::Grow).is_none());
-    }
-
-    #[test]
-    fn foreign_entry_uses_source_badge_and_has_no_detail_expansion() {
-        let mut entry = make_entry("foreign", "repo");
-        entry.source = "codex".into();
-        let mut state = PickerState::default();
-        state.expanded.insert(0);
-
-        let built = build_session_entry_data(&[entry], &[0], &state, 80);
-
-        assert_eq!(built[0].badge, "codex");
-        assert!(!built[0].collapsible);
-        assert!(!built[0].is_expanded);
-        assert!(built[0].field_data.is_empty());
     }
 
     #[test]
@@ -1563,7 +1336,7 @@ mod tests {
         }
         let entries = vec![
             entry_with_source("alpha", "local"),
-            entry_with_source("beta", "claude"),
+            entry_with_source("beta", "remote"),
         ];
 
         // Text query "alpha" + Local filter: only alpha matches both criteria.
@@ -1628,7 +1401,7 @@ mod tests {
             "",
             true,
             false,
-            SourceFilter::All,
+            SourceFilter::Grow,
             Some("repo-c"),
         );
         // [repo-c hdr, s2, repo-a hdr, s0, repo-b hdr, s1]
@@ -1656,7 +1429,7 @@ mod tests {
             "",
             true,
             false,
-            SourceFilter::All,
+            SourceFilter::Grow,
             Some("repo-zzz"),
         );
         assert!(map[0].is_none(), "repo-a header");

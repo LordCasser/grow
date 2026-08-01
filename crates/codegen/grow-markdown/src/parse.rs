@@ -19,7 +19,7 @@ use crate::buffers::{
 };
 use crate::checkpoint::CheckpointKind;
 use crate::latex;
-use crate::open_code_highlighter::OpenCodeHighlighter;
+use crate::open_fence_highlighter::OpenFenceHighlighter;
 use crate::style::{MarkdownStyle, TableBorders};
 use crate::syntax::{Syntect, syntax_highlight_raw};
 
@@ -191,7 +191,7 @@ pub struct MarkdownParser<'a, 'b, 'syn, 'oc> {
     /// Incremental highlighter for the trailing still-open fenced code block.
     /// Only set by the streaming tail re-render; `None` for batch renders, in
     /// which case code blocks go through the from-scratch [`syntax_highlight_raw`].
-    open_code: Option<&'oc mut OpenCodeHighlighter>,
+    open_fence: Option<&'oc mut OpenFenceHighlighter>,
     // Transient state (dropped after parse)
     tag_stack: Vec<Tag<'a>>,
     table_state: Option<TableState>,
@@ -422,7 +422,7 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
             ms,
             buffers,
             syntect,
-            open_code: None,
+            open_fence: None,
             tag_stack: Vec::new(),
             table_state: None,
             depth: 0,
@@ -468,10 +468,10 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
     /// code block (streaming tail re-render only).
     ///
     /// Internal: lets `rerender_tail` persist syntect's resumable per-line state
-    /// across passes so an open code block is highlighted in O(N) total instead
+    /// across passes so an open fenced code block is highlighted in O(N) total instead
     /// of O(N²). Batch/non-streaming callers leave this `None`.
-    pub(crate) fn open_code(mut self, cache: Option<&'oc mut OpenCodeHighlighter>) -> Self {
-        self.open_code = cache;
+    pub(crate) fn open_fence(mut self, cache: Option<&'oc mut OpenFenceHighlighter>) -> Self {
+        self.open_fence = cache;
         self
     }
 
@@ -615,7 +615,7 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                     let highlighted = match parent_code_block {
                         Some(lang) => {
                             if let Some(syn) = self.syntect
-                                && let Some(cache) = self.open_code.as_deref_mut()
+                                && let Some(cache) = self.open_fence.as_deref_mut()
                             {
                                 // Streaming tail: the cache routes between the
                                 // incremental open-block path and the

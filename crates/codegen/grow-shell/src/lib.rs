@@ -22,7 +22,6 @@ pub mod config;
 pub use grow_shell_base::cpu_profile;
 pub use grow_shell_base::env;
 pub mod extensions;
-pub use grow_workspace::foreign_sessions;
 pub mod heap_profile;
 pub use grow_http as http;
 pub mod inspect;

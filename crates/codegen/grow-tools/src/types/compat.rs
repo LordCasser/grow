@@ -1,5 +1,5 @@
-//! Vendor compatibility configuration for third-party agent surfaces
-//! (skills, rules, agents, MCPs, hooks, sessions).
+//! Vendor compatibility configuration for third-party project surfaces
+//! (skills, rules, agents, MCPs, and hooks).
 //!
 //! Historically the agent hard-coded the dir lists `[".grow", ".agents",
 //! ".claude", ".cursor"]` (and `RULES_DIRS` / `AGENT_FILENAMES`) across ~6
@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 pub enum CompatVendor {
     Cursor,
     Claude,
-    Codex,
 }
 
 impl CompatVendor {
@@ -27,7 +26,6 @@ impl CompatVendor {
         match self {
             Self::Cursor => "cursor",
             Self::Claude => "claude",
-            Self::Codex => "codex",
         }
     }
 }
@@ -39,7 +37,6 @@ pub enum CompatSurface {
     Agents,
     Mcps,
     Hooks,
-    Sessions,
 }
 
 impl CompatSurface {
@@ -50,7 +47,6 @@ impl CompatSurface {
             Self::Agents => "agents",
             Self::Mcps => "mcps",
             Self::Hooks => "hooks",
-            Self::Sessions => "sessions",
         }
     }
 }
@@ -62,14 +58,11 @@ pub enum CompatRemoteKey {
     CursorAgents,
     CursorMcps,
     CursorHooks,
-    CursorSessions,
     ClaudeSkills,
     ClaudeRules,
     ClaudeAgents,
     ClaudeMcps,
     ClaudeHooks,
-    ClaudeSessions,
-    CodexSessions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,20 +103,9 @@ impl CompatCell {
     pub const fn remote_key(self) -> Option<CompatRemoteKey> {
         self.remote_key
     }
-
-    /// Whether Grow currently implements this compatibility surface.
-    ///
-    /// Codex non-session cells remain reserved in the registry so their config
-    /// shape is stable, but runtime discovery does not consume them.
-    pub const fn is_runtime_supported(self) -> bool {
-        match self.vendor {
-            CompatVendor::Cursor | CompatVendor::Claude => true,
-            CompatVendor::Codex => matches!(self.surface, CompatSurface::Sessions),
-        }
-    }
 }
 
-pub const COMPAT_CELLS: [CompatCell; 18] = [
+pub const COMPAT_CELLS: [CompatCell; 10] = [
     CompatCell::new(
         CompatVendor::Cursor,
         CompatSurface::Skills,
@@ -155,12 +137,6 @@ pub const COMPAT_CELLS: [CompatCell; 18] = [
         Some(CompatRemoteKey::CursorHooks),
     ),
     CompatCell::new(
-        CompatVendor::Cursor,
-        CompatSurface::Sessions,
-        "GROW_CURSOR_SESSIONS_ENABLED",
-        Some(CompatRemoteKey::CursorSessions),
-    ),
-    CompatCell::new(
         CompatVendor::Claude,
         CompatSurface::Skills,
         "GROW_CLAUDE_SKILLS_ENABLED",
@@ -190,61 +166,19 @@ pub const COMPAT_CELLS: [CompatCell; 18] = [
         "GROW_CLAUDE_HOOKS_ENABLED",
         Some(CompatRemoteKey::ClaudeHooks),
     ),
-    CompatCell::new(
-        CompatVendor::Claude,
-        CompatSurface::Sessions,
-        "GROW_CLAUDE_SESSIONS_ENABLED",
-        Some(CompatRemoteKey::ClaudeSessions),
-    ),
-    CompatCell::new(
-        CompatVendor::Codex,
-        CompatSurface::Skills,
-        "GROW_CODEX_SKILLS_ENABLED",
-        None,
-    ),
-    CompatCell::new(
-        CompatVendor::Codex,
-        CompatSurface::Rules,
-        "GROW_CODEX_RULES_ENABLED",
-        None,
-    ),
-    CompatCell::new(
-        CompatVendor::Codex,
-        CompatSurface::Agents,
-        "GROW_CODEX_AGENTS_ENABLED",
-        None,
-    ),
-    CompatCell::new(
-        CompatVendor::Codex,
-        CompatSurface::Mcps,
-        "GROW_CODEX_MCPS_ENABLED",
-        None,
-    ),
-    CompatCell::new(
-        CompatVendor::Codex,
-        CompatSurface::Hooks,
-        "GROW_CODEX_HOOKS_ENABLED",
-        None,
-    ),
-    CompatCell::new(
-        CompatVendor::Codex,
-        CompatSurface::Sessions,
-        "GROW_CODEX_SESSIONS_ENABLED",
-        Some(CompatRemoteKey::CodexSessions),
-    ),
 ];
 
 /// Raw per-vendor compat cells parsed from `[compat.<vendor>]` TOML.
 ///
 /// Resolution order is env override, this value, remote flag, default ON.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct VendorCompatToml {
     pub skills: Option<bool>,
     pub rules: Option<bool>,
     pub agents: Option<bool>,
     pub mcps: Option<bool>,
     pub hooks: Option<bool>,
-    pub sessions: Option<bool>,
 }
 
 impl VendorCompatToml {
@@ -255,20 +189,18 @@ impl VendorCompatToml {
             CompatSurface::Agents => self.agents,
             CompatSurface::Mcps => self.mcps,
             CompatSurface::Hooks => self.hooks,
-            CompatSurface::Sessions => self.sessions,
         }
     }
 }
 
 /// Raw `[compat]` TOML section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct CompatConfigToml {
     #[serde(default)]
     pub cursor: VendorCompatToml,
     #[serde(default)]
     pub claude: VendorCompatToml,
-    #[serde(default)]
-    pub codex: VendorCompatToml,
 }
 
 impl CompatConfigToml {
@@ -276,7 +208,6 @@ impl CompatConfigToml {
         match cell.vendor() {
             CompatVendor::Cursor => self.cursor.value(cell.surface()),
             CompatVendor::Claude => self.claude.value(cell.surface()),
-            CompatVendor::Codex => self.codex.value(cell.surface()),
         }
     }
 }
@@ -289,7 +220,6 @@ pub struct VendorCompat {
     pub agents: bool,
     pub mcps: bool,
     pub hooks: bool,
-    pub sessions: bool,
 }
 
 impl VendorCompat {
@@ -300,7 +230,6 @@ impl VendorCompat {
             CompatSurface::Agents => self.agents,
             CompatSurface::Mcps => self.mcps,
             CompatSurface::Hooks => self.hooks,
-            CompatSurface::Sessions => self.sessions,
         }
     }
 
@@ -311,7 +240,6 @@ impl VendorCompat {
             CompatSurface::Agents => self.agents = value,
             CompatSurface::Mcps => self.mcps = value,
             CompatSurface::Hooks => self.hooks = value,
-            CompatSurface::Sessions => self.sessions = value,
         }
     }
 }
@@ -324,20 +252,17 @@ impl Default for VendorCompat {
             agents: true,
             mcps: true,
             hooks: true,
-            sessions: true,
         }
     }
 }
 
 /// Resolved `[compat]` configuration threaded into compatibility consumers.
 ///
-/// Every cell defaults on. Codex's non-session cells are reserved and are not
-/// consumed by discovery.
+/// Every cell defaults on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CompatConfig {
     pub cursor: VendorCompat,
     pub claude: VendorCompat,
-    pub codex: VendorCompat,
 }
 
 impl CompatConfig {
@@ -345,7 +270,6 @@ impl CompatConfig {
         match cell.vendor() {
             CompatVendor::Cursor => self.cursor.value(cell.surface()),
             CompatVendor::Claude => self.claude.value(cell.surface()),
-            CompatVendor::Codex => self.codex.value(cell.surface()),
         }
     }
 
@@ -353,7 +277,6 @@ impl CompatConfig {
         match cell.vendor() {
             CompatVendor::Cursor => self.cursor.set(cell.surface(), value),
             CompatVendor::Claude => self.claude.set(cell.surface(), value),
-            CompatVendor::Codex => self.codex.set(cell.surface(), value),
         }
     }
 
@@ -454,19 +377,11 @@ mod tests {
                 ("cursor", "agents", Some(CursorAgents)),
                 ("cursor", "mcps", Some(CursorMcps)),
                 ("cursor", "hooks", Some(CursorHooks)),
-                ("cursor", "sessions", Some(CursorSessions)),
                 ("claude", "skills", Some(ClaudeSkills)),
                 ("claude", "rules", Some(ClaudeRules)),
                 ("claude", "agents", Some(ClaudeAgents)),
                 ("claude", "mcps", Some(ClaudeMcps)),
                 ("claude", "hooks", Some(ClaudeHooks)),
-                ("claude", "sessions", Some(ClaudeSessions)),
-                ("codex", "skills", None),
-                ("codex", "rules", None),
-                ("codex", "agents", None),
-                ("codex", "mcps", None),
-                ("codex", "hooks", None),
-                ("codex", "sessions", Some(CodexSessions)),
             ]
         );
 
@@ -479,16 +394,14 @@ mod tests {
                 cell.surface().as_str()
             );
         }
-        for vendor in [defaults.cursor, defaults.claude, defaults.codex] {
+        for vendor in [defaults.cursor, defaults.claude] {
             assert!(vendor.skills && vendor.rules && vendor.agents);
             assert!(vendor.mcps && vendor.hooks);
-            assert!(vendor.sessions);
         }
 
         assert_eq!(
             COMPAT_CELLS
                 .into_iter()
-                .filter(|cell| cell.is_runtime_supported())
                 .map(|cell| (cell.vendor().as_str(), cell.surface().as_str()))
                 .collect::<Vec<_>>(),
             [
@@ -497,14 +410,11 @@ mod tests {
                 ("cursor", "agents"),
                 ("cursor", "mcps"),
                 ("cursor", "hooks"),
-                ("cursor", "sessions"),
                 ("claude", "skills"),
                 ("claude", "rules"),
                 ("claude", "agents"),
                 ("claude", "mcps"),
                 ("claude", "hooks"),
-                ("claude", "sessions"),
-                ("codex", "sessions"),
             ]
         );
     }
@@ -610,23 +520,15 @@ mod tests {
         // (where `toml` is a dep). Here we exercise the same serde shape via
         // YAML (available in this crate) to pin the `Option<bool>` + `#[serde(default)]`
         // semantics: unset cells stay `None`, unset vendors default-construct.
-        let parsed: CompatConfigToml = serde_yaml::from_str(
-            "cursor:\n  skills: false\n  sessions: true\ncodex:\n  sessions: true\n",
-        )
-        .unwrap();
+        let parsed: CompatConfigToml = serde_yaml::from_str("cursor:\n  skills: false\n").unwrap();
         assert_eq!(parsed.cursor.skills, Some(false));
         assert_eq!(parsed.cursor.rules, None);
-        assert_eq!(parsed.cursor.sessions, Some(true));
         assert_eq!(parsed.claude, VendorCompatToml::default());
-        assert_eq!(parsed.codex.sessions, Some(true));
-        assert_eq!(parsed.codex.skills, None);
 
         // mcps cell round-trips the same way.
         let parsed: CompatConfigToml = serde_yaml::from_str("claude:\n  mcps: false\n").unwrap();
         assert_eq!(parsed.claude.mcps, Some(false));
         assert_eq!(parsed.claude.hooks, None);
-        assert_eq!(parsed.claude.sessions, None);
         assert_eq!(parsed.cursor, VendorCompatToml::default());
-        assert_eq!(parsed.codex, VendorCompatToml::default());
     }
 }

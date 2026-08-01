@@ -91,7 +91,7 @@ impl Syntect {
     /// a `lineStart:lineEnd:path` citation resolves by file path, otherwise
     /// (or if the path has no known syntax) it falls back to a language token.
     ///
-    /// Exposed so the incremental open-code highlighter can build its own
+    /// Exposed so the incremental open-fence highlighter can build its own
     /// resumable `ParseState`/`HighlightState` against exactly the syntax the
     /// batch `HighlightLines` path would have used — keeping the two
     /// byte-identical.

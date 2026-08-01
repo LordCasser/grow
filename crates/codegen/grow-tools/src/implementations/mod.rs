@@ -1,4 +1,3 @@
-pub mod codex;
 pub mod cursor_rules_on_read;
 pub mod editor_infra;
 pub mod grow_build;
@@ -6,7 +5,6 @@ pub mod grow_build_concise;
 pub mod grow_build_hashline;
 pub mod lsp;
 pub mod memory;
-pub mod opencode;
 pub mod read_file;
 pub mod search_tool;
 pub mod skills;
@@ -19,9 +17,5 @@ pub use grow_build::{
     WebFetchTool,
 };
 pub use memory::{MemoryGetImpl, MemorySearchImpl};
-pub use opencode::{
-    OpenCodeBashTool, OpenCodeEditTool, OpenCodeGlobTool, OpenCodeGrepTool, OpenCodeReadTool,
-    OpenCodeSkillTool, OpenCodeTodoWriteTool, OpenCodeWriteTool,
-};
 pub use search_tool::SearchTool;
 pub use use_tool::{UseTool, UseToolInput};

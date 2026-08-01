@@ -1505,10 +1505,10 @@ fn summarize_tool_config_uses_name_override_and_strips_namespace() {
     use grow_tools::types::tool::ToolKind;
     let mut read = ToolConfig::from_id("Grow:read_file");
     read.kind = Some(ToolKind::Read);
-    let mut read_dup = ToolConfig::from_id("Codex:read_file");
+    let mut read_dup = ToolConfig::from_id("GrowConcise:read_file");
     read_dup.kind = Some(ToolKind::Read);
-    read_dup.name_override = Some("codex_read".to_string());
-    let mut grep = ToolConfig::from_id("OpenCode:grep");
+    read_dup.name_override = Some("concise_read".to_string());
+    let mut grep = ToolConfig::from_id("Grow:grep");
     grep.kind = Some(ToolKind::Search);
     grep.name_override = Some("alt_grep".to_string());
     let mcp = ToolConfig::from_id("MCP:custom");

@@ -1,8 +1,7 @@
 use crate::{
     computer::types::{AsyncFileSystem, TerminalBackend},
     implementations::{
-        codex, grow_build, grow_build_concise, grow_build_hashline, opencode,
-        skills::types::SkillInfo,
+        grow_build, grow_build_concise, grow_build_hashline, skills::types::SkillInfo,
     },
     notification::ToolNotificationHandle,
     persistence::ResourcesPersistence,
@@ -650,6 +649,7 @@ impl ToolRegistryBuilder {
                 grow_build::SearchReplaceTool,
                 grow_build::search_replace::SearchReplaceParams,
             >();
+        b.register::<grow_build::WriteTool>();
         b.register_with_params::<grow_build::ListDirTool, grow_build::list_dir::ListDirParams>();
         b.register_with_params::<grow_build::GrepTool, grow_build::grep::GrepParams>();
         b.register::<grow_build::KillTaskTool>();
@@ -672,18 +672,6 @@ impl ToolRegistryBuilder {
         b.register::<grow_build::SchedulerCreateTool>();
         b.register::<grow_build::SchedulerDeleteTool>();
         b.register::<grow_build::SchedulerListTool>();
-        b.register::<codex::apply_patch::ApplyPatchTool>();
-        b.register::<codex::list_dir::CodexListDirTool>();
-        b.register::<codex::grep_files::CodexGrepFilesTool>();
-        b.register::<codex::read_file::CodexReadFileTool>();
-        b.register::<opencode::OpenCodeBashTool>();
-        b.register::<opencode::OpenCodeReadTool>();
-        b.register::<opencode::OpenCodeEditTool>();
-        b.register::<opencode::OpenCodeWriteTool>();
-        b.register::<opencode::OpenCodeGrepTool>();
-        b.register::<opencode::OpenCodeGlobTool>();
-        b.register::<opencode::OpenCodeTodoWriteTool>();
-        b.register::<opencode::OpenCodeSkillTool>();
         b.register::<crate::implementations::memory::search_tool::MemorySearchImpl>();
         b.register::<crate::implementations::memory::get_tool::MemoryGetImpl>();
         b.register::<crate::implementations::search_tool::SearchTool>();
@@ -1929,7 +1917,6 @@ fn explain_requirement_failure(
                 "enabled_background",
                 true,
             );
-            let has_opencode_bash = has_tool(proposed, "OpenCode", "bash");
             let has_task = has_tool(proposed, "Grow", "task");
             let mut notes = vec![];
             if has_tool(proposed, "Grow", "run_terminal_cmd")
@@ -1948,17 +1935,17 @@ fn explain_requirement_failure(
                         "GrowConcise:run_terminal_cmd is present but enabled_background=false",
                     );
             }
-            let mut message = "get_task_output requires a background-capable bash tool (Grow:run_terminal_cmd or GrowConcise:run_terminal_cmd with enabled_background=true), OpenCode:bash, or Grow:task"
+            let mut message = "get_task_output requires a background-capable bash tool (Grow:run_terminal_cmd or GrowConcise:run_terminal_cmd with enabled_background=true), or Grow:task"
                 .to_string();
             let has_provider = has_grow_build_bash || has_grow_build_concise_bash
-                || has_opencode_bash || has_task;
+                || has_task;
             if !has_provider && !notes.is_empty() {
                 message.push_str(&format!("; {}", notes.join("; ")));
             }
             RequirementError::new(fq_tool_id, message)
                 .with_field_path("tools")
                 .with_expected(
-                    "include a background-capable bash tool, OpenCode:bash, or Grow:task",
+                    "include a background-capable bash tool or Grow:task",
                 )
                 .with_category("requirements")
         }
@@ -2063,17 +2050,9 @@ mod tests {
             system_reminder_tag: crate::reminders::DEFAULT_REMINDER_TAG,
         }
     }
-    /// Regression test: `kind_params` must merge input params from ALL tools
-    /// that share a `ToolKind`, not just the first one.
-    ///
-    /// Before the fix, the `kind_params` builder used `if map.is_empty()` to
-    /// seed identity param-name mappings only from the **first** tool of each
-    /// kind. When `codex:apply_patch` (`ToolKind::Edit`, input: `{ patch }`)
-    /// appeared before `grow_build:search_replace` (`ToolKind::Edit`, input:
-    /// `{ file_path, old_string, new_string, replace_all }`), the renderer's
-    /// context had `params.edit = { "patch": "patch" }` — missing
-    /// `replace_all`. At runtime, the template `${{ params.edit.replace_all }}`
-    /// failed with "undefined value".
+    /// `kind_params` remains available when multiple native tools share one
+    /// `ToolKind`. Standard and concise tools may coexist, while the separate
+    /// hashline file-tool family is intentionally rejected by validation.
     #[tokio::test]
     async fn kind_params_merged_across_multiple_tools_of_same_kind() {
         let tmp = TempDir::new().unwrap();
@@ -2082,9 +2061,9 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
-                    id: "Codex:apply_patch".to_string(),
+                    id: "GrowConcise:search_replace".to_string(),
                     params: None,
-                    name_override: None,
+                    name_override: Some("concise_search_replace".to_string()),
                     params_name_overrides: None,
                     description_override: None,
                     behavior_version: None,
@@ -2128,7 +2107,7 @@ mod tests {
             .await;
         let result = result.expect(
             "search_replace must not fail with template rendering error \
-             when codex:apply_patch appears before it in the config",
+             when the concise edit tool appears before it in the config",
         );
         assert!(
             result.prompt_text.contains("replace_all"),
@@ -2594,7 +2573,7 @@ mod tests {
             ToolOutput::SearchReplace(SearchReplaceOutput::NoMatchesFound(e)) => {
                 assert_eq!(
                     e.message,
-                    "The string to replace was not found in the file, use the read_file tool to see the correct string.",
+                    "The string to replace was not found in the file, use the read_file tool to see the correct string. The user may have changed the file since you last read it.",
                 );
             }
             other => panic!("Expected SearchReplace(NoMatchesFound), got: {other:?}"),
@@ -2741,7 +2720,7 @@ mod tests {
     ///
     /// Without `name_override`, the client_name defaults to `entry.id`
     /// (e.g. `"read_file"`). If both `Grow:read_file` and
-    /// `Codex:read_file` are in the config, both would get
+    /// `GrowConcise:read_file` are in the config, both would get
     /// `client_name = "read_file"`, making the second unreachable at
     /// dispatch time.
     #[test]
@@ -2759,7 +2738,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "Codex:read_file".to_string(),
+                    id: "GrowConcise:read_file".to_string(),
                     params: None,
                     name_override: None, // both resolve to "read_file"
                     params_name_overrides: None,
@@ -2855,9 +2834,9 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "Codex:read_file".to_string(),
+                    id: "GrowConcise:read_file".to_string(),
                     params: None,
-                    name_override: Some("codex_read_file".to_string()), // disambiguated
+                    name_override: Some("concise_read_file".to_string()), // disambiguated
                     params_name_overrides: None,
                     description_override: None,
                     behavior_version: None,
@@ -2894,7 +2873,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "Codex:read_file".to_string(),
+                    id: "GrowConcise:read_file".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3263,7 +3242,7 @@ mod tests {
                 ToolServerConfig {
                     tools: vec![
                         ToolConfig::for_tool::<grow_build::TodoWriteTool>(),
-                        ToolConfig::for_tool::<opencode::OpenCodeWriteTool>(),
+                        ToolConfig::for_tool::<grow_build::WriteTool>(),
                     ],
                     behavior_preset: None,
                 },
@@ -3960,7 +3939,6 @@ mod tests {
         let error = &errors[0];
         assert_eq!(error.tool, "Grow:get_task_output");
         assert!(error.message.contains("background-capable bash tool"));
-        assert!(error.message.contains("OpenCode:bash"));
         assert!(error.message.contains("Grow:task"));
     }
     #[test]

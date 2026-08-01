@@ -486,11 +486,11 @@ mod tests {
         );
 
         // Regression: an execute tool WITHOUT `is_background` in its schema
-        // (e.g. OpenCode's foreground-only bash) seeds `params.execute` from its
+        // (for example a foreground-only terminal tool) seeds `params.execute` from its
         // real fields only. `param_for_kind` must report the missing field as
         // absent so `get_task_output` / `wait_tasks` don't tell the model to
         // pass `is_background=true` to a tool that has no such field.
-        let opencode_bash = make_renderer(
+        let foreground_only_bash = make_renderer(
             &[(ToolKind::Execute, "bash")],
             &[(
                 ToolKind::Execute,
@@ -503,7 +503,7 @@ mod tests {
             )],
         );
         assert_eq!(
-            opencode_bash.param_for_kind(ToolKind::Execute, "is_background"),
+            foreground_only_bash.param_for_kind(ToolKind::Execute, "is_background"),
             None
         );
 

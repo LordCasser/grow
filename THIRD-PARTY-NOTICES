@@ -16613,29 +16613,6 @@ in Part II. A crate-local copy of these notices (with the same license bodies)
 ships at crates/codegen/grow-tools/THIRD_PARTY_NOTICES.md.
 
 
---------------------------------------------------------------------------------
-openai/codex
---------------------------------------------------------------------------------
-Source:  https://github.com/openai/codex
-License: Apache-2.0
-Upstream paths: codex-rs/core/src/tools/handlers/ (and apply-patch crate)
-
-Copyright notice:
-  Copyright 2025 OpenAI
-
-License text: see Part II — Apache-2.0
-
-Additional requirements / notices:
-  Tool implementations under:
-    crates/codegen/grow-tools/src/implementations/codex/
-  Modules: apply_patch, grep_files, list_dir, read_file.
-  These are derived/portions of openai/codex tool handlers, adapted to this
-  crate's Tool trait and runtime. Apache-2.0 §4 requires retention of
-  copyright, patent, trademark, and attribution notices, a copy of the
-  license, and a notice of changes (this entry).
-
-
---------------------------------------------------------------------------------
 sst/opencode
 --------------------------------------------------------------------------------
 Source:  https://github.com/sst/opencode
@@ -16648,14 +16625,13 @@ Copyright notice:
 License text: see Part II — MIT
 
 Additional requirements / notices:
-  Tool implementations under:
-    crates/codegen/grow-tools/src/implementations/opencode/
-  Modules: bash, edit, glob, grep, read, skill, todowrite, write.
-  These are derived/portions of sst/opencode tools, adapted to this crate's
-  Tool trait and runtime. The MIT copyright and permission notice must be
-  included in all copies or substantial portions of the Software (this entry
-  and the crate-local THIRD_PARTY_NOTICES.md satisfy that for source
-  distributions).
+  The Grow-native full-file write implementation under:
+    crates/codegen/grow-tools/src/implementations/grow_build/write/
+  retains portions of the upstream write tool, adapted to Grow's Tool trait
+  and runtime. Grow exposes no OpenCode runtime namespace or schema mode. The
+  MIT copyright and permission notice must be included in all copies or
+  substantial portions of the Software (this entry and the crate-local
+  THIRD_PARTY_NOTICES.md satisfy that for source distributions).
 
 
 ================================================================================

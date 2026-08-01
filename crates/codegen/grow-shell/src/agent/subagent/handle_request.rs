@@ -1,6 +1,6 @@
 use super::*;
 use grow_sampling_types::ReasoningEffort;
-use grow_tools::implementations::{grow_build, opencode};
+use grow_tools::implementations::grow_build;
 pub(super) fn canonical_total_tokens(totals: &grow_chat_state::UsageTotals) -> u64 {
     totals.total_tokens()
 }
@@ -678,7 +678,7 @@ pub(crate) async fn run_shell_child(
         let memory_tools: Vec<grow_tools::registry::types::ToolConfig> = vec![
             (&grow_build::ReadFileTool).into(),
             (&grow_build::SearchReplaceTool).into(),
-            (&opencode::OpenCodeWriteTool).into(),
+            (&grow_build::WriteTool).into(),
         ];
         for tc in memory_tools {
             if !definition.tool_config.tools.iter().any(|t| t.id == tc.id) {

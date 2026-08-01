@@ -483,7 +483,6 @@ rules = false
 agents = false
 mcps = false
 hooks = false
-sessions = false
 
 [compat.claude]
 skills = false
@@ -491,10 +490,6 @@ rules = false
 agents = false
 mcps = false
 hooks = false
-sessions = false
-
-[compat.codex]
-sessions = false                   # 其他 Codex 单元当前保留但无消费者，不建议配置
 
 [plugins]
 paths = ["~/my-plugins/custom-tools"]

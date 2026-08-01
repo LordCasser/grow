@@ -266,47 +266,6 @@ pub struct SearchReplaceEditDetail {
     #[serde(default)]
     pub line_prefix: String,
 }
-/// Output of the codex `grep_files` tool — file paths matching a regex.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub enum CodexGrepFilesOutput {
-    /// Matching file paths, one per line.
-    Matches { content: String, file_count: usize },
-    /// No files matched the pattern.
-    NoMatches(String),
-    /// Error (e.g., path not found, rg failed).
-    Error(String),
-}
-/// Per-file result included in a successful `ApplyPatchOutput`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ApplyPatchFileResult {
-    /// Absolute path to the affected file.
-    pub path: PathBuf,
-    /// What happened: `"added"`, `"modified"`, `"deleted"`, or `"moved"`.
-    pub action: String,
-    /// Full file content before the change. `None` for new files (add).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub old_text: Option<String>,
-    /// Full file content after the change. Empty string for deleted files.
-    pub new_text: String,
-    /// Destination path (only for moves).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub move_to: Option<PathBuf>,
-}
-/// Output of the `apply_patch` tool.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub enum ApplyPatchOutput {
-    /// Patch applied successfully.
-    Success {
-        files: Vec<ApplyPatchFileResult>,
-        tool_output_for_prompt: String,
-    },
-    /// Patch text could not be parsed.
-    ParseError(String),
-    /// Patch parsed but could not be applied to the filesystem.
-    ApplicationError(String),
-    /// No hunks in the patch.
-    EmptyPatch(String),
-}
 /// Payload for `SearchReplaceOutput::NoMatchesFound`.
 ///
 /// Separate struct so consumers (reminders, outcome trackers) can extract
@@ -555,8 +514,6 @@ pub enum ToolOutput {
     TaskOutput(TaskOutputOutput),
     KillTask(KillTaskOutput),
     Skill(SkillOutput),
-    ApplyPatch(ApplyPatchOutput),
-    CodexGrepFiles(CodexGrepFilesOutput),
     SearchTool(SearchToolOutput),
     SubagentCompleted(SubagentCompletedOutput),
     PlanControl(PlanControlOutput),
@@ -597,9 +554,6 @@ impl ToolOutput {
             ToolOutput::Skill(s) => !s.success,
             ToolOutput::WebFetch(WebFetchOutput::Content(_)) => false,
             ToolOutput::WebFetch(_) => true,
-            ToolOutput::ApplyPatch(ApplyPatchOutput::Success { .. }) => false,
-            ToolOutput::ApplyPatch(_) => true,
-            ToolOutput::CodexGrepFiles(CodexGrepFilesOutput::Error(_)) => true,
             ToolOutput::Todo(
                 TodoWriteOutput::DuplicateId(_) | TodoWriteOutput::InvalidArgument(_),
             ) => true,
@@ -767,21 +721,6 @@ impl ToolOutput {
                 .skill_message
                 .clone()
                 .unwrap_or_else(|| skill_output.tool_result.clone()),
-            ToolOutput::ApplyPatch(apply_patch_output) => match apply_patch_output {
-                ApplyPatchOutput::Success {
-                    tool_output_for_prompt,
-                    ..
-                } => tool_output_for_prompt.to_owned(),
-                ApplyPatchOutput::ParseError(msg)
-                | ApplyPatchOutput::ApplicationError(msg)
-                | ApplyPatchOutput::EmptyPatch(msg) => msg.to_owned(),
-            },
-            ToolOutput::CodexGrepFiles(output) => match output {
-                CodexGrepFilesOutput::Matches { content, .. } => content.clone(),
-                CodexGrepFilesOutput::NoMatches(msg) | CodexGrepFilesOutput::Error(msg) => {
-                    msg.clone()
-                }
-            },
             ToolOutput::SearchTool(out) => out.content.clone(),
             ToolOutput::SubagentCompleted(sub) => {
                 let mut text = sub.output.clone();
@@ -999,8 +938,6 @@ impl xai_tool_runtime::ToolOutput for SearchReplaceOutput {}
 impl xai_tool_runtime::ToolOutput for TodoWriteOutput {}
 impl xai_tool_runtime::ToolOutput for WebFetchOutput {}
 impl xai_tool_runtime::ToolOutput for SkillOutput {}
-impl xai_tool_runtime::ToolOutput for ApplyPatchOutput {}
-impl xai_tool_runtime::ToolOutput for CodexGrepFilesOutput {}
 impl xai_tool_runtime::ToolOutput for SearchToolOutput {}
 impl xai_tool_runtime::ToolOutput for PlanControlOutput {}
 impl xai_tool_runtime::ToolOutput for AskUserQuestionOutput {}
@@ -1281,58 +1218,6 @@ mod tests {
             json,
             json!({"type": "SearchReplace", "FilenameTooLong": "name too long"})
         );
-    }
-    #[test]
-    fn apply_patch_parse_error_json() {
-        let json = to_json(ApplyPatchOutput::ParseError("Invalid patch: boom".into()).into());
-        assert_eq!(
-            json,
-            json!({"type": "ApplyPatch", "ParseError": "Invalid patch: boom"})
-        );
-    }
-    #[test]
-    fn apply_patch_application_error_json() {
-        let json = to_json(
-            ApplyPatchOutput::ApplicationError("File /tmp/x.rs does not exist".into()).into(),
-        );
-        assert_eq!(
-            json,
-            json!({"type": "ApplyPatch", "ApplicationError": "File /tmp/x.rs does not exist"})
-        );
-    }
-    #[test]
-    fn apply_patch_empty_patch_json() {
-        let json = to_json(ApplyPatchOutput::EmptyPatch("No files were modified.".into()).into());
-        assert_eq!(
-            json,
-            json!({"type": "ApplyPatch", "EmptyPatch": "No files were modified."})
-        );
-    }
-    /// `Success` must not serialize under any of the keys Python treats as a
-    /// failure, otherwise a successful patch would be taxed as a tool error.
-    #[test]
-    fn apply_patch_success_json_is_not_an_error_shape() {
-        let json = to_json(
-            ApplyPatchOutput::Success {
-                files: vec![ApplyPatchFileResult {
-                    path: PathBuf::from("/repo/src/main.rs"),
-                    action: "modified".into(),
-                    old_text: Some("old".into()),
-                    new_text: "new".into(),
-                    move_to: None,
-                }],
-                tool_output_for_prompt: "Updated /repo/src/main.rs".into(),
-            }
-            .into(),
-        );
-        assert_eq!(json["type"], "ApplyPatch");
-        assert!(json.get("Success").is_some(), "missing Success key: {json}");
-        for key in ["ParseError", "ApplicationError", "EmptyPatch"] {
-            assert!(
-                json.get(key).is_none(),
-                "success must not serialize under the error key {key}: {json}"
-            );
-        }
     }
     #[test]
     fn kill_task_result_json() {

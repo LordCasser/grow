@@ -221,7 +221,6 @@ fn todo_gate_active_predicate_matrix() {
     }
     let mut templates = vec![
         TemplateOverride::None,
-        TemplateOverride::Codex,
         TemplateOverride::Custom("custom".into()),
     ];
     for tpl in templates {
