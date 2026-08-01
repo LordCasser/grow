@@ -1,4 +1,4 @@
-//! Claude session import dispatchers.
+//! Explicit Claude settings import dispatchers.
 
 use crate::app::actions::Effect;
 use crate::app::app_view::AppView;

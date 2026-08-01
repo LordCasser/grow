@@ -2648,7 +2648,7 @@ fn dashboard_overlay_cycle_order_matches_visible_rows() {
 }
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 /// Regression: the cycle anchors on the viewed agent, not a stale
-/// `attached_agent` left behind by an external session switch.
+/// `attached_agent` left behind by another session switch.
 #[test]
 fn dashboard_overlay_cycle_anchors_on_visible_agent_not_stale_attach() {
     let mut app = test_app_with_agent();

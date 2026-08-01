@@ -273,7 +273,6 @@ impl From<&grow_tools::types::ToolInput> for AccessKind {
             ToolInput::SearchReplace(search_replace) => {
                 AccessKind::Edit(search_replace.file_path.to_string())
             }
-            ToolInput::ApplyPatch(_) => AccessKind::Edit("apply_patch".to_string()),
             ToolInput::HashlineEdit(he) => AccessKind::Edit(he.file_path.to_string()),
             ToolInput::Write(w) => AccessKind::Edit(w.file_path.clone()),
             ToolInput::Bash(bash) => AccessKind::Bash(bash.command.to_string()),
@@ -614,21 +613,8 @@ mod tests {
         );
     }
     #[test]
-    fn apply_patch_maps_to_edit_access() {
-        use grow_tools::implementations::codex::apply_patch::ApplyPatchInput;
-        use grow_tools::types::ToolInput;
-        let input = ToolInput::ApplyPatch(ApplyPatchInput {
-            patch: String::new(),
-        });
-        let access = AccessKind::from(&input);
-        assert!(
-            matches!(access, AccessKind::Edit(_)),
-            "ApplyPatch should produce AccessKind::Edit, got {access:?}"
-        );
-    }
-    #[test]
     fn write_tool_maps_to_edit_access() {
-        use grow_tools::implementations::opencode::write::WriteInput;
+        use grow_tools::implementations::grow_build::write::WriteInput;
         use grow_tools::types::ToolInput;
         let input = ToolInput::Write(WriteInput {
             file_path: "/tmp/secret.txt".into(),
