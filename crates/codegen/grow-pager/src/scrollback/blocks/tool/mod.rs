@@ -34,6 +34,7 @@ pub use search_tool::{
 pub use use_tool::UseToolCallBlock;
 pub use web_fetch::WebFetchToolCallBlock;
 
+use crate::appearance::AppearanceConfig;
 use crate::scrollback::block::{BlockContent, join_searchable};
 use crate::scrollback::types::{
     AccentStyle, BlockBackground, BlockContext, BlockOutput, DisplayMode,
@@ -220,8 +221,8 @@ impl BlockContent for ToolCallBlock {
         delegate_tool!(self, background(ctx))
     }
 
-    fn has_vpad(&self, ctx: &BlockContext) -> bool {
-        delegate_tool!(self, has_vpad(ctx))
+    fn has_vpad_for(&self, appearance: &AppearanceConfig) -> bool {
+        delegate_tool!(self, has_vpad_for(appearance))
     }
 
     fn has_raw_mode(&self) -> bool {

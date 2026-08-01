@@ -15,7 +15,8 @@
 //! independent of leader mode.
 
 use crate::app::actions::Action;
-use crate::slash::command::{AppCtx, CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::{ModeSupport, Remedy};
 
 /// Open the Agent Dashboard view.
 pub struct DashboardCommand;
@@ -34,18 +35,11 @@ impl SlashCommand for DashboardCommand {
     }
 
     /// The agent dashboard is intentionally out of scope in minimal mode
-    /// (single-session standalone — K14/§6.15). Gated off with a message.
-    fn available_in_minimal(&self) -> bool {
-        false
-    }
-
-    /// Hidden from the completion dropdown in minimal mode: the dashboard
-    /// has nothing to
-    /// open there, so offering it just to refuse at dispatch is noise. A
-    /// fully-typed invocation still resolves and hits the central
-    /// `available_in_minimal` dispatch gate (friendly refusal, fail-closed).
-    fn visible(&self, ctx: &AppCtx) -> bool {
-        !ctx.screen_mode.is_minimal()
+    /// (single-session standalone — K14/§6.15).
+    fn mode_support(&self) -> ModeSupport {
+        ModeSupport::FullscreenOnly(Remedy::SwitchMode {
+            why: "minimal is single-session",
+        })
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
@@ -69,6 +63,8 @@ mod tests {
             session_id: None,
             bundle_state: &bundle,
             screen_mode: crate::app::ScreenMode::Inline,
+            billing_surface_visible: true,
+            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: false,
                 yolo_mode: false,
@@ -102,13 +98,15 @@ mod tests {
             current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
             workflows_available: true,
             screen_mode,
         };
         assert!(cmd.visible(&ctx(crate::app::ScreenMode::Fullscreen)));
         assert!(cmd.visible(&ctx(crate::app::ScreenMode::Inline)));
         assert!(
-            !cmd.visible(&ctx(crate::app::ScreenMode::Minimal)),
+            matches!(cmd.mode_support(), ModeSupport::FullscreenOnly(_)),
             "the Agent Dashboard must not be offered in minimal mode"
         );
     }
@@ -129,11 +127,5 @@ mod tests {
     fn has_no_legacy_aliases() {
         let cmd = DashboardCommand;
         assert!(cmd.aliases().is_empty());
-    }
-
-    #[test]
-    fn not_available_in_minimal() {
-        // The dashboard is out of scope in scrollback-native minimal mode.
-        assert!(!DashboardCommand.available_in_minimal());
     }
 }

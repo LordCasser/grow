@@ -37,7 +37,7 @@ use grow_tools::types::{
     tool::{ToolKind, ToolNamespace},
     tool_metadata::ToolMetadata,
 };
-use grow_tools::util::ProcessGroup;
+use grow_tools::util::{ProcessGroup, ProcessScope};
 
 /// MCP tool name delimiter: server names are qualified as `"server__tool"`.
 /// Canonical definition lives in `grow_workspace_types`; re-exported here
@@ -1134,6 +1134,24 @@ impl McpError {
     }
 }
 
+/// True when a failed refresh-token grant was a **network-level** failure
+/// that never reached the IdP (RT validity unknown, presumed good); IdP
+/// rejections and missing credentials stay terminal (escalate to browser).
+/// rmcp 2.1 collapses the error into `TokenRefreshFailed(String)`, so this
+/// anchors on the `oauth2` crate's stable `Display` texts via
+/// `starts_with` (an IdP error description can't spoof a match):
+/// `"Request failed"` = network, `"Failed to parse server response"` =
+/// non-OAuth 5xx/proxy bodies; `"Server returned error response: …"` does
+/// NOT match.
+pub(crate) fn mcp_refresh_failure_is_transient(err: &rmcp::transport::auth::AuthError) -> bool {
+    match err {
+        rmcp::transport::auth::AuthError::TokenRefreshFailed(msg) => {
+            msg.starts_with("Request failed") || msg.starts_with("Failed to parse server response")
+        }
+        _ => false,
+    }
+}
+
 /// True if an MCP error *message* indicates an auth rejection (vs. a transport
 /// drop, timeout, or protocol error), so host recovery can decide whether a
 /// credential re-fetch would help.
@@ -1924,7 +1942,8 @@ where
 /// grandchildren (e.g. `npx` -> `node`) before reaping the leader.
 pub struct SafeTokioChildProcess {
     child: Option<tokio::process::Child>,
-    process_group: Option<ProcessGroup>,
+    /// Strong `Arc` owner; the scope holds only a `Weak`, dropped on reap.
+    process_group: Option<Arc<ProcessGroup>>,
     transport: ResilientRwTransport<tokio::process::ChildStdout, tokio::process::ChildStdin>,
 }
 
@@ -1933,12 +1952,14 @@ impl SafeTokioChildProcess {
     /// (undecodable) stdout line can be logged for that server.
     fn spawn(
         mut cmd: Command,
+        scope: Option<&ProcessScope>,
         server_name: String,
     ) -> std::io::Result<(Self, Option<ChildStderr>)> {
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
+        #[allow(clippy::disallowed_methods)] // enrolled in the session scope below
         let mut child = cmd.spawn()?;
         let stdin = child
             .stdin
@@ -1953,7 +1974,7 @@ impl SafeTokioChildProcess {
         // Best-effort: a missing group just degrades to direct-child-only cleanup.
         let process_group = match ProcessGroup::new() {
             Ok(mut group) => match group.attach(&child) {
-                Ok(()) => Some(group),
+                Ok(()) => Some(Arc::new(group)),
                 Err(e) => {
                     tracing::warn!("Failed to attach MCP child to process group: {e}");
                     None
@@ -1964,6 +1985,30 @@ impl SafeTokioChildProcess {
                 None
             }
         };
+        // Enrollment ties this child to the *spawning* session's lifetime.
+        // `SharedMcpPool` may hand the resulting client Arc to subagent
+        // sessions, but subagents inherit the root session's scope, so the
+        // root's kill_all cannot strand an in-tree subagent. Residual: any
+        // detached holder of the Arc loses the transport when the spawning
+        // session closes — session close is deliberately the reap boundary.
+        if let (Some(scope), Some(group)) = (scope, process_group.as_ref())
+            && !scope.register(group)
+        {
+            // The scope latched closed (spawn raced session teardown), so
+            // `register` already killpg'd the child. Fail fast with a clear
+            // error instead of proceeding into a doomed rmcp handshake; the
+            // reap below mirrors `Drop`'s best-effort leader cleanup.
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let _ = child.kill().await;
+                });
+            } else if let Err(e) = child.start_kill() {
+                tracing::warn!("Error signaling MCP child killed by closed scope: {e}");
+            }
+            return Err(std::io::Error::other(
+                "session is closing (process scope already reclaimed); MCP server not started",
+            ));
+        }
 
         Ok((
             Self {
@@ -2688,7 +2733,12 @@ impl McpClient {
     /// Tries in order:
     /// 1. Reload from disk (picks up tokens from background auth task)
     /// 2. Refresh via refresh_token grant
-    /// 3. Full browser-based OAuth flow
+    /// 3. Full browser-based OAuth flow — unless the refresh failure was a
+    ///    pure network failure ([`mcp_refresh_failure_is_transient`]): the
+    ///    stored refresh token is then still presumed valid, and opening a
+    ///    browser tab / re-running DCR for a Wi-Fi blip right after
+    ///    wake-from-sleep is both useless (the IdP is unreachable for the
+    ///    browser too) and destructive (it discards a working credential).
     pub async fn force_reauth(&self, force: bool) -> bool {
         let (Some(auth_mgr), Some(config)) = (&self.auth_manager, &self.http_config) else {
             return false;
@@ -2739,22 +2789,43 @@ impl McpClient {
         }
 
         // Try token refresh.
-        let refresh_ok = {
+        let refresh_result = {
             let mgr = auth_mgr.lock().await;
-            mgr.refresh_token().await.is_ok()
+            mgr.refresh_token().await
         };
 
-        if refresh_ok {
-            tracing::info!(
-                server = self.server_name.as_str(),
-                "Token refreshed successfully (no browser)"
-            );
-            self.replace_state(ClientState::Pending(PendingTransport::HttpAuth {
-                config: config.clone(),
-                auth_manager: auth_mgr.clone(),
-            }))
-            .await;
-            return true;
+        match refresh_result {
+            Ok(_) => {
+                tracing::info!(
+                    server = self.server_name.as_str(),
+                    "Token refreshed successfully (no browser)"
+                );
+                self.replace_state(ClientState::Pending(PendingTransport::HttpAuth {
+                    config: config.clone(),
+                    auth_manager: auth_mgr.clone(),
+                }))
+                .await;
+                return true;
+            }
+            // Transient (network never reached the IdP): fail the attempt
+            // instead of discarding a presumed-good credential — the retry
+            // paths re-run the refresh once the network is back. An explicit
+            // user trigger (`force`) still opens the browser.
+            Err(ref e) if !force && mcp_refresh_failure_is_transient(e) => {
+                tracing::warn!(
+                    server = self.server_name.as_str(),
+                    error = %e,
+                    "Token refresh failed transiently (network); skipping browser escalation"
+                );
+                return false;
+            }
+            Err(e) => {
+                tracing::info!(
+                    server = self.server_name.as_str(),
+                    error = %e,
+                    "Token refresh failed terminally; falling back to browser auth"
+                );
+            }
         }
 
         // Full browser-based OAuth flow.
@@ -3957,13 +4028,41 @@ fn stdio_path_override(env: &[acp::EnvVariable]) -> Option<&str> {
         .map(|e| e.value.as_str())
 }
 
+/// Borrowed cross-cutting spawn context whose `scope`, when set, enrolls the stdio child for session-close reaping.
+pub struct McpSpawnCtx<'a> {
+    pub(crate) session_id: Option<&'a str>,
+    pub(crate) mode: OauthInteractivity,
+    pub(crate) scope: Option<&'a ProcessScope>,
+}
+
+impl<'a> McpSpawnCtx<'a> {
+    pub fn for_session(
+        session_id: &'a str,
+        mode: OauthInteractivity,
+        scope: Option<&'a ProcessScope>,
+    ) -> Self {
+        Self {
+            session_id: Some(session_id),
+            mode,
+            scope,
+        }
+    }
+
+    pub fn session_less() -> Self {
+        Self {
+            session_id: None,
+            mode: OauthInteractivity::Interactive,
+            scope: None,
+        }
+    }
+}
+
 pub async fn start_mcp_server(
     mcp_server: acp::McpServer,
-    session_id: Option<&str>,
     overrides: Option<&McpClientTimeoutOverrides>,
     meta_config: Option<&McpServerMetaConfig>,
     byo_config: Option<&McpOAuthConfig>,
-    mode: OauthInteractivity,
+    ctx: &McpSpawnCtx<'_>,
 ) -> Result<McpClient, McpError> {
     let _per_server_timer = grow_diagnostics::instrumentation::timer("mcp_start_one_server");
     match mcp_server {
@@ -3999,8 +4098,8 @@ pub async fn start_mcp_server(
             }
             grow_tools::util::detach_command(&mut cmd);
 
-            let (transport, stderr_handle) = SafeTokioChildProcess::spawn(cmd, name.clone())
-                .map_err(|e| {
+            let (transport, stderr_handle) =
+                SafeTokioChildProcess::spawn(cmd, ctx.scope, name.clone()).map_err(|e| {
                     tracing::error!("Failed to spawn MCP server '{}': {}", name, e);
                     grow_diagnostics::session_ctx::log_event(
                         grow_diagnostics::events::McpServerFailed {
@@ -4039,7 +4138,7 @@ pub async fn start_mcp_server(
                 tracing::info!(server = %name, %url, ?mc, "MCP http: meta config override");
             }
 
-            let headers = expand_session_id_headers(headers, session_id);
+            let headers = expand_session_id_headers(headers, ctx.session_id);
             let http_config = HttpConfig {
                 url: url.clone(),
                 headers,
@@ -4061,7 +4160,7 @@ pub async fn start_mcp_server(
                     grow_diagnostics::instrumentation::timer("mcp_http_auth_discovery");
                 match tokio::time::timeout(
                     OAUTH_DISCOVERY_TIMEOUT,
-                    discover_and_prepare_auth(&name, &url, mode),
+                    discover_and_prepare_auth(&name, &url, ctx.mode),
                 )
                 .await
                 {
@@ -4070,11 +4169,11 @@ pub async fn start_mcp_server(
                         tracing::warn!(
                             server = %name,
                             url = %url,
-                            ?mode,
+                            mode = ?ctx.mode,
                             timeout_secs = OAUTH_DISCOVERY_TIMEOUT.as_secs(),
                             "OAuth discovery timed out"
                         );
-                        HttpOauthPrep::on_probe_failure(mode)
+                        HttpOauthPrep::on_probe_failure(ctx.mode)
                     }
                 }
             };
@@ -4108,11 +4207,10 @@ pub async fn start_mcp_server(
 
 pub async fn start_mcp_servers(
     mcp_servers: Vec<acp::McpServer>,
-    session_id: Option<&str>,
     overrides_map: &HashMap<String, McpClientTimeoutOverrides>,
     meta_config_map: &McpMetaConfigMap,
     oauth_config_map: &crate::oauth_config::McpOAuthConfigMap,
-    mode: OauthInteractivity,
+    ctx: &McpSpawnCtx<'_>,
 ) -> Vec<Result<McpClient, McpError>> {
     let _mcp_start_timer = grow_diagnostics::instrumentation::timer("mcp_start_servers");
 
@@ -4130,7 +4228,7 @@ pub async fn start_mcp_servers(
             let overrides = overrides_map.get(server_name);
             let mc = meta_config_map.get(server_name);
             let byo = oauth_config_map.get(server_name);
-            start_mcp_server(server, session_id, overrides, mc, byo, mode)
+            start_mcp_server(server, overrides, mc, byo, ctx)
         })
         .buffer_unordered(8)
         .collect::<Vec<_>>()
@@ -4492,8 +4590,8 @@ mod tests {
             let mut cmd = Command::new("sleep");
             cmd.arg("30").kill_on_drop(true);
             grow_tools::util::detach_command(&mut cmd);
-            let (transport, _stderr) =
-                SafeTokioChildProcess::spawn(cmd, "test".to_string()).expect("spawn test child");
+            let (transport, _stderr) = SafeTokioChildProcess::spawn(cmd, None, "test".to_string())
+                .expect("spawn test child");
             let pid = transport.id().expect("spawned child pid");
             (transport, pid)
         });
@@ -4519,6 +4617,51 @@ mod tests {
             return true;
         }
         std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
+    /// `scope.kill_all()` reaps an enrolled MCP child even when its owner never
+    /// runs Drop. Non-vacuous: dropping the `Some(&scope)` enrollment makes this
+    /// time out.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scope_kill_all_reaps_enrolled_mcp_child_while_owner_wedged() {
+        use std::time::Duration;
+
+        let scope = ProcessScope::new();
+
+        let mut cmd = Command::new("sleep");
+        cmd.arg("600").kill_on_drop(true);
+        grow_tools::util::detach_command(&mut cmd);
+        let (mut child_process, _stderr) =
+            SafeTokioChildProcess::spawn(cmd, Some(&scope), "wedge-test".to_string())
+                .expect("spawn enrolled MCP child");
+        assert_eq!(
+            scope.live_count(),
+            1,
+            "the enrolled MCP child group must be tracked by the scope"
+        );
+
+        // Wedge: owner never runs Drop, so kill_all is the only reclaim path.
+        scope.kill_all();
+
+        // Take only the handle, not the group, so kill-on-drop can't mask a
+        // missing enrollment.
+        let mut child = child_process.child.take().expect("child handle present");
+        // Null the strong Arc<ProcessGroup> before reaping the leader below:
+        // holding it across the reap would let `child_process`'s later Drop
+        // killpg a reusable pgid — the PID-reuse pattern the Weak ownership
+        // contract exists to prevent.
+        child_process.process_group = None;
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("scope.kill_all must have SIGKILL'd the enrolled MCP child group")
+            .expect("wait on the reclaimed child succeeds");
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "the MCP child must have been SIGKILL'd by the scope, not have exited cleanly"
+        );
     }
 
     #[test]

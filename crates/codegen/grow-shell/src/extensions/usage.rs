@@ -59,8 +59,8 @@ async fn handle_session_usage(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grow_sampling_types::TokenUsage;
     use grow_chat_state::UsageLedger;
+    use grow_sampling_types::TokenUsage;
 
     fn usage(prompt: u32, completion: u32) -> TokenUsage {
         TokenUsage {
@@ -69,6 +69,7 @@ mod tests {
             total_tokens: 0,
             reasoning_tokens: 0,
             cached_prompt_tokens: 0,
+            cache_creation_prompt_tokens: 0,
         }
     }
 

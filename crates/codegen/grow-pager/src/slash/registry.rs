@@ -14,6 +14,7 @@ use grow_tools::implementations::skills::types::SkillScope;
 
 use super::acp_command::AcpSlashCommand;
 use super::command::SlashCommand;
+use super::mode_support::ModeSupport;
 
 fn client_collision_qualified_name(
     cmd: &agent_client_protocol::AvailableCommand,
@@ -99,6 +100,8 @@ pub struct CommandRegistry {
     sources: Vec<CommandSource>,
     key_to_index: HashMap<String, usize>,
     triggers: Vec<CommandTrigger>,
+    /// Deny list of canonical command names (mode-support gating).
+    restricted: HashSet<String>,
     /// Commands hidden by name (not shown in dropdown, not executable).
     hidden: HashSet<String>,
     /// Commands hidden from the completion menu ONLY (no dropdown row, no
@@ -139,13 +142,19 @@ impl CommandRegistry {
         hidden.insert("recap".to_string());
         // `/auto` is fail-closed: hidden until `set_auto_mode_available(true)`.
         hidden.insert("auto".to_string());
+        // `/share` starts menu-hidden (still dispatchable) until
+        // `set_share_visible(true)`. Menu-only so typed `/share` can
+        // surface a client disable message rather than PassThrough.
+        let mut menu_hidden = HashSet::new();
+        menu_hidden.insert("share".to_string());
         let mut reg = Self {
             commands: builtins,
             sources,
             key_to_index: HashMap::new(),
             triggers: Vec::new(),
             hidden,
-            menu_hidden: HashSet::new(),
+            menu_hidden,
+            restricted: HashSet::new(),
             available_tools: None,
         };
         reg.rebuild_triggers();
@@ -192,7 +201,85 @@ impl CommandRegistry {
             .get(key)
             .and_then(|idx| self.commands.get(*idx))
             .filter(|cmd| !self.hidden.contains(cmd.name()))
+            .filter(|cmd| !self.restricted_match(cmd))
             .filter(|cmd| self.tools_satisfied(cmd))
+    }
+
+    /// Declared modes for `key` (canonical name or alias), unfiltered by any
+    /// runtime gate.
+    pub(crate) fn mode_support(&self, key: &str) -> ModeSupport {
+        self.commands
+            .iter()
+            .find(|cmd| cmd.name() == key || cmd.aliases().contains(&key))
+            .map_or(ModeSupport::Both, |cmd| cmd.mode_support())
+    }
+
+    /// Normalize a deny-list entry: trim, strip one leading `/`, lowercase.
+    /// Lets callers write `usage`, `/usage`, or `Usage` interchangeably.
+    fn normalize_deny_name(name: &str) -> String {
+        name.trim().trim_start_matches('/').to_lowercase()
+    }
+
+    /// True when the command's canonical name or any alias is on the
+    /// deny list.
+    fn restricted_match(&self, cmd: &Arc<dyn SlashCommand>) -> bool {
+        if self.restricted.is_empty() {
+            return false;
+        }
+        self.restricted.contains(&cmd.name().to_lowercase())
+            || cmd
+                .aliases()
+                .iter()
+                .any(|a| self.restricted.contains(&a.to_lowercase()))
+    }
+
+    /// Replace the restricted-command deny list (e.g. tier restrictions).
+    ///
+    /// Entries are normalized via [`Self::normalize_deny_name`]. Restricted
+    /// commands stay visible in the dropdown/completion (discoverability)
+    /// but disappear from `get()` — invoking one shows the SuperGrok upsell
+    /// instead of executing (see the `dispatch_send_prompt_inner` hook).
+    /// Pass an empty slice to clear the deny list (e.g. after a tier
+    /// upgrade mid-session).
+    pub fn set_restricted_commands(&mut self, names: &[String]) {
+        self.restricted = names
+            .iter()
+            .map(|n| Self::normalize_deny_name(n))
+            .filter(|n| !n.is_empty())
+            .collect();
+        self.rebuild_triggers();
+    }
+
+    /// True when `key` (canonical name or alias, `/` and case ignored)
+    /// names a command the tier deny list blocks from [`Self::get`]. Lets
+    /// the dispatcher distinguish a restricted invocation (upsell) from a
+    /// genuinely unknown one (pass through to the shell/model).
+    ///
+    /// Deliberately scans `commands` instead of `key_to_index`: a
+    /// restricted command can still be missing from the key map for
+    /// *other* reasons (`tools_satisfied` drops tool-gated commands until
+    /// the toolset handshake lands), and a typed invocation must upsell
+    /// even then.
+    pub fn is_restricted(&self, key: &str) -> bool {
+        if self.restricted.is_empty() {
+            return false;
+        }
+        let key = Self::normalize_deny_name(key);
+        self.commands
+            .iter()
+            .filter(|cmd| self.restricted_match(cmd))
+            .any(|cmd| {
+                cmd.name().to_lowercase() == key
+                    || cmd.aliases().iter().any(|a| a.to_lowercase() == key)
+            })
+    }
+
+    /// Current deny list (normalized). Used to mirror the gate onto child
+    /// registries (subagent views), same as the `set_*_visible` gates.
+    pub fn restricted_commands(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.restricted.iter().cloned().collect();
+        names.sort();
+        names
     }
 
     /// True when `cmd.required_tools()` is empty, or the toolset is
@@ -281,7 +368,23 @@ impl CommandRegistry {
         self.available_tools = Some(tools);
     }
 
-    /// Show or hide the `/agents` command (feature-flag gating).
+    /// Show or hide `/share` in the completion menu.
+    ///
+    /// Menu-only: when not visible the command is absent from dropdown /
+    /// triggers but still resolves via [`Self::get_for_dispatch`], so a
+    /// fully typed `/share` reaches the pager handler (e.g. temporary
+    /// client disable) instead of falling through as an unknown command.
+    pub fn set_share_visible(&mut self, visible: bool) {
+        self.hidden.remove("share");
+        if visible {
+            self.menu_hidden.remove("share");
+        } else {
+            self.menu_hidden.insert("share".to_string());
+        }
+        self.rebuild_triggers();
+    }
+
+    /// Show or hide the `/dashboard` command (feature-flag gating).
     ///
     /// The command is hidden by default (see [`Self::new`]) and revealed here
     /// when the dashboard feature flag (`dashboard_enabled()`) is on. When
@@ -615,7 +718,164 @@ mod tests {
     }
 
     #[test]
-    fn agents_command_hidden_by_default_and_toggleable() {
+    fn set_share_visible_hides_and_restores_share_command() {
+        let share: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
+            name: "share",
+            aliases: &[],
+        });
+        let other: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
+            name: "exit",
+            aliases: &[],
+        });
+        let mut registry = CommandRegistry::new(vec![share, other]);
+
+        // Default: /share is menu-hidden (offered nowhere) but still dispatchable.
+        assert!(registry.get("share").is_none());
+        assert!(
+            registry.get_for_dispatch("share").is_some(),
+            "typed /share must still resolve while menu-hidden"
+        );
+        assert!(!registry.triggers().iter().any(|t| t.canonical == "share"));
+
+        // Revealing /share restores menu lookup and triggers.
+        registry.set_share_visible(true);
+        assert!(registry.get("share").is_some());
+        assert!(registry.get_for_dispatch("share").is_some());
+        assert!(registry.triggers().iter().any(|t| t.canonical == "share"));
+        // Other commands are unaffected.
+        assert!(registry.get("exit").is_some());
+
+        // Hiding again is menu-only: no offer, typed path still works.
+        registry.set_share_visible(false);
+        assert!(registry.get("share").is_none());
+        assert!(registry.get_for_dispatch("share").is_some());
+        assert!(!registry.triggers().iter().any(|t| t.canonical == "share"));
+    }
+
+    #[test]
+    fn restricted_commands_hide_and_restore() {
+        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
+            name: "usage",
+            aliases: &[],
+        });
+        let other: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
+            name: "exit",
+            aliases: &[],
+        });
+        let mut registry = CommandRegistry::new(vec![usage, other]);
+        assert!(registry.get("usage").is_some());
+
+        registry.set_restricted_commands(&["usage".to_string()]);
+        // Execution is blocked …
+        assert!(registry.get("usage").is_none());
+        // … but the command stays listed (dropdown/completion
+        // discoverability — invoking shows the upsell instead).
+        assert!(registry.triggers().iter().any(|t| t.canonical == "usage"));
+        // Other commands unaffected.
+        assert!(registry.get("exit").is_some());
+        assert_eq!(registry.restricted_commands(), vec!["usage"]);
+
+        // Clearing the deny list restores execution.
+        registry.set_restricted_commands(&[]);
+        assert!(registry.get("usage").is_some());
+        assert!(registry.restricted_commands().is_empty());
+    }
+
+    #[test]
+    fn restricted_entries_are_normalized() {
+        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
+            name: "usage",
+            aliases: &[],
+        });
+        let mut registry = CommandRegistry::new(vec![usage]);
+
+        // Leading slash, whitespace, and case are all tolerated; empty
+        // entries are dropped rather than denying the "" name.
+        registry.set_restricted_commands(&[" /Usage ".to_string(), String::new(), "/".to_string()]);
+        assert!(registry.get("usage").is_none());
+        assert_eq!(registry.restricted_commands(), vec!["usage"]);
+    }
+
+    /// `is_restricted` scans the command list (not `key_to_index`, which
+    /// can be missing tool-gated commands pre-handshake), resolves
+    /// aliases, and never matches unknown names.
+    #[test]
+    fn is_restricted_resolves_names_and_aliases() {
+        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
+            name: "usage",
+            aliases: &["cost"],
+        });
+        let mut registry = CommandRegistry::new(vec![usage]);
+        assert!(!registry.is_restricted("usage"), "empty deny list");
+
+        registry.set_restricted_commands(&["usage".to_string()]);
+        assert!(registry.get("usage").is_none(), "hidden from get()");
+        assert!(registry.is_restricted("usage"));
+        assert!(registry.is_restricted("cost"), "alias resolves");
+        assert!(registry.is_restricted("/Usage"), "normalized lookup");
+        assert!(!registry.is_restricted("frobnicate"), "unknown name");
+    }
+
+    #[test]
+    fn restricted_matches_aliases_both_ways() {
+        let cmd: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
+            name: "exit",
+            aliases: &["quit"],
+        });
+        let mut registry = CommandRegistry::new(vec![cmd]);
+
+        // Denying an alias hides the command entirely (canonical too).
+        registry.set_restricted_commands(&["quit".to_string()]);
+        assert!(registry.get("exit").is_none());
+        assert!(registry.get("quit").is_none());
+
+        // Denying the canonical name also hides alias lookups.
+        registry.set_restricted_commands(&["exit".to_string()]);
+        assert!(registry.get("exit").is_none());
+        assert!(registry.get("quit").is_none());
+    }
+
+    #[test]
+    fn restricted_wins_over_visible_setters() {
+        let share: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
+            name: "share",
+            aliases: &[],
+        });
+        let mut registry = CommandRegistry::new(vec![share]);
+
+        registry.set_restricted_commands(&["share".to_string()]);
+        // A later `set_share_visible(true)` must NOT resurrect a
+        // restricted command — deny wins over every visibility gate.
+        registry.set_share_visible(true);
+        assert!(registry.get("share").is_none());
+    }
+
+    #[test]
+    fn restricted_applies_to_acp_commands() {
+        let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
+            name: "exit",
+            aliases: &[],
+        });
+        let mut registry = CommandRegistry::new(vec![builtin]);
+        registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+            "flush".to_string(),
+            "Flush memory".to_string(),
+        )]);
+        assert!(registry.get("flush").is_some());
+
+        registry.set_restricted_commands(&["flush".to_string()]);
+        assert!(registry.get("flush").is_none());
+
+        // Deny list survives an ACP catalog resync.
+        registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
+            "flush".to_string(),
+            "Flush memory".to_string(),
+        )]);
+        assert!(registry.get("flush").is_none());
+    }
+
+    #[test]
+    fn dashboard_command_hidden_by_default_and_toggleable() {
         let dashboard: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
             name: "agents",
             aliases: &[],
@@ -941,17 +1201,23 @@ mod tests {
             name: "agents",
             aliases: &[],
         });
+        // Tier-restricted.
+        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
+            name: "usage",
+            aliases: &[],
+        });
         // Tool-gated (toolset unknown → fail-closed).
         let gated: Arc<dyn SlashCommand> = Arc::new(ToolGatedCommand {
             name: "loop",
             required: &["scheduler_create"],
         });
-        let mut reg = CommandRegistry::new(vec![dashboard, gated]);
+        let mut reg = CommandRegistry::new(vec![dashboard, usage, gated]);
         reg.set_dashboard_visible(false);
+        reg.set_restricted_commands(&["usage".to_string()]);
 
         assert!(
             reg.get_for_dispatch("agents").is_none(),
-            "hidden stays hard"
+            "hard-hidden stays hard"
         );
         assert!(
             reg.get_for_dispatch("loop").is_none(),

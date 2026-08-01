@@ -264,7 +264,7 @@ impl xai_tool_runtime::Tool for GrepTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "grep",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -824,6 +824,7 @@ async fn prepare_grep(
     crate::util::detach_command(&mut cmd);
     cmd.stdin(Stdio::null());
 
+    #[allow(clippy::disallowed_methods)] // search helper, waited on below
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {

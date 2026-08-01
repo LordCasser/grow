@@ -27,7 +27,7 @@ fn test_actor(info: Info, storage: Arc<dyn StorageAdapter>) -> ActorGuard {
                 crate::session::summary::SummaryConfig {
                     sampling_client,
                     model: String::new(),
-                    persistence_tx: summary_tx,
+                    persistence_tx: tx.downgrade(),
                 },
             ),
             gateway: None,
@@ -250,9 +250,7 @@ async fn current_model_write_back_replaces_bare_slug_and_preserves_rest() {
     actor
         .handle
         .tx
-        .send(PersistenceMsg::FlushAndAck {
-            respond_to: ack_tx,
-        })
+        .send(PersistenceMsg::FlushAndAck { respond_to: ack_tx })
         .unwrap();
     ack_rx.await.unwrap();
 

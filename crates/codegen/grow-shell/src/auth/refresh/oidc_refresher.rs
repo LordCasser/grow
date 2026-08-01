@@ -137,10 +137,7 @@ impl OidcRefresher {
                     None,
                     Some(serde_json::json!({ "reason": format!("{reason:?}") })),
                 );
-                Some(RefreshOutcome::permanent(
-                    reason,
-                    Some(disk_now.key.clone()),
-                ))
+                Some(RefreshOutcome::permanent_for(reason, &disk_now))
             }
             OidcRefreshResult::Failed => {
                 Some(RefreshOutcome::transient("OIDC disk-retry refresh failed"))
@@ -219,7 +216,7 @@ impl TokenRefresher for OidcRefresher {
                     return retry_outcome;
                 }
 
-                RefreshOutcome::permanent(reason, Some(auth.key.clone()))
+                RefreshOutcome::permanent_for(reason, &auth)
             }
             OidcRefreshResult::Failed => {
                 tracing::warn!(

@@ -79,7 +79,7 @@
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.active_modal = Some(crate::views::modal::ActiveModal::CommandPalette {
                 entries: crate::views::modal::default_palette_entries(
-                    agent.prompt.slash_controller.screen_mode(),
+                    &agent.prompt.slash_controller,
                 ),
                 state: crate::views::picker::PickerState::input_active(),
                 window: crate::views::modal_window::ModalWindowState::new(),

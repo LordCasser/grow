@@ -180,9 +180,10 @@ pub async fn spawn_grow_shell(
     // re-login). No-op where the OS listener is unavailable.
     auth_manager.start_system_power_listener();
 
-    // Best-effort refresh of managed policy before bootstrap reads it (repairs a wrong-identity/missing
-    // cache). Never errors — the OS-protected system/MDM layers still apply, and every network step
-    // inside is bounded (SESSION_START_AUTH_DEADLINE / SyncBudget::SessionStart).
+    // Best-effort refresh of managed policy before bootstrap reads it (repairs a
+    // wrong-identity/missing cache). Never errors — the OS-protected system/MDM
+    // layers still apply, and every network step inside is bounded
+    // (SESSION_START_AUTH_DEADLINE / SyncBudget::SessionStart).
     grow_shell::managed_config::ensure_managed_policy_present(&auth_manager).await;
 
     // Run the full bootstrap sequence: config resolution, process-level
