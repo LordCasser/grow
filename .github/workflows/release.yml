@@ -22,6 +22,11 @@ on:
         description: Existing release tag to build (for example v1.0.0)
         required: true
         type: string
+      skip-macos:
+        description: Skip the macOS build job and keep the existing macOS asset (Linux assets only)
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -215,6 +220,19 @@ jobs:
                 -p grow-pager-bin --bin grow --target "${TARGET_TRIPLE}"
             '
 
+      # Minimal release assets: the unstripped release-dist build ships
+      # ~600 MB of DWARF + symbols (the profile keeps them for debug sidecars
+      # this pipeline never produces). Full strip removes both for the
+      # smallest artifact; RUST_BACKTRACE then shows raw addresses instead of
+      # symbol names.
+      - name: Strip for minimal size
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${TARGET_TRIPLE}/release-dist/grow"
+          strip --strip-all "$BIN"
+          ls -la "$BIN"
+
       - name: Smoke-test binary
         shell: bash
         run: |
@@ -380,6 +398,19 @@ jobs:
                 -p grow-pager-bin --bin grow --target "${TARGET_TRIPLE}"
             '
 
+      # Minimal release assets: the unstripped release-dist build ships
+      # ~600 MB of DWARF + symbols (the profile keeps them for debug sidecars
+      # this pipeline never produces). Full strip removes both for the
+      # smallest artifact; RUST_BACKTRACE then shows raw addresses instead of
+      # symbol names.
+      - name: Strip for minimal size
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${TARGET_TRIPLE}/release-dist/grow"
+          strip --strip-all "$BIN"
+          ls -la "$BIN"
+
       - name: Smoke-test binary
         shell: bash
         run: |
@@ -539,6 +570,17 @@ jobs:
           cross build --locked --profile release-dist \
             -p grow-pager-bin --bin grow --target riscv64gc-unknown-linux-gnu
 
+      # Full strip, same as the other Linux jobs (release-dist keeps DWARF +
+      # symbols; the pipeline ships no debug sidecars). GNU strip handles the
+      # cross-arch ELF fine — section rewriting, no target execution needed.
+      - name: Strip for minimal size
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${TARGET_TRIPLE}/release-dist/grow"
+          strip --strip-all "$BIN"
+          ls -la "$BIN"
+
       # The riscv64 binary cannot execute on the amd64 runner; build success
       # is the acceptance bar for this target.
 
@@ -570,6 +612,8 @@ jobs:
   build-macos:
     name: Build macos-aarch64
     needs: validate
+    # Skip on explicit workflow_dispatch request; release events always build.
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.skip-macos != 'true' }}
     timeout-minutes: 180
     runs-on: macos-15
     env:
@@ -647,6 +691,16 @@ jobs:
           cargo build --locked --profile release-dist \
             -p grow-pager-bin --bin grow --target "${TARGET_TRIPLE}"
 
+      # Minimal release assets on macOS too: Apple strip (no flags) removes
+      # debug symbols + local symbols from the Mach-O.
+      - name: Strip for minimal size
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${TARGET_TRIPLE}/release-dist/grow"
+          strip "$BIN"
+          ls -la "$BIN"
+
       - name: Smoke-test binary
         shell: bash
         run: |
@@ -692,6 +746,9 @@ jobs:
       - build-linux-aarch64
       - build-linux-riscv64
       - build-macos
+    # Run as long as no build failed; a skipped build-macos (skip-macos=true)
+    # is fine — the three Linux assets are uploaded on their own.
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v8
@@ -709,6 +766,9 @@ jobs:
           mapfile -t assets < <(find . -maxdepth 1 -type f -name 'grow-*' | sort)
           if [[ "${ACT:-}" == "true" ]]; then
             test "${#assets[@]}" -ge 1
+          elif [[ "${{ needs.build-macos.result }}" == "skipped" ]]; then
+            # workflow_dispatch with skip-macos=true: the three Linux assets.
+            test "${#assets[@]}" -eq 3
           else
             test "${#assets[@]}" -eq 4
           fi
