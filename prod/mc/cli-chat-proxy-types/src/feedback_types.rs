@@ -1,7 +1,7 @@
 //! Feedback API request and response types.
 //!
 //! These types support the feedback collection system for Grow sessions.
-//! The agent (grow-shell) uses heuristics to determine when to request feedback,
+//! The agent (shell) uses heuristics to determine when to request feedback,
 //! and clients submit feedback through these types to the feedback backend.
 
 use chrono::{DateTime, Utc};
@@ -377,7 +377,7 @@ pub struct FeedbackSubmission {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_version: Option<String>,
 
-    /// Shell (grow-shell) version
+    /// Shell (shell) version
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell_version: Option<String>,
 

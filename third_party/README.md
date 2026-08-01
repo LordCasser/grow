@@ -24,7 +24,7 @@ re-vendoring.
 Dependency shape:
 
 ```text
-grow-mermaid
+mermaid
   └── mermaid-to-svg          (MIT)
         ├── dagre_rust        (Apache-2.0)
         │     ├── graphlib_rust
@@ -32,7 +32,7 @@ grow-mermaid
         └── graphlib_rust     (Apache-2.0)
               └── ordered_hashmap
 
-grow-sandbox
+sandbox
   └── nono                    (Apache-2.0, riscv64 syscall-table patch)
 ```
 

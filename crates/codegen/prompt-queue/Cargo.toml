@@ -1,0 +1,13 @@
+[package]
+edition.workspace = true
+license = "Apache-2.0"
+name = "prompt-queue"
+version = "0.1.0"
+description = "Shared prompt-queue wire types for grow-shell and grow-pager"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

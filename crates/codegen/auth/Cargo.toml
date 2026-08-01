@@ -1,0 +1,25 @@
+[package]
+license = "Apache-2.0"
+name = "auth"
+version.workspace = true
+edition.workspace = true
+description = "BYOK HTTP credential dependency-inversion seam"
+authors = ["Grow contributors"]
+
+[features]
+middleware = ["dep:reqwest-middleware", "dep:http"]
+
+[dependencies]
+async-trait = { workspace = true }
+http = { workspace = true, optional = true }
+reqwest = { workspace = true }
+reqwest-middleware = { workspace = true, optional = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+mockito = { workspace = true }
+reqwest-middleware = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

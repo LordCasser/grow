@@ -3,15 +3,12 @@
 # NOTE: clippy uses the NEAREST clippy.toml (no merging), so this file must
 # duplicate any settings from the repo-root //clippy.toml.
 
-# TODO: remove after https://github.com/hyperium/tonic/issues/2253 fixed.
-large-error-threshold = 256
-
 # Ban raw canonicalize: on Windows, std/tokio canonicalize return verbatim
 # `\\?\C:\...` paths that break external tools (git rejects them as clone
 # destinations), leak into model prompt context, and poison path-equality
 # keys. Use `dunce::canonicalize` (identical to std on Unix/macOS; strips the
 # verbatim prefix on Windows when safely representable). For async contexts
-# in grow-tools, use the blessed helpers in `crate::util::fs`.
+# in tools, use the blessed helpers in `crate::util::fs`.
 #
 # Caveat: dunce keeps the verbatim form for paths it cannot safely simplify
 # (notably > 260 chars or reserved device names), so prefix checks between two
@@ -20,11 +17,11 @@ large-error-threshold = 256
 #
 # Enforcement boundary: this ban is applied by the per-crate cargo clippy
 # presubmits only — the Bazel lint aspect pins the repo-root //:clippy.toml,
-# so Bazel-only crates (currently xai-coding-env) need manual vigilance.
+# so Bazel-only crates need manual vigilance.
 disallowed-methods = [
     { path = "std::fs::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use dunce::canonicalize" },
     { path = "std::path::Path::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use dunce::canonicalize" },
-    { path = "tokio::fs::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use grow_tools::util::fs helpers or spawn_blocking + dunce::canonicalize" },
-    { path = "std::process::Command::spawn", reason = "an unenrolled child outlives its session; use xai_tty_utils::ProcessScope::enroll" },
-    { path = "tokio::process::Command::spawn", reason = "an unenrolled child outlives its session; use xai_tty_utils::ProcessScope::enroll" },
+    { path = "tokio::fs::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use tools::util::fs helpers or spawn_blocking + dunce::canonicalize" },
+    { path = "std::process::Command::spawn", reason = "an unenrolled child outlives its session; use tty_utils::ProcessScope::enroll" },
+    { path = "tokio::process::Command::spawn", reason = "an unenrolled child outlives its session; use tty_utils::ProcessScope::enroll" },
 ]

@@ -10,8 +10,8 @@
 ### 机制
 
 子代理（或顶层会话）请求 bash 等工具权限时，shell 侧的 `AcpPrompter::request`
-（`grow-workspace/src/permission/prompter.rs`）构造 `request_permission` 后直接
-`self.gateway.request_permission(req).await`，**没有任何超时**。`xai-acp-lib` 的
+（`workspace/src/permission/prompter.rs`）构造 `request_permission` 后直接
+`self.gateway.request_permission(req).await`，**没有任何超时**。`acp` 的
 `GatewaySender::request_permission` 也只是 `forward(args).await`（`gateway.rs:391-396`），
 同样无超时。
 

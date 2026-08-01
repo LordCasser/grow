@@ -1,0 +1,106 @@
+[package]
+license = "Apache-2.0"
+name = "workspace"
+version.workspace = true
+edition.workspace = true
+description = "Core host-local workspace library for Grow"
+
+[dependencies]
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
+dunce = { workspace = true }
+version = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+fs2 = { workspace = true }
+dirs = "6"
+parking_lot = { workspace = true }
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+ignore = { workspace = true }
+md5 = { workspace = true }
+regex = { workspace = true }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+    "fs",
+    "io-std",
+    "macros",
+    "process",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+] }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4", "v5", "v7"] }
+agent = { path = "../agent" }
+tools = { path = "../tools" }
+workspace-types = { path = "../workspace-types" }
+config = { workspace = true }
+# Leaf config value types for folder-trust decisions.
+config-types = { workspace = true }
+toml = { workspace = true, features = ["preserve_order"] }
+dashmap = { workspace = true }
+agent-client-protocol = { workspace = true }
+acp-transport = { workspace = true }
+codebase-graph = { path = "../codebase-graph" }
+paths = { path = "../paths" }
+base64 = { workspace = true }
+infer = { workspace = true }
+sha2 = { workspace = true, features = ["force-soft"] }
+bstr = "1.12.1"
+hashbrown = "0.16.1"
+nohash-hasher = "0.2.0"
+rustc-hash = "2.1.1"
+nucleo = { workspace = true }
+indexmap = { workspace = true, features = ["serde"] }
+smallvec = { workspace = true }
+chrono = { workspace = true }
+tree-sitter = "0.25.10"
+tree-sitter-bash = "0.25"
+url = { workspace = true }
+prometheus = { workspace = true }
+glob = "0.3"
+sandbox = { path = "../sandbox", default-features = false }
+hooks = { path = "../hooks" }
+hunk-tracker = { path = "../hunk-tracker" }
+mcp = { path = "../mcp" }
+diagnostics = { workspace = true }
+tty-utils = { workspace = true }
+sqlite-journal = { workspace = true }
+tool-protocol = { workspace = true }
+tool-runtime = { workspace = true }
+tool-types = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
+urlencoding = "2"
+fast-worktree = { path = "../fast-worktree", features = ["metadata"] }
+fsnotify = { path = "../fsnotify" }
+tracing-subscriber = { workspace = true }
+fastrace = { workspace = true, features = ["enable"] }
+tempfile = { workspace = true }
+zstd = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
+[features]
+default = ["sandbox-enforce"]
+compression = []
+test-support = []
+sandbox-enforce = ["sandbox/enforce"]
+default-bazel = [
+    "sandbox-enforce",
+    ]
+
+[dev-dependencies]
+filetime = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+test-utils = { path = "../../common/test-utils" }
+[lints]
+workspace = true

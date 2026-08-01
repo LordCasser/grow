@@ -1,0 +1,27 @@
+[package]
+license = "Apache-2.0"
+name = "plugin-marketplace"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dirs = { workspace = true }
+dunce = { workspace = true }
+fs2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+wait-timeout = { workspace = true }
+tty-utils = { workspace = true }
+agent = { workspace = true }
+config = { workspace = true }
+extension-types = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

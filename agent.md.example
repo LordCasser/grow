@@ -77,7 +77,7 @@ subagents:
   deny: []
 
 # Additional tools are layered after toolPreset. Per-tool record keys use the
-# grow-tools wire contract.
+# tools wire contract.
 additionalTools:
   - id: Grow:read_file
     params: {}

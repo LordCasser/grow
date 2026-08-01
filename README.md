@@ -31,8 +31,8 @@ Grow 的 ACP 扩展协议使用 `grow/*`（转发层使用 `_grow/*`）。上游
 
 ## 1.0.0 里程碑
 
-`1.0.0` 是 Grow 脱离 Grok 产品运行时后的第一个里程碑版本。所有 `grow-*` crate 共享同一
-workspace 版本，发布 tag 必须使用 `v1.0.0` 并与 `grow-pager-bin` 的 Cargo 版本严格一致。
+`1.0.0` 是 Grow 脱离 Grok 产品运行时后的第一个里程碑版本。Grow 的第一方 crate 共享同一
+workspace 版本，发布 tag 必须使用 `v1.0.0` 并与 `cli` 的 Cargo 版本严格一致。
 
 这个里程碑明确收敛到代码和计算机任务：BYOK、多 Provider、Agent/Skill、MCP、LSP、Shell、
 文件工具、browser/computer、视觉输入和本地 Session 是核心能力；遥测上传、计费/订阅、托管
@@ -41,7 +41,7 @@ Web Search 由用户配置 MCP Server 提供。
 
 准备 release 时：
 
-1. 确认 `cargo metadata --locked --no-deps` 中所有 `grow-*` 包均为 `1.0.0`。
+1. 确认 `cargo metadata --locked --no-deps` 中所有 Grow 第一方包均为 `1.0.0`。
 2. 按本文的 release 构建方式验证三个支持目标，并确认产物内嵌 `rg`。
 3. 创建并发布 `v1.0.0` GitHub Release；workflow 会校验 tag、构建三个平台的 `grow` 二进制并挂到 Release。
 
@@ -66,7 +66,20 @@ Mandatory Core → Audience → Agent Role → Active Behavior → Runtime Conte
 
 最终工具能力是 Tool Registry、Agent policy、子 Agent 深度/能力限制、Behavior gate 和当前
 Permission 决策的交集。Behavior 不会授予工具，Permission 也不会改变 Agent Role。
-完整组合规则见 [Prompt Architecture](crates/codegen/grow-agent/PROMPT_ARCHITECTURE.md)。
+完整组合规则见 [Prompt Architecture](crates/codegen/agent/PROMPT_ARCHITECTURE.md)。
+
+### Crate 边界原则
+
+Grow 只在存在独立复用契约、依赖倒置、可部署产物或明确编译隔离收益时建立 crate；其余实现归入
+拥有该行为的模块，不用“一类一个 crate”模拟架构。组合根是 `cli`，交互层属于
+`pager`，Agent/session runtime 属于 `shell`，主机文件系统与工作区状态属于
+`workspace`，工具协议与执行属于 `tools` 及其轻量 contract crate。
+
+跨进程协议也遵循同一标准：只有实际存在独立进程、稳定 wire contract 或多语言消费者时才引入
+protobuf/gRPC。纯 Rust 进程内边界直接使用 Rust 类型，需要落盘或外部交换时使用已有 Serde
+协议。workspace 依赖必须有生产代码或测试消费者；失去消费者的生成器、转换层和依赖应一并删除。
+目前保留的单消费者 crate（例如 headless Markdown core、session-support 和 workflow engine）分别
+承担轻依赖复用、增量编译隔离和独立执行语义，不因“只有一个调用方”机械合并。
 
 ### Behavior、Role 与运行实例
 
@@ -134,7 +147,7 @@ Grow 会像发现其他 MCP 工具一样发现它，不要求固定的服务器�
 - `grow/*` 与 `_grow/*` 是本地 ACP wire protocol，不表示任何外部服务。
 
 Grow 不包含遥测、产品分析、Sentry、OTLP exporter 或 trace upload。诊断事件只写入用户指定
-的本地日志；详见 [Local Diagnostics](crates/codegen/grow-pager/docs/user-guide/24-monitoring-usage.md)。
+的本地日志；详见 [Local Diagnostics](crates/codegen/pager/docs/user-guide/24-monitoring-usage.md)。
 
 ## 配置 LLM（BYOK）
 
@@ -169,7 +182,7 @@ output_limit = 65536
 Grow 不设置可选的输出限制。`context_window` 只用于本地上下文管理和自动压缩。请求时
 `chat_completions`/`messages` 使用 `max_tokens`，`responses` 使用 `max_output_tokens`。
 完整字段和 session 继承规则见
-[LLM Providers and BYOK](crates/codegen/grow-pager/docs/user-guide/11-custom-models.md)。
+[LLM Providers and BYOK](crates/codegen/pager/docs/user-guide/11-custom-models.md)。
 全部公开配置项的注释示例，以及多 Provider、模型思考强度、Agent/子 Agent、工具、权限、
 MCP、Memory、本地公告和可替换 marketplace 的组合方式，见
 [config.example.toml](config.example.toml)。
@@ -299,7 +312,7 @@ You are a strict code reviewer. Report concrete findings with file locations.
 ```
 
 完整、可复制的所有字段见 [agent.md.example](agent.md.example)；字段语义见
-[grow-agent README](crates/codegen/grow-agent/README.md)。权限模式、provider 和 model 都属于
+[agent README](crates/codegen/agent/README.md)。权限模式、provider 和 model 都属于
 session，不属于 Agent 定义。
 
 ### 选择、替换或停止使用主 Agent
@@ -434,8 +447,6 @@ Delegate repository discovery to explore and code review to review/backend.
   发行版的基础构建工具）
 - [Rustup](https://rustup.rs/)；进入仓库后会根据 `rust-toolchain.toml` 自动安装并使用固定
   的 Rust 工具链
-- Protocol Buffers 编译器：推荐安装 [DotSlash](https://dotslash-cli.com) 以使用仓库中的
-  `bin/protoc`；也可以通过 `$PROTOC` 指定本机 `protoc`，或确保 `protoc` 已在 `PATH` 中
 - [ripgrep](https://github.com/BurntSushi/ripgrep)：源码构建默认直接使用 `PATH` 中的 `rg`；
   GitHub Release 产物已经内嵌固定版本，不要求终端用户另行安装
 
@@ -443,17 +454,14 @@ Delegate repository discovery to explore and code review to review/backend.
 git clone https://github.com/LordCasser/grow.git
 cd grow
 
-# 使用仓库内固定版本的 protoc
-cargo install dotslash
-
 # 编译并直接启动开发版本
-cargo run --locked -p grow-pager-bin --bin grow
+cargo run --locked -p cli --bin grow
 ```
 
 构建优化后的本机二进制：
 
 ```sh
-cargo build --locked --release -p grow-pager-bin --bin grow
+cargo build --locked --release -p cli --bin grow
 ./target/release/grow --version
 ```
 
@@ -468,7 +476,7 @@ install -m 0755 target/release/grow "$HOME/.local/bin/grow"
 上面的 [LLM（BYOK）配置](#配置-llmbyok)。只检查代码能否通过编译时，可运行：
 
 ```sh
-cargo check --locked -p grow-pager-bin
+cargo check --locked -p cli
 ```
 
 Cargo build script 不会联网下载 ripgrep。如果希望本地构建一个不依赖系统 `rg` 的自包含
@@ -476,7 +484,7 @@ Cargo build script 不会联网下载 ripgrep。如果希望本地构建一个�
 
 ```sh
 env GROW_TOOLS_BUNDLE_RG_PATH=/absolute/path/to/rg \
-  cargo build --locked --release -p grow-pager-bin --bin grow
+  cargo build --locked --release -p cli --bin grow
 ```
 
 官方 GitHub Release 使用更激进的 `release-dist` profile。复现同样的自包含构建时也要
@@ -484,7 +492,7 @@ env GROW_TOOLS_BUNDLE_RG_PATH=/absolute/path/to/rg \
 
 ```sh
 env GROW_TOOLS_BUNDLE_RG_PATH=/absolute/path/to/rg \
-  cargo build --locked --profile release-dist -p grow-pager-bin --bin grow
+  cargo build --locked --profile release-dist -p cli --bin grow
 ```
 
 对应产物位于 `target/release-dist/grow`。
@@ -494,14 +502,14 @@ env GROW_TOOLS_BUNDLE_RG_PATH=/absolute/path/to/rg \
 [release workflow](.github/workflows/release.yml) 会构建这些目标。Linux amd64/arm64 产物在
 AlmaLinux 8 容器内以 `*-unknown-linux-gnu` 构建，glibc 基线 2.28（覆盖 RHEL 8 / Ubuntu
 20.04+ / Debian 10+ 等），构建成功后对产物做版本烟雾测试（`grow --version`）；Linux
-riscv64 在 amd64 runner 上通过 `cross` 交叉编译（官方无 riscv64 预编译 protoc/rg，protoc
-用宿主版本，rg sidecar 由 CI 从源码构建），产物不做本机烟雾测试；protoc 与 ripgrep
-sidecar 在构建前 staging 到工作区供容器使用。
+riscv64 在 amd64 runner 上通过 `cross` 交叉编译（官方无 riscv64 预编译 rg，
+rg sidecar 由 CI 准备），产物不做本机烟雾测试；ripgrep sidecar 在构建前
+staging 到工作区供容器使用。
 
 GitHub Release 页面**只挂最终 `grow` 二进制**（`grow-{version}-linux-x86_64` /
 `grow-{version}-linux-aarch64` / `grow-{version}-linux-riscv64` /
 `grow-{version}-macos-aarch64`），与 auto-update 契约一致；
-protoc、ripgrep 下载包、Actions artifact 等只出现在 CI 过程中，不会作为 Release 下载项。
+ripgrep 下载包、Actions artifact 等只出现在 CI 过程中，不会作为 Release 下载项。
 CI 会在构建时把固定版本 ripgrep 嵌入二进制，并跑 `grow --version` 烟雾测试。
 
 自动更新只读取 [`LordCasser/grow` Releases](https://github.com/LordCasser/grow/releases)，且默认关闭：
@@ -530,13 +538,13 @@ Grow 不发布 npm 包，也不调用 npm 查询或安装更新；GitHub Release
 
 | 路径 | 职责 |
 |---|---|
-| `crates/codegen/grow-pager-bin` | composition root，构建 `grow` 二进制 |
-| `crates/codegen/grow-pager` | TUI、输入、modal、session UI |
-| `crates/codegen/grow-shell` | Agent runtime、stdio/serve/leader 入口 |
-| `crates/codegen/grow-agent` | Agent 定义、发现、prompt 与工具装配 |
-| `crates/codegen/grow-tools` | 终端、文件、搜索等工具实现 |
-| `crates/codegen/grow-config` | `GROW_HOME`、配置加载和路径约束 |
-| `crates/codegen/grow-workspace` | 文件系统、VCS、执行、权限和 checkpoint |
+| `crates/codegen/cli` | composition root，构建 `grow` 二进制 |
+| `crates/codegen/pager` | TUI、输入、modal、session UI |
+| `crates/codegen/shell` | Agent runtime、stdio/serve/leader 入口 |
+| `crates/codegen/agent` | Agent 定义、发现、prompt 与工具装配 |
+| `crates/codegen/tools` | 终端、文件、搜索等工具实现 |
+| `crates/codegen/config` | `GROW_HOME`、配置加载和路径约束 |
+| `crates/codegen/workspace` | 文件系统、VCS、执行、权限和 checkpoint |
 | `crates/common/` | 通用叶子 crate |
 | `third_party/` | vendored 第三方代码 |
 

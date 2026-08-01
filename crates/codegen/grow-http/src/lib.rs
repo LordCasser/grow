@@ -14,7 +14,7 @@
 //!   final retry attempt to escape a poisoned pool within a tight budget.
 //!
 //! Sampling traffic uses process-wide shared clients owned by
-//! `grow_sampler::shared_http` (one HTTP/2 pooled client plus
+//! `sampler::shared_http` (one HTTP/2 pooled client plus
 //! a pool-less HTTP/1.1 fallback shared across every
 //! `SamplingClient`). The sampler reads `GROW_POOL_*` /
 //! `GROW_CONNECT_TIMEOUT_SECS` once, when its shared client is
@@ -26,7 +26,7 @@
 
 use std::sync::OnceLock;
 
-use grow_workspace::permission::ClientType;
+use workspace::permission::ClientType;
 
 /// Per-attempt ceiling for a startup `/settings` or `/v1/models` fetch; raising
 /// it delays how soon the background refresh gives up and retries.
@@ -66,14 +66,14 @@ const _: () = assert!(
 
 /// Startup span timer, local to this crate.
 ///
-/// Replaces `grow_shell::instrumentation_timer!`, which cannot be referenced
+/// Replaces `shell::instrumentation_timer!`, which cannot be referenced
 /// here (it lives in the shell crate, which now depends on this one). This is a
 /// behavior-preserving copy: it routes to the same
-/// `grow_diagnostics::instrumentation` API and keeps the Chrome trace
+/// `diagnostics::instrumentation` API and keeps the Chrome trace
 /// span for these startup timings.
 macro_rules! startup_timer {
     ($name:literal) => {{
-        use grow_diagnostics::instrumentation::{
+        use diagnostics::instrumentation::{
             InstrumentationMode, InstrumentationTimer, TARGET, current_mode,
         };
         let mode = current_mode();
@@ -89,14 +89,14 @@ macro_rules! startup_timer {
 
 static CLIENT_TYPE: OnceLock<ClientType> = OnceLock::new();
 
-// `OriginClientInfo` is owned by `grow-sampler` so `SamplerConfig` can use
-// it without taking a circular dependency on `grow-shell`. Re-exported
+// `OriginClientInfo` is owned by `sampler` so `SamplerConfig` can use
+// it without taking a circular dependency on `shell`. Re-exported
 // under the same path (`crate::http::OriginClientInfo`) so existing call-sites
-// compile unchanged. The diagnostics engine in `grow-diagnostics` consumes
-// the same type via `grow_sampler::OriginClientInfo`. The shell-specific
+// compile unchanged. The diagnostics engine in `diagnostics` consumes
+// the same type via `sampler::OriginClientInfo`. The shell-specific
 // constructors that depended on `ClientType` (a shell-only type) are free
 // functions below.
-pub use grow_sampler::OriginClientInfo;
+pub use sampler::OriginClientInfo;
 
 /// Construct an [`OriginClientInfo`] from `GROW_CLIENT_NAME` /
 /// `GROW_CLIENT_VERSION` env vars. Returns `None` when
@@ -191,7 +191,7 @@ impl UserAgent {
 }
 
 fn agent_version() -> String {
-    grow_version::VERSION.to_string()
+    version::VERSION.to_string()
 }
 
 /// Set the process-level fallback origin client type for `User-Agent`.
@@ -335,10 +335,10 @@ pub fn shared_client() -> reqwest::Client {
 /// Wrap a raw client with the current BYOK Authorization header.
 pub fn with_auth_header(
     client: reqwest::Client,
-    credentials: std::sync::Arc<dyn grow_auth::AuthCredentialProvider>,
+    credentials: std::sync::Arc<dyn auth::AuthCredentialProvider>,
 ) -> reqwest_middleware::ClientWithMiddleware {
     reqwest_middleware::ClientBuilder::new(client)
-        .with(grow_auth::AuthHeaderMiddleware::new(credentials))
+        .with(auth::AuthHeaderMiddleware::new(credentials))
         .build()
 }
 

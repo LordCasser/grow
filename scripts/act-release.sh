@@ -47,10 +47,10 @@ if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   expected="${TAG#v}"
   actual="$(
     cargo metadata --locked --no-deps --format-version 1 \
-      | python3 -c "import json,sys; d=json.load(sys.stdin); print(next(p['version'] for p in d['packages'] if p['name']=='grow-pager-bin'))"
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print(next(p['version'] for p in d['packages'] if p['name']=='cli'))"
   )"
   if [[ "$actual" != "$expected" ]]; then
-    echo "Refusing to create ${TAG}: grow-pager-bin is ${actual}, expected ${expected}" >&2
+    echo "Refusing to create ${TAG}: cli is ${actual}, expected ${expected}" >&2
     exit 1
   fi
   echo "Creating local tag ${TAG} at HEAD for act checkout (not pushed)"

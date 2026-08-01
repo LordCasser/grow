@@ -2,7 +2,7 @@
 
 > **Status**: Drafting(记录用,无实施动作)
 > **Date**: 2026-07-31
-> **Scope**: grow-shell / xai-workflow / grow-pager 的 Workflow 行为与工作流引擎
+> **Scope**: shell / workflow / pager 的 Workflow 行为与工作流引擎
 > **结论**: 接受当前实现状态,不做行为改动;行为层命名已由 "Dynamic Workflow" 修正为 "Static Workflow"。
 
 ## 1. 背景与目的
@@ -48,7 +48,7 @@
    `prompts/behaviors/static-workflow.md` 提示词;每阶段:scout → 编写一个确定性 Rhai
    工作流脚本 → 启动**至多一个**运行 → yield(不轮询、不 sleep-wait)→ 收到完成通知后
    检查结果 → 决定/修订下一阶段。
-2. **引擎层(xai-workflow)**:Rhai 脚本;确定性执行(禁 `eval`/`timestamp`/`sleep`);
+2. **引擎层(workflow)**:Rhai 脚本;确定性执行(禁 `eval`/`timestamp`/`sleep`);
    host 调用按 `seq+hash` 记录 journal;暂停/恢复全量重放;脚本与 args 运行内不可变;
    `agent()` 单发、`parallel()` 平铺扇出(≤1024 项);`phase()`/`complete()`/`pause()`/
    `await_user()`/`budget()` 等 host 函数。
@@ -62,7 +62,7 @@
 **命名约定(本次修正后)**:用户可见命名统一为 "Static Workflow";wire id 与内部标识
 **保持不变**——`"workflow"`(ACP SessionModeId / BehaviorId / tool name)、
 `SessionMode::Workflow`、`PromptMode::Workflow`、`BehaviorState::Workflow`、
-包名 `xai-workflow`。
+包名 `workflow`。
 
 ## 5. 差距对比
 

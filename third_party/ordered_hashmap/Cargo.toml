@@ -7,7 +7,7 @@
 # `dagre_rust` layout crates (the Warp `mermaid-to-svg` engine stack). It is a
 # young single-author crate on the untrusted-input render path, so vendoring
 # gives a full audit surface and immunity to upstream yanks. See
-# crates/codegen/grow-mermaid and third_party/mermaid-to-svg.
+# crates/codegen/mermaid and third_party/mermaid-to-svg.
 #
 # ============================================================================
 # VENDORING NOTES — re-apply / re-bless ALL of the following on every upgrade:
@@ -43,7 +43,7 @@ doctest = false
 # Vendored third-party code is not restyled to our lint standards, so silence
 # the lints it trips under the workspace's `-D warnings` (the source is kept
 # verbatim — only this manifest carries the allows). Our own crate
-# (grow-mermaid) is still fully linted.
+# (mermaid) is still fully linted.
 [lints.rust]
 mismatched_lifetime_syntaxes = "allow"
 

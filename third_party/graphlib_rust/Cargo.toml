@@ -7,7 +7,7 @@
 # `dagre_rust` layout engine and directly by the Warp `mermaid-to-svg` engine.
 # It is a young single-author crate on the untrusted-input render path, so
 # vendoring gives a full audit surface and immunity to upstream yanks. See
-# third_party/mermaid-to-svg and crates/codegen/grow-mermaid.
+# third_party/mermaid-to-svg and crates/codegen/mermaid.
 #
 # ============================================================================
 # VENDORING NOTES — re-apply / re-bless ALL of the following on every upgrade:
@@ -39,7 +39,7 @@ ordered_hashmap = { path = "../ordered_hashmap" }
 # Vendored third-party code is not restyled to our lint standards, so silence
 # the lints it trips under the workspace's `-D warnings` (the source is kept
 # verbatim — only this manifest carries the allows). Our own crate
-# (grow-mermaid) is still fully linted.
+# (mermaid) is still fully linted.
 [lints.rust]
 noop_method_call = "allow"
 

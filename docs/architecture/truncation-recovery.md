@@ -2,15 +2,15 @@
 
 > **Status**: Implemented（D1–D8 已全部落地；§1 描述的是实现前的行为基线，仅作设计记录）
 > **Date**: 2026-07-31
-> **Scope**: grow-sampler, grow-sampling-types, grow-shell
+> **Scope**: sampler, sampling-types, shell
 > **Author**: software-architect
 
 实现对照（2026-07-31 核验）：
 
-- `StopReason` 新增 `ModelContextWindowExceeded` / `PauseTurn` 变体（grow-sampling-types，`messages.rs` / `conversation.rs`）。
+- `StopReason` 新增 `ModelContextWindowExceeded` / `PauseTurn` 变体（sampling-types，`messages.rs` / `conversation.rs`）。
 - `request_task.rs` 中 `StopReason::Length` 映射为 `AttemptOutcome::Truncated { partial_response }`（不再丢弃部分输出）。
-- `SyntheticReason::TruncationContinue` 已加入会话层，持久化部分输出并注入继续提示（见 grow-shell `session/acp_session_tests/truncation_recovery_tests.rs`）。
-- D8 crate 改名 `xai-chat-state` → `grow-chat-state` 已完成，workspace 版本 `1.0.0`。
+- `SyntheticReason::TruncationContinue` 已加入会话层，持久化部分输出并注入继续提示（见 shell `session/acp_session_tests/truncation_recovery_tests.rs`）。
+- D8 `chat-state` 使用功能命名，并继承 workspace 版本 `1.0.0`。
 
 ## 1. Problem Statement
 
@@ -61,14 +61,14 @@ All three are funneled into `Failed`, losing the partial response and preventing
 | D5 | **ACP StopFailure behavior change** -- successful continue does not emit `StopFailure`; `MaxOutputTokens` StopFailureKind retained for unrecoverable cases | A successfully continued turn is not a failure; documented as public contract change |
 | D6 | **Thinking blocks: discard incomplete** -- truncated thinking blocks cannot be recovered (Anthropic API constraint: signature must be complete and unmodified) | API-level hard constraint; cannot be worked around |
 | D7 | **Tool-call truncation: discard incomplete** -- incomplete `tool_use` blocks are dropped; only complete blocks are persisted | Anthropic: "incomplete tool use blocks cannot be used"; model re-generates on continue |
-| D8 | **Crate rename: `xai-chat-state` -> `grow-chat-state`, version 1.0.0** -- the chat-state crate joins the grow-* family; performed as a pure mechanical rename (Task 0) before any feature work | User decision; rename-first avoids re-renaming new feature code; version 1.0.0 matches workspace version (root `Cargo.toml:83`, `[workspace.package] version = "1.0.0"`) |
+| D8 | **Crate identity: `chat-state`, version 1.0.0** -- the state layer uses a functional package name and the workspace version | Keeps package identity aligned with its responsibility and the rest of the first-party workspace |
 
 ## 3. Architecture Overview
 
 ### 3.1 Module Boundaries and Changes
 
 ```
-grow-sampling-types (types layer)
+sampling-types (types layer)
   ├── StopReason: add ModelContextWindowExceeded, PauseTurn variants
   ├── AttemptOutcome: add Truncated / ContextWindowExceeded / PauseTurn variants
   │   (each carries the partial ConversationResponse)
@@ -76,7 +76,7 @@ grow-sampling-types (types layer)
       (no new ConversationResponse field: the truncation signal is the
        stop_reason itself; continue bookkeeping lives in the session layer)
 
-grow-sampler (sampling layer)
+sampler (sampling layer)
   ├── stream/messages.rs:    split MaxTokens vs ModelContextWindowExceeded vs PauseTurn;
   │                          remove the early Failed path for Length
   ├── stream/responses.rs:   keep Incomplete -> Length (no change)
@@ -90,11 +90,11 @@ grow-sampler (sampling layer)
   └── events.rs:             unchanged (reuse SamplingEvent::Completed; the
                              session layer distinguishes via response.stop_reason)
 
-grow-chat-state (chat state layer, formerly xai-chat-state)
+chat-state (chat state layer)
   ├── compaction_utils.rs: add TRUNCATION_CONTINUE_PROMPT (next to AUTO_CONTINUE_PROMPT)
-  └── (rename performed first as Task 0: xai-chat-state -> grow-chat-state, v1.0.0)
+  └── package identity and version verified before feature work
 
-grow-shell (session layer)
+shell (session layer)
   ├── session/acp_session_impl/sampler_turn.rs: continue loop (detect Truncated, persist, inject prompt, re-sample)
   ├── session/acp_session_impl/turn_end.rs:     StopFailure only for unrecoverable truncation
   ├── sampling/error.rs:                        ACP error mapping update
@@ -110,7 +110,7 @@ User sends request
 sampler_turn.rs: build SamplingConfig, call sampler
   │
   ▼
-grow-sampler: run_request_task
+sampler: run_request_task
   │
   ├── stream tokens to UI (ChannelToken, ToolCallDelta)
   │
@@ -147,7 +147,7 @@ sampler_turn.rs: receive outcome
 
 ### 3.3 Continue Loop Location: Session Layer
 
-The continue loop lives in **grow-shell's `sampler_turn.rs`**, not in grow-sampler.
+The continue loop lives in **shell's `sampler_turn.rs`**, not in sampler.
 
 **Rationale**:
 - The session layer owns conversation history (via `chat_state_handle`). Persisting partial
@@ -472,7 +472,7 @@ Hook scripts should only observe `StopFailure` when the turn genuinely fails. Th
 
 ### 10.3 ACP Error Mapping
 
-`map_sampling_err_to_acp` (`grow-shell/src/sampling/error.rs`):
+`map_sampling_err_to_acp` (`shell/src/sampling/error.rs`):
 - `MaxTokensTruncation` -> `acp::Error::internal_error()` with `error_kind: "max_tokens_truncation"`
 - This mapping is retained but only triggered when truncation is truly unrecoverable.
 - During auto-continue, no ACP error is produced.
@@ -524,38 +524,38 @@ Hook scripts should only observe `StopFailure` when the turn genuinely fails. Th
 
 | Test | Layer | Description |
 |---|---|---|
-| `stop_reason_mapping` | grow-sampling-types | Anthropic `max_tokens` -> `Length`; `model_context_window_exceeded` -> `ModelContextWindowExceeded`; `pause_turn` -> `PauseTurn` |
-| `truncated_outcome_carries_partial` | grow-sampler | `drive_l2` returns `Truncated` with partial response when stop_reason == Length |
-| `context_window_exceeded_outcome` | grow-sampler | `drive_l2` returns `ContextWindowExceeded` when stop_reason == ModelContextWindowExceeded |
-| `pause_turn_outcome` | grow-sampler | `drive_l2` returns `PauseTurn` with complete response |
-| `incomplete_thinking_discarded` | grow-sampler | Partial response sanitization discards thinking blocks without signature_delta |
-| `incomplete_tool_use_discarded` | grow-sampler | Partial response sanitization discards tool_use blocks with invalid JSON |
-| `max_tokens_truncation_not_produced_for_length` | grow-sampler | `SamplingError::MaxTokensTruncation` is not produced for Length stop reason |
-| `synthetic_reason_truncation_continue` | grow-sampling-types | New variant serializes/deserializes correctly; excluded from real-user-query extraction |
+| `stop_reason_mapping` | sampling-types | Anthropic `max_tokens` -> `Length`; `model_context_window_exceeded` -> `ModelContextWindowExceeded`; `pause_turn` -> `PauseTurn` |
+| `truncated_outcome_carries_partial` | sampler | `drive_l2` returns `Truncated` with partial response when stop_reason == Length |
+| `context_window_exceeded_outcome` | sampler | `drive_l2` returns `ContextWindowExceeded` when stop_reason == ModelContextWindowExceeded |
+| `pause_turn_outcome` | sampler | `drive_l2` returns `PauseTurn` with complete response |
+| `incomplete_thinking_discarded` | sampler | Partial response sanitization discards thinking blocks without signature_delta |
+| `incomplete_tool_use_discarded` | sampler | Partial response sanitization discards tool_use blocks with invalid JSON |
+| `max_tokens_truncation_not_produced_for_length` | sampler | `SamplingError::MaxTokensTruncation` is not produced for Length stop reason |
+| `synthetic_reason_truncation_continue` | sampling-types | New variant serializes/deserializes correctly; excluded from real-user-query extraction |
 
 ### 12.2 Integration Tests
 
 | Test | Scope | Description |
 |---|---|---|
-| `truncation_auto_continue_e2e` | grow-shell | Mock provider truncates at N tokens; assert: (1) partial response persisted, (2) continue prompt injected, (3) final output is concatenation, (4) turn completes successfully |
-| `truncation_multiple_continues` | grow-shell | Mock provider truncates 3 times then completes; assert all partials persisted and merged |
-| `truncation_thinking_block` | grow-shell | Mock provider truncates mid-thinking; assert incomplete thinking discarded, complete thinking retained |
-| `truncation_tool_use_incomplete` | grow-shell | Mock provider truncates mid-tool_use JSON; assert incomplete tool_use discarded, model re-generates on continue |
-| `context_window_exceeded_triggers_compaction` | grow-shell | Mock provider returns model_context_window_exceeded; assert compaction triggered, not continue |
-| `pause_turn_resend` | grow-shell | Mock provider returns pause_turn; assert response persisted, sampler re-called without continue prompt |
-| `cross_backend_consistency` | grow-shell | Messages and chat_completions produce the same continue behavior (chat_completions e2e: partial persisted, continue prompt injected, concatenated output, 2 sampling cycles; responses backend pinned at the stream layer by Task 2) — DONE |
-| `stop_failure_not_emitted_on_success` | grow-shell | Successful continue: no StopFailure hook event emitted — DONE |
-| `stop_failure_emitted_on_unrecoverable` | grow-shell | Unrecoverable recovery failure (compaction HTTP 500): turn fails, StopFailure hook event emitted — DONE |
-| `model_context_window_exceeded_test_update` | grow-sampler | Update `messages_tests.rs:378` test to assert new ContextWindowExceeded outcome, not MaxTokensTruncation — DONE (Task 2, renamed `model_context_window_exceeded_completes_with_context_window_stop_reason`) |
+| `truncation_auto_continue_e2e` | shell | Mock provider truncates at N tokens; assert: (1) partial response persisted, (2) continue prompt injected, (3) final output is concatenation, (4) turn completes successfully |
+| `truncation_multiple_continues` | shell | Mock provider truncates 3 times then completes; assert all partials persisted and merged |
+| `truncation_thinking_block` | shell | Mock provider truncates mid-thinking; assert incomplete thinking discarded, complete thinking retained |
+| `truncation_tool_use_incomplete` | shell | Mock provider truncates mid-tool_use JSON; assert incomplete tool_use discarded, model re-generates on continue |
+| `context_window_exceeded_triggers_compaction` | shell | Mock provider returns model_context_window_exceeded; assert compaction triggered, not continue |
+| `pause_turn_resend` | shell | Mock provider returns pause_turn; assert response persisted, sampler re-called without continue prompt |
+| `cross_backend_consistency` | shell | Messages and chat_completions produce the same continue behavior (chat_completions e2e: partial persisted, continue prompt injected, concatenated output, 2 sampling cycles; responses backend pinned at the stream layer by Task 2) — DONE |
+| `stop_failure_not_emitted_on_success` | shell | Successful continue: no StopFailure hook event emitted — DONE |
+| `stop_failure_emitted_on_unrecoverable` | shell | Unrecoverable recovery failure (compaction HTTP 500): turn fails, StopFailure hook event emitted — DONE |
+| `model_context_window_exceeded_test_update` | sampler | Update `messages_tests.rs:378` test to assert new ContextWindowExceeded outcome, not MaxTokensTruncation — DONE (Task 2, renamed `model_context_window_exceeded_completes_with_context_window_stop_reason`) |
 
 ### 12.3 Regression Tests
 
 | Test | Scope | Description |
 |---|---|---|
-| `compaction_auto_continue_unchanged` | grow-shell | Compaction's auto_continue mechanism is not affected |
-| `empty_response_retry_unchanged` | grow-sampler | EmptyResponse still triggers retry |
-| `doom_loop_detection_unchanged` | grow-sampler | DoomLoopDetected recovery budget unaffected |
-| `retry_only_before_output_unchanged` | grow-sampler | output_observed still prevents retry (but not continue) |
+| `compaction_auto_continue_unchanged` | shell | Compaction's auto_continue mechanism is not affected |
+| `empty_response_retry_unchanged` | sampler | EmptyResponse still triggers retry |
+| `doom_loop_detection_unchanged` | sampler | DoomLoopDetected recovery budget unaffected |
+| `retry_only_before_output_unchanged` | sampler | output_observed still prevents retry (but not continue) |
 
 ### 12.4 Forbidden Test Patterns
 
@@ -567,45 +567,26 @@ Hook scripts should only observe `StopFailure` when the turn genuinely fails. Th
 
 ## 13. Task Decomposition
 
-### Task 0: Crate Rename `xai-chat-state` -> `grow-chat-state`
-**Crate**: xai-chat-state (renamed to grow-chat-state), grow-shell (references only)
-**Scope**: Pure mechanical rename, zero behavior change:
-1. `git mv crates/codegen/xai-chat-state crates/codegen/grow-chat-state` (preserves git history)
-2. `grow-chat-state/Cargo.toml`: `name = "grow-chat-state"`, version per D8
-   (`version.workspace = true` recommended -- resolves to 1.0.0, consistent with all
-   other grow-* crates; alternatively explicit `version = "1.0.0"` if independent
-   versioning is desired -- confirm with user)
-3. Root `Cargo.toml`: workspace members entry update
-4. `grow-shell/Cargo.toml:134`: dependency name + path update
-5. All code references `xai_chat_state::` -> `grow_chat_state::` (100+ in grow-shell)
-6. All doc comments `xai-chat-state` -> `grow-chat-state` (cross-crate comments:
-   grow-shell x5, grow-sampling-types x2, grow-subagent-resolution x2,
-   grow-compaction x2, grow-chat-state internal x4, this document)
-7. `Cargo.lock` updated automatically by cargo
-**File ownership**: root `Cargo.toml`, `grow-shell/Cargo.toml`,
-`crates/codegen/grow-chat-state/**`, `grow-shell/src/**`
+### Task 0: Crate Identity Baseline
+**Crate**: chat-state; shell (references only)
+**Scope**: Verify that `chat-state` uses the functional package name, inherits the
+workspace version, and is wired into the workspace before feature work begins.
 **Dependencies**: None (base layer, runs first).
-**Forbidden**: no logic changes, no refactoring, no formatting of unrelated code,
-no cleanup of the `default-bazel` feature (legacy, out of scope), no semantic changes.
-**Tests**: `cargo build --workspace` green; `cargo test` for grow-shell and
-grow-chat-state green; grep confirms zero residual `xai_chat_state` / `xai-chat-state`.
-**Known observable change (documented)**: tracing log targets start with crate name
-(`xai_chat_state::...` -> `grow_chat_state::...`); fine-grained `RUST_LOG=xai_chat_state=...`
-filters become ineffective. Low risk (internal crate), recorded here.
-**Reject if**: any logic code touched; compile/test failures; residual old-name references.
+**Tests**: workspace metadata resolves `chat-state` at version `1.0.0`; the
+workspace builds before behavior changes are introduced.
 
 ### Task 1: StopReason and AttemptOutcome Type Changes
-**Crate**: grow-sampling-types; grow-sampler (request_task.rs only)
+**Crate**: sampling-types; sampler (request_task.rs only)
 **Scope**: Add `ModelContextWindowExceeded` and `PauseTurn` to `StopReason`; add
 `Truncated`, `ContextWindowExceeded`, `PauseTurn` to `AttemptOutcome`; add
 `TruncationContinue` to `SyntheticReason`; add `ConversationItem::truncation_continue()`
 constructor (content passed in by caller -- no prompt constant here).
 **Compile-impact note (verified by architect)**: The new enum variants force
-exhaustive-match updates in exactly two places, both in grow-sampling-types:
+exhaustive-match updates in exactly two places, both in sampling-types:
 `StopReason::as_str()` and `SyntheticReason::starts_prompt_turn()`. All other
-`SyntheticReason` matches use `Some(_)`/`Unknown` wildcards; grow-shell's
+`SyntheticReason` matches use `Some(_)`/`Unknown` wildcards; shell's
 `StopReason` references are the unrelated `acp::StopReason`. `AttemptOutcome` is
-defined in `grow-sampler/src/actor/request_task.rs` (not grow-sampling-types);
+defined in `sampler/src/actor/request_task.rs` (not sampling-types);
 adding variants forces `run_request_task`'s match to add temporary branches.
 Temporary branches must preserve current behavior (fatal: emit_failed +
 send_completion(Err)) with a `TODO(Task 2)` marker; the `drive_l2` Length check at
@@ -614,13 +595,13 @@ send_completion(Err)) with a `TODO(Task 2)` marker; the `drive_l2` Length check 
 **Tests**: Serialization round-trip for new variants; `as_str()` for new StopReason
 variants; `starts_prompt_turn() == false` for `TruncationContinue`; `truncation_continue()`
 constructs a User item tagged `Some(SyntheticReason::TruncationContinue)`.
-**Reject if**: Changes touch files outside grow-sampling-types and
-`grow-sampler/src/actor/request_task.rs`; changes compaction's `AutoContinue` semantics;
+**Reject if**: Changes touch files outside sampling-types and
+`sampler/src/actor/request_task.rs`; changes compaction's `AutoContinue` semantics;
 adds prompt text constants (owned by Task 3); changes `request_task.rs:622-626` or
 stream-layer stop-reason mapping (owned by Task 2).
 
 ### Task 2: Stream Layer Stop Reason Mapping
-**Crate**: grow-sampler
+**Crate**: sampler
 **Scope**: Update `stream/messages.rs`, `stream/responses.rs`, `stream/chat_completions.rs`
 to map wire stop reasons to the new `StopReason` variants. Update `messages.rs:368-392`
 to split `MaxTokens` / `ModelContextWindowExceeded` / `PauseTurn`. Update `responses.rs:453`
@@ -630,7 +611,7 @@ of `Failed` for `Length`.
 **Tests**: `stop_reason_mapping` per backend; `truncated_outcome_carries_partial`;
 `context_window_exceeded_outcome`; `pause_turn_outcome`; `incomplete_thinking_discarded`;
 `incomplete_tool_use_discarded`; update `messages_tests.rs:378`.
-**Reject if**: Changes touch grow-shell; changes retry.rs retry classification for
+**Reject if**: Changes touch shell; changes retry.rs retry classification for
 non-truncation errors; changes compaction path.
 
 **Implementation notes (Task 2, verified)**:
@@ -658,10 +639,10 @@ non-truncation errors; changes compaction path.
   `truncated_incomplete_tool_use_discarded`.
 
 ### Task 3: Continue Loop and Session Layer
-**Crate**: grow-shell, grow-chat-state (prompt constant only)
+**Crate**: shell, chat-state (prompt constant only)
 **Scope**: Implement continue loop; implement continue prompt injection
 using `TRUNCATION_CONTINUE_PROMPT`; add `TRUNCATION_CONTINUE_PROMPT` to
-`grow-chat-state/src/compaction_utils.rs` (next to `AUTO_CONTINUE_PROMPT` at
+`chat-state/src/compaction_utils.rs` (next to `AUTO_CONTINUE_PROMPT` at
 `compaction_utils.rs:309`) and extend `is_synthetic_extracted_query`
 (`compaction_utils.rs:329-334`) to exclude it; implement `ContextWindowExceeded` ->
 compaction trigger; implement `PauseTurn` resend; update `turn_end.rs` StopFailure
@@ -677,7 +658,7 @@ classification; update `sampling/error.rs` ACP mapping.
   loop** — the continue branch must be inserted AFTER this loop (line 2306) and BEFORE the
   `tool_calls.is_empty()` turn-end check (line 2340), so the persisted partial is what the
   next request builds from.
-- `build_request` (`grow-chat-state/src/actor/request_builder.rs:35-135`) clones the full
+- `build_request` (`chat-state/src/actor/request_builder.rs:35-135`) clones the full
   conversation into the request (hot path) — synthetic user items (including the injected
   `truncation_continue` item) are carried through unchanged; there is no filtering of
   synthetic user items.
@@ -688,7 +669,7 @@ classification; update `sampling/error.rs` ACP mapping.
   compaction entry used by both the error path (`sampler_turn.rs:700-729`) and pre-sampling
   checks; `AutoCompactTriggerInfo` needs `tokens_used` / `context_window` / `percentage`
   (use `get_estimated_total_tokens()` + `get_sampling_config().context_window` +
-  `xai_token_estimation::usage_percentage_u8`). For `ModelContextWindowExceeded` compaction
+  `token_estimation::usage_percentage_u8`). For `ModelContextWindowExceeded` compaction
   must be triggered **unconditionally** (client-side estimation can under-count; the server
   reported the overflow), not gated on `check_auto_compact_needed()`.
 
@@ -712,8 +693,8 @@ execution — tool_use wins, per Task 2 decision):
 - Any other stop reason (including `None`, `Stop`, `ToolCalls`, `ContentFilter`) ->
   existing turn-end path untouched.
 
-**MaxTokensTruncation after Task 2**: no production code constructs it anymore (grow-sampler
-stream/actor paths are clean; grow-shell `OaiCompatClient` never produced it). The
+**MaxTokensTruncation after Task 2**: no production code constructs it anymore (sampler
+stream/actor paths are clean; shell `OaiCompatClient` never produced it). The
 `map_sampling_err_to_acp` branch (`sampling/error.rs:94-100`), `stop_reason_for_turn_error`
 (`:136-144`), `StopFailureKind::MaxOutputTokens` classification (`turn_end.rs:348-352`) and
 `classify_sampling_error` (`session_compact.rs:73`) are retained as defensive dead code —
@@ -722,7 +703,7 @@ they stay, unchanged, so a future unrecoverable-truncation path can reuse the ho
 
 **Dependencies**: Task 0, Task 1, Task 2.
 **Tests**: All integration tests from section 12.2; all regression tests from 12.3.
-**Reject if**: Changes touch grow-sampler stream layer (already owned by Task 2); changes
+**Reject if**: Changes touch sampler stream layer (already owned by Task 2); changes
 compaction's auto_continue mechanism; adds continue count limit or config toggle; adds new
 SamplingError variants or new ACP error codes.
 
@@ -765,15 +746,15 @@ SamplingError variants or new ACP error codes.
   it as a proof of incomplete-thinking discard.
 
 ### Merge Order
-Task 0 -> Task 1 -> Task 2 -> Task 3 (strict sequential: rename first so all feature
-code uses the new crate name; then type dependencies).
+Task 0 -> Task 1 -> Task 2 -> Task 3 (strict sequential: establish the package baseline,
+then introduce type dependencies).
 
 ### Shared Contract Ownership
-- Crate name `grow-chat-state` (rename): Task 0 (only owner)
+- Crate identity `chat-state`: Task 0 (only owner)
 - `StopReason` enum: Task 1 (only owner)
 - `AttemptOutcome` enum: Task 1 (only owner)
 - `SyntheticReason` enum: Task 1 (only owner)
-- `TRUNCATION_CONTINUE_PROMPT`: Task 3 (owned, in grow-chat-state/src/compaction_utils.rs)
+- `TRUNCATION_CONTINUE_PROMPT`: Task 3 (owned, in chat-state/src/compaction_utils.rs)
 - Stream stop-reason mapping: Task 2 (only owner)
 - Continue loop: Task 3 (only owner)
 
@@ -781,9 +762,8 @@ code uses the new crate name; then type dependencies).
 
 ### 14.1 Per-Task Review
 
-**Task 0**: Verify it is a pure rename -- no logic changes; verify `grow-chat-state`
-name and version correct; verify zero residual `xai_chat_state` / `xai-chat-state`
-references (code and comments); verify workspace builds and tests pass.
+**Task 0**: Verify `chat-state` has the correct functional name and workspace
+version; verify workspace metadata and the baseline build pass.
 
 **Task 1**: Verify new variants are serializable; verify `SyntheticReason::TruncationContinue`
 is excluded from `is_synthetic_extracted_query`; verify no changes to existing
@@ -798,13 +778,12 @@ constructed with sanitized thinking/tool_use blocks.
 verify no count limit; verify `ContextWindowExceeded` triggers compaction (not continue);
 verify `PauseTurn` resend does not inject continue prompt; verify `StopFailure` not
 emitted on successful continue; verify `retry_only_before_output` not violated; verify
-`TRUNCATION_CONTINUE_PROMPT` lives in `grow-chat-state/src/compaction_utils.rs`, separate
+`TRUNCATION_CONTINUE_PROMPT` lives in `chat-state/src/compaction_utils.rs`, separate
 from `AUTO_CONTINUE_PROMPT`, and is used with `SyntheticReason::TruncationContinue`.
 
 ### 14.2 Final Integration Review
 
-- Crate rename: workspace builds green; zero residual `xai_chat_state` / `xai-chat-state`
-  references anywhere in the repo; `grow-chat-state` version resolved correctly.
+- Crate identity: workspace builds green and `chat-state` resolves at the workspace version.
 - End-to-end: user sends long request -> truncation -> auto-continue -> completion ->
   conversation history contains full output -> next turn model sees complete output.
 - Cross-backend: all three backends produce identical continue behavior.
@@ -817,17 +796,17 @@ from `AUTO_CONTINUE_PROMPT`, and is used with `SyntheticReason::TruncationContin
 ## 15. Open Questions for Implementation
 
 1. **~~Continue prompt location~~** (RESOLVED): `TRUNCATION_CONTINUE_PROMPT` lives in
-   `grow-chat-state/src/compaction_utils.rs` (next to `AUTO_CONTINUE_PROMPT`), per user
+   `chat-state/src/compaction_utils.rs` (next to `AUTO_CONTINUE_PROMPT`), per user
    decision. The `ConversationItem::truncation_continue(content)` constructor lives in
-   `grow-sampling-types` (content passed in by caller) -- matching the existing
+   `sampling-types` (content passed in by caller) -- matching the existing
    `AUTO_CONTINUE_PROMPT` / `ConversationItem::auto_continue()` split.
 
-2. **~~Version mechanism for grow-chat-state~~** (RESOLVED): `version.workspace = true`
+2. **~~Version mechanism for chat-state~~** (RESOLVED): `version.workspace = true`
    (user confirmed option A; resolves to 1.0.0, consistent with all grow-* crates).
 
 3. **~~PauseTurn resend mechanics~~** (RESOLVED): Plain resend via the existing
    persistence + rebuild path is sufficient. `build_request`
-   (`grow-chat-state/src/actor/request_builder.rs:35-135`) clones the full conversation
+   (`chat-state/src/actor/request_builder.rs:35-135`) clones the full conversation
    verbatim (hot path), so once the partial assistant items are persisted by the
    turn.rs items loop, the next request carries text + completed `tool_use` blocks +
    thinking blocks (with `signature`, `conversation.rs:3088-3100`) back unchanged —

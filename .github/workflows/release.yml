@@ -1,6 +1,6 @@
 # Official Grow release assets for the four supported platforms:
 #   macos-aarch64, linux-x86_64, linux-aarch64, linux-riscv64
-# Asset names must stay grow-{version}-{asset_platform} for grow-update.
+# Asset names must stay grow-{version}-{asset_platform} for update.
 #
 # Each platform is its own job: a failing target does not block the others
 # (artifacts land per job; publish collects whatever succeeds and can be
@@ -86,12 +86,12 @@ jobs:
                 ')"
           else
             version="$(cargo metadata --locked --no-deps --format-version 1 \
-              | jq -r '.packages[] | select(.name == "grow-pager-bin") | .version')"
+              | jq -r '.packages[] | select(.name == "cli") | .version')"
           fi
           tag_version="${RELEASE_TAG#v}"
           test -n "$version"
           if [[ "$tag_version" != "$version" ]]; then
-            echo "Release tag $RELEASE_TAG does not match grow-pager-bin / workspace $version" >&2
+            echo "Release tag $RELEASE_TAG does not match cli / workspace $version" >&2
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -144,29 +144,6 @@ jobs:
           key: release-linux-x86_64
           shared-key: release-dist
 
-      # The Linux build runs inside a container: only the workspace (and the
-      # host CARGO_HOME/RUSTUP_HOME mounts in the Build step) is visible, so
-      # protoc and the ripgrep sidecar must live under $GITHUB_WORKSPACE.
-      - name: Prepare protoc (Linux container build)
-        shell: bash
-        env:
-          PROTOC_VERSION: "30.1"
-          PROTOC_ARCH: "x86_64"
-          PROTOC_SHA256: "5537e15ab0c0e610f809573948d3ec7d6ef387a07991e1c361a2a0e8cad983e5"
-        run: |
-          set -euo pipefail
-          mkdir -p "${GITHUB_WORKSPACE}/.build-tools/protoc"
-          archive="${RUNNER_TEMP}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
-          url="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
-          curl --fail --location --retry 5 --retry-all-errors \
-            --connect-timeout 30 --max-time 300 \
-            --output "$archive" "$url"
-          echo "${PROTOC_SHA256}  $archive" | sha256sum -c -
-          unzip -q -o "$archive" -d "${GITHUB_WORKSPACE}/.build-tools/protoc"
-          test -x "${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc"
-          "${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" --version
-          echo "PROTOC=${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" >> "$GITHUB_ENV"
-
       - name: Prepare bundled ripgrep
         shell: bash
         env:
@@ -209,7 +186,6 @@ jobs:
             -e "PATH=${CARGO_HOME}/bin:${PATH}" \
             -e "CARGO_HOME=${CARGO_HOME}" -e "RUSTUP_HOME=${RUSTUP_HOME}" \
             -e "GROW_VERSION=${GROW_VERSION}" \
-            -e "PROTOC=${PROTOC}" \
             -e "GROW_TOOLS_BUNDLE_RG_PATH=${GROW_TOOLS_BUNDLE_RG_PATH}" \
             -e "GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1" \
             -e "TARGET_TRIPLE=${TARGET_TRIPLE}" \
@@ -217,7 +193,7 @@ jobs:
             almalinux:8 bash -euo pipefail -c '
               dnf install -y gcc gcc-c++ make cmake git perl pkgconf >/dev/null
               cargo build --locked --profile release-dist \
-                -p grow-pager-bin --bin grow --target "${TARGET_TRIPLE}"
+                -p cli --bin grow --target "${TARGET_TRIPLE}"
             '
 
       # Minimal release assets: the unstripped release-dist build ships
@@ -315,29 +291,6 @@ jobs:
           key: release-linux-aarch64
           shared-key: release-dist
 
-      # The Linux build runs inside a container: only the workspace (and the
-      # host CARGO_HOME/RUSTUP_HOME mounts in the Build step) is visible, so
-      # protoc and the ripgrep sidecar must live under $GITHUB_WORKSPACE.
-      - name: Prepare protoc (Linux container build)
-        shell: bash
-        env:
-          PROTOC_VERSION: "30.1"
-          PROTOC_ARCH: "aarch_64"
-          PROTOC_SHA256: "e866d3dc4775e8032721915e83e3fb6e1ab4def7199a49b4f95c4d1f6cf4c03a"
-        run: |
-          set -euo pipefail
-          mkdir -p "${GITHUB_WORKSPACE}/.build-tools/protoc"
-          archive="${RUNNER_TEMP}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
-          url="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
-          curl --fail --location --retry 5 --retry-all-errors \
-            --connect-timeout 30 --max-time 300 \
-            --output "$archive" "$url"
-          echo "${PROTOC_SHA256}  $archive" | sha256sum -c -
-          unzip -q -o "$archive" -d "${GITHUB_WORKSPACE}/.build-tools/protoc"
-          test -x "${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc"
-          "${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" --version
-          echo "PROTOC=${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" >> "$GITHUB_ENV"
-
       # Official ripgrep has no aarch64-musl asset for 15.0.0, so embed the gnu
       # build (extracted sidecar; runnable on any distro with glibc >= the rg
       # build baseline).
@@ -365,7 +318,7 @@ jobs:
           test -x "$bundle_dir/rg"
           # Validate runnability on the native runner (the gnu rg sidecar needs
           # newer glibc than the AlmaLinux 8 build container provides; that is
-          # fine for real deployment targets, see grow-tools build.rs).
+          # fine for real deployment targets, see tools build.rs).
           "$bundle_dir/rg" --version >/dev/null
           echo "GROW_TOOLS_BUNDLE_RG_PATH=$bundle_dir/rg" >> "$GITHUB_ENV"
 
@@ -386,7 +339,6 @@ jobs:
             -e "PATH=${CARGO_HOME}/bin:${PATH}" \
             -e "CARGO_HOME=${CARGO_HOME}" -e "RUSTUP_HOME=${RUSTUP_HOME}" \
             -e "GROW_VERSION=${GROW_VERSION}" \
-            -e "PROTOC=${PROTOC}" \
             -e "GROW_TOOLS_BUNDLE_RG_PATH=${GROW_TOOLS_BUNDLE_RG_PATH}" \
             -e "GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1" \
             -e "TARGET_TRIPLE=${TARGET_TRIPLE}" \
@@ -394,7 +346,7 @@ jobs:
             almalinux:8 bash -euo pipefail -c '
               dnf install -y gcc gcc-c++ make cmake git perl pkgconf >/dev/null
               cargo build --locked --profile release-dist \
-                -p grow-pager-bin --bin grow --target "${TARGET_TRIPLE}"
+                -p cli --bin grow --target "${TARGET_TRIPLE}"
             '
 
       # Minimal release assets: the unstripped release-dist build ships
@@ -500,27 +452,6 @@ jobs:
         shell: bash
         run: cargo install cross --locked
 
-      # protoc runs on the HOST (build scripts), so use the amd64 build.
-      - name: Prepare protoc (host arch)
-        shell: bash
-        env:
-          PROTOC_VERSION: "30.1"
-          PROTOC_ARCH: "x86_64"
-          PROTOC_SHA256: "5537e15ab0c0e610f809573948d3ec7d6ef387a07991e1c361a2a0e8cad983e5"
-        run: |
-          set -euo pipefail
-          mkdir -p "${GITHUB_WORKSPACE}/.build-tools/protoc"
-          archive="${RUNNER_TEMP}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
-          url="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
-          curl --fail --location --retry 5 --retry-all-errors \
-            --connect-timeout 30 --max-time 300 \
-            --output "$archive" "$url"
-          echo "${PROTOC_SHA256}  $archive" | sha256sum -c -
-          unzip -q -o "$archive" -d "${GITHUB_WORKSPACE}/.build-tools/protoc"
-          test -x "${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc"
-          "${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" --version
-          echo "PROTOC=${GITHUB_WORKSPACE}/.build-tools/protoc/bin/protoc" >> "$GITHUB_ENV"
-
       # Official ripgrep releases have no riscv64 asset, so use the riscv64
       # prebuilt from microsoft/ripgrep-prebuilt (pinned v15.0.0, the same
       # version embedded on the other platforms). The tarball holds a single
@@ -561,12 +492,11 @@ jobs:
           # newer), so the tools dir is mounted explicitly at a fixed
           # container path and referenced from there. Options must stay
           # single-space separated: cross splits CROSS_CONTAINER_OPTS on ' '.
-          export CROSS_CONTAINER_OPTS="-v ${GITHUB_WORKSPACE}/.build-tools:/opt/grow-tools:ro \
-          -e PROTOC=/opt/grow-tools/protoc/bin/protoc \
-          -e GROW_TOOLS_BUNDLE_RG_PATH=/opt/grow-tools/rg/ripgrep-15.0.0-riscv64gc-unknown-linux-gnu/rg \
+          export CROSS_CONTAINER_OPTS="-v ${GITHUB_WORKSPACE}/.build-tools:/opt/tools:ro \
+          -e GROW_TOOLS_BUNDLE_RG_PATH=/opt/tools/rg/ripgrep-15.0.0-riscv64gc-unknown-linux-gnu/rg \
           -e GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1"
           cross build --locked --profile release-dist \
-            -p grow-pager-bin --bin grow --target riscv64gc-unknown-linux-gnu
+            -p cli --bin grow --target riscv64gc-unknown-linux-gnu
 
       # Full strip, same as the other Linux jobs (release-dist keeps DWARF +
       # symbols; the pipeline ships no debug sidecars). The amd64 runner's
@@ -661,10 +591,6 @@ jobs:
           key: release-macos-aarch64
           shared-key: release-dist
 
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Prepare bundled ripgrep
         shell: bash
         env:
@@ -695,7 +621,7 @@ jobs:
           GROW_VERSION: ${{ needs.validate.outputs.version }}
         run: |
           cargo build --locked --profile release-dist \
-            -p grow-pager-bin --bin grow --target "${TARGET_TRIPLE}"
+            -p cli --bin grow --target "${TARGET_TRIPLE}"
 
       # Minimal release assets on macOS too: Apple strip (no flags) removes
       # debug symbols + local symbols from the Mach-O.

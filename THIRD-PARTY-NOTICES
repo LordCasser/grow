@@ -16525,7 +16525,7 @@ PART I (continued) — BUNDLED UI / SYNTAX THEMES
 ================================================================================
 
 In-tree TUI palettes and bundled TextMate (.tmTheme) assets under
-grow-pager-render / grow-markdown. Not crates.io dependencies.
+pager-render / markdown. Not crates.io dependencies.
 
 First-party themes (not listed as third-party entries):
   - grownight, growday, auto — xAI original
@@ -16548,10 +16548,10 @@ License text: see Part II — Apache-2.0
 
 Additional requirements / notices:
   UI palette for theme `tokyonight` (Night/Storm hexes) in
-  grow-pager-render/src/theme/tokyonight.rs.
+  pager-render/src/theme/tokyonight.rs.
   Bundled TextMate syntax theme:
-    crates/codegen/grow-pager-render/assets/tokyo-night.tmTheme
-    crates/codegen/grow-markdown/assets/tokyo-night.tmTheme
+    crates/codegen/pager-render/assets/tokyo-night.tmTheme
+    crates/codegen/markdown/assets/tokyo-night.tmTheme
   First-party theme `grownight` reuses Tokyo Night accent hexes (same entry).
   Palette hexes match the Tokyo Night Night/Storm colors shared by the nvim
   port (Apache-2.0) and the original VS Code theme (MIT). This distribution
@@ -16573,7 +16573,7 @@ License text: see Part II — MIT
 
 Additional requirements / notices:
   UI palette for theme `rosepine-moon` in
-  grow-pager-render/src/theme/rosepine.rs (Moon variant hexes from the
+  pager-render/src/theme/rosepine.rs (Moon variant hexes from the
   Rosé Pine palette).
 
 
@@ -16590,7 +16590,7 @@ License text: see Part II — MIT
 
 Additional requirements / notices:
   UI palette for theme `oscura-midnight` in
-  grow-pager-render/src/theme/oscura.rs.
+  pager-render/src/theme/oscura.rs.
   Derived from the Oscura Midnight aesthetic from narative/oscura (MIT),
   with its OKLCH palette converted to sRGB.
   Some TUI semantic/accent role colors are first-party choices on top of that
@@ -16610,7 +16610,7 @@ to this repository root. Ported files have been modified from their originals
 APIs/runtimes, and extended); this section constitutes the prominent notice
 of those changes required by Apache License 2.0 §4(b). Full license texts are
 in Part II. A crate-local copy of these notices (with the same license bodies)
-ships at crates/codegen/grow-tools/THIRD_PARTY_NOTICES.md.
+ships at crates/codegen/tools/THIRD_PARTY_NOTICES.md.
 
 
 sst/opencode
@@ -16626,7 +16626,7 @@ License text: see Part II — MIT
 
 Additional requirements / notices:
   The Grow-native full-file write implementation under:
-    crates/codegen/grow-tools/src/implementations/grow_build/write/
+    crates/codegen/tools/src/implementations/grow_build/write/
   retains portions of the upstream write tool, adapted to Grow's Tool trait
   and runtime. Grow exposes no OpenCode runtime namespace or schema mode. The
   MIT copyright and permission notice must be included in all copies or
