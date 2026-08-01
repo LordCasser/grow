@@ -259,7 +259,7 @@ pub fn format_monitor_events(
     task_output_name: Option<&str>,
 ) -> Option<String> {
     use std::fmt::Write as _;
-    let tool_hint = task_output_name.unwrap_or("get_command_or_subagent_output");
+    let tool_hint = task_output_name.unwrap_or("get_task_output");
     match events {
         [] => None,
         [event] => {
@@ -402,6 +402,10 @@ pub async fn resolve_read_tool_name(bridge: &ToolBridge) -> Option<String> {
 /// in the current agent's toolset. When `None`, the subagent's full
 /// `output` is inlined verbatim -- this notification is the only place
 /// the model will see it (no disk-backed output file exists for subagents).
+///
+/// KEEP IN SYNC: the exact wording of this message is a compatibility
+/// surface — downstream mirrors reproduce it verbatim (grep for
+/// `format_subagent_completion_reminder`). Update them when changing it.
 pub fn format_subagent_completion(
     c: &SubagentCompletionSummary,
     task_output_name: Option<&str>,
@@ -1928,7 +1932,7 @@ mod tests {
         assert!(
             batched.starts_with(
                 "3 monitor events from 2 monitors \
-                 (use get_command_or_subagent_output to identify each monitor):"
+                 (use get_task_output to identify each monitor):"
             ),
             "batch must lead with event + monitor counts and default tool hint: {batched}"
         );

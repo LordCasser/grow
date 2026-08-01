@@ -13,9 +13,9 @@
 //! on disk via the atomic `replace_chat_history`.
 
 use agent_client_protocol as acp;
+use grow_chat_state::compaction_utils::HistoryRepairReport;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
-use grow_chat_state::compaction_utils::HistoryRepairReport;
 
 use super::{ExtResult, parse_params, to_raw_response};
 use crate::agent::MvpAgent;

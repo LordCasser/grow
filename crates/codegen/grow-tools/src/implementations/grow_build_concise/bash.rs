@@ -128,7 +128,7 @@ impl xai_tool_runtime::Tool for BashConciseTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "run_terminal_cmd",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -265,9 +265,8 @@ mod tests {
         // to_prompt_format() is a passthrough — it must NOT add another header.
         let mut bash = make_bash(0, "hello world\n");
         // Pre-bake DEFAULT (what BashTool::run() does)
-        bash.output_for_prompt = crate::implementations::grow_build::bash::format_default_prompt(
-            &bash, /* append_noop_reminder */ true,
-        );
+        bash.output_for_prompt =
+            crate::implementations::grow_build::bash::format_default_prompt(&bash);
         assert!(bash.output_for_prompt.starts_with("exit: 0"));
 
         // Concise post-processing (what BashConciseTool::run() does)

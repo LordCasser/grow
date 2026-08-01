@@ -11,6 +11,7 @@
 
 use crate::app::actions::Action;
 use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::{ModeSupport, Remedy};
 use crate::theme::{Theme, ThemeKind, cache as theme_cache};
 
 /// Switch the pager color theme.
@@ -29,9 +30,10 @@ impl SlashCommand for ThemeCommand {
         "Switch the color theme"
     }
 
-    /// Minimal has no theming, so there is nothing for `/theme` to switch.
-    fn available_in_minimal(&self) -> bool {
-        false
+    fn mode_support(&self) -> ModeSupport {
+        ModeSupport::FullscreenOnly(Remedy::SwitchMode {
+            why: "minimal renders with your terminal's own palette",
+        })
     }
 
     fn usage(&self) -> &str {
@@ -163,11 +165,6 @@ mod tests {
         theme_cache::reset_for_test();
     }
 
-    #[test]
-    fn theme_unavailable_in_minimal() {
-        assert!(!ThemeCommand.available_in_minimal());
-    }
-
     // -- suggest_args ---------------------------------------------------------
 
     #[test]
@@ -186,6 +183,8 @@ mod tests {
                 current_permission: "ask",
                 cwd: std::path::Path::new("."),
                 has_session_announcements: false,
+                billing_surface_visible: true,
+                usage_command_visible: true,
                 workflows_available: true,
                 screen_mode: crate::app::ScreenMode::Fullscreen,
             };
@@ -214,6 +213,8 @@ mod tests {
                 current_permission: "ask",
                 cwd: std::path::Path::new("."),
                 has_session_announcements: false,
+                billing_surface_visible: true,
+                usage_command_visible: true,
                 workflows_available: true,
                 screen_mode: crate::app::ScreenMode::Fullscreen,
             };
@@ -243,6 +244,8 @@ mod tests {
                 current_permission: "ask",
                 cwd: std::path::Path::new("."),
                 has_session_announcements: false,
+                billing_surface_visible: true,
+                usage_command_visible: true,
                 workflows_available: true,
                 screen_mode: crate::app::ScreenMode::Fullscreen,
             };
@@ -273,6 +276,8 @@ mod tests {
                 current_permission: "ask",
                 cwd: std::path::Path::new("."),
                 has_session_announcements: false,
+                billing_surface_visible: true,
+                usage_command_visible: true,
                 workflows_available: true,
                 screen_mode: crate::app::ScreenMode::Fullscreen,
             };
@@ -307,6 +312,8 @@ mod tests {
                 current_permission: "ask",
                 cwd: std::path::Path::new("."),
                 has_session_announcements: false,
+                billing_surface_visible: true,
+                usage_command_visible: true,
                 workflows_available: true,
                 screen_mode: crate::app::ScreenMode::Fullscreen,
             };
@@ -337,6 +344,8 @@ mod tests {
                 session_id: None,
                 bundle_state: &bundle,
                 screen_mode: crate::app::ScreenMode::Inline,
+                billing_surface_visible: true,
+                usage_command_visible: true,
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: false,
                     yolo_mode: false,
@@ -378,6 +387,8 @@ mod tests {
                 session_id: None,
                 bundle_state: &bundle,
                 screen_mode: crate::app::ScreenMode::Inline,
+                billing_surface_visible: true,
+                usage_command_visible: true,
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: false,
                     yolo_mode: false,
@@ -408,6 +419,8 @@ mod tests {
                 session_id: None,
                 bundle_state: &bundle,
                 screen_mode: crate::app::ScreenMode::Inline,
+                billing_surface_visible: true,
+                usage_command_visible: true,
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: false,
                     yolo_mode: false,
@@ -436,6 +449,8 @@ mod tests {
                 session_id: None,
                 bundle_state: &bundle,
                 screen_mode: crate::app::ScreenMode::Inline,
+                billing_surface_visible: true,
+                usage_command_visible: true,
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: false,
                     yolo_mode: false,
@@ -542,6 +557,8 @@ mod tests {
                 session_id: None,
                 bundle_state: &bundle,
                 screen_mode: crate::app::ScreenMode::Inline,
+                billing_surface_visible: true,
+                usage_command_visible: true,
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: false,
                     yolo_mode: false,
@@ -569,6 +586,8 @@ mod tests {
                 session_id: None,
                 bundle_state: &bundle,
                 screen_mode: crate::app::ScreenMode::Inline,
+                billing_surface_visible: true,
+                usage_command_visible: true,
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: false,
                     yolo_mode: false,

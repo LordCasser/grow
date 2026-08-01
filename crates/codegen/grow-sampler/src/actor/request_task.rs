@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use grow_sampling_types::{
-    ConversationRequest, ConversationResponse, EmptyResponseContext, SamplingError,
+    ConversationRequest, ConversationResponse, EmptyResponseContext, SamplingError, SentCredential,
     error::Result as SamplingResult,
 };
 
@@ -770,7 +770,10 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
                 .find_map(|tok| tok.strip_suffix('s').and_then(|n| n.parse::<u64>().ok()))
                 .unwrap_or(0),
         },
-        SamplingErrorKind::Auth => SamplingError::Auth(info.message.clone()),
+        SamplingErrorKind::Auth => SamplingError::Auth {
+            message: info.message.clone(),
+            credential: info.credential,
+        },
         // Must stay Serialization: EventStreamError is retryable, and a
         // response-parse failure is deterministic on retry. `info.message`
         // is the variant's rendered Display, so rebuild via the constructor
@@ -904,6 +907,7 @@ fn handle_cancellation(
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
+        credential: SentCredential::Unknown,
     };
     let _ = event_tx.send(SamplingEvent::Failed {
         request_id: request_id.clone(),
@@ -911,7 +915,7 @@ fn handle_cancellation(
     });
     send_completion(
         completion_tx,
-        Err(SamplingError::Auth("request cancelled".to_string())),
+        Err(SamplingError::auth_unknown("request cancelled")),
     );
 }
 
@@ -941,6 +945,7 @@ mod tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -961,6 +966,7 @@ mod tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -986,6 +992,7 @@ mod tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -1122,9 +1129,11 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: doom_signals,
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
-        let metrics =
-            InferenceLatencyStats::from_timestamps(Instant::now(), &[], Instant::now());
+        let metrics = InferenceLatencyStats::from_timestamps(Instant::now(), &[], Instant::now());
         let l2 = stream::iter(vec![SamplingEvent::Completed {
             request_id: request_id.clone(),
             response: Box::new(response),
@@ -1156,7 +1165,9 @@ mod tests {
                 // The partial response must survive intact for the session
                 // layer to persist and continue from.
                 assert_eq!(partial_response.stop_reason, Some(StopReason::Length));
-                let a = partial_response.assistant().expect("assistant item present");
+                let a = partial_response
+                    .assistant()
+                    .expect("assistant item present");
                 assert_eq!(a.content.as_ref(), "partial answer");
             }
             _ => panic!("expected Truncated outcome"),
@@ -1165,12 +1176,9 @@ mod tests {
 
     #[tokio::test]
     async fn drive_l2_context_window_exceeded_outcome() {
-        let outcome = drive_l2_with_stop_reason(
-            Some(StopReason::ModelContextWindowExceeded),
-            vec![],
-            None,
-        )
-        .await;
+        let outcome =
+            drive_l2_with_stop_reason(Some(StopReason::ModelContextWindowExceeded), vec![], None)
+                .await;
         match outcome {
             AttemptOutcome::ContextWindowExceeded {
                 partial_response, ..

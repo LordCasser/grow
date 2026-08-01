@@ -1024,7 +1024,9 @@ pub fn render_picker_row(
         // Keep at least half the content for the left label when possible.
         let min_left = (content_width / 2).max(1);
         let max_right = content_width.saturating_sub(min_left + 2); // gap=2
-        let right_budget = raw_right.min(max_right).min(content_width.saturating_sub(1));
+        let right_budget = raw_right
+            .min(max_right)
+            .min(content_width.saturating_sub(1));
         let gap = if right_budget > 0 { 2u16 } else { 0 };
         let max_label = content_width.saturating_sub(right_budget + gap) as usize;
         (right_budget, max_label)

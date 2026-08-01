@@ -10,7 +10,7 @@ use crate::app::app_view::{ActiveView, AppView};
 use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
 
-/// Show session info: fetch via grow/session/info and display in scrollback.
+/// Show session info: fetch via x.ai/session/info and display in scrollback.
 ///
 /// Produces Effect::ShowSessionInfo which spawns an async ACP ext request.
 /// On completion, TaskResult::SessionInfoComplete shows the formatted info.

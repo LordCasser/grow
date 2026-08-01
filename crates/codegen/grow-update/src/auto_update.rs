@@ -592,6 +592,7 @@ async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::
             // Detach = new session (Ctrl+C isolation), not handle abandonment:
             // the child is still ours to wait() on.
             grow_tools::util::detach_command(&mut cmd);
+            #[allow(clippy::disallowed_methods)] // the caller owns the returned handle
             let child = cmd.spawn()?;
             Ok(Some(child))
         }
@@ -642,6 +643,7 @@ pub fn restart_grow() -> Result<()> {
         cmd.stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
+        #[allow(clippy::disallowed_methods)] // the relaunched CLI replaces this process
         let _ = cmd.spawn()?;
         std::process::exit(0);
     }
@@ -1014,17 +1016,41 @@ async fn remove_stale_pager(bin_dir: &std::path::Path) {
 
 const SMOKE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Retry budget for exec attempts refused with ETXTBSY. The failure window
+/// is normally the microseconds another spawn in this process sits between
+/// fork and exec (see [`smoke_test_binary`]), but on a heavily loaded
+/// machine that window can stretch, so the budget errs generous — a false
+/// "failed to run" both aborts this install and deletes the binary.
+const SMOKE_TEST_ETXTBSY_ATTEMPTS: u32 = 8;
+const SMOKE_TEST_ETXTBSY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(25);
+
 async fn smoke_test_binary(binary_path: &std::path::Path) -> bool {
-    let mut cmd = tokio::process::Command::new(binary_path);
-    cmd.arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    grow_tools::util::detach_command(&mut cmd);
-    match tokio::time::timeout(SMOKE_TEST_TIMEOUT, cmd.status()).await {
-        Ok(Ok(status)) => status.success(),
-        _ => false,
+    // ETXTBSY race: while a concurrent updater in this process is between
+    // fork and exec (pre_exec in detach_command forces the fork/exec path),
+    // its child briefly holds every open fd — including the write-side fd of
+    // a download that has just been renamed onto `binary_path`. Exec'ing a
+    // binary whose inode is still open for write fails with ETXTBSY even
+    // though the file is complete and healthy, so retry instead of failing
+    // the install (and deleting a racer's freshly installed binary).
+    for attempt in 1..=SMOKE_TEST_ETXTBSY_ATTEMPTS {
+        let mut cmd = tokio::process::Command::new(binary_path);
+        cmd.arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        grow_tools::util::detach_command(&mut cmd);
+        match tokio::time::timeout(SMOKE_TEST_TIMEOUT, cmd.status()).await {
+            Ok(Ok(status)) => return status.success(),
+            Ok(Err(e))
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && attempt < SMOKE_TEST_ETXTBSY_ATTEMPTS =>
+            {
+                tokio::time::sleep(SMOKE_TEST_ETXTBSY_BACKOFF * attempt).await;
+            }
+            _ => return false,
+        }
     }
+    false
 }
 
 /// Regenerate shell completions after a binary update (best-effort).

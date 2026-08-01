@@ -35,8 +35,9 @@ pub struct CampaignOverride {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct DoomLoopRecoverySettings {
-    /// Send the `x-grow-doom-loop-check` header and parse the reported
-    /// triggers. `Some(false)` is a kill-switch; absent ⇒ client default (off).
+    /// Send the `x-grow-doom-loop-check` header, parse the reported
+    /// triggers, and resample confident loops. `Some(false)` is a
+    /// kill-switch; absent ⇒ client default (ON).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     /// Highest `tail_repetition` threshold considered confident (clamped to
@@ -149,7 +150,7 @@ pub struct WorktreeAutoGcSettings {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_age_by_kind: Option<std::collections::BTreeMap<String, WorktreeKindMaxAge>>,
-    /// Optional discovery rebuild + stale `.git/worktrees/` prune (default off).
+    /// Optional discovery rebuild + grow-scoped stale `.git/worktrees/` scrub (default off).
     #[serde(
         default,
         deserialize_with = "de_opt_bool_tolerant",

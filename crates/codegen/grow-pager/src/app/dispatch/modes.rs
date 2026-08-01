@@ -346,11 +346,9 @@ fn set_yolo_mode_inner_scoped(app: &mut AppView, new: bool, update_default: bool
                 .iter()
                 .find(|o| o.kind == acp::PermissionOptionKind::AllowOnce)
             {
-                acp::RequestPermissionResponse::new(
-                    acp::RequestPermissionOutcome::Selected(
-                        acp::SelectedPermissionOutcome::new(allow.option_id.clone()),
-                    ),
-                )
+                acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(
+                    acp::SelectedPermissionOutcome::new(allow.option_id.clone()),
+                ))
             } else {
                 acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled)
             };

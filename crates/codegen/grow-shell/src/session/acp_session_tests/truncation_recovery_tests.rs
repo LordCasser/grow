@@ -68,18 +68,20 @@ fn tool_use_block_incomplete(id: &str, name: &str, input_json: &str) -> serde_js
 /// `stop_reason`. Each block is streamed as start → delta(s) → stop; the
 /// stream ends with `message_delta` carrying `stop_reason` + `message_stop`.
 fn messages_turn(blocks: &[serde_json::Value], stop_reason: &str) -> ScriptedResponse {
-    let mut events: Vec<String> = vec![json!({
-        "type": "message_start",
-        "message": {
-            "id": "msg_test", "type": "message", "role": "assistant",
-            "content": [], "model": "test-model", "stop_reason": null,
-            "usage": {
-                "input_tokens": 10, "output_tokens": 0,
-                "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0
+    let mut events: Vec<String> = vec![
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_test", "type": "message", "role": "assistant",
+                "content": [], "model": "test-model", "stop_reason": null,
+                "usage": {
+                    "input_tokens": 10, "output_tokens": 0,
+                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0
+                }
             }
-        }
-    })
-    .to_string()];
+        })
+        .to_string(),
+    ];
     for (i, block) in blocks.iter().enumerate() {
         let block_type = block["type"].as_str().expect("block has a type");
         // The start event must NOT carry content: the stream layer seeds
@@ -89,7 +91,9 @@ fn messages_turn(blocks: &[serde_json::Value], stop_reason: &str) -> ScriptedRes
         let start_block = match block_type {
             "text" => json!({ "type": "text", "text": "" }),
             "thinking" => json!({ "type": "thinking", "thinking": "", "signature": "" }),
-            "tool_use" => json!({ "type": "tool_use", "id": block["id"], "name": block["name"], "input": {} }),
+            "tool_use" => {
+                json!({ "type": "tool_use", "id": block["id"], "name": block["name"], "input": {} })
+            }
             other => panic!("unsupported block type {other:?}"),
         };
         events.push(
@@ -176,18 +180,20 @@ fn messages_turn(blocks: &[serde_json::Value], stop_reason: &str) -> ScriptedRes
 /// unified turn loop feeds into the same continue branch as the Messages
 /// `max_tokens` stop reason.
 fn chat_completions_turn(text: &str, finish_reason: Option<&str>) -> ScriptedResponse {
-    let mut events: Vec<String> = vec![json!({
-        "id": "chatcmpl-test",
-        "object": "chat.completion.chunk",
-        "created": 1234567890,
-        "model": "test-model",
-        "choices": [{
-            "index": 0,
-            "delta": { "role": "assistant", "content": text },
-            "finish_reason": null
-        }]
-    })
-    .to_string()];
+    let mut events: Vec<String> = vec![
+        json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "created": 1234567890,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": { "role": "assistant", "content": text },
+                "finish_reason": null
+            }]
+        })
+        .to_string(),
+    ];
     events.push(
         json!({
             "id": "chatcmpl-test",
@@ -248,8 +254,7 @@ async fn actor_with_sampler(
     std::sync::Arc<SessionActor>,
     mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
 ) {
-    let (gateway_tx, gateway_rx) =
-        mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+    let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
     let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
     // Point the chat-state sampling config at the mock server so BOTH the
@@ -410,11 +415,8 @@ fn truncation_auto_continue_e2e() {
                 "/v1/messages",
                 messages_turn(&[text_block("part two")], END_TURN),
             );
-            let (actor, _gateway_rx) = actor_with_sampler(
-                &server,
-                grow_sampling_types::ApiBackend::Messages,
-            )
-            .await;
+            let (actor, _gateway_rx) =
+                actor_with_sampler(&server, grow_sampling_types::ApiBackend::Messages).await;
 
             let result = run_user_turn(&actor, "trunc-e2e").await;
             result.expect("turn must complete successfully");
@@ -466,11 +468,8 @@ fn truncation_multiple_continues() {
                 "/v1/messages",
                 messages_turn(&[text_block("four")], END_TURN),
             );
-            let (actor, _gateway_rx) = actor_with_sampler(
-                &server,
-                grow_sampling_types::ApiBackend::Messages,
-            )
-            .await;
+            let (actor, _gateway_rx) =
+                actor_with_sampler(&server, grow_sampling_types::ApiBackend::Messages).await;
 
             let result = run_user_turn(&actor, "trunc-multi").await;
             result.expect("turn must complete successfully");
@@ -521,11 +520,8 @@ fn truncation_thinking_block() {
                 "/v1/messages",
                 messages_turn(&[text_block("part two")], END_TURN),
             );
-            let (actor, _gateway_rx) = actor_with_sampler(
-                &server,
-                grow_sampling_types::ApiBackend::Messages,
-            )
-            .await;
+            let (actor, _gateway_rx) =
+                actor_with_sampler(&server, grow_sampling_types::ApiBackend::Messages).await;
 
             let result = run_user_turn(&actor, "trunc-think").await;
             result.expect("turn must complete successfully");
@@ -536,21 +532,19 @@ fn truncation_thinking_block() {
             let reasoning_texts: Vec<String> = conversation
                 .iter()
                 .filter_map(|item| match item {
-                    ConversationItem::Reasoning(r) => {
-                        Some(format!(
-                            "sig={:?} text={}",
-                            r.encrypted_content,
-                            r.summary
-                                .iter()
-                                .map(|p| match p {
-                                    grow_sampling_types::rs::SummaryPart::SummaryText(s) => {
-                                        s.text.clone()
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("")
-                        ))
-                    }
+                    ConversationItem::Reasoning(r) => Some(format!(
+                        "sig={:?} text={}",
+                        r.encrypted_content,
+                        r.summary
+                            .iter()
+                            .map(|p| match p {
+                                grow_sampling_types::rs::SummaryPart::SummaryText(s) => {
+                                    s.text.clone()
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("")
+                    )),
                     _ => None,
                 })
                 .collect();
@@ -561,7 +555,9 @@ fn truncation_thinking_block() {
                 "complete thinking block with signature must be retained, got {reasoning_texts:?}"
             );
             assert!(
-                !reasoning_texts.iter().any(|r| r.contains("partial thinking")),
+                !reasoning_texts
+                    .iter()
+                    .any(|r| r.contains("partial thinking")),
                 "incomplete thinking block must be discarded, got {reasoning_texts:?}"
             );
             assert_eq!(truncation_continue_count(&conversation), 1);
@@ -599,11 +595,8 @@ fn truncation_tool_use_incomplete() {
                 "/v1/messages",
                 messages_turn(&[text_block("part two")], END_TURN),
             );
-            let (actor, _gateway_rx) = actor_with_sampler(
-                &server,
-                grow_sampling_types::ApiBackend::Messages,
-            )
-            .await;
+            let (actor, _gateway_rx) =
+                actor_with_sampler(&server, grow_sampling_types::ApiBackend::Messages).await;
 
             let result = run_user_turn(&actor, "trunc-tool").await;
             result.expect("turn must complete successfully");
@@ -623,9 +616,7 @@ fn truncation_tool_use_incomplete() {
                 assistant_items[0].content
             );
             assert!(
-                assistant_items
-                    .iter()
-                    .all(|a| a.tool_calls.is_empty()),
+                assistant_items.iter().all(|a| a.tool_calls.is_empty()),
                 "the incomplete tool_use must not surface as a tool call"
             );
             assert_eq!(truncation_continue_count(&conversation), 1);
@@ -683,11 +674,8 @@ fn truncation_tool_use_complete_wins_over_length() {
                 "/v1/messages",
                 messages_turn(&[text_block("done")], END_TURN),
             );
-            let (actor, _gateway_rx) = actor_with_sampler(
-                &server,
-                grow_sampling_types::ApiBackend::Messages,
-            )
-            .await;
+            let (actor, _gateway_rx) =
+                actor_with_sampler(&server, grow_sampling_types::ApiBackend::Messages).await;
             let result = run_user_turn(&actor, "trunc-tool-wins").await;
             result.expect("turn must complete successfully");
 
@@ -749,11 +737,8 @@ fn context_window_exceeded_triggers_compaction() {
                 "/v1/messages",
                 messages_turn(&[text_block("after compact")], END_TURN),
             );
-            let (actor, _gateway_rx) = actor_with_sampler(
-                &server,
-                grow_sampling_types::ApiBackend::Messages,
-            )
-            .await;
+            let (actor, _gateway_rx) =
+                actor_with_sampler(&server, grow_sampling_types::ApiBackend::Messages).await;
             // Compaction requires a System item in chat state (production
             // session startup injects it; the bare test actor starts empty).
             actor
@@ -815,11 +800,8 @@ fn pause_turn_resend() {
                 "/v1/messages",
                 messages_turn(&[text_block("second segment")], END_TURN),
             );
-            let (actor, _gateway_rx) = actor_with_sampler(
-                &server,
-                grow_sampling_types::ApiBackend::Messages,
-            )
-            .await;
+            let (actor, _gateway_rx) =
+                actor_with_sampler(&server, grow_sampling_types::ApiBackend::Messages).await;
 
             let result = run_user_turn(&actor, "pause-resend").await;
             result.expect("turn must complete successfully");
@@ -862,11 +844,8 @@ fn stop_failure_not_emitted_on_success() {
                 "/v1/messages",
                 messages_turn(&[text_block("part two")], END_TURN),
             );
-            let (actor, mut gateway_rx) = actor_with_sampler(
-                &server,
-                grow_sampling_types::ApiBackend::Messages,
-            )
-            .await;
+            let (actor, mut gateway_rx) =
+                actor_with_sampler(&server, grow_sampling_types::ApiBackend::Messages).await;
             actor.client_hooks.borrow_mut().insert(
                 grow_hooks::event::HookEventName::StopFailure,
                 vec![crate::extensions::hooks::ClientHookGroup {
@@ -912,11 +891,8 @@ fn stop_failure_emitted_on_unrecoverable() {
                     json!({ "error": { "type": "server_error", "message": "boom" } }),
                 ),
             );
-            let (actor, mut gateway_rx) = actor_with_sampler(
-                &server,
-                grow_sampling_types::ApiBackend::Messages,
-            )
-            .await;
+            let (actor, mut gateway_rx) =
+                actor_with_sampler(&server, grow_sampling_types::ApiBackend::Messages).await;
             actor.client_hooks.borrow_mut().insert(
                 grow_hooks::event::HookEventName::StopFailure,
                 vec![crate::extensions::hooks::ClientHookGroup {
@@ -966,11 +942,8 @@ fn cross_backend_consistency() {
                 "/v1/chat/completions",
                 chat_completions_turn("part two", Some("stop")),
             );
-            let (actor, _gateway_rx) = actor_with_sampler(
-                &server,
-                grow_sampling_types::ApiBackend::ChatCompletions,
-            )
-            .await;
+            let (actor, _gateway_rx) =
+                actor_with_sampler(&server, grow_sampling_types::ApiBackend::ChatCompletions).await;
 
             let result = run_user_turn(&actor, "cross-backend-cc").await;
             result.expect("turn must complete successfully");

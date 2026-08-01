@@ -204,7 +204,9 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             .prompt
             .set_contextual_hints(app.contextual_hints.undo, app.contextual_hints.plan_mode);
         agent.set_session_recap_available(app.session_recap_available);
+
         agent.apply_app_scoped_gates(app.screen_mode, &app.active_announcements);
+
         agent
             .prompt
             .slash_controller

@@ -138,7 +138,9 @@ fn stacked_gate() -> (u16, u16) {
 
 /// Width of the centered text group in stacked / text-only mode.
 fn text_group_width(content_width: u16) -> u16 {
-    content_width.saturating_sub(2 * logo::H_PAD).min(STACKED_TEXT_WIDTH)
+    content_width
+        .saturating_sub(2 * logo::H_PAD)
+        .min(STACKED_TEXT_WIDTH)
 }
 
 /// Text-group geometry for a mode: `(text_width, logo_height, base_block_height)`.
@@ -226,7 +228,11 @@ pub(super) fn compute_hero(input: HeroLayoutInput<'_>) -> HeroLayout {
     let h = content_area.height;
     let gap_err = if input.error_height > 0 { 1 } else { 0 };
     let fixed_below = fixed_below(input.tip_height);
-    let menu_h = if input.with_menu { input.menu_height } else { 0 };
+    let menu_h = if input.with_menu {
+        input.menu_height
+    } else {
+        0
+    };
     // version(1) + subtitle(1) + gap-before-menu(1) + menu.
     let base_text_h = 1 + 1 + u16::from(menu_h > 0) + menu_h;
 
@@ -416,7 +422,9 @@ pub(super) fn render_hero(
     let mut announcement_truncated = false;
     let mut announcement_rect = None;
     let mut promo_cta_rect = None;
-    if layout.info.height > 0 && let Some(ann) = announcement {
+    if layout.info.height > 0
+        && let Some(ann) = announcement
+    {
         let (text_area, truncated, cta_rect) = render_announcement_with_cta(
             buf,
             theme,
@@ -480,12 +488,14 @@ fn render_announcement_with_cta(
     let mut cta_rect = None;
     if let Some(label) = promo_cta {
         use unicode_width::UnicodeWidthStr;
-        let text_rows = announcement_text_rows(ann, text_area.width, expanded).min(text_area.height);
+        let text_rows =
+            announcement_text_rows(ann, text_area.width, expanded).min(text_area.height);
         let cta_y = area.y + text_rows + 1;
         if cta_y < area.y + area.height {
             // Hover follows the button cells (mouse-pos driven, like the sibling
             // info blocks); the shared painter owns the styling + truncation.
-            let btn_w = UnicodeWidthStr::width(format!("[{label}]").as_str()).min(area.width as usize);
+            let btn_w =
+                UnicodeWidthStr::width(format!("[{label}]").as_str()).min(area.width as usize);
             let hovered = mouse_pos.is_some_and(|(mx, my)| {
                 my == cta_y && mx >= area.x && (mx as usize) < area.x as usize + btn_w
             });
@@ -656,7 +666,8 @@ fn render_wrapped_text(
             let (head, ell_x) = if line.width() < w {
                 (line.as_str(), x + line.width() as u16)
             } else {
-                let cut = crate::render::line_utils::byte_offset_at_width(line, w.saturating_sub(1));
+                let cut =
+                    crate::render::line_utils::byte_offset_at_width(line, w.saturating_sub(1));
                 (&line[..cut], x + line[..cut].width() as u16)
             };
             buf.set_span(x, row, &Span::styled(head, style), width);
@@ -814,7 +825,10 @@ managed devices and accounts. Report security incidents";
         let l = layout(30, 20);
         assert_eq!(l.mode, HeroMode::TextOnly);
         assert_eq!(l.logo.height, 0);
-        assert_eq!(l.text.width, 26, "text group shrinks to the available width");
+        assert_eq!(
+            l.text.width, 26,
+            "text group shrinks to the available width"
+        );
     }
 
     #[test]
@@ -836,15 +850,32 @@ managed devices and accounts. Report security incidents";
     fn hero_renders_no_border_glyphs() {
         let area = Rect::new(0, 0, 150, 50);
         let mut buf = Buffer::empty(area);
-        let items = [("ctrl+w", "New worktree"), ("ctrl+s", "Resume session"), ("ctrl+q", "Quit")];
+        let items = [
+            ("ctrl+w", "New worktree"),
+            ("ctrl+s", "Resume session"),
+            ("ctrl+q", "Quit"),
+        ];
         let l = compute_hero(HeroLayoutInput {
             content_area: area,
             menu_height: 3,
             with_menu: true,
             ..Default::default()
         });
-        render_hero(&l, &mut buf, &theme(), &items, None, None, None, false, None, true);
-        let border_chars = ['╭', '╮', '╰', '╯', '│', '─', '┌', '┐', '└', '┘', '┼', '├', '┤', '┬', '┴'];
+        render_hero(
+            &l,
+            &mut buf,
+            &theme(),
+            &items,
+            None,
+            None,
+            None,
+            false,
+            None,
+            true,
+        );
+        let border_chars = [
+            '╭', '╮', '╰', '╯', '│', '─', '┌', '┐', '└', '┘', '┼', '├', '┤', '┬', '┴',
+        ];
         for y in 0..area.height {
             for x in 0..area.width {
                 let sym = buf.cell((x, y)).map_or("", |c| c.symbol());
@@ -860,14 +891,29 @@ managed devices and accounts. Report security incidents";
     fn hero_menu_rects_follow_rows() {
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
-        let items = [("ctrl+w", "New worktree"), ("ctrl+s", "Resume session"), ("ctrl+q", "Quit")];
+        let items = [
+            ("ctrl+w", "New worktree"),
+            ("ctrl+s", "Resume session"),
+            ("ctrl+q", "Quit"),
+        ];
         let l = compute_hero(HeroLayoutInput {
             content_area: area,
             menu_height: 3,
             with_menu: true,
             ..Default::default()
         });
-        let rects = render_hero(&l, &mut buf, &theme(), &items, None, None, None, false, None, true);
+        let rects = render_hero(
+            &l,
+            &mut buf,
+            &theme(),
+            &items,
+            None,
+            None,
+            None,
+            false,
+            None,
+            true,
+        );
         assert_eq!(rects.menu_rects.len(), 3);
         assert!(rects.menu_rects[1].y > rects.menu_rects[0].y);
         assert!(rects.menu_rects[2].y > rects.menu_rects[1].y);

@@ -244,7 +244,18 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                         false
                     }
                 } else {
-                    finish_wake_turn(agent, &prompt_id, &stop_reason, agent_result.as_deref());
+                    let cancel_trigger = session_notif
+                        .meta
+                        .as_ref()
+                        .and_then(|v| v.get("cancelTrigger"))
+                        .and_then(|v| v.as_str());
+                    finish_wake_turn(
+                        agent,
+                        &prompt_id,
+                        &stop_reason,
+                        agent_result.as_deref(),
+                        cancel_trigger,
+                    );
                     true
                 }
             } else if is_server_initiated_prompt(&prompt_id)
@@ -1356,16 +1367,11 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
             // so re-creating the confirm state must never drop the prompt.
             if let Some(target) = change.get("target").and_then(serde_json::Value::as_str) {
                 let target = SessionMode::from_id(target);
-                let already_parked =
-                    matches!(&mut agent.behavior_switch_confirm, Some(confirm) if confirm.target == target);
+                let already_parked = matches!(&mut agent.behavior_switch_confirm, Some(confirm) if confirm.target == target);
                 if !already_parked {
-                    let prompt = agent
-                        .behavior_switch_confirm
-                        .take()
-                        .and_then(|c| c.prompt);
-                    agent.behavior_switch_confirm = Some(
-                        crate::app::agent_view::BehaviorSwitchConfirm { target, prompt },
-                    );
+                    let prompt = agent.behavior_switch_confirm.take().and_then(|c| c.prompt);
+                    agent.behavior_switch_confirm =
+                        Some(crate::app::agent_view::BehaviorSwitchConfirm { target, prompt });
                 }
             }
         } else {

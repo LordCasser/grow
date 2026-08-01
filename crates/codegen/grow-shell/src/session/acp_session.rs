@@ -1531,9 +1531,6 @@ mod interjection_actor_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/permission_auto_mode_tests.rs"]
 mod permission_auto_mode_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/subagent_bash_permission_tests.rs"]
-mod subagent_bash_permission_tests;
 /// Tests for [`conversation_has_project_instructions`], the idempotence
 /// helper that gates the spawn-time AGENTS.md / CLAUDE.md injector.
 ///
@@ -1570,6 +1567,9 @@ mod rewind_cross_compaction_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/rewind_synthetic_turn_tests.rs"]
 mod rewind_synthetic_turn_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/subagent_bash_permission_tests.rs"]
+mod subagent_bash_permission_tests;
 /// Pins the `SubagentFinished` usage-fold attribution gate.
 #[cfg(test)]
 #[path = "acp_session_tests/subagent_usage_fold_tests.rs"]
@@ -1749,6 +1749,8 @@ mod build_tool_parse_error_message_tests;
 #[path = "acp_session_tests/cancel_running_task_tests.rs"]
 mod cancel_running_task_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/turn/chat_history_integrity_tests.rs"]
+mod chat_history_integrity_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/inline_auto_compact_flow_tests.rs"]
 mod inline_auto_compact_flow_tests;

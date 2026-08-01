@@ -620,6 +620,11 @@ pub struct TokenUsage {
     ///   into `prompt_tokens` instead.
     #[serde(default)]
     pub cached_prompt_tokens: u32,
+    /// Prompt tokens written to cache this call (Messages `cache_creation_input_tokens`,
+    /// billed at ~1.25x). Part of `prompt_tokens` but distinct from cache reads; 0 on
+    /// backends without a cache-write signal.
+    #[serde(default)]
+    pub cache_creation_prompt_tokens: u32,
 }
 
 impl TokenUsage {
@@ -646,6 +651,7 @@ impl From<Usage> for TokenUsage {
                 .as_ref()
                 .map_or(0, |d| d.reasoning_tokens),
             cached_prompt_tokens,
+            cache_creation_prompt_tokens: 0,
         }
     }
 }
@@ -688,6 +694,17 @@ pub struct ConversationResponse {
     /// the wire (Messages `message_delta.stop_details.explanation`); `None`
     /// otherwise and on backends that don't report one.
     pub stop_message: Option<String>,
+    /// Provider message id (Messages `message.id`); `None` on backends that do
+    /// not carry one (OAI Chat Completions / Responses).
+    pub message_id: Option<String>,
+    /// Verbatim wire stop reason before it collapses into [`StopReason`]
+    /// (e.g. `end_turn`, `tool_use`, `pause_turn`); `None` when unreported.
+    pub raw_stop_reason: Option<String>,
+    /// The provider's matched stop sequence (Messages API
+    /// `message_delta.stop_sequence`), present only when the model stopped on a
+    /// configured stop sequence; `None` otherwise and on backends that do not
+    /// report one (OAI Chat Completions / Responses).
+    pub stop_sequence: Option<String>,
 }
 
 /// Normalize a wire cost-ticks value at capture.
@@ -2889,12 +2906,79 @@ pub fn dedup_duplicate_tool_results(conversation: &mut Vec<ConversationItem>) ->
 // Anthropic Messages API Conversion
 // ============================================================================
 
+/// Marks the last block that can carry one, scanning back past `Thinking`,
+/// which the API rejects a breakpoint on.
+fn mark_message_cache_breakpoint(msg: &mut crate::messages::Message) -> bool {
+    use crate::messages::{CacheControl, ContentBlock, MessageContent};
+
+    match &mut msg.content {
+        MessageContent::Blocks(blocks) => {
+            for block in blocks.iter_mut().rev() {
+                let cache_control = match block {
+                    ContentBlock::Text { cache_control, .. }
+                    | ContentBlock::ToolResult { cache_control, .. }
+                    | ContentBlock::Image { cache_control, .. }
+                    | ContentBlock::ToolUse { cache_control, .. } => cache_control,
+                    ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {
+                        continue;
+                    }
+                };
+                *cache_control = Some(CacheControl::ephemeral());
+                return true;
+            }
+            false
+        }
+        // Plain text cannot carry a breakpoint, so promote it to block form.
+        MessageContent::Text(text) => {
+            let text = std::mem::take(text);
+            msg.content = MessageContent::Blocks(vec![ContentBlock::Text {
+                text,
+                cache_control: Some(CacheControl::ephemeral()),
+            }]);
+            true
+        }
+    }
+}
+
+/// An entry is written only at a breakpoint, so marking the system prompt alone
+/// leaves the transcript uncached. The third covers a turn that appends more
+/// than the API's 20 block lookback. The fourth slot stays free: a gateway that
+/// turns on automatic caching takes it, and five is rejected outright.
+fn apply_cache_breakpoints(
+    system_blocks: &mut [crate::messages::TextBlock],
+    messages: &mut [crate::messages::Message],
+) {
+    use crate::messages::{CacheControl, MessageRole};
+
+    if let Some(last) = system_blocks.last_mut() {
+        last.cache_control = Some(CacheControl::ephemeral());
+    }
+
+    let tip = (0..messages.len())
+        .rev()
+        .find(|&i| mark_message_cache_breakpoint(&mut messages[i]));
+
+    // Where the previous request ended. A turn can append several user messages
+    // in a row, so skip the whole trailing run rather than a neighbour of the tip.
+    if let Some(tip) = tip
+        && let Some(prev) = messages[..tip]
+            .iter()
+            .rposition(|m| matches!(m.role, MessageRole::Assistant))
+            .and_then(|assistant| {
+                messages[..assistant]
+                    .iter()
+                    .rposition(|m| matches!(m.role, MessageRole::User))
+            })
+    {
+        mark_message_cache_breakpoint(&mut messages[prev]);
+    }
+}
+
 /// Convert a ConversationRequest to Anthropic MessagesRequest.
 pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::MessagesRequest {
     use crate::messages::{
-        CacheControl, ContentBlock, ImageSource, Message, MessageContent, MessageRole,
-        MessagesRequest, OutputConfig, SystemParam, TextBlock, ToolChoiceParam, ToolParam,
-        ToolResultContent,
+        ContentBlock, ImageSource, Message, MessageContent, MessageRole, MessagesRequest,
+        OutputConfig, SystemParam, TextBlock, ToolChoiceParam, ToolParam, ToolResultContent,
     };
 
     let mut system_blocks: Vec<TextBlock> = Vec::new();
@@ -2940,6 +3024,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                                     media_type,
                                     data: data.to_string(),
                                 },
+                                cache_control: None,
                             }
                         } else {
                             // Malformed data URI, treat as text
@@ -2953,6 +3038,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                             source: ImageSource::Url {
                                 url: url.as_ref().to_owned(),
                             },
+                            cache_control: None,
                         }
                     } else {
                         // Unknown format, treat as text
@@ -3032,6 +3118,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                         id: sanitize_tool_call_id(&tc.id),
                         name: tc.name.clone(),
                         input,
+                        cache_control: None,
                     });
                 }
             }
@@ -3062,7 +3149,10 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                                     url: url.as_ref().to_owned(),
                                 }
                             };
-                            blocks.push(ContentBlock::Image { source });
+                            blocks.push(ContentBlock::Image {
+                                source,
+                                cache_control: None,
+                            });
                         }
                     }
                     ToolResultContent::Blocks(blocks)
@@ -3108,12 +3198,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
     flush_assistant(&mut pending_assistant, &mut messages);
     flush_tool_results(&mut pending_tool_results, &mut messages);
 
-    // Attach cache_control: {type: "ephemeral"} to last system block
-    if let Some(last) = system_blocks.last_mut() {
-        last.cache_control = Some(CacheControl {
-            r#type: "ephemeral".to_string(),
-        });
-    }
+    apply_cache_breakpoints(&mut system_blocks, &mut messages);
 
     // Build system param
     let system: Option<SystemParam> = if system_blocks.is_empty() {
@@ -3219,7 +3304,9 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
                     }
                     content.push_str(&text);
                 }
-                ContentBlock::ToolUse { id, name, input } => {
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => {
                     tool_calls.push(ToolCall {
                         id: Arc::<str>::from(id),
                         name,
@@ -5082,6 +5169,176 @@ mod tests {
         );
     }
 
+    fn count_cache_control(value: &serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::Object(map) => {
+                usize::from(map.contains_key("cache_control"))
+                    + map.values().map(count_cache_control).sum::<usize>()
+            }
+            serde_json::Value::Array(items) => items.iter().map(count_cache_control).sum(),
+            _ => 0,
+        }
+    }
+
+    fn marker_on_last_block(message: &serde_json::Value) -> Option<&str> {
+        message
+            .get("content")?
+            .as_array()?
+            .last()?
+            .pointer("/cache_control/type")?
+            .as_str()
+    }
+
+    fn agent_turn(n: usize) -> Vec<ConversationItem> {
+        let id = format!("call_{n}");
+        vec![
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: id.as_str().into(),
+                name: "read_file".to_string(),
+                arguments: r#"{"path": "src/main.rs"}"#.into(),
+            }]),
+            ConversationItem::tool_result(id, "fn main() {}"),
+        ]
+    }
+
+    fn agent_request(turns: usize) -> serde_json::Value {
+        let mut items = vec![
+            ConversationItem::system("You are a helpful assistant."),
+            ConversationItem::user("Fix the bug"),
+        ];
+        for n in 0..turns {
+            items.extend(agent_turn(n));
+        }
+        serde_json::to_value(build_messages_request(
+            &ConversationRequest::from_items(items).with_model("messages-compatible-model"),
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_messages_request_cache_breakpoint_placement() {
+        let json = agent_request(2);
+        let messages = json["messages"].as_array().unwrap();
+
+        assert_eq!(
+            json.pointer("/system/0/cache_control/type")
+                .and_then(|v| v.as_str()),
+            Some("ephemeral"),
+            "{json:#}",
+        );
+        assert_eq!(
+            marker_on_last_block(messages.last().unwrap()),
+            Some("ephemeral"),
+            "tip: {json:#}"
+        );
+        assert_eq!(
+            messages.last().unwrap()["content"]
+                .as_array()
+                .and_then(|b| b.last())
+                .and_then(|b| b["type"].as_str()),
+            Some("tool_result"),
+        );
+
+        let previous_user = messages[..messages.len() - 1]
+            .iter()
+            .rposition(|m| m["role"] == "user")
+            .unwrap();
+        assert_eq!(
+            marker_on_last_block(&messages[previous_user]),
+            Some("ephemeral"),
+            "previous turn's tip: {json:#}",
+        );
+        assert_eq!(count_cache_control(&json), 3, "{json:#}");
+    }
+
+    #[test]
+    fn test_messages_request_previous_tip_skips_a_trailing_user_run() {
+        let mut items = vec![
+            ConversationItem::system("You are a helpful assistant."),
+            ConversationItem::user("Fix the bug"),
+        ];
+        items.extend(agent_turn(0));
+        items.extend(agent_turn(1));
+        // The shape after a parallel batch: tool results, then followups.
+        items.push(ConversationItem::user("[Image content]"));
+        items.push(ConversationItem::user("<system-reminder>"));
+
+        let json = serde_json::to_value(build_messages_request(
+            &ConversationRequest::from_items(items).with_model("messages-compatible-model"),
+        ))
+        .unwrap();
+        let messages = json["messages"].as_array().unwrap();
+
+        let marked: Vec<usize> = (0..messages.len())
+            .filter(|&i| marker_on_last_block(&messages[i]).is_some())
+            .collect();
+        let last_assistant = messages
+            .iter()
+            .rposition(|m| m["role"] == "assistant")
+            .unwrap();
+        assert_eq!(marked.len(), 2, "tip and previous tip only: {json:#}");
+        assert_eq!(marked[1], messages.len() - 1, "tip: {json:#}");
+        assert!(
+            marked[0] < last_assistant,
+            "the previous tip must sit before the last assistant turn, not inside \
+             the trailing user run; got {marked:?} in {json:#}",
+        );
+    }
+
+    #[test]
+    fn test_messages_request_cache_breakpoint_marks_an_image_tip() {
+        let req = ConversationRequest::from_items(vec![
+            ConversationItem::system("You are a helpful assistant."),
+            ConversationItem::User(UserItem {
+                content: vec![
+                    ContentPart::Text {
+                        text: "what is in this screenshot".into(),
+                    },
+                    ContentPart::Image {
+                        url: "data:image/png;base64,iVBOR".into(),
+                    },
+                ],
+                ..Default::default()
+            }),
+        ])
+        .with_model("messages-compatible-model");
+
+        let json = serde_json::to_value(build_messages_request(&req)).unwrap();
+        let blocks = json["messages"][0]["content"].as_array().unwrap();
+
+        assert_eq!(blocks.last().unwrap()["type"].as_str(), Some("image"));
+        assert_eq!(
+            marker_on_last_block(&json["messages"][0]),
+            Some("ephemeral"),
+            "{json:#}",
+        );
+        assert!(blocks[0].get("cache_control").is_none(), "{json:#}");
+    }
+
+    #[test]
+    fn test_messages_request_cache_breakpoint_skips_thinking() {
+        let req = ConversationRequest::from_items(vec![
+            ConversationItem::user("Fix the bug"),
+            ConversationItem::Reasoning(synthesized_reasoning_item("weighing options")),
+            ConversationItem::assistant("Fixed it."),
+        ])
+        .with_model("messages-compatible-model");
+
+        let json = serde_json::to_value(build_messages_request(&req)).unwrap();
+        let blocks = json["messages"][1]["content"].as_array().unwrap();
+
+        let thinking = blocks
+            .iter()
+            .find(|b| b["type"] == "thinking")
+            .expect("reasoning should emit a thinking block");
+        assert!(thinking.get("cache_control").is_none(), "{json:#}");
+        assert_eq!(
+            marker_on_last_block(&json["messages"][1]),
+            Some("ephemeral"),
+            "{json:#}",
+        );
+    }
+
     /// Regression: /btw side questions snapshot the conversation (which may
     /// include thinking blocks from prior turns) but fire without
     /// reasoning_effort.  If the caller forgets to strip reasoning from items,
@@ -6415,6 +6672,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(response.is_empty());
 
@@ -6427,6 +6687,9 @@ mod tests {
             message_chunks_emitted: 1,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(!response.is_empty());
 
@@ -6443,6 +6706,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(!response.is_empty());
     }
@@ -6465,6 +6731,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(
             response.is_empty(),
@@ -6486,6 +6755,9 @@ mod tests {
             message_chunks_emitted: 1,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(
             !response.is_empty(),
@@ -6511,6 +6783,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(
             !response.is_empty(),
@@ -6539,6 +6814,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
 
         let calls = response.tool_calls();
@@ -6559,6 +6837,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert_eq!(
             response.fallback_text().as_deref(),
@@ -6578,6 +6859,9 @@ mod tests {
             message_chunks_emitted: 42,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -6593,6 +6877,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -6612,6 +6899,9 @@ mod tests {
             message_chunks_emitted: 0, // only reasoning chunks were streamed
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert_eq!(
             response.fallback_text().as_deref(),
@@ -6634,6 +6924,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -7539,7 +7832,7 @@ mod tests {
             matches!(&inner[0], crate::messages::ContentBlock::Text { text, .. } if text == "Read image file: photo.png")
         );
         assert!(
-            matches!(&inner[1], crate::messages::ContentBlock::Image { source: crate::messages::ImageSource::Base64 { media_type, data } } if media_type == "image/png" && data == "iVBOR")
+            matches!(&inner[1], crate::messages::ContentBlock::Image { source: crate::messages::ImageSource::Base64 { media_type, data }, .. } if media_type == "image/png" && data == "iVBOR")
         );
     }
 
@@ -8010,6 +8303,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         }
     }
 
@@ -8060,6 +8356,9 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
         assert_eq!(
             response.empty_reason(),

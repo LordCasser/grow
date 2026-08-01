@@ -1761,6 +1761,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctor"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec09e802f5081de6157da9a75701d6c713d8dc3ba52571fd4bd25f412644e8a6"
+dependencies = [
+ "ctor-proc-macro",
+ "dtor",
+]
+
+[[package]]
+name = "ctor-proc-macro"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2931af7e13dc045d8e9d26afccc6fa115d64e115c9c84b1166288b46f6782c2"
+
+[[package]]
 name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2211,6 +2227,21 @@ checksum = "cd1511a7b6a56299bd043a9c167a6d2bfb37bf84a6dfceaba651168adfb43c87"
 dependencies = [
  "dtoa",
 ]
+
+[[package]]
+name = "dtor"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97cbdf2ad6846025e8e25df05171abfb30e3ababa12ee0a0e44b9bbe570633a8"
+dependencies = [
+ "dtor-proc-macro",
+]
+
+[[package]]
+name = "dtor-proc-macro"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7454e41ff9012c00d53cf7f475c5e3afa3b91b7c90568495495e8d9bf47a1055"
 
 [[package]]
 name = "dunce"
@@ -4144,6 +4175,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "ctor",
  "filetime",
  "git2",
  "grow-config",
@@ -4672,6 +4704,7 @@ dependencies = [
  "chrono",
  "clap",
  "criterion",
+ "ctor",
  "dashmap",
  "dhat",
  "dirs 6.0.0",
@@ -4900,6 +4933,7 @@ dependencies = [
  "dirs 5.0.1",
  "dunce",
  "educe",
+ "flate2",
  "fs2",
  "futures",
  "futures-util",
@@ -4931,10 +4965,12 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_yaml",
+ "sha2 0.10.9",
  "shellexpand",
  "similar",
  "strip-ansi-escapes",
  "strum 0.27.2",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -12503,6 +12539,7 @@ version = "0.1.0"
 dependencies = [
  "dirs 5.0.1",
  "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]

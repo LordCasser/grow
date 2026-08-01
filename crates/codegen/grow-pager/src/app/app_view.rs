@@ -264,7 +264,7 @@ pub enum TickDemand {
 pub const SLOW_TICK_INTERVAL: Duration = Duration::from_millis(83);
 /// Welcome toast lifetime (wall clock, so the duration holds whether the
 /// event loop is ticking Slow or Fast).
-const WELCOME_TOAST_DURATION: Duration = Duration::from_secs(4);
+const WELCOME_TOAST_DURATION: Duration = Duration::from_secs(2);
 /// Entry in the session picker list on the welcome screen.
 #[derive(Debug, Clone)]
 pub struct SessionPickerEntry {
@@ -416,7 +416,7 @@ impl PendingAction {
     }
     /// Like [`Self::new`] but with an explicit confirm window. Used by
     /// the dashboard-overlay stop (Ctrl+X), which mirrors the
-    /// dashboard's [`crate::views::dashboard::state::STOP_CONFIRM_WINDOW`]
+    /// dashboard's [`crate::views::dashboard::state::CONFIRM_WINDOW`]
     /// rather than the default double-press TTL.
     pub fn with_ttl(
         action: Action,
@@ -1853,7 +1853,7 @@ impl AppView {
                                     Action::DashboardOverlayStop,
                                     KeyShortcut::from(*key),
                                     Some("close this session"),
-                                    crate::views::dashboard::state::STOP_CONFIRM_WINDOW,
+                                    crate::views::dashboard::state::CONFIRM_WINDOW,
                                 ));
                                 return InputOutcome::Changed;
                             }
@@ -7880,7 +7880,10 @@ pub(crate) mod tests {
         ));
         app.welcome_menu_index = Some(1);
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Action(Action::FetchSessionList)));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::FetchSessionList)
+        ));
         // Quit (index 2) on the welcome screen quits on the first press:
         // no session to lose, so no double-press confirmation. A second
         // Enter also quits and must not arm a pending action.
@@ -7909,7 +7912,10 @@ pub(crate) mod tests {
         ));
         app.welcome_menu_index = Some(2);
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Action(Action::FetchSessionList)));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::FetchSessionList)
+        ));
         // Quit (index 3) on the welcome screen quits on the first press:
         // no session to lose, so no double-press confirmation. A second
         // Enter also quits and must not arm a pending action.
@@ -7957,7 +7963,10 @@ pub(crate) mod tests {
         let mut app = test_app();
         app.auth_state = AuthState::Done;
         let outcome = app.handle_input(&key_event(KeyCode::Char('s'), KeyModifiers::CONTROL));
-        assert!(matches!(outcome, InputOutcome::Action(Action::FetchSessionList)));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::FetchSessionList)
+        ));
     }
     #[test]
     fn welcome_done_ctrl_i_opens_import_modal() {
@@ -7996,7 +8005,10 @@ pub(crate) mod tests {
         ];
         // Row 1 (Resume session).
         let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 5, 11));
-        assert!(matches!(outcome, InputOutcome::Action(Action::FetchSessionList)));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::FetchSessionList)
+        ));
         // Row 2 (Quit).
         let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 5, 12));
         assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
@@ -8008,13 +8020,15 @@ pub(crate) mod tests {
         app.has_claude_import = true;
         // Import row spans x 0..40; the `[x]` affordance is the last 3 cols.
         app.welcome_menu_rects = vec![ratatui::layout::Rect::new(0, 10, 40, 1)];
-        let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 38, 10));
+        let outcome =
+            app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 38, 10));
         assert!(matches!(
             outcome,
             InputOutcome::Action(Action::DismissClaudeImport)
         ));
         // Clicking the label region (not the dismiss affordance) opens import.
-        let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 10, 10));
+        let outcome =
+            app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 10, 10));
         assert!(matches!(
             outcome,
             InputOutcome::Action(Action::ImportClaudeSettings)

@@ -245,6 +245,8 @@ mod tests {
             session_id: None,
             bundle_state: &EMPTY_BUNDLE,
             screen_mode: crate::app::ScreenMode::Inline,
+            billing_surface_visible: true,
+            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: false,
                 yolo_mode: false,
@@ -287,6 +289,8 @@ mod tests {
             current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
@@ -305,10 +309,7 @@ mod tests {
         assert_eq!(reasoning.match_text, "reasoning-x");
 
         // Plain model has no trailing space -- Enter commits immediately.
-        let plain = items
-            .iter()
-            .find(|i| i.insert_text == "grow-4.5")
-            .unwrap();
+        let plain = items.iter().find(|i| i.insert_text == "grow-4.5").unwrap();
         assert_eq!(plain.insert_text, "grow-4.5");
         assert_eq!(plain.display, "grow-4.5");
         assert_eq!(plain.match_text, "grow-4.5");
@@ -332,6 +333,8 @@ mod tests {
             current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
@@ -374,6 +377,8 @@ mod tests {
             current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
@@ -400,6 +405,8 @@ mod tests {
             current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };

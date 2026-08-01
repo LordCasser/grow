@@ -5,9 +5,9 @@
 
 use std::io;
 
+use grow_chat_state::{ChatPersistence, StrictAppendAck, StrictAppendError};
 use grow_sampling_types::ConversationItem;
 use tokio::sync::{mpsc, oneshot};
-use grow_chat_state::{ChatPersistence, StrictAppendAck, StrictAppendError};
 
 use super::persistence::PersistenceMsg;
 

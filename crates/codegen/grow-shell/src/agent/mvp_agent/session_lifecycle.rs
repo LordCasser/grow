@@ -9,35 +9,76 @@ impl MvpAgent {
             let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
         }
     }
+    pub(crate) async fn teardown_live_session_before_delete(&self, id: &acp::SessionId) {
+        let Some(handle) = self.sessions.borrow().get(id).cloned() else {
+            return;
+        };
+        let _ = handle.cmd_tx.send(SessionCommand::Cancel {
+            cancel_subagents: true,
+            kill_background_tasks: true,
+            rewind_if_pristine: false,
+            trigger: Some("session_delete".into()),
+        });
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+        drop(handle);
+        let thread = self.session_threads.borrow_mut().remove(id);
+        self.remove_session_terminal(id, SessionLiveState::Completed);
+        if let Some(thread) = thread {
+            self.session_threads.borrow_mut().insert(id.clone(), thread);
+            self.drain_old_session_thread(id).await;
+        }
+    }
+    /// The funnel for a handle leaving `self.sessions` (the spawn-path insert
+    /// reaps any displaced handle the same way): reaps its child-process tree
+    /// on the agent thread, so even a wedged session's tree is reclaimed.
+    ///
+    /// The reap is a synchronous SIGKILL issued before the actor drains
+    /// `Shutdown` — deliberately, including on non-terminal idle-unload:
+    /// enrolled children are resident-session-scoped by contract, so graceful
+    /// child teardown belongs to the enrolling owner while the actor is live,
+    /// not to this funnel.
+    pub(super) fn take_session(&self, id: &acp::SessionId) -> Option<SessionHandle> {
+        let handle = self.sessions.borrow_mut().remove(id);
+        if let Some(handle) = &handle
+            && let Some(scope) = &handle.tool_context.process_scope
+        {
+            scope.kill_all();
+        }
+        handle
+    }
     /// Remove a session without finalizing; it stays resumable on disk.
     pub(crate) fn remove_session(&self, id: &acp::SessionId) {
-        self.sessions.borrow_mut().remove(id);
-        self.dispatch_locks.borrow_mut().remove(id);
+        let _ = self
+            .subagent_event_tx
+            .send(grow_tools::implementations::grow_build::task::types::SubagentEvent::TeardownSession {
+                parent_session_id: id.0.to_string(),
+            });
+        self.take_session(id);
         self.session_threads.borrow_mut().remove(id);
-        self.session_index_claims.borrow_mut().remove(id);
-        self.require_gateway_sessions.borrow_mut().remove(id);
+        self.resident_resources.borrow_mut().remove(id);
+        self.retained_resources.borrow_mut().remove(id);
         self.model_unavailable_sessions
             .borrow_mut()
             .remove(id.0.as_ref());
-        self.permission_event_receivers.borrow_mut().remove(id);
-        self.session_turn_numbers.borrow_mut().remove(id);
         self.session_live_state.borrow_mut().remove(id);
         if let Some(ops) = self.workspace_ops.borrow().as_ref() {
             ops.end_local_session(id.0.as_ref());
         }
-        let _ = self
-            .subagent_event_tx
-            .send(grow_tools::implementations::grow_build::task::types::SubagentEvent::DiscardSessionCompletions {
-                parent_session_id: id.0.to_string(),
-            });
     }
-    /// Get-or-create the per-session dispatch lock (see
-    /// [`Self::dispatch_locks`]). Cheap clone of the shared `Rc`.
+    /// Get-or-create the per-session dispatch lock. `prompt` holds it across
+    /// intake so a cancel cannot overtake the prompt it targets.
+    /// Get-or-create the per-session prompt-intake lock. `prompt` holds it across
+    /// its intake preamble and `cancel` around its `Cancel` send, so prompts land
+    /// in submission order and a cancel cannot overtake the prompt it targets.
+    /// Cancels therefore wait behind an intake preamble: keep preambles lean.
+    /// Bridge cancels take their own path and stay unordered against this lock.
     pub(super) fn dispatch_lock(&self, id: &acp::SessionId) -> std::rc::Rc<tokio::sync::Mutex<()>> {
-        self.dispatch_locks
+        self.retained_resources
             .borrow_mut()
             .entry(id.clone())
             .or_default()
+            .dispatch_lock
+            .get_or_insert_with(Default::default)
             .clone()
     }
     /// Close a session in response to an explicit terminal close.
@@ -394,16 +435,44 @@ impl MvpAgent {
             )
             .registry_counts()
             .await;
+        let (resident_resources, session_index_claims, require_gateway_sessions) = {
+            let resident = self.resident_resources.borrow();
+            (
+                resident.len(),
+                resident
+                    .values()
+                    .filter(|r| r.codebase_index.is_some())
+                    .count(),
+                resident.values().filter(|r| r.require_gateway).count(),
+            )
+        };
+        let retained = self.retained_resources.borrow();
+        let retained_resources = retained.len();
+        let dispatch_locks = retained
+            .values()
+            .filter(|d| d.dispatch_lock.is_some())
+            .count();
+        let session_turn_numbers = retained
+            .values()
+            .filter(|d| d.turn_number.is_some())
+            .count();
+        let permission_event_receivers = retained
+            .values()
+            .filter(|d| d.permission_event_receiver.is_some())
+            .count();
+        drop(retained);
         RegistrySnapshot {
             sessions: self.sessions.borrow().len(),
             session_threads: self.session_threads.borrow().len(),
-            dispatch_locks: self.dispatch_locks.borrow().len(),
-            session_turn_numbers: self.session_turn_numbers.borrow().len(),
-            permission_event_receivers: self.permission_event_receivers.borrow().len(),
+            resident_resources,
+            retained_resources,
+            dispatch_locks,
+            session_turn_numbers,
+            permission_event_receivers,
             model_unavailable_sessions: self.model_unavailable_sessions.borrow().len(),
             session_live_state: self.session_live_state.borrow().len(),
-            session_index_claims: self.session_index_claims.borrow().len(),
-            require_gateway_sessions: self.require_gateway_sessions.borrow().len(),
+            session_index_claims,
+            require_gateway_sessions,
             subagent_pending: subagents.pending,
             subagent_active: subagents.active,
             subagent_completed: subagents.completed,
@@ -421,6 +490,8 @@ impl MvpAgent {
 pub struct RegistrySnapshot {
     pub sessions: usize,
     pub session_threads: usize,
+    pub resident_resources: usize,
+    pub retained_resources: usize,
     pub dispatch_locks: usize,
     pub session_turn_numbers: usize,
     pub permission_event_receivers: usize,

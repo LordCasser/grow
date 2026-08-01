@@ -1171,6 +1171,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: Some("hit".into()),
         seq: 7,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListLoaded { sessions, scope, seq, query, .. } => {
@@ -1187,6 +1188,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: None,
         seq: 8,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListLoaded { scope, seq, query, .. } => {
@@ -1202,6 +1204,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: Some("fail-me".into()),
         seq: 9,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListFailed { error, seq, query } => {

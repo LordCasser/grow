@@ -118,6 +118,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            cancel: Default::default(),
         },
         memory: crate::session::memory_state::SessionMemory {
             flush_config: crate::config::MemoryFlushConfig::default(),
@@ -494,6 +495,9 @@ async fn completed_event_releases_stream_drain_barrier() {
                         message_chunks_emitted: 1,
                         doom_loop_signals: Vec::new(),
                         stop_message: None,
+                        message_id: None,
+                        raw_stop_reason: None,
+                        stop_sequence: None,
                     }),
                     metrics: InferenceLatencyStats::default(),
                 })
@@ -557,6 +561,9 @@ async fn observe_only_confident_completion_stays_warn_only() {
                     "tail_repetition:8@thinking",
                 )],
                 stop_message: None,
+                message_id: None,
+                raw_stop_reason: None,
+                stop_sequence: None,
             };
             actor
                 .handle_sampling_event(SamplingEvent::Completed {
@@ -648,6 +655,9 @@ async fn doom_loop_recovery_updates_tally_and_counters() {
                     "tail_repetition:4@thinking",
                 )],
                 stop_message: None,
+                message_id: None,
+                raw_stop_reason: None,
+                stop_sequence: None,
             };
             actor
                 .handle_sampling_event(SamplingEvent::Completed {

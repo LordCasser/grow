@@ -275,7 +275,9 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             .prompt
             .set_contextual_hints(app.contextual_hints.undo, app.contextual_hints.plan_mode);
         agent.set_session_recap_available(app.session_recap_available);
+
         agent.apply_app_scoped_gates(app.screen_mode, &app.active_announcements);
+
         agent
             .prompt
             .slash_controller
@@ -317,6 +319,106 @@ pub(in crate::app::dispatch) fn dispatch_exit_session(app: &mut AppView) -> Vec<
     app.session_picker_content_results = None;
     app.session_picker_content_loading = false;
     app.exit_session_pending = None;
+    effects
+}
+/// Confirm deleting the parent session (not a subagent view).
+pub(in crate::app::dispatch) fn open_delete_current_session_question(
+    app: &mut AppView,
+) -> Vec<Effect> {
+    use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
+    use grow_tools::implementations::grow_build::ask_user_question::{Question, QuestionOption};
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    if agent.session.session_id.is_none() {
+        app.show_toast("No active session to delete");
+        return vec![];
+    }
+    if agent.question_view.is_some() {
+        app.show_toast("Finish answering the current question first");
+        return vec![];
+    }
+    let question = Question {
+        question: "Delete this session permanently?".into(),
+        id: None,
+        options: vec![
+            QuestionOption {
+                label: "Delete".into(),
+                description: "Remove history and return home".into(),
+                preview: None,
+                id: None,
+            },
+            QuestionOption {
+                label: "Cancel".into(),
+                description: "Keep the session".into(),
+                preview: None,
+                id: None,
+            },
+        ],
+        multi_select: Some(false),
+    };
+    let stashed = agent.prompt.stash();
+    agent.question_view = Some(
+        QuestionViewState::new(
+            format!("delete-session-{}", uuid::Uuid::new_v4()),
+            vec![question],
+            stashed,
+        )
+        .with_local_kind(LocalQuestionKind::DeleteCurrentSession)
+        .with_no_freeform(),
+    );
+    agent.prompt.set_text("");
+    vec![]
+}
+pub(in crate::app::dispatch) fn dispatch_delete_current_session_answered(
+    app: &mut AppView,
+    confirmed: bool,
+) -> Vec<Effect> {
+    if !confirmed {
+        return vec![];
+    }
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some((session_id, cwd, running_bg_tasks)) = app.agents.get(&id).and_then(|agent| {
+        let session_id = agent.session.session_id.clone()?;
+        let cwd = agent.session.cwd.display().to_string();
+        let running_bg_tasks: Vec<String> = agent
+            .session
+            .bg_tasks
+            .values()
+            .filter(|t| t.status == crate::app::agent::BgTaskStatus::Running)
+            .map(|t| t.task_id.clone())
+            .collect();
+        Some((session_id, cwd, running_bg_tasks))
+    }) else {
+        app.show_toast("No active session to delete");
+        return vec![];
+    };
+    let mut effects = vec![Effect::CancelTurn {
+        session_id: session_id.clone(),
+        cancel_subagents: true,
+        trigger: None,
+        rewind_if_pristine: false,
+    }];
+    effects.extend(
+        running_bg_tasks
+            .into_iter()
+            .map(|task_id| Effect::KillBgTask {
+                session_id: session_id.clone(),
+                task_id,
+            }),
+    );
+    app.show_toast("Deleting session\u{2026}");
+    effects.push(Effect::DeleteSession {
+        source: "current".into(),
+        session_id: session_id.to_string(),
+        cwd,
+        after: crate::app::actions::AfterSessionDelete::Welcome,
+    });
     effects
 }
 /// Handle the user accepting the folder-trust question: persist the grant for
@@ -369,6 +471,7 @@ pub(in crate::app::dispatch) fn drain_startup_actions(app: &mut AppView) -> Vec<
         new_session,
         prompt,
         open_dashboard,
+        pending_chat: _,
     } = app.deferred_startup.take();
     let mut effects = Vec::new();
     match deferred {
@@ -575,7 +678,9 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             .prompt
             .set_contextual_hints(app.contextual_hints.undo, app.contextual_hints.plan_mode);
         agent.set_session_recap_available(app.session_recap_available);
+
         agent.apply_app_scoped_gates(app.screen_mode, &app.active_announcements);
+
         agent
             .prompt
             .slash_controller

@@ -1321,9 +1321,7 @@ mod tests {
         // early-return) is what leaves the palette alone.
         agent.prompt_mode = editing_lone_local();
         agent.active_modal = Some(ActiveModal::CommandPalette {
-            entries: crate::views::modal::default_palette_entries(
-                agent.prompt.slash_controller.screen_mode(),
-            ),
+            entries: crate::views::modal::default_palette_entries(&agent.prompt.slash_controller),
             state: crate::views::picker::PickerState::input_active(),
             window: crate::views::modal_window::ModalWindowState::new(),
         });

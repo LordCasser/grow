@@ -978,6 +978,7 @@ impl SessionActor {
         } else {
             error.kind.as_str()
         };
+        let (error_type, detailed_message) = (error_type, detailed_message);
         self.log_terminal_failure(error_type, error.status_code, &detailed_message);
         self.send_grow_notification(GrowSessionUpdate::RetryState(
             crate::extensions::notification::RetryState::Failed {

@@ -932,7 +932,7 @@ impl acp::Agent for MvpAgent {
         )
         .await
         .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?;
-        self.session_turn_numbers.borrow_mut().insert(session_id.clone(), 0u64);
+        self.set_turn_number(&session_id, 0u64);
         let chat_history = vec![];
         let client_code_nav_enabled = arguments
             .meta
@@ -1301,9 +1301,7 @@ impl acp::Agent for MvpAgent {
         let restored_approval_pending = persisted_behavior
             .as_ref()
             .is_some_and(|s| s.approval_pending);
-        self.session_turn_numbers
-            .borrow_mut()
-            .insert(session_id.clone(), 0);
+        self.set_turn_number(&session_id, 0);
         let no_replay = parse_no_replay(request_meta.as_ref());
         let cursor = request_meta
             .as_ref()

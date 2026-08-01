@@ -1,5 +1,24 @@
 # Changelog
 
+# 1.0.0+upstream — 2026-08-01
+
+## Upstream Sync (grok-build 8d69c91f, curated)
+
+策展合入上游 2026-07-28 ~ 07-31 的 4 个同步提交中与本项目架构兼容的部分。
+
+## Features
+
+- **进程回收**：会话关闭时回收子进程树（bash/后台命令、hook、LSP、stdio MCP、PTY 全树、agent 子进程与 idle inhibitor）；子代理继承根会话的进程作用域；PTY shell 注册前自回收。
+- **稳健性**：crash handler 捕获 SIGABRT；启动线程耗尽降级而非崩溃；tokio worker 线程上限（GROW_WORKER_THREADS）；会话搜索 SQLite 缓存损坏自愈；fast-worktree resume 不再误删用户注册；doom-loop 恢复默认开启。
+- **采样与会话**：messages 后端缓存增长中的 transcript；truncation continue 与 context-overflow 恢复（fit 阶梯）；"exceeds budget" 归类为 context overflow；auth 401 归属（sent credential 溯源）；会话关闭取消子代理与进行中压缩（[stop]）；/btw 模型过载自动重试；删除当前会话（/delete）。
+- **Pager**：Kitty 键盘协议按终端版本降级；DA2 终端版本探测；minimal 模式 plan 驻留 scrollback；全屏 resize 提速；settings 枚举选择器保持已提交值；dashboard/welcome 删除会话；Ctrl+. 快捷键表补充 history/search；壁钟计时（OS 挂起不再计入工作时长）。
+- **工具**：工具描述/输出矛盾修复；blocking-wait 上限可配置（GROW_MAX_WAIT_BLOCK_MS）；LSP 拉取式 C# 诊断；MCP 服务器 CLI enable/disable；.grow/sandbox.toml 保护编辑；git_commit 硬化与 git_sync_base。
+- **其他**：外部 auth 提供命令走平台 shell（修 Windows）；前端 frontmatter 颜色宽松解析；/undo 别名；session 持久化 actor 随会话退出；后台任务/子代理跨压缩保留；MCP OAuth 有界锁与新鲜度守卫。
+
+## Removed Product Features (still excluded)
+
+- 本批次上游提交中的 xAI 产品内容（SuperGrok 订阅、Coding Data Sharing、遥测、托管 Web Search、远程会话、voice、share 链接、chat-kind、本地 workspace 特性、团队托管配置、extra CA bundle）均未合入。
+
 # 1.0.0 — 2026-07-30
 
 ## Breaking Changes

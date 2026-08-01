@@ -156,6 +156,7 @@ windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 [dev-dependencies]
 # Enable the render crate's test-only helpers for the pager's test build.
 grow-pager-render = { path = "../grow-pager-render", features = ["test-support"] }
+grow-shell = { workspace = true, features = ["test-support"] }
 pretty_assertions = { workspace = true }
 insta = { workspace = true }
 criterion = { workspace = true }
@@ -283,6 +284,11 @@ default-bazel = [
 jemalloc = []
 sandbox-enforce = ["grow-sandbox/enforce"]
 release-dist = []
+# Local workspace mode (own/attach): run tools on this machine instead of the
+# chat sandbox. Pager-side implementation only in this tree (constants, CLI
+# flags, startup banner) -- the shell-side counterpart was not merged, so this
+# stays an empty feature enabled explicitly via `--features local-workspace`.
+local-workspace = []
 # Exposes test-only view-model constructors/setters (e.g. `test_agent_view`,
 # `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds — used
 # by `grow-pager-minimal`'s unit tests. Never enabled in production builds.

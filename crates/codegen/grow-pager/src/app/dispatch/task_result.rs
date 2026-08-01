@@ -32,6 +32,7 @@ use super::session::load::{
     handle_card_detail_loaded, handle_deep_search_results, handle_session_load_failed,
     handle_session_loaded, handle_session_search_debounce_expired, remove_session_from_pickers,
 };
+use super::session::modal::remove_agent_and_cleanup;
 use super::settings::ui::apply_setting_rollback;
 use super::status::{
     commit_session_usage_block, handle_context_info_complete, scrub_error_for_toast,
@@ -421,12 +422,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 agent.note_queue_echo_retired(&prompt_id);
                 agent.retire_send_now_painted_block(&prompt_id);
                 let target = grow_tools::types::SessionMode::from_id(mode_id.0.as_ref());
-                agent.behavior_switch_confirm = Some(crate::app::agent_view::BehaviorSwitchConfirm {
-                    target,
-                    prompt: Some(crate::app::agent_view::BehaviorSwitchStashedPrompt {
-                        text,
-                    }),
-                });
+                agent.behavior_switch_confirm =
+                    Some(crate::app::agent_view::BehaviorSwitchConfirm {
+                        target,
+                        prompt: Some(crate::app::agent_view::BehaviorSwitchStashedPrompt { text }),
+                    });
                 if !agent.behavior_switch_warning_pending {
                     agent.show_behavior_switch_warning(&message);
                 }
@@ -874,10 +874,82 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::DeleteSessionComplete { source, session_id } => {
-            remove_session_from_pickers(app, &source, &session_id);
+        TaskResult::DeleteSessionComplete {
+            source,
+            session_id,
+            after,
+        } => {
+            use crate::app::actions::AfterSessionDelete;
+            remove_session_from_pickers(
+                app,
+                &source,
+                &session_id,
+                after != AfterSessionDelete::Stay,
+            );
+            if after == AfterSessionDelete::Stay {
+                app.dashboard_local_sessions
+                    .retain(|entry| entry.session_id != session_id);
+                app.leader_roster
+                    .retain(|entry| entry.session_id != session_id);
+                app.show_toast("Session deleted");
+                return vec![];
+            }
+            let sid = acp::SessionId::new(session_id.clone());
+            let to_remove: Vec<_> = app
+                .agents
+                .iter()
+                .filter(|(_, agent)| agent.session.session_id.as_ref() == Some(&sid))
+                .map(|(id, _)| *id)
+                .collect();
+            let foreground =
+                matches!(app.active_view, ActiveView::Agent(id) if to_remove.contains(&id));
+            let roster_row = crate::views::dashboard::DashboardRowId::Roster {
+                session_id: session_id.clone(),
+            };
+            let closed_rows: Vec<_> = to_remove
+                .iter()
+                .copied()
+                .map(crate::views::dashboard::DashboardRowId::TopLevel)
+                .chain(std::iter::once(roster_row))
+                .collect();
+            let selected = app.dashboard.as_ref().and_then(|d| d.selected.clone());
+            let neighbor = if after == AfterSessionDelete::Dashboard
+                && let Some(sel) = selected.as_ref().filter(|sel| closed_rows.contains(sel))
+            {
+                super::dashboard::dashboard_neighbor_row(app, sel)
+            } else {
+                None
+            };
+            app.dashboard_local_sessions
+                .retain(|entry| entry.session_id != session_id);
+            app.leader_roster
+                .retain(|entry| entry.session_id != session_id);
+            for id in to_remove {
+                remove_agent_and_cleanup(app, id);
+            }
+            let mut effects = unregister_session_effect(Some(sid));
+            if after == AfterSessionDelete::Dashboard {
+                if let Some(d) = app.dashboard.as_mut() {
+                    d.delete_confirm = None;
+                    let selected_closed = d
+                        .selected
+                        .as_ref()
+                        .is_some_and(|sel| closed_rows.contains(sel));
+                    match (selected_closed, neighbor) {
+                        (true, Some(n)) => d.focus_row(n),
+                        (true, None) => d.focus_new_agent_button(),
+                        _ => {}
+                    }
+                }
+                if foreground {
+                    super::dashboard::ensure_dashboard_state(app);
+                    app.active_view = ActiveView::AgentDashboard;
+                }
+            } else if foreground && after == AfterSessionDelete::Welcome {
+                effects.extend(dispatch_exit_session(app));
+            }
             app.show_toast("Session deleted");
-            vec![]
+            effects
         }
         TaskResult::DeleteSessionFailed {
             source,

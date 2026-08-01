@@ -382,7 +382,10 @@ fn dismiss_behavior_switch_warning_clears_parked_switch_and_prompt() {
     assert!(agent.behavior_switch_confirm.is_none());
     assert!(!agent.behavior_switch_warning_pending);
     assert!(
-        matches!(effects.as_slice(), [Effect::SetSessionMode { mode_id: _, .. }]),
+        matches!(
+            effects.as_slice(),
+            [Effect::SetSessionMode { mode_id: _, .. }]
+        ),
         "dismiss must re-sync the confirmed behavior, got: {effects:?}"
     );
 }

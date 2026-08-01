@@ -134,6 +134,7 @@ pub(in crate::app::dispatch) fn dispatch_fetch_session_list(app: &mut AppView) -
     let mut effects = vec![Effect::FetchSessionList {
         query: None,
         seq: app.session_picker_list_seq,
+        kind_filter: None,
     }];
     let grow_home = grow_tools::util::grow_home::grow_home();
     let foreign_effect = crate::app::foreign_sessions::scan_effect(

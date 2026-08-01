@@ -3,6 +3,14 @@
 //! refresh.
 use super::*;
 impl SessionActor {
+    /// Resolve the slash-skill list for prompt building (disk/plugin skills only).
+    pub(crate) async fn slash_skills_for_resolve(
+        &self,
+    ) -> Vec<grow_tools::implementations::skills::types::SkillInfo> {
+        let bridge = self.tool_bridge_handle();
+        bridge.slash_skills().await
+    }
+
     /// `true` for session-based ACP auth methods.
     fn is_session_based_auth(&self) -> bool {
         self.auth_method_id

@@ -321,15 +321,31 @@ pub const MAX_MULTI_WAIT_IDS: usize = 20;
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct TaskOutputToolInput {
     /// Task IDs to query. Pass one or more; a single task is a one-element list.
+    ///
+    /// Lenient on the wire (invisible to the advertised schema — schemars
+    /// ignores serde aliases and custom deserializers): also accepts the
+    /// singular `task_id` key and a bare string/number instead of an array.
+    /// Models frequently mirror `kill_task`'s singular `task_id` here (in
+    /// soak rollouts 3 of 4 organic calls did) and previously hard-failed
+    /// with "Provide a non-empty task_ids list", after which they abandoned
+    /// the background-task workflow for shell polling.
     #[schemars(
         description = "Task IDs to get output from. Pass one or more; for a single task use a one-element array. With a positive timeout_ms, multiple ids wait until all complete. Omit timeout_ms or pass 0 for a non-blocking snapshot."
     )]
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "task_id",
+        deserialize_with = "crate::serde_lenient::deserialize_lenient_string_list"
+    )]
     pub task_ids: Vec<String>,
 
     /// When set and positive, wait up to this many milliseconds; omit or `0` polls.
+    ///
+    /// `{max_wait_ms}` is resolved at finalize from the session's wait ceiling,
+    /// which also pins it as the schema `maximum` — the tool description cannot
+    /// carry the bound alone, since randomization may replace it wholesale.
     #[schemars(
-        description = "Max wait time in milliseconds. A positive value waits for completion; omit or pass 0 for a non-blocking status poll."
+        description = "Max wait time in milliseconds, up to {max_wait_ms}. A positive value waits for completion; omit or pass 0 for a non-blocking status poll."
     )]
     #[serde(default)]
     pub timeout_ms: Option<u64>,
@@ -368,6 +384,44 @@ impl TaskOutputToolInput {
 pub fn task_output_waits(timeout_ms: Option<u64>) -> bool {
     timeout_ms.is_some_and(|ms| ms > 0)
 }
+
+/// Default ceiling on a single blocking wait (`get_task_output` with a positive
+/// `timeout_ms`, `wait_tasks`). Capping is safe because a completed task pings
+/// the model, so a truncated wait costs one more poll, not the result.
+pub const MAX_WAIT_BLOCK_MS_DEFAULT: u64 = 600_000;
+
+/// The blocking-wait ceiling in effect, honoring `GROW_MAX_WAIT_BLOCK_MS`.
+///
+/// A host whose transport deadline is shorter than the default sets the env var
+/// so the server enforces — and the tool descriptions advertise — the same
+/// number the caller will actually wait for. Without that, a model believing the
+/// default asks for a wait its own client will abandon first.
+pub fn max_wait_block_ms() -> u64 {
+    std::env::var("GROW_MAX_WAIT_BLOCK_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(MAX_WAIT_BLOCK_MS_DEFAULT)
+}
+
+/// Render a wait ceiling for tool descriptions, e.g. `600000 (~10 min)`.
+///
+/// The unit is derived from the value, so it cannot drift from the millisecond
+/// figure beside it. Both branches round *down*: a cap must never read as
+/// longer than it is.
+pub fn format_wait_cap_ms(ms: u64) -> String {
+    if ms < 60_000 {
+        format!("{ms} (~{} s)", ms / 1_000)
+    } else {
+        format!("{ms} (~{} min)", ms / 60_000)
+    }
+}
+
+/// Placeholder the description builders emit for the wait ceiling.
+///
+/// Resolved per session by `TruncationConfig::interpolate_description` in the
+/// finalize loop, the same way `{max_lines_read}` is: the cap is client
+/// configurable, so it cannot be baked in when the description is built.
+pub const MAX_WAIT_MS_PLACEHOLDER: &str = "{max_wait_ms}";
 
 /// Same as [`task_output_waits`], from raw tool-arg JSON (fingerprint / doom-loop).
 pub fn task_output_waits_from_json(args: &serde_json::Value) -> bool {
@@ -492,7 +546,9 @@ pub struct WaitTasksToolInput {
     )]
     pub mode: WaitMode,
 
-    #[schemars(description = "Max wait time in milliseconds")]
+    /// Carries the same `{max_wait_ms}` marker as `TaskOutputToolInput`: this
+    /// tool blocks on the same ceiling, so it needs the same resolved bound.
+    #[schemars(description = "Max wait time in milliseconds, up to {max_wait_ms}")]
     #[serde(default)]
     pub timeout_ms: Option<u64>,
 }
@@ -737,7 +793,7 @@ Workspace boundary:
 pub const GENERAL_PURPOSE_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     name: "general-purpose",
     description: "General purpose agent for multi-step tasks.",
-    tools_template: "Has access to all tools: \
+    tools_template: "Has access to: \
          ${{ tools.by_kind.execute }}, ${{ tools.by_kind.read }}, ${{ tools.by_kind.edit }}, \
          ${{ tools.by_kind.list }}, ${{ tools.by_kind.search }}, and ${{ tools.by_kind.plan }}.",
     prompt_template: GENERAL_PURPOSE_PROMPT,
@@ -946,26 +1002,27 @@ pub fn build_task_output_description(naming: &TaskOutputToolNaming) -> String {
 
     let target_suffix = lifecycle_target_suffix(monitor_present, subagent_present);
 
-    let mut sources: Vec<String> = Vec::new();
-    if let Some(p) = bash_background_param {
-        sources.push(format!("{p}=true commands"));
-    }
-    if let Some(p) = subagent_background_param {
-        sources.push(format!("{p}=true subagents"));
-    }
-    let sources = sources.join(" or ");
+    let sources = match (bash_background_param, subagent_background_param) {
+        // Both params share one client-facing name: don't repeat it.
+        (Some(b), Some(s)) if b == s => format!("{b}=true commands or subagents"),
+        (Some(b), Some(s)) => format!("{b}=true commands or {s}=true subagents"),
+        (Some(b), None) => format!("{b}=true commands"),
+        (None, Some(s)) => format!("{s}=true subagents"),
+        (None, None) => "background tasks".to_string(),
+    };
 
     let monitor_note = monitor_task_id_note(monitor_tool, task_id_param);
     let read_note = match read_tool {
         Some(r) => format!("\n- If output is large, use {r} on the output_file path"),
         None => String::new(),
     };
+    let wait_cap = MAX_WAIT_MS_PLACEHOLDER;
 
     format!(
         "Get output and status from a background task{target_suffix}.\n\n\
          Usage notes:\n\
          - Pass {task_ids_param} with one or more ids from {sources}{monitor_note}; for a single task use a one-element array. Multiple ids with a positive {timeout_ms_param} wait until all complete\n\
-         - Omit {timeout_ms_param} or pass 0 for a non-blocking status snapshot; set a positive {timeout_ms_param} to wait up to that many milliseconds, capped at ~10 min\n\
+         - Omit {timeout_ms_param} or pass 0 for a non-blocking status snapshot; set a positive {timeout_ms_param} to wait up to that many milliseconds, capped at {wait_cap}\n\
          - Returns current output, status, and exit code if completed{read_note}"
     )
 }
@@ -989,14 +1046,16 @@ pub fn build_wait_tasks_description(naming: &WaitTasksToolNaming) -> String {
         subagent_background_param,
     } = *naming;
 
-    let mut sources: Vec<String> = Vec::new();
-    if let Some(p) = bash_background_param {
-        sources.push(format!("{p}=true"));
-    }
-    if let Some(p) = subagent_background_param {
-        sources.push(format!("{p}=true"));
-    }
-    let sources = sources.join(" or ");
+    let sources = match (bash_background_param, subagent_background_param) {
+        // Both params share one client-facing name: don't repeat it.
+        (Some(b), Some(s)) if b == s => format!("{b}=true commands or subagents"),
+        (Some(b), Some(s)) => format!("{b}=true commands or {s}=true subagents"),
+        (Some(b), None) => format!("{b}=true commands"),
+        (None, Some(s)) => format!("{s}=true subagents"),
+        (None, None) => "background tasks".to_string(),
+    };
+
+    let wait_cap = MAX_WAIT_MS_PLACEHOLDER;
 
     format!(
         "Wait for multiple background tasks or subagents to complete.\n\n\
@@ -1004,7 +1063,7 @@ pub fn build_wait_tasks_description(naming: &WaitTasksToolNaming) -> String {
          Usage notes:\n\
          - task_ids: list of task IDs from {sources}\n\
          - mode: 'wait_all' or 'wait_any'\n\
-         - timeout_ms: optional max wait, default 30s, capped at ~10 min"
+         - timeout_ms: optional max wait, default 30s, capped at {wait_cap}"
     )
 }
 
@@ -1104,6 +1163,54 @@ mod tests {
         };
         let value = serde_json::to_value(&input).unwrap();
         assert!(value.get("model").is_none());
+    }
+
+    #[test]
+    fn task_output_input_accepts_singular_task_id_alias() {
+        // Canonical plural form (unchanged).
+        let input: TaskOutputToolInput =
+            serde_json::from_str(r#"{"task_ids": ["a", "b"]}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["a", "b"]);
+
+        // Singular key with a bare string — the shape models organically send
+        // (mirroring kill_task's singular task_id).
+        let input: TaskOutputToolInput =
+            serde_json::from_str(r#"{"task_id": "abc-123", "timeout_ms": 0}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["abc-123"]);
+        assert_eq!(input.timeout_ms, Some(0));
+
+        // Singular key with an array also works.
+        let input: TaskOutputToolInput =
+            serde_json::from_str(r#"{"task_id": ["x", "y"]}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["x", "y"]);
+
+        // Plural key with a bare string.
+        let input: TaskOutputToolInput = serde_json::from_str(r#"{"task_ids": "solo"}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["solo"]);
+
+        // Bare number (observed: an OS PID) becomes a string id, so the tool
+        // answers "Task 228 not found" instead of a deserialize error.
+        let input: TaskOutputToolInput = serde_json::from_str(r#"{"task_id": 228}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["228"]);
+    }
+
+    #[test]
+    fn task_output_input_schema_does_not_advertise_the_alias() {
+        // The leniency is wire-only: the advertised schema must keep exactly
+        // the canonical properties (task_ids, timeout_ms) so tool-definition
+        // dumps and param randomization are unaffected.
+        let schema = serde_json::to_value(schemars::schema_for!(TaskOutputToolInput)).unwrap();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("task_ids"));
+        assert!(props.contains_key("timeout_ms"));
+        assert!(
+            !props.contains_key("task_id"),
+            "singular alias must not leak into the schema: {props:?}"
+        );
+        assert_eq!(props.len(), 2);
+        // And task_ids stays a plain string array.
+        assert_eq!(props["task_ids"]["type"], "array");
+        assert_eq!(props["task_ids"]["items"]["type"], "string");
     }
 
     #[test]
@@ -1398,6 +1505,19 @@ mod tests {
     }
 
     #[test]
+    fn format_wait_cap_ms_derives_its_unit_and_rounds_down() {
+        assert_eq!(
+            format_wait_cap_ms(MAX_WAIT_BLOCK_MS_DEFAULT),
+            "600000 (~10 min)"
+        );
+        assert_eq!(format_wait_cap_ms(300_000), "300000 (~5 min)");
+        // Rounds down: 1.5 min must not read as 2.
+        assert_eq!(format_wait_cap_ms(90_000), "90000 (~1 min)");
+        // Sub-minute caps switch unit rather than rendering "~0 min".
+        assert_eq!(format_wait_cap_ms(30_000), "30000 (~30 s)");
+    }
+
+    #[test]
     fn task_output_description_tracks_renamed_params() {
         let desc = build_task_output_description(&TaskOutputToolNaming {
             monitor_tool: Some("monitor"),
@@ -1441,8 +1561,8 @@ mod tests {
             desc,
             "Get output and status from a background task, monitor, or subagent.\n\n\
              Usage notes:\n\
-             - Pass task_ids with one or more ids from background=true commands or background=true subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
-             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at ~10 min\n\
+             - Pass task_ids with one or more ids from background=true commands or subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
+             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at {max_wait_ms}\n\
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
         );
@@ -1464,7 +1584,7 @@ mod tests {
             "Get output and status from a background task or subagent.\n\n\
              Usage notes:\n\
              - Pass task_ids with one or more ids from run_in_background=true subagents; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
-             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at ~10 min\n\
+             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at {max_wait_ms}\n\
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
         );
@@ -1482,9 +1602,9 @@ mod tests {
             "Wait for multiple background tasks or subagents to complete.\n\n\
              Prefer get_command_or_subagent_output with task_ids and a positive timeout_ms. This tool is kept for compatibility.\n\n\
              Usage notes:\n\
-             - task_ids: list of task IDs from background=true or background=true\n\
+             - task_ids: list of task IDs from background=true commands or subagents\n\
              - mode: 'wait_all' or 'wait_any'\n\
-             - timeout_ms: optional max wait, default 30s, capped at ~10 min"
+             - timeout_ms: optional max wait, default 30s, capped at {max_wait_ms}"
         );
     }
 
@@ -1495,7 +1615,9 @@ mod tests {
             bash_background_param: None,
             subagent_background_param: Some("run_in_background"),
         });
-        assert!(desc.contains("- task_ids: list of task IDs from run_in_background=true\n"));
+        assert!(
+            desc.contains("- task_ids: list of task IDs from run_in_background=true subagents\n")
+        );
         assert!(desc.contains("Prefer get_task_output with task_ids"));
     }
 }

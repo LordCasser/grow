@@ -68,8 +68,8 @@ use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
 /// Tracks the extra Kitty keyboard layer pushed while the `/gboom` game is
-/// open (see [`push_gboom_keyboard_flags`]). Kept separate from
-/// `KITTY_FLAGS_PUSHED` so teardown pops both, in LIFO order.
+/// open (see [`push_gboom_keyboard_flags`]). Kept separate from the base layer
+/// (`terminal::kitty_keyboard`) so teardown pops both, in LIFO order.
 static GBOOM_KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
 /// While the `/gboom` game owns input, additionally request
 /// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` so plain letter keys (WASD) emit
@@ -1214,28 +1214,31 @@ fn init_terminal(
                     Ok(true) => None,
                     _ => Some("unsupported"),
                 });
-        let use_keyboard_enhancement = skip_reason.is_none();
-        if use_keyboard_enhancement {
-            let flags = event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
+        crate::terminal::da2::probe_at_startup();
+        let flags = crate::terminal::negotiated_kitty_flags(
+            skip_reason,
+            crate::terminal::da2::detected_packed(),
+        );
+        if flags.is_empty() {
+            tracing::info!(
+                kitty.flags = "none",
+                kitty.skipped_reason = skip_reason.unwrap_or("unknown"),
+                "kitty keyboard protocol skipped"
+            );
+        } else {
             grow_shell::util::with_locked_stderr(|stderr| {
                 let _ = execute!(stderr, event::PushKeyboardEnhancementFlags(flags));
             });
             tracing::info!(
                 kitty.flags = ?flags,
                 kitty.disambiguate = true,
-                kitty.report_event_types = true,
+                kitty.report_event_types =
+                    flags.contains(event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES),
                 kitty.report_all_keys = false,
                 "kitty keyboard protocol pushed"
             );
-        } else {
-            tracing::info!(
-                kitty.flags = "none",
-                kitty.skipped_reason = skip_reason.unwrap_or("unknown"),
-                "kitty keyboard protocol skipped"
-            );
         }
-        crate::terminal::set_kitty_flags_pushed(use_keyboard_enhancement);
+        crate::terminal::set_pushed_kitty_flags(flags);
         if mode.is_fullscreen() {
             let backend = CrosstermBackend::new(
                 crate::render::draw::TermWriter::new(frame_tx, writer_sync)
@@ -1899,6 +1902,25 @@ mod tests {
     #[test]
     fn cli_chat_flag_rejected_without_feature() {
         assert!(try_parse_pager(&["grow-pager", "--chat"]).is_err());
+    }
+    #[test]
+    fn cli_local_workspace_flags_rejected_without_feature() {
+        assert!(try_parse_pager(&["grow-pager", "--local-workspace-attach=srv"]).is_err());
+        assert!(try_parse_pager(&["grow-pager", "--local-workspace"]).is_err());
+        assert!(try_parse_pager(&["grow-pager", "--local-workspace-cwd=/tmp"]).is_err());
+    }
+    #[test]
+    fn chat_mode_leader_guard_truth_table() {
+        assert!(session_startup::chat_mode_conflicts_with_leader(true, true));
+        assert!(!session_startup::chat_mode_conflicts_with_leader(
+            true, false
+        ));
+        assert!(!session_startup::chat_mode_conflicts_with_leader(
+            false, true
+        ));
+        assert!(!session_startup::chat_mode_conflicts_with_leader(
+            false, false
+        ));
     }
     #[test]
     fn cli_worktree_flag_parses() {

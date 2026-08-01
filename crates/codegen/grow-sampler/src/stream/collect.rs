@@ -53,6 +53,7 @@ pub async fn collect_response(
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
+        credential: grow_sampling_types::SentCredential::Unknown,
     })
 }
 
@@ -171,6 +172,9 @@ mod tests {
                 message_chunks_emitted: 1,
                 doom_loop_signals: Vec::new(),
                 stop_message: None,
+                message_id: None,
+                raw_stop_reason: None,
+                stop_sequence: None,
             }),
             metrics: InferenceLatencyStats::default(),
         };

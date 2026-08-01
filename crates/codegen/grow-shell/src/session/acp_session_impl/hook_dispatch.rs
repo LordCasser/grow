@@ -60,6 +60,7 @@ impl SessionActor {
         grow_hooks::runner::RunContext {
             session_id: &self.session_info.id.0,
             workspace_root: &self.hook_resolved_workspace_root,
+            process_scope: self.tool_context.process_scope.clone(),
         }
     }
 

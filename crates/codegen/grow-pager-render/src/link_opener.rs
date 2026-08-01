@@ -45,10 +45,23 @@ pub fn browser_open_likely_available() -> bool {
     browser_open_likely_available_from_env(&env)
 }
 
-/// User-facing copy when the browser opener cannot run. Includes the full
-/// URL on its own line so it is easy to select/copy in the TUI.
+const BROWSER_UNAVAILABLE_NOTICE: &str = "Could not open a browser. Open this URL manually";
+
+/// Multi-line copy for agent scrollback: notice, then the full URL alone
+/// so it is easy to select/copy in the TUI.
 pub fn browser_unavailable_message(url: &str) -> String {
-    format!("Could not open a browser. Open this URL manually:\n{url}")
+    format!("{BROWSER_UNAVAILABLE_NOTICE}:\n{url}")
+}
+
+/// Single-line welcome toast: URL first so prefix truncation keeps the
+/// destination. `copied` is true only when clipboard delivery reported
+/// success — never claim a copy that did not happen.
+pub fn browser_unavailable_line(url: &str, copied: bool) -> String {
+    if copied {
+        format!("{url} — {BROWSER_UNAVAILABLE_NOTICE} (URL copied)")
+    } else {
+        format!("{url} — {BROWSER_UNAVAILABLE_NOTICE}")
+    }
 }
 
 /// Open a URL in the system's default browser/handler.
@@ -59,10 +72,12 @@ pub fn browser_unavailable_message(url: &str) -> String {
 ///
 /// Returns `true` when the opener was launched (or the test seam recorded
 /// the URL). Returns `false` when the environment looks headless or spawn
-/// fails — callers should show [`browser_unavailable_message`].
+/// fails — callers should surface the URL via [`browser_unavailable_message`]
+/// (scrollback) or [`browser_unavailable_line`] (welcome toast).
 ///
 /// **Callers handling untrusted input** should call [`is_safe_to_open`]
 /// first, or use [`open_url_if_safe`] / [`try_open_url`] which combine both.
+#[allow(clippy::disallowed_methods)] // fire and forget; the child is reaped when this process exits
 pub fn open_url(url: &str) -> bool {
     // Test seam: PTY e2e must observe the open without launching a real
     // browser. When set, append the URL to the file and skip the OS opener.
@@ -155,6 +170,7 @@ fn build_open_path_command(path: &std::path::Path) -> std::process::Command {
 ///   expansion corrupts the percent-encoded session-directory segment in
 ///   local image paths (e.g. `…\C%3A%5CUsers…`).
 /// - **macOS / Linux**: `open` / `xdg-open` open the file in its default app.
+#[allow(clippy::disallowed_methods)] // fire and forget; the child is reaped when this process exits
 pub fn open_path(path: &std::path::Path) -> bool {
     // Never launch a real GUI app in tests.
     #[cfg(test)]
@@ -188,6 +204,7 @@ pub fn open_path(path: &std::path::Path) -> bool {
 /// Prefer the on-disk path as-is. When the file is missing, open the parent
 /// folder (no `/select`) so the user lands near the media instead of Home.
 #[cfg(all(not(test), target_os = "windows"))]
+#[allow(clippy::disallowed_methods)] // fire and forget; the child is reaped when this process exits
 fn reveal_in_explorer(path: &std::path::Path) -> bool {
     use std::os::windows::process::CommandExt;
 

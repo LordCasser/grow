@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -61,6 +61,7 @@ impl LogEntry {
 pub struct RequestLog {
     count: AtomicU32,
     entries: std::sync::Mutex<Vec<LogEntry>>,
+    keep_entries: AtomicBool,
 }
 
 impl RequestLog {
@@ -68,6 +69,7 @@ impl RequestLog {
         Self {
             count: AtomicU32::new(0),
             entries: std::sync::Mutex::new(Vec::new()),
+            keep_entries: AtomicBool::new(true),
         }
     }
 
@@ -80,6 +82,9 @@ impl RequestLog {
         headers: Vec<(String, String)>,
     ) {
         self.count.fetch_add(1, Ordering::SeqCst);
+        if !self.keep_entries.load(Ordering::SeqCst) {
+            return;
+        }
         self.entries.lock().unwrap().push(LogEntry {
             method: method.to_string(),
             path: path.to_string(),
@@ -426,6 +431,11 @@ impl MockInferenceServer {
 
     pub fn request_count(&self) -> u32 {
         self.log.count.load(Ordering::SeqCst)
+    }
+
+    /// Stop retaining entries. [`Self::request_count`] stays exact.
+    pub fn set_keep_requests(&self, enabled: bool) {
+        self.log.keep_entries.store(enabled, Ordering::SeqCst);
     }
 
     pub fn requests(&self) -> Vec<LogEntry> {

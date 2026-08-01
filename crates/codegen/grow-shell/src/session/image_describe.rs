@@ -21,12 +21,12 @@
 use crate::sampling::{Client as OaiCompatClient, ConversationRequest};
 use agent_client_protocol::ImageContent;
 use base64::Engine as _;
+use grow_chat_state::compaction_utils::{extract_real_user_queries, extract_user_query};
 use grow_sampling_types::conversation::{ContentPart, ConversationItem, UserItem};
 use grow_tools::util::truncate::truncate_middle;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use grow_chat_state::compaction_utils::{extract_real_user_queries, extract_user_query};
 /// Per-entry character cap for the conversation outline sent to the
 /// vision model. Mirrors the compat-harness behavior.
 pub const OUTLINE_PER_ENTRY_CAP: usize = 1_500;

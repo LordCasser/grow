@@ -2,6 +2,7 @@
 //! its buffered/transient/direct variants, Grow-notification handling, and
 //! the gateway-bridge dispatch shims.
 use super::*;
+use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
 /// Result of applying a subagent fold into parent ledgers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SubagentUsageApply {
@@ -705,6 +706,39 @@ impl SessionActor {
             .await;
     }
     /// [`Self::send_grow_notification`] with caller-supplied `_meta` keys merged
+    /// Build the per-response boundary update, projecting the response's usage
+    /// into the Messages API `message.usage` shape (uncached `input_tokens`).
+    pub(super) fn response_completed_update(
+        &self,
+        response: &grow_sampling_types::ConversationResponse,
+    ) -> GrowSessionUpdate {
+        let usage =
+            response
+                .usage
+                .as_ref()
+                .map(|u| crate::extensions::notification::ResponseUsage {
+                    input_tokens: u64::from(
+                        u.prompt_tokens
+                            .saturating_sub(u.cached_prompt_tokens)
+                            .saturating_sub(u.cache_creation_prompt_tokens),
+                    ),
+                    output_tokens: u64::from(u.completion_tokens),
+                    cache_read_input_tokens: u64::from(u.cached_prompt_tokens),
+                    cache_creation_input_tokens: u64::from(u.cache_creation_prompt_tokens),
+                    reasoning_tokens: u64::from(u.reasoning_tokens),
+                });
+        let signature = response
+            .reasoning_items()
+            .find_map(|r| r.encrypted_content.clone());
+        GrowSessionUpdate::ResponseCompleted {
+            message_id: response.message_id.clone(),
+            stop_reason: response.raw_stop_reason.clone(),
+            usage,
+            signature,
+            stop_sequence: response.stop_sequence.clone(),
+        }
+    }
+    /// [`Self::send_xai_notification`] with caller-supplied `_meta` keys merged
     /// into the standard eventId/timestamp meta. Caller keys win on collision.
     #[tracing::instrument(skip_all)]
     pub(super) async fn send_grow_notification_with_extra_meta(
@@ -1095,7 +1129,10 @@ mod grow_event_id_stamping_tests {
                     .request_behavior_change(acp::SessionModeId::new("normal"))
                     .await;
                 assert!(
-                    matches!(second, crate::session::behavior::BehaviorChangeOutcome::Applied),
+                    matches!(
+                        second,
+                        crate::session::behavior::BehaviorChangeOutcome::Applied
+                    ),
                     "the same-target re-request must apply the switch, got {second:?}"
                 );
             })
@@ -1172,19 +1209,16 @@ mod synthetic_prompt_behavior_tests {
                             .await
                     })
                 };
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    async {
-                        loop {
-                            if *actor.turn_start_prompt_mode.lock()
-                                == crate::session::behavior::PromptMode::Plan
-                            {
-                                break;
-                            }
-                            tokio::task::yield_now().await;
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        if *actor.turn_start_prompt_mode.lock()
+                            == crate::session::behavior::PromptMode::Plan
+                        {
+                            break;
                         }
-                    },
-                )
+                        tokio::task::yield_now().await;
+                    }
+                })
                 .await
                 .expect("the synthetic wake must pass the behavior gate and start under Plan");
                 wake.abort();
@@ -1259,19 +1293,16 @@ mod synthetic_prompt_behavior_tests {
                             .await
                     })
                 };
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    async {
-                        loop {
-                            if *actor.turn_start_prompt_mode.lock()
-                                == crate::session::behavior::PromptMode::Plan
-                            {
-                                break;
-                            }
-                            tokio::task::yield_now().await;
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        if *actor.turn_start_prompt_mode.lock()
+                            == crate::session::behavior::PromptMode::Plan
+                        {
+                            break;
                         }
-                    },
-                )
+                        tokio::task::yield_now().await;
+                    }
+                })
                 .await
                 .expect("the synthetic wake must pass the behavior gate and start under Plan");
                 wake.abort();

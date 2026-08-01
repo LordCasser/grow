@@ -194,6 +194,8 @@ flate2 = { workspace = true }
 rsa = { workspace = true }
 semver = { workspace = true }
 serial_test = { workspace = true }
+# Pre-main unified-log redirect (`test_support::redirect_unified_log_for_tests`).
+ctor = { workspace = true }
 # Test-only builds expose `env::EnvVarGuard` and the cpu_profile test seams to
 # this crate's test targets.
 grow-shell-base = { workspace = true, features = ["test-support"] }
@@ -217,6 +219,10 @@ harness = false
 required-features = ["test-support"]
 
 # Consume `session::testkit`, so they need the gate (on by default under Bazel).
+[[test]]
+name = "test_leader_soak"
+required-features = ["test-support"]
+
 [[test]]
 name = "test_session_load_memory"
 required-features = ["test-support"]

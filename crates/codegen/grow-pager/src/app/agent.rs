@@ -581,6 +581,16 @@ impl AgentState {
     pub fn is_turn_running(&self) -> bool {
         matches!(self, Self::TurnRunning)
     }
+    /// Manual `/compact` is in flight (stoppable via session/cancel).
+    pub fn is_compact_running(&self) -> bool {
+        matches!(
+            self,
+            Self::CommandRunning {
+                command: AgentCommand::Compact,
+                ..
+            }
+        )
+    }
     /// Either a turn or command cancel is in progress.
     pub fn is_cancelling(&self) -> bool {
         matches!(self, Self::TurnCancelling | Self::CommandCancelling { .. })
@@ -798,9 +808,9 @@ impl AgentSession {
     ) -> bool {
         let has_workflow_tool =
             available_tools.is_some_and(|tools| tools.contains(WORKFLOW_TOOL_NAME));
-        let has_workflow_command = available_commands.iter().any(|c| {
-            c.name == WORKFLOW_TOOL_NAME || c.name == WORKFLOW_RUN_COMMAND_NAME
-        });
+        let has_workflow_command = available_commands
+            .iter()
+            .any(|c| c.name == WORKFLOW_TOOL_NAME || c.name == WORKFLOW_RUN_COMMAND_NAME);
         has_workflow_tool || has_workflow_command || has_workflow_runs
     }
     /// Process an ACP session update. Returns true if scrollback was modified.
@@ -895,6 +905,18 @@ impl AgentSession {
     /// Finish a running command, return to Idle.
     pub fn finish_command(&mut self) {
         self.state = AgentState::Idle;
+    }
+    /// Mark an in-flight `/compact` as cancelling (waiting for CompactComplete).
+    pub fn cancel_compact_command(&mut self) {
+        if let AgentState::CommandRunning {
+            command: AgentCommand::Compact,
+            ..
+        } = &self.state
+        {
+            self.state = AgentState::CommandCancelling {
+                command: AgentCommand::Compact,
+            };
+        }
     }
     /// Push a prompt onto the back of the queue. Returns the assigned ID.
     pub fn enqueue_prompt(&mut self, text: String) -> u64 {
@@ -1136,7 +1158,11 @@ mod tests {
             WORKFLOW_TOOL_NAME.to_string(),
             "workflows".to_string(),
         )];
-        assert!(AgentSession::workflows_available(Some(&HashSet::new()), &cmds, false));
+        assert!(AgentSession::workflows_available(
+            Some(&HashSet::new()),
+            &cmds,
+            false
+        ));
     }
 
     #[test]
@@ -1144,7 +1170,11 @@ mod tests {
         // (c) No tool, no command, no runs → unavailable. Covers both the
         // not-yet-received (None) and empty-toolset (Some(&[])) cases.
         assert!(!AgentSession::workflows_available(None, &[], false));
-        assert!(!AgentSession::workflows_available(Some(&HashSet::new()), &[], false));
+        assert!(!AgentSession::workflows_available(
+            Some(&HashSet::new()),
+            &[],
+            false
+        ));
     }
 
     #[test]

@@ -22,9 +22,9 @@ pub use grow_workspace_types::rpc::git::{
     DiffStatsSummary, GitBranchesReq, GitCheckoutCommitReq, GitCheckoutReq, GitCollectChangesReq,
     GitCollectChangesResponse, GitCommitReq, GitCurrentCommitReq, GitDiffReq, GitDiscardReq,
     GitFilesReq, GitInfoReq, GitResolveRootReq, GitStageContentReq, GitStageReq, GitStashReq,
-    GitStatusExtReq, GitStatusExtResponse, GitStatusFormat, GitStatusReq, GitUnstageReq,
-    IdentityData, PublicBaseData, RepoInfo, UNTRACKED_CONTENT_THRESHOLD, UncommittedChangesData,
-    UntrackedFileData,
+    GitStatusExtReq, GitStatusExtResponse, GitStatusFormat, GitStatusReq, GitSyncBaseReq,
+    GitUnstageReq, IdentityData, PublicBaseData, RepoInfo, UNTRACKED_CONTENT_THRESHOLD,
+    UncommittedChangesData, UntrackedFileData,
 };
 pub use grow_workspace_types::rpc::hooks::{
     HookEventNameWire, HookRegistryReq, HookRegistryWire, HookSpecWire,
@@ -368,13 +368,24 @@ impl WorkspaceOp for GitCommitReq {
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
         let cwd = git_op_cwd(ws, &self.git_root)?;
-        crate::session::git::commit(
+        crate::session::git::commit(&cwd, self)
+            .await
+            .map_err(|e| WorkspaceError::Operation(e.to_string()))
+    }
+}
+#[async_trait]
+impl WorkspaceOp for GitSyncBaseReq {
+    async fn execute(
+        &self,
+        ws: &WorkspaceHandle,
+        _session_id: Option<&str>,
+    ) -> WorkspaceResult<Self::Response> {
+        let cwd = git_op_cwd(ws, &self.git_root)?;
+        crate::session::git::sync_base(
             &cwd,
-            &self.message,
-            self.amend,
-            self.signoff,
-            self.push,
-            self.sync,
+            self.base_ref.as_deref(),
+            self.abort,
+            self.expected_branch.as_deref(),
         )
         .await
         .map_err(|e| WorkspaceError::Operation(e.to_string()))

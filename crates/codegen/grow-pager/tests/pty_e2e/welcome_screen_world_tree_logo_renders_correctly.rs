@@ -50,9 +50,8 @@ async fn welcome_screen_big_logo_renders_on_wide_terminal() {
     let content = ContentController::start().await.expect("start content");
 
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness =
-        PtyHarness::spawn_with_content(&binary, DEFAULT_ROWS, 180, &content, &[])
-            .expect("spawn pager at 180x50");
+    let mut harness = PtyHarness::spawn_with_content(&binary, DEFAULT_ROWS, 180, &content, &[])
+        .expect("spawn pager at 180x50");
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)

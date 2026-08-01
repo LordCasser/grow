@@ -251,6 +251,8 @@ mod tests {
             session_id: None,
             bundle_state: &crate::app::bundle::BundleState::default(),
             screen_mode: crate::app::ScreenMode::Minimal,
+            billing_surface_visible: true,
+            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot::default(),
         };
         match acp_cmd.run(&mut ctx, "fix the branch") {
@@ -376,6 +378,8 @@ mod tests {
             session_id: None,
             bundle_state: bundle,
             screen_mode: crate::app::ScreenMode::Inline,
+            billing_surface_visible: true,
+            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: false,
                 yolo_mode: false,
@@ -612,6 +616,8 @@ mod tests {
             current_permission: "ask",
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         }
@@ -621,7 +627,9 @@ mod tests {
     fn goal_suggests_subcommands_with_trailing_space_rule() {
         let cmd = AcpSlashCommand::from(&make_cmd("goal", None));
         let ctx = make_ctx();
-        let items = cmd.suggest_args(&ctx, "").expect("goal must suggest subcommands");
+        let items = cmd
+            .suggest_args(&ctx, "")
+            .expect("goal must suggest subcommands");
 
         let display: Vec<&str> = items.iter().map(|i| i.display.as_str()).collect();
         assert_eq!(
@@ -641,7 +649,11 @@ mod tests {
                 "match_text mirrors display for {:?}",
                 item.display
             );
-            assert!(!item.description.is_empty(), "description required for {:?}", item.display);
+            assert!(
+                !item.description.is_empty(),
+                "description required for {:?}",
+                item.display
+            );
         }
     }
 

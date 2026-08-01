@@ -108,15 +108,15 @@ impl ArgPickerProfile {
 
     /// Total selector height so `min(n, max_visible)` list rows fit.
     fn selector_height(self, item_count: usize, area_height: u16) -> u16 {
-        let visible = (item_count as u16)
-            .min(self.max_visible_items())
-            .max(1);
+        let visible = (item_count as u16).min(self.max_visible_items()).max(1);
         // SearchRich may wrap one summary line under each row (+1 per visible).
         let list_rows = match self {
             Self::SearchRich => visible.saturating_mul(2),
             _ => visible,
         };
-        (self.chrome_rows() + list_rows).min(area_height).max(self.chrome_rows() + 1)
+        (self.chrome_rows() + list_rows)
+            .min(area_height)
+            .max(self.chrome_rows() + 1)
     }
 
     fn modal_sizing(self, compact: bool) -> ModalSizing {
@@ -198,7 +198,6 @@ impl AgentView {
             &mut self.active_modal,
             &self.prompt.slash_controller,
             &self.session.models,
-            &self.session.cwd,
         )
     }
 
@@ -206,7 +205,6 @@ impl AgentView {
         active_modal: &mut Option<ActiveModal>,
         slash_controller: &crate::slash::SlashController,
         models: &crate::acp::model_state::ModelState,
-        cwd: &std::path::Path,
     ) -> bool {
         let Some(ActiveModal::ArgPicker {
             command,
@@ -223,7 +221,6 @@ impl AgentView {
         let Some(cmd) = slash_controller.registry().get(&command) else {
             return false;
         };
-        let _ = cwd;
         let ctx = slash_controller.app_ctx(models);
         let Some(model_items) = cmd.suggest_args(&ctx, "") else {
             return false;
@@ -816,11 +813,8 @@ impl AgentView {
                                 *items = next_items.clone();
                                 *original_items = next_items;
                                 // Phase-2 (effort / behavior) is nav-only.
-                                *state = ArgPickerProfile::for_command(
-                                    &command_clone,
-                                    &next_query,
-                                )
-                                .initial_state();
+                                *state = ArgPickerProfile::for_command(&command_clone, &next_query)
+                                    .initial_state();
                             }
                             return InputOutcome::Changed;
                         }
@@ -853,7 +847,7 @@ impl AgentView {
                 // Build filtered entries for count and non-selectable indices.
                 let filtered = crate::views::modal::filter_palette_entries(
                     state.query(),
-                    self.prompt.slash_controller.screen_mode(),
+                    &self.prompt.slash_controller,
                 );
                 let non_sel: Vec<bool> = filtered
                     .iter()
@@ -1045,7 +1039,7 @@ impl AgentView {
                         {
                             *entries = crate::views::modal::filter_palette_entries(
                                 state.query(),
-                                self.prompt.slash_controller.screen_mode(),
+                                &self.prompt.slash_controller,
                             );
                             state.selected = state.selected.min(entries.len().saturating_sub(1));
                         }
@@ -1131,41 +1125,19 @@ impl AgentView {
                     vim_normal_first: crate::appearance::cache::load_vim_mode(),
                 };
 
-                // Delete-confirmation flow: `d` arms a confirmation on the
-                // focused row, then `y` confirms and `n` (or any other key)
-                // cancels. y/n are intercepted here — before the picker
-                // handler — only while armed, so the rest of the time `y`
-                // keeps its normal meaning (copy the session id).
-                if pending_delete.is_some()
-                    && let crossterm::event::Event::Key(k) = ev
-                    && k.kind == KeyEventKind::Press
-                    && k.modifiers.is_empty()
-                {
-                    match k.code {
-                        crossterm::event::KeyCode::Char('y') => {
-                            // Confirm. The cwd was captured when the row was
-                            // armed, so this can't be foiled by an async
-                            // picker-list update (e.g. a deep-search result)
-                            // landing between `d` and `y`.
-                            if let Some((source, session_id, cwd)) = pending_delete.take() {
-                                return InputOutcome::Action(Action::DeleteSession {
-                                    source,
-                                    session_id,
-                                    cwd,
-                                });
-                            }
-                            return InputOutcome::Changed;
-                        }
-                        crossterm::event::KeyCode::Char('n') => {
-                            *pending_delete = None;
-                            return InputOutcome::Changed;
-                        }
-                        _ => {
-                            // Any other key cancels, then falls through to its
-                            // normal handling below.
-                            *pending_delete = None;
-                        }
+                match crate::views::session_picker::handle_pending_delete_key(pending_delete, ev) {
+                    crate::views::session_picker::PendingDeleteKey::Confirm(pd) => {
+                        return InputOutcome::Action(Action::DeleteSession {
+                            source: pd.source,
+                            session_id: pd.session_id,
+                            cwd: pd.cwd,
+                        });
                     }
+                    crate::views::session_picker::PendingDeleteKey::Cancel => {
+                        return InputOutcome::Changed;
+                    }
+                    crate::views::session_picker::PendingDeleteKey::Disarmed
+                    | crate::views::session_picker::PendingDeleteKey::NotArmed => {}
                 }
 
                 if let crossterm::event::Event::Key(key) = ev
@@ -1191,7 +1163,12 @@ impl AgentView {
                     });
                 }
 
-                match handle_picker_input(ev, state, entry_count, &config) {
+                let selected_before = state.selected;
+                let outcome = handle_picker_input(ev, state, entry_count, &config);
+                if pending_delete.is_some() && state.selected != selected_before {
+                    *pending_delete = None;
+                }
+                match outcome {
                     PickerOutcome::Selected(i) => {
                         match entry_map.get(i).and_then(|e| e.as_ref()) {
                             Some(PickerItem::Fuzzy { original_index }) => {
@@ -1334,28 +1311,13 @@ impl AgentView {
                         InputOutcome::Action(Action::CycleSessionSourceFilter)
                     }
                     PickerOutcome::Action('d') => {
-                        // Arm a delete confirmation on the highlighted row,
-                        // capturing source, id, and cwd now (the row is present at
-                        // this moment) so the `y` confirm can't be foiled by an
-                        // async picker-list update. `y` confirms / `n` cancels
-                        // on the next key press (intercepted above).
                         *pending_delete =
-                            match entry_map.get(state.selected).and_then(|e| e.as_ref()) {
-                                Some(PickerItem::Fuzzy { original_index }) => entries
-                                    .as_ref()
-                                    .and_then(|e| e.get(*original_index))
-                                    .filter(|entry| {
-                                        !crate::app::foreign_sessions::is_foreign_picker_source(
-                                            &entry.source,
-                                        )
-                                    })
-                                    .map(|e| (e.source.clone(), e.id.clone(), e.cwd.clone())),
-                                Some(PickerItem::Content { hit_index }) => content_results
-                                    .as_ref()
-                                    .and_then(|h| h.get(*hit_index))
-                                    .map(|h| ("local".into(), h.session_id.clone(), h.cwd.clone())),
-                                None => None,
-                            };
+                            crate::views::session_picker::pending_delete_from_selection(
+                                state.selected,
+                                &entry_map,
+                                entries.as_deref(),
+                                content_results.as_deref(),
+                            );
                         InputOutcome::Changed
                     }
                     PickerOutcome::NonSelectableClick(_)
@@ -1822,10 +1784,8 @@ impl AgentView {
             } = active_modal
             {
                 // Command palette: ModalWindow chrome + picker content.
-                let filtered = modal::filter_palette_entries(
-                    state.query(),
-                    self.prompt.slash_controller.screen_mode(),
-                );
+                let filtered =
+                    modal::filter_palette_entries(state.query(), &self.prompt.slash_controller);
                 let non_sel: Vec<bool> = filtered
                     .iter()
                     .map(|e| matches!(e.command, modal::PaletteCommand::SectionHeader(_)))
@@ -2531,7 +2491,7 @@ mod session_picker_delete_tests {
     use crate::app::agent_view::test_fixtures::make_agent;
     use crate::app::app_view::{InputOutcome, SessionPickerEntry};
     use crate::views::modal::ActiveModal;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
     fn entry(id: &str) -> SessionPickerEntry {
         SessionPickerEntry {
@@ -2575,9 +2535,9 @@ mod session_picker_delete_tests {
 
     fn pending(agent: &AgentView) -> Option<String> {
         match agent.active_modal.as_ref() {
-            Some(ActiveModal::SessionPicker { pending_delete, .. }) => pending_delete
-                .as_ref()
-                .map(|(_, session_id, _)| session_id.clone()),
+            Some(ActiveModal::SessionPicker { pending_delete, .. }) => {
+                pending_delete.as_ref().map(|pd| pd.session_id.clone())
+            }
             _ => None,
         }
     }
@@ -2635,6 +2595,20 @@ mod session_picker_delete_tests {
             pending(&agent).is_none(),
             "any non-y/d key cancels the pending delete"
         );
+    }
+
+    #[test]
+    fn mouse_move_keeps_pending_delete() {
+        let mut agent = make_agent();
+        open_picker(&mut agent, vec![entry("s0"), entry("s1")]);
+        agent.handle_palette_or_arg_input(&key('d'));
+        agent.handle_palette_or_arg_input(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(pending(&agent).as_deref(), Some("s0"));
     }
 
     #[test]
@@ -2861,9 +2835,7 @@ mod command_palette_vim_input_tests {
     // INPUT mode (`input_active`) over the full palette entries.
     fn open_command_palette(agent: &mut AgentView) {
         agent.active_modal = Some(ActiveModal::CommandPalette {
-            entries: crate::views::modal::default_palette_entries(
-                agent.prompt.slash_controller.screen_mode(),
-            ),
+            entries: crate::views::modal::default_palette_entries(&agent.prompt.slash_controller),
             state: PickerState::input_active(),
             window: crate::views::modal_window::ModalWindowState::new(),
         });
@@ -2893,7 +2865,7 @@ mod command_palette_vim_input_tests {
             .set_screen_mode(crate::app::ScreenMode::Minimal);
         agent.prompt.set_text("keep this draft");
         agent.active_modal = Some(ActiveModal::CommandPalette {
-            entries: crate::views::modal::default_palette_entries(crate::app::ScreenMode::Minimal),
+            entries: crate::views::modal::default_palette_entries(&agent.prompt.slash_controller),
             state: {
                 let mut state = PickerState::input_active();
                 // Contiguous substring of the label ("Edit Prompt in External Editor").
@@ -3106,7 +3078,10 @@ mod arg_picker_profile_tests {
         assert!(profile.min_width() > ArgPickerProfile::NavCompact.min_width());
         let h_behavior = profile.selector_height(3, 80);
         let h_nav = ArgPickerProfile::NavCompact.selector_height(3, 80);
-        assert_eq!(h_behavior, h_nav, "same selector-height logic as NavCompact");
+        assert_eq!(
+            h_behavior, h_nav,
+            "same selector-height logic as NavCompact"
+        );
     }
 
     #[test]
@@ -3155,10 +3130,7 @@ mod arg_picker_profile_tests {
         agent.handle_modal_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         agent.handle_modal_key(&KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
 
-        let Some(ActiveModal::ArgPicker {
-            items, state, ..
-        }) = agent.active_modal.as_ref()
-        else {
+        let Some(ActiveModal::ArgPicker { items, state, .. }) = agent.active_modal.as_ref() else {
             panic!("expected ArgPicker");
         };
         assert_eq!(state.query(), "b");

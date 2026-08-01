@@ -10,14 +10,14 @@ use super::ctx::{
 use super::dashboard::{
     dispatch_dashboard_attach, dispatch_dashboard_begin_rename, dispatch_dashboard_change_location,
     dispatch_dashboard_commit_rename, dispatch_dashboard_confirm_worktree,
-    dispatch_dashboard_create_new_agent_with_detail, dispatch_dashboard_dispatch,
-    dispatch_dashboard_dispatch_slash, dispatch_dashboard_open_location_picker,
-    dispatch_dashboard_open_shortcuts_help, dispatch_dashboard_overlay_cycle,
-    dispatch_dashboard_overlay_exit, dispatch_dashboard_overlay_stop,
-    dispatch_dashboard_peek_reply, dispatch_dashboard_permission_followup,
-    dispatch_dashboard_permission_select, dispatch_dashboard_question_answer,
-    dispatch_dashboard_reorder, dispatch_dashboard_select, dispatch_dashboard_stop,
-    dispatch_dashboard_toggle_grouping, dispatch_dashboard_toggle_pin,
+    dispatch_dashboard_create_new_agent_with_detail, dispatch_dashboard_delete,
+    dispatch_dashboard_dispatch, dispatch_dashboard_dispatch_slash,
+    dispatch_dashboard_open_location_picker, dispatch_dashboard_open_shortcuts_help,
+    dispatch_dashboard_overlay_cycle, dispatch_dashboard_overlay_exit,
+    dispatch_dashboard_overlay_stop, dispatch_dashboard_peek_reply,
+    dispatch_dashboard_permission_followup, dispatch_dashboard_permission_select,
+    dispatch_dashboard_question_answer, dispatch_dashboard_reorder, dispatch_dashboard_select,
+    dispatch_dashboard_stop, dispatch_dashboard_toggle_grouping, dispatch_dashboard_toggle_pin,
     dispatch_dashboard_toggle_worktree, dispatch_exit_dashboard, dispatch_open_dashboard,
 };
 use super::import_claude::{
@@ -57,8 +57,9 @@ use super::session::fork::{
     dispatch_startup_fork_session,
 };
 use super::session::lifecycle::{
-    clear_startup_actions, dispatch_exit_session, dispatch_new_session, dispatch_new_session_inner,
-    dispatch_new_session_with_id, dispatch_new_worktree_session, dispatch_trust_folder,
+    clear_startup_actions, dispatch_delete_current_session_answered, dispatch_exit_session,
+    dispatch_new_session, dispatch_new_session_inner, dispatch_new_session_with_id,
+    dispatch_new_worktree_session, dispatch_trust_folder, open_delete_current_session_question,
     open_new_session_question,
 };
 use super::session::load::{
@@ -184,6 +185,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::NewSession => dispatch_new_session(app),
         Action::ChooseNewSessionMode => open_new_session_question(app),
         Action::ExitSession | Action::ExitSessionConfirmed => dispatch_exit_session(app),
+        Action::DeleteCurrentSession => open_delete_current_session_question(app),
+        Action::DeleteCurrentSessionAnswered { confirmed } => {
+            dispatch_delete_current_session_answered(app, confirmed)
+        }
         Action::NewWorktreeSession {
             load_session_id,
             label,
@@ -841,9 +846,11 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             // via SwitchAgentComplete scrollback.
             let Some(session_id) = agent.session.session_id.clone() else {
                 if let Some(agent) = app.agents.get_mut(&id) {
-                    agent.scrollback.push_block(crate::scrollback::block::RenderBlock::system(
-                        "Agent can be changed after the session connects.",
-                    ));
+                    agent
+                        .scrollback
+                        .push_block(crate::scrollback::block::RenderBlock::system(
+                            "Agent can be changed after the session connects.",
+                        ));
                 } else {
                     app.show_toast("Agent can be changed after the session connects.");
                 }
@@ -1113,6 +1120,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 source,
                 session_id,
                 cwd,
+                after: crate::app::actions::AfterSessionDelete::Stay,
             }]
         }
         Action::Fork(args) => dispatch_fork(app, args),
@@ -1239,6 +1247,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::DashboardStop => dispatch_dashboard_stop(app),
+        Action::DashboardDelete => dispatch_dashboard_delete(app),
+        Action::DashboardCycleMode => vec![],
+        Action::DashboardPeekCycleMode => vec![],
         Action::DashboardToggleGrouping => dispatch_dashboard_toggle_grouping(app),
         Action::DashboardSetFilter(value) => {
             if let Some(d) = app.dashboard.as_mut() {
