@@ -222,7 +222,6 @@ fn post_open_error_carries_real_session_context() {
         permission_mode: None,
         mcp_servers: Vec::new(),
         include_partial_messages: false,
-        api_key_auth: true,
         context_window: None,
     });
     let post_lines = post.error("boom", None, 0, None);

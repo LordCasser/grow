@@ -10,8 +10,7 @@
 //!       --api-base-url <provider-base-url> \
 //!       [--api-key <key> | $LLM_API_KEY] \
 //!       [--min-confidence 0.7] \
-//!       [--include-reasoning true] \
-//!       [--grow-home <path>]
+//!       [--include-reasoning true]
 //!
 //! The binary name is `trace_classify` (underscore) — that's the file
 //! name in `src/bin/`, which cargo's auto-discovery uses verbatim.
@@ -70,13 +69,6 @@ struct Cli {
     /// `LazinessDetectorPerModelConfig::include_reasoning` separately.
     #[arg(long)]
     include_reasoning: Option<bool>,
-
-    /// Override the directory containing `auth.json` for the
-    /// third-tier API-key fallback. Defaults to the same path the
-    /// shell uses (`$GROW_HOME` or `~/.grow`). Exposed primarily for
-    /// tests / sandboxed invocations.
-    #[arg(long)]
-    grow_home: Option<PathBuf>,
 }
 
 /// `current_thread` flavour: the replay is strictly sequential
@@ -95,7 +87,6 @@ async fn main() -> anyhow::Result<()> {
         api_key: cli.api_key,
         min_confidence: cli.min_confidence,
         include_reasoning: cli.include_reasoning,
-        grow_home: cli.grow_home,
     };
     let summary = run(args).await?;
     eprintln!("{}", summary.render());
@@ -129,7 +120,6 @@ mod tests {
         assert!(cli.api_key.is_none());
         assert!(cli.min_confidence.is_none());
         assert!(cli.include_reasoning.is_none());
-        assert!(cli.grow_home.is_none());
     }
 
     /// Per-model knob (mirrored as a CLI override on the offline tool):
@@ -155,17 +145,6 @@ mod tests {
 
         let cli_absent = Cli::try_parse_from(required_args()).expect("parse absent");
         assert!(cli_absent.include_reasoning.is_none());
-    }
-
-    #[test]
-    fn cli_grow_home_override_parses() {
-        let cli = Cli::try_parse_from(
-            required_args()
-                .into_iter()
-                .chain(["--grow-home", "/tmp/scratch-grow"]),
-        )
-        .expect("parse");
-        assert_eq!(cli.grow_home, Some(PathBuf::from("/tmp/scratch-grow")));
     }
 
     #[test]

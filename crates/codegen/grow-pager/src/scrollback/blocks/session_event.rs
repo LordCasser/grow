@@ -86,11 +86,6 @@ pub enum SessionEvent {
         /// Used to match known error patterns without fragile string matching.
         error_type: Option<String>,
     },
-    /// The server rejected the credentials (401 / auth error) and automatic
-    /// recovery was exhausted. Rendered as a prominent call-to-action that
-    /// points the user at `/login` to re-authenticate, replacing the raw
-    /// "Retry failed: Unauthorized (401) …" dump.
-    ReAuthRequired,
     /// Terminal context overflow — ideally unreachable, since auto-compaction should
     /// shrink the conversation first; a safeguard for when it didn't (estimate drift
     /// vs the server's max_prompt_length, or compaction suppressed/failed). One actionable
@@ -213,12 +208,6 @@ impl SessionEvent {
                 } else {
                     format!("Retry failed: {error}")
                 }
-            }
-            SessionEvent::ReAuthRequired => {
-                "Authentication required \u{2014} your session has expired or your \
-                 credentials were rejected. Run /login to re-authenticate, then resend \
-                 your message."
-                    .to_string()
             }
             SessionEvent::ContextTooLarge => {
                 "This conversation is too large for the model's context window. \
@@ -517,13 +506,11 @@ impl BlockContent for SessionEventBlock {
         }
 
         let theme = Theme::current();
-        // Failures and re-auth / context-overflow prompts are actionable, not
+        // Failures and context-overflow prompts are actionable, not
         // informational — render them in the warning color, not muted noise.
         let style = if matches!(
             self.event,
-            SessionEvent::ReAuthRequired
-                | SessionEvent::ContextTooLarge
-                | SessionEvent::CompactionFailed { .. }
+            SessionEvent::ContextTooLarge | SessionEvent::CompactionFailed { .. }
         ) {
             ratatui::style::Style::default().fg(theme.warning)
         } else {
@@ -569,9 +556,7 @@ impl BlockContent for SessionEventBlock {
         }
         if matches!(
             self.event,
-            SessionEvent::ReAuthRequired
-                | SessionEvent::ContextTooLarge
-                | SessionEvent::CompactionFailed { .. }
+            SessionEvent::ContextTooLarge | SessionEvent::CompactionFailed { .. }
         ) {
             Some(AccentStyle::static_color(theme.warning))
         } else {
@@ -756,29 +741,6 @@ mod tests {
             error_type: Some("api_400".into()),
         };
         assert_eq!(event.message(), "Retry failed: bad request");
-    }
-
-    #[test]
-    fn reauth_required_message_points_at_login() {
-        let msg = SessionEvent::ReAuthRequired.message();
-        assert!(msg.contains("/login"), "must tell the user to run /login");
-        assert!(
-            msg.to_lowercase().contains("authentication")
-                || msg.to_lowercase().contains("credentials"),
-            "must explain it is an auth problem: {msg}"
-        );
-    }
-
-    #[test]
-    fn reauth_required_has_warning_accent() {
-        let block = SessionEventBlock::new(SessionEvent::ReAuthRequired);
-        let theme = Theme::current();
-        let accent = block.accent(&ctx());
-        assert_eq!(
-            accent.map(|a| a.color),
-            Some(theme.warning),
-            "re-auth prompt must stand out with a warning accent"
-        );
     }
 
     #[test]

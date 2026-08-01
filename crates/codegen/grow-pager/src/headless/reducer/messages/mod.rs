@@ -105,11 +105,7 @@ impl MessagesReducer {
         let session = self.session.as_ref();
         to_line(&MessagesLine::System(SystemLine::Init(SystemInitLine {
             session_id: self.session_id().to_string(),
-            api_key_source: if session.is_none_or(|s| s.api_key_auth) {
-                "user"
-            } else {
-                "oauth"
-            },
+            api_key_source: "user",
             model: self.model_or_unknown(),
             cwd: session.map(|s| s.cwd.clone()).unwrap_or_default(),
             permission_mode: messages_permission_mode(
@@ -455,7 +451,6 @@ impl Reducer for MessagesReducer {
             model: ctx.model,
             cwd: ctx.cwd,
             permission_mode: ctx.permission_mode,
-            api_key_auth: ctx.api_key_auth,
             mcp_servers: ctx.mcp_servers,
             include_partials: ctx.include_partial_messages,
             context_window: ctx.context_window,

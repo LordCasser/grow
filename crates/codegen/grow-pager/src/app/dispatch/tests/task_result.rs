@@ -269,66 +269,6 @@ fn doctor_apply_success_only_renders_resolution_instructions() {
 }
 
 #[test]
-fn stale_auth_copy_timeout_does_not_clear_newer_feedback() {
-    let mut app = test_app();
-    app.auth_state = AuthState::Authenticating {
-        request_seq: 1,
-        handle: None,
-        auth_url: Some("https://service.example.com/auth".to_owned()),
-        mode: AuthMode::Command,
-    };
-
-    let first_effects = crate::app::dispatch::router::dispatch_copy_auth_url(&mut app, |_| {
-        crate::clipboard::ClipboardDelivery::Failed
-    });
-    let [
-        Effect::ScheduleClearAuthCopyFeedback {
-            generation: first_generation,
-        },
-    ] = first_effects.as_slice()
-    else {
-        panic!("first copy must schedule feedback clear");
-    };
-
-    let second_effects = crate::app::dispatch::router::dispatch_copy_auth_url(&mut app, |_| {
-        crate::clipboard::ClipboardDelivery::Confirmed
-    });
-    let [
-        Effect::ScheduleClearAuthCopyFeedback {
-            generation: second_generation,
-        },
-    ] = second_effects.as_slice()
-    else {
-        panic!("second copy must schedule feedback clear");
-    };
-    assert_ne!(first_generation, second_generation);
-    assert_eq!(
-        app.auth_clipboard_delivery,
-        Some(crate::clipboard::ClipboardDelivery::Confirmed)
-    );
-
-    dispatch_task_result(
-        TaskResult::AuthCopyFeedbackTimeout {
-            generation: *first_generation,
-        },
-        &mut app,
-    );
-    assert_eq!(
-        app.auth_clipboard_delivery,
-        Some(crate::clipboard::ClipboardDelivery::Confirmed),
-        "the first copy's stale timeout must preserve the second feedback"
-    );
-
-    dispatch_task_result(
-        TaskResult::AuthCopyFeedbackTimeout {
-            generation: *second_generation,
-        },
-        &mut app,
-    );
-    assert_eq!(app.auth_clipboard_delivery, None);
-}
-
-#[test]
 fn stale_workflows_result_does_not_repaint_replaced_session_modal() {
     let mut app = test_app_with_agent();
     app.agents.get_mut(&AgentId(0)).unwrap().extensions_modal =

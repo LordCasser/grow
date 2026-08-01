@@ -5,27 +5,17 @@
 use grow_config::signed_policy::now_unix;
 use serde::Deserialize;
 
-/// Which credential a config fetch used — tailors error messages and the
-/// post-fetch confirmation (team vs deployment).
+/// Credential used for managed-policy fetches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ManagedConfigSource {
     DeploymentKey,
-    TeamOauth,
 }
 
 impl ManagedConfigSource {
-    pub(super) fn is_team(self) -> bool {
-        matches!(self, Self::TeamOauth)
-    }
-
-    /// The 401/403 error tailored to the credential (don't tell a team user to
-    /// check `GROW_DEPLOYMENT_KEY`).
+    /// Managed policy is deployment-key-only.
     pub(super) fn auth_rejected_error(self) -> ManagedConfigError {
-        if self.is_team() {
-            ManagedConfigError::TeamAuthRejected
-        } else {
-            ManagedConfigError::DeploymentKeyRejected
-        }
+        let Self::DeploymentKey = self;
+        ManagedConfigError::DeploymentKeyRejected
     }
 }
 
@@ -41,10 +31,6 @@ pub enum ManagedConfigError {
         "The deployment key was rejected. Confirm that GROW_DEPLOYMENT_KEY is set correctly and hasn't expired."
     )]
     DeploymentKeyRejected,
-    #[error(
-        "Your team sign-in was rejected. It may have expired or lack access. Run `grow login` to sign in again."
-    )]
-    TeamAuthRejected,
     #[error("The server returned an unexpected error (HTTP {status}). Try again in a few minutes.")]
     ServerError { status: u16 },
     #[error("The server returned an unexpected response.\n  ({0})")]
@@ -74,7 +60,7 @@ impl ManagedConfigError {
 
     /// Auth/eligibility rejection (no access or expired session) — not fixable by retrying.
     pub fn is_auth_rejection(&self) -> bool {
-        matches!(self, Self::TeamAuthRejected | Self::DeploymentKeyRejected)
+        matches!(self, Self::DeploymentKeyRejected)
     }
 }
 
@@ -82,8 +68,6 @@ impl ManagedConfigError {
 pub(super) struct ManagedConfigResponse {
     #[serde(default)]
     pub(super) deployment_id: Option<String>,
-    #[serde(default)]
-    pub(super) team_id: Option<String>,
     pub(super) managed_config: Option<String>,
     pub(super) requirements: Option<String>,
     /// The signed envelopes (additive; absent from old servers), primary first —
@@ -100,7 +84,7 @@ pub(super) struct ManagedConfigResponse {
 
 impl ManagedConfigResponse {
     pub(super) fn config_exists(&self) -> bool {
-        self.deployment_id.is_some() || self.team_id.is_some()
+        self.deployment_id.is_some()
     }
 
     /// The signed envelope to verify, when the server included any: the first
@@ -206,14 +190,17 @@ pub(super) struct VerifiedEnvelope {
 /// load-time gate can re-verify it). The error is a plain message: the caller only logs it.
 pub(super) fn verify_signed_envelope(
     body: &ManagedConfigResponse,
-    active_team_id: Option<&str>,
 ) -> Result<VerifiedEnvelope, String> {
     use grow_config::signed_policy;
     let sidecar = body.signature_sidecar().ok_or_else(|| {
         "managed policy is required but the server returned no signature".to_owned()
     })?;
+    let expected_deployment_id = body
+        .deployment_id
+        .as_deref()
+        .ok_or_else(|| "managed policy response is missing deployment_id".to_owned())?;
     // Unclamped wall clock: a fresh envelope must heal an inflated floor, not be refused by it.
-    let payload = signed_policy::verify_fetched(&sidecar, active_team_id, now_unix())
+    let payload = signed_policy::verify_fetched(&sidecar, expected_deployment_id, now_unix())
         .map_err(|e| e.to_string())?;
     if body.managed_config != payload.managed_config || body.requirements != payload.requirements {
         return Err("served policy does not match the signed payload".to_owned());

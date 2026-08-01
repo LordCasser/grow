@@ -2,7 +2,6 @@ use crate::agent::auth_method::ModelByok;
 use crate::agent::model_providers::{
     ModelProviderConfig, auth_config_issues, model_provider_auth_name, parse_model_providers,
 };
-use crate::auth::{AuthManager, OidcAuthConfig, ServiceAuthConfig};
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::{sampling::ApiBackend, tools::config::ShellToolsetConfig};
 use agent_client_protocol as acp;
@@ -925,7 +924,6 @@ pub struct Config {
     pub config_models: IndexMap<String, ConfigModelOverride>,
     #[serde(skip)]
     pub config_warnings: Vec<super::config_model_override_parse::ConfigWarning>,
-    pub auth: ServiceAuthConfig,
     /// `[auth_provider.<name>]` tables, populated by
     /// [`parse_auth_providers`] from trusted config layers only.
     #[serde(skip)]
@@ -1320,7 +1318,6 @@ impl Default for Config {
             auto_mode: AutoModeConfig::default(),
             config_models: IndexMap::new(),
             config_warnings: Vec::new(),
-            auth: ServiceAuthConfig::default(),
             auth_providers: IndexMap::new(),
             model_providers: IndexMap::new(),
             shortcuts: None,
@@ -1480,11 +1477,6 @@ impl Config {
             }
         }
         Ok(())
-    }
-    /// Build an `AuthManager` with the configured proxy URL applied.
-    pub fn create_auth_manager(&self) -> AuthManager {
-        AuthManager::new(&crate::util::grow_home::grow_home(), self.auth.clone())
-            .with_proxy_base_url(&self.endpoints.proxy_url())
     }
     /// Deserialize the merged `base` document, also returning the ignored key
     /// paths whose top-level key appears in `user_config`. Paths outside it
@@ -1647,12 +1639,6 @@ impl Config {
             }
         }
         super::config_model_override_parse::log_config_warnings(&config.config_warnings);
-        if config.auth.oidc.is_none() {
-            config.auth.oidc = OidcAuthConfig::from_env();
-        }
-        if config.auth.oidc.is_none() && config.auth.oauth2.is_none() {
-            config.auth.oauth2 = crate::auth::OAuth2ProviderConfig::from_env();
-        }
         if config.client_version.is_none() {
             config.client_version = Self::default().client_version;
         }
@@ -2245,17 +2231,6 @@ impl Config {
             .default(true)
             .resolve()
     }
-    /// Resolve whether explicitly configured OAuth/OIDC login is enabled.
-    ///
-    /// No issuer or client is built in; this flag only selects a provider
-    /// configured through local auth settings or environment variables.
-    /// Priority: `--oauth` > `GROW_OAUTH_ENABLED` > enabled.
-    pub fn resolve_provider_oauth(&self, cli_oidc: Option<bool>) -> Resolved<bool> {
-        BoolFlag::env("GROW_OAUTH_ENABLED")
-            .cli(cli_oidc)
-            .default(true)
-            .resolve()
-    }
     /// Resolve whether to spawn the per-`Ready`-client transport
     /// liveness pollers and the session-actor `StatusDispatcher`.
     ///
@@ -2741,11 +2716,6 @@ pub struct ModelEntryConfig {
     /// Per-model system-prompt identity label (not UI `name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_label: Option<String>,
-    /// The base URL to use when authenticating with an API key (non-session auth).
-    /// When set, `base_url` is used for session-based auth and `api_base_url` for API key auth.
-    /// When not set, `base_url` is used for all auth methods (e.g. BYOK / third-party models).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_base_url: Option<String>,
     /// When true, this model uses concise mode (compact system prompt,
     /// concise tool output, concise user message prefix, reduced toolset).
     /// Defaults to false — when omitted or false, nothing changes.
@@ -2770,9 +2740,6 @@ pub struct ModelEntryConfig {
     /// Exclude from the client model picker; still usable by internal tasks.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
-    /// When false, only OAuth users see this in the picker.
-    #[serde(default = "default_true")]
-    pub supported_in_api: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -2825,7 +2792,6 @@ pub struct ConfigModelOverride {
     /// are set.
     pub auth_provider: Option<String>,
     pub model_provider: Option<String>,
-    pub api_base_url: Option<String>,
     pub output_limit: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
@@ -2849,7 +2815,6 @@ pub struct ConfigModelOverride {
     pub inference_idle_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
     pub hidden: Option<bool>,
-    pub supported_in_api: Option<bool>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub supports_reasoning_effort: Option<bool>,
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
@@ -2869,9 +2834,6 @@ impl ConfigModelOverride {
         }
         if let Some(ref v) = self.base_url {
             entry.info.base_url = v.clone();
-            if self.api_base_url.is_none() {
-                entry.api_base_url = None;
-            }
         }
         if self.name.is_some() {
             entry.info.name.clone_from(&self.name);
@@ -2918,9 +2880,6 @@ impl ConfigModelOverride {
         if let Some(v) = self.hidden {
             entry.info.hidden = v;
         }
-        if let Some(v) = self.supported_in_api {
-            entry.info.supported_in_api = v;
-        }
         if self.reasoning_effort.is_some() {
             entry.info.reasoning_effort = self.reasoning_effort;
         }
@@ -2954,14 +2913,6 @@ impl ConfigModelOverride {
         }
         if let Some(ref name) = self.auth_provider {
             entry.auth_provider = Some(crate::auth::AuthProviderRef::unresolved(name.clone()));
-        }
-        if self.api_base_url.is_some() {
-            entry.api_base_url.clone_from(&self.api_base_url);
-        }
-        if self.supported_in_api.is_none()
-            && (self.api_key.is_some() || self.env_key.is_some() || self.auth_provider.is_some())
-        {
-            entry.info.supported_in_api = true;
         }
         entry
     }
@@ -3010,15 +2961,12 @@ pub struct ModelInfo {
     /// Per-chunk idle timeout for inference streaming (see `ModelEntryConfig`).
     pub inference_idle_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
-    /// Never show in picker (any auth). See also `supported_in_api`.
+    /// Never show in picker.
     pub hidden: bool,
     /// May the user select this model for normal chat? Derived from
     /// `allowed_models` in `resolve_model_catalog`; never persisted.
     #[serde(skip_serializing, default = "default_true")]
     pub user_selectable: bool,
-    /// When false, only OAuth users see this in the picker.
-    #[serde(default = "default_true")]
-    pub supported_in_api: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
     /// When true, the UI shows effort controls for this model.
     pub supports_reasoning_effort: bool,
@@ -3066,7 +3014,6 @@ impl ModelInfo {
             inference_idle_timeout_secs: None,
             max_retries: None,
             hidden: false,
-            supported_in_api: true,
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
@@ -3102,7 +3049,6 @@ impl ModelInfo {
             inference_idle_timeout_secs: entry.inference_idle_timeout_secs,
             max_retries: entry.max_retries,
             hidden: entry.hidden,
-            supported_in_api: entry.supported_in_api,
             reasoning_effort: entry.reasoning_effort,
             supports_reasoning_effort: entry.supports_reasoning_effort,
             reasoning_efforts: entry.reasoning_efforts.clone(),
@@ -3131,16 +3077,6 @@ impl ModelInfo {
             self.reasoning_effort = default;
         }
     }
-    /// Whether this model appears in the picker for the given auth mode.
-    ///
-    /// | `hidden` | `supported_in_api` | OAuth user | API-key user |
-    /// |----------|--------------------|------------|--------------|
-    /// | true     | _                  | hidden     | hidden       |
-    /// | false    | true               | visible    | visible      |
-    /// | false    | false              | visible    | **hidden**   |
-    pub fn visible_for_auth(&self, is_session_auth: bool) -> bool {
-        !self.hidden && (is_session_auth || self.supported_in_api)
-    }
 }
 /// Flat struct so credential and endpoint fields coexist after deep-merge.
 /// Routing reads fields, not provenance.
@@ -3154,8 +3090,6 @@ pub struct ModelEntry {
     /// Config-file models only: the built-in catalog never carries one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_provider: Option<crate::auth::AuthProviderRef>,
-    /// When set, `base_url` is used for session auth, `api_base_url` for API-key auth.
-    pub api_base_url: Option<String>,
 }
 impl ModelEntry {
     /// Minimal fallback entry for an unknown model slug.
@@ -3167,7 +3101,6 @@ impl ModelEntry {
             api_key: None,
             env_key: None,
             auth_provider: None,
-            api_base_url: None,
         }
     }
     pub fn info(&self) -> &ModelInfo {
@@ -3179,7 +3112,6 @@ impl ModelEntry {
             api_key: entry.api_key.clone(),
             env_key: entry.env_key.clone(),
             auth_provider: None,
-            api_base_url: entry.api_base_url.clone(),
         }
     }
     /// Non-empty `api_key`, else first non-empty resolved `env_key`.
@@ -3541,7 +3473,6 @@ pub struct Features {
 pub struct ResolvedCredentials {
     pub api_key: Option<String>,
     pub base_url: String,
-    pub auth_type: grow_chat_state::AuthType,
     pub auth_scheme: AuthScheme,
 }
 /// First usable BYOK credential: a non-empty (trimmed) api_key, else the first
@@ -3558,21 +3489,13 @@ pub(crate) fn first_own_credential(
 }
 /// Resolve only credentials owned by the configured provider/model.
 /// Product login credentials are never inference credentials.
-pub fn resolve_credentials(model: &ModelEntry, _session_key: Option<&str>) -> ResolvedCredentials {
+pub fn resolve_credentials(model: &ModelEntry) -> ResolvedCredentials {
     let info = model.info();
-    let (api_key, base_url, auth_type) = if let Some(key) = model.own_credential() {
-        (
-            Some(key),
-            info.base_url.clone(),
-            grow_chat_state::AuthType::ApiKey,
-        )
+    let (api_key, base_url) = if let Some(key) = model.own_credential() {
+        (Some(key), info.base_url.clone())
     } else if let Some(provider) = model.auth_provider.as_ref() {
         debug_assert!(model.effective_auth_provider().is_some());
-        (
-            provider.cached_token(),
-            info.base_url.clone(),
-            grow_chat_state::AuthType::ApiKey,
-        )
+        (provider.cached_token(), info.base_url.clone())
     } else {
         if let Some(ref env_keys) = model.env_key
             && !env_keys.is_empty()
@@ -3584,42 +3507,14 @@ pub fn resolve_credentials(model: &ModelEntry, _session_key: Option<&str>) -> Re
                  requests will have no API key",
             );
         }
-        (
-            None,
-            info.base_url.clone(),
-            grow_chat_state::AuthType::ApiKey,
-        )
+        (None, info.base_url.clone())
     };
     let auth_scheme = info.auth_scheme;
-    tracing::debug!(
-        model = %info.model,
-        auth_type = ?auth_type,
-        "resolved credentials"
-    );
     ResolvedCredentials {
         api_key,
         base_url,
-        auth_type,
         auth_scheme,
     }
-}
-/// Product authentication policy does not rewrite provider-owned inference
-/// credentials.
-pub fn enforce_disable_api_key_auth(
-    _creds: &mut ResolvedCredentials,
-    _disable_api_key_auth: bool,
-    _session_key: Option<&str>,
-) {
-}
-/// Resolve provider-owned credentials for an auxiliary sampling path.
-fn resolve_credentials_enforced(
-    entry: &ModelEntry,
-    session_key: Option<&str>,
-    disable_api_key_auth: bool,
-) -> ResolvedCredentials {
-    let mut credentials = resolve_credentials(entry, session_key);
-    enforce_disable_api_key_auth(&mut credentials, disable_api_key_auth, session_key);
-    credentials
 }
 /// Derive a stable local identifier from a deployment key without exposing the key.
 pub fn deployment_id_from_key(key: &str) -> String {
@@ -3627,12 +3522,8 @@ pub fn deployment_id_from_key(key: &str) -> String {
 }
 /// Try to resolve credentials for a model by loading the effective config.
 /// Returns `None` (with a warning) if config loading, parsing, or model
-/// lookup fails. `session_key` should only be passed when `auth_type` is
-/// `SessionToken` — callers must guard this.
-pub fn try_resolve_model_credentials(
-    model_id: &str,
-    session_key: Option<&str>,
-) -> Option<ResolvedCredentials> {
+/// lookup fails.
+pub fn try_resolve_model_credentials(model_id: &str) -> Option<ResolvedCredentials> {
     let raw = crate::config::load_effective_config()
         .map_err(|e| tracing::warn!(error = %e, "config load failed for credential resolution"))
         .ok()?;
@@ -3641,13 +3532,7 @@ pub fn try_resolve_model_credentials(
         .ok()?;
     let models = resolve_model_list(&cfg);
     let entry = find_model_by_id(&models, model_id)?;
-    let mut credentials = resolve_credentials(entry, session_key);
-    enforce_disable_api_key_auth(
-        &mut credentials,
-        cfg.auth.api_key_auth_disabled(),
-        session_key,
-    );
-    Some(credentials)
+    Some(resolve_credentials(entry))
 }
 /// Per-model auth facts (BYOK status + auth scheme) from one effective-config
 /// load, memoized by the session actor.
@@ -3730,9 +3615,6 @@ fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T
 pub fn resolve_aux_model_sampling_config(
     model_id: &str,
     models: &IndexMap<String, ModelEntry>,
-    _endpoints: &EndpointsConfig,
-    session_key: Option<&str>,
-    disable_api_key_auth: bool,
     alpha_test_key: Option<String>,
 ) -> Option<SamplerConfig> {
     if model_id.trim().is_empty() {
@@ -3740,7 +3622,7 @@ pub fn resolve_aux_model_sampling_config(
     }
     let catalog_entry = find_model_by_id(models, model_id).cloned();
     if let Some(entry) = &catalog_entry {
-        let credentials = resolve_credentials_enforced(entry, session_key, disable_api_key_auth);
+        let credentials = resolve_credentials(entry);
         let sampler = sampling_config_for_model(entry, credentials, alpha_test_key.clone());
         if sampler.api_key.is_some() {
             return Some(sampler);
@@ -3805,18 +3687,6 @@ pub fn finalize_image_describe_sampler_config(
             (model, active_session_config.clone())
         }
     }
-}
-/// Re-derive `auth_type` from the model's own credentials so BYOK env-key
-/// models stay on `ApiKey` even when a session token is present. Falls
-/// back to `fallback` when the model isn't in the on-disk catalog.
-pub fn resolve_chat_state_auth_type(
-    model_id: &str,
-    session_key: Option<&str>,
-    fallback: grow_chat_state::AuthType,
-) -> grow_chat_state::AuthType {
-    try_resolve_model_credentials(model_id, session_key)
-        .map(|r| r.auth_type)
-        .unwrap_or(fallback)
 }
 pub fn sampling_config_for_model(
     model: &ModelEntry,
@@ -3892,23 +3762,6 @@ pub fn inject_url_derived_headers(
             .or_insert_with(|| crate::http::process_client_mode().to_string());
     }
     let _ = (alpha_test_key, base_url);
-}
-pub fn resolve_model_to_sampling_config(
-    model_id: &str,
-    models: &IndexMap<String, ModelEntry>,
-    session_key: Option<&str>,
-    alpha_test_key: Option<String>,
-    fallback_entry: Option<ModelEntry>,
-) -> Option<SamplerConfig> {
-    let entry = find_model_by_id(models, model_id)
-        .cloned()
-        .or(fallback_entry)?;
-    let credentials = resolve_credentials(&entry, session_key);
-    Some(sampling_config_for_model(
-        &entry,
-        credentials,
-        alpha_test_key,
-    ))
 }
 pub fn to_acp_model_info(
     models: &IndexMap<String, ModelEntry>,
@@ -4217,15 +4070,8 @@ reasoning_effort = "low"
                 None,
             ),
         );
-        let resolved = resolve_aux_model_sampling_config(
-            "grow-build",
-            &catalog,
-            &endpoints,
-            None,
-            false,
-            None,
-        )
-        .expect("override entry has an API key, so resolution succeeds");
+        let resolved = resolve_aux_model_sampling_config("grow-build", &catalog, None)
+            .expect("override entry has an API key, so resolution succeeds");
         assert_eq!(resolved.model, "v9m-rl-learnability-tp8");
         assert_eq!(resolved.base_url, "https://vendor.example/v1");
         assert_eq!(resolved.api_key.as_deref(), Some("vendor-key"));
@@ -4234,7 +4080,6 @@ reasoning_effort = "low"
     /// warm cache serves the provider token at the provider endpoint.
     #[tokio::test]
     async fn aux_model_with_auth_provider_never_reroutes() {
-        let endpoints = EndpointsConfig::default();
         let provider = crate::auth::AuthProviderRef::new(
             "aux-provider-test".into(),
             crate::auth::AuthProviderConfig {
@@ -4251,27 +4096,12 @@ reasoning_effort = "low"
         let mut catalog = IndexMap::new();
         catalog.insert("proxied-aux".to_string(), entry);
         assert!(
-            resolve_aux_model_sampling_config(
-                "proxied-aux",
-                &catalog,
-                &endpoints,
-                Some("session-jwt"),
-                false,
-                None,
-            )
-            .is_none(),
+            resolve_aux_model_sampling_config("proxied-aux", &catalog, None).is_none(),
             "cold provider cache must not reroute the aux model through the configured service proxy"
         );
         let _ = provider.ensure_fresh_token(None).await;
-        let resolved = resolve_aux_model_sampling_config(
-            "proxied-aux",
-            &catalog,
-            &endpoints,
-            Some("session-jwt"),
-            false,
-            None,
-        )
-        .expect("warm cache resolves");
+        let resolved = resolve_aux_model_sampling_config("proxied-aux", &catalog, None)
+            .expect("warm cache resolves");
         assert_eq!(resolved.base_url, "https://litellm.example/v1");
         assert_eq!(resolved.api_key.as_deref(), Some("aux-token"));
     }
@@ -4573,10 +4403,6 @@ reasoning_effort = "low"
             model.has_own_credentials(),
             "provider-backed models classify as BYOK (session token must not leak)"
         );
-        assert!(
-            model.info.supported_in_api,
-            "declaring an auth provider implies supported_in_api"
-        );
     }
     #[test]
     fn undefined_auth_provider_fails_closed() {
@@ -4601,12 +4427,11 @@ reasoning_effort = "low"
             "undefined provider keeps an empty command"
         );
         assert!(model.has_own_credentials());
-        let creds = resolve_credentials(model, Some("session-jwt"));
+        let creds = resolve_credentials(model);
         assert_eq!(creds.api_key, None);
     }
     #[tokio::test]
     async fn resolve_credentials_serves_cached_provider_token() {
-        use grow_chat_state::AuthType;
         let mut model = test_model_entry("m", "https://litellm.example/v1", None, None, None);
         let provider = crate::auth::AuthProviderRef::new(
             "resolve-creds-test".into(),
@@ -4620,12 +4445,11 @@ reasoning_effort = "low"
             },
         );
         model.auth_provider = Some(provider.clone());
-        let creds = resolve_credentials(&model, Some("session-jwt"));
+        let creds = resolve_credentials(&model);
         assert_eq!(creds.api_key, None, "cold cache must not run the command");
         let _ = provider.ensure_fresh_token(None).await;
-        let creds = resolve_credentials(&model, Some("session-jwt"));
+        let creds = resolve_credentials(&model);
         assert_eq!(creds.api_key.as_deref(), Some("provider-minted-token"));
-        assert_eq!(creds.auth_type, AuthType::ApiKey);
         assert_eq!(creds.base_url, "https://litellm.example/v1");
     }
     /// A set `env_key` shadows even a warm provider cache at resolve time, so
@@ -4654,7 +4478,7 @@ reasoning_effort = "low"
             None,
             "a resolvable env_key shadows the provider"
         );
-        let creds = resolve_credentials(&model, Some("session-jwt"));
+        let creds = resolve_credentials(&model);
         assert_eq!(
             creds.api_key.as_deref(),
             Some("env-token"),
@@ -4666,7 +4490,7 @@ reasoning_effort = "low"
         base_url: &str,
         api_key: Option<&str>,
         env_key: Option<&str>,
-        api_base_url: Option<&str>,
+        _api_base_url: Option<&str>,
     ) -> ModelEntry {
         ModelEntry {
             info: ModelInfo {
@@ -4692,7 +4516,6 @@ reasoning_effort = "low"
                 inference_idle_timeout_secs: None,
                 max_retries: None,
                 hidden: false,
-                supported_in_api: true,
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
@@ -4705,7 +4528,6 @@ reasoning_effort = "low"
             api_key: api_key.map(|s| s.to_string()),
             env_key: env_key.map(EnvKeys::single),
             auth_provider: None,
-            api_base_url: api_base_url.map(|s| s.to_string()),
         }
     }
     /// The effective-model RE-support lookup must use the model ACTUALLY used:
@@ -4742,8 +4564,7 @@ reasoning_effort = "low"
             None,
             None,
         );
-        let sampling_config =
-            sampling_config_for_model(&model, resolve_credentials(&model, None), None);
+        let sampling_config = sampling_config_for_model(&model, resolve_credentials(&model), None);
         assert_eq!(
             sampling_config.api_key,
             Some("model-specific-key".to_string())
@@ -4758,7 +4579,6 @@ reasoning_effort = "low"
             ResolvedCredentials {
                 api_key: Some("fallback-key".to_string()),
                 base_url: model.info().base_url.clone(),
-                auth_type: grow_chat_state::AuthType::ApiKey,
                 auth_scheme: AuthScheme::Bearer,
             },
             None,
@@ -4857,7 +4677,6 @@ reasoning_effort = "low"
     #[test]
     #[serial]
     fn resolve_credentials_multi_env_key_uses_lc_alias() {
-        use grow_chat_state::AuthType;
         let primary = "GROW_TEST_MULTI_ENV_PRIMARY";
         let alias = "GROW_TEST_MULTI_ENV_LC_ALIAS";
         unsafe {
@@ -4870,15 +4689,14 @@ reasoning_effort = "low"
             model.has_own_credentials(),
             "alias alone should satisfy has_own_credentials"
         );
-        let creds = resolve_credentials(&model, None);
-        assert_eq!(creds.auth_type, AuthType::ApiKey);
+        let creds = resolve_credentials(&model);
         assert_eq!(creds.api_key.as_deref(), Some("token-via-lc-alias"));
         unsafe {
             std::env::remove_var(alias);
             std::env::set_var(primary, "token-via-primary");
             std::env::set_var(alias, "token-via-lc-alias");
         }
-        let creds = resolve_credentials(&model, None);
+        let creds = resolve_credentials(&model);
         assert_eq!(
             creds.api_key.as_deref(),
             Some("token-via-primary"),
@@ -4894,7 +4712,6 @@ reasoning_effort = "low"
     #[test]
     #[serial_test::serial]
     fn resolve_credentials_env_key_byok_keeps_api_key_auth_with_session() {
-        use grow_chat_state::AuthType;
         let env_var = "REGRESSION_BYOK_TOKEN_FOR_AUTH_TYPE_TEST";
         unsafe {
             std::env::set_var(env_var, "sk-byok-test-value");
@@ -4907,12 +4724,7 @@ reasoning_effort = "low"
             None,
         );
         assert!(model.has_own_credentials());
-        let creds = resolve_credentials(&model, Some("session-jwt"));
-        assert_eq!(
-            creds.auth_type,
-            AuthType::ApiKey,
-            "BYOK env_key model must resolve to ApiKey even when a session token is available",
-        );
+        let creds = resolve_credentials(&model);
         assert_eq!(
             creds.api_key.as_deref(),
             Some("sk-byok-test-value"),
@@ -4922,20 +4734,10 @@ reasoning_effort = "low"
             std::env::remove_var(env_var);
         }
     }
-    /// Regression: without a session key, `resolve_credentials` falls through
-    /// to ApiKey. Session-based callers must override auth_type to SessionToken
-    /// when their auth manager has only a buffered/expired token.
-    #[test]
-    fn resolve_credentials_no_session_key_returns_api_key() {
-        let model = test_model_entry("m", "https://example.com/v1", None, None, None);
-        let creds = resolve_credentials(&model, None);
-        assert_eq!(creds.auth_type, grow_chat_state::AuthType::ApiKey);
-    }
     fn api_key_creds(base_url: &str) -> ResolvedCredentials {
         ResolvedCredentials {
             api_key: Some("provider-secret".to_string()),
             base_url: base_url.to_string(),
-            auth_type: grow_chat_state::AuthType::ApiKey,
             auth_scheme: Default::default(),
         }
     }
@@ -4950,9 +4752,8 @@ reasoning_effort = "low"
         );
         model.info.api_backend = ApiBackend::Messages;
         model.info.auth_scheme = AuthScheme::XApiKey;
-        let creds = resolve_credentials(&model, None);
+        let creds = resolve_credentials(&model);
         assert_eq!(creds.auth_scheme, AuthScheme::XApiKey);
-        assert_eq!(creds.auth_type, grow_chat_state::AuthType::ApiKey);
         assert_eq!(creds.api_key, Some("sk-ant-test-key".to_string()));
         let config = sampling_config_for_model(&model, creds, None);
         assert_eq!(config.auth_scheme, AuthScheme::XApiKey);
@@ -4971,7 +4772,7 @@ reasoning_effort = "low"
             None,
         );
         assert_eq!(model.info.auth_scheme, AuthScheme::Bearer);
-        let creds = resolve_credentials(&model, None);
+        let creds = resolve_credentials(&model);
         assert_eq!(creds.auth_scheme, AuthScheme::Bearer);
         let config = sampling_config_for_model(&model, creds, None);
         assert_eq!(config.auth_scheme, AuthScheme::Bearer);
@@ -5124,12 +4925,12 @@ reasoning_effort = "low"
     #[test]
     fn sampling_config_context_window_from_entry_or_default() {
         let model = test_model_entry("any-model", "https://api.example.com/v1", None, None, None);
-        let config = sampling_config_for_model(&model, resolve_credentials(&model, None), None);
+        let config = sampling_config_for_model(&model, resolve_credentials(&model), None);
         assert_eq!(config.context_window, 200_000);
         let mut model =
             test_model_entry("any-model", "https://api.example.com/v1", None, None, None);
         model.info.context_window = NonZeroU64::new(256_000).unwrap();
-        let config = sampling_config_for_model(&model, resolve_credentials(&model, None), None);
+        let config = sampling_config_for_model(&model, resolve_credentials(&model), None);
         assert_eq!(config.context_window, 256_000);
     }
     #[test]
@@ -5137,8 +4938,7 @@ reasoning_effort = "low"
         let mut model =
             test_model_entry("test-model", "https://api.example.com/v1", None, None, None);
         model.info.api_backend = ApiBackend::Responses;
-        let sampling_config =
-            sampling_config_for_model(&model, resolve_credentials(&model, None), None);
+        let sampling_config = sampling_config_for_model(&model, resolve_credentials(&model), None);
         assert_eq!(sampling_config.api_backend, ApiBackend::Responses);
     }
     #[test]
@@ -5160,13 +4960,11 @@ reasoning_effort = "low"
             context_window: NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
-            api_base_url: None,
             use_concise: true,
             agent_type: default_agent_type(),
             inference_idle_timeout_secs: None,
             max_retries: None,
             hidden: false,
-            supported_in_api: true,
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
@@ -5263,13 +5061,11 @@ reasoning_effort = "low"
             context_window: NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
-            api_base_url: None,
             use_concise: false,
             agent_type: "codex".to_string(),
             inference_idle_timeout_secs: None,
             max_retries: None,
             hidden: false,
-            supported_in_api: true,
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
@@ -5536,13 +5332,11 @@ reasoning_effort = "low"
             context_window: NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
-            api_base_url: None,
             use_concise: false,
             agent_type: default_agent_type(),
             inference_idle_timeout_secs: Some(120),
             max_retries: None,
             hidden: false,
-            supported_in_api: true,
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
@@ -5556,129 +5350,6 @@ reasoning_effort = "low"
         assert_eq!(info.inference_idle_timeout_secs, Some(120));
     }
 
-    #[test]
-    fn auth_alias_maps_to_auth() {
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [auth.oidc]
-            issuer = "https://example.okta.com"
-            client_id = "test-id"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
-        let oidc = cfg.auth.oidc.expect("oidc should be set");
-        assert_eq!(oidc.issuer, "https://example.okta.com");
-        assert_eq!(oidc.client_id, "test-id");
-    }
-    #[test]
-    fn auth_still_works() {
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [auth.oidc]
-            issuer = "https://example.okta.com"
-            client_id = "test-id"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
-        let oidc = cfg.auth.oidc.expect("oidc should be set");
-        assert_eq!(oidc.issuer, "https://example.okta.com");
-    }
-    /// `disable_api_key_auth` plumbs through the `[auth]` alias, and absent
-    /// means None (opt-in knob, zero impact by default).
-    #[test]
-    fn disable_api_key_auth_parses_from_auth_alias() {
-        let absent = Config::new_from_toml_cfg(&toml::from_str("").unwrap()).unwrap();
-        assert_eq!(absent.auth.disable_api_key_auth, None);
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [auth]
-            disable_api_key_auth = true
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
-        assert_eq!(cfg.auth.disable_api_key_auth, Some(true));
-    }
-    /// `force_login_team_uuid` parses a string (pin), array (any-of), or `[]`
-    /// (fail closed); absent => None.
-    #[test]
-    fn force_login_team_uuid_parses_string_and_array() {
-        use crate::auth::ForceLoginTeam;
-        let absent = Config::new_from_toml_cfg(&toml::from_str("").unwrap()).unwrap();
-        assert_eq!(absent.auth.force_login_team_uuid, None);
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [auth]
-            force_login_team_uuid = "team-abc"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
-        assert_eq!(
-            cfg.auth.force_login_team_uuid,
-            Some(ForceLoginTeam::Single("team-abc".into())),
-        );
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [auth]
-            force_login_team_uuid = ["team-a", "team-b"]
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
-        assert_eq!(
-            cfg.auth.force_login_team_uuid,
-            Some(ForceLoginTeam::AnyOf(vec![
-                "team-a".into(),
-                "team-b".into()
-            ])),
-        );
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [auth]
-            force_login_team_uuid = []
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
-        assert_eq!(
-            cfg.auth.force_login_team_uuid,
-            Some(ForceLoginTeam::AnyOf(vec![])),
-        );
-    }
-    /// Pinning a team via `force_login_team_uuid` implies API-key auth is
-    /// disabled even without an explicit `disable_api_key_auth` (team
-    /// membership can't be verified from a bare API key, so it needs IdP login).
-    #[test]
-    fn force_login_team_uuid_implies_api_key_auth_disabled() {
-        use crate::auth::{ForceLoginTeam, ServiceAuthConfig};
-        let base = ServiceAuthConfig {
-            disable_api_key_auth: None,
-            force_login_team_uuid: None,
-            ..ServiceAuthConfig::default()
-        };
-        assert!(!base.api_key_auth_disabled());
-        assert!(
-            ServiceAuthConfig {
-                disable_api_key_auth: Some(true),
-                ..base.clone()
-            }
-            .api_key_auth_disabled()
-        );
-        assert!(
-            ServiceAuthConfig {
-                force_login_team_uuid: Some(ForceLoginTeam::Single("team-x".into())),
-                ..base
-            }
-            .api_key_auth_disabled()
-        );
-    }
-    fn resolve_sampling(model: &ModelEntry, session_key: Option<&str>) -> SamplerConfig {
-        let credentials = resolve_credentials(model, session_key);
-        sampling_config_for_model(model, credentials, None)
-    }
     #[test]
     fn parsed_config_has_models_config() {
         let raw: toml::Value = toml::from_str(
@@ -7749,7 +7420,6 @@ default = "grow-4.5"
                 inference_idle_timeout_secs: None,
                 max_retries: None,
                 hidden: false,
-                supported_in_api: true,
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
@@ -7764,7 +7434,6 @@ default = "grow-4.5"
             api_key: None,
             env_key: None,
             auth_provider: None,
-            api_base_url: None,
         }
     }
     #[test]

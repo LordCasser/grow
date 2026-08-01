@@ -210,9 +210,7 @@ pub(crate) async fn run_shell_child(
         request.runtime_overrides.model_override_provenance,
         resume_source.is_some(),
         &ctx.available_models,
-        ctx.auth_manager
-            .current_or_expired()
-            .is_some_and(|a| a.is_session_auth()),
+        false,
     ) {
         return child_run_output(failure_result(&request, &error), completion_data, None);
     }
@@ -654,15 +652,8 @@ pub(crate) async fn run_shell_child(
     let tracker_child_cwd = child_session_info.cwd.clone();
     let tracker_model_id = effective_model_id.0.to_string();
     let initial_child_tokens = grow_chat_state::estimate_conversation_tokens(&forked_conversation);
-    let model_entry = crate::agent::config::find_model_by_id(
-        &ctx.available_models,
-        effective_model_id.0.as_ref(),
-    );
-    let model_has_own_creds = model_entry.is_some_and(|entry| entry.has_own_credentials());
-    let inherited_auth_type = subagent_auth_type(model_entry, &ctx.auth_method_id);
     let credentials = grow_chat_state::Credentials {
         api_key: effective_sampling_config.api_key.clone(),
-        auth_type: inherited_auth_type,
         alpha_test_key: ctx.alpha_test_key.clone(),
     };
     grow_diagnostics::unified_log::info(
@@ -675,16 +666,12 @@ pub(crate) async fn run_shell_child(
             "effective_model_raw": &effective_sampling_config.model,
             "base_url": &effective_sampling_config.base_url,
             "key_prefix": key_prefix(&effective_sampling_config.api_key),
-            "auth_type": format!("{:?}", inherited_auth_type),
-            "model_has_own_creds": model_has_own_creds,
             "auth_method_id": ctx.auth_method_id.0.as_ref(),
             "parent_model": ctx.model_id.0.as_ref(),
             "parent_key_prefix": key_prefix(&ctx.sampling_config.api_key),
             "context_window": effective_sampling_config.context_window,
         })),
     );
-    let attribution_callback: Option<grow_sampler::SharedAttributionCallback> =
-        effective_sampling_config.attribution_callback.clone();
     let agent_memory_scope = definition.memory;
     let agent_name_for_memory = definition.name.clone();
     if let Some(scope) = agent_memory_scope {
@@ -901,8 +888,6 @@ pub(crate) async fn run_shell_child(
         effective_sampling_config,
         credentials,
         crate::agent::auth_method::new_shared_auth_method_id(Some(ctx.auth_method_id.clone())),
-        Some(ctx.auth_manager.clone()),
-        attribution_callback,
         tool_ctx,
         agent_mcp_servers,
         vec![],
@@ -974,7 +959,6 @@ pub(crate) async fn run_shell_child(
             ctx.memory_config.clone()
         },
         ctx.managed_mcp_state.clone(),
-        None,
         ctx.managed_mcp_proxy_base_url.clone(),
         effective_model_id,
         ctx.yolo_mode,
@@ -1004,7 +988,7 @@ pub(crate) async fn run_shell_child(
         None,
         ctx.models_manager.clone(),
         ctx.permission_handle.clone(),
-        ctx.api_key_provider.clone(),
+        None,
         ctx.image_description_model.clone(),
         ctx.hook_registry.clone(),
         ctx.workspace_ops.clone(),

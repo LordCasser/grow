@@ -11,11 +11,6 @@
 //!    (`grow_mcp::rmcp::*`).
 //!
 //! 2. **Owns MCP-specific integration code**:
-//!    - [`credentials`] -- on-disk `$GROW_HOME/mcp_credentials.json` store and
-//!      the rmcp `CredentialStore` adapter.
-//!    - [`oauth`] -- browser-based OAuth flow with cross-process + in-process
-//!      dedup.
-//!    - [`oauth_config`] -- BYO OAuth config types parsed out of `config.toml`.
 //!    - [`servers`] -- MCP transport layer (rmcp's `StreamableHttpClientTransport`
 //!      and `TokioChildProcess`) plus client lifecycle, tool invocation, error
 //!      classification, and managed-MCP refresh.
@@ -26,10 +21,7 @@
 pub use rmcp;
 
 pub mod acp_transport;
-pub mod credentials;
 pub mod liveness;
 pub mod mcp_http_client;
-pub mod oauth;
-pub mod oauth_config;
 pub mod servers;
 pub mod wire;

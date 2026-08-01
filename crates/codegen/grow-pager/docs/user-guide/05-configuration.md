@@ -216,8 +216,8 @@ allow_local = false                            # true = allow localhost / 127.0.
 ### Authentication
 
 Credentials are provider-scoped. Prefer an environment variable declared by `env_key`; use
-`api_key` only when storing a secret in TOML is acceptable. OAuth and credential helpers are
-optional provider mechanisms, not a global Grow login requirement. See
+`api_key` only when storing a secret in TOML is acceptable. A local key helper is available for
+external secret stores; Grow has no global login lifecycle. See
 [Authentication](02-authentication.md) for the full story.
 
 ```toml
@@ -704,12 +704,6 @@ Common variables are listed below.
 | Variable | Description |
 |----------|-------------|
 | `GROW_API_KEY` | Fallback API key for configured providers that do not declare their own `api_key` or `env_key` |
-| `GROW_AUTH_PROVIDER_COMMAND` | External auth binary path |
-| `GROW_AUTH_PROVIDER_LABEL` | Display name on TUI login screen |
-| `GROW_AUTH_TOKEN_TTL` | Token lifetime in seconds |
-| `GROW_AUTH_EARLY_INVALIDATION_SECS` | Seconds before expiry to refresh (default: 300) |
-| `GROW_OIDC_ISSUER` | OIDC issuer URL |
-| `GROW_OIDC_CLIENT_ID` | OIDC client ID |
 
 ### Endpoints
 
@@ -751,7 +745,6 @@ Common variables are listed below.
 |------|-------------|
 | `~/.grow/config.toml` | Main configuration file |
 | `~/.grow/pager.toml` | TUI appearance configuration |
-| `~/.grow/auth.json` | Authentication credentials (auto-managed) |
 | `~/.grow/sessions/` | Persisted sessions (organized by working directory) |
 | `~/.grow/memory/` | Cross-session memory files and index |
 | `~/.grow/skills/` | User-scoped skill definitions |

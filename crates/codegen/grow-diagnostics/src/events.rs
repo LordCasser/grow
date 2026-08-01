@@ -258,70 +258,6 @@ pub enum PluginSource {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Auth
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[derive(Serialize)]
-pub struct Login {
-    pub auth_method: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<String>,
-}
-
-/// The login-method picker was shown. `trigger` is "startup", "logout", or
-/// "mid_session".
-#[derive(Serialize)]
-pub struct LoginPickerShown {
-    pub trigger: String,
-}
-
-/// A login method was chosen from the picker. `method` is "xai" or "api_key";
-/// `mode` is "device", "loopback", or "api_key".
-#[derive(Serialize)]
-pub struct LoginMethodChosen {
-    pub method: String,
-    pub mode: String,
-}
-
-/// A login flow completed successfully. `method` is "xai" or "api_key";
-/// `mode` is the resolved auth mode; `mid_session` is true for `/login`/401
-/// re-auth (as opposed to the startup/logout flow).
-#[derive(Serialize)]
-pub struct LoginCompleted {
-    pub method: String,
-    pub mode: String,
-    pub duration_ms: u64,
-    pub mid_session: bool,
-}
-
-/// A login flow failed. `error` is the raw error message from the auth flow.
-#[derive(Serialize)]
-pub struct LoginFailed {
-    pub method: String,
-    pub mode: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    pub duration_ms: u64,
-}
-
-/// The user backed out of the login funnel. `stage` is "picker",
-/// "api_key_entry", "loopback_paste", "device_wait", "api_key_wait", or
-/// "command_wait"; `via` is "esc" or "quit".
-#[derive(Serialize)]
-pub struct LoginAbandoned {
-    pub stage: String,
-    pub via: String,
-}
-
-/// Result of persisting a user-provided API key.
-#[derive(Serialize)]
-pub struct ApiKeySaveResult {
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Plan Mode
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -796,7 +732,7 @@ pub struct McpInitCompleted {
     pub server_count: u32,
     pub servers_succeeded: u32,
     pub servers_failed: u32,
-    pub servers_auth_required: u32,
+    pub servers_credentials_rejected: u32,
     pub total_tools_registered: u32,
     pub strategy: McpStrategy,
     pub is_reinit: bool,
@@ -1329,79 +1265,10 @@ pub struct InternalError {
     pub error_type: String,
 }
 
-/// Why auth recovery could not refresh the credential, forcing the user to
-/// manually re-authenticate. Mapped from shell's `AuthError`; only terminal
-/// failures map — transient ones don't emit (recovery retries).
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum ManualAuthReason {
-    /// IdP rejected the refresh token (`invalid_grant`); a re-login is required.
-    RefreshTokenRejected,
-    /// Token type has no refresh authority (API key / legacy / OIDC sans refresh token).
-    NoRefreshAuthority,
-    RecoveryExhausted,
-    TokenExpiredNoRefresh,
-    /// Recovered session violated the `force_login_team_uuid` pin.
-    WrongTeam,
-}
-
-/// User-facing surface where the manual re-auth was triggered. Background
-/// recoveries do not emit this event.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum ManualAuthSurface {
-    /// A chat/inference turn (the yellow `ReAuthRequired` banner).
-    Turn,
-}
-
-/// The kind of bearer that was rejected. Mirrors shell's `TokenType` as a
-/// stable wire enum (don't serialize the shell `Debug` repr).
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthTokenKind {
-    OidcSession,
-    ExternalBinary,
-    LegacySession,
-    ApiKey,
-    None,
-}
-
-/// Local diagnostic event: a user-facing 401 recovery (`Turn`/`Relay`)
-/// terminally failed, forcing a manual re-login.
-///
-/// Local event contract: the event lands under the Shell-origin name
-/// `grow-shell-manual_auth` (the `manual_auth` binding gets the `grow-shell-`
-/// prefix at emit). Count `distinct(principal)`, never raw events — the debounce
-/// is a single slot per process (repeats on the most-recent dead credential
-/// collapse; alternating credentials can re-emit), and `trigger` is whichever
-/// surface fired first, not a reliable per-surface split. `principal` is absent for
-/// unattributed lockouts (all collapse into one NULL bucket). API-key sessions
-/// are excluded (a 401 there means rotate the key, not `/login`).
-// `Debug`/`Clone`/`PartialEq` let shell tests assert the emitted event by value
-// (a downstream crate's `cfg(test)` can't turn on `cfg_attr(test, ...)` here).
-#[derive(Serialize, Debug, Clone, PartialEq)]
-pub struct ManualAuth {
-    pub reason: ManualAuthReason,
-    pub trigger: ManualAuthSurface,
-    pub token_kind: AuthTokenKind,
-    /// `user_id` of the locked-out account, when known.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub principal: Option<String>,
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Event name bindings
 // ─────────────────────────────────────────────────────────────────────────────
 
-diagnostics_event!(ManualAuth, "manual_auth");
-
-diagnostics_event!(Login, "login");
-diagnostics_event!(LoginPickerShown, "login_picker_shown");
-diagnostics_event!(LoginMethodChosen, "login_method_chosen");
-diagnostics_event!(LoginCompleted, "login_completed");
-diagnostics_event!(LoginFailed, "login_failed");
-diagnostics_event!(LoginAbandoned, "login_abandoned");
-diagnostics_event!(ApiKeySaveResult, "api_key_save_result");
 diagnostics_event!(PlanModeToggled, "plan_mode_toggled");
 diagnostics_event!(ContextualTip, "contextual_tip");
 diagnostics_event!(PromptSuggestion, "prompt_suggestion");
@@ -1582,39 +1449,6 @@ mod tests {
     }
 
     #[test]
-    fn manual_auth_name_and_shape() {
-        assert_eq!(ManualAuth::NAME, "manual_auth");
-
-        let with_principal = serde_json::to_value(ManualAuth {
-            reason: ManualAuthReason::RefreshTokenRejected,
-            trigger: ManualAuthSurface::Turn,
-            token_kind: AuthTokenKind::OidcSession,
-            principal: Some("user-1".into()),
-        })
-        .unwrap();
-        assert_eq!(
-            with_principal,
-            serde_json::json!({
-                "reason": "refresh_token_rejected",
-                "trigger": "turn",
-                "token_kind": "oidc_session",
-                "principal": "user-1",
-            })
-        );
-
-        // `principal` is omitted (not null) when unknown. `LegacySession` is a
-        // reachable fixture (API-key sessions never emit this event).
-        let no_principal = serde_json::to_value(ManualAuth {
-            reason: ManualAuthReason::NoRefreshAuthority,
-            trigger: ManualAuthSurface::Turn,
-            token_kind: AuthTokenKind::LegacySession,
-            principal: None,
-        })
-        .unwrap();
-        assert!(!no_principal.as_object().unwrap().contains_key("principal"));
-    }
-
-    #[test]
     fn project_picker_selected_name_and_shape() {
         assert_eq!(ProjectPickerSelected::NAME, "project_picker_selected");
 
@@ -1785,55 +1619,6 @@ mod tests {
         assert_eq!(
             v,
             serde_json::json!({ "plugin_name": "figma", "success": true })
-        );
-    }
-
-    #[test]
-    fn login_funnel_event_names() {
-        assert_eq!(LoginPickerShown::NAME, "login_picker_shown");
-        assert_eq!(LoginMethodChosen::NAME, "login_method_chosen");
-        assert_eq!(LoginCompleted::NAME, "login_completed");
-        assert_eq!(LoginFailed::NAME, "login_failed");
-        assert_eq!(LoginAbandoned::NAME, "login_abandoned");
-        assert_eq!(ApiKeySaveResult::NAME, "api_key_save_result");
-    }
-
-    #[test]
-    fn login_completed_serializes_all_fields() {
-        let v = serde_json::to_value(LoginCompleted {
-            method: "xai".into(),
-            mode: "device".into(),
-            duration_ms: 1234,
-            mid_session: false,
-        })
-        .unwrap();
-        assert_eq!(
-            v,
-            serde_json::json!({
-                "method": "xai",
-                "mode": "device",
-                "duration_ms": 1234,
-                "mid_session": false,
-            })
-        );
-    }
-
-    #[test]
-    fn api_key_save_result_omits_error_when_ok() {
-        let ok = serde_json::to_value(ApiKeySaveResult {
-            ok: true,
-            error: None,
-        })
-        .unwrap();
-        assert_eq!(ok, serde_json::json!({ "ok": true }));
-        let err = serde_json::to_value(ApiKeySaveResult {
-            ok: false,
-            error: Some("failed to write key".into()),
-        })
-        .unwrap();
-        assert_eq!(
-            err,
-            serde_json::json!({ "ok": false, "error": "failed to write key" })
         );
     }
 

@@ -379,7 +379,7 @@ impl ModelsManager {
             None => panic!("validated LLM configuration produced an empty model catalog"),
         };
 
-        let credentials = resolve_credentials(current_model, None);
+        let credentials = resolve_credentials(current_model);
 
         sampling_config_for_model(
             current_model,

@@ -284,14 +284,8 @@ async fn run_persistent_agent(
     let gateway = GatewaySender::new(gw_tx);
 
     // Create MvpAgent ONCE -- it persists for the lifetime of the server.
-    let auth_manager = Arc::new(agent_config.create_auth_manager());
-    // Proactive token refresh; runs until process exit.
-    auth_manager.start_proactive_refresh(tokio_util::sync::CancellationToken::new());
-    // Restore managed policy right before bootstrap reads it — the agent is created lazily here,
-    // so an earlier restore could go stale before the gate.
-    crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
     let agent = Rc::new(
-        MvpAgent::new(gateway, &agent_config, auth_manager)
+        MvpAgent::new(gateway, &agent_config)
             .unwrap_or_else(crate::agent::init::exit_on_config_error),
     );
 

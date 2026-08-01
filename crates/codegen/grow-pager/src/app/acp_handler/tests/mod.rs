@@ -1956,7 +1956,6 @@ pub(super) fn seed_owner_agent_with_open_modal(app: &mut AppView) {
             display_name: None,
             status: McpServerDisplayStatus::Initializing,
             tool_count: 0,
-            auth_required: false,
             setup_required: false,
             setup: None,
             setup_values: std::collections::HashMap::new(),

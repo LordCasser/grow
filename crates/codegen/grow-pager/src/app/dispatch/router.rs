@@ -1,8 +1,4 @@
 //! Top-level action router: maps actions and action results to handlers.
-use super::auth::{
-    dispatch_cancel_login, dispatch_login, dispatch_logout, dispatch_submit_auth_code,
-    dispatch_switch_account,
-};
 use super::ctx::{
     active_agent_session_id, get_active_agent_mut, navigate_clearing_selection, open_url_or_show,
     sync_sleep_inhibitor, with_active_agent, with_scrollback,
@@ -109,26 +105,9 @@ use super::turn::{
 };
 use crate::app::actions::{Action, Effect};
 use crate::app::agent_view::ActivePane;
-use crate::app::app_view::{ActiveView, AppView, AuthState};
+use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::types::DisplayMode;
 use crate::views::session_picker::CONTENT_EXPAND_OFFSET;
-pub(super) fn dispatch_copy_auth_url(
-    app: &mut AppView,
-    copy: impl FnOnce(&str) -> crate::clipboard::ClipboardDelivery,
-) -> Vec<Effect> {
-    let AuthState::Authenticating {
-        auth_url: Some(url),
-        ..
-    } = &app.auth_state
-    else {
-        return vec![];
-    };
-    app.auth_clipboard_delivery = Some(copy(url));
-    app.auth_clipboard_feedback_generation = app.auth_clipboard_feedback_generation.wrapping_add(1);
-    vec![Effect::ScheduleClearAuthCopyFeedback {
-        generation: app.auth_clipboard_feedback_generation,
-    }]
-}
 /// Dispatch an action: mutate state, return effects to execute.
 ///
 /// The returned `Vec<Effect>` may be empty (pure state mutation) or contain
@@ -588,22 +567,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             dispatch_open_extensions_modal(app, tab, trigger)
         }
         Action::OpenConfigAgentsModal(tab) => dispatch_open_config_agents_modal(app, tab),
-        Action::McpAuthTrigger { server_name } => {
-            let ActiveView::Agent(id) = app.active_view else {
-                return vec![];
-            };
-            let Some(agent) = app.agents.get_mut(&id) else {
-                return vec![];
-            };
-            let Some(session_id) = agent.session.session_id.clone() else {
-                return vec![];
-            };
-            vec![Effect::McpAuthTrigger {
-                agent_id: id,
-                session_id,
-                server_name,
-            }]
-        }
         Action::McpSetupSubmit {
             server_name,
             values,
@@ -1033,8 +996,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PermissionSelect(option_id) => dispatch_permission_select(app, option_id),
         Action::PermissionFollowup(text) => dispatch_permission_followup(app, text),
         Action::PermissionCancel => dispatch_permission_cancel(app),
-        Action::Logout => dispatch_logout(app),
-        Action::SwitchAccount => dispatch_switch_account(app),
         Action::OpenUrl(url) => {
             if url.starts_with("file://") {
                 let opened = url::Url::parse(&url)
@@ -1075,20 +1036,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::OpenPrevLink => {
             with_active_agent(app, |agent| agent.cycle_highlighted_link(false));
-            vec![]
-        }
-        Action::Login => dispatch_login(app),
-        Action::CancelLogin => dispatch_cancel_login(app),
-        Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),
-        Action::CopyAuthUrl => {
-            dispatch_copy_auth_url(app, crate::clipboard::SystemClipboard::try_set)
-        }
-        Action::ShowRawAuthUrl => {
-            app.auth_show_raw_url = true;
-            vec![]
-        }
-        Action::HideRawAuthUrl => {
-            app.auth_show_raw_url = false;
             vec![]
         }
         Action::TrustFolder => dispatch_trust_folder(app),

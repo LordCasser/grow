@@ -97,18 +97,6 @@ impl Default for PruningConfig {
     }
 }
 
-/// Where the session's current api_key came from.
-/// Determines whether the key can be refreshed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthType {
-    /// From AuthManager (grow login, OIDC, external binary). Refreshable.
-    #[default]
-    SessionToken,
-    /// From user config ([model.*] api_key, env_key, GROW_API_KEY). Not refreshable.
-    ApiKey,
-}
-
 /// Credential/secret fields that the actor stores opaquely.
 ///
 /// These are fields from the shell's full `Config` that aren't part of
@@ -118,9 +106,6 @@ pub enum AuthType {
 pub struct Credentials {
     /// API key for authentication.
     pub api_key: Option<String>,
-    /// Whether this is a session token (refreshable) or user-provided api key.
-    #[serde(default)]
-    pub auth_type: AuthType,
     /// Optional extra auth material forwarded with requests when present.
     pub alpha_test_key: Option<String>,
 }

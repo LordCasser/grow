@@ -126,7 +126,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         }
         _ => {}
     }
-    let is_api_key_auth = app.is_api_key_auth;
     let matched = match find_session_match(app, &session_notif.session_id) {
         Some(m) => m,
         None => {
@@ -146,12 +145,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         .expect("find_session_match returned an existing AgentId");
     if matches!(matched, SessionMatch::Child(_)) {
         let child_sid: &str = session_notif.session_id.0.as_ref();
-        let changed = handle_child_session_notification(
-            session_notif.update,
-            child_sid,
-            agent,
-            is_api_key_auth,
-        );
+        let changed = handle_child_session_notification(session_notif.update, child_sid, agent);
         return changed && is_active;
     }
     let meta = NotificationMeta::from_json(session_notif.meta.as_ref().and_then(|v| v.as_object()));
@@ -196,12 +190,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         | GrowSessionUpdate::MemoryFlushCompleted { .. }
         | GrowSessionUpdate::MemoryDreamCompleted { .. }
         | GrowSessionUpdate::MemorySessionSaved { .. }) => {
-            let changed = apply_session_event(
-                update,
-                &mut agent.session,
-                &mut agent.scrollback,
-                is_api_key_auth,
-            );
+            let changed = apply_session_event(update, &mut agent.session, &mut agent.scrollback);
             if let GrowSessionUpdate::AutoCompactCompleted { tokens_after, .. } = update {
                 refresh_context_used(agent, *tokens_after);
                 agent.todo.update_todos(Vec::new());
@@ -1062,7 +1051,6 @@ pub(super) fn handle_child_session_notification(
     update: GrowSessionUpdate,
     child_sid: &str,
     agent: &mut AgentView,
-    is_api_key_auth: bool,
 ) -> bool {
     match update {
         GrowSessionUpdate::AutoCompactStarted { .. }
@@ -1080,7 +1068,6 @@ pub(super) fn handle_child_session_notification(
                     &update,
                     &mut child_view.session,
                     &mut child_view.scrollback,
-                    is_api_key_auth,
                 );
                 if let Some(tokens_after) = compact_tokens {
                     refresh_context_used(child_view, tokens_after);
@@ -1101,12 +1088,7 @@ pub(super) fn handle_child_session_notification(
         | GrowSessionUpdate::MemoryDreamCompleted { .. }
         | GrowSessionUpdate::MemorySessionSaved { .. }) => {
             if let Some(child_view) = agent.subagent_views.get_mut(child_sid) {
-                apply_session_event(
-                    update,
-                    &mut child_view.session,
-                    &mut child_view.scrollback,
-                    is_api_key_auth,
-                )
+                apply_session_event(update, &mut child_view.session, &mut child_view.scrollback)
             } else {
                 false
             }
@@ -1117,23 +1099,10 @@ pub(super) fn handle_child_session_notification(
 /// Apply a compaction or retry event to a session's activity state and scrollback.
 ///
 /// Shared between the root agent and child (subagent) notification paths.
-/// Test-only shim so dispatch-level tests can replay real notification
-/// sequences (e.g. `RetryState::Retrying` → `Exhausted`) through the
-/// production handler — the Retrying arm clears the `in_flight_prompt`
-/// rewind stash, which a fixture setting fields directly would miss.
-#[cfg(test)]
-pub(crate) fn apply_session_event_for_test(
-    update: &GrowSessionUpdate,
-    session: &mut AgentSession,
-    scrollback: &mut crate::scrollback::state::ScrollbackState,
-) -> bool {
-    apply_session_event(update, session, scrollback, false)
-}
 pub(super) fn apply_session_event(
     update: &GrowSessionUpdate,
     session: &mut AgentSession,
     scrollback: &mut crate::scrollback::state::ScrollbackState,
-    is_api_key_auth: bool,
 ) -> bool {
     match update {
         GrowSessionUpdate::AutoCompactStarted { percentage, .. } => {
@@ -1191,7 +1160,7 @@ pub(super) fn apply_session_event(
         }
         GrowSessionUpdate::RetryState(retry) => {
             tracing::debug!("Retry state: {retry:?}");
-            apply_retry_state(retry, session, scrollback, is_api_key_auth);
+            apply_retry_state(retry, session, scrollback);
             true
         }
         GrowSessionUpdate::ImageDropped { notes } => {
@@ -1248,9 +1217,7 @@ pub(super) fn apply_retry_state(
     retry: &grow_shell::extensions::notification::RetryState,
     session: &mut AgentSession,
     scrollback: &mut crate::scrollback::state::ScrollbackState,
-    _is_api_key_auth: bool,
 ) {
-    let mut is_reauth = false;
     use grow_shell::extensions::notification::RetryState;
     match retry {
         RetryState::Retrying {
@@ -1302,10 +1269,7 @@ pub(super) fn apply_retry_state(
             if error_type == "encrypted_content_mismatch" {
                 session.model_incompatible = true;
             }
-            if is_reauthable_failure(Some(error_type.as_str())) {
-                is_reauth = true;
-                scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
-            } else if error_type == "context_length" {
+            if error_type == "context_length" {
                 if !scrollback_has_recent_compaction_failed(scrollback) {
                     scrollback
                         .push_block(RenderBlock::session_event(SessionEvent::ContextTooLarge));
@@ -1318,9 +1282,7 @@ pub(super) fn apply_retry_state(
             }
         }
     }
-    if !is_reauth {
-        session.in_flight_prompt = None;
-    }
+    session.in_flight_prompt = None;
 }
 /// Single source of truth for Behavior state on the pager side.
 ///

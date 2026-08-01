@@ -1751,7 +1751,6 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             inference_idle_timeout_secs: None,
             max_retries: None,
             hidden: false,
-            supported_in_api: true,
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
@@ -1764,44 +1763,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
         api_key: None,
         env_key: None,
         auth_provider: None,
-        api_base_url: None,
     }
-}
-fn byok_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
-    crate::agent::config::ModelEntry {
-        api_key: Some("byok-key".to_string()),
-        ..test_model_entry(model_id)
-    }
-}
-#[test]
-fn subagent_auth_type_rule() {
-    use crate::agent::auth_method::{CACHED_TOKEN_AUTH_METHOD_ID, PROVIDER_API_KEY_METHOD_ID};
-    use grow_chat_state::AuthType;
-    let session = acp::AuthMethodId::new(CACHED_TOKEN_AUTH_METHOD_ID);
-    let api_key = acp::AuthMethodId::new(PROVIDER_API_KEY_METHOD_ID);
-    let byok = byok_model_entry("grow-byok");
-    let plain = test_model_entry("grow-plain");
-    assert_eq!(
-            super::subagent_auth_type(Some(&byok), &session),
-            AuthType::ApiKey
-        );
-    assert_eq!(
-            super::subagent_auth_type(Some(&byok), &api_key),
-            AuthType::ApiKey
-        );
-    assert_eq!(
-            super::subagent_auth_type(Some(&plain), &session),
-            AuthType::SessionToken,
-        );
-    assert_eq!(
-            super::subagent_auth_type(Some(&plain), &api_key),
-            AuthType::ApiKey
-        );
-    assert_eq!(
-            super::subagent_auth_type(None, &session),
-            AuthType::SessionToken
-        );
-    assert_eq!(super::subagent_auth_type(None, &api_key), AuthType::ApiKey);
 }
 #[test]
 fn fresh_tool_model_accepts_visible_key_and_internal_id() {
@@ -1886,9 +1848,10 @@ fn fresh_tool_model_rejects_unknown_and_nonavailable_entries() {
     let mut not_selectable = test_model_entry("disabled-internal");
     not_selectable.info.user_selectable = false;
     models.insert("disabled".to_string(), not_selectable);
-    let mut oauth_only = test_model_entry("oauth-only-internal");
-    oauth_only.info.supported_in_api = false;
-    models.insert("oauth-only".to_string(), oauth_only);
+    models.insert(
+        "alternate".to_string(),
+        test_model_entry("alternate-internal"),
+    );
     models.insert("alpha".to_string(), test_model_entry("alpha-internal"));
     for requested in [
         "stale-model",
@@ -1908,7 +1871,7 @@ fn fresh_tool_model_rejects_unknown_and_nonavailable_entries() {
         assert_eq!(
                 error,
                 format!(
-                    "Unknown Task.model slug '{requested}'. Valid model slugs: alpha, oauth-only, zeta. \
+                    "Unknown Task.model slug '{requested}'. Valid model slugs: alpha, alternate, zeta. \
                      Omit `model` to inherit the parent model."
                 )
             );
@@ -1916,14 +1879,14 @@ fn fresh_tool_model_rejects_unknown_and_nonavailable_entries() {
     }
     assert!(
             super::handle_request::task_model_override_error(
-                Some("oauth-only"),
+                Some("alternate"),
                 ModelOverrideProvenance::Tool,
                 false,
                 &models,
                 false,
             )
             .is_none(),
-            "every explicitly configured provider model is selectable regardless of credential kind"
+            "every explicitly configured provider model is selectable"
         );
 }
 #[test]

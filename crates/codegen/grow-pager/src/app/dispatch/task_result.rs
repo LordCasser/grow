@@ -1,8 +1,4 @@
 //! Async task-result application: routes task results into state.
-use super::auth::{
-    ensure_login_method, handle_auth_complete, handle_auth_url_ready, handle_mcp_auth_trigger_done,
-    handle_mcp_setup_submit_done,
-};
 use super::cta::{
     handle_cta_plugin_install_done, handle_cta_plugin_reload_done,
     handle_plugin_cta_catalog_loaded, handle_plugin_cta_debounce_expired,
@@ -48,7 +44,7 @@ use crate::app::actions::{
     TaskResult,
 };
 use crate::app::agent::AgentId;
-use crate::app::app_view::{ActiveView, AppView, AuthState};
+use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 use agent_client_protocol as acp;
 pub(super) fn unregister_session_effect(session_id: Option<acp::SessionId>) -> Vec<Effect> {
@@ -69,6 +65,35 @@ pub(super) fn unregister_all_active_sessions(app: &AppView) -> Vec<Effect> {
                 })
         })
         .collect()
+}
+fn handle_mcp_setup_submit_done(
+    app: &mut AppView,
+    agent_id: AgentId,
+    server_name: String,
+    result: Result<(), String>,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    if let Some(modal) = agent.extensions_modal.as_mut() {
+        modal.pending_action = None;
+        modal.pending_entry_index = None;
+        if let Err(error) = result {
+            modal.modal_message = Some(crate::views::extensions_modal::ModalMessage::Error(
+                format!("{server_name} setup failed: {error}"),
+            ));
+            return vec![];
+        }
+        modal.mcp_setup = None;
+    }
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return vec![];
+    };
+    vec![Effect::FetchMcpsList {
+        agent_id,
+        session_id,
+        cache: false,
+    }]
 }
 pub(super) const X11_PRIMARY_PASTE_HINT: &str = "Try Shift+Insert to paste selected text";
 fn show_clipboard_toast(target: &ClipboardPasteTarget, message: &str, app: &mut AppView) {
@@ -682,29 +707,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::AuthComplete { request_seq, meta } => {
-            handle_auth_complete(app, request_seq, meta)
-        }
-        TaskResult::AuthFailed { request_seq, error } => {
-            if let AuthState::Authenticating {
-                request_seq: current_seq,
-                ..
-            } = &app.auth_state
-                && *current_seq == request_seq
-            {
-                app.auth_state = AuthState::Pending { error: Some(error) };
-                app.auth_code_input.reset();
-            }
-            vec![]
-        }
-        TaskResult::AuthUrlReady {
-            request_seq,
-            auth_url,
-            external,
-            mode,
-        } => handle_auth_url_ready(app, request_seq, auth_url, external, mode),
-        TaskResult::AuthCodeSubmitted { .. } => vec![],
-        TaskResult::AuthCancelComplete => vec![],
         TaskResult::McpsListLoaded { agent_id, result } => {
             use crate::views::extensions_modal::TabDataState;
             if let Some(agent) = app.agents.get_mut(&agent_id)
@@ -719,11 +721,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::McpAuthTriggerDone {
-            agent_id,
-            server_name,
-            result,
-        } => handle_mcp_auth_trigger_done(app, agent_id, server_name, result),
         TaskResult::McpSetupSubmitDone {
             agent_id,
             server_name,
@@ -1129,20 +1126,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 super::super::acp_handler::refresh_workflow_run_capabilities(agent);
             }
             vec![]
-        }
-        TaskResult::AuthCopyFeedbackTimeout { generation } => {
-            if generation == app.auth_clipboard_feedback_generation {
-                app.auth_clipboard_delivery = None;
-            }
-            vec![]
-        }
-        TaskResult::LogoutComplete => {
-            app.auth_state = AuthState::Pending { error: None };
-            app.login_method_id = None;
-            ensure_login_method(app);
-            app.auth_clipboard_delivery = None;
-            let effects = dispatch_exit_session(app);
-            effects
         }
         TaskResult::DeepSearchResults { results, seq } => {
             handle_deep_search_results(app, results, seq)

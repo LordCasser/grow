@@ -127,8 +127,6 @@ async fn create_test_actor_with_memory(
         },
         auth_method_id: test_auth_method_id("test-auth"),
         model_auth_memo: std::cell::RefCell::new(None),
-        attribution_callback: None,
-        auth_manager: None,
         state,
         notifications: NotificationSender {
             gateway: GatewaySender::new(gateway_tx),
@@ -258,7 +256,6 @@ async fn create_test_actor_with_memory(
         pending_classifier_completions: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle: Default::default(),
-        managed_mcp_expires_at: std::sync::Mutex::new(None),
         initial_client_mcp_servers: vec![],
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announced_servers: Mutex::new(HashMap::new()),

@@ -27,8 +27,8 @@ fn payload() -> SignedPayload {
     SignedPayload {
         typ: MANAGED_POLICY_TYP.into(),
         version: 1,
-        deployment_id: None,
-        team_id: Some("team-007".into()),
+        deployment_id: Some("dep-007".into()),
+        team_id: None,
         managed_config: Some("[cli]\ntheme = \"dark\"\n".into()),
         requirements: Some("[features]\nweb_fetch = false\n".into()),
         fail_closed: false,
@@ -57,8 +57,7 @@ fn server_wire_format_is_client_verifiable() {
     let (kp, pubkey) = test_keypair();
     let signed_payload = serde_json::json!({
         "typ": "grow.managed_policy.v1",
-        "deployment_id": serde_json::Value::Null,
-        "team_id": "team-007",
+        "deployment_id": "dep-007",
         "managed_config": "[cli]\n",
         "requirements": "[features]\n",
         "fail_closed": true,
@@ -72,10 +71,9 @@ fn server_wire_format_is_client_verifiable() {
         signature: base64::engine::general_purpose::STANDARD.encode(sig.as_ref()),
         key_id: "v1".into(),
     };
-    let payload =
-        verify_fetched_with_keys(&sidecar, &keyset("v1", &pubkey), Some("team-007"), 1_000)
-            .expect("server format must verify");
-    assert_eq!(payload.team_id.as_deref(), Some("team-007"));
+    let payload = verify_fetched_with_keys(&sidecar, &keyset("v1", &pubkey), "dep-007", 1_000)
+        .expect("server format must verify");
+    assert_eq!(payload.deployment_id.as_deref(), Some("dep-007"));
     assert_eq!(payload.requirements.as_deref(), Some("[features]\n"));
     assert!(payload.fail_closed);
 }
@@ -86,7 +84,7 @@ fn missing_fail_closed_defaults_false() {
     let (kp, pubkey) = test_keypair();
     let signed_payload = serde_json::json!({
         "typ": "grow.managed_policy.v1",
-        "team_id": "team-007",
+        "deployment_id": "dep-007",
         "expires_at": 4_000_000_000u64,
         "key_id": "v1",
     })
@@ -97,9 +95,8 @@ fn missing_fail_closed_defaults_false() {
         signature: base64::engine::general_purpose::STANDARD.encode(sig.as_ref()),
         key_id: "v1".into(),
     };
-    let payload =
-        verify_fetched_with_keys(&sidecar, &keyset("v1", &pubkey), Some("team-007"), 1_000)
-            .expect("must verify");
+    let payload = verify_fetched_with_keys(&sidecar, &keyset("v1", &pubkey), "dep-007", 1_000)
+        .expect("must verify");
     assert!(!payload.fail_closed);
 }
 
@@ -147,41 +144,37 @@ fn wrong_key_fails() {
     );
 }
 
-/// Pins where the fetch binding ([`check_fetch_identity`], expiry enforced, deployment
-/// trusted on signature alone) diverges from the at-rest rule
-/// ([`signed_principal_matches`], strict effective-principal equality, expiry-free).
+/// Fetch binding requires the exact deployment and enforces expiry; the
+/// at-rest comparison remains expiry-free.
 #[test]
-fn binding_rejects_other_team_and_expiry() {
+fn binding_rejects_other_deployment_missing_deployment_and_expiry() {
     let p = payload();
     assert_eq!(
-        check_fetch_identity(&p, Some("team-evil"), 1_000),
+        check_fetch_identity(&p, "dep-evil", 1_000),
         Err(SigError::PrincipalMismatch)
     );
     assert_eq!(
-        check_fetch_identity(&p, Some("team-007"), p.expires_at + 1),
+        check_fetch_identity(&p, "dep-007", p.expires_at + 1),
         Err(SigError::Expired)
     );
-    assert!(check_fetch_identity(&p, Some("team-007"), 1_000).is_ok());
-    // No resolvable active team is lenient (an auth.json read blip must not brick a session).
-    assert!(check_fetch_identity(&p, None, 1_000).is_ok());
-    // A DEPLOYMENT-signed policy is accepted even when the active team differs.
-    let dep = SignedPayload {
-        deployment_id: Some("dep-1".into()),
-        team_id: Some("team-other".into()),
+    assert!(check_fetch_identity(&p, "dep-007", 1_000).is_ok());
+    let missing = SignedPayload {
+        deployment_id: None,
         ..payload()
     };
-    assert!(check_fetch_identity(&dep, Some("team-007"), 1_000).is_ok());
-    // The at-rest rule instead requires the effective principal (its deployment_id)...
-    assert!(signed_principal_matches(&dep, Some("dep-1")));
-    assert!(!signed_principal_matches(&dep, Some("team-007")));
-    // ...and is expiry-free: an expired payload still matches, while the fetch binding rejects it.
+    assert_eq!(
+        check_fetch_identity(&missing, "dep-007", 1_000),
+        Err(SigError::PrincipalMismatch)
+    );
+    assert!(signed_principal_matches(&p, Some("dep-007")));
+    assert!(!signed_principal_matches(&p, Some("dep-other")));
     let expired = SignedPayload {
         expires_at: 10,
         ..payload()
     };
-    assert!(signed_principal_matches(&expired, Some("team-007")));
+    assert!(signed_principal_matches(&expired, Some("dep-007")));
     assert_eq!(
-        check_fetch_identity(&expired, Some("team-007"), 1_000),
+        check_fetch_identity(&expired, "dep-007", 1_000),
         Err(SigError::Expired)
     );
 }
@@ -239,11 +232,11 @@ fn planted_artifact_in_signed_absent_slot_is_tamper() {
     assert!(cloud_cache_signature_invalid_with_keys(
         home,
         &keyset("v1", &pubkey),
-        Some("team-007"),
+        Some("dep-007"),
         1_000
     ));
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::Compromised
     );
 
@@ -289,13 +282,13 @@ fn unreadable_artifact_refetches_but_does_not_refuse() {
         cloud_cache_signature_invalid_with_keys(
             home,
             &keyset("v1", &pubkey),
-            Some("team-007"),
+            Some("dep-007"),
             1_000
         ),
         "an unreadable artifact must trigger a refetch"
     );
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::Trusted,
         "an unreadable artifact must not refuse at the gate"
     );
@@ -323,14 +316,14 @@ fn directory_squat_is_tamper_not_unreadable() {
         Err(SigError::ContentMismatch("requirements"))
     );
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::Compromised,
         "a directory squat must read compromised at the gate"
     );
     assert!(cloud_cache_signature_invalid_with_keys(
         home,
         &keyset("v1", &pubkey),
-        Some("team-007"),
+        Some("dep-007"),
         1_000
     ));
 }
@@ -359,7 +352,7 @@ fn sidecar_read_blip_is_lenient_at_gate_but_refetches() {
     }
 
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::SidecarUnreadable,
         "a sidecar read blip is not tamper — it must not read NoAuthenticSidecar"
     );
@@ -367,7 +360,7 @@ fn sidecar_read_blip_is_lenient_at_gate_but_refetches() {
         cloud_cache_signature_invalid_with_keys(
             home,
             &keyset("v1", &pubkey),
-            Some("team-007"),
+            Some("dep-007"),
             1_000
         ),
         "the blip must trigger a refetch"
@@ -401,7 +394,7 @@ fn symlink_at_artifact_slot_is_tamper() {
         "a matching-content symlink is still tamper"
     );
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::Compromised
     );
 
@@ -411,7 +404,7 @@ fn symlink_at_artifact_slot_is_tamper() {
     std::fs::create_dir(&squat_dir).unwrap();
     std::os::unix::fs::symlink(&squat_dir, &slot).unwrap();
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::Compromised
     );
 }
@@ -438,7 +431,7 @@ fn symlink_at_sidecar_slot_is_absence_not_a_blip() {
     std::fs::rename(&path, &target).unwrap();
     std::os::unix::fs::symlink(&target, &path).unwrap();
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::NoAuthenticSidecar,
         "a symlinked sidecar is not an authentic sidecar"
     );
@@ -449,7 +442,7 @@ fn symlink_at_sidecar_slot_is_absence_not_a_blip() {
     std::fs::create_dir(&squat_dir).unwrap();
     std::os::unix::fs::symlink(&squat_dir, &path).unwrap();
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::NoAuthenticSidecar
     );
 }
@@ -471,7 +464,7 @@ fn sidecar_directory_squat_is_absence_not_a_blip() {
     std::fs::remove_file(&path).unwrap();
     std::fs::create_dir(&path).unwrap();
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::NoAuthenticSidecar
     );
 }
@@ -530,20 +523,20 @@ fn cloud_cache_signature_invalid_when_armed() {
     assert!(verification_active());
     assert!(!cloud_cache_signature_invalid(
         dir.path(),
-        Some("team-007"),
+        Some("dep-007"),
         1_000
     ));
     write_policy(dir.path(), &payload());
     assert!(cloud_cache_signature_invalid(
         dir.path(),
-        Some("team-007"),
+        Some("dep-007"),
         1_000
     ));
     let (kp, _) = test_keypair();
     write_sidecar(dir.path(), &sign(&kp, &payload())).unwrap();
     assert!(cloud_cache_signature_invalid(
         dir.path(),
-        Some("team-007"),
+        Some("dep-007"),
         1_000
     ));
 }
@@ -556,7 +549,7 @@ fn cloud_cache_signature_invalid_inert_when_dark() {
         write_policy(dir.path(), &payload());
         assert!(!verification_active());
         assert!(
-            !cloud_cache_signature_invalid(dir.path(), Some("team-007"), 1_000),
+            !cloud_cache_signature_invalid(dir.path(), Some("dep-007"), 1_000),
             "dark build must not flag unsigned on-disk policy"
         );
     });
@@ -570,7 +563,7 @@ fn cloud_cache_signature_invalid_is_false_when_no_policy() {
     assert!(!cloud_cache_signature_invalid_with_keys(
         dir.path(),
         &keyset("v1", &pubkey),
-        Some("team-007"),
+        Some("dep-007"),
         1_000,
     ));
 }
@@ -588,7 +581,7 @@ fn cloud_cache_signature_invalid_detects_missing_and_edited() {
     assert!(cloud_cache_signature_invalid_with_keys(
         home,
         &keyset("v1", &pubkey),
-        Some("team-007"),
+        Some("dep-007"),
         1_000
     ));
 
@@ -597,7 +590,7 @@ fn cloud_cache_signature_invalid_detects_missing_and_edited() {
     assert!(!cloud_cache_signature_invalid_with_keys(
         home,
         &keyset("v1", &pubkey),
-        Some("team-007"),
+        Some("dep-007"),
         1_000
     ));
 
@@ -605,7 +598,7 @@ fn cloud_cache_signature_invalid_detects_missing_and_edited() {
     assert!(cloud_cache_signature_invalid_with_keys(
         home,
         &keyset("v1", &pubkey),
-        Some("team-evil"),
+        Some("dep-evil"),
         1_000
     ));
 
@@ -618,7 +611,7 @@ fn cloud_cache_signature_invalid_detects_missing_and_edited() {
     assert!(cloud_cache_signature_invalid_with_keys(
         home,
         &keyset("v1", &pubkey),
-        Some("team-007"),
+        Some("dep-007"),
         1_000
     ));
 }
@@ -637,13 +630,13 @@ fn cloud_cache_signature_invalid_flags_foreign_authentic_cache() {
     assert!(!cloud_cache_signature_invalid_with_keys(
         home,
         &keyset("v1", &pubkey),
-        Some("team-007"),
+        Some("dep-007"),
         1_000
     ));
     assert!(cloud_cache_signature_invalid_with_keys(
         home,
         &keyset("v1", &pubkey),
-        Some("team-999"),
+        Some("dep-999"),
         1_000
     ));
 
@@ -684,7 +677,7 @@ fn signed_cache_compromised_honors_signed_opt_in() {
 
     // Opted in + bound + intact → not compromised.
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::Trusted
     );
 
@@ -695,7 +688,7 @@ fn signed_cache_compromised_honors_signed_opt_in() {
     )
     .unwrap();
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::Compromised
     );
 }
@@ -717,7 +710,7 @@ fn signed_cache_compromised_respects_signed_opt_out() {
     )
     .unwrap();
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::Trusted
     );
 }
@@ -737,7 +730,7 @@ fn signed_cache_compromised_none_without_authentic_sidecar() {
 
     // No sidecar → not an authentic verdict.
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::NoAuthenticSidecar
     );
 
@@ -746,7 +739,7 @@ fn signed_cache_compromised_none_without_authentic_sidecar() {
     bad.signature = base64::engine::general_purpose::STANDARD.encode([0u8; 64]);
     write_sidecar(home, &bad).unwrap();
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::NoAuthenticSidecar
     );
 }
@@ -789,26 +782,26 @@ fn signed_cache_compromised_rejects_foreign_deployment() {
     );
 }
 
-/// A replayed TEAM-signed cache on a deployment-key machine reads foreign rather than
-/// slipping past a deployment-only check.
+/// A replayed cache without a signed deployment id reads foreign on a
+/// deployment-key machine rather than slipping past a deployment-only check.
 #[test]
-fn signed_cache_compromised_rejects_team_cache_on_deployment_machine() {
+fn signed_cache_compromised_rejects_unbound_cache_on_deployment_machine() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     let (kp, pubkey) = test_keypair();
-    let team = SignedPayload {
+    let unbound = SignedPayload {
         deployment_id: None,
-        team_id: Some("team-x".into()),
+        team_id: Some("dep-x".into()),
         fail_closed: true,
         ..payload()
     };
-    write_policy(home, &team);
-    write_sidecar(home, &sign(&kp, &team)).unwrap();
+    write_policy(home, &unbound);
+    write_sidecar(home, &sign(&kp, &unbound)).unwrap();
     // Expected principal = the machine's recorded deployment id.
     assert_eq!(
         signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-local"), 1_000),
         SignedVerdict::Compromised,
-        "a team-signed cache on a deployment machine must read foreign"
+        "an unbound cache on a deployment machine must read foreign"
     );
 }
 
@@ -835,32 +828,32 @@ fn signed_cache_compromised_rejects_foreign_permissive_policy() {
         "a foreign permissive deployment policy must be rejected, not short-circuited"
     );
 
-    // Permissive policy bound to a FOREIGN team.
-    let other_team = SignedPayload {
+    // A permissive policy with no deployment binding is also foreign.
+    let unbound = SignedPayload {
         deployment_id: None,
-        team_id: Some("team-evil".into()),
+        team_id: Some("dep-evil".into()),
         fail_closed: false,
         ..payload()
     };
-    write_policy(home, &other_team);
-    write_sidecar(home, &sign(&kp, &other_team)).unwrap();
+    write_policy(home, &unbound);
+    write_sidecar(home, &sign(&kp, &unbound)).unwrap();
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::Compromised,
-        "a foreign permissive team policy must be rejected"
+        "an unbound permissive policy must be rejected"
     );
 
     // OUR OWN permissive policy is fine (not compromised).
     let ours = SignedPayload {
-        deployment_id: None,
-        team_id: Some("team-007".into()),
+        deployment_id: Some("dep-007".into()),
+        team_id: None,
         fail_closed: false,
         ..payload()
     };
     write_policy(home, &ours);
     write_sidecar(home, &sign(&kp, &ours)).unwrap();
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::Trusted,
         "our own permissive policy is not compromised"
     );
@@ -875,7 +868,7 @@ fn signed_cache_compromised_inactive_when_dark() {
         write_policy(home, &payload());
         assert!(!verification_active());
         assert_eq!(
-            signed_cache_compromised(home, Some("team-007"), 1_000),
+            signed_cache_compromised(home, Some("dep-007"), 1_000),
             SignedVerdict::Inactive
         );
     });
@@ -895,7 +888,7 @@ fn signed_cache_compromised_is_no_authentic_sidecar_when_armed() {
     write_sidecar(home, &sign(&kp, &p)).unwrap();
     assert!(verification_active());
     assert_eq!(
-        signed_cache_compromised(home, Some("team-007"), 1_000),
+        signed_cache_compromised(home, Some("dep-007"), 1_000),
         SignedVerdict::NoAuthenticSidecar
     );
 }
@@ -916,13 +909,13 @@ fn signed_cache_compromised_expired_reads_compromised() {
     write_sidecar(home, &sign(&kp, &p)).unwrap();
     // Past expiry → compromised, despite intact content + matching principal.
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_001),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_001),
         SignedVerdict::Compromised,
         "an expired authentic sidecar must read compromised (anti-rollback TTL)"
     );
     // Just inside the window → honored.
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 999),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 999),
         SignedVerdict::Trusted
     );
 }
@@ -969,7 +962,7 @@ fn unknown_signed_key_id_is_rejected() {
     write_policy(home, &p);
     write_sidecar(home, &sidecar).unwrap();
     assert_eq!(
-        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("team-007"), 1_000),
+        signed_cache_compromised_with_keys(home, &keyset("v1", &pubkey), Some("dep-007"), 1_000),
         SignedVerdict::NoAuthenticSidecar,
         "an unknown key id is not an authentic verdict"
     );
@@ -977,7 +970,7 @@ fn unknown_signed_key_id_is_rejected() {
         cloud_cache_signature_invalid_with_keys(
             home,
             &keyset("v1", &pubkey),
-            Some("team-007"),
+            Some("dep-007"),
             1_000
         ),
         "an unknown key id must trigger a refetch"

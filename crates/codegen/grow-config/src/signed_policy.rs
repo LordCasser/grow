@@ -288,53 +288,43 @@ fn verify_signature_with_keys(
         .map_err(|_| SigError::SignatureMismatch)
 }
 
-/// Fetch-time identity binding for a VERIFIED payload, expiry enforced: a
-/// deployment-signed payload is trusted on signature alone; a team-signed payload
-/// must match the active team. Lenient on a missing active team — an `auth.json`
-/// read blip must not brick a session (a cross-team attacker has a team of their
-/// own). The at-rest checks use [`signed_principal_matches`] instead.
+/// Fetch-time identity binding for a verified deployment payload.
+/// The signed deployment id must be present and exactly match the id returned
+/// for the deployment key used by this request.
 pub fn check_fetch_identity(
     payload: &SignedPayload,
-    active_team_id: Option<&str>,
+    expected_deployment_id: &str,
     now_unix: u64,
 ) -> Result<(), SigError> {
     if now_unix > payload.expires_at {
         return Err(SigError::Expired);
     }
-    if payload.deployment_id.is_some() {
-        return Ok(());
+    match payload.deployment_id.as_deref() {
+        Some(signed) if signed == expected_deployment_id => Ok(()),
+        _ => Err(SigError::PrincipalMismatch),
     }
-    if let (Some(signed), Some(active)) = (payload.team_id.as_deref(), active_team_id)
-        && signed != active
-    {
-        return Err(SigError::PrincipalMismatch);
-    }
-    Ok(())
 }
 
-/// Whether the payload's effective principal (`deployment_id`, else `team_id`) matches
-/// ours — the at-rest identity rule, so another tenant's cache reads foreign. Lenient
-/// when either side is unknown. Deliberately expiry-free: the gate orders identity
+/// Whether the payload's deployment principal matches ours — the at-rest
+/// identity rule, so another deployment's cache reads foreign. A caller with
+/// no expected principal remains lenient; otherwise a missing signed deployment
+/// is rejected. Deliberately expiry-free: the gate orders identity
 /// BEFORE the `fail_closed` short-circuit and expiry after it (see [`SignedCacheFacts`]).
 fn signed_principal_matches(payload: &SignedPayload, expected_principal: Option<&str>) -> bool {
-    let signed = payload
-        .deployment_id
-        .as_deref()
-        .or(payload.team_id.as_deref());
-    !matches!(
-        (signed, expected_principal),
-        (Some(signed), Some(expected)) if signed != expected
-    )
+    let signed = payload.deployment_id.as_deref();
+    expected_principal.is_none_or(|expected| signed == Some(expected))
 }
 
 /// Full verification of a fetched envelope against the embedded trusted keys
 /// (signature, binding, expiry), returning the trusted payload to persist.
 pub fn verify_fetched(
     sidecar: &SignatureEnvelope,
-    active_team_id: Option<&str>,
+    expected_deployment_id: &str,
     now_unix: u64,
 ) -> Result<SignedPayload, SigError> {
-    with_embedded_keys(|keys| verify_fetched_with_keys(sidecar, keys, active_team_id, now_unix))
+    with_embedded_keys(|keys| {
+        verify_fetched_with_keys(sidecar, keys, expected_deployment_id, now_unix)
+    })
 }
 
 /// Fetch-time claim verification (signature + expiry; binding is the caller's rule).
@@ -363,11 +353,11 @@ fn verify_fetched_claim_with_keys(
 fn verify_fetched_with_keys(
     sidecar: &SignatureEnvelope,
     trusted_keys: &[(&str, &[u8])],
-    active_team_id: Option<&str>,
+    expected_deployment_id: &str,
     now_unix: u64,
 ) -> Result<SignedPayload, SigError> {
     let payload = verify_signed_payload(&sidecar.signed_payload, &sidecar.signature, trusted_keys)?;
-    check_fetch_identity(&payload, active_team_id, now_unix)?;
+    check_fetch_identity(&payload, expected_deployment_id, now_unix)?;
     Ok(payload)
 }
 
@@ -495,11 +485,7 @@ pub fn stored_envelope_nonce(
         return None;
     };
     let payload: SignedPayload = serde_json::from_str(&sidecar.signed_payload).ok()?;
-    // Effective principal mirrors the server's bookkeeping: deployment over team.
-    let issued_to = payload
-        .deployment_id
-        .as_deref()
-        .or(payload.team_id.as_deref());
+    let issued_to = payload.deployment_id.as_deref();
     (issued_to == Some(fetch_principal) && is_server_nonce_shape(&payload.nonce))
         .then_some(payload.nonce)
 }
@@ -677,7 +663,7 @@ pub enum SignedVerdict {
 
 /// The signed verdict for the on-disk cache; see [`SignedVerdict`]. The fail-closed
 /// opt-in is read from the SIGNED bytes, not the forgeable marker. `expected_principal`
-/// is the machine's managed principal (active team id, or the recorded deployment id);
+/// is the machine's recorded deployment id;
 /// a payload bound elsewhere is a cross-tenant replay and reads compromised.
 pub fn signed_cache_compromised(
     home: &std::path::Path,

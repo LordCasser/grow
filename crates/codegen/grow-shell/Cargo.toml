@@ -78,12 +78,10 @@ tracing-subscriber = { workspace = true, features = [
 ] }
 obfstr = { workspace = true }
 tokio-util = { workspace = true, features = ["compat"] }
-tokio-retry = { workspace = true }
 uuid = { workspace = true, features = ["v4", "v5", "v7"] }
 xai-acp-lib = { workspace = true }
 axum = { workspace = true, features = ["ws", "multipart"] }
 backon = { workspace = true }
-webbrowser = { workspace = true }
 tokio-rustls = { version = "0.26", default-features = false, features = [
     "ring",
     "logging",
@@ -111,7 +109,6 @@ image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 moka = { workspace = true, features = ["future"] }
 dhat = { workspace = true, optional = true }
 base64 = { workspace = true }
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 sha2 = { workspace = true }
 rand = { workspace = true }
 shlex = { workspace = true }
@@ -140,7 +137,6 @@ grow-sampling-types = { path = "../grow-sampling-types" }
 grow-tools = { path = "../grow-tools" }
 xai-tty-utils = { workspace = true }
 xai-workflow = { path = "../xai-workflow" }
-xai-system-power = { workspace = true }
 grow-workspace = { workspace = true }
 grow-subagent-resolution = { path = "../grow-subagent-resolution" }
 grow-agent = { path = "../grow-agent" }
@@ -150,7 +146,6 @@ grow-memory = { workspace = true }
 grow-hooks = { path = "../grow-hooks" }
 xai-hooks-plugins-types = { path = "../xai-hooks-plugins-types" }
 grow-plugin-marketplace = { path = "../grow-plugin-marketplace" }
-grow-auth = { workspace = true, features = ["middleware"] }
 grow-diagnostics = { workspace = true }
 grow-http = { workspace = true }
 prod-mc-cli-chat-proxy-types = { path = "../../../prod/mc/cli-chat-proxy-types" }

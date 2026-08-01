@@ -1,8 +1,8 @@
-//! Managed MCP credential resolution via cli-chat-proxy.
+//! Managed MCP configuration resolution via cli-chat-proxy.
 //!
-//! For remote MCP servers where the user has completed OAuth enrollment,
-//! this module resolves credentials at agent init (cached across sessions)
-//! and proactively refreshes them before token expiry.
+//! This module treats returned transport headers as opaque deployment-managed
+//! configuration. Grow does not own an interactive authorization or token
+//! refresh lifecycle for these servers.
 //!
 //! Config-file/plugin merge layering (which reads shell's config system) lives
 //! in shell's `session::managed_mcp`, which re-exports everything here.
@@ -11,8 +11,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use agent_client_protocol as acp;
-use chrono::{DateTime, Utc};
-use tokio_util::sync::CancellationToken;
 
 /// Agent-level cache for managed MCP configs.
 ///
@@ -25,59 +23,6 @@ pub enum ManagedMcpCache {
     Fetching,
     /// May be empty if no managed servers are configured for this user.
     Ready(Vec<ManagedMcpConfig>),
-}
-
-/// Consecutive failed reactive re-auth attempts before a managed server is
-/// parked in a terminal needs-auth state. Once reached, the cooldown gate
-/// refuses further attempts until a successful proactive fetch clears it.
-const MAX_REACTIVE_REAUTH_ATTEMPTS: u32 = 3;
-
-/// Defensive upper bound (seconds) on the exponential backoff between reactive
-/// re-auth attempts. The terminal attempt cap (`2^3 = 8s`) means the reactive
-/// path never reaches this ceiling today.
-const REACTIVE_REAUTH_BACKOFF_CAP_SECS: u64 = 64;
-
-/// Per-server cooldown for the reactive managed re-auth path: a genuinely
-/// revoked connector keeps returning a bad token, so each failed attempt pushes
-/// the next eligible instant out by capped exponential backoff and the server
-/// goes terminal after `MAX_REACTIVE_REAUTH_ATTEMPTS`.
-#[derive(Debug, Clone)]
-struct ManagedReauthState {
-    consecutive_failures: u32,
-    next_allowed_at: DateTime<Utc>,
-}
-
-impl Default for ManagedReauthState {
-    fn default() -> Self {
-        // No backoff window yet — the first attempt is always eligible.
-        Self {
-            consecutive_failures: 0,
-            next_allowed_at: DateTime::<Utc>::MIN_UTC,
-        }
-    }
-}
-
-impl ManagedReauthState {
-    /// Terminal once the attempt cap is hit: no further reactive attempts until
-    /// a successful fetch clears the entry.
-    fn is_terminal(&self) -> bool {
-        self.consecutive_failures >= MAX_REACTIVE_REAUTH_ATTEMPTS
-    }
-
-    /// Eligible when the backoff window has elapsed and the cap is not reached.
-    fn is_eligible(&self, now: DateTime<Utc>) -> bool {
-        !self.is_terminal() && now >= self.next_allowed_at
-    }
-
-    /// Bump the failure count and push the next eligible instant out by
-    /// `min(2^failures, REACTIVE_REAUTH_BACKOFF_CAP_SECS)` seconds.
-    fn record_failure(&mut self, now: DateTime<Utc>) {
-        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-        let backoff_secs = 2u64
-            .saturating_pow(self.consecutive_failures)
-            .min(REACTIVE_REAUTH_BACKOFF_CAP_SECS);
-        self.next_allowed_at = now + chrono::Duration::seconds(backoff_secs as i64);
-    }
 }
 
 /// Agent-level cache for managed MCP gateway tool catalogs.
@@ -127,18 +72,6 @@ pub struct ManagedMcpState {
     /// MCP descriptor mirror can remove stale gateway connector directories when
     /// the current catalog is empty or absent.
     pub gateway_tool_connectors_seen: HashSet<String>,
-    pub refresh_task_spawned: bool,
-    /// Cancels the background refresh task on drop.
-    refresh_cancel: CancellationToken,
-    /// Per-server reactive re-auth cooldown, keyed by MCP server name: one
-    /// backoff entry per connector. Coalescing of concurrent attempts is
-    /// best-effort — the caller takes the mutex sequentially for the
-    /// `reauth_allowed` check and the later `record_reauth_failure`, not across
-    /// the network attempt in between, so two simultaneously in-flight tool
-    /// calls can each record a failure and reach the cap in fewer real re-auth
-    /// rounds. Acceptable because the terminal state is cleared by the next
-    /// proactive `clear_reauth_cooldowns`.
-    reauth_cooldown: HashMap<String, ManagedReauthState>,
 }
 
 impl Default for ManagedMcpState {
@@ -151,16 +84,7 @@ impl Default for ManagedMcpState {
             gateway_tool_cache: GatewayToolCatalogCache::NotFetched,
             gateway_tool_fetch_notify: Arc::new(tokio::sync::Notify::new()),
             gateway_tool_connectors_seen: HashSet::new(),
-            refresh_task_spawned: false,
-            refresh_cancel: CancellationToken::new(),
-            reauth_cooldown: HashMap::new(),
         }
-    }
-}
-
-impl Drop for ManagedMcpState {
-    fn drop(&mut self) {
-        self.refresh_cancel.cancel();
     }
 }
 
@@ -183,7 +107,7 @@ async fn wait_for_fetch_slot<T>(
 
 async fn get_authenticated_json<T: serde::de::DeserializeOwned>(
     url: &str,
-    auth_key: &str,
+    deployment_key: &str,
     unavailable_message: &'static str,
     fetch_failed_message: &'static str,
     parse_error_message: &'static str,
@@ -191,7 +115,7 @@ async fn get_authenticated_json<T: serde::de::DeserializeOwned>(
     let resp = match grow_http::shared_client()
         .get(url)
         .timeout(std::time::Duration::from_secs(10))
-        .header("Authorization", format!("Bearer {}", auth_key))
+        .header("Authorization", format!("Bearer {}", deployment_key))
         .header("X-Grow-Token-Auth", "grow-cli")
         .header("x-grow-client-version", grow_version::VERSION)
         .send()
@@ -222,25 +146,9 @@ async fn get_authenticated_json<T: serde::de::DeserializeOwned>(
 }
 
 impl ManagedMcpState {
-    /// Store fetched configs, optionally spawn the proactive refresh task, and
-    /// wake any concurrent callers that were waiting on this fetch.
-    pub fn complete_fetch(
-        &mut self,
-        configs: Vec<ManagedMcpConfig>,
-        state_handle: &ManagedMcpStateHandle,
-        refresh_ctx: Option<RefreshContext>,
-    ) {
-        let should_refresh = configs.iter().any(|c| c.token_expires_at.is_some());
+    /// Store fetched configs and wake concurrent callers waiting on this fetch.
+    pub fn complete_fetch(&mut self, configs: Vec<ManagedMcpConfig>) {
         self.cache = ManagedMcpCache::Ready(configs);
-
-        if should_refresh
-            && !self.refresh_task_spawned
-            && let Some(ctx) = refresh_ctx
-        {
-            spawn_cache_refresh_task(state_handle.clone(), ctx, self.refresh_cancel.clone());
-            self.refresh_task_spawned = true;
-        }
-
         self.fetch_notify.notify_waiters();
     }
 
@@ -255,47 +163,6 @@ impl ManagedMcpState {
     pub fn fail_fetch(&mut self) {
         self.cache = ManagedMcpCache::NotFetched;
         self.fetch_notify.notify_waiters();
-    }
-
-    /// True if a reactive re-auth attempt for `server` is permitted at `now`:
-    /// no prior cooldown entry, or the backoff window elapsed and the terminal
-    /// attempt cap is not reached.
-    pub fn reauth_allowed(&self, server: &str, now: DateTime<Utc>) -> bool {
-        self.reauth_cooldown
-            .get(server)
-            .is_none_or(|state| state.is_eligible(now))
-    }
-
-    /// True once `server` exhausted `MAX_REACTIVE_REAUTH_ATTEMPTS` — the
-    /// terminal needs-auth state that holds until a proactive refresh clears the
-    /// cooldown or a reactive re-auth succeeds.
-    pub fn reauth_is_terminal(&self, server: &str) -> bool {
-        self.reauth_cooldown
-            .get(server)
-            .is_some_and(ManagedReauthState::is_terminal)
-    }
-
-    /// Record a failed reactive re-auth for `server`: bump the failure count and
-    /// extend the backoff window.
-    pub fn record_reauth_failure(&mut self, server: &str, now: DateTime<Utc>) {
-        self.reauth_cooldown
-            .entry(server.to_string())
-            .or_default()
-            .record_failure(now);
-    }
-
-    /// Reset `server`'s cooldown after a successful reactive re-auth.
-    pub fn record_reauth_success(&mut self, server: &str) {
-        self.reauth_cooldown.remove(server);
-    }
-
-    /// Clear every server's reactive re-auth cooldown. Invoked only by the
-    /// proactive background refresh after a fresh fetch, so a parked (terminal)
-    /// connector re-authorized on service.example.com can retry. The reactive path must NOT
-    /// trigger this: a still-rejected token would reset its own attempt cap each
-    /// attempt and loop instead of going terminal.
-    pub fn clear_reauth_cooldowns(&mut self) {
-        self.reauth_cooldown.clear();
     }
 
     pub fn enable_gateway_tools(&mut self) -> u64 {
@@ -354,7 +221,6 @@ pub struct ManagedMcpConfig {
     pub endpoint: String,
     #[serde(default)]
     pub headers: HashMap<String, String>,
-    pub token_expires_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub scope: Option<String>,
     #[serde(default)]
@@ -377,8 +243,6 @@ pub struct GatewayToolCallRequest {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct GatewayToolCallResponse {
     pub result: serde_json::Value,
-    #[serde(default)]
-    pub connectors_needing_reauth: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -387,8 +251,6 @@ pub struct GatewayToolCatalog {
     pub tools: Vec<GatewayTool>,
     #[serde(default)]
     pub total_tools: u32,
-    #[serde(default)]
-    pub connectors_needing_reauth: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -420,9 +282,8 @@ pub enum ManagedMcpFetchError {
     },
     #[error("transport: {0}")]
     Transport(#[from] reqwest::Error),
-    /// No usable auth token at fetch time.
-    #[error("no auth token available")]
-    NoAuth,
+    #[error("no deployment key available")]
+    MissingDeploymentKey,
 }
 
 /// Fetch managed MCP configs from cli-chat-proxy (`GET /v1/mcp/configs`).
@@ -432,13 +293,13 @@ pub enum ManagedMcpFetchError {
 /// failure, parse error) — callers must NOT cache the result as empty.
 pub async fn fetch_managed_configs(
     proxy_base_url: &str,
-    auth_key: &str,
+    deployment_key: &str,
 ) -> Result<Vec<ManagedMcpConfig>, ManagedMcpFetchError> {
     let url = format!("{}/mcp/configs", proxy_base_url);
 
     let response: McpConfigsResponse = get_authenticated_json(
         &url,
-        auth_key,
+        deployment_key,
         "Managed MCP configs unavailable",
         "Managed MCP configs fetch failed",
         "Managed MCP configs parse error",
@@ -457,7 +318,7 @@ const GATEWAY_TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from
 
 pub async fn call_gateway_tool(
     proxy_base_url: &str,
-    auth_key: &str,
+    deployment_key: &str,
     call_id: &str,
     arguments: serde_json::Value,
 ) -> Result<GatewayToolCallResponse, ManagedMcpFetchError> {
@@ -475,7 +336,7 @@ pub async fn call_gateway_tool(
     let resp = match grow_http::shared_client()
         .post(&url)
         .timeout(GATEWAY_TOOL_CALL_TIMEOUT)
-        .header("Authorization", format!("Bearer {}", auth_key))
+        .header("Authorization", format!("Bearer {}", deployment_key))
         .header("X-Grow-Token-Auth", "grow-cli")
         .header("x-grow-client-version", grow_version::VERSION)
         .json(&request)
@@ -542,13 +403,13 @@ async fn gateway_error_message(status: reqwest::StatusCode, response: reqwest::R
 /// empty catalog.
 pub async fn fetch_gateway_tool_catalog(
     proxy_base_url: &str,
-    auth_key: &str,
+    deployment_key: &str,
 ) -> Result<GatewayToolCatalog, ManagedMcpFetchError> {
     let url = format!("{}/mcp/tools/list", proxy_base_url);
 
     let catalog: GatewayToolCatalog = get_authenticated_json(
         &url,
-        auth_key,
+        deployment_key,
         "Managed MCP gateway tools unavailable",
         "Managed MCP gateway tools fetch failed",
         "Managed MCP gateway tools parse error",
@@ -557,7 +418,6 @@ pub async fn fetch_gateway_tool_catalog(
     tracing::info!(
         count = catalog.tools.len(),
         total_tools = catalog.total_tools,
-        reauth = catalog.connectors_needing_reauth.len(),
         "Fetched managed MCP gateway tool catalog"
     );
     Ok(catalog)
@@ -591,8 +451,7 @@ pub async fn invalidate_gateway_tool_cache(handle: &ManagedMcpStateHandle) {
 pub async fn get_or_fetch(
     handle: &ManagedMcpStateHandle,
     proxy_url: &str,
-    auth_key: Option<&str>,
-    refresh_ctx: Option<RefreshContext>,
+    deployment_key: Option<&str>,
 ) -> Vec<ManagedMcpConfig> {
     let fetch = wait_for_fetch_slot(handle, |state| {
         state.cache.claim_fetch(state.fetch_notify.clone())
@@ -602,17 +461,14 @@ pub async fn get_or_fetch(
         return configs;
     }
 
-    let result = match auth_key {
+    let result = match deployment_key {
         Some(key) => fetch_managed_configs(proxy_url, key).await,
-        None => Err(ManagedMcpFetchError::NoAuth),
+        None => Err(ManagedMcpFetchError::MissingDeploymentKey),
     };
 
     match result {
         Ok(configs) => {
-            handle
-                .lock()
-                .await
-                .complete_fetch(configs.clone(), handle, refresh_ctx);
+            handle.lock().await.complete_fetch(configs.clone());
             configs
         }
         Err(e) => {
@@ -635,7 +491,7 @@ pub async fn get_or_fetch(
 pub async fn get_or_fetch_gateway_tool_catalog(
     handle: &ManagedMcpStateHandle,
     proxy_url: &str,
-    auth_key: Option<&str>,
+    deployment_key: Option<&str>,
 ) -> Option<GatewayToolCatalog> {
     let fetch_epoch = loop {
         let maybe_notify = {
@@ -661,9 +517,9 @@ pub async fn get_or_fetch_gateway_tool_catalog(
         }
     };
 
-    let result = match auth_key {
+    let result = match deployment_key {
         Some(key) => fetch_gateway_tool_catalog(proxy_url, key).await,
-        None => Err(ManagedMcpFetchError::NoAuth),
+        None => Err(ManagedMcpFetchError::MissingDeploymentKey),
     };
 
     match result {
@@ -688,7 +544,7 @@ pub async fn get_or_fetch_gateway_tool_catalog(
 /// Namespace prefix for managed MCP servers.
 ///
 /// Servers with names starting with this prefix are managed by service.example.com —
-/// their OAuth credentials are stored server-side.
+/// their transport headers are supplied by deployment-managed configuration.
 /// Servers without this prefix are user-managed (local keychain, config.toml headers, etc.).
 ///
 /// Examples:
@@ -712,24 +568,6 @@ pub fn to_managed_name(display_name: &str) -> String {
         normalize_managed_name(display_name)
     );
     grow_shell_base::util::truncate(&raw, MANAGED_MCP_NAME_MAX_CHARS).to_string()
-}
-
-/// Minutes before token expiry to refresh credentials.
-pub const TOKEN_EXPIRY_BUFFER_MINUTES: i64 = 5;
-
-/// Whether a managed token should be treated as stale (eligible for a swap).
-///
-/// A `None` expiry carries no TTL to reason about, so we conservatively treat
-/// it as stale; otherwise a tokenless connector would never become eligible for
-/// a swap. The downstream rebuild remains gated on actual header changes.
-pub fn managed_token_is_stale(
-    expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> bool {
-    match expires_at {
-        Some(exp) => now > exp - chrono::Duration::minutes(TOKEN_EXPIRY_BUFFER_MINUTES),
-        None => true,
-    }
 }
 
 /// Returns `true` if this server should use server-side managed credentials.
@@ -757,7 +595,7 @@ pub fn normalize_url(url: &str) -> String {
 /// Key for managed config lookup: (normalized_url, scope, scope_id).
 type ManagedConfigKey = (String, Option<String>, Option<String>);
 
-/// Inject managed OAuth headers into `grow_managed_`-prefixed MCP servers.
+/// Inject deployment-managed headers into `grow_managed_`-prefixed MCP servers.
 ///
 /// Matches on endpoint URL + scope from `X-Connector-Scope` headers.
 /// Falls back to URL-only match when no scope headers are present (backward compat).
@@ -903,109 +741,6 @@ pub fn inject_managed_headers(servers: &mut [acp::McpServer], managed: &[Managed
     }
 }
 
-/// Boxed future returned by a [`TokenProvider`] call.
-pub type TokenFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>;
-
-/// Resolves a fresh bearer token for each proactive refresh attempt; `None`
-/// when no valid token is available. Injected by the caller so this crate
-/// stays independent of shell's auth manager.
-pub type TokenProvider = Arc<dyn Fn() -> TokenFuture + Send + Sync>;
-
-/// Context needed for the proactive refresh background task.
-pub struct RefreshContext {
-    pub proxy_base_url: String,
-    /// Per-attempt token resolution (backed by shell's live auth manager).
-    pub token_provider: TokenProvider,
-}
-
-/// Proactive refresh: sleep until ~5 min before earliest token expiry,
-/// re-fetch configs, and update the agent-level cache so new sessions
-/// (and re-connected MCP clients) get fresh credentials.
-pub fn spawn_cache_refresh_task(
-    state: ManagedMcpStateHandle,
-    ctx: RefreshContext,
-    cancel: CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut consecutive_failures: u32 = 0;
-        loop {
-            let iteration = async {
-                let wake_at = {
-                    let state_ref = state.lock().await;
-                    match &state_ref.cache {
-                        ManagedMcpCache::Ready(configs) => configs
-                            .iter()
-                            .filter_map(|c| c.token_expires_at)
-                            .min()
-                            .map(|exp| exp - chrono::Duration::minutes(TOKEN_EXPIRY_BUFFER_MINUTES))
-                            .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(30)),
-                        _ => Utc::now() + chrono::Duration::minutes(30),
-                    }
-                };
-
-                let sleep_dur = (wake_at - Utc::now())
-                    .to_std()
-                    .unwrap_or(std::time::Duration::from_secs(60));
-
-                tracing::debug!("MCP refresh: sleeping {sleep_dur:?} until next token refresh");
-                tokio::time::sleep(sleep_dur).await;
-
-                let Some(auth_key) = (ctx.token_provider)().await else {
-                    consecutive_failures = consecutive_failures.saturating_add(1);
-                    let backoff_secs = 2u64.pow(consecutive_failures.min(5));
-                    tracing::debug!(
-                        failures = consecutive_failures,
-                        backoff_secs,
-                        "MCP refresh: auth unavailable, backing off before retry"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-                    return;
-                };
-
-                // Empty success is treated like failure here on purpose: the
-                // refresh task only runs when a previous fetch returned
-                // expiring configs, so keep the old (still usable) cache and
-                // back off rather than wiping it on a suspicious response.
-                let configs = match fetch_managed_configs(&ctx.proxy_base_url, &auth_key).await {
-                    Ok(configs) if !configs.is_empty() => configs,
-                    Ok(_) | Err(_) => {
-                        consecutive_failures = consecutive_failures.saturating_add(1);
-                        let backoff_secs = 2u64.pow(consecutive_failures.min(5));
-                        tracing::debug!(
-                            failures = consecutive_failures,
-                            backoff_secs,
-                            "MCP refresh: failed or empty response, backing off before retry"
-                        );
-                        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-                        return;
-                    }
-                };
-
-                consecutive_failures = 0;
-                tracing::info!(
-                    count = configs.len(),
-                    "MCP refresh: updated managed config cache"
-                );
-                {
-                    let mut s = state.lock().await;
-                    s.complete_fetch(configs, &state, None);
-                    // A proactive refresh pulled fresh configs, so let a parked
-                    // (terminal) connector retry reactively on its next tool call.
-                    s.clear_reauth_cooldowns();
-                }
-            };
-
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    tracing::debug!("MCP refresh: task cancelled");
-                    return;
-                }
-                _ = iteration => {}
-            }
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1015,33 +750,10 @@ mod tests {
             name: name.to_string(),
             endpoint: endpoint.to_string(),
             headers: HashMap::from([("Authorization".into(), "Bearer tok".into())]),
-            token_expires_at: None,
             scope: Some(scope.to_string()),
             scope_id: Some(format!("{scope}-id-123")),
             scope_name: None,
         }
-    }
-
-    #[test]
-    fn managed_token_none_expiry_is_stale() {
-        let now = chrono::Utc::now();
-        // No TTL info → conservatively stale.
-        assert!(managed_token_is_stale(None, now));
-        // Well inside the buffer window → not yet stale.
-        assert!(!managed_token_is_stale(
-            Some(now + chrono::Duration::hours(1)),
-            now
-        ));
-        // Within the buffer window → stale.
-        assert!(managed_token_is_stale(
-            Some(now + chrono::Duration::minutes(TOKEN_EXPIRY_BUFFER_MINUTES - 1)),
-            now
-        ));
-        // Already expired → stale.
-        assert!(managed_token_is_stale(
-            Some(now - chrono::Duration::minutes(1)),
-            now
-        ));
     }
 
     /// A failed fetch (here: no auth token) must NOT be committed to the
@@ -1052,7 +764,7 @@ mod tests {
     #[tokio::test]
     async fn failed_fetch_is_not_cached_as_ready_empty() {
         let handle = ManagedMcpStateHandle::default();
-        let configs = get_or_fetch(&handle, "http://127.0.0.1:0", None, None).await;
+        let configs = get_or_fetch(&handle, "http://127.0.0.1:0", None).await;
         assert!(configs.is_empty());
         assert!(
             matches!(handle.lock().await.cache, ManagedMcpCache::NotFetched),
@@ -1081,8 +793,7 @@ mod tests {
                     }
                 }
             ],
-            "total_tools": 1,
-            "connectors_needing_reauth": ["Slack"]
+            "total_tools": 1
         }"#,
         )
         .unwrap();
@@ -1090,13 +801,11 @@ mod tests {
         assert_eq!(1, catalog.total_tools);
         let without_total_tools: GatewayToolCatalog = serde_json::from_str(
             r#"{
-            "tools": [],
-            "connectors_needing_reauth": []
+            "tools": []
         }"#,
         )
         .unwrap();
         assert_eq!(0, without_total_tools.total_tools);
-        assert_eq!(vec!["Slack"], catalog.connectors_needing_reauth);
         assert_eq!("gmail_search", catalog.tools[0].call_id);
         assert_eq!("gmail__search", catalog.tools[0].qualified_name());
         assert_eq!("gmail", catalog.tools[0].connector_id);
@@ -1165,7 +874,6 @@ mod tests {
             GatewayToolCatalog {
                 tools: vec![],
                 total_tools: 0,
-                connectors_needing_reauth: vec![],
             }
         ));
         assert!(state.gateway_tools_active);
@@ -1194,7 +902,6 @@ mod tests {
             GatewayToolCatalog {
                 tools: vec![],
                 total_tools: 0,
-                connectors_needing_reauth: vec![],
             },
         );
 
@@ -1259,7 +966,6 @@ mod tests {
             GatewayToolCatalog {
                 tools: vec![],
                 total_tools: 0,
-                connectors_needing_reauth: vec![],
             },
         ));
 
@@ -1291,8 +997,7 @@ mod tests {
                                 "json_schema": { "type": "object" }
                             }
                         ],
-                        "total_tools": 1,
-                        "connectors_needing_reauth": []
+                        "total_tools": 1
                     }))
                 }
             }),
@@ -1348,8 +1053,8 @@ mod tests {
         let h2 = handle.clone();
         let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             tokio::join!(
-                get_or_fetch(&handle, "http://127.0.0.1:0", None, None),
-                get_or_fetch(&h2, "http://127.0.0.1:0", None, None),
+                get_or_fetch(&handle, "http://127.0.0.1:0", None),
+                get_or_fetch(&h2, "http://127.0.0.1:0", None),
             )
         })
         .await
@@ -1359,111 +1064,5 @@ mod tests {
             handle.lock().await.cache,
             ManagedMcpCache::NotFetched
         ));
-    }
-
-    /// A fresh server with no cooldown entry is always eligible, and its first
-    /// failure escalates the backoff window without going terminal yet.
-    #[test]
-    fn reauth_first_attempt_allowed_then_backs_off() {
-        let mut state = ManagedMcpState::default();
-        let now = Utc::now();
-        assert!(state.reauth_allowed("grow_managed_slack", now));
-        assert!(!state.reauth_is_terminal("grow_managed_slack"));
-
-        state.record_reauth_failure("grow_managed_slack", now);
-        // 2^1 = 2s backoff: not eligible now, eligible after the window.
-        assert!(!state.reauth_allowed("grow_managed_slack", now));
-        assert!(state.reauth_allowed("grow_managed_slack", now + chrono::Duration::seconds(2)));
-        assert!(!state.reauth_is_terminal("grow_managed_slack"));
-    }
-
-    /// Backoff escalates per failure and is capped at
-    /// `REACTIVE_REAUTH_BACKOFF_CAP_SECS`; the cap is observed by forcing the
-    /// failure count high enough that `2^n` would exceed it.
-    #[test]
-    fn reauth_backoff_escalates_and_caps() {
-        let mut state = ManagedReauthState::default();
-        let now = Utc::now();
-
-        state.record_failure(now);
-        assert_eq!(state.next_allowed_at, now + chrono::Duration::seconds(2));
-        state.record_failure(now);
-        assert_eq!(state.next_allowed_at, now + chrono::Duration::seconds(4));
-
-        // Drive failures past the cap exponent; the window must clamp to 64s.
-        for _ in 0..10 {
-            state.record_failure(now);
-        }
-        assert_eq!(
-            state.next_allowed_at,
-            now + chrono::Duration::seconds(REACTIVE_REAUTH_BACKOFF_CAP_SECS as i64)
-        );
-    }
-
-    /// After `MAX_REACTIVE_REAUTH_ATTEMPTS` consecutive failures the server is
-    /// terminal and never eligible again — even past the backoff window — until
-    /// the cooldown is cleared.
-    #[test]
-    fn reauth_goes_terminal_after_max_attempts() {
-        let mut state = ManagedMcpState::default();
-        let now = Utc::now();
-        for _ in 0..MAX_REACTIVE_REAUTH_ATTEMPTS {
-            state.record_reauth_failure("grow_managed_slack", now);
-        }
-        assert!(state.reauth_is_terminal("grow_managed_slack"));
-        // Even far past any backoff window, a terminal server stays ineligible.
-        assert!(!state.reauth_allowed("grow_managed_slack", now + chrono::Duration::seconds(3600)));
-    }
-
-    /// A successful reactive re-auth resets that server's cooldown so the next
-    /// failure starts a fresh backoff.
-    #[test]
-    fn reauth_success_resets_cooldown() {
-        let mut state = ManagedMcpState::default();
-        let now = Utc::now();
-        for _ in 0..MAX_REACTIVE_REAUTH_ATTEMPTS {
-            state.record_reauth_failure("grow_managed_slack", now);
-        }
-        assert!(state.reauth_is_terminal("grow_managed_slack"));
-
-        state.record_reauth_success("grow_managed_slack");
-        assert!(state.reauth_allowed("grow_managed_slack", now));
-        assert!(!state.reauth_is_terminal("grow_managed_slack"));
-    }
-
-    /// `complete_fetch` must NOT clear the reactive cooldown: the reactive path
-    /// re-fetches through it, so clearing there would reset a still-rejected
-    /// connector's attempt cap every attempt and loop. Only the explicit
-    /// `clear_reauth_cooldowns` (invoked by the proactive refresh) clears it.
-    #[test]
-    fn complete_fetch_preserves_cooldown_clear_resets_it() {
-        let handle = ManagedMcpStateHandle::default();
-        let now = Utc::now();
-        {
-            let mut state = handle.blocking_lock();
-            for _ in 0..MAX_REACTIVE_REAUTH_ATTEMPTS {
-                state.record_reauth_failure("grow_managed_slack", now);
-                state.record_reauth_failure("grow_managed_linear", now);
-            }
-            assert!(state.reauth_is_terminal("grow_managed_slack"));
-            assert!(state.reauth_is_terminal("grow_managed_linear"));
-
-            // A fetch (the reactive path's re-fetch) must leave the cooldown intact.
-            // refresh_ctx = None so no background task is spawned in the test.
-            state.complete_fetch(
-                vec![make_managed("Slack", "https://mcp.slack.com/sse", "user")],
-                &handle,
-                None,
-            );
-            assert!(state.reauth_is_terminal("grow_managed_slack"));
-            assert!(state.reauth_is_terminal("grow_managed_linear"));
-
-            // The explicit proactive-refresh clear resets every server.
-            state.clear_reauth_cooldowns();
-            assert!(state.reauth_allowed("grow_managed_slack", now));
-            assert!(state.reauth_allowed("grow_managed_linear", now));
-            assert!(!state.reauth_is_terminal("grow_managed_slack"));
-            assert!(!state.reauth_is_terminal("grow_managed_linear"));
-        }
     }
 }

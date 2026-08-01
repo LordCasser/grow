@@ -80,7 +80,7 @@ impl ApiEmbeddingProvider {
 pub(super) fn build_middleware_client(
     credentials: std::sync::Arc<dyn grow_auth::AuthCredentialProvider>,
 ) -> reqwest_middleware::ClientWithMiddleware {
-    grow_http::with_auth_retry(grow_http::shared_client(), credentials)
+    grow_http::with_auth_header(grow_http::shared_client(), credentials)
 }
 
 fn build_static_middleware_client(

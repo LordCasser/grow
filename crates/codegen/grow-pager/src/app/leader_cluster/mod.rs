@@ -57,7 +57,7 @@ use xai_acp_lib::{
 use super::actions::{Action, TaskResult};
 use super::agent::AgentState;
 use super::agent_view::AgentView;
-use super::app_view::{AppView, AuthState, TrustState};
+use super::app_view::{AppView, TrustState};
 use super::{acp_handler, dispatch, effects};
 use crate::acp::leader_bridge::bridge_channels;
 use crate::acp::model_state::ModelState;
@@ -146,7 +146,6 @@ impl ClusterClient {
                 matches!(self.app.current_ui.permission_mode.as_deref(), Some("auto")),
             ),
             screen_mode_label: Some(self.app.screen_mode.meta_label()),
-            is_api_key_auth: self.app.is_api_key_auth,
             resume_local_miss: self.app.resume_local_miss.clone(),
         };
         for eff in effs {
@@ -396,11 +395,9 @@ impl PagerLeaderCluster {
 
         generation_tasks.push(tokio::task::spawn_local(async move {
             let agent_config = AgentConfig::default();
-            let auth_manager = Arc::new(agent_config.create_auth_manager());
             let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
             let gateway = GatewaySender::new(gw_tx);
-            let agent =
-                MvpAgent::new(gateway, &agent_config, auth_manager).expect("valid agent config");
+            let agent = MvpAgent::new(gateway, &agent_config).expect("valid agent config");
             let incoming = LineBufferedRead::spawn_local(agent_in_read.compat());
             let (conn, handle_io) = acp::AgentSideConnection::new(
                 agent,
@@ -576,7 +573,6 @@ impl PagerLeaderCluster {
 
         let mut app = AppView::new(tx, ModelState::default(), Vec::new());
         app.leader_mode = true;
-        app.auth_state = AuthState::Done;
         app.trust_state = TrustState::Done;
         app.project_picker_shown = true;
         app.cwd = self.workdir.path().to_path_buf();

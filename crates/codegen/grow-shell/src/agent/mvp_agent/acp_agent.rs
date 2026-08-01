@@ -55,30 +55,6 @@ impl acp::Agent for MvpAgent {
                 );
             });
         grow_workspace::trust::migrate_legacy_hook_trust();
-        if let Some(auth) = self.auth_manager.current() {
-            let user_id = auth.user_id.trim();
-            let needs_user_info = user_id.is_empty()
-                || user_id.eq_ignore_ascii_case("unknown");
-            grow_diagnostics::unified_log::info(
-                "auth init user_info check",
-                None,
-                Some(
-                    serde_json::json!({
-                    "user_id": user_id,
-                    "needs_user_info": needs_user_info,
-                    "key_prefix": crate::auth::token_suffix(&auth.key),
-                    "rt_prefix": auth.refresh_token.as_deref().map(crate::auth::token_suffix),
-                }),
-                ),
-            );
-            if needs_user_info && let Err(e) = self.auth_manager.update(auth).await {
-                tracing::warn!(
-                    "Failed to refresh user info from proxy during new_session: {}",
-                    e
-                );
-            }
-        }
-        self.maybe_sync_bundle_in_background(false);
         let mut client_type = arguments
             .meta
             .as_ref()
@@ -143,255 +119,22 @@ impl acp::Agent for MvpAgent {
         if self.initialize_request.set(arguments).is_err() {
             tracing::info!("Initialize called on reconnect (already initialized)");
         }
-        let pre = self
-            .auth_manager
-            .current()
-            .map(|a| (
-                crate::auth::token_suffix(&a.key).to_owned(),
-                a
-                    .refresh_token
-                    .as_deref()
-                    .map(|t| crate::auth::token_suffix(t).to_owned()),
-            ));
-        self.auth_manager.force_reload_from_disk();
-        let post = self
-            .auth_manager
-            .current()
-            .map(|a| (
-                crate::auth::token_suffix(&a.key).to_owned(),
-                a
-                    .refresh_token
-                    .as_deref()
-                    .map(|t| crate::auth::token_suffix(t).to_owned()),
-            ));
-        grow_diagnostics::unified_log::info(
-            "auth init disk refresh",
-            None,
-            Some(
-                serde_json::json!({
-                "pre_key": pre.as_ref().map(|p| &p.0),
-                "pre_rt": pre.as_ref().and_then(|p| p.1.as_deref()),
-                "post_key": post.as_ref().map(|p| &p.0),
-                "post_rt": post.as_ref().and_then(|p| p.1.as_deref()),
-                "changed": pre.as_ref().map(|p| &p.0) != post.as_ref().map(|p| &p.0),
-            }),
-            ),
-        );
-        grow_diagnostics::unified_log::info(
-            "auth: initialize() refreshed auth state from disk",
-            None,
-            Some(
-                serde_json::json!({
-                "has_current": self.auth_manager.current().is_some(),
-                "is_expired": self.auth_manager.is_expired(),
-                "auth_mode": self.auth_manager.current().map(|a| format!("{:?}", a.auth_mode)),
-            }),
-            ),
-        );
-        if !self.cfg.borrow().auth.api_key_auth_disabled()
-            && auth_method::read_provider_api_key_env().is_err()
-            && let Some(api_key) = crate::auth::read_api_key(
-                &crate::util::grow_home::grow_home(),
-            )
-        {
-            unsafe { std::env::set_var("GROW_API_KEY", &api_key) };
-            tracing::info!("auth: loaded API key from auth.json (grow::api_key scope)");
-            grow_diagnostics::unified_log::info(
-                "auth: loaded API key from auth.json (grow::api_key scope)",
-                None,
-                None,
-            );
-        }
-        let disable_api_key_auth = self
-            .cfg
-            .borrow()
-            .auth
-            .api_key_auth_disabled();
-        {
-            let cfg = self.cfg.borrow();
-            let gc = &cfg.auth;
-            if disable_api_key_auth || gc.force_login_team_uuid.is_some() {
-                grow_diagnostics::unified_log::info(
-                    "auth: enterprise login policy active",
-                    None,
-                    Some(
-                        serde_json::json!({
-                        "force_login_team_uuid": gc.force_login_team_uuid.as_ref().map(|t| format!("{t:?}")),
-                        "disable_api_key_auth_knob": gc.disable_api_key_auth,
-                        "api_key_auth_disabled": disable_api_key_auth,
-                    }),
-                    ),
-                );
-            }
-        }
-        let has_external_api_key = auth_method::should_advertise_provider_api_key(
-            disable_api_key_auth,
+        let has_byok_provider = auth_method::should_advertise_provider_api_key(
             self.models_manager.models().values(),
         );
-        let init_has_current = self.auth_manager.current().is_some();
-        let init_is_expired = self.auth_manager.is_expired();
-        grow_diagnostics::unified_log::info(
-            "auth init token state",
-            None,
-            Some(
-                serde_json::json!({
-                "has_current": init_has_current,
-                "is_expired": init_is_expired,
-            }),
-            ),
-        );
-        let mut has_cached_token = init_has_current;
-        if !init_has_current && init_is_expired {
-            let refreshed = matches!(
-                tokio::time::timeout(
-                    crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-                    self.auth_manager.auth(),
-                )
-                .await,
-                Ok(Ok(_))
-            );
-            if refreshed {
-                tracing::debug!(
-                    auth_type = ?self.auth_type(),
-                    "auth: initialize() silent refresh succeeded",
-                );
-                grow_diagnostics::unified_log::info(
-                    "auth: initialize() silent refresh succeeded",
-                    None,
-                    Some(
-                        serde_json::json!({ "auth_type": format!("{:?}", self.auth_type()) }),
-                    ),
-                );
-                has_cached_token = true;
-            } else {
-                tracing::warn!(
-                    "auth: token expired, silent refresh failed - re-authentication required"
-                );
-                grow_diagnostics::unified_log::warn(
-                    "auth: token expired, silent refresh failed - re-authentication required",
-                    None,
-                    None,
-                );
-            }
+        if !has_byok_provider {
+            return Err(acp::Error::auth_required().data(
+                "no BYOK provider is configured; add a provider/model to ~/.grow/config.toml",
+            ));
         }
-        let (
-            login_label,
-            has_auth_provider,
-            has_enterprise_oidc,
-            enterprise_oidc_issuer,
-        ) = {
-            let cfg = self.cfg.borrow();
-            let issuer = cfg.auth.oidc.as_ref().map(|o| o.issuer.clone());
-            (
-                cfg.auth.auth_provider_label.clone(),
-                cfg.auth.auth_provider_command.is_some(),
-                cfg.auth.oidc.is_some(),
-                issuer,
-            )
-        };
-        if has_enterprise_oidc {
-            let issuer = enterprise_oidc_issuer
-                .as_deref()
-                .expect(
-                    "enterprise_oidc_issuer must be Some when has_enterprise_oidc is true",
-                );
-            tracing::info!(
-                issuer = %issuer,
-                "auth: advertising enterprise OIDC auth method",
-            );
-            grow_diagnostics::unified_log::info(
-                "auth: advertising enterprise OIDC auth method",
-                None,
-                Some(serde_json::json!({ "issuer": issuer })),
-            );
-        } else {
-            tracing::info!(
-                label = ?login_label,
-                has_auth_provider,
-                "auth: advertising service.example.com auth method",
-            );
-        }
-        let preferred_method = self.cfg.borrow().auth.preferred_method;
-        let has_external_api_key = match preferred_method {
-            Some(crate::auth::PreferredAuthMethod::Oidc) => false,
-            _ => has_external_api_key,
-        };
-        let has_cached_token = match preferred_method {
-            Some(crate::auth::PreferredAuthMethod::ApiKey) => false,
-            _ => has_cached_token,
-        };
-        let built = auth_method::build_auth_methods(auth_method::AuthMethodsBuildInputs {
-            has_external_api_key,
-            has_cached_token,
-            has_enterprise_oidc,
-            enterprise_oidc_issuer: enterprise_oidc_issuer.as_deref(),
-            login_label: login_label.as_deref(),
-            has_auth_provider_command: has_auth_provider,
-            preferred_method,
-        });
+        let built = auth_method::build_auth_methods();
         let auth_methods = built.methods;
-        grow_diagnostics::unified_log::info(
-            "auth: initialize() built auth_methods for ACP response",
-            None,
-            Some(
-                serde_json::json!({
-                "grow_home": crate::util::grow_home::grow_home().display().to_string(),
-                "HOME": std::env::var("HOME").unwrap_or_else(|_| "(unset)".into()),
-                "has_external_api_key": has_external_api_key,
-                "disable_api_key_auth": disable_api_key_auth,
-                "has_cached_token": has_cached_token,
-                "has_enterprise_oidc": has_enterprise_oidc,
-                "init_has_current": init_has_current,
-                "init_is_expired": init_is_expired,
-                "auth_mode": self.auth_manager.current().map(|a| format!("{:?}", a.auth_mode)),
-                "methods": auth_methods.iter().map(|m| m.id().0.as_ref()).collect::<Vec<_>>(),
-                "default_auth_method_id": built.default_auth_method_id.as_ref().map(|id| id.0.as_ref()),
-            }),
-            ),
-        );
-        debug_assert!(
-            !has_external_api_key
-                || matches!(
-                    auth_methods
-                        .first()
-                        .map(|m| auth_method::AuthMethodKind::from_id(m.id())),
-                    Some(auth_method::AuthMethodKind::ProviderApiKey)
-                ),
-            "BYOK invariant violated: provider.api_key MUST be auth_methods.first() \
-             when has_external_api_key is true; got {:?}",
-            auth_methods.first().map(|m| m.id()),
-        );
-        let default_auth_method_id_wire: Option<String> = built
-            .default_auth_method_id
-            .as_ref()
-            .map(|id| id.0.to_string());
-        if let Some(default_id) = built.default_auth_method_id {
-            grow_diagnostics::unified_log::info(
-                "auth method selection",
-                None,
-                Some(
-                    serde_json::json!({
-                    "default_auth_method_id": default_id.0.as_ref(),
-                    "has_external_api_key": has_external_api_key,
-                    "has_cached_token": has_cached_token,
-                    "methods_first": auth_methods.first().map(|m| m.id().0.as_ref()),
-                    "methods_count": auth_methods.len(),
-                }),
-                ),
-            );
-            self.set_auth_method(default_id);
-        }
-        self.sync_process_static_api_key(None);
+        let default_auth_method_id_wire = Some(built.default_auth_method_id.0.to_string());
+        self.set_auth_method(built.default_auth_method_id);
         let current_working_directory = self.launch_cwd.clone();
         let hostname = gethostname::gethostname();
         let mcp_servers: Vec<crate::extensions::mcp::McpServerEntry> = Vec::new();
-        let fetch_managed_mcps = self.cfg.borrow().managed_mcps_enabled
-            && self.can_fetch_managed_mcps();
-        if self.cfg.borrow().managed_mcps_enabled && !fetch_managed_mcps {
-            tracing::info!("Managed MCP fetch: DISABLED");
-        }
-        self.spawn_initialize_launch_mcp_setup(fetch_managed_mcps);
-        self.spawn_managed_gateway_tool_catalog_fetch();
+        self.spawn_initialize_launch_mcp_setup();
         {
             let agent_ref = LocalRef::new(self);
             tokio::task::spawn_local(async move {
@@ -431,8 +174,7 @@ impl acp::Agent for MvpAgent {
                     let metadata = parse_json_object_env("GROW_AGENT_METADATA");
                     serde_json::json!({
                     "growShell": true,
-                    // Re-deriving this precedence client-side has regressed OIDC
-                    // refresh, so clients consume the agent's choice from here.
+                    // Clients consume the agent's single BYOK method from here.
                     "defaultAuthMethodId": default_auth_method_id_wire,
                     // The agent can drive in-process SDK MCP servers over the ACP reverse
                     // channel (`grow/mcp/sdk_call`); the SDK reads this to enable transport="acp".
@@ -464,296 +206,26 @@ impl acp::Agent for MvpAgent {
         &self,
         arguments: acp::AuthenticateRequest,
     ) -> Result<AuthenticateResponse, acp::Error> {
-        tracing::info!(method = %arguments.method_id.0, "auth: authenticate request");
-        grow_diagnostics::unified_log::info(
-            "auth started",
-            None,
-            Some(serde_json::json!({"method": arguments.method_id.0.as_ref()})),
-        );
-        if let Some(preferred) = self.cfg.borrow().auth.preferred_method {
-            let kind = auth_method::AuthMethodKind::from_id(&arguments.method_id);
-            let allowed = match preferred {
-                crate::auth::PreferredAuthMethod::ApiKey => kind.is_api_key(),
-                crate::auth::PreferredAuthMethod::Oidc => kind.is_session_based(),
-            };
-            if !allowed {
-                let msg = match preferred {
-                    crate::auth::PreferredAuthMethod::ApiKey => {
-                        auth_method::PREFERRED_API_KEY_UNAVAILABLE
-                    }
-                    crate::auth::PreferredAuthMethod::Oidc => {
-                        "preferred_method=oidc; API-key auth is not allowed."
-                    }
-                };
-                emit_login_span(
-                    false,
-                    arguments.method_id.0.as_ref(),
-                    None,
-                    Some("preferred_method_mismatch"),
-                );
-                return Err(acp::Error::auth_required().data(msg));
-            }
-        }
-        match arguments.method_id.0.as_ref() {
-            auth_method::PROVIDER_API_KEY_METHOD_ID => {
-                if self.cfg.borrow().auth.api_key_auth_disabled() {
-                    emit_login_span(false, "api_key", None, Some("disabled_by_admin"));
-                    return Err(
-                        acp::Error::auth_required()
-                            .data("API-key auth is disabled by your administrator."),
-                    );
-                }
-                let mut sampling_config = self.sampling_config.borrow_mut();
-                if sampling_config.api_key.is_none() {
-                    if let Ok(api_key) = auth_method::read_provider_api_key_env() {
-                        sampling_config.api_key = Some(api_key.clone());
-                        if let Err(e) = crate::auth::store_api_key(
-                            &crate::util::grow_home::grow_home(),
-                            &api_key,
-                        ) {
-                            tracing::warn!("failed to persist API key to auth.json: {e}");
-                            grow_diagnostics::unified_log::warn(
-                                "failed to persist API key to auth.json",
-                                None,
-                                Some(serde_json::json!({ "error": e.to_string() })),
-                            );
-                        }
-                    } else if !self
-                        .models_manager
-                        .models()
-                        .values()
-                        .any(|m| m.has_own_credentials())
-                    {
-                        emit_login_span(false, "api_key", None, Some("no_credentials"));
-                        return Err(
-                            acp::Error::auth_required()
-                                .data(
-                                    "Set GROW_API_KEY or add api_key/env_key to config.toml.",
-                                ),
-                        );
-                    }
-                }
-                self.set_auth_method(arguments.method_id.clone());
-                self.sync_process_static_api_key(None);
-                emit_login_span(true, "api_key", None, None);
-                log_event(grow_diagnostics::events::Login {
-                    auth_method: "api_key".to_string(),
-                    user_id: None,
-                });
-                Ok(Default::default())
-            }
-            auth_method::CACHED_TOKEN_AUTH_METHOD_ID => {
-                let auth_meta = AuthRequestMeta::from_json(arguments.meta.as_ref());
-                if auth_meta.force_interactive {
-                    return self
-                        .authenticate(
-                            acp::AuthenticateRequest::new(
-                                    acp::AuthMethodId::new(auth_method::OIDC_METHOD_ID),
-                                )
-                                .meta(arguments.meta),
-                        )
-                        .await;
-                }
-                let current_auth = self.auth_manager.current();
-                let has_current = current_auth.is_some();
-                let is_expired = self.auth_manager.is_expired();
-                grow_diagnostics::unified_log::info(
-                    "auth cached_token check",
-                    None,
-                    Some(
-                        serde_json::json!({
-                        "has_current": has_current,
-                        "is_expired": is_expired,
-                    }),
-                    ),
-                );
-                let Some(auth) = self.auth_manager.current() else {
-                    let message = if self.auth_manager.is_expired() {
-                        "Session expired, re-authentication required"
-                    } else {
-                        "No cached auth token found"
-                    };
-                    tracing::info!(%message, "cached_token missing/expired, falling through");
-                    grow_diagnostics::unified_log::warn(
-                        "auth cached_token fallthrough",
-                        None,
-                        Some(serde_json::json!({ "reason": message })),
-                    );
-                    return self
-                        .authenticate_after_cached_token_unavailable(arguments)
-                        .await;
-                };
-                self.maybe_sync_bundle_in_background(false);
-                let auth_for_settings = auth.clone();
-                {
-                    let mut sampling_config = self.sampling_config.borrow_mut();
-                    sampling_config.api_key = Some(auth.key);
-                    tracing::debug!("auth: cached_token handler set api_key (SessionToken)");
-                    grow_diagnostics::unified_log::debug(
-                        "auth: cached_token handler set api_key (SessionToken)",
-                        None,
-                        None,
-                    );
-                }
-                self.set_auth_method(arguments.method_id.clone());
-                let uid = self.auth_manager.current().map(|a| a.user_id);
-                emit_login_span(true, "cached_token", uid.as_deref(), None);
-                log_event(grow_diagnostics::events::Login {
-                    auth_method: "cached_token".to_string(),
-                    user_id: uid,
-                });
-                Ok(self.auth_response_with_meta())
-            }
-            auth_method::PROVIDER_OAUTH_METHOD_ID | auth_method::OIDC_METHOD_ID => {
-                let grow_ctx = self.auth_manager.service_config();
-                let auth_meta = AuthRequestMeta::from_json(arguments.meta.as_ref());
-                tracing::info!(
-                    method = arguments.method_id.0.as_ref(),
-                    headless = auth_meta.headless,
-                    reauth = auth_meta.reauth,
-                    use_oauth = auth_meta.use_oauth,
-                    "auth: inline auth flow",
-                );
-                grow_diagnostics::unified_log::info(
-                    "auth: inline auth flow",
-                    None,
-                    Some(
-                        serde_json::json!({
-                        "method": arguments.method_id.0.as_ref(),
-                        "headless": auth_meta.headless,
-                        "reauth": auth_meta.reauth,
-                        "use_oauth": auth_meta.use_oauth,
-                    }),
-                    ),
-                );
-                if auth_meta.reauth {
-                    let _ = self.auth_manager.clear();
-                }
-                let cli_oauth = auth_meta.use_oauth.then_some(true);
-                let use_oidc = self.cfg.borrow().resolve_provider_oauth(cli_oauth);
-                tracing::debug!(resolved = use_oidc.value, source = ?use_oidc.source, "auth: method resolved");
-                grow_diagnostics::unified_log::debug(
-                    "auth: method resolved",
-                    None,
-                    Some(
-                        serde_json::json!({
-                        "use_oidc": use_oidc.value,
-                        "source": format!("{:?}", use_oidc.source),
-                    }),
-                    ),
-                );
-                let login_override = auth_meta.login_override();
-                let mut cancelled = false;
-                let client_seq = auth_meta.request_seq;
-                let auth_result = if !auth_meta.headless {
-                    let (url_tx, url_rx) = tokio::sync::oneshot::channel();
-                    let (code_tx, code_rx) = tokio::sync::mpsc::channel(1);
-                    let (cancel, _guard) = self
-                        .interactive_auth
-                        .begin(
-                            Some(
-                                crate::auth::single_flight::AttemptChannels::new(
-                                    code_tx,
-                                    url_rx,
-                                ),
-                            ),
-                            client_seq,
-                        );
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => {
-                            cancelled = true;
-                            Err(anyhow::anyhow!("Authentication cancelled"))
-                        }
-                        r = crate::auth::run_auth_flow_with_stderr_bridge(
-                            &self.auth_manager,
-                            grow_ctx,
-                            crate::auth::AuthChannels {
-                                url_tx: Some(url_tx),
-                                code_rx,
-                            },
-                            auth_meta.reauth,
-                            auth_meta.force_interactive,
-                            login_override,
-                        ) => r,
-                    }
-                } else {
-                    let (cancel, _guard) = self.interactive_auth.begin(None, client_seq);
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => {
-                            cancelled = true;
-                            Err(anyhow::anyhow!("Authentication cancelled"))
-                        }
-                        r = crate::auth::run_auth_flow(
-                            &self.auth_manager,
-                            grow_ctx,
-                            auth_meta.reauth,
-                            None,
-                            None,
-                            None,
-                            login_override,
-                        ) => r,
-                    }
-                };
-                let (auth, _did_auth) = auth_result
-                    .map_err(|e| {
-                        emit_login_span(
-                            false,
-                            arguments.method_id.0.as_ref(),
-                            None,
-                            Some(
-                                if cancelled {
-                                    "login_cancelled"
-                                } else {
-                                    "login_flow_failed"
-                                },
-                            ),
-                        );
-                        let mut err = acp::Error::auth_required();
-                        err.message = e.to_string();
-                        err
-                    })?;
-                {
-                    let mut sampling_config = self.sampling_config.borrow_mut();
-                    sampling_config.api_key = Some(auth.key.clone());
-                    tracing::debug!("auth: service.example.com/oidc handler set api_key (SessionToken)");
-                    grow_diagnostics::unified_log::debug(
-                        "auth: service.example.com/oidc handler set api_key (SessionToken)",
-                        None,
-                        None,
-                    );
-                }
-                self.auth_manager.hot_swap(auth.clone());
-                self.maybe_sync_bundle_in_background(false);
-                tokio::task::spawn_local(
-                    crate::managed_config::post_login_sync(Some(auth.clone())),
-                );
-                self.set_auth_method(arguments.method_id.clone());
-                emit_login_span(
-                    true,
-                    arguments.method_id.0.as_ref(),
-                    Some(auth.user_id.as_str()),
-                    None,
-                );
-                log_event(grow_diagnostics::events::Login {
-                    auth_method: arguments.method_id.0.as_ref().to_string(),
-                    user_id: Some(auth.user_id.clone()),
-                });
-                Ok(self.auth_response_with_meta())
-            }
-            _ => {
-                Err(
-                    acp::Error::invalid_params()
-                        .data(
-                            format!(
-                "unsupported auth method: {}",
+        if arguments.method_id.0.as_ref() != auth_method::PROVIDER_API_KEY_METHOD_ID {
+            return Err(acp::Error::invalid_params().data(format!(
+                "unsupported auth method: {}; Grow is BYOK-only",
                 arguments.method_id.0
-            ),
-                        ),
-                )
-            }
+            )));
         }
+
+        if let Ok(api_key) = auth_method::read_provider_api_key_env() {
+            self.sampling_config.borrow_mut().api_key = Some(api_key);
+        }
+        if !auth_method::should_advertise_provider_api_key(
+            self.models_manager.models().values(),
+        ) {
+            return Err(acp::Error::auth_required().data(
+                "no BYOK provider is configured; set api_key/env_key/auth_provider in config.toml",
+            ));
+        }
+
+        self.set_auth_method(arguments.method_id);
+        Ok(Default::default())
     }
     async fn new_session(
         &self,
@@ -773,7 +245,7 @@ impl acp::Agent for MvpAgent {
         let remote_settings = self.cfg.borrow().remote_settings.clone();
         folder_trust::resolve_and_record(cwd.as_path(), remote_settings.as_ref(), false);
         let initial_client_mcp_servers = arguments.mcp_servers.clone();
-        let (mcp_servers, managed_mcp_expires_at) = self
+        let mcp_servers = self
             .resolve_mcp_servers(arguments.mcp_servers, cwd.as_path())
             .await;
         let mcp_meta_config_map = parse_mcp_meta_config(arguments.meta.as_ref());
@@ -969,7 +441,6 @@ impl acp::Agent for MvpAgent {
                         persisted_workflow_runs: Vec::new(),
                         persisted_announcement_state: None,
                         session_meta: arguments.meta.as_ref(),
-                        managed_mcp_expires_at,
                         persisted_agent_name: None,
                         session_model_id,
                         session_yolo_mode,
@@ -1126,7 +597,7 @@ impl acp::Agent for MvpAgent {
         let remote_settings = self.cfg.borrow().remote_settings.clone();
         folder_trust::resolve_and_record(cwd.as_path(), remote_settings.as_ref(), false);
         let initial_client_mcp_servers = client_mcp_servers.clone();
-        let (mcp_servers, managed_mcp_expires_at) = self
+        let mcp_servers = self
             .resolve_mcp_servers(client_mcp_servers, cwd.as_path())
             .await;
         let mcp_meta_config_map = parse_mcp_meta_config(request_meta.as_ref());
@@ -1494,7 +965,6 @@ impl acp::Agent for MvpAgent {
                         persisted_workflow_runs,
                         persisted_announcement_state,
                         session_meta: request_meta.as_ref(),
-                        managed_mcp_expires_at,
                         persisted_agent_name: persisted_agent_name.as_deref(),
                         session_model_id: summary.current_model_id.clone(),
                         session_yolo_mode,
@@ -2244,9 +1714,6 @@ impl acp::Agent for MvpAgent {
         let mut backend_no_bridge_err: Option<acp::Error> = None;
         let method = args.method.clone();
         let result = match method.as_ref() {
-            "grow/getApiKey" | "grow/setApiKey" => {
-                crate::extensions::auth::handle(self, &args).await
-            }
             "grow/session/info" | "grow/session/set_agent" | "grow/session/close" | "grow/session/list"
             | "grow/sessions/list" => {
                 crate::agent::handlers::session::handle(self, &args).await
@@ -2276,7 +1743,6 @@ impl acp::Agent for MvpAgent {
             | "grow/internal/reload_project_mcp_servers" | "grow/internal/reload_skills"
             | "grow/internal/reload_workflows" | "grow/internal/reload_models"
             | "grow/internal/reload_announcements"
-            | "grow/internal/auth_cleared"
             | "grow/plugins/reload" | "grow/commands/list" => {
                 crate::extensions::session_admin::handle(self, &args).await
             }
@@ -2301,9 +1767,6 @@ impl acp::Agent for MvpAgent {
             }
             "grow/suggest" => crate::extensions::suggest::handle(self, &args).await,
             "grow/suggestPrompt" => crate::extensions::suggest::handle(self, &args).await,
-            s if s.starts_with("grow/auth/") => {
-                crate::extensions::auth::handle(self, &args).await
-            }
             s if s.starts_with("grow/session_summaries/") => {
                 crate::agent::handlers::session::handle(self, &args).await
             }

@@ -26,42 +26,6 @@ fn valid_agent_config() -> crate::agent::config::Config {
     config
 }
 
-/// Build an unsigned JWT with a `tier` claim (header.payload.sig base64url).
-fn jwt_with_tier(tier: u64) -> String {
-    use base64::Engine;
-    let enc = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let header = enc.encode(br#"{"alg":"none"}"#);
-    let payload = enc.encode(format!(r#"{{"tier":{tier}}}"#).as_bytes());
-    format!("{header}.{payload}.sig")
-}
-fn auth_with_mode(mode: crate::auth::AuthMode, key: &str) -> crate::auth::ProviderAuth {
-    crate::auth::ProviderAuth {
-        key: key.into(),
-        auth_mode: mode,
-        create_time: chrono::Utc::now(),
-        user_id: "u".into(),
-        email: None,
-        first_name: None,
-        last_name: None,
-        profile_image_asset_id: None,
-        principal_type: None,
-        principal_id: None,
-        team_id: None,
-        team_name: None,
-        team_role: None,
-        organization_id: None,
-        organization_name: None,
-        organization_role: None,
-        user_blocked_reason: None,
-        team_blocked_reasons: vec![],
-        refresh_token: None,
-        expires_at: None,
-        oidc_issuer: None,
-        oidc_client_id: None,
-    }
-}
-/// JWT claim ↔ `/user` tier mapping used to gate post-unblock catalog refresh
-/// (a stale older paid claim must not skip retry).
 /// Single-flight flag must clear on Drop even if the retry task panics /
 /// aborts mid-backoff (guards against the flag stuck true forever).
 mod hunk_tracking_mode {
@@ -626,7 +590,6 @@ fn make_test_handle(
         )),
         force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permission_handle: grow_workspace::permission::PermissionHandle::allow_all(),
-        attribution_callback: None,
         agent_name: "grow-build".to_string(),
         subagent_filter: Default::default(),
         managed_mcp_proxy_base_url: String::new(),
@@ -978,38 +941,6 @@ fn test_sessionless_request_requires_session_id() {
         "cwd-only requests with no sessionId must return SessionRequired"
     );
 }
-#[tokio::test(flavor = "current_thread")]
-async fn ext_method_routes_auth_cleared_and_refreshes_resident_sessions() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let agent = build_agent_with_auth(crate::auth::ProviderAuth {
-                key: "eligible".into(),
-                auth_mode: crate::auth::AuthMode::Oidc,
-                ..crate::auth::ProviderAuth::test_default()
-            });
-            use acp::Agent as _;
-            agent.managed_mcp_cache.lock().await.enable_gateway_tools();
-            let sid = acp::SessionId::new("sess-auth-cleared");
-            let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
-            agent.sessions.borrow_mut().insert(sid, handle);
-            let params = serde_json::json!({});
-            agent
-                .ext_method(acp::ExtRequest::new(
-                    "grow/internal/auth_cleared",
-                    std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
-                ))
-                .await
-                .expect("auth_cleared must route through session-admin");
-            let cmd = tokio::time::timeout(std::time::Duration::from_secs(1), cmd_rx.recv())
-                .await
-                .expect("refresh command should be sent")
-                .expect("channel should stay open until command is received");
-            assert!(matches!(cmd, SessionCommand::RefreshMcpSearchIndex));
-            assert!(!agent.managed_mcp_cache.lock().await.gateway_tools_active);
-        })
-        .await;
-}
 /// Fresh managed catalog sync must push UpdateMcpServers with the injected
 /// managed connector. The `search_tool` rebuild is a SEPARATE broadcast
 /// (`refresh_mcp_search_index_in_sessions`), so it is not asserted here.
@@ -1018,11 +949,7 @@ async fn sync_fresh_managed_mcp_pushes_update() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let agent = build_agent_with_auth(crate::auth::ProviderAuth {
-                key: "eligible".into(),
-                auth_mode: crate::auth::AuthMode::Oidc,
-                ..crate::auth::ProviderAuth::test_default()
-            });
+            let agent = build_minimal_agent_for_tests();
             let sid = acp::SessionId::new("sess-managed-sync");
             let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
             agent.sessions.borrow_mut().insert(sid, handle);
@@ -1033,7 +960,6 @@ async fn sync_fresh_managed_mcp_pushes_update() {
                     "Authorization".into(),
                     "Bearer tok".into(),
                 )]),
-                token_expires_at: None,
                 scope: None,
                 scope_id: None,
                 scope_name: None,
@@ -1083,17 +1009,10 @@ async fn refresh_mcp_search_index_broadcasts_to_sessions() {
 }
 /// Build a minimal MvpAgent suitable for testing extension methods.
 fn build_minimal_agent_for_tests() -> MvpAgent {
-    use crate::agent::config::Config as AgentConfig;
-    use crate::auth::{AuthManager, ServiceAuthConfig};
-    let temp_dir = tempfile::tempdir().unwrap();
-    let auth_manager = std::sync::Arc::new(AuthManager::new(
-        temp_dir.path(),
-        ServiceAuthConfig::default(),
-    ));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = valid_agent_config();
-    MvpAgent::new(gateway, &cfg, auth_manager).expect("valid test config")
+    MvpAgent::new(gateway, &cfg).expect("valid test config")
 }
 fn session_usage_request(session_id: &str) -> acp::ExtRequest {
     acp::ExtRequest::new(
@@ -1146,21 +1065,6 @@ async fn session_meta_publishes_the_sessions_pinned_scheduler_background_loops()
         "session meta must carry the handle's pinned value"
     );
 }
-/// Build a minimal MvpAgent with pre-loaded auth for gate tests.
-fn build_agent_with_auth(auth: crate::auth::ProviderAuth) -> MvpAgent {
-    use crate::agent::config::Config as AgentConfig;
-    use crate::auth::{AuthManager, ServiceAuthConfig};
-    let temp_dir = tempfile::tempdir().unwrap();
-    let auth_manager = std::sync::Arc::new(AuthManager::new(
-        temp_dir.path(),
-        ServiceAuthConfig::default(),
-    ));
-    auth_manager.hot_swap(auth);
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let gateway = GatewaySender::new(tx);
-    let cfg = valid_agent_config();
-    MvpAgent::new(gateway, &cfg, auth_manager).expect("valid test config")
-}
 /// Regression: boot-time plugin discovery is deferred past ACP
 /// `initialize`, so the shared plugin registry starts empty.
 /// `resolve_mcp_servers` reads that snapshot to merge plugin-contributed
@@ -1170,8 +1074,6 @@ fn build_agent_with_auth(auth: crate::auth::ProviderAuth) -> MvpAgent {
 #[tokio::test]
 #[serial_test::serial]
 async fn ensure_plugin_registry_lazily_populates_snapshot() {
-    use crate::agent::config::Config as AgentConfig;
-    use crate::auth::{AuthManager, ServiceAuthConfig};
     use grow_test_support::EnvGuard;
     let grow_home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::set("GROW_HOME", grow_home.path());
@@ -1186,16 +1088,11 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
         r#"{"mcpServers":{"regr-srv":{"command":"echo","args":["hi"]}}}"#,
     )
     .unwrap();
-    let auth_home = tempfile::tempdir().unwrap();
-    let auth_manager = std::sync::Arc::new(AuthManager::new(
-        auth_home.path(),
-        ServiceAuthConfig::default(),
-    ));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let mut cfg = valid_agent_config();
     cfg.plugins.cli_plugin_dirs = vec![plugin_dir.path().to_path_buf()];
-    let agent = MvpAgent::new(gateway, &cfg, auth_manager).expect("valid test config");
+    let agent = MvpAgent::new(gateway, &cfg).expect("valid test config");
     assert!(
         agent.plugin_registry_handle.snapshot().is_none(),
         "snapshot must start empty (boot discovery deferred past initialize)"
@@ -1377,18 +1274,11 @@ fn drain_roster_changed(
 /// `Idle` for a session that is in fact starting a turn.
 #[tokio::test]
 async fn push_roster_activity_delta_broadcasts_overridden_activity() {
-    use crate::agent::config::Config as AgentConfig;
     use crate::agent::roster::RosterActivity;
-    use crate::auth::{AuthManager, ServiceAuthConfig};
-    let temp_dir = tempfile::tempdir().unwrap();
-    let auth_manager = std::sync::Arc::new(AuthManager::new(
-        temp_dir.path(),
-        ServiceAuthConfig::default(),
-    ));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = valid_agent_config();
-    let agent = MvpAgent::new(gateway, &cfg, auth_manager).expect("valid test config");
+    let agent = MvpAgent::new(gateway, &cfg).expect("valid test config");
     let sid = acp::SessionId::new("sess-activity");
     agent
         .sessions
@@ -1646,7 +1536,6 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             inference_idle_timeout_secs: None,
             max_retries: None,
             hidden: false,
-            supported_in_api: true,
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
@@ -1659,7 +1548,6 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
         api_key: None,
         env_key: None,
         auth_provider: None,
-        api_base_url: None,
     };
     let mut models = indexmap::IndexMap::new();
     models.insert("a".to_string(), entry("target"));
@@ -1795,140 +1683,6 @@ fn orphaned_tasks_filters_rewind_dead_branches() {
         "task in dead branch should be filtered"
     );
 }
-/// Regression for a 401 sequence seen in production. After a long idle
-/// window, the auth manager may have no
-/// live token by the time `session/new` runs. For session-based auth methods
-/// we MUST still report `SessionToken` so chat_state credentials retain the
-/// session-token shape and `try_refresh_session_token` will run on the next
-/// prompt instead of early-returning.
-#[tokio::test(flavor = "current_thread")]
-async fn auth_type_session_based_no_current_returns_session_token() {
-    for method_id in [
-        crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
-        crate::agent::auth_method::PROVIDER_OAUTH_METHOD_ID,
-        crate::agent::auth_method::OIDC_METHOD_ID,
-    ] {
-        let agent = build_minimal_agent_for_tests();
-        agent.set_auth_method(acp::AuthMethodId::new(method_id));
-        assert!(
-            agent.auth_manager.current().is_none(),
-            "{method_id}: precondition: AuthManager has no current token",
-        );
-        assert_eq!(
-            agent.auth_type(),
-            grow_chat_state::AuthType::SessionToken,
-            "{method_id}: session-based auth must report SessionToken even \
-                 without a live token -- otherwise chat_state gets locked into \
-                 auth_type = ApiKey and try_refresh_session_token will skip \
-                 every subsequent refresh attempt.",
-        );
-    }
-}
-/// BYOK guard. Users with `provider.api_key` must continue to report `ApiKey`
-/// regardless of live-token state -- BYOK sessions have nothing to refresh,
-/// and reporting `SessionToken` would route through OAuth proxy paths that do
-/// not apply to BYOK keys.
-#[tokio::test(flavor = "current_thread")]
-async fn auth_type_provider_api_key_no_current_returns_api_key() {
-    let agent = build_minimal_agent_for_tests();
-    agent.set_auth_method(acp::AuthMethodId::new(
-        crate::agent::auth_method::PROVIDER_API_KEY_METHOD_ID,
-    ));
-    assert!(agent.auth_manager.current().is_none());
-    assert_eq!(
-        agent.auth_type(),
-        grow_chat_state::AuthType::ApiKey,
-        "provider.api_key auth must report ApiKey -- BYOK has no session-token \
-             behavior to fall back to."
-    );
-}
-/// Positive baseline: when both signals agree (session-based method AND
-/// a live in-memory token), `SessionToken` is returned. This is the
-/// common case during a healthy session.
-#[tokio::test(flavor = "current_thread")]
-async fn auth_type_session_based_with_current_returns_session_token() {
-    use crate::auth::ProviderAuth;
-    let agent = build_minimal_agent_for_tests();
-    agent.set_auth_method(acp::AuthMethodId::new(
-        crate::agent::auth_method::OIDC_METHOD_ID,
-    ));
-    agent.auth_manager.hot_swap(ProviderAuth::test_default());
-    assert!(agent.auth_manager.current().is_some());
-    assert_eq!(agent.auth_type(), grow_chat_state::AuthType::SessionToken,);
-}
-/// Defensive case: no `auth_method_id` selected yet (pre-`authenticate`
-/// state) and no live credential. We default to `ApiKey` so callers
-/// that key off this value (e.g. `resolve_chat_state_auth_type` for chat
-/// routing) don't accidentally route session-token-shaped traffic
-/// through cli-chat-proxy before a method has been chosen.
-#[tokio::test(flavor = "current_thread")]
-async fn auth_type_no_method_id_no_current_returns_api_key() {
-    let agent = build_minimal_agent_for_tests();
-    assert!(agent.auth_method_id.load().is_none());
-    assert!(agent.auth_manager.current().is_none());
-    assert_eq!(agent.auth_type(), grow_chat_state::AuthType::ApiKey,);
-}
-/// Live credential present but `auth_method_id` is still `None`. The
-/// in-memory bearer takes precedence: this is the order observed during
-/// `initialize()` silent refresh -- a token is hot-swapped in before
-/// `authenticate()` writes the method id. Reporting `SessionToken`
-/// here matches pre-fix behavior and keeps logging stable.
-#[tokio::test(flavor = "current_thread")]
-async fn auth_type_no_method_id_with_current_returns_session_token() {
-    use crate::auth::ProviderAuth;
-    let agent = build_minimal_agent_for_tests();
-    agent.auth_manager.hot_swap(ProviderAuth::test_default());
-    assert!(agent.auth_method_id.load().is_none());
-    assert!(agent.auth_manager.current().is_some());
-    assert_eq!(agent.auth_type(), grow_chat_state::AuthType::SessionToken,);
-}
-/// Deployment-key / managed-config user: `GROW_API_KEY` resolves and the kill
-/// switch is off, so a dead `cached_token` MUST fall through to `provider.api_key`
-/// (no browser). This is the exact regression the fallthrough fixes.
-#[tokio::test(flavor = "current_thread")]
-#[serial_test::serial]
-async fn cached_token_fallthrough_prefers_api_key_for_deployment_key() {
-    use crate::agent::auth_method::{GROW_API_KEY_ENV_VAR, PROVIDER_API_KEY_METHOD_ID};
-    use grow_test_support::EnvGuard;
-    let _lockdown = EnvGuard::unset("GROW_DISABLE_API_KEY_AUTH");
-    let _key = EnvGuard::set(GROW_API_KEY_ENV_VAR, "test-deployment-key");
-    let agent = build_minimal_agent_for_tests();
-    assert_eq!(
-        agent
-            .cached_token_fallthrough_method_id()
-            .as_ref()
-            .map(|id| id.0.as_ref()),
-        Some(PROVIDER_API_KEY_METHOD_ID),
-        "deployment-key user (GROW_API_KEY set, no kill switch) must fall \
-         through to provider.api_key on a dead cached_token -- not interactive login",
-    );
-}
-/// Regression: `grow/auth/info` must return profile fields even when the
-/// access token is expired — profile data does not expire with the token,
-/// and hiding it made embedding clients render "Signed in" with no identity.
-#[tokio::test]
-async fn auth_info_returns_profile_when_token_expired() {
-    let agent = build_agent_with_auth(crate::auth::ProviderAuth {
-        email: Some("user@example.com".into()),
-        first_name: Some("Test".into()),
-        refresh_token: Some("rt".into()),
-        expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
-        ..crate::auth::ProviderAuth::test_default()
-    });
-    let resp = crate::extensions::auth::handle(
-        &agent,
-        &acp::ExtRequest::new(
-            "grow/auth/info",
-            std::sync::Arc::from(serde_json::value::to_raw_value(&serde_json::json!({})).unwrap()),
-        ),
-    )
-    .await
-    .expect("auth/info must succeed with an expired token");
-    let info: serde_json::Value = serde_json::from_str(resp.0.get()).unwrap();
-    assert_eq!(info["email"], "user@example.com");
-    assert_eq!(info["firstName"], "Test");
-}
-
 /// `spawn_gateway_bridge` uses `tokio::task::spawn_local`.
 fn run_local_for_bridge_test<F, Fut, T>(body: F) -> T
 where
@@ -2632,17 +2386,10 @@ fn build_agent_with_gateway_rx() -> (
     MvpAgent,
     tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
 ) {
-    use crate::agent::config::Config as AgentConfig;
-    use crate::auth::{AuthManager, ServiceAuthConfig};
-    let temp_dir = tempfile::tempdir().unwrap();
-    let auth_manager = std::sync::Arc::new(AuthManager::new(
-        temp_dir.path(),
-        ServiceAuthConfig::default(),
-    ));
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = valid_agent_config();
-    let agent = MvpAgent::new(gateway, &cfg, auth_manager).expect("valid test config");
+    let agent = MvpAgent::new(gateway, &cfg).expect("valid test config");
     (agent, rx)
 }
 fn write_project_subagent_definitions(cwd: &std::path::Path) {
@@ -2824,16 +2571,9 @@ mod soft_default_settings_emit {
     use super::*;
     #[tokio::test]
     async fn emit_settings_update_carries_permission_mode_from_cfg() {
-        use crate::agent::config::Config as AgentConfig;
-        use crate::auth::{AuthManager, ServiceAuthConfig};
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let temp_dir = tempfile::tempdir().unwrap();
-                let auth_manager = std::sync::Arc::new(AuthManager::new(
-                    temp_dir.path(),
-                    ServiceAuthConfig::default(),
-                ));
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                 let gateway = GatewaySender::new(tx);
                 let mut cfg = valid_agent_config();
@@ -2846,8 +2586,7 @@ mod soft_default_settings_emit {
                     ),
                     ..Default::default()
                 });
-                let agent =
-                    MvpAgent::new(gateway, &cfg, auth_manager).expect("valid test config");
+                let agent = MvpAgent::new(gateway, &cfg).expect("valid test config");
                 agent.cfg.borrow_mut().remote_settings = cfg.remote_settings.clone();
                 agent.emit_settings_update_notification();
                 let msg = rx.try_recv().expect("settings/update must be emitted");

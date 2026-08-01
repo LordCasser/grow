@@ -2,12 +2,10 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 
 use grow_tools::types::config_source::ConfigSource;
 use serde::Serialize;
 
-use crate::auth::ServiceAuthConfig;
 use crate::session::managed_mcp;
 use crate::session::mcp_servers;
 
@@ -269,30 +267,15 @@ fn managed_found(
     )
 }
 
-/// Discover configured managed `grow_managed_*` servers when service auth is available.
+/// Discover configured managed servers when a deployment key is available.
 async fn try_discover_managed_servers() -> (ConfigSourceStatus, Vec<DiscoveredServer>) {
-    let grow_home = grow_tools::util::grow_home::grow_home();
-    let auth = ServiceAuthConfig::default();
-    let auth_manager = Arc::new(crate::auth::AuthManager::new(&grow_home, auth));
-
-    let Some(snapshot) = auth_manager.current_or_expired() else {
-        return managed_skipped("not logged in");
-    };
-    if !snapshot.is_managed_mcp_eligible() {
-        return managed_skipped(format!(
-            "{:?} auth (not eligible for managed MCP)",
-            snapshot.auth_mode
-        ));
-    }
-
-    let token = match auth_manager.get_valid_token().await {
-        Ok(key) => key,
-        Err(_) => return managed_skipped("auth expired — run `grow login`"),
+    let Some(deployment_key) = crate::managed_config::resolve_deployment_key() else {
+        return managed_skipped("no deployment key configured");
     };
 
     let proxy_url = crate::agent::config::EndpointsConfig::from_effective_config().proxy_url();
 
-    let configs = match managed_mcp::fetch_managed_configs(&proxy_url, &token).await {
+    let configs = match managed_mcp::fetch_managed_configs(&proxy_url, &deployment_key).await {
         Ok(configs) => configs,
         Err(e) => return managed_skipped(format!("fetch failed: {e}")),
     };
@@ -367,7 +350,7 @@ async fn check_server_start(
     // EventWriter::noop() removed — xai_file_utils::events is gone
     let start = std::time::Instant::now();
     let ctx = mcp_servers::McpSpawnCtx::session_less();
-    match mcp_servers::start_mcp_server(acp_server, Some(cwd), None, None, &ctx).await {
+    match mcp_servers::start_mcp_server(acp_server, Some(cwd), None, &ctx).await {
         Ok(client) => {
             let elapsed = start.elapsed();
             Ok((

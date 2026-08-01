@@ -17,7 +17,7 @@ pub const GROW_AGENT_ENV: &str = "GROW_AGENT";
 /// Sentinel value for [`GROW_AGENT_ENV`] on agent tool terminals.
 pub const GROW_AGENT_ENV_VALUE: &str = "1";
 
-/// Force `GROW_AGENT=1` on an agent terminal child so request/login env cannot
+/// Force `GROW_AGENT=1` on an agent terminal child so request-scoped env cannot
 /// clear the agent marker.
 pub fn apply_grow_agent_marker(cmd: &mut tokio::process::Command) {
     cmd.env(GROW_AGENT_ENV, GROW_AGENT_ENV_VALUE);

@@ -343,11 +343,6 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    #[serde(rename = "mcp_oauth_discovery_timeout")]
-    McpOAuthDiscoveryTimeout {
-        server_name: String,
-        url: String,
-    },
     McpServerStarting {
         server_name: String,
         transport: String,
@@ -383,7 +378,7 @@ pub enum Event {
         total_servers: u32,
         succeeded: u32,
         failed: u32,
-        auth_required: u32,
+        credentials_rejected: u32,
         total_tools: u32,
         duration_ms: u64,
         is_reinit: bool,

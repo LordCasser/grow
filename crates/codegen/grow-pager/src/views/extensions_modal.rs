@@ -614,8 +614,8 @@ pub enum ButtonAction {
     ToggleSelectedSkill,
     /// Toggle enable/disable on the MCP server under the cursor.
     ToggleSelectedMcpServer,
-    /// Trigger MCP auth for the selected server.
-    McpAuthTrigger,
+    /// Configure setup fields for the selected MCP server.
+    SetupSelectedMcpServer,
     /// Add an MCP server (parsed from inline input).
     AddMcpServer {
         name: String,
@@ -1073,7 +1073,7 @@ pub const RESULT_NOTICE_TICKS: u16 = 75;
 pub const MCP_SERVERS_ACTION_KEYS: &[(char, &str)] = &[
     ('r', "refresh"),
     ('a', "add"),
-    ('i', "auth"),
+    ('s', "setup"),
     (' ', "toggle"),
     ('x', "remove"),
 ];
@@ -1377,7 +1377,7 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
         (ExtensionsTab::McpServers, 'x') => Some(ButtonAction::RemoveSelectedMcpServer),
         (ExtensionsTab::McpServers, 'r') => Some(ButtonAction::RefreshMcpList),
         (ExtensionsTab::McpServers, ' ') => Some(ButtonAction::ToggleSelectedMcpServer),
-        (ExtensionsTab::McpServers, 'i') => Some(ButtonAction::McpAuthTrigger),
+        (ExtensionsTab::McpServers, 's') => Some(ButtonAction::SetupSelectedMcpServer),
         (ExtensionsTab::Hooks, 'f') => Some(ButtonAction::CycleFilter),
         (ExtensionsTab::Plugins, 'f') => Some(ButtonAction::CycleFilter),
         (ExtensionsTab::McpServers, 'f') => Some(ButtonAction::CycleFilter),
@@ -1612,9 +1612,6 @@ fn parse_mcp_add_fields(name: &str, url_or_cmd: &str) -> Option<ButtonAction> {
             transport_type: None,
             bearer_token_env_var: None,
             headers: None,
-            oauth_client_id: None,
-            oauth_client_secret_env_var: None,
-            oauth_scopes: None,
         }
     } else {
         McpServerTransportConfig::Stdio {
@@ -1631,7 +1628,6 @@ fn parse_mcp_add_fields(name: &str, url_or_cmd: &str) -> Option<ButtonAction> {
             transport,
             enabled: true,
             read_only: false,
-            oauth: None,
             setup: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -2044,34 +2040,6 @@ impl ExtensionsModalState {
         let plugin_idx = source.plugins.iter().position(|p| p.name == *label)?;
         Some((source_idx, Some(plugin_idx)))
     }
-
-    /// True when the user is expanding an auth-required server's tool list (OAuth
-    /// should run instead of fold). False when collapsing or when tools are already
-    /// expanded.
-    pub fn mcp_auth_intercept_on_expand(&self) -> bool {
-        if self.active_tab != ExtensionsTab::McpServers {
-            return false;
-        }
-        let Some(group_key) = self
-            .entry_group_keys
-            .get(self.picker_state.selected)
-            .and_then(|k| k.as_ref())
-        else {
-            return false;
-        };
-        let Some(si) = parse_mcp_tools_server_index(group_key) else {
-            return false;
-        };
-        if self.mcps_tools_expanded.contains(&si) {
-            return false;
-        }
-        matches!(
-            &self.mcps_data,
-            TabDataState::Loaded(servers) if {
-                servers.get(si).is_some_and(|srv| srv.auth_required)
-            }
-        )
-    }
 }
 
 /// Parse raw server index from an `mcp-tools:{si}` group key.
@@ -2191,30 +2159,6 @@ pub(crate) fn init_mcps_section_collapse_on_first_load(
             collapsed_sections.insert(section_key(&McpSectionId::Plugin(name.clone())));
         }
     }
-    *initialized = true;
-}
-
-/// Seed the MCP section collapse map for a post-CTA-install handoff: collapse
-/// Managed, Local, and every plugin section EXCEPT `target_plugin`, then mark
-/// the map initialized so the default first-load seeder no-ops. Leaves only the
-/// just-installed plugin's section expanded for the auth step.
-pub(crate) fn seed_mcps_section_collapse_for_cta(
-    collapsed_sections: &mut std::collections::HashSet<String>,
-    initialized: &mut bool,
-    servers: &[crate::views::mcps_modal::McpServerInfo],
-    target_plugin: &str,
-) {
-    use crate::views::mcps_modal::{McpSectionId, section_for, section_key};
-    let target = section_key(&McpSectionId::Plugin(target_plugin.to_string()));
-    collapsed_sections.insert(section_key(&McpSectionId::Managed));
-    collapsed_sections.insert(section_key(&McpSectionId::Local));
-    for server in servers {
-        let key = section_key(&section_for(server));
-        if key != target {
-            collapsed_sections.insert(key);
-        }
-    }
-    collapsed_sections.remove(&target);
     *initialized = true;
 }
 
@@ -4096,7 +4040,7 @@ mod tests {
                 &[
                     ('r', "refresh"),
                     ('a', "add"),
-                    ('i', "auth"),
+                    ('s', "setup"),
                     (' ', "toggle"),
                     ('x', "remove"),
                 ],
@@ -4160,7 +4104,6 @@ mod tests {
             display_name: None,
             status: McpServerDisplayStatus::SetupRequired,
             tool_count: 0,
-            auth_required: false,
             setup_required: true,
             setup: Some(McpSetupConfig {
                 fields: vec![McpSetupField {
@@ -4261,46 +4204,6 @@ mod tests {
         assert!(!state.is_group_expanded(1, "mcp-tools:0"));
     }
 
-    #[test]
-    fn mcp_auth_intercept_on_expand_detects_auth_required_server() {
-        use crate::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo, McpWireSource};
-
-        let mut state = ExtensionsModalState::new(ExtensionsTab::McpServers);
-        state.mcps_data = TabDataState::Loaded(vec![McpServerInfo {
-            name: "needs-oauth".into(),
-            display_name: None,
-            status: McpServerDisplayStatus::NeedsAuth,
-            tool_count: 0,
-            auth_required: true,
-            setup_required: false,
-            setup: None,
-            setup_values: std::collections::HashMap::new(),
-            tools: vec![],
-            enabled: true,
-            source: "managed".into(),
-            wire_source: McpWireSource::Managed,
-            plugin_name: None,
-            is_managed_gateway: false,
-        }]);
-        state.entry_data_indices = vec![None, Some(0)];
-        state.entry_group_keys = vec![
-            Some("mcp-section:managed".into()),
-            Some("mcp-tools:0".into()),
-        ];
-        state.picker_state.selected = 1;
-        assert!(
-            state.mcp_auth_intercept_on_expand(),
-            "collapsed auth-required server should intercept expand"
-        );
-        state.mcps_tools_expanded.insert(0);
-        assert!(
-            !state.mcp_auth_intercept_on_expand(),
-            "expanded tools must not intercept (collapse allowed)"
-        );
-        state.picker_state.selected = 0;
-        assert!(!state.mcp_auth_intercept_on_expand());
-    }
-
     fn make_mcp_server_for_rows(
         name: &str,
         wire: crate::views::mcps_modal::McpWireSource,
@@ -4322,7 +4225,6 @@ mod tests {
             display_name: None,
             status: McpServerDisplayStatus::Ready,
             tool_count: tc,
-            auth_required: false,
             setup_required: false,
             setup: None,
             setup_values: std::collections::HashMap::new(),
@@ -4412,7 +4314,6 @@ mod tests {
                 display_name: None,
                 status: McpServerDisplayStatus::Ready,
                 tool_count: 0,
-                auth_required: false,
                 setup_required: false,
                 setup: None,
                 setup_values: std::collections::HashMap::new(),
@@ -4428,7 +4329,6 @@ mod tests {
                 display_name: None,
                 status: McpServerDisplayStatus::Ready,
                 tool_count: 0,
-                auth_required: false,
                 setup_required: false,
                 setup: None,
                 setup_values: std::collections::HashMap::new(),
@@ -4466,73 +4366,6 @@ mod tests {
                 .contains("mcp-section:plugin:beta")
         );
         assert!(state.mcps_section_collapse_initialized);
-    }
-
-    #[test]
-    fn seed_mcps_section_collapse_for_cta_expands_only_target() {
-        use crate::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo, McpWireSource};
-
-        let server = |name: &str, plugin: Option<&str>| McpServerInfo {
-            name: name.into(),
-            display_name: None,
-            status: McpServerDisplayStatus::Ready,
-            tool_count: 0,
-            auth_required: false,
-            setup_required: false,
-            setup: None,
-            setup_values: std::collections::HashMap::new(),
-            tools: vec![],
-            enabled: true,
-            source: plugin
-                .map(|p| format!("plugin: {p}"))
-                .unwrap_or_else(|| "local".into()),
-            wire_source: McpWireSource::Local,
-            plugin_name: plugin.map(str::to_string),
-            is_managed_gateway: false,
-        };
-        let servers = vec![
-            server("grow_managed_x", None),
-            server("local-srv", None),
-            server("alpha-srv", Some("alpha")),
-            server("beta-srv", Some("beta")),
-        ];
-        let mut state = ExtensionsModalState::new(ExtensionsTab::McpServers);
-        seed_mcps_section_collapse_for_cta(
-            &mut state.mcps_collapsed_sections,
-            &mut state.mcps_section_collapse_initialized,
-            &servers,
-            "alpha",
-        );
-        // Managed AND Local are collapsed too (not just other plugins).
-        assert!(
-            state
-                .mcps_collapsed_sections
-                .contains("mcp-section:managed")
-        );
-        assert!(state.mcps_collapsed_sections.contains("mcp-section:local"));
-        assert!(
-            state
-                .mcps_collapsed_sections
-                .contains("mcp-section:plugin:beta")
-        );
-        // Only the target plugin stays expanded.
-        assert!(
-            !state
-                .mcps_collapsed_sections
-                .contains("mcp-section:plugin:alpha")
-        );
-        // Default first-load seeder will no-op.
-        assert!(state.mcps_section_collapse_initialized);
-        init_mcps_section_collapse_on_first_load(
-            &mut state.mcps_collapsed_sections,
-            &mut state.mcps_section_collapse_initialized,
-            &servers,
-        );
-        assert!(
-            !state
-                .mcps_collapsed_sections
-                .contains("mcp-section:plugin:alpha")
-        );
     }
 
     #[test]

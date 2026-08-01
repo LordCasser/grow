@@ -12,14 +12,6 @@ pub const GH_RELEASE_REPO: &str = "LordCasser/grow";
 /// Minimal configuration threaded through the update call chain.
 #[derive(Debug, Clone)]
 pub struct UpdateConfig {
-    /// Explicitly configured chat API proxy base URL.
-    pub proxy_base_url: String,
-    /// Auth scope key for `~/.grow/auth.json`.
-    pub auth_scope: String,
-    /// Enterprise deployment key (GROW_DEPLOYMENT_KEY).
-    pub deployment_key: Option<String>,
-    /// Optional extra auth material forwarded with requests when present.
-    pub alpha_test_key: Option<String>,
     /// Release channel: "stable" or "alpha". Loaded from config.
     pub channel: String,
 }
@@ -27,10 +19,6 @@ pub struct UpdateConfig {
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
-            proxy_base_url: String::new(),
-            auth_scope: grow_shell::auth::ServiceAuthConfig::default().auth_scope(),
-            deployment_key: None,
-            alpha_test_key: None,
             channel: "stable".to_string(),
         }
     }

@@ -691,10 +691,9 @@ pub(super) async fn run_session(
                                 session.chat_state_handle.update_sampling_config(cfg);
 
                                 let existing = session.chat_state_handle.get_credentials().await;
-                                if let Some(r) = crate::agent::config::try_resolve_model_credentials(model_name.as_str(), existing.api_key.as_deref()) {
+                                if let Some(r) = crate::agent::config::try_resolve_model_credentials(model_name.as_str()) {
                                     session.chat_state_handle.update_credentials(grow_chat_state::Credentials {
                                         api_key: r.api_key,
-                                        auth_type: r.auth_type,
                                         alpha_test_key: existing.alpha_test_key,
                                     });
                                 }
@@ -1665,38 +1664,11 @@ pub(super) async fn run_session(
                                 let _ = respond_to.send(result);
                             });
                         }
-                        SessionCommand::McpAuthStatus { respond_to } => {
-                            let mcp_state = session.mcp_state.clone();
-                            tokio::task::spawn_local(async move {
-                                let state = mcp_state.lock().await;
-                                let entries: Vec<_> = state.auth_required.iter().map(|name| {
-                                    crate::extensions::mcp::McpAuthStatusEntry {
-                                        server_name: name.clone(),
-                                        status: "needs_auth",
-                                    }
-                                }).collect();
-                                let _ = respond_to.send(entries);
-                            });
-                        }
-                        SessionCommand::McpAuthTrigger { server_name, respond_to } => {
-                            let s = session.clone();
-                            tokio::task::spawn_local(async move {
-                                let result = s.handle_mcp_auth_trigger(&server_name).await;
-                                let _ = respond_to.send(result);
-                            });
-                        }
                         SessionCommand::GetManagedGatewayDisabledTools { respond_to } => {
                             let disabled_tools = crate::util::config::get_all_mcp_disabled_tools(
                                 std::path::Path::new(&session.session_info.cwd),
                             );
                             let _ = respond_to.send(disabled_tools);
-                        }
-                        SessionCommand::RetryAuthRequiredServers { respond_to } => {
-                            let s = session.clone();
-                            tokio::task::spawn_local(async move {
-                                s.retry_auth_required_servers().await;
-                                let _ = respond_to.send(());
-                            });
                         }
                         SessionCommand::RefreshMcpSearchIndex => {
                             session.refresh_mcp_snapshot_and_schedule_reminder().await;

@@ -183,8 +183,8 @@ Usage notes:
   not a guarantee of exact equality when rounds lack usage or hit gates.
 - `total_cost_usd` appears only when the server reported a **complete** cost.
   Absence means unreported or incomplete, never free. Cost is stamped for
-  API-key traffic today; pool/OAuth paths often omit it until the server
-  stamps cost. When some calls lacked cost, `cost_is_partial` is true and
+  requests whose provider reports it. When some calls lacked cost,
+  `cost_is_partial` is true and
   **all** cost floats are omitted (`total_cost_usd` and every
   `modelUsage.*.costUSD`) so consumers cannot sum model rows into a fake
   complete bill.
@@ -280,7 +280,7 @@ On `init`, `skills` is live. It lists the session's user-invocable skill names, 
 
 The other `init` fields carry real data:
 
-- `apiKeySource` is `user` for API-key auth and `oauth` otherwise. Grow does not distinguish the schema's `project`, `org`, and `temporary` sources.
+- `apiKeySource` is `user`; Grow only supports user-supplied provider credentials.
 - `permissionMode` is the effective headless mode mapped to the Messages enum: the `--permission-mode` value, or `bypassPermissions` under `--yolo`, else `default`. Grow-only modes such as `auto` collapse to `default`.
 - `mcp_servers[].status` reflects configuration, not live connection state. A configured server always reports `"connected"`, because per-server handshake state is not resolved by the time `init` is emitted.
 
@@ -566,14 +566,9 @@ grow -p "Run the test suite" --yolo
 
 ## Authentication for Headless Environments
 
-For headless use, authenticate with one of:
-
-- **`GROW_API_KEY`** — simplest for CI. See [Environment Variables](#environment-variables-for-headless) above.
-- **`grow login --device-auth`** (or `--device-code`) — no browser needed on the target machine.
-  See [Authentication > Device Code Flow](02-authentication.md#device-code-flow).
-- **`grow login`** — browser-based OAuth2 on machines with a GUI.
-
-If you've previously logged in, cached credentials are used automatically.
+For headless use, provide the selected model provider's `env_key`, configure `api_key`, or use a
+local key helper. `GROW_API_KEY` remains a fallback for providers that declare neither `api_key`
+nor `env_key`. See [Authentication](02-authentication.md).
 
 ---
 
@@ -605,7 +600,6 @@ Grow stores data in `~/.grow` (override with `GROW_HOME`; see [Environment Varia
 | Path                     | Contents                              |
 | ------------------------ | ------------------------------------- |
 | `config.toml`            | User configuration                    |
-| `auth.json`              | Cached OAuth2/API credentials         |
 | `version.json`           | Version cache for update checks       |
 | `sessions/`              | Session transcripts (SQLite)          |
 | `memory/`                | Cross-session memory store            |
@@ -621,7 +615,7 @@ Grow stores data in `~/.grow` (override with `GROW_HOME`; see [Environment Varia
 
 For containers or CI, mount `~/.grow` read-only:
 
-- Pre-populate provider OAuth credentials or set the environment variable named by the provider's `env_key`
+- Set the environment variable named by the provider's `env_key`
 - Session persistence fails silently (ephemeral)
 - Update checks log a warning and skip
 

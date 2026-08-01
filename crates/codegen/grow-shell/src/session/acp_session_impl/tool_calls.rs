@@ -478,9 +478,6 @@ impl SessionActor {
                 }
             }
         }
-        if approved.iter().any(|p| p.tool_name == "search_tool") {
-            self.retry_auth_required_servers().await;
-        }
         let write_paths: std::collections::HashSet<String> = approved
             .iter()
             .filter(|prepared| !prepared.is_read_only)
@@ -499,7 +496,6 @@ impl SessionActor {
             }
             map
         };
-        let shared_recovery = Arc::new(tokio::sync::OnceCell::<bool>::const_new());
         let workspace_ops = self.workspace_ops.clone();
         let pending_interjections = self.pending_interjections.clone();
         let session_id: Arc<str> = Arc::from(&*self.session_info.id.0);
@@ -508,8 +504,6 @@ impl SessionActor {
             .enumerate()
             .map(|(idx, prepared)| {
                 let prepared = Arc::new(prepared.clone());
-                let am = self.auth_manager.clone();
-                let shared_recovery = Arc::clone(&shared_recovery);
                 let workspace_ops = workspace_ops.clone();
                 let session_id = session_id.clone();
                 let pending_interjections = pending_interjections.clone();
@@ -548,12 +542,7 @@ impl SessionActor {
                         async {
                             tokio::select! {
                                 biased;
-                                result = call_with_auth_retry(
-                                    am.as_ref(),
-                                    Some(&shared_recovery),
-                                    &prepared.tool_name,
-                                    run_tool,
-                                ) => result,
+                                result = run_tool() => result,
                                 _ = wait_for_pending_interjection(&pending_interjections) => {
                                     tracing::info!(
                                         tool = %prepared.tool_name,
@@ -566,14 +555,7 @@ impl SessionActor {
                         .instrument(tool_span)
                         .await
                     } else {
-                        call_with_auth_retry(
-                            am.as_ref(),
-                            Some(&shared_recovery),
-                            &prepared.tool_name,
-                            run_tool,
-                        )
-                        .instrument(tool_span)
-                        .await
+                        run_tool().instrument(tool_span).await
                     };
                     let duration_ms = exec_start.elapsed().as_millis() as u64;
                     let success = record_tool_span_outcome(tool_span_for_record, &result);
@@ -635,42 +617,6 @@ impl SessionActor {
                 duration_ms,
             );
             let mut post_tool_use_result: Option<serde_json::Value> = None;
-            if let Some((server, _)) =
-                crate::session::mcp_servers::parse_mcp_tool_name(&prepared.tool_name)
-                && server.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-            {
-                let auth_rejected = match &result {
-                    Err(err) => grow_mcp::servers::is_auth_rejection_message(&err.to_string()),
-                    Ok(tool_result) => {
-                        tool_result.output.is_error()
-                            && grow_mcp::servers::is_auth_rejection_message(
-                                &tool_result.prompt_text,
-                            )
-                    }
-                };
-                if auth_rejected && self.reactive_managed_reauth(&server).await.is_ok() {
-                    let retry_start = std::time::Instant::now();
-                    let retry_span = tool_execution_span(
-                        &tracing::Span::current(),
-                        &self.session_info.id.0,
-                        &prepared,
-                        &tool_call_id,
-                        true,
-                    );
-                    let retry_span_for_record = retry_span.clone();
-                    result = dispatch_tool(&self.workspace_ops, &prepared, &self.session_info.id.0)
-                        .instrument(retry_span)
-                        .await;
-                    duration_ms =
-                        duration_ms.saturating_add(retry_start.elapsed().as_millis() as u64);
-                    record_tool_span_outcome(retry_span_for_record, &result);
-                    self.events.tool_started(
-                        prepared.tool_name.clone(),
-                        tool_call_id.clone(),
-                        duration_ms,
-                    );
-                }
-            }
             let tool_result_size_bytes = match &result {
                 Ok(tool_result) => tool_result.prompt_text.len() as i64,
                 Err(_) => 0,
@@ -905,12 +851,6 @@ impl SessionActor {
         }
         let mcp_parts = parse_mcp_tool_name(&call.function.name);
         let is_mcp_tool = mcp_parts.is_some();
-        if let Some((ref server, _)) = mcp_parts
-            && server.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-        {
-            let _span = tracing::info_span!("tool.refresh_managed_mcp").entered();
-            self.refresh_managed_mcp_if_stale().await;
-        }
         if is_mcp_tool && !self.mcp_state.lock().await.is_initialized() {
             match self.mcp_strategy {
                 McpInitStrategy::Blocking => {

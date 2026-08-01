@@ -77,8 +77,7 @@ pub struct ToolDuration {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool_call_id: String,
     /// Dispatch wall-clock ms (start → result ready), including lock wait and
-    /// in-dispatch auth retries. A managed-MCP reauth retry adds its second
-    /// attempt here; the reauth handshake wait itself is excluded.
+    /// in-dispatch credential retries.
     pub duration_ms: u64,
 }
 

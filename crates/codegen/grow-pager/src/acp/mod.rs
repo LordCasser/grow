@@ -14,7 +14,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client_identity::{HEADLESS_CLIENT_TYPE, PAGER_CLIENT_TYPE, PAGER_CLIENT_VERSION};
 use agent_client_protocol as acp;
-use grow_shell::agent::auth_method::AuthMethodKind;
 use grow_shell::agent::config::Config as AgentConfig;
 use grow_shell::sampling::types::ReasoningEffort;
 use xai_acp_lib::{AcpAgentTx, AcpClientRx, acp_send};
@@ -33,19 +32,6 @@ pub(crate) fn wait_for_exit_not_supported(context: &str) -> acp::Error {
     )
 }
 
-/// Initial auth mode hint from the agent's auth method metadata.
-///
-/// Determined at startup from `AuthMethod.meta.external_provider`.
-/// Used by the welcome screen to decide whether to show a browser-opening
-/// message or a manual token paste input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthStartMode {
-    /// Mode not yet known (will be resolved after AuthenticateRequest).
-    Pending,
-    /// External provider (meta.external_provider == true) — browser opens automatically.
-    Command,
-}
-
 /// Result of connecting to an agent.
 pub struct AcpConnection {
     /// Send requests to the agent.
@@ -56,8 +42,6 @@ pub struct AcpConnection {
     pub models: ModelState,
     /// Whether the agent is a grow-shell instance.
     pub is_grow_shell: bool,
-    /// Auth methods advertised by the agent.
-    pub auth_methods: Vec<acp::AuthMethod>,
     /// Cancellation token to stop the agent.
     pub cancel: CancellationToken,
     /// In-process agent worker thread (`connect` only). Join after cancel so
@@ -70,17 +54,6 @@ pub struct AcpConnection {
     // NOTE: Startup announcements from InitializeResponse.meta are not yet supported.
     // Requires shell to include announcements in initialize metadata.
     // When available, add field: startup_announcements: Option<Vec<grow_announcements::Announcement>>
-    /// Whether interactive login is required (deferred auth for `provider.oauth`).
-    pub needs_login: bool,
-    /// Login button label from `AuthMethod.name` (e.g., "provider.oauth", "Acme Corp").
-    pub login_label: Option<String>,
-    /// The auth method ID to use for login (copied from the first advertised method).
-    pub login_method_id: Option<acp::AuthMethodId>,
-    /// Initial auth mode hint (Command vs Pending) from method metadata.
-    pub auth_start_mode: AuthStartMode,
-    /// Auth response metadata from eager authentication (cached token / API key).
-    /// Contains `team_name`, etc. `None` when interactive login is required.
-    pub auth_meta: Option<serde_json::Value>,
     /// Leader connection status. `Some` only when connected via leader.
     pub leader_status_rx: Option<tokio::sync::watch::Receiver<leader_bridge::ConnectionStatus>>,
     /// Whether cancel-rewind is enabled (resolved by shell from config layers).
@@ -92,12 +65,6 @@ pub struct AcpConnection {
     /// disabled feature produces zero `grow/recap` traffic. Defaults to `false`
     /// when absent (e.g. an older shell that predates the feature).
     pub session_recap_available: bool,
-    /// `AuthManager` for pager-side authenticated channels.
-    ///
-    /// In-process mode shares the agent's instance (single token cache); leader
-    /// mode builds a dedicated one off the same local `auth.json`. Either way it
-    /// resolves a fresh bearer per request via the refresh chain.
-    pub auth_manager: std::sync::Arc<grow_shell::auth::AuthManager>,
 }
 
 /// CLI flags that affect agent configuration, threaded from PagerArgs.
@@ -184,7 +151,6 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     // Spawn the agent
     let memory_config = agent_config.memory_config.clone();
     let spawned = spawn::spawn_grow_shell(agent_config, cancel, memory_config).await?;
-    let auth_manager = spawned.auth_manager.clone();
     let (tx, rx) = (spawned.channel.tx, spawned.channel.rx);
 
     // Initialize
@@ -198,40 +164,19 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         session_recap_available,
     ) = initialize(&tx, &flags).await?;
 
-    // Determine whether interactive login is needed.
-    let (needs_login, login_label, login_method_id, auth_start_mode) =
-        startup_auth_metadata(&auth_methods);
-
-    let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
-        bounded_eager_auth(
-            &tx,
-            &auth_methods,
-            default_auth_method_id.as_ref(),
-            needs_login,
-            login_label,
-            login_method_id,
-            auth_start_mode,
-        )
-        .await;
+    authenticate(&tx, &auth_methods, default_auth_method_id.as_ref()).await?;
 
     Ok(AcpConnection {
         tx,
         rx,
         models,
         is_grow_shell,
-        auth_methods,
         cancel: spawned.cancel,
         agent_thread: Some(spawned.thread_handle),
         available_commands,
-        needs_login,
-        login_label,
-        login_method_id,
-        auth_start_mode,
-        auth_meta,
         leader_status_rx: None,
         cancel_rewind_enabled,
         session_recap_available,
-        auth_manager,
     })
 }
 
@@ -300,50 +245,19 @@ pub async fn connect_via_leader(
         session_recap_available,
     ) = initialize(&tx, &flags).await?;
 
-    let (needs_login, login_label, login_method_id, auth_start_mode) =
-        startup_auth_metadata(&auth_methods);
-
-    let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
-        bounded_eager_auth(
-            &tx,
-            &auth_methods,
-            default_auth_method_id.as_ref(),
-            needs_login,
-            login_label,
-            login_method_id,
-            auth_start_mode,
-        )
-        .await;
-
-    // Leader mode runs the agent in a separate process, so there's no shared
-    // in-process `AuthManager`. Build a dedicated *non-refreshing* one over the
-    // same `auth.json`: skip `configure_refresher` so only the agent rotates the
-    // token. A second refresher would race rotation and could clear credentials
-    // on failure. This one just reads the valid token, and on expiry adopts the
-    // agent's disk-rotated token under the file lock (`try_adopt_disk_token`).
-    let auth_manager = std::sync::Arc::new(grow_shell::auth::AuthManager::new(
-        &grow_shell::util::grow_home::grow_home(),
-        agent_config.auth.clone(),
-    ));
+    authenticate(&tx, &auth_methods, default_auth_method_id.as_ref()).await?;
 
     Ok(AcpConnection {
         tx,
         rx,
         models,
         is_grow_shell,
-        auth_methods,
         cancel: bridge.cancel,
         agent_thread: None,
         available_commands,
-        needs_login,
-        login_label,
-        login_method_id,
-        auth_start_mode,
-        auth_meta,
         leader_status_rx: Some(status_rx),
         cancel_rewind_enabled,
         session_recap_available,
-        auth_manager,
     })
 }
 
@@ -539,203 +453,16 @@ pub fn parse_session_recap_available(meta: Option<&acp::Meta>) -> bool {
         .unwrap_or(false)
 }
 
-/// Determine whether interactive login is needed based on the advertised auth methods.
-///
-/// Matches TUI startup behavior: if the first method is `provider.oauth`, defer auth
-/// and show the login-aware welcome flow. Otherwise, authenticate eagerly.
-///
-/// Returns `(needs_login, login_label, login_method_id, auth_start_mode)`.
-pub fn startup_auth_metadata(
-    auth_methods: &[acp::AuthMethod],
-) -> (
-    bool,
-    Option<String>,
-    Option<acp::AuthMethodId>,
-    AuthStartMode,
-) {
-    let first_method = auth_methods.first();
-    let needs_login = first_method
-        .map(|m| AuthMethodKind::from_id(m.id()).needs_interactive_login())
-        .unwrap_or(false);
-
-    if !needs_login {
-        return (false, None, None, AuthStartMode::Pending);
-    }
-
-    let method = first_method.unwrap(); // safe: needs_login == true implies first_method.is_some()
-    let login_label = Some(method.name().to_string());
-    let login_method_id = Some(method.id().clone());
-
-    let is_provider = method
-        .meta()
-        .as_ref()
-        .and_then(|v| v.get("external_provider"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let auth_start_mode = if is_provider {
-        AuthStartMode::Command
-    } else {
-        AuthStartMode::Pending
-    };
-
-    (needs_login, login_label, login_method_id, auth_start_mode)
-}
-
-/// Find an interactive login method from the auth methods list.
-///
-/// Used when eager auth (cached_token / API key) fails and we need to fall
-/// back to the welcome screen with a working login button. Scans the list
-/// for a `provider.oauth` or `oidc` method — these are the ones that can trigger
-/// a browser-based re-auth flow.
-pub fn find_interactive_login_method(
-    auth_methods: &[acp::AuthMethod],
-) -> (Option<String>, Option<acp::AuthMethodId>, AuthStartMode) {
-    let interactive = auth_methods
-        .iter()
-        .find(|m| AuthMethodKind::from_id(m.id()).needs_interactive_login());
-
-    match interactive {
-        Some(method) => {
-            let is_provider = method
-                .meta()
-                .as_ref()
-                .and_then(|v| v.get("external_provider"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let mode = if is_provider {
-                AuthStartMode::Command
-            } else {
-                AuthStartMode::Pending
-            };
-            (
-                Some(method.name().to_string()),
-                Some(method.id().clone()),
-                mode,
-            )
-        }
-        None => (None, None, AuthStartMode::Pending),
-    }
-}
-
-/// Attempt eager auth; on failure fall back to the interactive login screen.
-///
-/// Errors from `authenticate` are caught so the connection still succeeds.
-/// When `provider.api_key` was advertised, non-interactive credentials were
-/// available — do not promote to interactive auto-Login (shell owns
-/// unpinned fallthrough; a failed api_key must not open a browser). Otherwise
-/// hand the interactive method for the login screen.
-///
-/// Empty `auth_methods` (e.g. `preferred_method=api_key` with no key) is
-/// fail-closed: needs_login without an interactive method.
-///
-/// Returns `(needs_login, login_label, login_method_id, auth_start_mode, auth_meta)`.
-async fn eager_auth_or_login_fallback(
-    tx: &AcpAgentTx,
-    auth_methods: &[acp::AuthMethod],
-    default_auth_method_id: Option<&acp::AuthMethodId>,
-    needs_login: bool,
-    login_label: Option<String>,
-    login_method_id: Option<acp::AuthMethodId>,
-    auth_start_mode: AuthStartMode,
-) -> (
-    bool,
-    Option<String>,
-    Option<acp::AuthMethodId>,
-    AuthStartMode,
-    Option<serde_json::Value>,
-) {
-    if auth_methods.is_empty() {
-        // preferred_method pin unavailable — fail closed, no invented method.
-        return (true, None, None, AuthStartMode::Pending, None);
-    }
-    if needs_login {
-        return (
-            needs_login,
-            login_label,
-            login_method_id,
-            auth_start_mode,
-            None,
-        );
-    }
-    match authenticate(tx, auth_methods, default_auth_method_id).await {
-        Ok(meta) => (
-            needs_login,
-            login_label,
-            login_method_id,
-            auth_start_mode,
-            meta,
-        ),
-        Err(_) => {
-            // Non-interactive credentials were advertised; shell fallthrough
-            // already preferred them — do not auto-open browser login.
-            let has_api_key = auth_methods
-                .iter()
-                .any(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::ProviderApiKey);
-            if has_api_key {
-                return (false, login_label, login_method_id, auth_start_mode, None);
-            }
-            let (label, method_id, mode) = find_interactive_login_method(auth_methods);
-            (true, label, method_id, mode, None)
-        }
-    }
-}
-
-/// [`eager_auth_or_login_fallback`] bounded by `STARTUP_AUTH_REFRESH_TIMEOUT`,
-/// so a hung agent cannot gate the first draw. On timeout the inputs pass
-/// through unchanged and the agent finishes authentication in the background.
-async fn bounded_eager_auth(
-    tx: &AcpAgentTx,
-    auth_methods: &[acp::AuthMethod],
-    default_auth_method_id: Option<&acp::AuthMethodId>,
-    needs_login: bool,
-    login_label: Option<String>,
-    login_method_id: Option<acp::AuthMethodId>,
-    auth_start_mode: AuthStartMode,
-) -> (
-    bool,
-    Option<String>,
-    Option<acp::AuthMethodId>,
-    AuthStartMode,
-    Option<serde_json::Value>,
-) {
-    match tokio::time::timeout(
-        grow_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-        eager_auth_or_login_fallback(
-            tx,
-            auth_methods,
-            default_auth_method_id,
-            needs_login,
-            login_label.clone(),
-            login_method_id.clone(),
-            auth_start_mode,
-        ),
-    )
-    .await
-    {
-        Ok(resolved) => resolved,
-        Err(_) => (
-            needs_login,
-            login_label,
-            login_method_id,
-            auth_start_mode,
-            None,
-        ),
-    }
-}
-
 /// Authenticate with the agent using the agent's chosen default method.
 ///
 /// Prefer `defaultAuthMethodId` from initialize meta when present and listed.
-/// Do not re-derive api_key vs session ordering client-side (that has regressed
-/// OIDC refresh before). Legacy fallback: `cached_token` then first method.
-///
-/// Returns the response `meta` (contains `team_name`, etc.) so callers can
-/// propagate it to the UI.
+/// The BYOK-only agent advertises one method; the metadata default remains the
+/// source of truth for protocol peers that advertise more than one.
 async fn authenticate(
     tx: &AcpAgentTx,
     auth_methods: &[acp::AuthMethod],
     default_auth_method_id: Option<&acp::AuthMethodId>,
-) -> Result<Option<serde_json::Value>> {
+) -> Result<()> {
     let method_id = select_eager_auth_method(auth_methods, default_auth_method_id)
         .ok_or_else(|| anyhow::anyhow!("No auth methods available"))?;
     crate::unified_log::info(
@@ -750,15 +477,15 @@ async fn authenticate(
         })),
     );
 
-    let resp: acp::AuthenticateResponse =
+    let _: acp::AuthenticateResponse =
         acp_send(acp::AuthenticateRequest::new(method_id), tx).await?;
-    Ok(resp.meta.map(serde_json::Value::Object))
+    Ok(())
 }
 
 /// Pick the method id for eager authenticate.
 ///
 /// 1. Agent's `defaultAuthMethodId` when present in the advertised list
-/// 2. Legacy: `cached_token` if advertised, else first method
+/// 2. First advertised method
 pub fn select_eager_auth_method(
     auth_methods: &[acp::AuthMethod],
     default_auth_method_id: Option<&acp::AuthMethodId>,
@@ -768,12 +495,7 @@ pub fn select_eager_auth_method(
     {
         return Some(default_id.clone());
     }
-    let cached_token_method = auth_methods
-        .iter()
-        .find(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::CachedToken);
-    cached_token_method
-        .or_else(|| auth_methods.first())
-        .map(|m| m.id().clone())
+    auth_methods.first().map(|m| m.id().clone())
 }
 
 #[cfg(test)]
@@ -851,152 +573,33 @@ mod tests {
         assert!(!parse_session_recap_available(meta.as_object()));
     }
 
-    // ── startup_auth_metadata ──────────────────────────────────────
-
-    fn make_auth_method(id: &str, name: &str, meta: Option<serde_json::Value>) -> acp::AuthMethod {
-        let mut agent = acp::AuthMethodAgent::new(acp::AuthMethodId::new(id), name.to_string());
-        if let Some(m) = meta.and_then(|v| v.as_object().cloned()) {
-            agent = agent.meta(m);
-        }
-        acp::AuthMethod::Agent(agent)
+    fn make_auth_method(id: &str) -> acp::AuthMethod {
+        acp::AuthMethod::Agent(acp::AuthMethodAgent::new(
+            acp::AuthMethodId::new(id),
+            id.to_string(),
+        ))
     }
 
     #[test]
-    fn startup_auth_empty_methods_no_login() {
-        let (needs, label, method_id, mode) = startup_auth_metadata(&[]);
-        assert!(!needs);
-        assert!(label.is_none());
-        assert!(method_id.is_none());
-        assert_eq!(mode, AuthStartMode::Pending);
-    }
-
-    #[test]
-    fn startup_auth_grow_managed_no_provider_needs_login_pending() {
-        let methods = vec![make_auth_method("provider.oauth", "provider.oauth", None)];
-        let (needs, label, method_id, mode) = startup_auth_metadata(&methods);
-        assert!(needs);
-        assert_eq!(label.as_deref(), Some("provider.oauth"));
-        assert_eq!(method_id.as_ref().unwrap().0.as_ref(), "provider.oauth");
-        assert_eq!(mode, AuthStartMode::Pending);
-    }
-
-    #[test]
-    fn startup_auth_grow_managed_with_external_provider_command() {
-        let meta = serde_json::json!({ "external_provider": true });
-        let methods = vec![make_auth_method("provider.oauth", "Acme Corp", Some(meta))];
-        let (needs, label, method_id, mode) = startup_auth_metadata(&methods);
-        assert!(needs);
-        assert_eq!(label.as_deref(), Some("Acme Corp"));
-        assert_eq!(method_id.as_ref().unwrap().0.as_ref(), "provider.oauth");
-        assert_eq!(mode, AuthStartMode::Command);
-    }
-
-    #[test]
-    fn startup_auth_non_grow_managed_no_login() {
-        let methods = vec![make_auth_method("api-key", "API Key", None)];
-        let (needs, label, method_id, mode) = startup_auth_metadata(&methods);
-        assert!(!needs);
-        assert!(label.is_none());
-        assert!(method_id.is_none());
-        assert_eq!(mode, AuthStartMode::Pending);
-    }
-
-    /// CROSS-CRATE REGRESSION GUARD:
-    ///
-    /// Enterprise/BYOK configs (e.g. an enterprise `~/.grow/config.toml` with a
-    /// `[model.*]` table containing `env_key = "ANTHROPIC_AUTH_TOKEN"`) MUST
-    /// NOT send the user to the login screen at startup.
-    ///
-    /// This test exercises the SHELL-PAGER JOIN, not just the pager half:
-    /// it calls the shell-side `build_auth_methods()` with the exact inputs
-    /// `MvpAgent::initialize()` would compute for an enterprise user, then feeds
-    /// the result into the pager's `startup_auth_metadata()`. If a future
-    /// change re-orders `build_auth_methods()` to put `provider.api_key` anywhere
-    /// other than first (the shape of a past regression), this test fails
-    /// because `startup_auth_metadata()` returns `needs_login = true`.
-    ///
-    /// Counterpart shell-side tests
-    /// (`agent::auth_method::tests::enterprise_byok_first_method_is_provider_api_key`
-    /// and `enterprise_byok_config_does_not_require_login`) pin the same
-    /// invariant from the shell side; this test pins the cross-crate
-    /// contract that the pager actually consumes the shell's output as
-    /// expected.
-    #[test]
-    fn shell_built_auth_methods_for_byok_user_skip_login_screen() {
-        use grow_shell::agent::auth_method::{AuthMethodsBuildInputs, build_auth_methods};
-
-        let built = build_auth_methods(AuthMethodsBuildInputs {
-            // enterprise-style: model has `env_key` set and the env var resolves,
-            // so the shell-side predicate returns true.
-            has_external_api_key: true,
-            // Realistic enterprise user: no cached session token, default `provider.oauth`
-            // login (no enterprise OIDC).
-            has_cached_token: false,
-            has_enterprise_oidc: false,
-            enterprise_oidc_issuer: None,
-            login_label: None,
-            has_auth_provider_command: false,
-            preferred_method: None,
-        });
-
-        let (needs, label, method_id, mode) = startup_auth_metadata(&built.methods);
-        assert!(
-            !needs,
-            "shell built auth_methods for a BYOK user, but the pager still \
-             reports needs_login = true. Either the shell stopped putting \
-             provider.api_key first or the pager stopped treating provider.api_key as \
-             a no-login method.",
-        );
-        assert!(label.is_none());
-        assert!(method_id.is_none());
-        assert_eq!(mode, AuthStartMode::Pending);
-    }
-
-    /// Inverse direction: when `provider.api_key` is NOT in the list, the pager
-    /// MUST show the login screen. We assert this with `provider.api_key` present
-    /// LATER in the list (the shape of a past regression) and confirm the
-    /// pager still requires login -- because the pager only inspects
-    /// `auth_methods.first()`. This locks the failure mode of the regression:
-    /// if a future refactor makes the pager scan past `.first()`, this test
-    /// stops being equivalent to
-    /// `startup_auth_grow_managed_no_provider_needs_login_pending` above and
-    /// either passes or fails on a meaningful new code path.
-    #[test]
-    fn startup_auth_provider_api_key_not_first_still_requires_login() {
-        use grow_shell::agent::auth_method::{
-            PROVIDER_API_KEY_METHOD_ID, PROVIDER_OAUTH_METHOD_ID,
-        };
-
+    fn eager_auth_prefers_advertised_default_then_first() {
         let methods = vec![
-            make_auth_method(PROVIDER_OAUTH_METHOD_ID, "Grow", None),
-            make_auth_method(PROVIDER_API_KEY_METHOD_ID, "provider.api_key", None),
+            make_auth_method("provider.api_key"),
+            make_auth_method("custom"),
         ];
-        let (needs, _, _, _) = startup_auth_metadata(&methods);
-        assert!(
-            needs,
-            "with provider.oauth first, the pager must require login -- pinning \
-             the BAD-ordering failure mode (provider.api_key not first)",
+        assert_eq!(
+            select_eager_auth_method(&methods, Some(&acp::AuthMethodId::new("custom")),)
+                .unwrap()
+                .0
+                .as_ref(),
+            "custom"
         );
-    }
-
-    #[test]
-    fn startup_auth_method_id_is_copied_not_synthesized() {
-        let methods = vec![make_auth_method("provider.oauth", "My Login", None)];
-        let (_, _, method_id, _) = startup_auth_metadata(&methods);
-        // Verify it's the exact same ID from the method, not hardcoded
-        assert_eq!(&method_id.unwrap(), methods[0].id());
-    }
-
-    #[test]
-    fn startup_auth_external_provider_false_is_pending() {
-        let meta = serde_json::json!({ "external_provider": false });
-        let methods = vec![make_auth_method(
-            "provider.oauth",
-            "provider.oauth",
-            Some(meta),
-        )];
-        let (_, _, _, mode) = startup_auth_metadata(&methods);
-        assert_eq!(mode, AuthStartMode::Pending);
+        assert_eq!(
+            select_eager_auth_method(&methods, Some(&acp::AuthMethodId::new("missing")),)
+                .unwrap()
+                .0
+                .as_ref(),
+            "provider.api_key"
+        );
     }
 
     // ── unsupported_leader_flags ──────────────────────────────────

@@ -224,31 +224,19 @@ reasoning_efforts = ["none", "high"] # 简写形式
 # context_window = 200000
 
 # -----------------------------------------------------------------------------
-# 可选 Provider 凭据机制
+# 可选 BYOK 密钥读取机制
 # -----------------------------------------------------------------------------
 
 # 外部命令 stdout 返回 token；只有引用它的 Provider 才会调用。
 [auth_provider.corporate]
-type = "command"
 command = "/usr/local/bin/company-llm-token"
 args = ["--format", "json"]
 token_ttl_secs = 3600
 timeout_secs = 30
 cwd = "~"
 
-# OAuth 是某个 LLM Provider 的可选认证方式，不是 Grow 全局登录要求。
-[auth_provider.team-sso]
-type = "oauth"
-issuer = "https://login.example.com"
-client_id = "public-client-id"
-scopes = ["openid", "profile", "offline_access"]
-
-# 也可直接嵌在某个 Provider 下；不要与该 Provider 的静态 api_key 同时配置。
-# [provider.example.options.auth]
-# type = "oauth"
-# issuer = "https://login.example.com"
-# client_id = "public-client-id"
-# scopes = ["openid", "profile", "offline_access"]
+# Grow 仅支持 BYOK，不实现 OAuth/OIDC、设备登录或 refresh token。
+# helper 只应返回用户自有 key；密钥生命周期由 Grow 外部管理。
 
 # -----------------------------------------------------------------------------
 # 主 Agent 与子 Agent
@@ -449,17 +437,7 @@ url = "https://mcp.example.com/api/mcp"
 type = "streamable-http"
 bearer_token_env_var = "REMOTE_MCP_TOKEN"
 headers = { "X-Workspace" = "example" }
-oauth_client_id = "public-client-id"
-oauth_client_secret_env_var = "MCP_OAUTH_CLIENT_SECRET"
-oauth_scopes = ["tools.read", "tools.execute"]
 enabled = false
-
-# MCP JSON 兼容 OAuth block 使用 camelCase 字段；通常只需上面的 snake_case 字段。
-# [mcp_servers.remote-tools.oauth]
-# clientId = "public-client-id"
-# clientSecretEnvVar = "MCP_OAUTH_CLIENT_SECRET"
-# scopes = ["tools.read"]
-# callbackPort = 8787
 
 # 可选 setup schema 可让 UI 在首次启用 MCP 时收集选项，并把选择映射进 URL/header/env 模板。
 # [[mcp_servers.remote-tools.setup.fields]]

@@ -27,7 +27,6 @@
 //! command and the turn wall time loses meaning.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -283,10 +282,9 @@ async fn run_storm(
             // served by the mock's dedicated runtime thread, so it completes
             // and the catalog contains the mock's chat-completions model.
             let agent_config = AgentConfig::default();
-            let auth_manager = Arc::new(agent_config.create_auth_manager());
             let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
             let gateway = GatewaySender::new(gw_tx);
-            let agent = MvpAgent::new(gateway, &agent_config, auth_manager).expect("valid config");
+            let agent = MvpAgent::new(gateway, &agent_config).expect("valid config");
 
             let (c2a_a, c2a_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
             let (a2c_a, a2c_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);

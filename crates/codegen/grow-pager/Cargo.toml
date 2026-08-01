@@ -149,7 +149,7 @@ core-foundation = { workspace = true }
 # SetConsoleCtrlHandler for the exec-emulating screen-mode relaunch
 # (`/minimal` / `/fullscreen`): the waiting parent must ignore console Ctrl
 # events so only the relaunched child handles them. Version matches the other
-# in-repo consumers (xai-crash-handler, xai-system-power).
+# in-repo consumers (for example xai-crash-handler).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 

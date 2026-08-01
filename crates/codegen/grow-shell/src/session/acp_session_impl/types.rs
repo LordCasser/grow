@@ -19,10 +19,12 @@ pub(crate) enum SamplerFailureRecovery {
     /// Compaction ran. The turn loop should rebuild the request from
     /// the compacted conversation and resubmit.
     CompactAndResubmit,
-    /// Auth 401 recovery succeeded (devbox re-mint, OIDC refresh, or auth
-    /// provider re-mint). The turn loop should resubmit once with the
-    /// fresh token.
-    RefreshAuthAndResubmit,
+    /// A BYOK helper or newly available configured key replaced the credential.
+    /// `credential` records what the rejected request actually sent so retry
+    /// accounting can distinguish a missing header from a rejected key.
+    RefreshByokAndResubmit {
+        credential: grow_sampling_types::SentCredential,
+    },
 }
 
 /// Outcome of a single turn attempt via the sampler-based path.
@@ -36,8 +38,9 @@ pub(crate) enum SamplerTurnOutcome {
         Box<grow_sampler::InferenceLatencyStats>,
     ),
     CompactAndResubmit,
-    /// Auth recovery succeeded; the outer loop should retry once.
-    RefreshAuthAndResubmit,
+    RefreshByokAndResubmit {
+        credential: grow_sampling_types::SentCredential,
+    },
 }
 
 /// Outcome of `process_conversation_turn`, distinguishing normal completion from cancellation.

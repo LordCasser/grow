@@ -313,10 +313,6 @@ pub enum Action {
     /// Open the agents modal (listing all agent definitions).
     /// Optionally opens directly on a specific tab.
     OpenConfigAgentsModal(Option<crate::views::agents_modal::AgentsTab>),
-    /// Trigger OAuth for an MCP server from the modal.
-    McpAuthTrigger {
-        server_name: String,
-    },
     McpSetupSubmit {
         server_name: String,
         values: std::collections::HashMap<String, String>,
@@ -586,25 +582,6 @@ pub enum Action {
     PermissionFollowup(String),
     /// User cancelled the front permission request (Ctrl-C / Esc in Options mode).
     PermissionCancel,
-    /// Log out: remove credentials and return to the login screen.
-    Logout,
-    /// Log out and immediately start a new login flow.
-    SwitchAccount,
-    /// User pressed login on the welcome screen.
-    Login,
-    /// Cancel an in-progress login that was started from inside a session
-    /// (`/login` or a 401 re-auth prompt) and return to the previous view.
-    /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit
-    /// the app or lose the open session.
-    CancelLogin,
-    /// User submitted a manually-pasted auth token (loopback mode).
-    SubmitAuthCode(String),
-    /// Copy the auth URL to the clipboard during authentication.
-    CopyAuthUrl,
-    /// Show the raw auth URL with mouse capture disabled for manual copy.
-    ShowRawAuthUrl,
-    /// Hide the raw auth URL and re-enable mouse capture.
-    HideRawAuthUrl,
     /// User accepted the folder-trust question: persist the grant for the cwd's
     /// workspace, mark trust resolved, and replay any deferred session startup.
     /// (Declining quits via [`Action::Quit`]; there is no decline action.)
@@ -1416,7 +1393,7 @@ pub enum Effect {
         /// What user gesture triggered the cancel (ESC / Ctrl+C / mouse), sent
         /// on `session/cancel` as `_meta.cancelTrigger` so the agent's
         /// `mid_turn_abort` diagnostics can distinguish them. `None` for
-        /// programmatic cancels (login/reauth flows).
+        /// programmatic cancels.
         trigger: Option<CancelTrigger>,
         /// Ask the shell to trim the in-flight prompt from session history when
         /// the turn is still pristine (no server activity), sent as
@@ -1624,28 +1601,11 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
-    /// Send AuthenticateRequest to the agent.
-    Authenticate {
-        request_seq: u64,
-        method_id: acp::AuthMethodId,
-        use_oauth: bool,
-        force_interactive: bool,
-    },
-    /// Poll for auth URL from the agent (ext request).
-    PollAuthUrl { request_seq: u64 },
-    /// Submit a manually-pasted auth code (ext request).
-    SubmitAuthCode { request_seq: u64, code: String },
     /// Fetch MCP server list from the shell (grow/mcp/list).
     FetchMcpsList {
         agent_id: AgentId,
         session_id: acp::SessionId,
         cache: bool,
-    },
-    /// Trigger MCP OAuth for a server (grow/mcp/auth_trigger).
-    McpAuthTrigger {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
-        server_name: String,
     },
     McpSetupSubmit {
         agent_id: AgentId,
@@ -1848,21 +1808,6 @@ pub enum Effect {
         /// interjections — the wire shape stays byte-identical to legacy.
         blocks: Option<Vec<acp::ContentBlock>>,
     },
-    /// Log out via `grow/auth/logout` (shell clears auth.json + in-memory state).
-    Logout,
-    /// Cancel an in-flight interactive auth on the shell (`grow/auth/cancel`).
-    /// Used when the user abandons mid-session `/login` so the device-code
-    /// poll stops instead of running until the code expires. `request_seq`
-    /// scopes the cancel so a delayed RPC cannot tear down a successor login.
-    CancelAuth { request_seq: u64 },
-    /// Log out then authenticate sequentially in one task.
-    SwitchAccount {
-        request_seq: u64,
-        method_id: acp::AuthMethodId,
-        use_oauth: bool,
-    },
-    /// Clear the auth copy feedback after a delay if its generation is still current.
-    ScheduleClearAuthCopyFeedback { generation: u64 },
     /// Register the current session in the active-sessions crash-recovery
     /// registry (`~/.grow/active_sessions.json`).
     RegisterActiveSession {
@@ -2010,12 +1955,7 @@ pub enum SubagentKillOutcome {
     /// row alone rather than show a false terminal state.
     RpcFailed,
 }
-#[derive(Debug)]
-pub enum McpAuthTriggerOutcome {
-    Authenticated,
-    SetupRequired(crate::views::mcps_modal::McpSetupConfig),
-}
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 pub enum DoctorPlanningOutcome {
     Listing(String),
     Plan(Box<crate::diagnostics::FixPlan>),
@@ -2177,7 +2117,7 @@ pub enum TaskResult {
         agent_id: AgentId,
         result: Result<acp::PromptResponse, String>,
         /// HTTP status code from the upstream API error, if available.
-        /// Used by dispatch to distinguish re-authentication failures.
+        /// Used by dispatch to distinguish rejected BYOK credentials.
         http_status: Option<u16>,
         /// The `prompt_id` the pager minted when it sent this `session/prompt`
         /// RPC. On `Ok` the agent echoes `promptId` back in PR meta, but an
@@ -2278,40 +2218,10 @@ pub enum TaskResult {
         agent_id: AgentId,
         agent_name: Option<String>,
     },
-    /// Authentication completed successfully.
-    AuthComplete {
-        request_seq: u64,
-        meta: Option<serde_json::Value>,
-    },
-    /// Authentication failed.
-    AuthFailed {
-        request_seq: u64,
-        error: String,
-    },
-    /// Auth URL is ready (from the provider).
-    AuthUrlReady {
-        request_seq: u64,
-        auth_url: Option<String>,
-        /// Deprecated: superseded by `mode` (authoritative). Kept only as a
-        /// back-compat fallback for older agents that don't send `mode`.
-        external: bool,
-        /// Presentation mode from `grow/auth/get_url`; `None` on older agents.
-        mode: Option<String>,
-    },
-    /// Auth code was submitted (fire-and-forget).
-    AuthCodeSubmitted {
-        request_seq: u64,
-    },
     /// MCP server list fetched from shell.
     McpsListLoaded {
         agent_id: AgentId,
         result: Result<Vec<crate::views::mcps_modal::McpServerInfo>, String>,
-    },
-    /// MCP auth trigger completed.
-    McpAuthTriggerDone {
-        agent_id: AgentId,
-        server_name: String,
-        result: Result<McpAuthTriggerOutcome, String>,
     },
     McpSetupSubmitDone {
         agent_id: AgentId,
@@ -2532,14 +2442,6 @@ pub enum TaskResult {
     AvailableCommandsRefreshed {
         agent_id: AgentId,
         commands: Vec<acp::AvailableCommand>,
-    },
-    /// Shell acknowledged logout (auth cleared).
-    LogoutComplete,
-    /// Best-effort `grow/auth/cancel` finished (no UI update; state already left Authenticating).
-    AuthCancelComplete,
-    /// The 2-second auth copy feedback timer expired.
-    AuthCopyFeedbackTimeout {
-        generation: u64,
     },
     DeepSearchResults {
         results: Vec<grow_shell::extensions::session_search::SearchSessionHit>,

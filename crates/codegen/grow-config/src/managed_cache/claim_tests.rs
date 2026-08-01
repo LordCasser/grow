@@ -2,7 +2,7 @@
 //! (sidecar-removal downgrade closure).
 
 use super::super::*;
-use super::team;
+use super::dkey;
 
 /// Headline: a stripped policy sidecar + imposing claim refuses even over a fully
 /// forged permissive marker; without the claim that state is the pre-fix downgrade.
@@ -13,7 +13,7 @@ fn claim_refuses_stripped_sidecar_even_with_forged_marker() {
     let home = dir.path();
     // The forged-marker shape: permissive, nothing served, matching principal.
     let forged = ManagedConfigCache {
-        principal: Some("team-007".into()),
+        principal: Some("dep-007".into()),
         fail_closed: false,
         ..Default::default()
     };
@@ -24,7 +24,7 @@ fn claim_refuses_stripped_sidecar_even_with_forged_marker() {
             false,
             Some(&forged),
             home,
-            &team("team-007")
+            &dkey("dep-007")
         ),
         "an imposing claim outranks the forged marker when the policy sidecar is gone"
     );
@@ -35,7 +35,7 @@ fn claim_refuses_stripped_sidecar_even_with_forged_marker() {
             false,
             Some(&forged),
             home,
-            &team("team-007")
+            &dkey("dep-007")
         ),
         "without the claim this exact state is the (documented) marker downgrade"
     );
@@ -50,7 +50,7 @@ fn claim_not_consulted_on_sidecar_read_blip() {
     let home = dir.path();
     std::fs::write(home.join("requirements.toml"), "[features]\n").unwrap();
     let served = ManagedConfigCache {
-        principal: Some("team-007".into()),
+        principal: Some("dep-007".into()),
         had_requirements: true,
         fail_closed: true,
         ..Default::default()
@@ -62,7 +62,7 @@ fn claim_not_consulted_on_sidecar_read_blip() {
             false,
             Some(&served),
             home,
-            &team("team-007")
+            &dkey("dep-007")
         ),
         "a transient sidecar read blip must not refuse, claim or no claim"
     );
@@ -77,7 +77,7 @@ fn garbage_claim_without_fail_closed_is_not_imposing() {
     mark_managed_config_synced_at(
         home,
         SyncMarker {
-            principal: Some("team-a"),
+            principal: Some("dep-a"),
             had_managed_config: false,
             had_requirements: false,
             key_fingerprint: None,
@@ -90,11 +90,11 @@ fn garbage_claim_without_fail_closed_is_not_imposing() {
     )
     .unwrap();
     assert!(
-        !managed_policy_compromised_for_at(home, &team("team-a")),
+        !managed_policy_compromised_for_at(home, &dkey("dep-a")),
         "garbage claim without fail-closed must not make the gate fail closed"
     );
     assert!(
-        !is_managed_config_hard_stale_for_at(home, &team("team-a")),
+        !is_managed_config_hard_stale_for_at(home, &dkey("dep-a")),
         "garbage claim without fail-closed must not force a refetch"
     );
 }
@@ -109,7 +109,7 @@ fn claim_paths_are_inert_in_dark_build() {
         mark_managed_config_synced_at(
             home,
             SyncMarker {
-                principal: Some("team-a"),
+                principal: Some("dep-a"),
                 had_managed_config: false,
                 had_requirements: false,
                 key_fingerprint: None,
@@ -122,11 +122,11 @@ fn claim_paths_are_inert_in_dark_build() {
         )
         .unwrap();
         assert!(
-            !managed_policy_compromised_for_at(home, &team("team-a")),
+            !managed_policy_compromised_for_at(home, &dkey("dep-a")),
             "dark build: a claim file must not make the gate fail closed"
         );
         assert!(
-            !is_managed_config_hard_stale_for_at(home, &team("team-a")),
+            !is_managed_config_hard_stale_for_at(home, &dkey("dep-a")),
             "dark build: a claim file must not force a refetch"
         );
     });

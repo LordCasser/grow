@@ -520,7 +520,6 @@ impl ManagedGatewayToolCatalog {
 #[derive(Debug, Clone)]
 pub struct ManagedGatewayToolCallResponse {
     pub result: serde_json::Value,
-    pub connectors_needing_reauth: Vec<String>,
 }
 #[async_trait::async_trait]
 pub trait ManagedGatewayToolCaller: Send + Sync {

@@ -115,10 +115,9 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
 async fn run_setup_command(json: bool) {
     use grow_shell::managed_config::{self, SetupOutcome};
     if !managed_config::has_principal() {
-        eprintln!("No deployment key or team sign-in found.");
+        eprintln!("No deployment key found.");
         eprintln!();
-        eprintln!("To install managed configuration, sign in with a team using `grow login`,");
-        eprintln!("or set a deployment key:");
+        eprintln!("To install managed configuration, set a deployment key:");
         eprintln!();
         if cfg!(unix) {
             eprintln!("  export GROW_DEPLOYMENT_KEY=<your-key>");
@@ -1637,25 +1636,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 )
                 .await;
             }
-            Command::Login { provider } => {
-                init_tracing_simple("cli");
-                let config = grow_shell::config::load_effective_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                grow_shell::auth::run_provider_login(&config, provider.as_deref()).await?;
-                println!();
-                grow_shell::instrumentation::finalize_and_exit(0);
-            }
-            Command::Logout { provider } => {
-                init_tracing_simple("cli");
-                let config = grow_shell::config::load_effective_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                grow_shell::auth::run_provider_logout(&config, provider.as_deref())?;
-                grow_shell::instrumentation::finalize_and_exit(0);
-            }
             Command::Wrap(ref wrap_args) => {
                 return grow_pager::wrap_cmd::run(wrap_args);
             }
@@ -1823,7 +1803,6 @@ async fn finish_update_on_exit(
 /// Build an [`UpdateConfig`] from the current environment and config files.
 fn build_update_config() -> UpdateConfig {
     let mut config = UpdateConfig::default();
-    config.deployment_key = grow_shell::agent::config::EndpointsConfig::default().deployment_key;
     if let Ok(root) = grow_shell::config::load_effective_config_disk_only()
         && let Some(ch) = grow_shell::util::config::channel_from_toml_opt(&root)
     {

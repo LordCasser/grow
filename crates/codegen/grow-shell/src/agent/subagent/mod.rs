@@ -117,7 +117,6 @@ pub(crate) struct SubagentSpawnContext {
     pub alpha_test_key: Option<String>,
     pub auth_method_id: acp::AuthMethodId,
     pub model_id: acp::ModelId,
-    pub auth: Option<crate::auth::ProviderAuth>,
     pub parent_cwd: PathBuf,
     pub parent_session_id: String,
     /// The parent's cutoff at spawn, applied to the child's first turn. `None` if unset.
@@ -238,23 +237,9 @@ pub(crate) struct SubagentSpawnContext {
     pub hook_registry: Option<std::sync::Arc<grow_hooks::discovery::HookRegistry>>,
     pub permission_handle: Option<grow_workspace::permission::PermissionHandle>,
     pub worktree_type: crate::util::config::WorktreeType,
-    pub api_key_provider: Option<grow_tools::types::SharedApiKeyProvider>,
     pub image_description_model: String,
     /// Dual-mode workspace operations handle.
     pub workspace_ops: grow_workspace::WorkspaceOps,
-    pub auth_manager: std::sync::Arc<crate::auth::AuthManager>,
-    /// The parent SessionActor's live
-    /// `Auth401AttributionCallback`, captured at spawn time.
-    /// Subagents inherit this so the child's `OaiCompatClient` 401
-    /// sites emit attribution under the parent's session id, joined
-    /// with the parent's live `AuthManager`.
-    ///
-    /// Note: this is the load-bearing source of the inherited
-    /// callback. Reading from `ctx.sampling_config.attribution_callback`
-    /// would not work because the baseline `MvpAgent.sampling_config`
-    /// goes through `agent/config.rs::sampling_config_for_model`
-    /// which always sets that field to `None`.
-    pub attribution_callback: Option<grow_sampler::SharedAttributionCallback>,
     /// Parent session's agent name (e.g. "grow-build").
     pub parent_agent_name: Option<String>,
     /// Parent's MCP server configs for resolving named references in agent mcpServers.
@@ -673,9 +658,15 @@ async fn read_parent_sampling_config(
                 creds.alpha_test_key.as_deref(),
                 &cfg.base_url,
             );
-            let auth_scheme = crate::agent::config::try_resolve_model_credentials(&cfg.model, None)
+            let auth_scheme = crate::agent::config::try_resolve_model_credentials(&cfg.model)
                 .map(|r| r.auth_scheme)
                 .unwrap_or_default();
+            let bearer_resolver = crate::agent::config::find_model_by_id(
+                &ctx.available_models,
+                ctx.model_id.0.as_ref(),
+            )
+            .and_then(crate::agent::config::ModelEntry::effective_auth_provider)
+            .map(crate::auth::AuthProviderRef::bearer_resolver);
             let inherited = grow_sampler::SamplerConfig {
                 api_key: creds.api_key,
                 base_url: cfg.base_url,
@@ -695,8 +686,8 @@ async fn read_parent_sampling_config(
                 stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),
                 idle_timeout_secs: None,
                 origin_client: ctx.sampling_config.origin_client.clone(),
-                attribution_callback: ctx.attribution_callback.clone(),
-                bearer_resolver: None,
+                attribution_callback: None,
+                bearer_resolver,
                 compactions_remaining: ctx
                     .models_manager
                     .model_compactions_remaining(ctx.model_id.0.as_ref()),
@@ -746,21 +737,6 @@ async fn read_parent_sampling_config(
         .model_compaction_at_tokens(ctx.model_id.0.as_ref());
     (fallback, ctx.model_id.clone())
 }
-/// `AuthType` for a subagent: BYOK ⇒ `ApiKey` (don't overwrite the BYOK
-/// key); session-based ACP method ⇒ `SessionToken` (keep refresh wired);
-/// otherwise `ApiKey`.
-fn subagent_auth_type(
-    model: Option<&crate::agent::config::ModelEntry>,
-    auth_method_id: &acp::AuthMethodId,
-) -> grow_chat_state::AuthType {
-    if model.is_some_and(|m| m.has_own_credentials()) {
-        grow_chat_state::AuthType::ApiKey
-    } else if crate::agent::auth_method::is_session_based_method(auth_method_id) {
-        grow_chat_state::AuthType::SessionToken
-    } else {
-        grow_chat_state::AuthType::ApiKey
-    }
-}
 /// Resolve a model override string (config key or model ID) to a
 /// `(SamplerConfig, ModelId)` pair.
 fn resolve_model_override_to_config(
@@ -773,11 +749,7 @@ fn resolve_model_override_to_config(
     } else {
         acp::ModelId::new(entry.info().model.clone())
     };
-    let session_key = ctx.auth.as_ref().map(|a| a.key.as_str());
-    let has_session_key = session_key.is_some();
-    let mut credentials = resolve_credentials(&entry, session_key);
-    credentials.auth_type = subagent_auth_type(Some(&entry), &ctx.auth_method_id);
-    let resolved_auth_type = credentials.auth_type;
+    let credentials = resolve_credentials(&entry);
     let config = sampling_config_for_model(&entry, credentials, ctx.alpha_test_key.clone());
     grow_diagnostics::unified_log::debug(
         "subagent resolve_model_override_to_config",
@@ -789,8 +761,6 @@ fn resolve_model_override_to_config(
             "base_url": &config.base_url,
             "key_prefix": key_prefix(&config.api_key),
             "has_own_credentials": entry.has_own_credentials(),
-            "has_session_key": has_session_key,
-            "auth_type": format!("{:?}", resolved_auth_type),
             "auth_method_id": ctx.auth_method_id.0.as_ref(),
         })),
     );

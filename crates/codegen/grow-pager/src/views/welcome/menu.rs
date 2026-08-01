@@ -26,7 +26,7 @@ const KEY_RIGHT_PAD: u16 = 4;
 /// width as `min_width_hint`, the row is left-aligned with `area` so the
 /// labels stay flush with the version/subtitle above, and the shortcut keeps
 /// a [`KEY_RIGHT_PAD`] right inset so keys never reach the screen edge. With
-/// `min_width_hint == 0` (login / ZDR / trust gates) the row stays compact
+/// `min_width_hint == 0` (trust gate) the row stays compact
 /// and centered within `area`.
 pub fn render_menu(
     area: Rect,
@@ -126,14 +126,11 @@ pub fn render_menu(
         } else {
             key_style
         };
-        let key_x_start =
-            menu_centered.x + menu_centered.width.saturating_sub(key_width + KEY_RIGHT_PAD);
-        buf.set_span(
-            key_x_start,
-            y,
-            &Span::styled(*key, kstyle),
-            key_width,
-        );
+        let key_x_start = menu_centered.x
+            + menu_centered
+                .width
+                .saturating_sub(key_width + KEY_RIGHT_PAD);
+        buf.set_span(key_x_start, y, &Span::styled(*key, kstyle), key_width);
 
         // [x] dismiss affordance restyling (for the import row)
         if let Some(x_offset) = key.rfind("[x]") {
@@ -194,8 +191,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let rects = render_menu(area, &mut buf, &Theme::current(), &items, None, None, 60);
         assert_eq!(
-            rects[0].x,
-            area.x,
+            rects[0].x, area.x,
             "hero rows must left-align with the text column"
         );
         let rects = render_menu(area, &mut buf, &Theme::current(), &items, None, None, 0);

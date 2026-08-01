@@ -203,8 +203,6 @@ pub(crate) async fn spawn_session_actor(
     sampling_config: SamplingConfig,
     credentials: grow_chat_state::Credentials,
     auth_method_id: crate::agent::auth_method::SharedAuthMethodId,
-    auth_manager: Option<Arc<AuthManager>>,
-    attribution_callback: Option<grow_sampler::SharedAttributionCallback>,
     mut tool_context: ToolContext,
     mcp_servers: Vec<acp::McpServer>,
     initial_client_mcp_servers: Vec<acp::McpServer>,
@@ -248,7 +246,6 @@ pub(crate) async fn spawn_session_actor(
     persisted_announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     memory_config: Option<crate::config::MemoryConfig>,
     managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
-    managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     managed_mcp_proxy_base_url: String,
     session_model_id: acp::ModelId,
     session_yolo_mode: bool,
@@ -853,14 +850,7 @@ pub(crate) async fn spawn_session_actor(
             .as_ref()
             .and_then(|r| r.scheduler_background_loops),
     );
-    let managed_gateway_tool_client = auth_manager.as_ref().map(|am| {
-        grow_tools::types::resources::ManagedGatewayToolClient(Arc::new(
-            ShellManagedGatewayToolClient {
-                proxy_base_url: managed_mcp_proxy_base_url.clone(),
-                auth_manager: am.clone(),
-            },
-        ))
-    });
+    let managed_gateway_tool_client = None;
     let mcp_state = {
         let mut state = McpState::new_with_meta(mcp_servers.clone(), mcp_meta_config_map);
         if let Some(ref pool) = parent_mcp_pool {
@@ -1110,7 +1100,6 @@ pub(crate) async fn spawn_session_actor(
         sampler_retry_policy,
         sampler_event_tx,
     );
-    let attribution_callback_for_handle = attribution_callback.clone();
     let agent_name_for_handle = initial_agent_type
         .as_deref()
         .unwrap_or(crate::agent::config::DEFAULT_AGENT_TYPE)
@@ -1425,8 +1414,6 @@ pub(crate) async fn spawn_session_actor(
         session_info: session_info.clone(),
         auth_method_id,
         model_auth_memo: std::cell::RefCell::new(None),
-        attribution_callback,
-        auth_manager,
         state,
         notifications: NotificationSender {
             gateway: gateway.clone(),
@@ -1571,7 +1558,6 @@ pub(crate) async fn spawn_session_actor(
         pending_classifier_completions: parking_lot::Mutex::new(VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle,
-        managed_mcp_expires_at: std::sync::Mutex::new(managed_mcp_expires_at),
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announced_servers: Mutex::new(
             persisted_announcement_state
@@ -1944,7 +1930,6 @@ pub(crate) async fn spawn_session_actor(
             behavior: behavior.clone(),
             force_compact,
             permission_handle: permissions_for_handle,
-            attribution_callback: attribution_callback_for_handle,
             agent_name: agent_name_for_handle,
             subagent_filter: subagent_filter_for_handle,
             managed_mcp_proxy_base_url,
@@ -1997,8 +1982,6 @@ pub(crate) async fn spawn_session_on_thread(
     sampling_config: SamplingConfig,
     credentials: grow_chat_state::Credentials,
     auth_method_id: crate::agent::auth_method::SharedAuthMethodId,
-    auth_manager: Option<Arc<AuthManager>>,
-    attribution_callback: Option<grow_sampler::SharedAttributionCallback>,
     tool_context: ToolContext,
     mcp_servers: Vec<acp::McpServer>,
     initial_client_mcp_servers: Vec<acp::McpServer>,
@@ -2040,7 +2023,6 @@ pub(crate) async fn spawn_session_on_thread(
     persisted_announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     memory_config: Option<crate::config::MemoryConfig>,
     managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
-    managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     managed_mcp_proxy_base_url: String,
     session_model_id: acp::ModelId,
     session_yolo_mode: bool,
@@ -2145,8 +2127,6 @@ pub(crate) async fn spawn_session_on_thread(
                         sampling_config,
                         credentials,
                         auth_method_id,
-                        auth_manager,
-                        attribution_callback,
                         tool_context,
                         mcp_servers,
                         initial_client_mcp_servers,
@@ -2190,7 +2170,6 @@ pub(crate) async fn spawn_session_on_thread(
                         persisted_announcement_state,
                         memory_config,
                         managed_mcp_handle,
-                        managed_mcp_expires_at,
                         managed_mcp_proxy_base_url,
                         session_model_id,
                         session_yolo_mode,

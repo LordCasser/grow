@@ -8,12 +8,11 @@ use std::path::PathBuf;
 use toml::Value as TomlValue;
 use toml::map::Map as TomlMap;
 
-pub use grow_mcp::oauth_config::{McpOAuthConfig, McpOAuthConfigMap};
 // MCP server config value types extracted to `grow-config-types` (config
 // dependency inversion); re-exported so `crate::util::config::*` paths keep working.
 pub use grow_config_types::{
-    KNOWN_MCP_SERVER_FIELDS, McpJsonOAuthBlock, McpPreferenceSource, McpPreferencesFile,
-    McpServerConfig, McpServerConfigProblem, McpServerPreferences, McpServerProblemSeverity,
+    KNOWN_MCP_SERVER_FIELDS, McpPreferenceSource, McpPreferencesFile, McpServerConfig,
+    McpServerConfigProblem, McpServerPreferences, McpServerProblemSeverity,
     McpServerTransportConfig, McpSetupConfig, McpSetupDerivedValue, McpSetupField,
     McpSetupFieldType, McpSetupOption, McpSetupResolution,
 };
@@ -101,70 +100,6 @@ pub(crate) fn mcp_server_scope(name: &str, cwd: &std::path::Path) -> &'static st
         }
     }
     MCP_SCOPE_USER
-}
-
-/// Load MCP servers and their OAuth configurations from config.toml.
-///
-/// Returns both the `acp::McpServer` list and a parallel [`McpOAuthConfigMap`].
-pub fn load_mcp_servers_with_oauth(
-    cwd: &std::path::Path,
-    compat: &CompatConfig,
-) -> (Vec<acp::McpServer>, McpOAuthConfigMap) {
-    let global_config =
-        crate::config::load_from_disk().unwrap_or_else(|_| TomlValue::Table(toml::map::Map::new()));
-
-    let mut servers_map: IndexMap<String, McpServerConfig> = IndexMap::new();
-    for (name, config) in parse_mcp_servers_from_toml(&global_config) {
-        servers_map.insert(name, config);
-    }
-
-    let project_configs = crate::config::find_project_configs(cwd);
-    for config_path in &project_configs {
-        if let Ok(root) = crate::config::load_config_file(config_path) {
-            for (name, config) in parse_mcp_servers_from_toml(&root) {
-                servers_map.insert(name, config);
-            }
-        }
-    }
-    // Also load from ~/.claude.json (lower priority than TOML)
-    for (name, config) in load_claude_json_mcp_servers_as_configs(cwd, compat) {
-        servers_map.entry(name).or_insert(config);
-    }
-
-    // Also load from ~/.cursor/mcp.json (lower priority than TOML and ~/.claude.json)
-    for (name, config) in load_cursor_mcp_servers_as_configs(cwd, compat) {
-        servers_map.entry(name).or_insert(config);
-    }
-
-    // Also load from .mcp.json files (lower priority than TOML, ~/.claude.json, and ~/.cursor)
-    for (name, config) in load_mcp_json_servers_as_configs(cwd) {
-        servers_map.entry(name).or_insert(config);
-    }
-
-    let mut oauth_configs = McpOAuthConfigMap::new();
-    let mut acp_servers = Vec::new();
-
-    let preferences = load_mcp_preferences().file();
-    let sub = &crate::config::expand_env_vars_in_string;
-    for (name, config) in servers_map {
-        let mut config = match config.resolve_setup(preferences.servers.get(&name)) {
-            McpSetupResolution::Resolved(config) => config,
-            McpSetupResolution::Required(_) => continue,
-            McpSetupResolution::Invalid(reason) => {
-                tracing::warn!(server = %name, error = %reason, "MCP setup config is invalid");
-                continue;
-            }
-        };
-        config.expand_strings(sub);
-        if let Some(oauth) = config.oauth_config() {
-            oauth_configs.insert(name.clone(), oauth);
-        }
-        if let Some(acp_server) = config.to_acp_mcp_server(name) {
-            acp_servers.push(acp_server);
-        }
-    }
-
-    (acp_servers, oauth_configs)
 }
 
 /// Load the worktree pool configuration from config.toml.
@@ -900,9 +835,7 @@ pub async fn delete_mcp_server_config(server_name: &str) -> Result<bool> {
 /// Delete an MCP server entry from the config file at `path`.
 ///
 /// Same semantics as [`delete_mcp_server_config`] but targets an explicit
-/// config file, e.g. a project-scoped `.grow/config.toml`. OAuth credential
-/// cleanup is keyed by server name against the global credential store, so it
-/// also drops credentials a same-named server in another config file uses.
+/// config file, e.g. a project-scoped `.grow/config.toml`.
 pub async fn delete_mcp_server_config_at(
     path: &std::path::Path,
     server_name: &str,
@@ -963,14 +896,6 @@ pub async fn delete_mcp_server_config_at(
     }
     tokio::fs::write(&tmp, &toml_str).await?;
     tokio::fs::rename(&tmp, &path).await?;
-
-    // Clean up OAuth credentials for the deleted server.
-    if let Ok(mut cred_store) = grow_mcp::credentials::McpCredentialStore::load_default() {
-        let removed = cred_store.remove_by_server_name(server_name);
-        if removed > 0 {
-            let _ = cred_store.save_default();
-        }
-    }
 
     Ok(true)
 }
@@ -1206,17 +1131,8 @@ pub(crate) fn parse_mcp_config(
     source_label: &str,
     sub: &dyn Fn(&str) -> String,
 ) -> Vec<acp::McpServer> {
-    parse_mcp_config_with_oauth(config, source_label, sub).0
-}
-
-pub(crate) fn parse_mcp_config_with_oauth(
-    config: &McpConfig,
-    source_label: &str,
-    sub: &dyn Fn(&str) -> String,
-) -> (Vec<acp::McpServer>, McpOAuthConfigMap) {
     let preferences = load_mcp_preferences().file();
     let mut servers = Vec::new();
-    let mut oauth_configs = McpOAuthConfigMap::new();
     for (name, server_config) in &config.mcp_servers {
         let mut server_config = match server_config.resolve_setup(preferences.servers.get(name)) {
             McpSetupResolution::Resolved(config) => config,
@@ -1232,9 +1148,6 @@ pub(crate) fn parse_mcp_config_with_oauth(
             }
         };
         server_config.expand_strings(sub);
-        if let Some(oauth) = server_config.oauth_config() {
-            oauth_configs.insert(name.clone(), oauth);
-        }
         if let Some(server) = server_config.to_acp_mcp_server(name.clone()) {
             servers.push(server);
         } else {
@@ -1254,7 +1167,7 @@ pub(crate) fn parse_mcp_config_with_oauth(
         );
     }
 
-    (servers, oauth_configs)
+    servers
 }
 
 /// Load MCP servers from `~/.claude.json`.
@@ -2283,29 +2196,6 @@ expose_image_base64 = true
         let servers = parse_mcp_servers_from_toml(&root);
         let grafana = servers.get("grafana").unwrap();
         assert_eq!(grafana.expose_image_base64, Some(true));
-    }
-
-    #[test]
-    fn mcp_json_oauth_block_parsed_into_oauth_config() {
-        let json = r#"{
-            "mcpServers": {
-                "slack": {
-                    "type": "http",
-                    "url": "https://mcp.slack.example/mcp",
-                    "oauth": { "clientId": "slack-byo-client", "callbackPort": 3118 }
-                }
-            }
-        }"#;
-        let config: McpConfig = serde_json::from_str(json).expect("parse .mcp.json");
-        let slack = config.mcp_servers.get("slack").expect("slack server");
-
-        let block = slack.oauth.as_ref().expect("oauth block parsed");
-        assert_eq!(block.client_id.as_deref(), Some("slack-byo-client"));
-        assert_eq!(block.callback_port, Some(3118));
-
-        let oauth = slack.oauth_config().expect("oauth_config from block");
-        assert_eq!(oauth.client_id.as_deref(), Some("slack-byo-client"));
-        assert_eq!(oauth.callback_port, Some(3118));
     }
 
     #[test]

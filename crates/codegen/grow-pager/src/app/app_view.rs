@@ -16,7 +16,6 @@ use crate::key;
 use crate::notifications::NotificationService;
 use crate::render::draw::CursorState;
 use crate::scrollback::render::ScratchBuffer;
-use crate::views::prompt_widget::PromptWidget;
 use agent_client_protocol as acp;
 use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use indexmap::IndexMap;
@@ -295,44 +294,10 @@ pub struct CardDetail {
     pub tool_call_count: usize,
     pub first_prompt_preview: String,
 }
-/// Authentication state for the welcome screen.
-///
-/// Drives the login flow UI and input routing on the welcome screen.
-#[derive(Debug)]
-pub enum AuthState {
-    /// No login required (API key, cached token, or already authenticated).
-    Done,
-    /// Login required -- show login menu on welcome screen.
-    /// `error` is set after a failed auth attempt so the user sees what went wrong.
-    Pending { error: Option<String> },
-    /// Auth flow is in progress.
-    Authenticating {
-        /// Sequence number for this auth attempt (stale results are ignored).
-        request_seq: u64,
-        /// Abort handle for the in-flight Authenticate task.
-        handle: Option<tokio::task::AbortHandle>,
-        /// Auth URL from the provider (populated by AuthUrlReady).
-        auth_url: Option<String>,
-        /// How the auth flow presents itself to the user.
-        mode: AuthMode,
-    },
-}
-/// How the auth flow presents itself to the user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthMode {
-    /// Mode not yet determined (waiting for auth URL response).
-    Pending,
-    /// Browser opened automatically by external provider.
-    Command,
-    /// Manual: user must visit URL and paste token.
-    Loopback,
-    /// RFC 8628 device flow: device code + copyable URL, no paste box.
-    Device,
-}
 /// Folder-trust state for the welcome screen.
 ///
-/// Mirrors [`AuthState`]: a welcome sub-state that drives the "Do you trust the
-/// contents of this directory?" question and gates session creation until it is
+/// Welcome sub-state that drives the "Do you trust the contents of this
+/// directory?" question and gates session creation until it is
 /// answered. Seeded once before the first render from the pure
 /// [`grow_workspace::folder_trust::decide`] verdict; when the feature flag
 /// is off `decide` returns trusted, so this is always [`TrustState::Done`].
@@ -454,10 +419,6 @@ fn parse_esc_ttl(raw: Option<String>) -> Duration {
         .map(|ms| Duration::from_millis(ms.min(ESC_DOUBLE_PRESS_TEST_MS)))
         .unwrap_or(PendingAction::ESC_DOUBLE_PRESS_TTL)
 }
-/// True for API-key labels from shell/CCP: `"ApiKey"`, `"API Key"`, `"api_key"`.
-pub(crate) fn is_api_key_label(s: &str) -> bool {
-    s.trim().to_ascii_lowercase().replace([' ', '_', '-'], "") == "apikey"
-}
 /// Pending re-exec into another screen mode (see `/minimal` / `/fullscreen`).
 #[derive(Debug, Clone)]
 pub struct ScreenModeRelaunch {
@@ -470,13 +431,6 @@ pub struct ScreenModeRelaunch {
 pub struct AppView {
     /// Which view is currently active.
     pub active_view: ActiveView,
-    /// View to return to after a mid-session login flow completes or is
-    /// cancelled. `Some` only while a `/login` (or 401-triggered re-auth)
-    /// initiated from an active session is in progress — it lets the auth
-    /// UI take over the `Welcome` screen and then restore the caller's view
-    /// (e.g. `Agent`) afterwards. `None` at startup so the normal
-    /// login-then-load flow is preserved.
-    pub auth_return_view: Option<ActiveView>,
     /// Per-agent views (keyed by AgentId).
     pub agents: IndexMap<AgentId, AgentView>,
     /// Monotonically increasing counter for agent ID allocation.
@@ -634,9 +588,6 @@ pub struct AppView {
     /// resolved by the shell and advertised on ACP initialize (`sessionRecap`).
     /// When false, the pager must not request recaps (zero `grow/recap` traffic).
     pub session_recap_available: bool,
-    /// Prompt widget rendered on the login gate screen (AuthState::Pending).
-    /// The home page has no input box, so this is only used while blocked.
-    pub welcome_prompt: PromptWidget,
     /// The single slash-command MRU/recency store. Owned here and injected
     /// into every agent prompt and the dashboard dispatch via
     /// [`PromptWidget::adopt_slash_mru`] so command recency is shared across
@@ -693,15 +644,9 @@ pub struct AppView {
     /// Last off-screen render-cache eviction sweep (see
     /// [`Self::maybe_evict_offscreen_caches`]).
     pub(super) last_cache_evict_at: Option<Instant>,
-    /// Hit-test rect for the auth URL (click-to-open during Authenticating).
-    pub welcome_auth_url_rect: Option<ratatui::layout::Rect>,
-    /// Whether the mouse pointer was last over the auth URL (for OSC 22 cursor shape).
-    pub welcome_on_auth_url: bool,
     /// Per-visit announcement UI state on the welcome screen (expansion, hover,
     /// overflow flag, hit-rect).
     pub welcome_announcement: WelcomeAnnouncementState,
-    /// Hit-test rect for the "show full URL" fallback link.
-    pub welcome_auth_fallback_rect: Option<ratatui::layout::Rect>,
     /// Hit-test rect for the welcome hero promo CTA `[label]` button
     /// (click → `AnnouncementsOpenCta`).
     pub welcome_promo_cta_rect: Option<ratatui::layout::Rect>,
@@ -709,10 +654,6 @@ pub struct AppView {
     pub welcome_toast: Option<(String, std::time::Instant)>,
     /// Sticky hover flag for the welcome promo CTA (redraw on enter/leave).
     pub welcome_on_promo_cta: bool,
-    /// Show the raw auth URL with mouse capture disabled for manual copy.
-    pub auth_show_raw_url: bool,
-    /// Whether mouse capture is currently disabled for raw URL mode.
-    pub auth_mouse_disabled: bool,
     /// Fetched session list for the session picker (None = not yet fetched).
     pub session_picker_entries: Option<Vec<SessionPickerEntry>>,
     /// Whether the session list is currently being fetched.
@@ -855,43 +796,11 @@ pub struct AppView {
     /// an `AvailableCommandsUpdate` that includes skills, so subsequent
     /// sessions start with the full command catalog immediately.
     pub bootstrap_acp_commands: Vec<agent_client_protocol::AvailableCommand>,
-    /// Auth methods from the ACP connection (preserved for re-login after logout).
-    pub auth_methods: Vec<acp::AuthMethod>,
-    /// Authentication state for the welcome screen login flow.
-    pub auth_state: AuthState,
-    /// Folder-trust state for the welcome screen. Mirrors [`AppView::auth_state`]:
-    /// when `Pending`, the welcome screen shows the trust question and session
-    /// creation is deferred (gated after auth) until it is answered.
+    /// Folder-trust state for the welcome screen. When `Pending`, the welcome
+    /// screen shows the trust question and session creation is deferred.
     pub trust_state: TrustState,
-    /// Login button label from `AuthMethod.name` (e.g., "service.example.com", "Acme Corp").
-    pub login_label: Option<String>,
-    /// The auth method ID to use for login.
-    pub login_method_id: Option<acp::AuthMethodId>,
-    /// Initial auth mode hint from method metadata.
-    pub auth_start_mode: AuthMode,
-    /// Text buffer for manual auth token paste (loopback mode).
-    pub(crate) auth_code_input: LineEditor,
-    /// Monotonically increasing sequence number for auth requests.
-    pub next_auth_request_seq: u64,
-    /// Abort handle for the in-flight `PollAuthUrl` task (with its request_seq).
-    /// Aborted alongside the Authenticate task in single-flight re-login.
-    pub auth_url_poll_handle: Option<(u64, tokio::task::AbortHandle)>,
     /// Every session/chat/worktree/prompt action deferred behind startup gates.
     pub deferred_startup: crate::app::session_startup::DeferredStartupActions,
-    /// Whether deferred welcome-screen login should force OAuth.
-    pub auth_use_oauth: bool,
-    /// Delivery state from the last clipboard copy during auth.
-    pub auth_clipboard_delivery: Option<crate::clipboard::ClipboardDelivery>,
-    /// Generation of the current auth copy feedback and its clear timer.
-    pub auth_clipboard_feedback_generation: u64,
-    /// Team principal UUID from auth (`None` for personal sessions).
-    pub team_id: Option<String>,
-    /// Team name from auth (displayed in the shortcuts bar).
-    pub team_name: Option<String>,
-    /// Whether the user's team has enterprise Zero Data Retention enabled.
-    pub is_zdr: bool,
-    /// Team role (e.g. "Admin", "Member", "Read Only") for access-control checks.
-    pub team_role: Option<String>,
     /// Persisted `[cli].show_tips` mirror. `None` = no override (default `true`).
     pub show_tips: Option<bool>,
     /// Persisted `[cli].auto_update` mirror. `None` = no override (default `false`).
@@ -900,9 +809,6 @@ pub struct AppView {
     /// from the effective TOML merge like `show_tips`. `None` = unset in TOML
     /// (default `true`); toggles write the user layer.
     pub ask_user_question_timeout_enabled: Option<bool>,
-    /// Whether ZDR users are allowed to use the product.
-    /// Server-controlled via RemoteSettings (remote settings). Default `false` (blocked) during beta.
-    pub zdr_access_enabled: bool,
     /// Whether a leader reconnect is in progress (blocks prompt submission).
     pub reconnect_pending: bool,
     /// Structured startup warnings collected from the terminal diagnostics
@@ -910,7 +816,6 @@ pub struct AppView {
     pub startup_warnings: Vec<crate::startup::StartupWarning>,
     /// Whether the active credential is an API key, used for auth-specific errors and
     /// session flags.
-    pub is_api_key_auth: bool,
     /// Latest version string from a background update check. Set when
     /// a newer version is detected; rendered as a notification on the
     /// welcome screen.
@@ -980,26 +885,9 @@ fn paint_welcome_toast(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout:
     }
 }
 impl AppView {
-    pub fn is_zdr_blocked(&self) -> bool {
-        self.is_zdr && !self.zdr_access_enabled
-    }
-    /// Whether deferred session-startup actions may run: both auth AND folder
-    /// trust must be resolved. Mirrors the auth gate at the session-creating
-    /// startup sites; trust is gated AFTER auth so a pending trust question
-    /// defers session creation until answered.
+    /// Whether deferred session-startup actions may run.
     pub fn session_startup_allowed(&self) -> bool {
-        matches!(self.auth_state, AuthState::Done) && matches!(self.trust_state, TrustState::Done)
-    }
-    /// Apply typed authentication metadata from the shell.
-    pub fn apply_auth_meta(&mut self, meta: &grow_shell::auth::AuthMeta) {
-        self.team_id = meta.team_id.clone();
-        self.team_name = meta.team_name.clone();
-        self.is_zdr = meta.is_zdr;
-        self.team_role = meta.team_role.clone();
-        self.is_api_key_auth = meta.auth_mode.as_deref().is_some_and(is_api_key_label);
-        if let Some(show) = meta.show_resolved_model {
-            self.show_resolved_model = show;
-        }
+        matches!(self.trust_state, TrustState::Done)
     }
     /// Create a new AppView with the given ACP connection details.
     pub fn new(
@@ -1011,12 +899,8 @@ impl AppView {
             std::rc::Rc::new(std::cell::RefCell::new(crate::slash::mru::SlashMru::new()));
         let command_tags =
             std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
-        let mut welcome_prompt = PromptWidget::new();
-        welcome_prompt.adopt_slash_mru(slash_mru.clone());
-        welcome_prompt.adopt_command_tags(command_tags.clone());
         Self {
             active_view: ActiveView::Welcome,
-            auth_return_view: None,
             agents: IndexMap::new(),
             next_agent_id: 0,
             models,
@@ -1051,7 +935,6 @@ impl AppView {
             changelog_bullets: Vec::new(),
             tips: Vec::new(),
             tip: None,
-            welcome_prompt,
             slash_mru,
             command_tags,
             pending_effects: Vec::new(),
@@ -1065,15 +948,10 @@ impl AppView {
             last_mouse_pos: None,
             last_scroll_pos: None,
             last_cache_evict_at: None,
-            welcome_auth_url_rect: None,
-            welcome_on_auth_url: false,
             welcome_announcement: WelcomeAnnouncementState::default(),
-            welcome_auth_fallback_rect: None,
             welcome_promo_cta_rect: None,
             welcome_toast: None,
             welcome_on_promo_cta: false,
-            auth_show_raw_url: false,
-            auth_mouse_disabled: false,
             session_picker_entries: None,
             session_picker_loading: false,
             session_picker_state: crate::views::picker::PickerState::with_mode(
@@ -1120,30 +998,13 @@ impl AppView {
             resume_local_miss: None,
             agent_override: None,
             bootstrap_acp_commands,
-            auth_methods: Vec::new(),
-            auth_state: AuthState::Done,
             trust_state: TrustState::Done,
-            login_label: None,
-            login_method_id: None,
-            auth_start_mode: AuthMode::Pending,
-            auth_code_input: LineEditor::default(),
-            next_auth_request_seq: 1,
-            auth_url_poll_handle: None,
             deferred_startup: Default::default(),
-            auth_use_oauth: false,
-            auth_clipboard_delivery: None,
-            auth_clipboard_feedback_generation: 0,
-            team_id: None,
-            team_name: None,
-            is_zdr: false,
-            team_role: None,
             show_tips: None,
             auto_update: None,
             ask_user_question_timeout_enabled: None,
-            zdr_access_enabled: false,
             reconnect_pending: false,
             startup_warnings: Vec::new(),
-            is_api_key_auth: false,
             pending_update_version: None,
             foreign_resume_launch_generation: 0,
             foreign_resume_launch: None,
@@ -1195,7 +1056,6 @@ impl AppView {
         for agent in self.agents.values_mut() {
             agent.prompt.set_auto_mode_available(available);
         }
-        self.welcome_prompt.set_auto_mode_available(available);
         if let Some(dashboard) = self.dashboard.as_mut() {
             dashboard.set_auto_mode_available(available);
         }
@@ -1475,7 +1335,6 @@ impl AppView {
                 .set_plugins_visible(!config.disable_plugins);
             agent.prompt.sync_tab_width_from_appearance();
         }
-        self.welcome_prompt.sync_tab_width_from_appearance();
         self.appearance = config;
     }
     /// Recompute the render-value compact flag from the user setting +
@@ -1742,7 +1601,6 @@ impl AppView {
             }
             return InputOutcome::Changed;
         }
-        let zdr_blocked = self.is_zdr_blocked();
         let welcome_pinned_promo_cta = crate::views::announcements::promo_cta(
             &self.active_announcements,
             &self.hidden_announcement_ids,
@@ -1760,22 +1618,13 @@ impl AppView {
                 ev,
                 &mut WelcomeInputCtx {
                     registry: &self.registry,
-                    auth_state: &self.auth_state,
                     trust_state: &self.trust_state,
                     cwd: &self.cwd,
-                    mid_session_login: self.auth_return_view.is_some(),
-                    auth_code_input: &mut self.auth_code_input,
                     new_worktree_dialog: &mut self.new_worktree_dialog,
                     menu_index: &mut self.welcome_menu_index,
                     menu_rects: &self.welcome_menu_rects,
-                    menu_count: if zdr_blocked {
-                        2
-                    } else {
-                        3 + if self.has_claude_import { 1 } else { 0 }
-                    },
+                    menu_count: 3 + if self.has_claude_import { 1 } else { 0 },
                     import_banner_rect: self.welcome_import_banner_rect.as_ref(),
-                    auth_url_rect: self.welcome_auth_url_rect.as_ref(),
-                    auth_fallback_rect: self.welcome_auth_fallback_rect.as_ref(),
                     promo_cta_rect: self.welcome_promo_cta_rect.as_ref(),
                     on_promo_cta: &mut self.welcome_on_promo_cta,
                     promo_cta_keyboard: welcome_pinned_promo_cta,
@@ -1783,8 +1632,6 @@ impl AppView {
                     announcement_rect: self.welcome_announcement.rect.as_ref(),
                     on_announcement: &mut self.welcome_announcement.on_cta,
                     announcement_expanded: &mut self.welcome_announcement.expanded,
-                    show_raw_url: &mut self.auth_show_raw_url,
-                    is_zdr_blocked: zdr_blocked,
                     sp_entries: &mut self.session_picker_entries,
                     sp_loading,
                     sp_state: &mut self.session_picker_state,
@@ -2258,7 +2105,7 @@ impl AppView {
         if def.requires_confirmation {
             if action_id == ActionId::Quit && self.active_view == ActiveView::Welcome {
                 // Welcome fallback path: quit keys that reach the When::Always
-                // global layer (e.g. Ctrl+Q on the ZDR screen) must also quit
+                // global layer (for example Ctrl+Q on a welcome gate) must also quit
                 // on the first press — no session state to lose. Do not arm a
                 // pending action here.
                 return InputOutcome::Action(Action::Quit);
@@ -2328,25 +2175,17 @@ use crate::views::session_picker::{
 /// Context for welcome-view input handling.
 struct WelcomeInputCtx<'a> {
     registry: &'a ActionRegistry,
-    auth_state: &'a AuthState,
-    /// Folder-trust state. When `Pending` (and auth is `Done`), the trust
-    /// question intercepts keys and swallows the rest so no session starts.
+    /// Folder-trust state. When `Pending`, the trust question intercepts keys
+    /// and swallows the rest so no session starts.
     trust_state: &'a TrustState,
     /// Live working directory (tracks `Effect::SetWorkingDir`), used to pin
     /// the current repo's group to the top of the session picker.
     cwd: &'a std::path::Path,
-    /// `true` when the welcome screen is showing only to host a login flow
-    /// that was started from inside a session. Esc / `q` then cancel the
-    /// login and return to the session rather than quitting the app.
-    mid_session_login: bool,
-    auth_code_input: &'a mut LineEditor,
     new_worktree_dialog: &'a mut Option<NewWorktreeDialogState>,
     menu_index: &'a mut Option<usize>,
     menu_rects: &'a [ratatui::layout::Rect],
     menu_count: usize,
     import_banner_rect: Option<&'a ratatui::layout::Rect>,
-    auth_url_rect: Option<&'a ratatui::layout::Rect>,
-    auth_fallback_rect: Option<&'a ratatui::layout::Rect>,
     /// Hit-test rect for the welcome hero promo CTA `[label]` button
     /// (click → open the promo url).
     promo_cta_rect: Option<&'a ratatui::layout::Rect>,
@@ -2364,8 +2203,6 @@ struct WelcomeInputCtx<'a> {
     on_announcement: &'a mut bool,
     /// Whether the long announcement is currently expanded inline.
     announcement_expanded: &'a mut bool,
-    show_raw_url: &'a mut bool,
-    is_zdr_blocked: bool,
     sp_entries: &'a mut Option<Vec<SessionPickerEntry>>,
     /// Mirrors the render's `session_picker_loading` param: the spinner-only
     /// picker still owns input (Esc must dismiss it, not hit the hidden menu).
@@ -2434,10 +2271,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             NewWorktreeDialogOutcome::Unchanged => return InputOutcome::Unchanged,
         }
     }
-    if matches!(ctx.auth_state, AuthState::Done)
-        && !ctx.is_zdr_blocked
-        && matches!(ctx.trust_state, TrustState::Pending { .. })
-    {
+    if matches!(ctx.trust_state, TrustState::Pending { .. }) {
         if let Event::Key(key) = ev {
             if key.kind == KeyEventKind::Release {
                 return InputOutcome::Unchanged;
@@ -2475,7 +2309,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         }
         return InputOutcome::Unchanged;
     }
-    if (ctx.sp_entries.is_some() || ctx.sp_loading) && matches!(ctx.auth_state, AuthState::Done) {
+    if ctx.sp_entries.is_some() || ctx.sp_loading {
         use crate::views::picker::{PickerConfig, PickerOutcome, handle_picker_input};
         let source_filter = *ctx.sp_source_filter;
         let current_repo =
@@ -2677,15 +2511,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         if key.kind == KeyEventKind::Release {
             return InputOutcome::Unchanged;
         }
-        if ctx.is_zdr_blocked && matches!(ctx.auth_state, AuthState::Done) {
-            return handle_menu_shortcuts(
-                key,
-                ctx.menu_index,
-                &['l', 'q'],
-                dispatch_zdr_menu_action,
-            );
-        }
-        if matches!(ctx.auth_state, AuthState::Done) {
+        {
             // Home page input model (no input box): captured shortcuts first,
             // then menu navigation / Enter / Esc — any other key starts a new
             // session and is forwarded into its prompt.
@@ -2747,104 +2573,9 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             // modifiers, ...) starts a session and is forwarded to its prompt.
             return InputOutcome::ActionThenForward(Action::NewSession);
         }
-        match ctx.auth_state {
-            AuthState::Pending { .. } => {
-                if key!('q').matches(key)
-                    || key!('c', CONTROL).matches(key)
-                    || key!('d', CONTROL).matches(key)
-                {
-                    if ctx.mid_session_login {
-                        return InputOutcome::Action(Action::CancelLogin);
-                    }
-                    return InputOutcome::Action(Action::QuitConfirmed);
-                }
-                if key!('l').matches(key) || key!(Enter).matches(key) {
-                    return InputOutcome::Action(Action::Login);
-                }
-            }
-            AuthState::Authenticating { .. } if *ctx.show_raw_url => {
-                if key!('q', CONTROL).matches(key) || key!('c', CONTROL).matches(key) {
-                    return InputOutcome::Action(Action::HideRawAuthUrl);
-                }
-                return InputOutcome::Unchanged;
-            }
-            AuthState::Authenticating {
-                mode: AuthMode::Loopback,
-                ..
-            } => {
-                if key!(Esc).matches(key)
-                    || key!('q', CONTROL).matches(key)
-                    || key!('c', CONTROL).matches(key)
-                {
-                    if ctx.mid_session_login {
-                        return InputOutcome::Action(Action::CancelLogin);
-                    }
-                    return InputOutcome::Action(Action::QuitConfirmed);
-                }
-                if key!(Enter).matches(key) {
-                    let trimmed = ctx.auth_code_input.text().trim().to_string();
-                    if !trimmed.is_empty() {
-                        return InputOutcome::Action(Action::SubmitAuthCode(trimmed));
-                    }
-                    return InputOutcome::Unchanged;
-                }
-                let outcome = if crate::input::key::is_paste_key(key) {
-                    let Some(text) = crate::clipboard::system_clipboard_get() else {
-                        return InputOutcome::Unchanged;
-                    };
-                    ctx.auth_code_input.insert_paste(&text)
-                } else if key.modifiers.intersects(
-                    crossterm::event::KeyModifiers::CONTROL
-                        | crossterm::event::KeyModifiers::ALT
-                        | crossterm::event::KeyModifiers::SUPER,
-                ) && !crate::input::key::is_altgr(key.modifiers)
-                {
-                    return InputOutcome::Changed;
-                } else {
-                    ctx.auth_code_input
-                        .handle_key_with_insert_policy(key, |character| !character.is_control())
-                };
-                return match outcome {
-                    LineEditOutcome::TextChanged
-                    | LineEditOutcome::CursorChanged
-                    | LineEditOutcome::HandledNoChange => InputOutcome::Changed,
-                    LineEditOutcome::Unhandled => InputOutcome::Unchanged,
-                };
-            }
-            AuthState::Authenticating { .. } => {
-                if key!(Esc).matches(key)
-                    || key!('q', CONTROL).matches(key)
-                    || key!('c', CONTROL).matches(key)
-                {
-                    if ctx.mid_session_login {
-                        return InputOutcome::Action(Action::CancelLogin);
-                    }
-                    return InputOutcome::Action(Action::QuitConfirmed);
-                }
-            }
-            // The home-page (`Done`) key model returns from the branch above,
-            // so this match never sees `Done` — the arm exists only to keep
-            // the match exhaustive over `&AuthState`.
-            AuthState::Done => {}
-        }
     }
-    if let Event::Paste(text) = ev {
-        match ctx.auth_state {
-            AuthState::Done => {
-                if ctx.is_zdr_blocked {
-                    return InputOutcome::Unchanged;
-                }
-                return InputOutcome::ActionThenForward(Action::NewSession);
-            }
-            AuthState::Authenticating {
-                mode: AuthMode::Loopback,
-                ..
-            } => {
-                let _ = ctx.auth_code_input.insert_paste(text);
-                return InputOutcome::Changed;
-            }
-            _ => {}
-        }
+    if let Event::Paste(_) = ev {
+        return InputOutcome::ActionThenForward(Action::NewSession);
     }
     if matches!(ev, Event::Resize(_, _)) {
         return InputOutcome::Changed;
@@ -2859,12 +2590,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                         && mouse.row >= rect.y
                         && mouse.row < rect.y + rect.height
                     {
-                        if matches!(ctx.auth_state, AuthState::Pending { .. }) {
-                            return dispatch_pending_menu_action(i);
-                        }
-                        if ctx.is_zdr_blocked {
-                            return dispatch_zdr_menu_action(i);
-                        }
                         if ctx.has_claude_import
                             && i == 0
                             && mouse.column >= rect.x + rect.width.saturating_sub(4)
@@ -2887,20 +2612,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     *ctx.announcement_expanded = !*ctx.announcement_expanded;
                     return InputOutcome::Changed;
                 }
-                if let Some(rect) = ctx.auth_url_rect
-                    && matches!(ctx.auth_state, AuthState::Authenticating { .. })
-                    && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
-                {
-                    return InputOutcome::Action(Action::CopyAuthUrl);
-                }
-                if let Some(rect) = ctx.auth_fallback_rect
-                    && matches!(ctx.auth_state, AuthState::Authenticating { .. })
-                    && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
-                {
-                    return InputOutcome::Action(Action::ShowRawAuthUrl);
-                }
                 if let Some(rect) = ctx.import_banner_rect
-                    && matches!(ctx.auth_state, AuthState::Done)
                     && mouse.column >= rect.x
                     && mouse.column < rect.x + rect.width
                     && mouse.row >= rect.y
@@ -2940,11 +2652,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     *ctx.on_announcement = over_ann;
                     return InputOutcome::Changed;
                 }
-                if matches!(ctx.auth_state, AuthState::Authenticating { .. })
-                    && ctx.auth_url_rect.is_some()
-                {
-                    return InputOutcome::Changed;
-                }
             }
             _ => {}
         }
@@ -2956,28 +2663,6 @@ fn is_quit_signal(key: &crossterm::event::KeyEvent) -> bool {
     key!('c', CONTROL).matches(key) || key!('d', CONTROL).matches(key)
 }
 /// `shortcuts[i]` triggers `menu_dispatch(i)`.
-fn handle_menu_shortcuts(
-    key: &crossterm::event::KeyEvent,
-    menu_index: &mut Option<usize>,
-    shortcuts: &[char],
-    menu_dispatch: fn(usize) -> InputOutcome,
-) -> InputOutcome {
-    if is_quit_signal(key) {
-        return InputOutcome::Action(Action::Quit);
-    }
-    for (i, &ch) in shortcuts.iter().enumerate() {
-        if key.code == KeyCode::Char(ch) {
-            return menu_dispatch(i);
-        }
-    }
-    if key!(Enter).matches(key) {
-        return menu_dispatch(menu_index.unwrap_or(0));
-    }
-    if let Some(outcome) = handle_menu_nav(key, menu_index, shortcuts.len()) {
-        return outcome;
-    }
-    InputOutcome::Unchanged
-}
 fn handle_menu_nav(
     key: &crossterm::event::KeyEvent,
     index: &mut Option<usize>,
@@ -2999,24 +2684,6 @@ fn handle_menu_nav(
             Some(InputOutcome::Changed)
         }
         _ => None,
-    }
-}
-/// Dispatch an action for a welcome menu item when not yet authenticated.
-/// Menu layout: 0 = Login, 1 = Quit.
-fn dispatch_pending_menu_action(index: usize) -> InputOutcome {
-    match index {
-        0 => InputOutcome::Action(Action::Login),
-        1 => InputOutcome::Action(Action::Quit),
-        _ => InputOutcome::Unchanged,
-    }
-}
-/// Dispatch an action for a welcome menu item when ZDR-blocked.
-/// Menu layout: 0 = Switch account, 1 = Quit.
-fn dispatch_zdr_menu_action(index: usize) -> InputOutcome {
-    match index {
-        0 => InputOutcome::Action(Action::SwitchAccount),
-        1 => InputOutcome::Action(Action::Quit),
-        _ => InputOutcome::Unchanged,
     }
 }
 /// Dispatch an action for a welcome menu item by index.
@@ -3212,44 +2879,6 @@ impl AppView {
             }
             return;
         }
-        if self.welcome_on_auth_url
-            && !matches!(
-                (&self.active_view, &self.auth_state),
-                (ActiveView::Welcome, AuthState::Authenticating { .. })
-            )
-        {
-            self.welcome_on_auth_url = false;
-            if crate::terminal::terminal_context()
-                .hyperlink_capabilities()
-                .osc22_cursor
-            {
-                grow_shell::util::with_locked_stderr(|stderr| {
-                    let _ = crossterm::execute!(stderr, crate::terminal::SetDefaultCursor);
-                });
-            }
-        }
-        let want_mouse_off = self.auth_show_raw_url
-            && !self.screen_mode.is_minimal()
-            && matches!(self.active_view, ActiveView::Welcome)
-            && matches!(self.auth_state, AuthState::Authenticating { .. });
-        if want_mouse_off && !self.auth_mouse_disabled {
-            self.auth_mouse_disabled = true;
-            grow_shell::util::with_locked_stderr(|stderr| {
-                let _ = crossterm::execute!(stderr, crossterm::event::DisableMouseCapture);
-            });
-            #[cfg(windows)]
-            super::win_native_selection::enable_native_selection();
-            super::MOUSE_CAPTURE_ENABLED.store(false, std::sync::atomic::Ordering::Release);
-        } else if !want_mouse_off && self.auth_mouse_disabled {
-            self.auth_mouse_disabled = false;
-            grow_shell::util::with_locked_stderr(|stderr| {
-                let _ = crossterm::execute!(stderr, crossterm::event::EnableMouseCapture);
-            });
-            super::MOUSE_CAPTURE_ENABLED.store(true, std::sync::atomic::Ordering::Release);
-            for agent in self.agents.values_mut() {
-                agent.set_sticky_toast_recursive(None);
-            }
-        }
         self.maybe_trigger_small_screen_tip();
         self.maybe_trigger_ssh_wrap_tip();
         let compact = self.appearance.prompt.compact;
@@ -3261,7 +2890,6 @@ impl AppView {
                 layout_cfg.eff_outer_vpad(compact),
             )
         };
-        let zdr_blocked_for_draw = self.is_zdr_blocked();
         let esc_owned_before_agent = self.esc_owned_before_agent();
         let scroll_debug_panel = self.scroll_debug_panel();
         let dev_fps_rows = self.dev_fps_rows();
@@ -3349,22 +2977,14 @@ impl AppView {
                             .or(self.announcement.as_ref());
                         let welcome_params = crate::views::welcome::WelcomeRenderParams {
                             cwd: &self.cwd,
-                            auth_state: &self.auth_state,
                             trust_state: &self.trust_state,
-                            login_label: self.login_label.as_deref(),
-                            auth_code_input: self.auth_code_input.text(),
-                            auth_code_cursor_byte: self.auth_code_input.cursor_byte(),
-                            clipboard_delivery: self.auth_clipboard_delivery,
-                            show_raw_url: self.auth_show_raw_url,
                             announcement: hero_announcement,
                             tip,
                             model_name: &model_name,
                             flags: &flags_vec,
                             selected: self.welcome_menu_index,
-                            team_name: self.team_name.as_deref(),
                             has_claude_import: self.has_claude_import,
                             mouse_pos: self.last_mouse_pos,
-                            is_zdr_blocked: zdr_blocked_for_draw,
                             session_picker: self.session_picker_entries.as_deref(),
                             session_picker_loading:
                                 crate::views::session_picker::loading_spinner_active(
@@ -3395,13 +3015,10 @@ impl AppView {
                             view_area,
                             f.buffer_mut(),
                             &welcome_params,
-                            &mut self.welcome_prompt,
                             &mut self.session_picker_state,
                         );
                         self.welcome_menu_rects = result.menu_rects;
                         self.welcome_import_banner_rect = result.import_banner_rect;
-                        self.welcome_auth_url_rect = result.auth_url_rect;
-                        self.welcome_auth_fallback_rect = result.auth_fallback_rect;
                         self.welcome_promo_cta_rect = result.promo_cta_rect;
                         if let Some((ref msg, _)) = self.welcome_toast {
                             paint_welcome_toast(f.buffer_mut(), view_area, msg);
@@ -3444,38 +3061,7 @@ impl AppView {
                         // (and the gate screens never report a cursor), so the
                         // terminal cursor stays hidden here.
                         let cursor: Option<(u16, u16)> = None;
-                        let on_url = self.welcome_auth_url_rect.as_ref().is_some_and(|r| {
-                            matches!(self.auth_state, AuthState::Authenticating { .. })
-                                && self.last_mouse_pos.is_some_and(|(mx, my)| {
-                                    mx >= r.x
-                                        && mx < r.x + r.width
-                                        && my >= r.y
-                                        && my < r.y + r.height
-                                })
-                        });
-                        let mut post_flush = result.post_flush_escapes;
-                        if crate::terminal::terminal_context()
-                            .hyperlink_capabilities()
-                            .osc22_cursor
-                            && on_url != self.welcome_on_auth_url
-                        {
-                            use crossterm::Command;
-                            let mut buf = String::new();
-                            if on_url {
-                                let _ = crate::terminal::SetPointerCursor.write_ansi(&mut buf);
-                            } else {
-                                let _ = crate::terminal::SetDefaultCursor.write_ansi(&mut buf);
-                            }
-                            match post_flush.as_mut() {
-                                Some(existing) => existing.append_plain(&buf),
-                                None => {
-                                    post_flush =
-                                        Some(crate::terminal::overlay::PostFlush::plain(buf));
-                                }
-                            }
-                        }
-                        self.welcome_on_auth_url = on_url;
-                        return (cursor, post_flush);
+                        return (cursor, result.post_flush_escapes);
                     }
                     ActiveView::Agent(id) => {
                         let overlay_focused = false;
@@ -4123,8 +3709,6 @@ impl AppView {
             needs_redraw |= agent.mermaid_tick();
         }
         if let Some(commands) = bootstrap_commands_update {
-            self.welcome_prompt
-                .sync_acp_commands(&commands, None, &self.models);
             if let Some(d) = self.dashboard.as_mut() {
                 d.dispatch.sync_acp_commands(&commands, None, &self.models);
             }
@@ -4533,7 +4117,6 @@ pub(crate) mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         AppView {
             active_view: ActiveView::Welcome,
-            auth_return_view: None,
             agents: indexmap::IndexMap::new(),
             next_agent_id: 0,
             models: ModelState::default(),
@@ -4590,31 +4173,14 @@ pub(crate) mod tests {
             resume_local_miss: None,
             agent_override: None,
             bootstrap_acp_commands: Vec::new(),
-            auth_methods: Vec::new(),
-            auth_state: AuthState::Done,
             trust_state: TrustState::Done,
-            login_label: None,
-            login_method_id: None,
-            auth_start_mode: AuthMode::Pending,
-            auth_code_input: LineEditor::default(),
-            next_auth_request_seq: 1,
-            auth_url_poll_handle: None,
             deferred_startup: Default::default(),
-            auth_use_oauth: false,
-            auth_clipboard_delivery: None,
-            auth_clipboard_feedback_generation: 0,
-            team_id: None,
-            team_name: None,
-            is_zdr: false,
-            team_role: None,
             show_tips: None,
             auto_update: None,
             ask_user_question_timeout_enabled: None,
-            zdr_access_enabled: false,
             bundle_state: BundleState::default(),
             scroll_debug_hud: crate::views::scroll_debug_hud::ScrollDebugHud::new(),
             fps_hud: crate::views::fps_hud::FpsHud::new(),
-            welcome_prompt: crate::views::prompt_widget::PromptWidget::new(),
             slash_mru: std::rc::Rc::new(std::cell::RefCell::new(
                 crate::slash::mru::SlashMru::new_in_memory(),
             )),
@@ -4627,15 +4193,10 @@ pub(crate) mod tests {
             last_mouse_pos: None,
             last_scroll_pos: None,
             last_cache_evict_at: None,
-            welcome_auth_url_rect: None,
-            welcome_on_auth_url: false,
             welcome_announcement: WelcomeAnnouncementState::default(),
-            welcome_auth_fallback_rect: None,
             welcome_promo_cta_rect: None,
             welcome_toast: None,
             welcome_on_promo_cta: false,
-            auth_show_raw_url: false,
-            auth_mouse_disabled: false,
             session_picker_entries: None,
             session_picker_loading: false,
             session_picker_state: crate::views::picker::PickerState::with_mode(
@@ -4656,7 +4217,6 @@ pub(crate) mod tests {
             welcome_tick: 0,
             welcome_shimmer_frame: 0,
             startup_warnings: Vec::new(),
-            is_api_key_auth: false,
             pending_update_version: None,
             foreign_resume_launch_generation: 0,
             foreign_resume_launch: None,
@@ -6475,27 +6035,6 @@ pub(crate) mod tests {
         ));
     }
     #[test]
-    fn welcome_pending_ctrl_c_quits_instantly() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Pending { error: None };
-        let outcome = app.handle_input(&ctrl_c());
-        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
-        assert!(app.pending_action.is_none());
-    }
-    #[test]
-    fn welcome_authenticating_ctrl_c_quits_instantly() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Authenticating {
-            request_seq: 1,
-            handle: None,
-            auth_url: None,
-            mode: AuthMode::Command,
-        };
-        let outcome = app.handle_input(&ctrl_c());
-        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
-        assert!(app.pending_action.is_none());
-    }
-    #[test]
     fn page_keys_from_prompt_page_conversation_without_mutating_prompt() {
         let mut app = test_app_with_agent();
         let ActiveView::Agent(id) = app.active_view else {
@@ -7795,30 +7334,8 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    fn welcome_pending_l_triggers_login() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Pending { error: None };
-        let outcome = app.handle_input(&key_event(KeyCode::Char('l'), KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Action(Action::Login)));
-    }
-    #[test]
-    fn welcome_pending_enter_triggers_login() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Pending { error: None };
-        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Action(Action::Login)));
-    }
-    #[test]
-    fn welcome_pending_n_is_unchanged() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Pending { error: None };
-        let outcome = app.handle_input(&key_event(KeyCode::Char('n'), KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Unchanged));
-    }
-    #[test]
     fn welcome_done_n_starts_session() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         let outcome = app.handle_input(&key_event(KeyCode::Char('n'), KeyModifiers::NONE));
         assert!(matches!(
             outcome,
@@ -7828,7 +7345,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_ctrl_backslash_opens_dashboard_without_starting_session() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         let outcome = app.handle_input(&key_event(KeyCode::Char('\\'), KeyModifiers::CONTROL));
         assert!(matches!(
             outcome,
@@ -7841,7 +7357,6 @@ pub(crate) mod tests {
         // Shift+Tab is not captured by the home page, so it starts a session
         // and is forwarded into its prompt (it switches panes there).
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         for shortcut in crate::input::key::shift_tab_keys() {
             let outcome = app.handle_input(&key_event(shortcut.code, shortcut.modifiers));
             assert!(matches!(
@@ -7853,7 +7368,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_backspace_starts_session_and_forwards() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         let outcome = app.handle_input(&key_event(KeyCode::Backspace, KeyModifiers::NONE));
         assert!(matches!(
             outcome,
@@ -7863,7 +7377,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_done_enter_without_selection_starts_session() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Action(Action::NewSession)));
     }
@@ -7871,7 +7384,6 @@ pub(crate) mod tests {
     fn welcome_done_enter_with_selection_dispatches_menu_action() {
         // No import row: 0 = New worktree, 1 = Resume session, 2 = Quit.
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         app.welcome_menu_index = Some(0);
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(
@@ -7902,7 +7414,6 @@ pub(crate) mod tests {
     fn welcome_done_enter_with_import_row_dispatches_menu_action() {
         // With the import row: 0 = Import, 1 = New worktree, 2 = Resume, 3 = Quit.
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         app.has_claude_import = true;
         app.welcome_menu_index = Some(0);
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
@@ -7933,7 +7444,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_esc_clears_menu_selection() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         app.welcome_menu_index = Some(1);
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Changed));
@@ -7945,7 +7455,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_arrows_cycle_menu_selection() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         let outcome = app.handle_input(&key_event(KeyCode::Down, KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(app.welcome_menu_index, Some(0));
@@ -7961,7 +7470,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_done_ctrl_s_opens_session_picker() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         let outcome = app.handle_input(&key_event(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert!(matches!(
             outcome,
@@ -7971,7 +7479,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_done_ctrl_i_opens_import_modal() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         app.has_claude_import = true;
         let outcome = app.handle_input(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL));
         assert!(matches!(
@@ -7982,7 +7489,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_done_ctrl_shift_i_dismisses_import() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         app.has_claude_import = true;
         let outcome = app.handle_input(&key_event(
             KeyCode::Char('I'),
@@ -7996,7 +7502,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_mouse_click_menu_row_dispatches_action() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         // 3 rows (no import) at y = 10..13, x = 0..40.
         app.welcome_menu_rects = vec![
             ratatui::layout::Rect::new(0, 10, 40, 1),
@@ -8016,7 +7521,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_mouse_click_import_row_dismiss_region() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         app.has_claude_import = true;
         // Import row spans x 0..40; the `[x]` affordance is the last 3 cols.
         app.welcome_menu_rects = vec![ratatui::layout::Rect::new(0, 10, 40, 1)];
@@ -8037,7 +7541,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_mouse_click_import_banner_opens_import() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         app.welcome_import_banner_rect = Some(ratatui::layout::Rect::new(0, 5, 40, 1));
         let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 10, 5));
         assert!(matches!(
@@ -8048,7 +7551,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_done_ctrl_w_opens_new_worktree_dialog() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         app.cwd_has_git_ancestor = true;
         let outcome = app.handle_input(&key_event(KeyCode::Char('w'), KeyModifiers::CONTROL));
         assert!(matches!(
@@ -8059,7 +7561,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_ctrl_v_creates_normal_session() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         let outcome = app.handle_input(&key_event(KeyCode::Char('v'), KeyModifiers::CONTROL));
         assert!(matches!(
             outcome,
@@ -8069,7 +7570,6 @@ pub(crate) mod tests {
     #[test]
     fn welcome_cmd_v_creates_normal_session() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         let outcome = app.handle_input(&key_event(KeyCode::Char('v'), KeyModifiers::SUPER));
         assert!(matches!(
             outcome,
@@ -8079,7 +7579,6 @@ pub(crate) mod tests {
     #[test]
     fn worktree_dialog_enter_creates_worktree_session() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         app.new_worktree_dialog = Some(NewWorktreeDialogState::new());
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(
@@ -8095,7 +7594,6 @@ pub(crate) mod tests {
     #[test]
     fn worktree_dialog_modified_enter_is_ignored() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         app.new_worktree_dialog = Some(NewWorktreeDialogState::new());
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::CONTROL));
         assert!(matches!(outcome, InputOutcome::Unchanged));
@@ -8107,7 +7605,6 @@ pub(crate) mod tests {
     #[test]
     fn worktree_dialog_enter_threads_label() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         app.new_worktree_dialog = Some(NewWorktreeDialogState::new());
         for c in "wolves".chars() {
             app.handle_input(&key_event(KeyCode::Char(c), KeyModifiers::NONE));
@@ -8126,7 +7623,6 @@ pub(crate) mod tests {
     #[test]
     fn worktree_dialog_esc_closes() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         app.new_worktree_dialog = Some(NewWorktreeDialogState::new());
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Changed));
@@ -8135,7 +7631,6 @@ pub(crate) mod tests {
     #[test]
     fn worktree_dialog_typing_updates_label() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         app.new_worktree_dialog = Some(NewWorktreeDialogState::new());
         let outcome = app.handle_input(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Changed));
@@ -8147,7 +7642,6 @@ pub(crate) mod tests {
     #[test]
     fn worktree_dialog_backspace_removes_char() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         let mut dialog = NewWorktreeDialogState::new();
         dialog.set_label("test");
         app.new_worktree_dialog = Some(dialog);
@@ -8158,7 +7652,6 @@ pub(crate) mod tests {
     #[test]
     fn worktree_dialog_enforces_byte_cap_for_typing_and_middle_paste() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         let mut dialog = NewWorktreeDialogState::new();
         dialog.set_label("a".repeat(98));
         let _ = dialog.set_cursor_byte(1);
@@ -8178,9 +7671,8 @@ pub(crate) mod tests {
         assert_eq!(app.new_worktree_dialog.as_ref().unwrap().label().len(), 99);
     }
     #[test]
-    fn worktree_dialog_paste_is_scoped_away_from_welcome_prompt() {
+    fn worktree_dialog_paste_stays_scoped_to_dialog() {
         let mut app = test_app();
-        app.auth_state = AuthState::Done;
         let mut dialog = NewWorktreeDialogState::new();
         dialog.set_label("ab");
         let _ = dialog.set_cursor_byte(1);
@@ -8188,231 +7680,6 @@ pub(crate) mod tests {
         let outcome = app.handle_input(&Event::Paste("中".to_owned()));
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(app.new_worktree_dialog.as_ref().unwrap().label(), "a中b");
-        assert!(app.welcome_prompt.text().is_empty());
-    }
-    #[test]
-    fn authenticating_loopback_esc_quits() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Authenticating {
-            request_seq: 1,
-            handle: None,
-            auth_url: None,
-            mode: AuthMode::Loopback,
-        };
-        let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
-    }
-    #[test]
-    fn authenticating_command_esc_quits() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Authenticating {
-            request_seq: 1,
-            handle: None,
-            auth_url: None,
-            mode: AuthMode::Command,
-        };
-        let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
-    }
-    /// Regression (user report): 'q' must type into the auth-code input,
-    /// not quit.
-    #[test]
-    fn authenticating_loopback_q_types_into_code_input() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Authenticating {
-            request_seq: 1,
-            handle: None,
-            auth_url: None,
-            mode: AuthMode::Loopback,
-        };
-        let outcome = app.handle_input(&key_event(KeyCode::Char('q'), KeyModifiers::NONE));
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "typing 'q' must edit the auth code input, got {outcome:?}"
-        );
-        assert_eq!(app.auth_code_input.text(), "q");
-    }
-    /// Users reflex-type the displayed device code; bare 'q' must not abort.
-    #[test]
-    fn authenticating_device_and_command_q_does_not_quit() {
-        for mode in [AuthMode::Device, AuthMode::Command] {
-            let mut app = test_app();
-            app.auth_state = AuthState::Authenticating {
-                request_seq: 1,
-                handle: None,
-                auth_url: None,
-                mode,
-            };
-            let outcome = app.handle_input(&key_event(KeyCode::Char('q'), KeyModifiers::NONE));
-            assert!(
-                matches!(outcome, InputOutcome::Unchanged),
-                "bare 'q' must not quit during {mode:?} auth, got {outcome:?}"
-            );
-        }
-    }
-    /// Advertised cancel keys must survive the bare-'q' removal.
-    #[test]
-    fn authenticating_advertised_cancel_keys_still_quit() {
-        for mode in [AuthMode::Loopback, AuthMode::Device, AuthMode::Command] {
-            for (code, mods) in [
-                (KeyCode::Char('q'), KeyModifiers::CONTROL),
-                (KeyCode::Char('c'), KeyModifiers::CONTROL),
-                (KeyCode::Esc, KeyModifiers::NONE),
-            ] {
-                let mut app = test_app();
-                app.auth_state = AuthState::Authenticating {
-                    request_seq: 1,
-                    handle: None,
-                    auth_url: None,
-                    mode,
-                };
-                let outcome = app.handle_input(&key_event(code, mods));
-                assert!(
-                    matches!(outcome, InputOutcome::Action(Action::Quit)),
-                    "{code:?}+{mods:?} must still quit during {mode:?} auth, got {outcome:?}"
-                );
-            }
-        }
-    }
-    #[test]
-    fn authenticating_loopback_char_mutates_input() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Authenticating {
-            request_seq: 1,
-            handle: None,
-            auth_url: None,
-            mode: AuthMode::Loopback,
-        };
-        let outcome = app.handle_input(&key_event(KeyCode::Char('a'), KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert_eq!(app.auth_code_input.text(), "a");
-    }
-    #[test]
-    fn authenticating_loopback_readline_control_chords_are_ignored() {
-        for code in [KeyCode::Char('u'), KeyCode::Char('d')] {
-            let mut app = test_app();
-            app.auth_state = AuthState::Authenticating {
-                request_seq: 1,
-                handle: None,
-                auth_url: None,
-                mode: AuthMode::Loopback,
-            };
-            app.auth_code_input.set_text("token");
-            let outcome = app.handle_input(&key_event(code, KeyModifiers::CONTROL));
-            assert!(matches!(outcome, InputOutcome::Changed));
-            assert_eq!(app.auth_code_input.text(), "token");
-        }
-    }
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn authenticating_loopback_altgr_char_mutates_input() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Authenticating {
-            request_seq: 1,
-            handle: None,
-            auth_url: None,
-            mode: AuthMode::Loopback,
-        };
-        let outcome = app.handle_input(&key_event(
-            KeyCode::Char('@'),
-            KeyModifiers::CONTROL | KeyModifiers::ALT,
-        ));
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert_eq!(app.auth_code_input.text(), "@");
-    }
-    #[test]
-    fn authenticating_loopback_backspace_removes_char() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Authenticating {
-            request_seq: 1,
-            handle: None,
-            auth_url: None,
-            mode: AuthMode::Loopback,
-        };
-        app.auth_code_input.set_text("ab");
-        let outcome = app.handle_input(&key_event(KeyCode::Backspace, KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert_eq!(app.auth_code_input.text(), "a");
-    }
-    #[test]
-    fn authenticating_loopback_paste_appends_text() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Authenticating {
-            request_seq: 1,
-            handle: None,
-            auth_url: None,
-            mode: AuthMode::Loopback,
-        };
-        app.auth_code_input.set_text("tok");
-        let outcome = app.handle_input(&Event::Paste("en_value".to_string()));
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert_eq!(app.auth_code_input.text(), "token_value");
-    }
-    #[test]
-    fn authenticating_loopback_cursor_edit_and_paste_stay_scoped() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Authenticating {
-            request_seq: 1,
-            handle: None,
-            auth_url: None,
-            mode: AuthMode::Loopback,
-        };
-        app.auth_code_input.set_text("ab");
-        let _ = app.handle_input(&key_event(KeyCode::Left, KeyModifiers::NONE));
-        let _ = app.handle_input(&Event::Paste("中\r\n".to_owned()));
-        assert_eq!(app.auth_code_input.text(), "a中b");
-        assert!(app.welcome_prompt.text().is_empty());
-        let _ = app.handle_input(&key_event(KeyCode::Delete, KeyModifiers::NONE));
-        assert_eq!(app.auth_code_input.text(), "a中");
-    }
-    #[test]
-    fn authenticating_loopback_uses_canonical_super_v_paste() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Authenticating {
-            request_seq: 1,
-            handle: None,
-            auth_url: None,
-            mode: AuthMode::Loopback,
-        };
-        crate::clipboard::set_clipboard_probe_hook(
-            crate::clipboard::ClipboardProbeHook::no_raster(Some("secret\r\n")),
-        );
-        let outcome = app.handle_input(&key_event(KeyCode::Char('v'), KeyModifiers::SUPER));
-        crate::clipboard::clear_clipboard_probe_hook();
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert_eq!(app.auth_code_input.text(), "secret");
-        assert!(app.welcome_prompt.text().is_empty());
-    }
-    #[test]
-    fn authenticating_loopback_enter_empty_is_noop() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Authenticating {
-            request_seq: 1,
-            handle: None,
-            auth_url: None,
-            mode: AuthMode::Loopback,
-        };
-        app.auth_code_input.set_text("   ");
-        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Unchanged));
-    }
-    #[test]
-    fn authenticating_loopback_enter_with_content_submits() {
-        let mut app = test_app();
-        app.auth_state = AuthState::Authenticating {
-            request_seq: 1,
-            handle: None,
-            auth_url: None,
-            mode: AuthMode::Loopback,
-        };
-        app.auth_code_input.set_text(" token123 ");
-        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-        match outcome {
-            InputOutcome::Action(Action::SubmitAuthCode(code)) => {
-                assert_eq!(code, "token123");
-            }
-            other => panic!("expected SubmitAuthCode, got {:?}", other),
-        }
     }
     #[test]
     fn moved_with_button_held_promotes_pending_scrollback_drag() {

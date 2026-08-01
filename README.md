@@ -13,7 +13,7 @@ Grow 不是 xAI 官方产品，也不内置 Grok 模型、推理端点或推理�
 |---|---|---|
 | 产品身份 | `grok`、`GROK_HOME`、`~/.grok`、`xai-grok-*` | `grow`、`GROW_HOME`、`~/.grow`、`grow-*` |
 | 模型来源 | 带有产品内置模型和远端模型目录 | 仅加载用户声明的 `[provider]` 模型，不提供内置目录 |
-| 推理凭据 | 可依赖产品登录态 | 每个 provider 自带 API key、环境变量、auth helper 或显式 OAuth；不存在全局内置推理登录态 |
+| 推理凭据 | 可依赖产品登录态 | 仅支持用户提供的 API key、环境变量或本地密钥 helper；不存在 OAuth 或全局推理登录态 |
 | 默认模型 | 产品默认值 | `[models].default` 只为新 session 提供初始值 |
 | session 恢复 | 受产品模型状态影响 | 打开已有 session 时恢复该 session 上次退出时的 Agent 和模型 |
 | 模型切换 | slash command / 旧式选择流程 | `Ctrl+X` 后按 `M` 打开已配置模型选单，同时保留 `/model` |
@@ -117,7 +117,8 @@ Fork 后删除的不是表面入口，而是整条产品依赖链：托管模型
 
 ## 网络边界
 
-Grow 没有内置的 xAI/Grok 服务端点、OAuth issuer 或 OAuth client。未在本地显式开启
+Grow 没有内置的 xAI/Grok 服务端点，也不实现 OAuth、OIDC、设备登录或 refresh token
+生命周期。未在本地显式开启
 `[cli].auto_update = true` 时，也不会在后台检查 GitHub Release 更新。
 
 运行时连接分为三类：
@@ -217,8 +218,12 @@ thinking/output-config 字段。`Ctrl+X E`、`/effort` 和 `/model` 共用同一
 模型声明档位中的最低值。没有声明 `reasoning_efforts` 的 BYOK 模型不会被 Grow 猜测支持，
 此时 Effort 选单只会显示配置提示。
 
-OAuth 是 provider 的另一种可选凭据来源，不是 Grow 的全局登录态。模型仍然必须显式属于
-该 provider，也不会因为登录成功而自动添加模型：
+Grow 的认证边界是长期稳定的 BYOK-only：每个模型的凭据只能来自 `api_key`、`env_key`
+或返回用户自有 API key 的本地 helper。Grow 不提供 `login/logout`，不打开授权页面，不保存
+refresh token，也不替任何企业维护 OAuth/OIDC 会话。需要轮换密钥时，由环境、配置或 helper
+在 Grow 外部完成。
+
+本地 helper 只是读取 BYOK 的另一种方式：
 
 ```toml
 [models]
@@ -229,20 +234,19 @@ api_backend = "responses"
 
 [provider.example.options]
 base_url = "https://api.example.com/v1"
+auth_provider = "company-secret-store"
 
-[provider.example.options.auth]
-type = "oauth"
-issuer = "https://auth.example.com"
-client_id = "public-client-id"
-scopes = ["openid", "profile", "offline_access"]
+[auth_provider.company-secret-store]
+command = "/usr/local/bin/read-company-llm-key"
+args = ["--format", "json"]
+token_ttl_secs = 3600
 
 [provider.example.models.model-a]
 name = "Model A"
 ```
 
-使用 `grow login example` 登录，使用 `grow logout example` 只清除这个 provider 的凭据。
-只有一个 OAuth provider 时可以省略名称。API key / `env_key` 仍优先于 OAuth，因此 BYOK
-保持默认且无需登录。
+helper stdout 可以是裸 key，或 `{ "access_token": "...", "expires_in": 3600 }`。Grow 只在
+内存中缓存结果；JSON 不接受 refresh token、issuer 或 client metadata。
 
 ## 插件市场启动源
 

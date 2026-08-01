@@ -1,296 +1,55 @@
+//! ACP representation of Grow's BYOK-only credential boundary.
+//!
+//! Grow advertises one non-interactive method. The method selects credentials
+//! already supplied by the user through provider config, environment variables,
+//! or a local key helper; it never starts a login flow.
+
 use agent_client_protocol as acp;
 
 use crate::agent::config::ModelEntry;
-use crate::auth::PreferredAuthMethod;
 
-/// Shared, live handle to the agent's current ACP auth method id.
-///
-/// `Arc` so a clone can cross the per-session-thread boundary at spawn; the
-/// `ArcSwapOption` interior lets the agent's `authenticate` handler publish a
-/// new method that every running session's per-turn auth gate observes on its
-/// next turn -- no re-spawn. `None` until the first `authenticate`. Auth is
-/// process-global (one user, one `AuthManager`), so all sessions sharing one
-/// cell is correct.
 pub(crate) type SharedAuthMethodId = std::sync::Arc<arc_swap::ArcSwapOption<acp::AuthMethodId>>;
 
-/// Construct a [`SharedAuthMethodId`]. `None` is the pre-`authenticate` state.
 pub(crate) fn new_shared_auth_method_id(initial: Option<acp::AuthMethodId>) -> SharedAuthMethodId {
     std::sync::Arc::new(arc_swap::ArcSwapOption::new(
         initial.map(std::sync::Arc::new),
     ))
 }
 
-/// Env var that, when set, advertises `provider.api_key` as a viable auth method.
-///
-/// Kept as a constant so test code and the production check stay in sync.
 pub const GROW_API_KEY_ENV_VAR: &str = "GROW_API_KEY";
 
-/// Read the API key from the environment.
 pub fn read_provider_api_key_env() -> Result<String, std::env::VarError> {
     std::env::var(GROW_API_KEY_ENV_VAR)
 }
 
-/// Returns `true` if the generic API-key override is set.
 pub fn has_provider_api_key_env() -> bool {
     read_provider_api_key_env().is_ok()
 }
 
-/// Whether `provider.api_key` should be advertised (and pushed FIRST) when building
-/// the `auth_methods` list at `initialize()` time.
-///
-/// Regression: `provider.api_key` must stay first when only per-model credentials
-/// exist (no global `GROW_API_KEY`). Deferring it made BYOK users hit the login
-/// screen because the pager uses `auth_methods.first()` for startup metadata.
-///
-/// [`build_auth_methods`] consumes this predicate and pins the ordering;
-/// its tests catch call-site and predicate regressions.
-///
-/// A configured provider is sufficient: keyless local endpoints must not be
-/// sent through product login. Static credentials remain a valid signal for
-/// callers that construct a catalog entry directly.
-///
-/// `disable_api_key_auth` (`[auth] disable_api_key_auth` /
-/// `GROW_DISABLE_API_KEY_AUTH`) is the admin kill switch: when true the
-/// method is never advertised, regardless of available credentials, so
-/// `GROW_API_KEY` can't bypass a deployment's forced IdP login.
-pub fn should_advertise_provider_api_key<'a, I>(disable_api_key_auth: bool, models: I) -> bool
+/// A configured model is enough to advertise BYOK: local endpoints may be
+/// intentionally keyless and still must not be redirected to a login UI.
+pub fn should_advertise_provider_api_key<'a, I>(models: I) -> bool
 where
     I: IntoIterator<Item = &'a ModelEntry>,
 {
-    let mut has_configured_provider = false;
-    let mut has_static_credential = false;
-    for model in models {
-        has_configured_provider = true;
-        has_static_credential |= model.has_own_credentials();
-    }
-    has_configured_provider
-        || (!disable_api_key_auth && (has_provider_api_key_env() || has_static_credential))
+    models.into_iter().next().is_some()
 }
 
-/// Inputs to [`build_auth_methods`].
-///
-/// Booleans are computed by the caller (`MvpAgent::initialize()`) because they
-/// depend on async side effects (token refresh) and shared mutable state
-/// (`AuthManager`). The list-construction logic itself is pure so it can be
-/// unit-tested without any of that machinery.
-pub struct AuthMethodsBuildInputs<'a> {
-    /// True if `provider.api_key` should be advertised AT ALL. Caller computes via
-    /// [`should_advertise_provider_api_key`]. When `preferred_method` is `Oidc`,
-    /// this is ignored (API key is never advertised under that pin).
-    pub has_external_api_key: bool,
-    /// True if a cached session token is available (either present at startup
-    /// or recovered via silent refresh).
-    pub has_cached_token: bool,
-    /// True if enterprise OIDC is configured. Mutually exclusive with the
-    /// default `provider.oauth` method.
-    pub has_enterprise_oidc: bool,
-    /// Required when `has_enterprise_oidc` is true; ignored otherwise.
-    pub enterprise_oidc_issuer: Option<&'a str>,
-    /// Optional display label for the login method (`provider.oauth` or `oidc`).
-    pub login_label: Option<&'a str>,
-    /// True if `auth.auth_provider_command` is configured (sets
-    /// `meta.external_provider = true` on the `provider.oauth` method).
-    pub has_auth_provider_command: bool,
-    /// Config pin (`[auth] preferred_method`). `None` keeps multi-method
-    /// fallthrough; `Some` is fail-closed (only that method family).
-    pub preferred_method: Option<PreferredAuthMethod>,
-}
-
-/// Output of [`build_auth_methods`].
 pub struct BuiltAuthMethods {
-    /// Auth methods in advertised order. ORDER IS THE CONTRACT: the pager's
-    /// `startup_auth_metadata()` reads `methods.first()` to decide whether
-    /// interactive login is needed.
     pub methods: Vec<acp::AuthMethod>,
-    /// The default `auth_method_id` to install on the agent. When unpinned,
-    /// `cached_token` wins over `provider.api_key` when both are present. When
-    /// pinned, only the preferred method may appear; `None` means unavailable
-    /// (fail auth — no cross-method fallthrough).
-    pub default_auth_method_id: Option<acp::AuthMethodId>,
+    pub default_auth_method_id: acp::AuthMethodId,
 }
 
-/// Build the `auth_methods` list and default `auth_method_id` from
-/// pre-computed inputs.
-///
-/// REGRESSION GUARD: when unpinned and
-/// `has_external_api_key` is true, the **first** entry MUST be `provider.api_key`.
-/// A prior change deferred it to the END for per-model credentials, which made
-/// the pager send per-model-key users to the login screen. Unit tests lock this.
-///
-/// Unpinned ordering (when each method is enabled):
-/// 1. `provider.api_key`     (if `has_external_api_key`)
-/// 2. `cached_token`    (if `has_cached_token`)
-/// 3. exactly one of:
-///    - `oidc`          (if `has_enterprise_oidc`)
-///    - `provider.oauth`      (otherwise)
-///
-/// Unpinned `default_auth_method_id`:
-/// - `cached_token` if `has_cached_token`
-/// - `provider.api_key`  else if `has_external_api_key`
-/// - `None`         otherwise
-///
-/// Pinned (`preferred_method`):
-/// - `ApiKey`: only `provider.api_key` if available; else empty list + `None` (fail).
-/// - `Oidc`: `cached_token` (if any) + interactive login; never `provider.api_key`.
-///   Default is `cached_token` when present, else `None` (interactive).
-pub fn build_auth_methods(inputs: AuthMethodsBuildInputs<'_>) -> BuiltAuthMethods {
-    let AuthMethodsBuildInputs {
-        has_external_api_key,
-        has_cached_token,
-        has_enterprise_oidc,
-        enterprise_oidc_issuer,
-        login_label,
-        has_auth_provider_command,
-        preferred_method,
-    } = inputs;
-
-    match preferred_method {
-        Some(PreferredAuthMethod::ApiKey) => build_pinned_api_key(has_external_api_key),
-        Some(PreferredAuthMethod::Oidc) => build_pinned_oidc(
-            has_cached_token,
-            has_enterprise_oidc,
-            enterprise_oidc_issuer,
-            login_label,
-            has_auth_provider_command,
-        ),
-        None => build_unpinned(
-            has_external_api_key,
-            has_cached_token,
-            has_enterprise_oidc,
-            enterprise_oidc_issuer,
-            login_label,
-            has_auth_provider_command,
-        ),
-    }
-}
-
-fn build_pinned_api_key(has_external_api_key: bool) -> BuiltAuthMethods {
-    if !has_external_api_key {
-        grow_diagnostics::unified_log::warn(
-            "auth: preferred_method=api_key but no API key credentials available",
-            None,
-            None,
-        );
-        return BuiltAuthMethods {
-            methods: Vec::new(),
-            default_auth_method_id: None,
-        };
-    }
+pub fn build_auth_methods() -> BuiltAuthMethods {
     BuiltAuthMethods {
         methods: vec![provider_api_key_auth_method()],
-        default_auth_method_id: Some(acp::AuthMethodId::new(PROVIDER_API_KEY_METHOD_ID)),
+        default_auth_method_id: acp::AuthMethodId::new(PROVIDER_API_KEY_METHOD_ID),
     }
 }
 
-fn build_pinned_oidc(
-    has_cached_token: bool,
-    has_enterprise_oidc: bool,
-    enterprise_oidc_issuer: Option<&str>,
-    login_label: Option<&str>,
-    has_auth_provider_command: bool,
-) -> BuiltAuthMethods {
-    let mut methods: Vec<acp::AuthMethod> = Vec::new();
-    let mut default_auth_method_id: Option<acp::AuthMethodId> = None;
-
-    if has_cached_token {
-        methods.push(cached_token_auth_method());
-        default_auth_method_id = Some(acp::AuthMethodId::new(CACHED_TOKEN_AUTH_METHOD_ID));
-    }
-
-    push_interactive_login(
-        &mut methods,
-        has_enterprise_oidc,
-        enterprise_oidc_issuer,
-        login_label,
-        has_auth_provider_command,
-    );
-
-    BuiltAuthMethods {
-        methods,
-        default_auth_method_id,
-    }
-}
-
-fn build_unpinned(
-    has_external_api_key: bool,
-    has_cached_token: bool,
-    has_enterprise_oidc: bool,
-    enterprise_oidc_issuer: Option<&str>,
-    login_label: Option<&str>,
-    has_auth_provider_command: bool,
-) -> BuiltAuthMethods {
-    let mut methods: Vec<acp::AuthMethod> = Vec::new();
-    let mut default_auth_method_id: Option<acp::AuthMethodId> = None;
-
-    if has_external_api_key {
-        methods.push(provider_api_key_auth_method());
-        default_auth_method_id = Some(acp::AuthMethodId::new(PROVIDER_API_KEY_METHOD_ID));
-    }
-
-    if has_cached_token {
-        methods.push(cached_token_auth_method());
-        // cached_token wins over provider.api_key for default_auth_method_id so
-        // is_session_based_auth() returns true and OIDC refresh stays alive.
-        let overrode_api_key = default_auth_method_id.is_some();
-        default_auth_method_id = Some(acp::AuthMethodId::new(CACHED_TOKEN_AUTH_METHOD_ID));
-        if overrode_api_key {
-            grow_diagnostics::unified_log::info(
-                "auth method priority: cached_token overrides provider.api_key for default_auth_method_id",
-                None,
-                Some(serde_json::json!({
-                    "has_external_api_key": has_external_api_key,
-                    "has_cached_token": has_cached_token,
-                })),
-            );
-        }
-    }
-
-    push_interactive_login(
-        &mut methods,
-        has_enterprise_oidc,
-        enterprise_oidc_issuer,
-        login_label,
-        has_auth_provider_command,
-    );
-
-    BuiltAuthMethods {
-        methods,
-        default_auth_method_id,
-    }
-}
-
-fn push_interactive_login(
-    methods: &mut Vec<acp::AuthMethod>,
-    has_enterprise_oidc: bool,
-    enterprise_oidc_issuer: Option<&str>,
-    login_label: Option<&str>,
-    has_auth_provider_command: bool,
-) {
-    if has_enterprise_oidc {
-        // Caller invariant: `enterprise_oidc_issuer` MUST be `Some(...)` when
-        // `has_enterprise_oidc` is true. Production callers derive both from
-        // the same `cfg.auth.oidc` Option, so the inconsistent
-        // `(true, None)` combination is a programmer error -- panic loudly
-        // (matches the original `cfg.auth.oidc.as_ref().unwrap()`
-        // call in `MvpAgent::initialize()` before this refactor).
-        let issuer = enterprise_oidc_issuer
-            .expect("enterprise_oidc_issuer is required when has_enterprise_oidc is true");
-        methods.push(oidc_auth_method(issuer, login_label));
-    } else {
-        methods.push(provider_oauth_auth_method(
-            login_label,
-            has_auth_provider_command,
-        ));
-    }
-}
-
-/// ACP session auth method. Use `is_session_based_method` for classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMethodKind {
     ProviderApiKey,
-    CachedToken,
-    ProviderOAuth,
-    Oidc,
     Unknown,
 }
 
@@ -298,51 +57,24 @@ impl AuthMethodKind {
     pub fn from_id(id: &acp::AuthMethodId) -> Self {
         match id.0.as_ref() {
             PROVIDER_API_KEY_METHOD_ID => Self::ProviderApiKey,
-            CACHED_TOKEN_AUTH_METHOD_ID => Self::CachedToken,
-            PROVIDER_OAUTH_METHOD_ID => Self::ProviderOAuth,
-            OIDC_METHOD_ID => Self::Oidc,
             _ => Self::Unknown,
         }
     }
 
-    /// API key auth: no auth.json, no refresh, no user interaction.
     pub fn is_api_key(self) -> bool {
         matches!(self, Self::ProviderApiKey)
     }
 
-    /// `true` for session-based methods (cached_token, provider.oauth, oidc).
-    pub fn is_session_based(self) -> bool {
-        matches!(self, Self::CachedToken | Self::ProviderOAuth | Self::Oidc)
-    }
-
-    /// Requires user interaction (browser, OIDC redirect, or external auth command).
-    pub fn needs_interactive_login(self) -> bool {
-        matches!(self, Self::ProviderOAuth | Self::Oidc)
-    }
-
     pub fn auth_error_message(self) -> &'static str {
-        if self.is_session_based() {
-            AUTH_ERROR_SESSION_EXPIRED
-        } else {
-            AUTH_ERROR_API_KEY
-        }
+        AUTH_ERROR_API_KEY
     }
 }
 
-/// `true` for session-based ACP methods (cached_token, provider.oauth, oidc).
-pub fn is_session_based_method(method_id: &acp::AuthMethodId) -> bool {
-    AuthMethodKind::from_id(method_id).is_session_based()
-}
-
-/// Per-model BYOK status: whether the selected model belongs to the configured
-/// provider catalog. Credentials are optional for keyless local providers.
+/// Per-model status used for diagnostics and fail-closed config reloads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelByok {
-    /// Model has its own per-model key (not refreshable).
     Byok,
-    /// Model has no per-model key (session auth governs).
     NotByok,
-    /// Config couldn't be loaded/parsed — BYOK status indeterminate.
     Unknown,
 }
 
@@ -350,648 +82,42 @@ impl ModelByok {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Byok => "byok",
-            Self::NotByok => "not_byok",
+            Self::NotByok => "keyless",
             Self::Unknown => "unknown",
         }
     }
 }
 
-/// Whether this session+model uses a refreshable session token.
-///
-/// Gates on stable inputs, not `Credentials.auth_type`: that field collapses
-/// to `ApiKey` when the session-token cache is momentarily empty and
-/// `GROW_API_KEY` is set, which demoted live OIDC sessions to non-refreshable
-/// api-key mode and 401'd every prompt until restart. `model_byok` still
-/// excludes genuine per-model BYOK, whose keys are not refreshable.
-///
-/// `Unknown` (BYOK status indeterminate — config currently unparseable, no
-/// sampling config yet, or the per-model memo was cleared) must **not** demote
-/// a live session to non-refreshable api-key mode: that re-sends the stale
-/// buffered token on every turn and 401s with `bad-credentials` until restart
-/// (the stale-token regression this gate addresses; fall back rather than
-/// demote on `Unknown`). It refreshes when `endpoint_is_first_party` — the
-/// request targets a first-party host (cli-chat-proxy / first-party API),
-/// where sending the session token cannot leak to a third-party BYOK
-/// endpoint. A definite `NotByok` always refreshes (it only ever routes to
-/// the session endpoint); a definite `Byok` never does.
-pub fn session_token_auth_gate(
-    is_session_based_method: bool,
-    model_byok: ModelByok,
-    endpoint_is_first_party: bool,
-) -> bool {
-    is_session_based_method
-        && match model_byok {
-            ModelByok::NotByok => true,
-            ModelByok::Byok => false,
-            ModelByok::Unknown => endpoint_is_first_party,
-        }
-}
+pub const AUTH_ERROR_API_KEY: &str = "Authentication failed. Set GROW_API_KEY or configure api_key/env_key/auth_provider in ~/.grow/config.toml.";
 
-pub const AUTH_ERROR_SESSION_EXPIRED: &str =
-    "Session expired. Run `grow login` to re-authenticate.";
-
-pub const AUTH_ERROR_API_KEY: &str = "Authentication failed. Run `grow login`, set GROW_API_KEY, or add api_key to ~/.grow/config.toml.";
-
-/// Next ACP method id when `cached_token` cannot proceed (missing / expired /
-/// an expired session), or `None` when fallthrough is forbidden.
-///
-/// Unpinned: prefer non-interactive `provider.api_key` when advertiseable, else
-/// interactive `provider.oauth`.
-///
-/// Pinned `oidc`: **no** fallthrough to api_key — return `None` so the caller
-/// fails auth. Pinned `api_key` should not reach this path (cached_token is
-/// not advertised).
-pub fn method_id_after_cached_token_unavailable(
-    has_external_api_key: bool,
-    preferred_method: Option<PreferredAuthMethod>,
-) -> Option<&'static str> {
-    match preferred_method {
-        Some(PreferredAuthMethod::Oidc) | Some(PreferredAuthMethod::ApiKey) => None,
-        None => Some(if has_external_api_key {
-            PROVIDER_API_KEY_METHOD_ID
-        } else {
-            PROVIDER_OAUTH_METHOD_ID
-        }),
-    }
-}
-
-/// Error when `preferred_method=api_key` but no key/BYOK credentials exist.
-pub const PREFERRED_API_KEY_UNAVAILABLE: &str = "preferred_method=api_key but no API key is configured (set GROW_API_KEY or model api_key/env_key in config.toml).";
-
-/// Error when `preferred_method=oidc` but the session path cannot proceed.
-pub const PREFERRED_OIDC_UNAVAILABLE: &str =
-    "preferred_method=oidc but no session is available. Run `grow login` to authenticate.";
+pub const PREFERRED_API_KEY_UNAVAILABLE: &str = "no BYOK provider is configured (set GROW_API_KEY or model api_key/env_key/auth_provider in config.toml).";
 
 pub const PROVIDER_API_KEY_METHOD_ID: &str = "provider.api_key";
+
 pub fn provider_api_key_auth_method() -> acp::AuthMethod {
     acp::AuthMethod::Agent(
         acp::AuthMethodAgent::new(
             acp::AuthMethodId::new(PROVIDER_API_KEY_METHOD_ID),
-            "provider.api_key".to_string(),
+            "BYOK provider configuration".to_string(),
         )
         .description(Some(format!(
-            "{GROW_API_KEY_ENV_VAR} or api_key/env_key in config.toml"
+            "{GROW_API_KEY_ENV_VAR} or api_key/env_key/auth_provider in config.toml"
         ))),
-    )
-}
-
-pub const CACHED_TOKEN_AUTH_METHOD_ID: &str = "cached_token";
-pub fn cached_token_auth_method() -> acp::AuthMethod {
-    acp::AuthMethod::Agent(
-        acp::AuthMethodAgent::new(
-            acp::AuthMethodId::new(CACHED_TOKEN_AUTH_METHOD_ID),
-            "cached_token".to_string(),
-        )
-        .description(Some("Cached token from ~/.grow/auth.json".to_string())),
-    )
-}
-
-pub const PROVIDER_OAUTH_METHOD_ID: &str = "provider.oauth";
-
-/// Provider-scoped OAuth2/OIDC auth. The ACP method id is `"provider.oauth"`.
-pub fn provider_oauth_auth_method(
-    label: Option<&str>,
-    has_auth_provider_command: bool,
-) -> acp::AuthMethod {
-    let name = label.unwrap_or("Grow");
-    let meta = if has_auth_provider_command {
-        let mut m = acp::Meta::new();
-        m.insert("external_provider".to_owned(), serde_json::json!(true));
-        Some(m)
-    } else {
-        None
-    };
-    acp::AuthMethod::Agent(
-        acp::AuthMethodAgent::new(
-            acp::AuthMethodId::new(PROVIDER_OAUTH_METHOD_ID),
-            name.to_string(),
-        )
-        .description(Some(format!("Sign in with {name}")))
-        .meta(meta),
-    )
-}
-
-pub const OIDC_METHOD_ID: &str = "oidc";
-pub fn oidc_auth_method(issuer: &str, label: Option<&str>) -> acp::AuthMethod {
-    let name = label
-        .map(|l| l.to_string())
-        .unwrap_or_else(|| format!("Single sign-on ({})", issuer));
-    acp::AuthMethod::Agent(
-        acp::AuthMethodAgent::new(acp::AuthMethodId::new(OIDC_METHOD_ID), name.clone())
-            .description(Some(format!("Sign in with {name}"))),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::config::{Config, resolve_model_list};
-    use agent_client_protocol as acp;
-    use serial_test::serial;
 
-    /// When API-key credentials are advertiseable, fall through from a dead
-    /// `cached_token` to non-interactive `provider.api_key` (not browser OAuth).
-    /// Covers the both-advertised case (`has_cached_token` true at initialize
-    /// but session later missing/expired/legacy): advertise order still puts
-    /// `provider.api_key` first, while `default_auth_method_id` prefers session;
-    /// after session fails, this helper must still pick `provider.api_key`.
     #[test]
-    fn after_cached_token_unavailable_prefers_api_key_when_advertiseable() {
-        assert_eq!(
-            method_id_after_cached_token_unavailable(true, None),
-            Some(PROVIDER_API_KEY_METHOD_ID),
-        );
-    }
-
-    /// No advertiseable API-key credentials → interactive `provider.oauth`.
-    #[test]
-    fn after_cached_token_unavailable_falls_to_grow_managed_without_api_key() {
-        assert_eq!(
-            method_id_after_cached_token_unavailable(false, None),
-            Some(PROVIDER_OAUTH_METHOD_ID),
-        );
-    }
-
-    /// Pinned methods never fall through across the api_key ↔ oidc boundary.
-    #[test]
-    fn after_cached_token_unavailable_fails_closed_when_pinned() {
-        assert_eq!(
-            method_id_after_cached_token_unavailable(true, Some(PreferredAuthMethod::Oidc)),
-            None,
-        );
-        assert_eq!(
-            method_id_after_cached_token_unavailable(true, Some(PreferredAuthMethod::ApiKey)),
-            None,
-        );
-    }
-
-    /// Classifier matrix for all auth method variants.
-    #[test]
-    fn auth_method_kind_classifier_matrix() {
-        let session_methods = [
-            CACHED_TOKEN_AUTH_METHOD_ID,
-            PROVIDER_OAUTH_METHOD_ID,
-            OIDC_METHOD_ID,
-        ];
-        for method_id in session_methods {
-            let id = acp::AuthMethodId::new(method_id);
-            let kind = AuthMethodKind::from_id(&id);
-            assert!(
-                kind.is_session_based(),
-                "{method_id}: kind must be session-based"
-            );
-            assert!(
-                is_session_based_method(&id),
-                "{method_id}: wrapper must agree"
-            );
-        }
-        let api_id = acp::AuthMethodId::new(PROVIDER_API_KEY_METHOD_ID);
-        let api_kind = AuthMethodKind::from_id(&api_id);
-        assert!(!api_kind.is_session_based());
-        assert!(api_kind.is_api_key());
-        assert!(!is_session_based_method(&api_id));
-        assert!(!is_session_based_method(&acp::AuthMethodId::new(
-            "unknown-method"
-        )));
-    }
-
-    use grow_test_support::EnvGuard;
-
-    // ── Helpers ─────────────────────────────────────────────────────────
-
-    /// Default inputs to `build_auth_methods` representing a session-only user
-    /// with no API key anywhere. Tests override only the fields they care
-    /// about.
-    fn default_inputs() -> AuthMethodsBuildInputs<'static> {
-        AuthMethodsBuildInputs {
-            has_external_api_key: false,
-            has_cached_token: false,
-            has_enterprise_oidc: false,
-            enterprise_oidc_issuer: None,
-            login_label: None,
-            has_auth_provider_command: false,
-            preferred_method: None,
-        }
-    }
-
-    fn method_ids(built: &BuiltAuthMethods) -> Vec<&str> {
-        built.methods.iter().map(|m| m.id().0.as_ref()).collect()
-    }
-
-    fn default_id(built: &BuiltAuthMethods) -> Option<&str> {
-        built
-            .default_auth_method_id
-            .as_ref()
-            .map(|id| id.0.as_ref())
-    }
-
-    fn first_kind(methods: &[acp::AuthMethod]) -> Option<AuthMethodKind> {
-        methods.first().map(|m| AuthMethodKind::from_id(m.id()))
-    }
-
-    // build_auth_methods regression: pin production call-site ordering.
-    // Reordering so `provider.api_key` is after login methods must fail the tests below.
-
-    /// BYOK with only per-model `env_key` must list `provider.api_key` first.
-    #[test]
-    fn enterprise_byok_first_method_is_provider_api_key() {
-        let inputs = AuthMethodsBuildInputs {
-            has_external_api_key: true, // enterprise user with resolved per-model env_key
-            has_cached_token: false,
-            ..default_inputs()
-        };
-        let built = build_auth_methods(inputs);
-
-        assert_eq!(
-            first_kind(&built.methods),
-            Some(AuthMethodKind::ProviderApiKey),
-            "BYOK enterprise-style: auth_methods.first() MUST be provider.api_key \
-             (deferred-to-last ordering sends users to the login screen)",
-        );
-        assert_eq!(
-            built
-                .default_auth_method_id
-                .as_ref()
-                .map(|id| id.0.as_ref()),
-            Some(PROVIDER_API_KEY_METHOD_ID),
-        );
-        // Cross-check with the pager-side predicate: the first method must
-        // not require interactive login, which is the exact condition the
-        // pager's `startup_auth_metadata()` uses.
-        assert!(
-            !AuthMethodKind::from_id(built.methods[0].id()).needs_interactive_login(),
-            "first method MUST NOT need interactive login when provider.api_key is available",
-        );
-    }
-
-    /// BYOK + cached session token: provider.api_key stays first in the methods
-    /// list (skips login screen), but `default_auth_method_id` is
-    /// `cached_token` (keeps OIDC refresh alive).
-    #[test]
-    fn byok_with_cached_token_keeps_provider_api_key_first() {
-        let inputs = AuthMethodsBuildInputs {
-            has_external_api_key: true,
-            has_cached_token: true,
-            ..default_inputs()
-        };
-        let built = build_auth_methods(inputs);
-
-        assert_eq!(
-            first_kind(&built.methods),
-            Some(AuthMethodKind::ProviderApiKey),
-            "provider.api_key MUST precede cached_token in advertised order",
-        );
-        // Sanity: cached_token still appears, just second.
-        assert!(
-            built
-                .methods
-                .iter()
-                .any(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::CachedToken),
-            "cached_token must still be advertised when present",
-        );
-        // cached_token wins for default_auth_method_id (keeps OIDC refresh alive).
-        assert_eq!(
-            built
-                .default_auth_method_id
-                .as_ref()
-                .map(|id| id.0.as_ref()),
-            Some(CACHED_TOKEN_AUTH_METHOD_ID),
-        );
-    }
-
-    /// Session-only user (no API key anywhere): cached_token first, then
-    /// `provider.oauth` — `auth_methods.first()` does NOT need interactive login,
-    /// so this user also skips the login screen at startup.
-    #[test]
-    fn session_only_user_first_method_is_cached_token() {
-        let inputs = AuthMethodsBuildInputs {
-            has_external_api_key: false,
-            has_cached_token: true,
-            ..default_inputs()
-        };
-        let built = build_auth_methods(inputs);
-
-        assert_eq!(
-            first_kind(&built.methods),
-            Some(AuthMethodKind::CachedToken)
-        );
-        assert_eq!(
-            built
-                .default_auth_method_id
-                .as_ref()
-                .map(|id| id.0.as_ref()),
-            Some(CACHED_TOKEN_AUTH_METHOD_ID),
-        );
-    }
-
-    /// Brand-new user (no API key, no cached token): only `provider.oauth` is
-    /// advertised, and the pager will (correctly) show the login screen.
-    /// `default_auth_method_id` is None so the pager falls back to the
-    /// advertised login method.
-    #[test]
-    fn fresh_user_only_advertises_grow_managed_and_requires_login() {
-        let built = build_auth_methods(default_inputs());
-
-        assert_eq!(
-            first_kind(&built.methods),
-            Some(AuthMethodKind::ProviderOAuth)
-        );
-        assert!(built.default_auth_method_id.is_none());
+    fn advertises_exactly_one_non_interactive_method() {
+        let built = build_auth_methods();
         assert_eq!(built.methods.len(), 1);
-    }
-
-    /// Enterprise OIDC replaces `provider.oauth` (mutually exclusive). provider.api_key,
-    /// when present, still leads.
-    #[test]
-    fn enterprise_oidc_replaces_grow_managed_but_provider_api_key_still_first() {
-        let inputs = AuthMethodsBuildInputs {
-            has_external_api_key: true,
-            has_cached_token: false,
-            has_enterprise_oidc: true,
-            enterprise_oidc_issuer: Some("https://sso.example.com"),
-            ..default_inputs()
-        };
-        let built = build_auth_methods(inputs);
-
         assert_eq!(
-            first_kind(&built.methods),
-            Some(AuthMethodKind::ProviderApiKey)
+            built.default_auth_method_id.0.as_ref(),
+            PROVIDER_API_KEY_METHOD_ID
         );
-        assert!(
-            built
-                .methods
-                .iter()
-                .any(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::Oidc),
-            "oidc must be advertised when has_enterprise_oidc",
-        );
-        assert!(
-            !built
-                .methods
-                .iter()
-                .any(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::ProviderOAuth),
-            "provider.oauth and oidc are mutually exclusive",
-        );
-    }
-
-    /// `has_auth_provider_command` is plumbed through to the `provider.oauth` method
-    /// as `meta.external_provider = true`. Pinning this here so the pager's
-    /// `AuthStartMode::Command` path keeps working.
-    #[test]
-    fn auth_provider_command_sets_external_provider_meta() {
-        let inputs = AuthMethodsBuildInputs {
-            has_auth_provider_command: true,
-            login_label: Some("Acme Corp"),
-            ..default_inputs()
-        };
-        let built = build_auth_methods(inputs);
-
-        let grow = built
-            .methods
-            .iter()
-            .find(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::ProviderOAuth)
-            .expect("provider.oauth must be advertised");
-        assert_eq!(grow.name(), "Acme Corp");
-        let meta = grow.meta().expect("meta should be set");
-        assert_eq!(
-            meta.get("external_provider").and_then(|v| v.as_bool()),
-            Some(true),
-        );
-    }
-
-    // ── End-to-end: enterprise TOML -> resolved models -> build_auth_methods ─
-
-    /// END-TO-END REGRESSION TEST: parses the literal enterprise-style
-    /// `~/.grow/config.toml` skeleton from the bug report, walks it through
-    /// the same predicate (`should_advertise_provider_api_key`) and the same
-    /// list-builder (`build_auth_methods`) that `MvpAgent::initialize()` uses
-    /// in production, and asserts that `auth_methods.first()` is `provider.api_key`
-    /// (which causes the pager to skip the login screen).
-    ///
-    /// This is the test that *would have caught* that regression -- if you mentally
-    /// re-introduce that bug (push provider.api_key LAST when has_external_api_key
-    /// && !global env var), this test fails because `first_kind` is no longer
-    /// `ProviderApiKey`.
-    #[test]
-    #[serial]
-    fn enterprise_byok_config_does_not_require_login() {
-        const TEST_ENV_VAR: &str = "TEST_ENTERPRISE_REGRESSION_AUTH_TOKEN";
-
-        // Make sure no global key is masking the per-model path we're trying
-        // to exercise. Held until end-of-scope so we restore on panic too.
-        let _global = EnvGuard::unset(GROW_API_KEY_ENV_VAR);
-
-        let toml: toml::Value = toml::from_str(
-            r#"
-            [models]
-            default = "enterprise/model"
-
-            [provider.enterprise]
-            api_backend = "chat_completions"
-
-            [provider.enterprise.options]
-            base_url = "https://inference.example.com/v1"
-            env_key = "TEST_ENTERPRISE_REGRESSION_AUTH_TOKEN"
-
-            [provider.enterprise.models.model]
-            context_window = 200000
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&toml).expect("config should parse");
-        let models = resolve_model_list(&cfg);
-        let model = models
-            .get("enterprise/model")
-            .expect("enterprise-style model should exist");
-        assert_eq!(
-            model.env_key.as_ref().map(|k| k.names()),
-            Some(vec![TEST_ENV_VAR])
-        );
-
-        // A keyless or temporarily-unset provider remains BYOK. Product login
-        // is unrelated to whether this provider currently has a secret.
-        {
-            let _unset = EnvGuard::unset(TEST_ENV_VAR);
-            let has_external_api_key = should_advertise_provider_api_key(false, models.values());
-            assert!(has_external_api_key);
-            let built = build_auth_methods(AuthMethodsBuildInputs {
-                has_external_api_key,
-                ..default_inputs()
-            });
-            assert_eq!(
-                first_kind(&built.methods),
-                Some(AuthMethodKind::ProviderApiKey),
-                "configured providers must bypass product login even without a key",
-            );
-        }
-
-        // With the env var present (the actual enterprise scenario), the predicate
-        // returns true and the builder MUST put `provider.api_key` first so the
-        // pager's `startup_auth_metadata()` returns `needs_login = false`.
-        {
-            let _set = EnvGuard::set(TEST_ENV_VAR, "enterprise-secret-token");
-            let has_external_api_key = should_advertise_provider_api_key(false, models.values());
-            assert!(has_external_api_key);
-            let built = build_auth_methods(AuthMethodsBuildInputs {
-                has_external_api_key,
-                // Realistic enterprise user: no cached session token, default
-                // provider.oauth login (no enterprise OIDC).
-                has_cached_token: false,
-                ..default_inputs()
-            });
-            assert_eq!(
-                first_kind(&built.methods),
-                Some(AuthMethodKind::ProviderApiKey),
-                "BYOK: provider.api_key must be auth_methods.first(); deferred-to-last \
-                 ordering sends enterprise users to the login screen",
-            );
-            assert!(
-                !AuthMethodKind::from_id(built.methods[0].id()).needs_interactive_login(),
-                "auth_methods.first() MUST NOT need interactive login -- this \
-                 is the exact predicate the pager's startup_auth_metadata() \
-                 uses to decide whether to show the login screen",
-            );
-        }
-    }
-
-    /// `GROW_API_KEY` alone (no per-model creds) also triggers
-    /// advertising `provider.api_key` as the first method. Historical "external
-    /// key" path; covered here so the predicate keeps treating env-var-only
-    /// users the same as per-model users.
-    #[test]
-    #[serial]
-    fn global_external_api_key_advertises_provider_api_key_first() {
-        let _set = EnvGuard::set(GROW_API_KEY_ENV_VAR, "provider-external-key");
-        let cfg = Config::default();
-        let models = resolve_model_list(&cfg);
-        let has_external_api_key = should_advertise_provider_api_key(false, models.values());
-        assert!(has_external_api_key);
-        let built = build_auth_methods(AuthMethodsBuildInputs {
-            has_external_api_key,
-            ..default_inputs()
-        });
-        assert_eq!(
-            first_kind(&built.methods),
-            Some(AuthMethodKind::ProviderApiKey)
-        );
-    }
-
-    /// Admin kill switch (`disable_api_key_auth`): the predicate must return
-    /// false even when credentials are available everywhere (global env var
-    /// AND per-model env_key), so the builder never advertises `provider.api_key`
-    /// and the pager sends the user to the deployment's login method instead.
-    #[test]
-    #[serial]
-    fn disable_api_key_auth_suppresses_provider_api_key_method() {
-        let _set = EnvGuard::set(GROW_API_KEY_ENV_VAR, "provider-external-key");
-        let cfg = Config::default();
-        let models = resolve_model_list(&cfg);
-
-        // Flag off: today's behavior (advertised first).
-        assert!(should_advertise_provider_api_key(false, models.values()));
-
-        // Flag on: never advertised, regardless of credentials.
-        let has_external_api_key = should_advertise_provider_api_key(true, models.values());
-        assert!(!has_external_api_key);
-        let built = build_auth_methods(AuthMethodsBuildInputs {
-            has_external_api_key,
-            ..default_inputs()
-        });
-        assert!(
-            !built
-                .methods
-                .iter()
-                .any(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::ProviderApiKey),
-            "provider.api_key must not be advertised when disable_api_key_auth is set",
-        );
-        assert_eq!(
-            first_kind(&built.methods),
-            Some(AuthMethodKind::ProviderOAuth),
-            "with api-key auth disabled and no cached token, the login method \
-             must lead so the pager requires interactive login",
-        );
-        assert!(built.default_auth_method_id.is_none());
-    }
-
-    /// When auth.json does not contain the configured scope, AuthManager::current() is None,
-    /// has_cached_token is false, and build_auth_methods advertises only
-    /// the login method. This pins the predicate's "no" answer so the test
-    /// above isn't trivially passing.
-    #[test]
-    #[serial]
-    fn no_token_means_no_cached_token_advertised() {
-        use crate::auth::{AuthManager, ServiceAuthConfig};
-
-        let _g1 = EnvGuard::unset("GROW_AUTH");
-        let _g2 = EnvGuard::unset("GROW_AUTH_PATH");
-
-        let dir = tempfile::tempdir().unwrap();
-        // No auth.json in the tempdir.
-        let cfg = ServiceAuthConfig::default();
-        let mgr = AuthManager::new(dir.path(), cfg);
-        assert!(mgr.current().is_none());
-
-        let built = build_auth_methods(AuthMethodsBuildInputs {
-            has_external_api_key: false,
-            has_cached_token: mgr.current().is_some(),
-            ..default_inputs()
-        });
-        assert_eq!(
-            first_kind(&built.methods),
-            Some(AuthMethodKind::ProviderOAuth),
-            "no cached token AND no api key: pager must show login (provider.oauth first)",
-        );
-    }
-
-    // ── preferred_method pin (fail-closed) ──────────────────────────────
-
-    #[test]
-    fn pin_api_key_with_key_only_advertises_api_key() {
-        let built = build_auth_methods(AuthMethodsBuildInputs {
-            has_external_api_key: true,
-            has_cached_token: true,
-            preferred_method: Some(PreferredAuthMethod::ApiKey),
-            ..default_inputs()
-        });
-        assert_eq!(method_ids(&built), vec![PROVIDER_API_KEY_METHOD_ID]);
-        assert_eq!(default_id(&built), Some(PROVIDER_API_KEY_METHOD_ID));
-    }
-
-    #[test]
-    fn pin_api_key_without_key_fails_closed_even_with_session() {
-        let built = build_auth_methods(AuthMethodsBuildInputs {
-            has_external_api_key: false,
-            has_cached_token: true,
-            preferred_method: Some(PreferredAuthMethod::ApiKey),
-            ..default_inputs()
-        });
-        assert!(built.methods.is_empty());
-        assert!(built.default_auth_method_id.is_none());
-    }
-
-    #[test]
-    fn pin_oidc_with_session_hides_api_key() {
-        let built = build_auth_methods(AuthMethodsBuildInputs {
-            has_external_api_key: true,
-            has_cached_token: true,
-            preferred_method: Some(PreferredAuthMethod::Oidc),
-            ..default_inputs()
-        });
-        assert_eq!(
-            method_ids(&built),
-            vec![CACHED_TOKEN_AUTH_METHOD_ID, PROVIDER_OAUTH_METHOD_ID]
-        );
-        assert_eq!(default_id(&built), Some(CACHED_TOKEN_AUTH_METHOD_ID));
-    }
-
-    #[test]
-    fn pin_oidc_without_session_is_interactive_only() {
-        let built = build_auth_methods(AuthMethodsBuildInputs {
-            has_external_api_key: true,
-            has_cached_token: false,
-            preferred_method: Some(PreferredAuthMethod::Oidc),
-            ..default_inputs()
-        });
-        assert_eq!(method_ids(&built), vec![PROVIDER_OAUTH_METHOD_ID]);
-        assert!(built.default_auth_method_id.is_none());
+        assert!(AuthMethodKind::from_id(&built.default_auth_method_id).is_api_key());
     }
 }

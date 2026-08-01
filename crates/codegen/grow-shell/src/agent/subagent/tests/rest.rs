@@ -2041,10 +2041,6 @@ async fn subagent_override_provider_model_spawns_cache_only_credentials() {
     ctx.sampling_config.model = "grow-4.5".to_string();
     ctx.model_id = acp::ModelId::new("grow-4.5");
     ctx.available_models = models;
-    ctx.auth = Some(crate::auth::ProviderAuth {
-        key: "parent-session-jwt".to_string(),
-        ..Default::default()
-    });
     ctx.subagent_model_overrides.insert("explore".to_string(), "proxied".to_string());
     let (config, model_id) = resolve_subagent_sampling_config("explore", &ctx).await;
     assert_eq!(model_id.0.as_ref(), "proxied");

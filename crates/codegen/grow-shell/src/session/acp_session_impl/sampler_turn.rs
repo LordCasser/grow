@@ -7,7 +7,7 @@ use super::*;
 /// `SamplingError::is_auth_error` in grow-sampling-types: 403 is
 /// deliberately excluded because it means "authenticated but forbidden"
 /// (content-safety blocks, ZDR-gated requests, remote settings gates), where
-/// a token refresh would be a no-op and would surface to the client as
+/// rereading a BYOK key would be a no-op and would surface to the client as
 /// a spurious auth_required teardown.
 ///
 /// String fallbacks remain for tools that surface auth failures without
@@ -25,84 +25,6 @@ pub(super) fn is_auth_tool_error(err: &xai_tool_runtime::ToolError) -> bool {
     lower.contains("unauthorized")
         || lower.contains("invalid api key")
         || lower.contains("invalid_token")
-}
-/// Gate inputs bundled with the composed decision so the 401-recovery log can
-/// report the components.
-#[derive(Clone, Copy)]
-struct SessionTokenAuthGate {
-    is_session_based: bool,
-    model_byok: crate::agent::auth_method::ModelByok,
-    /// Whether the request targets an explicitly configured service proxy. Lets
-    /// an `Unknown` BYOK status still refresh without risking a session-token
-    /// leak to an unrelated provider endpoint.
-    endpoint_is_first_party: bool,
-}
-impl SessionTokenAuthGate {
-    /// Single place `is_session_based` / `endpoint_is_first_party` are derived,
-    /// so all call sites assemble the gate identically.
-    fn new(
-        auth_method_id: Option<&acp::AuthMethodId>,
-        model_byok: crate::agent::auth_method::ModelByok,
-        base_url: &str,
-    ) -> Self {
-        Self {
-            is_session_based: auth_method_id
-                .is_some_and(crate::agent::auth_method::is_session_based_method),
-            model_byok,
-            endpoint_is_first_party: crate::util::is_service_api_url(base_url),
-        }
-    }
-    fn active(self) -> bool {
-        crate::agent::auth_method::session_token_auth_gate(
-            self.is_session_based,
-            self.model_byok,
-            self.endpoint_is_first_party,
-        )
-    }
-}
-/// Run a tool call; on an auth-shaped failure, attempt recovery via
-/// `AuthManager` and one retry. When `shared_recovery` is `Some`, concurrent
-/// 401s in the same batch deduplicate via `OnceCell::get_or_init`.
-pub(super) async fn call_with_auth_retry<F, Fut>(
-    auth_manager: Option<&std::sync::Arc<crate::auth::AuthManager>>,
-    shared_recovery: Option<&tokio::sync::OnceCell<bool>>,
-    tool_name: &str,
-    mut call: F,
-) -> Result<grow_tools::types::output::ToolRunResult, xai_tool_runtime::ToolError>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<
-            Output = Result<grow_tools::types::output::ToolRunResult, xai_tool_runtime::ToolError>,
-        >,
-{
-    let result = call().await;
-    let Err(ref err) = result else { return result };
-    if !is_auth_tool_error(err) {
-        return result;
-    }
-    let Some(am) = auth_manager else {
-        return result;
-    };
-    let src = crate::auth::recovery::RecoverySource::Background;
-    let recovered = match shared_recovery {
-        Some(cell) => *cell.get_or_init(|| am.try_recover_unauthorized(src)).await,
-        None => am.try_recover_unauthorized(src).await,
-    };
-    if recovered {
-        tracing::info!(
-            tool = tool_name,
-            "auth recovery: tool 401, recovered, retrying"
-        );
-        call().await
-    } else {
-        tracing::warn!(tool = tool_name, "auth recovery: tool 401, refresh failed");
-        grow_diagnostics::unified_log::warn(
-            "auth recovery: tool 401, refresh failed",
-            None,
-            Some(serde_json::json!({ "tool": tool_name })),
-        );
-        result
-    }
 }
 impl SessionActor {
     pub(super) async fn prepare_tool_definitions_timed(&self) -> (Vec<ToolDefinition>, u64) {
@@ -271,73 +193,11 @@ impl SessionActor {
         self.set_chat_api_key(new_key).await;
         true
     }
-    /// Gate inputs for `model_id` routed to `base_url`. See
-    /// [`crate::agent::auth_method::session_token_auth_gate`] for the rationale
-    /// (`base_url` keeps an `Unknown` BYOK status refreshable only
-    /// against configured trusted service hosts).
-    fn auth_gate(&self, model_id: &str, base_url: &str) -> SessionTokenAuthGate {
-        let byok = self.model_auth_facts(model_id).byok;
-        let auth_method = self.auth_method_id.load();
-        SessionTokenAuthGate::new(auth_method.as_deref(), byok, base_url)
-    }
-    pub(crate) fn session_auth_recovery_eligible(&self, model_id: &str, base_url: &str) -> bool {
-        self.auth_gate(model_id, base_url).active()
-    }
-    /// Emit a unified-log breadcrumb whenever the session-token refresh gate is
-    /// evaluated with an **`Unknown`** per-model BYOK status on a session-based
-    /// method — the condition that (pre-fix) silently demoted live sessions to
-    /// stale-token 401s. The local unified log then shows whether
-    /// the first-party-endpoint fallback kept refresh active or withheld it, so
-    /// we can confirm the fix works (or catch a residual demotion) per session
-    /// even when server-side metrics only show the aggregate 401. No-op for a
-    /// definite `Byok`/`NotByok`, so steady-state turns stay quiet — a burst of
-    /// these is itself the signal that `Unknown` is being hit in the field.
-    fn log_auth_gate_unknown(&self, site: &str, gate: SessionTokenAuthGate, base_url: &str) {
-        use crate::agent::auth_method::ModelByok;
-        if gate.model_byok != ModelByok::Unknown || !gate.is_session_based {
-            return;
-        }
-        let refresh_active = gate.active();
-        let ctx = serde_json::json!({
-            "site": site,
-            "model_byok": gate.model_byok.as_str(),
-            "is_session_based": gate.is_session_based,
-            "endpoint_is_first_party": gate.endpoint_is_first_party,
-            "refresh_active": refresh_active,
-            "base_url": base_url,
-        });
-        let sid = Some(self.session_info.id.0.as_ref());
-        if refresh_active {
-            grow_diagnostics::unified_log::info(
-                "auth gate: Unknown BYOK on first-party endpoint — session-token refresh kept active",
-                sid,
-                Some(ctx),
-            );
-        } else {
-            grow_diagnostics::unified_log::warn(
-                "auth gate: Unknown BYOK on non-first-party endpoint — refresh withheld (may surface stale-token 401)",
-                sid,
-                Some(ctx),
-            );
-        }
-    }
     /// Reconstruct a full `SamplerConfig` (with credentials) by combining
     /// the actor's `SamplingConfig` and `Credentials`. Folds in the
     /// URL-derived headers (cli-chat-proxy auth, the staging auth header)
     /// so the sampler crate stays URL-agnostic.
     pub(super) async fn reconstruct_full_config(&self) -> SamplingConfig {
-        #[allow(clippy::items_after_statements)]
-        struct AuthManagerBearerResolver(std::sync::Arc<crate::auth::AuthManager>);
-        impl std::fmt::Debug for AuthManagerBearerResolver {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct("AuthManagerBearerResolver").finish()
-            }
-        }
-        impl grow_sampler::BearerResolver for AuthManagerBearerResolver {
-            fn current_bearer(&self) -> Option<String> {
-                self.0.current_wire_valid().map(|a| a.key)
-            }
-        }
         let cfg = self
             .chat_state_handle
             .get_sampling_config()
@@ -358,21 +218,8 @@ impl SessionActor {
             });
         let creds = self.chat_state_handle.get_credentials().await;
         let model_facts = self.model_auth_facts(cfg.model.as_str());
-        let auth_method = self.auth_method_id.load();
-        let gate =
-            SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
-        let use_bearer_resolver = gate.active();
-        self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
-        if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
-            let _ = am.auth().await;
-        }
-        let api_key = if use_bearer_resolver {
-            self.auth_manager
-                .as_ref()
-                .and_then(|am| am.current_wire_valid().map(|a| a.key))
-        } else {
-            creds.api_key
-        };
+        let provider = self.model_auth_provider(cfg.model.as_str());
+        let api_key = creds.api_key;
         let auth_scheme = model_facts.auth_scheme;
         let mut extra_headers = cfg.extra_headers;
         crate::agent::config::inject_url_derived_headers(
@@ -423,16 +270,10 @@ impl SessionActor {
             stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),
             idle_timeout_secs: None,
             origin_client: self.origin_client.clone(),
-            attribution_callback: self.attribution_callback.clone(),
-            bearer_resolver: if use_bearer_resolver {
-                self.auth_manager
-                    .as_ref()
-                    .map(|am| -> grow_sampler::SharedBearerResolver {
-                        std::sync::Arc::new(AuthManagerBearerResolver(am.clone()))
-                    })
-            } else {
-                None
-            },
+            attribution_callback: None,
+            bearer_resolver: provider
+                .as_ref()
+                .map(crate::auth::AuthProviderRef::bearer_resolver),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
@@ -563,23 +404,10 @@ impl SessionActor {
         slug: &str,
     ) -> Option<grow_sampler::SamplerConfig> {
         let creds = self.chat_state_handle.get_credentials().await;
-        let session_key = self
-            .auth_manager
-            .as_ref()
-            .and_then(|am| am.current_or_expired().map(|a| a.key.clone()));
         let models = self.models_manager.models();
-        let endpoints = self.models_manager.endpoints();
-        let disable_api_key_auth = self
-            .auth_manager
-            .as_ref()
-            .map(|am| am.service_config().api_key_auth_disabled())
-            .unwrap_or(false);
         crate::agent::config::resolve_aux_model_sampling_config(
             slug,
             &models,
-            &endpoints,
-            session_key.as_deref(),
-            disable_api_key_auth,
             creds.alpha_test_key.clone(),
         )
     }
@@ -616,7 +444,7 @@ impl SessionActor {
         &self,
         force_http1: bool,
     ) -> Result<grow_sampler::SamplingClient, acp::Error> {
-        self.refresh_token_if_expired().await;
+        self.refresh_byok_credential().await;
         let mut full_config = self.reconstruct_full_config().await;
         full_config.force_http1 = force_http1;
         let sampling_client =
@@ -629,13 +457,13 @@ impl SessionActor {
     /// `grow-sampler` instead of constructing a new
     /// `OaiCompatClient`.
     ///
-    /// Behaviour parity: we run the same `refresh_token_if_expired()`
+    /// Behaviour parity: we run the same `refresh_byok_credential()`
     /// and `reconstruct_full_config()` so the sampler picks up any
-    /// newly issued session token. The previous client cache inside
+    /// refreshed BYOK credentials. The previous client cache inside
     /// the sampler actor is invalidated automatically by
     /// `update_config`.
     pub(crate) async fn prepare_sampler_for_turn(&self) {
-        self.refresh_token_if_expired().await;
+        self.refresh_byok_credential().await;
         let mut sampler_config = self.reconstruct_full_config().await;
         if self.tool_context.task_output_token_budget.is_some()
             || self.tool_context.sampler_retry_only_before_output
@@ -646,23 +474,12 @@ impl SessionActor {
         self.sampler_handle.update_config(sampler_config);
     }
     fn log_terminal_failure(&self, error_type: &str, status_code: Option<u16>, message: &str) {
-        let auth = self
-            .auth_manager
-            .as_ref()
-            .and_then(|am| am.current_or_expired());
-        let reauthable = is_reauthable_failure(Some(error_type));
         grow_diagnostics::unified_log::warn(
             "turn.terminal_failure",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
                 "error_type": error_type,
                 "status_code": status_code,
-                "reauthable": reauthable,
-                "auth_mode": auth.as_ref().map(|a| format!("{:?}", a.auth_mode)),
-                "key_prefix": auth.as_ref().map(|a| crate::auth::token_suffix(&a.key).to_owned()),
-                "expires_at": auth
-                    .as_ref()
-                    .and_then(|a| a.expires_at.map(|e| e.to_rfc3339())),
                 "message": crate::util::truncate(message, 300),
             })),
         );
@@ -764,115 +581,39 @@ impl SessionActor {
             .data(detailed_message);
             return Err(acp_err);
         }
-        let (failed_model_id, failed_base_url) = self
+        let failed_model_id = self
             .chat_state_handle
             .get_sampling_config()
             .await
-            .map(|c| (c.model, c.base_url))
+            .map(|c| c.model)
             .unwrap_or_default();
         let is_auth_401 =
             error.status_code == Some(401) || matches!(error.kind, SamplingErrorKind::Auth);
         let auth_provider = is_auth_401
             .then(|| self.model_auth_provider(&failed_model_id))
             .flatten();
-        let auth_recovery_eligible = is_auth_401 && {
-            let gate = self.auth_gate(&failed_model_id, &failed_base_url);
-            let eligible = gate.active();
-            self.log_auth_gate_unknown("handle_sampling_failure", gate, &failed_base_url);
-            if !eligible && auth_provider.is_none() {
-                tracing::warn!(
-                    session_id = %self.session_info.id.0,
-                    is_session_based = gate.is_session_based,
-                    model_byok = gate.model_byok.as_str(),
-                    endpoint_is_first_party = gate.endpoint_is_first_party,
-                    "auth recovery: sampler 401 not refreshable (api-key auth) — surfacing 401",
-                );
-                grow_diagnostics::unified_log::warn(
-                    "auth recovery: sampler 401 not eligible (api-key auth)",
-                    Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!({
-                        "kind": error.kind.as_str(),
-                        "status_code": error.status_code,
-                        "is_session_based": gate.is_session_based,
-                        "model_byok": gate.model_byok.as_str(),
-                        "endpoint_is_first_party": gate.endpoint_is_first_party,
-                    })),
-                );
-            }
-            eligible
-        };
-        debug_assert!(
-            !(auth_recovery_eligible && auth_provider.is_some()),
-            "a provider-backed model must not be session-recovery-eligible"
-        );
-        if !matches!(error.kind, SamplingErrorKind::Auth)
-            && error.status_code == Some(401)
-            && auth_provider.is_none()
-            && !auth_recovery_eligible
-        {
-            grow_diagnostics::unified_log::warn(
-                "auth recovery: sampler 401 not eligible (non-auth error kind)",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({
-                    "kind": error.kind.as_str(),
-                    "status_code": error.status_code,
-                })),
-            );
-        }
-        if auth_recovery_eligible
-            && crate::auth::devbox_login::is_devbox_environment()
-            && let Some(ref am) = self.auth_manager
-        {
-            match am.try_devbox_recovery().await {
-                Ok(auth) => {
-                    tracing::info!(
-                        session_id = %self.session_info.id.0,
-                        user_id = %auth.user_id,
-                        "auth recovery: sampler 401, devbox re-mint, retrying"
-                    );
-                    self.prepare_sampler_for_turn().await;
-                    return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %self.session_info.id.0,
-                        error = %e,
-                        "auth recovery: sampler 401, devbox re-mint failed"
-                    );
-                    grow_diagnostics::unified_log::warn(
-                        "auth recovery: sampler 401, devbox re-mint failed",
-                        Some(self.session_info.id.0.as_ref()),
-                        Some(serde_json::json!({ "error": format!("{e}") })),
-                    );
-                }
-            }
-        }
-        if auth_recovery_eligible && let Some(ref am) = self.auth_manager {
-            if am
-                .try_recover_unauthorized(crate::auth::recovery::RecoverySource::Turn)
-                .await
-            {
-                tracing::info!(session_id = %self.session_info.id.0, "auth recovery: sampler 401, recovered, retrying");
-                grow_diagnostics::unified_log::info(
-                    "auth recovery: sampler 401, recovered, retrying",
-                    Some(self.session_info.id.0.as_ref()),
-                    None,
-                );
-                self.prepare_sampler_for_turn().await;
-                return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
-            }
-            tracing::warn!(session_id = %self.session_info.id.0, "auth recovery: sampler 401, refresh failed");
-            grow_diagnostics::unified_log::warn(
-                "auth recovery: sampler 401, refresh failed",
-                Some(self.session_info.id.0.as_ref()),
-                None,
-            );
-        }
+
         if let Some(ref provider) = auth_provider
             && self.try_provider_401_recovery(provider).await
         {
             self.prepare_sampler_for_turn().await;
-            return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
+            return Ok(SamplerFailureRecovery::RefreshByokAndResubmit {
+                credential: error.credential,
+            });
+        }
+
+        // A fail-closed request may have gone out before an env/config key was
+        // available. Re-read BYOK once; this is not a credential rejection and
+        // therefore must not consume the rejected-key retry budget.
+        if is_auth_401
+            && auth_provider.is_none()
+            && error.credential.is_missing()
+            && self.refresh_byok_credential().await
+        {
+            self.prepare_sampler_for_turn().await;
+            return Ok(SamplerFailureRecovery::RefreshByokAndResubmit {
+                credential: error.credential,
+            });
         }
         if matches!(error.kind, SamplingErrorKind::IdleTimeout) {
             self.signals_handle().record_idle_timeout();
@@ -896,23 +637,13 @@ impl SessionActor {
             }
             self.signals_handle().record_error_typed("empty_response");
         }
-        let session_auth_mode = self
-            .auth_manager
-            .as_ref()
-            .and_then(|am| am.current())
-            .map(|a| a.auth_mode)
-            .unwrap_or(crate::auth::AuthMode::ApiKey);
         let model_auth_facts = self.model_auth_facts(&failed_model_id);
         let auth_mode_str = if let Some(provider) = auth_provider.as_ref() {
-            if provider.config.is_oauth() {
-                format!("OAuth ([auth_provider.{}])", provider.name)
-            } else {
-                format!("Command ([auth_provider.{}])", provider.name)
-            }
+            format!("BYOK helper ([auth_provider.{}])", provider.name)
         } else if model_auth_facts.byok == crate::agent::auth_method::ModelByok::Byok {
             "BYOK (api_key/env_key or keyless provider)".to_string()
         } else {
-            format!("{session_auth_mode:?}")
+            "BYOK (credential missing or rejected)".to_string()
         };
         let client_version = grow_version::VERSION;
         let is_model_404 =
@@ -934,17 +665,10 @@ impl SessionActor {
             msg.push_str(&format!("\n  Model:     {current_model}"));
             msg.push_str(&format!("\n  Auth:      {auth_mode_str}"));
             if let Some(ref provider) = auth_provider {
-                if provider.config.is_oauth() {
-                    msg.push_str(&format!(
-                        "\n  Fix:       run `grow login {}` and retry",
-                        provider.name
-                    ));
-                } else {
-                    msg.push_str(&format!(
-                        "\n  Fix:       check [auth_provider.{}] and the debug log",
-                        provider.name
-                    ));
-                }
+                msg.push_str(&format!(
+                    "\n  Fix:       check [auth_provider.{}] and the debug log",
+                    provider.name
+                ));
             } else if is_auth_401
                 && model_auth_facts.byok == crate::agent::auth_method::ModelByok::Byok
             {
@@ -971,8 +695,6 @@ impl SessionActor {
         };
         let error_type = if grow_sampling_types::is_context_length_error(&error.message) {
             "context_length"
-        } else if is_auth_401 && auth_recovery_eligible {
-            "reauth_required"
         } else if is_auth_401 {
             "provider_credentials"
         } else {
@@ -1003,7 +725,7 @@ impl SessionActor {
     /// * `Ok(SamplerTurnOutcome::Response(_))` - model responded.
     /// * `Ok(SamplerTurnOutcome::CompactAndResubmit)` - compaction
     ///    ran, the outer turn loop should `continue`.
-    /// * `Ok(SamplerTurnOutcome::RefreshAuthAndResubmit)` - auth 401
+    /// * `Ok(SamplerTurnOutcome::RefreshByokAndResubmit { .. })` - a BYOK source recovered a 401
     ///    recovery succeeded, credentials refreshed, retry once.
     /// * `Err(acp::Error)` - terminal failure already reported via
     ///    `send_grow_notification(RetryState::Failed)`.
@@ -1055,85 +777,27 @@ impl SessionActor {
                     SamplerFailureRecovery::CompactAndResubmit => {
                         Ok(SamplerTurnOutcome::CompactAndResubmit)
                     }
-                    SamplerFailureRecovery::RefreshAuthAndResubmit => {
-                        Ok(SamplerTurnOutcome::RefreshAuthAndResubmit)
+                    SamplerFailureRecovery::RefreshByokAndResubmit { credential } => {
+                        Ok(SamplerTurnOutcome::RefreshByokAndResubmit { credential })
                     }
                 }
             }
         }
     }
-    /// Proactively refresh the auth token if near expiry.
+    /// Re-read the selected model's BYOK source before a request.
     ///
-    /// Session-token path is best-effort: on success, update credentials and
-    /// return. On failure, do **not** fall through to the JWT/config.toml
-    /// branch when the session gate was active — that path is for BYOK JWTs
-    /// only. Falling through after a failed session refresh left hard-expired
-    /// opaque tokens (External/OIDC) on the wire and guaranteed a 401.
-    /// Soft failures with a still-usable access token still return here
-    /// (grace / optimistic send); 401 recovery remains the safety net.
-    pub(crate) async fn refresh_token_if_expired(&self) {
-        if let Some(ref am) = self.auth_manager {
-            let creds = self.chat_state_handle.get_credentials().await;
-            let (model_id, base_url) = self
-                .chat_state_handle
-                .get_sampling_config()
-                .await
-                .map(|c| (c.model, c.base_url))
-                .unwrap_or_default();
-            if self.auth_gate(&model_id, &base_url).active() {
-                match am.get_valid_token().await {
-                    Ok(key) => {
-                        if creds.api_key.as_deref() != Some(&key) {
-                            let mut creds = creds;
-                            creds.api_key = Some(key);
-                            self.chat_state_handle.update_credentials(creds);
-                        }
-                        self.clear_auth_compact_suppression();
-                        return;
-                    }
-                    Err(e) => {
-                        let hard_expired = !am.has_usable_token();
-                        if hard_expired && creds.api_key.is_some() {
-                            let mut cleared = creds;
-                            cleared.api_key = None;
-                            self.chat_state_handle.update_credentials(cleared);
-                        }
-                        tracing::warn!(
-                            error = %e,
-                            hard_expired,
-                            model = %model_id,
-                            "auth: preflight get_valid_token failed"
-                        );
-                        grow_diagnostics::unified_log::warn(
-                            "auth.preflight.refresh_failed",
-                            Some(self.session_info.id.0.as_ref()),
-                            Some(serde_json::json!({
-                                "error": format!("{e}"),
-                                "hard_expired": hard_expired,
-                                "model": model_id,
-                            })),
-                        );
-                        return;
-                    }
-                }
-            }
-        } else {
-            grow_diagnostics::unified_log::debug(
-                "token refresh skipped: no auth manager",
-                Some(self.session_info.id.0.as_ref()),
-                None,
-            );
-        }
-        use crate::auth::{is_jwt_expired_or_near, parse_jwt_expiration};
-        const REFRESH_THRESHOLD: chrono::Duration = chrono::Duration::minutes(5);
-        let creds = self.chat_state_handle.get_credentials().await;
-        let current_key = creds.api_key;
+    /// Named helpers are single-flighted by their provider slot. Static and env
+    /// keys are re-resolved from effective config so rotation remains external
+    /// to Grow. Returns true only when chat-state received a different key.
+    pub(crate) async fn refresh_byok_credential(&self) -> bool {
         let current_model_id = self
             .chat_state_handle
             .get_sampling_config()
             .await
             .map(|c| c.model)
             .unwrap_or_default();
+        let current_key = self.chat_state_handle.get_credentials().await.api_key;
+
         if let Some(provider) = self.model_auth_provider(&current_model_id) {
             self.refresh_provider_token_pre_turn(
                 &provider,
@@ -1141,54 +805,19 @@ impl SessionActor {
                 &current_model_id,
             )
             .await;
-            return;
+            return self.chat_state_handle.get_credentials().await.api_key != current_key;
         }
-        let Some(ref key) = current_key else { return };
-        if !is_jwt_expired_or_near(key, REFRESH_THRESHOLD) {
-            if let Some(exp) = parse_jwt_expiration(key) {
-                let remaining_secs = (exp - chrono::Utc::now()).num_seconds();
-                tracing::debug!(
-                    model = %current_model_id,
-                    remaining_secs,
-                    "JWT token valid, no refresh needed"
-                );
-            } else {
-                tracing::debug!(
-                    model = %current_model_id,
-                    key_len = key.len(),
-                    "Token is not a JWT, expiry-based refresh not applicable"
-                );
-            }
-            return;
-        }
-        let remaining_secs =
-            parse_jwt_expiration(key).map_or(0, |exp| (exp - chrono::Utc::now()).num_seconds());
-        tracing::info!(
-            model = %current_model_id,
-            remaining_secs,
-            "JWT near expiry, refreshing from config.toml"
-        );
+
         let Some(new_key) = self.reload_api_key_from_config(&current_model_id) else {
-            return;
+            return false;
         };
-        if key == &new_key {
-            tracing::warn!(
-                model = %current_model_id,
-                "Config.toml returned same token (not yet rotated by external process?)"
-            );
-            return;
+        if current_key.as_deref() == Some(new_key.as_str()) {
+            return false;
         }
-        let new_remaining_secs = parse_jwt_expiration(&new_key)
-            .map_or(0, |exp| (exp - chrono::Utc::now()).num_seconds());
-        tracing::info!(
-            model = %current_model_id,
-            new_remaining_secs,
-            key_len = new_key.len(),
-            "Refreshed API token from config.toml"
-        );
         let mut creds = self.chat_state_handle.get_credentials().await;
         creds.api_key = Some(new_key);
         self.chat_state_handle.update_credentials(creds);
+        true
     }
     fn reload_api_key_from_config(&self, current_model_id: &str) -> Option<String> {
         let raw_config = crate::config::load_effective_config()

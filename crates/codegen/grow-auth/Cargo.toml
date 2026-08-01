@@ -3,7 +3,7 @@ license = "Apache-2.0"
 name = "grow-auth"
 version.workspace = true
 edition.workspace = true
-description = "Auth dependency-inversion seam: HttpAuth + AuthCredentialProvider traits"
+description = "BYOK HTTP credential dependency-inversion seam"
 authors = ["Grow contributors"]
 
 [features]

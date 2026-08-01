@@ -36,8 +36,6 @@ pub mod mcp_methods {
 
     pub const LIST: &str = "grow/mcp/list";
     pub const READ_RESOURCE: &str = "grow/mcp/read_resource";
-    pub const AUTH_STATUS: &str = "grow/mcp/auth_status";
-    pub const AUTH_TRIGGER: &str = "grow/mcp/auth_trigger";
     pub const SETUP: &str = "grow/mcp/setup";
     pub const TOGGLE: &str = "grow/mcp/toggle";
     pub const TOGGLE_TOOL: &str = "grow/mcp/toggle_tool";
@@ -60,8 +58,7 @@ pub struct McpListRequest {
     #[serde(default)]
     pub session_id: Option<String>,
     /// When false, bypass cache and refetch from cli-chat-proxy, then sync
-    /// into live sessions so `search_tool` sees new tools. Use after OAuth
-    /// enrollment or disconnect.
+    /// into live sessions so `search_tool` sees new tools.
     #[serde(default = "default_true")]
     pub cache: bool,
 }
@@ -147,8 +144,6 @@ pub struct McpServerSessionState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<McpToolEntry>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub auth_required: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub setup_required: bool,
 }
 
@@ -214,7 +209,6 @@ pub struct McpContentBlock {
 pub struct McpStatusSnapshot {
     pub configs: Vec<acp::McpServer>,
     pub clients: Vec<McpClientStatus>,
-    pub auth_required: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -346,8 +340,6 @@ enum McpRoute {
     List,
     Call,
     ReadResource,
-    AuthStatus,
-    AuthTrigger,
     Setup,
     Toggle,
     ToggleTool,
@@ -360,8 +352,6 @@ fn route_mcp_method(method: &str) -> Option<McpRoute> {
         mcp_methods::LIST => McpRoute::List,
         wire::MCP_CALL => McpRoute::Call,
         mcp_methods::READ_RESOURCE => McpRoute::ReadResource,
-        mcp_methods::AUTH_STATUS => McpRoute::AuthStatus,
-        mcp_methods::AUTH_TRIGGER => McpRoute::AuthTrigger,
         mcp_methods::SETUP => McpRoute::Setup,
         mcp_methods::TOGGLE => McpRoute::Toggle,
         mcp_methods::TOGGLE_TOOL => McpRoute::ToggleTool,
@@ -377,8 +367,6 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         Some(McpRoute::List) => handle_list(agent, args).await,
         Some(McpRoute::Call) => handle_call(agent, args).await,
         Some(McpRoute::ReadResource) => handle_read_resource(agent, args).await,
-        Some(McpRoute::AuthStatus) => handle_auth_status(agent, args).await,
-        Some(McpRoute::AuthTrigger) => handle_auth_trigger(agent, args).await,
         Some(McpRoute::Setup) => handle_setup(agent, args).await,
         Some(McpRoute::Toggle) => handle_toggle(agent, args).await,
         Some(McpRoute::ToggleTool) => handle_toggle_tool(agent, args).await,
@@ -443,11 +431,6 @@ pub fn build_mcp_catalog_with_gateway_tools(
     }
 
     if let Some(catalog) = gateway_catalog {
-        let reauth: HashSet<&str> = catalog
-            .connectors_needing_reauth
-            .iter()
-            .map(String::as_str)
-            .collect();
         let mut by_connector: BTreeMap<&str, Vec<&crate::session::managed_mcp::GatewayTool>> =
             BTreeMap::new();
         for tool in &catalog.tools {
@@ -466,7 +449,6 @@ pub fn build_mcp_catalog_with_gateway_tools(
             let server_disabled = disabled_tools
                 .get(crate::util::config::MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY)
                 .is_some_and(|set| set.contains(connector_id));
-            let auth_required = reauth.contains(connector_id) || reauth.contains(connector_name);
             servers.push(McpServerEntry {
                 name: managed_gateway_entry_name(connector_id),
                 display_name: Some(connector_name.to_owned()),
@@ -477,7 +459,7 @@ pub fn build_mcp_catalog_with_gateway_tools(
                 setup_values: None,
                 session: Some(McpServerSessionState {
                     enabled: !server_disabled,
-                    status: (!auth_required && !server_disabled).then_some(McpSessionStatus::Ready),
+                    status: (!server_disabled).then_some(McpSessionStatus::Ready),
                     tools: tools
                         .into_iter()
                         .map(|tool| {
@@ -491,7 +473,6 @@ pub fn build_mcp_catalog_with_gateway_tools(
                             }
                         })
                         .collect(),
-                    auth_required,
                     setup_required: false,
                 }),
             });
@@ -598,7 +579,6 @@ fn disabled_server_placeholder_entry(name: &str) -> McpServerEntry {
             enabled: false,
             status: None,
             tools: vec![],
-            auth_required: false,
             setup_required: false,
         }),
     }
@@ -621,7 +601,6 @@ pub async fn build_mcp_status(
         _is_initializing,
         initializing_servers,
         mcp_tool_meta,
-        auth_required,
         init_failed,
         disabled_regs,
     ) = {
@@ -635,7 +614,6 @@ pub async fn build_mcp_status(
             state.is_initializing(),
             state.handshaking_servers_cloned(),
             state.mcp_tool_meta.clone(),
-            state.auth_required.clone(),
             state.init_failed.clone(),
             // Collect (qualified_name, description) for disabled tools so we
             // can include them in the snapshot without cloning the full registration.
@@ -737,7 +715,6 @@ pub async fn build_mcp_status(
     McpStatusSnapshot {
         configs,
         clients: client_statuses,
-        auth_required,
     }
 }
 
@@ -781,12 +758,9 @@ pub async fn init_agent_mcp_pool(mcp_state: &Arc<TokioMutex<McpState>>, cwd: &st
         return;
     }
 
-    // session_less picks Interactive to preserve prior deferred-OAuth behavior. A session-less SDK
-    // agent can reach this non-interactively; threading real non-interactivity is a deliberate follow-up.
     let ctx = crate::session::mcp_servers::McpSpawnCtx::session_less();
     let meta = Default::default();
-    let oauth = Default::default();
-    let results = start_mcp_servers(configs, Some(cwd), &meta, &oauth, &ctx).await;
+    let results = start_mcp_servers(configs, Some(cwd), &meta, &ctx).await;
     let clients: HashMap<McpServerName, Arc<McpClient>> = results
         .into_iter()
         .filter_map(|r| match r {
@@ -888,13 +862,8 @@ pub async fn call_mcp_tool(
 // ── mcp/list handler ────────────────────────────────────────────────
 
 async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
-    // Latency layout: the two costly awaits — the managed-MCP
-    // proxy fetch (~1-2s) and the session-state branch (conditional
-    // `retry_auth_required_servers` followed by `build_mcp_status`, the
-    // latter cheap since is_healthy is a state-mutex inspection) —
-    // are independent and now run concurrently via tokio::join!. OAuth
-    // retries only fire on explicit refresh (cache=false); cached opens
-    // skip them so the warm path stays fast.
+    // Managed catalog resolution and session status inspection are
+    // independent and run concurrently.
     let req = parse_params::<McpListRequest>(args)?;
 
     let cwd = req
@@ -927,14 +896,8 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         );
     }
 
-    let cache = req.cache;
     let session_state_fut = async {
         let handle = session_handle.as_ref()?;
-        // Auth retries belong on explicit refresh: skipping them on cached
-        // opens saves ~500ms when multiple OAuth servers are configured.
-        if !cache {
-            handle.retry_auth_required_servers().await;
-        }
         Some(handle.get_mcp_status().await)
     };
 
@@ -955,7 +918,7 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // The two broadcasts are INDEPENDENT concerns, gated separately (and in
     // practice mutually exclusive — legacy managed fetch runs only when gateway
     // tools are OFF, gateway fetch only when ON):
-    if !cache {
+    if !req.cache {
         // 1. Legacy managed connectors -> per-session `McpServers`. Only when
         //    the managed fetch actually succeeded (cache `Ready`). A failed
         //    proxy fetch returns an empty vec AND rolls the cache back to
@@ -1040,7 +1003,6 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 enabled,
                 status,
                 tools: vec![],
-                auth_required: false,
                 setup_required,
             }),
         });
@@ -1129,7 +1091,6 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 enabled,
                 status,
                 tools,
-                auth_required: snapshot.auth_required.contains(&entry.name),
                 setup_required: false,
             });
         }
@@ -1153,7 +1114,6 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                         enabled: true,
                         status: Some(client_status.status.clone()),
                         tools: client_status.tools.clone(),
-                        auth_required: snapshot.auth_required.contains(&client_status.name),
                         setup_required: false,
                     }),
                 });
@@ -1463,105 +1423,6 @@ impl grow_tools::types::resources::McpResourceProvider for McpStateResourceProvi
             // Unreachable: `first` is pre-filtered to supported variants, but
             // `ResourceContents` is non_exhaustive so the match must be total.
             _ => Err(format!("Unsupported resource content type for: {uri}")),
-        }
-    }
-}
-
-// ── Auth status / trigger ────────────────────────────────────────────
-
-#[derive(serde::Deserialize)]
-struct McpAuthStatusRequest {
-    session_id: String,
-}
-
-#[derive(serde::Serialize)]
-pub struct McpAuthStatusEntry {
-    pub server_name: String,
-    pub status: &'static str,
-}
-
-#[derive(serde::Serialize)]
-struct McpAuthStatusResponse {
-    servers: Vec<McpAuthStatusEntry>,
-}
-
-async fn handle_auth_status(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
-    let req = parse_params::<McpAuthStatusRequest>(args)?;
-    let acp_id = acp::SessionId::new(req.session_id);
-    let handle = agent
-        .get_session_handle(&acp_id)
-        .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
-    let entries = handle.mcp_auth_status().await;
-    to_ext_response(Ok(McpAuthStatusResponse { servers: entries }))
-}
-
-#[derive(serde::Deserialize)]
-struct McpAuthTriggerRequest {
-    session_id: String,
-    server_name: String,
-}
-
-#[derive(serde::Serialize)]
-struct McpAuthTriggerResponse {
-    status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    setup: Option<crate::util::config::McpSetupConfig>,
-    /// Descriptive failure reason from the shell. `None` on success and on
-    /// failures with no detail; surfaced verbatim by the TUI.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-async fn handle_auth_trigger(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
-    let req = parse_params::<McpAuthTriggerRequest>(args)?;
-    let acp_id = acp::SessionId::new(req.session_id);
-    let handle = agent
-        .get_session_handle(&acp_id)
-        .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
-    let cwd = agent
-        .get_session_cwd(&acp_id)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let setup_entries = crate::util::config::collect_mcp_setup_configs(
-        &cwd,
-        agent.plugin_registry_snapshot().as_deref(),
-        &agent.cfg.borrow().compat_resolved,
-    );
-    let preferences = crate::util::config::load_mcp_preferences().file();
-    if let Some(entry) = setup_entries.get(&req.server_name) {
-        match entry
-            .config
-            .resolve_setup(preferences.servers.get(&req.server_name))
-        {
-            crate::util::config::McpSetupResolution::Required(setup) => {
-                return to_ext_response(Ok(McpAuthTriggerResponse {
-                    status: "setup_required",
-                    setup: Some(setup),
-                    error: None,
-                }));
-            }
-            crate::util::config::McpSetupResolution::Invalid(reason) => {
-                return to_ext_response(Ok(McpAuthTriggerResponse {
-                    status: "setup_required",
-                    setup: entry.config.setup.clone(),
-                    error: Some(reason),
-                }));
-            }
-            crate::util::config::McpSetupResolution::Resolved(_) => {}
-        }
-    }
-    match handle.mcp_auth_trigger(req.server_name).await {
-        Ok(()) => to_ext_response(Ok(McpAuthTriggerResponse {
-            status: "authenticated",
-            setup: None,
-            error: None,
-        })),
-        Err(e) => {
-            tracing::warn!(%e, "MCP auth trigger failed");
-            to_ext_response(Ok(McpAuthTriggerResponse {
-                status: "failed",
-                setup: None,
-                error: Some(e),
-            }))
         }
     }
 }
@@ -1972,117 +1833,6 @@ mod tests {
         }
     }
 
-    /// **Pattern-regression test, not an end-to-end `handle_list` test.**
-    ///
-    /// `handle_list` takes an `&MvpAgent`, which has no lightweight test
-    /// constructor; spinning up a fake agent here would be a much larger
-    /// refactor than this test warrants. Instead this test mirrors the exact
-    /// production structure (resolve session handle synchronously, then
-    /// `tokio::join!` a managed-fetch arm with a session-state arm whose
-    /// inner future conditionally awaits `retry_auth_required_servers` then
-    /// `build_mcp_status`) using stand-in futures, and asserts the two
-    /// latency invariants `handle_list` guarantees:
-    ///
-    /// 1. The two `tokio::join!` arms — `get_managed_mcp_configs` on one
-    ///    side, and the session-state branch (`retry_auth_required_servers?`
-    ///    + `build_mcp_status`) on the other — are polled concurrently, so
-    ///    total wall-time ≈ max(t_managed, t_session) rather than the sum.
-    /// 2. `retry_auth_required_servers` is gated on `cache=false`. On cached
-    ///    opens it is skipped entirely, removing ~500ms of OAuth retry
-    ///    overhead when multiple OAuth servers are configured.
-    ///
-    /// If a future refactor of `handle_list` changes the structure (e.g.
-    /// awaits the arms sequentially, or runs auth retry on cache=true),
-    /// this test will *not* fail — it only guards the pattern. The real
-    /// behavioural guard is reading the diff against the structure
-    /// documented here.
-    #[tokio::test(start_paused = true)]
-    async fn handle_list_parallel_join_pattern_regression() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use tokio::time::{Duration, Instant};
-
-        async fn run(cache: bool) -> (Duration, bool, usize) {
-            let auth_retried = Arc::new(AtomicBool::new(false));
-            let max_concurrent = Arc::new(AtomicUsize::new(0));
-            let in_flight = Arc::new(AtomicUsize::new(0));
-
-            let bump = {
-                let max_concurrent = Arc::clone(&max_concurrent);
-                let in_flight = Arc::clone(&in_flight);
-                move || {
-                    let n = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                    max_concurrent.fetch_max(n, Ordering::SeqCst);
-                }
-            };
-            let drop_ = {
-                let in_flight = Arc::clone(&in_flight);
-                move || {
-                    in_flight.fetch_sub(1, Ordering::SeqCst);
-                }
-            };
-
-            // Stand-in for `agent.get_managed_mcp_configs()` (~1-2s proxy fetch).
-            let managed_fut = {
-                let bump = bump.clone();
-                let drop_ = drop_.clone();
-                async move {
-                    bump();
-                    tokio::time::sleep(Duration::from_millis(1500)).await;
-                    drop_();
-                }
-            };
-
-            // Stand-in for the session-state branch: conditional auth retry
-            // followed by `build_mcp_status`. Mirrors the closure in
-            // `handle_list`.
-            let session_fut = {
-                let auth_retried = Arc::clone(&auth_retried);
-                let bump = bump.clone();
-                let drop_ = drop_.clone();
-                async move {
-                    bump();
-                    if !cache {
-                        auth_retried.store(true, Ordering::SeqCst);
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                    }
-                    // build_mcp_status is cheap (state-mutex inspect).
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    drop_();
-                }
-            };
-
-            let start = Instant::now();
-            tokio::join!(managed_fut, session_fut);
-            (
-                start.elapsed(),
-                auth_retried.load(Ordering::SeqCst),
-                max_concurrent.load(Ordering::SeqCst),
-            )
-        }
-
-        // cache=true: no auth retry, total ≈ managed fetch alone.
-        let (cached_elapsed, cached_auth, cached_overlap) = run(true).await;
-        assert!(!cached_auth, "auth retry must be skipped on cache=true");
-        assert_eq!(cached_overlap, 2, "futures must run concurrently");
-        assert!(
-            cached_elapsed < Duration::from_millis(1600),
-            "cached handle_list should finish in ~1.5s, got {:?}",
-            cached_elapsed
-        );
-
-        // cache=false: auth retry runs, but still concurrent with managed
-        // fetch — total ≈ max(1500, 500+50) ≈ 1500ms, not 2050ms.
-        let (refresh_elapsed, refresh_auth, refresh_overlap) = run(false).await;
-        assert!(refresh_auth, "auth retry must run on cache=false");
-        assert_eq!(refresh_overlap, 2, "futures must run concurrently");
-        assert!(
-            refresh_elapsed < Duration::from_millis(1600),
-            "refresh handle_list should still finish in ~1.5s (parallel), got {:?}",
-            refresh_elapsed
-        );
-    }
-
     #[test]
     fn test_mcp_list_response_serialization() {
         let resp = McpListResponse {
@@ -2117,7 +1867,6 @@ mod tests {
                     session: Some(McpServerSessionState {
                         enabled: true,
                         status: Some(McpSessionStatus::Ready),
-                        auth_required: false,
                         setup_required: false,
                         tools: vec![McpToolEntry {
                             name: "read_file".to_string(),
@@ -2152,7 +1901,6 @@ mod tests {
                 enabled: true,
                 status: Some(McpSessionStatus::Ready),
                 tools: vec![],
-                auth_required: false,
                 setup_required: false,
             }),
         })
@@ -2209,7 +1957,6 @@ mod tests {
                 ),
             ],
             total_tools: 3,
-            connectors_needing_reauth: vec!["slack".into()],
         };
         let servers =
             build_mcp_catalog_with_gateway_tools(&[], &[], Some(&catalog), &Default::default());
@@ -2221,7 +1968,6 @@ mod tests {
         assert!(matches!(servers[0].config, McpServerConfig::ManagedGateway));
         let linear_session = servers[0].session.as_ref().unwrap();
         assert_eq!(linear_session.status, Some(McpSessionStatus::Ready));
-        assert!(!linear_session.auth_required);
         let linear_names: Vec<&str> = linear_session
             .tools
             .iter()
@@ -2235,8 +1981,7 @@ mod tests {
         assert_eq!(servers[1].name, "managed_gateway:slack");
         assert_eq!(servers[1].display_name.as_deref(), Some("Slack"));
         let slack_session = servers[1].session.as_ref().unwrap();
-        assert!(slack_session.auth_required);
-        assert!(slack_session.status.is_none());
+        assert_eq!(slack_session.status, Some(McpSessionStatus::Ready));
         assert_eq!(slack_session.tools[0].name, "slack__search");
         assert_eq!(
             slack_session.tools[0].display_name.as_deref(),
@@ -2256,7 +2001,6 @@ mod tests {
                 "List Linear issues",
             )],
             total_tools: 1,
-            connectors_needing_reauth: vec![],
         };
         let local = acp::McpServer::Stdio(
             acp::McpServerStdio::new("linear", "/usr/bin/local-linear")
@@ -2347,7 +2091,6 @@ mod tests {
                 "List Linear issues",
             )],
             total_tools: 1,
-            connectors_needing_reauth: vec![],
         };
         let mut servers =
             build_mcp_catalog_with_gateway_tools(&[], &[], Some(&gateway), &Default::default());
@@ -2389,7 +2132,6 @@ mod tests {
                 ),
             ],
             total_tools: 2,
-            connectors_needing_reauth: vec![],
         };
         let disabled: HashMap<String, HashSet<String>> = HashMap::from([
             (
@@ -2456,7 +2198,6 @@ mod tests {
                 enabled: true,
                 status: Some(McpSessionStatus::SetupRequired),
                 tools: vec![],
-                auth_required: false,
                 setup_required: true,
             }),
         };
@@ -2465,48 +2206,6 @@ mod tests {
         assert_eq!(json["session"]["setupRequired"], true);
         assert_eq!(json["setup"]["fields"][0]["id"], "site");
         assert_eq!(json["setupValues"]["site"], "us5");
-    }
-
-    #[test]
-    fn test_mcp_auth_trigger_response_success_no_error_field() {
-        let resp = McpAuthTriggerResponse {
-            status: "authenticated",
-            setup: None,
-            error: None,
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["status"], "authenticated");
-        assert!(
-            json.get("error").is_none(),
-            "error field must be omitted on success: {json}"
-        );
-    }
-
-    #[test]
-    fn test_mcp_auth_trigger_response_failure_carries_error() {
-        let resp = McpAuthTriggerResponse {
-            status: "failed",
-            setup: None,
-            error: Some("MCP server 'linear' does not use OAuth".to_string()),
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["status"], "failed");
-        assert_eq!(
-            json["error"], "MCP server 'linear' does not use OAuth",
-            "failure must carry the descriptive error verbatim: {json}"
-        );
-    }
-
-    #[test]
-    fn test_mcp_auth_trigger_response_failure_omits_error_when_none() {
-        let resp = McpAuthTriggerResponse {
-            status: "failed",
-            setup: None,
-            error: None,
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["status"], "failed");
-        assert!(json.get("error").is_none());
     }
 
     #[test]
@@ -2528,7 +2227,6 @@ mod tests {
                 enabled: false,
                 status: None,
                 tools: vec![],
-                auth_required: false,
                 setup_required: false,
             }),
         };

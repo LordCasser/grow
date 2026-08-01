@@ -738,58 +738,39 @@ impl SessionActor {
             None => err.message.clone(),
         }
     }
-    /// Auth/401 compact failure — abort for reauth resubmit; don't sample oversized.
+    /// Credential/401 compact failure — abort so the caller can reread BYOK; don't sample oversized.
     pub(crate) fn is_auth_compact_error(err: &acp::Error) -> bool {
         matches!(
             Self::classify_suppress_reason(&Self::acp_error_message(err)),
             SuppressReason::Auth
         )
     }
-    /// Terminal auth compact failure. Only a session-owned credential is
-    /// labeled re-authable; configured model providers retain their own repair
-    /// path instead of being redirected to Grow's `/login` flow.
+    /// Terminal auth compact failure. Grow is BYOK-only, so every credential
+    /// failure belongs to the selected model or its credential helper.
     pub(crate) async fn surface_compact_auth_failure(&self, err: acp::Error) -> acp::Error {
         use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
         let detailed = Self::acp_error_message(&err);
-        let (model_id, base_url) = self
+        let model_id = self
             .chat_state_handle
             .get_sampling_config()
             .await
-            .map(|config| (config.model, config.base_url))
+            .map(|config| config.model)
             .unwrap_or_default();
         let auth_provider = self.model_auth_provider(&model_id);
-        let session_reauthable =
-            auth_provider.is_none() && self.session_auth_recovery_eligible(&model_id, &base_url);
-        let message = if session_reauthable {
+        let message = if let Some(provider) = auth_provider.as_ref() {
             format!(
-                "{detailed}\n\nAuthentication required — run /login to re-authenticate, then retry."
+                "{detailed}\n\nThe credential for model `{model_id}` was rejected. Check [auth_provider.{}] and the debug log, then retry.",
+                provider.name
             )
-        } else if let Some(provider) = auth_provider.as_ref() {
-            if provider.config.is_oauth() {
-                format!(
-                    "{detailed}\n\nThe OAuth credential for model `{model_id}` was rejected. Run `grow login {}` and retry.",
-                    provider.name
-                )
-            } else {
-                format!(
-                    "{detailed}\n\nThe credential for model `{model_id}` was rejected. Check [auth_provider.{}] and the debug log, then retry.",
-                    provider.name
-                )
-            }
         } else {
             format!(
                 "{detailed}\n\nThe configured BYOK credential for model `{model_id}` was rejected. Check its provider api_key/env_key and endpoint in ~/.grow/config.toml, then retry."
             )
         };
-        let error_type = if session_reauthable {
-            "reauth_required"
-        } else {
-            "provider_credentials"
-        };
+        let error_type = "provider_credentials";
         tracing::warn!(
             session_id = %self.session_info.id.0,
             error = %message,
-            reauthable = session_reauthable,
             "auto-compact auth failure: aborting turn"
         );
         grow_diagnostics::unified_log::warn(
@@ -813,13 +794,10 @@ impl SessionActor {
             Some(401),
             grow_sampler::SamplingErrorKind::Auth,
         );
-        if session_reauthable {
-            acp::Error::auth_required().data(data)
-        } else {
-            acp::Error::internal_error().data(data)
-        }
+        acp::Error::internal_error().data(data)
     }
-    /// Clear [`SUPPRESS_AUTH`] on login/token refresh (provider-limit suppress waits for a 200).
+    /// Clear [`SUPPRESS_AUTH`] after a credential update (provider-limit
+    /// suppression waits for a successful response).
     pub(crate) fn clear_auth_compact_suppression(&self) {
         let _ = self.compaction.auto_compact_suppressed.compare_exchange(
             SUPPRESS_AUTH,
@@ -1996,7 +1974,7 @@ impl SessionActor {
     /// Leaves provider-limit/auth suppression (a switch can't fix those) and short-circuits.
     /// Auth compact failures abort the turn (same as pre-sampling/preflight).
     pub(crate) async fn maybe_compact_on_model_switch(self: &Arc<Self>) -> Result<(), acp::Error> {
-        self.refresh_token_if_expired().await;
+        self.refresh_byok_credential().await;
         let Some(prev) = self.compaction.previous_model.take() else {
             return Ok(());
         };
@@ -2349,8 +2327,6 @@ mod inline_auto_compact_flow_tests {
             },
             auth_method_id: test_auth_method_id("test-auth"),
             model_auth_memo: std::cell::RefCell::new(None),
-            attribution_callback: None,
-            auth_manager: None,
             state,
             notifications: NotificationSender {
                 gateway: GatewaySender::new(gateway_tx),
@@ -2472,7 +2448,6 @@ mod inline_auto_compact_flow_tests {
             ),
             goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
             managed_mcp_handle: Default::default(),
-            managed_mcp_expires_at: std::sync::Mutex::new(None),
             initial_client_mcp_servers: vec![],
             tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
             mcp_announced_servers: parking_lot::Mutex::new(std::collections::HashMap::new()),
@@ -2804,8 +2779,8 @@ mod inline_auto_compact_flow_tests {
             })
             .await;
     }
-    /// After /login, clearing auth suppress must re-arm pre-sampling compact
-    /// before the next sample (ordering that prepare_sampler-after-gate broke).
+    /// After a BYOK key refresh, clearing credential suppression must re-arm
+    /// pre-sampling compact before the next sample.
     #[tokio::test(flavor = "current_thread")]
     async fn clear_auth_suppress_rearms_pre_sampling_compact_gate() {
         use crate::session::compaction_config::SUPPRESS_AUTH;
@@ -2979,9 +2954,9 @@ mod inline_auto_compact_flow_tests {
         });
         format!("http://{addr}")
     }
-    /// 401 auto-compact: SUPPRESS_AUTH + reauthable RetryState (abort for /login).
+    /// 401 auto-compact: SUPPRESS_AUTH + retryable state for BYOK reread.
     #[tokio::test(flavor = "current_thread")]
-    async fn e2e_auto_compact_401_suppresses_auth_and_surfaces_reauth() {
+    async fn e2e_auto_compact_401_suppresses_auth_and_surfaces_credential_failure() {
         use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
         use crate::session::compaction_config::SUPPRESS_AUTH;
         use crate::session::storage::SessionUpdate;
@@ -3065,9 +3040,9 @@ mod inline_auto_compact_flow_tests {
             })
             .await;
     }
-    /// Model-switch compact 401 must surface reauth (same path as pre-sampling).
+    /// Model-switch compact 401 must surface the credential failure (same path as pre-sampling).
     #[tokio::test(flavor = "current_thread")]
-    async fn e2e_model_switch_compact_401_surfaces_reauth() {
+    async fn e2e_model_switch_compact_401_surfaces_credential_failure() {
         use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
         use crate::session::compaction_config::{PreviousModelInfo, SUPPRESS_AUTH};
         use crate::session::storage::SessionUpdate;

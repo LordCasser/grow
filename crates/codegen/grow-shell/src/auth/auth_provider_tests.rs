@@ -5,32 +5,6 @@
 use super::test_counting_provider as counting_provider;
 use super::*;
 
-#[test]
-fn oauth_provider_is_explicit_and_usable() {
-    let provider: AuthProviderConfig = toml::from_str(
-        r#"
-        type = "oauth"
-        issuer = "https://auth.example.com"
-        client_id = "grow-client"
-        scopes = ["openid", "offline_access"]
-        "#,
-    )
-    .unwrap();
-    assert!(provider.is_oauth());
-    assert!(provider.is_usable());
-    let service = provider.oauth_service_config().unwrap();
-    let oauth = service.oauth2.unwrap();
-    assert_eq!(oauth.issuer, "https://auth.example.com");
-    assert_eq!(oauth.client_id, "grow-client");
-}
-
-#[test]
-fn oauth_provider_requires_issuer_and_client_id() {
-    let provider: AuthProviderConfig = toml::from_str("type = \"oauth\"\n").unwrap();
-    assert!(provider.is_oauth());
-    assert!(!provider.is_usable());
-}
-
 #[tokio::test]
 async fn provider_token_is_cached_while_fresh() {
     let dir = tempfile::tempdir().unwrap();

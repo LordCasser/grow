@@ -1,6 +1,5 @@
 //! Active-agent lookup and view-context helpers shared across dispatch modules.
 
-use super::dashboard_diagnostics::log_dashboard_opened;
 use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView, WelcomeAnnouncementState};
@@ -136,22 +135,6 @@ pub(super) fn reseed_tip_for_new_session(app: &mut AppView) {
 pub(super) fn show_welcome(app: &mut AppView) {
     app.active_view = ActiveView::Welcome;
     app.welcome_announcement = WelcomeAnnouncementState::default();
-}
-
-/// Restore the view a mid-session auth flow launched from, falling back to the
-/// welcome screen (via `show_welcome`) when the original agent is gone. Shared by
-/// cancel-login and AuthComplete so they can't diverge.
-pub(super) fn restore_auth_return_view(app: &mut AppView, return_view: ActiveView) {
-    match return_view {
-        ActiveView::Agent(id) if app.agents.contains_key(&id) => {
-            app.active_view = ActiveView::Agent(id)
-        }
-        ActiveView::AgentDashboard => {
-            app.active_view = ActiveView::AgentDashboard;
-            log_dashboard_opened(app);
-        }
-        _ => show_welcome(app),
-    }
 }
 
 /// Why a switch from one [`ActiveView::Agent`] to another is happening.

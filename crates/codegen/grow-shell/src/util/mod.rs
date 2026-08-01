@@ -1,7 +1,6 @@
 pub mod config;
 pub mod hooks;
 pub mod limits;
-pub mod provider_auth_credentials;
 pub(crate) mod subprocess;
 
 // The foundation utilities live in `grow-shell-base` (upstream of this

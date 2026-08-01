@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 
-use grow_pager_pty_harness::{EnvOp, oauth_credential_ops};
+use grow_pager_pty_harness::EnvOp;
 
 #[test]
 fn set_and_remove_operations_have_one_typed_surface() {
@@ -17,9 +17,4 @@ fn set_and_remove_operations_have_one_typed_surface() {
     assert!(matches!(operations[1], EnvOp::Remove(_)));
     assert!(matches!(operations[2], EnvOp::Set(_, _)));
     assert!(matches!(operations[3], EnvOp::Remove(_)));
-}
-
-#[test]
-fn oauth_credential_operations_remove_the_api_key() {
-    assert_eq!(oauth_credential_ops(), [EnvOp::remove("GROW_API_KEY")],);
 }

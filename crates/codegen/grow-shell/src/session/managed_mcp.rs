@@ -1,6 +1,5 @@
 //! Shell-side managed MCP: merges MCP server sources, then injects managed
-//! OAuth headers, and binds the extracted credential/catalog machinery to
-//! shell's auth manager.
+//! explicit transport headers.
 //!
 //! Merge layers are applied in order; later `insert()` beats earlier
 //! `or_insert()`:
@@ -17,52 +16,8 @@
 
 pub use grow_shell_session_support::managed_mcp::*;
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use agent_client_protocol as acp;
-
-/// Build a [`RefreshContext`] whose token provider resolves fresh tokens from
-/// `auth_manager`; the extracted refresh task never sees the auth manager
-/// itself, only the closure.
-fn refresh_context(
-    proxy_base_url: String,
-    auth_manager: Arc<crate::auth::AuthManager>,
-) -> RefreshContext {
-    RefreshContext {
-        proxy_base_url,
-        token_provider: Arc::new(move || -> TokenFuture {
-            let auth_manager = auth_manager.clone();
-            Box::pin(async move { auth_manager.get_valid_token().await.ok() })
-        }),
-    }
-}
-
-/// Resolve an auth key from `auth_manager` then [`get_or_fetch`] the managed MCP
-/// configs (with a [`RefreshContext`] for proactive refresh). Single source for
-/// the auth-key dance across every managed-config fetch —
-/// [`crate::agent::MvpAgent::get_managed_mcp_configs`], the interactive
-/// folder-trust grant reload, agent-init MCP setup, and the reactive re-auth
-/// re-fetch — so the copies can't drift.
-/// Callers gate on `can_fetch_managed_mcps`/auth before calling.
-pub(crate) async fn fetch_managed_mcp_configs(
-    handle: &ManagedMcpStateHandle,
-    proxy_url: &str,
-    auth_manager: &Arc<crate::auth::AuthManager>,
-) -> Vec<ManagedMcpConfig> {
-    let auth_key = auth_manager
-        .get_valid_token()
-        .await
-        .ok()
-        .or_else(|| auth_manager.current_or_expired().map(|a| a.key));
-    get_or_fetch(
-        handle,
-        proxy_url,
-        auth_key.as_deref(),
-        Some(refresh_context(proxy_url.to_string(), auth_manager.clone())),
-    )
-    .await
-}
+use std::collections::HashMap;
 
 /// Dedup key for the merge map: normalized URL for Http/Sse, name for Stdio.
 fn mcp_server_key(s: &acp::McpServer) -> String {
@@ -294,7 +249,7 @@ pub fn merge_managed_mcp_servers_sourced(
         for plugin in registry.active_plugins() {
             let mut plugin_servers: Vec<acp::McpServer> = Vec::new();
             if let Some(ref mcp_path) = plugin.mcp_config_path {
-                let (servers, _) = load_plugin_mcp_servers(
+                let servers = load_plugin_mcp_servers(
                     mcp_path,
                     &plugin.name,
                     &plugin.root_str(),
@@ -303,7 +258,7 @@ pub fn merge_managed_mcp_servers_sourced(
                 plugin_servers.extend(servers);
             }
             if let Some(ref inline_value) = plugin.inline_mcp_servers {
-                let (servers, _) = load_plugin_mcp_servers_from_value(
+                let servers = load_plugin_mcp_servers_from_value(
                     inline_value,
                     &plugin.name,
                     &plugin.root_str(),
@@ -438,9 +393,9 @@ fn load_plugin_mcp_servers(
     plugin_name: &str,
     plugin_root: &str,
     plugin_data: &str,
-) -> (Vec<acp::McpServer>, crate::util::config::McpOAuthConfigMap) {
+) -> Vec<acp::McpServer> {
     let Some(config) = crate::util::config::read_mcp_json(mcp_path) else {
-        return (vec![], crate::util::config::McpOAuthConfigMap::new());
+        return vec![];
     };
     load_plugin_mcp_servers_from_config(&config, plugin_name, plugin_root, plugin_data)
 }
@@ -451,11 +406,11 @@ fn load_plugin_mcp_servers_from_value(
     plugin_name: &str,
     plugin_root: &str,
     plugin_data: &str,
-) -> (Vec<acp::McpServer>, crate::util::config::McpOAuthConfigMap) {
+) -> Vec<acp::McpServer> {
     let normalized = grow_agent::plugins::manifest::normalize_inline_mcp_servers(root);
     let Ok(config) = serde_json::from_value::<crate::util::config::McpConfig>(normalized) else {
         tracing::warn!(plugin = plugin_name, "failed to parse plugin MCP config");
-        return (vec![], crate::util::config::McpOAuthConfigMap::new());
+        return vec![];
     };
     load_plugin_mcp_servers_from_config(&config, plugin_name, plugin_root, plugin_data)
 }
@@ -465,62 +420,13 @@ fn load_plugin_mcp_servers_from_config(
     plugin_name: &str,
     plugin_root: &str,
     plugin_data: &str,
-) -> (Vec<acp::McpServer>, crate::util::config::McpOAuthConfigMap) {
+) -> Vec<acp::McpServer> {
     let sub = |s: &str| -> String {
         let s = grow_agent::plugins::manifest::substitute_env_vars(s, plugin_root, plugin_data);
         crate::config::expand_env_vars_in_string(&s)
     };
     let label = format!("plugin:{}", plugin_name);
-    crate::util::config::parse_mcp_config_with_oauth(config, &label, &sub)
-}
-
-pub fn collect_plugin_oauth_configs(
-    plugin_registry: Option<&grow_agent::plugins::PluginRegistry>,
-) -> crate::util::config::McpOAuthConfigMap {
-    let mut oauth_configs = crate::util::config::McpOAuthConfigMap::new();
-    let Some(registry) = plugin_registry else {
-        return oauth_configs;
-    };
-
-    for plugin in registry.active_plugins() {
-        if let Some(ref mcp_path) = plugin.mcp_config_path {
-            let (_, oauth) = load_plugin_mcp_servers(
-                mcp_path,
-                &plugin.name,
-                &plugin.root_str(),
-                &plugin.data_dir_str(),
-            );
-            for (name, cfg) in oauth {
-                oauth_configs.entry(name).or_insert(cfg);
-            }
-        }
-        if let Some(ref inline_value) = plugin.inline_mcp_servers {
-            let (_, oauth) = load_plugin_mcp_servers_from_value(
-                inline_value,
-                &plugin.name,
-                &plugin.root_str(),
-                &plugin.data_dir_str(),
-            );
-            for (name, cfg) in oauth {
-                oauth_configs.entry(name).or_insert(cfg);
-            }
-        }
-    }
-
-    oauth_configs
-}
-
-pub fn merge_plugin_oauth_into(
-    oauth_config_map: &mut crate::util::config::McpOAuthConfigMap,
-    plugin_oauth: crate::util::config::McpOAuthConfigMap,
-    toml_mcp_names: &std::collections::HashSet<String>,
-) {
-    for (name, cfg) in plugin_oauth {
-        if toml_mcp_names.contains(&name) {
-            continue;
-        }
-        oauth_config_map.insert(name, cfg);
-    }
+    crate::util::config::parse_mcp_config(config, &label, &sub)
 }
 
 #[cfg(test)]
@@ -532,7 +438,6 @@ mod tests {
             name: name.to_string(),
             endpoint: endpoint.to_string(),
             headers: HashMap::from([("Authorization".into(), "Bearer tok".into())]),
-            token_expires_at: None,
             scope: Some(scope.to_string()),
             scope_id: Some(format!("{scope}-id-123")),
             scope_name: None,
@@ -921,7 +826,7 @@ enabled = false
         }))
         .expect("parse test MCP config");
 
-        let (servers, _) = load_plugin_mcp_servers_from_config(
+        let servers = load_plugin_mcp_servers_from_config(
             &config,
             "team-tool",
             "/home/user/.grow/plugins/team-tool",
@@ -959,7 +864,7 @@ enabled = false
         }))
         .expect("parse test MCP config");
 
-        let (servers, _) = load_plugin_mcp_servers_from_config(
+        let servers = load_plugin_mcp_servers_from_config(
             &config,
             "my-plugin",
             "/tmp/plugin",
@@ -985,8 +890,7 @@ enabled = false
         let value = serde_json::json!({
             "sentry": { "type": "http", "url": "https://mcp.sentry.dev/mcp" }
         });
-        let (servers, _) =
-            load_plugin_mcp_servers_from_value(&value, "sentry", "/tmp/p", "/tmp/pd");
+        let servers = load_plugin_mcp_servers_from_value(&value, "sentry", "/tmp/p", "/tmp/pd");
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             acp::McpServer::Http(acp::McpServerHttp { name, url, .. }) => {
@@ -1139,109 +1043,5 @@ enabled = false
             }
             other => panic!("expected Http server, got {:?}", other),
         }
-    }
-
-    #[test]
-    fn collect_plugin_oauth_configs_reads_byo_client_id_from_mcp_json() {
-        use grow_agent::plugins::PluginRegistry;
-        use grow_agent::plugins::PluginScope;
-        use grow_agent::plugins::discovery::{DiscoveredPlugin, PluginId};
-        use grow_agent::plugins::manifest::PluginManifest;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let plugin_root = tmp.path().join("slack");
-        std::fs::create_dir_all(&plugin_root).unwrap();
-        let mcp_json = plugin_root.join(".mcp.json");
-        std::fs::write(
-            &mcp_json,
-            r#"{"mcpServers":{"slack":{"type":"http","url":"https://mcp.slack.example/mcp","oauth":{"clientId":"slack-byo-client","callbackPort":3118}}}}"#,
-        )
-        .unwrap();
-
-        let manifest = PluginManifest {
-            name: "slack".into(),
-            version: None,
-            description: None,
-            author: None,
-            homepage: None,
-            repository: None,
-            license: None,
-            keywords: vec![],
-            skills: None,
-            commands: None,
-            agents: None,
-            hooks: None,
-            mcp_servers: None,
-            lsp_servers: None,
-        };
-        let id = PluginId::new(PluginScope::User, &plugin_root, "slack");
-        let dp = DiscoveredPlugin {
-            manifest,
-            id,
-            root: plugin_root.clone(),
-            canonical_root: plugin_root.clone(),
-            scope: PluginScope::User,
-            origin: grow_agent::plugins::PluginOrigin::UserGrow,
-            trusted: true,
-            skill_dirs: vec![],
-            command_dirs: vec![],
-            agent_dirs: vec![],
-            hooks_path: None,
-            mcp_config_path: Some(mcp_json),
-            lsp_config_path: None,
-            conflict: None,
-        };
-        let registry = PluginRegistry::from_discovered(vec![dp], &[], &["slack".to_string()]);
-
-        let oauth = collect_plugin_oauth_configs(Some(&registry));
-        assert_eq!(
-            oauth
-                .get("slack")
-                .expect("slack oauth")
-                .client_id
-                .as_deref(),
-            Some("slack-byo-client")
-        );
-    }
-
-    #[test]
-    fn collect_plugin_oauth_configs_none_registry_is_empty() {
-        assert!(collect_plugin_oauth_configs(None).is_empty());
-    }
-
-    #[test]
-    fn merge_plugin_oauth_respects_source_precedence() {
-        use crate::util::config::{McpOAuthConfig, McpOAuthConfigMap};
-
-        let byo = |id: &str| McpOAuthConfig {
-            client_id: Some(id.to_string()),
-            ..Default::default()
-        };
-
-        let mut base = McpOAuthConfigMap::new();
-        base.insert("shared".to_string(), byo("file-client"));
-        base.insert("toml-svc".to_string(), byo("toml-client"));
-
-        let mut plugin = McpOAuthConfigMap::new();
-        plugin.insert("shared".to_string(), byo("plugin-client"));
-        plugin.insert("toml-svc".to_string(), byo("plugin-shadow"));
-        plugin.insert("plugin-only".to_string(), byo("plugin-only-client"));
-
-        let toml_names: std::collections::HashSet<String> =
-            ["toml-svc".to_string()].into_iter().collect();
-        merge_plugin_oauth_into(&mut base, plugin, &toml_names);
-
-        assert_eq!(
-            base.get("shared").unwrap().client_id.as_deref(),
-            Some("plugin-client")
-        );
-        assert_eq!(
-            base.get("toml-svc").unwrap().client_id.as_deref(),
-            Some("toml-client")
-        );
-        assert_eq!(
-            base.get("plugin-only").unwrap().client_id.as_deref(),
-            Some("plugin-only-client")
-        );
     }
 }

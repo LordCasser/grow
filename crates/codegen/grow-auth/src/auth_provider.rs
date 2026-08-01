@@ -1,74 +1,29 @@
-//! Credential dependency-inversion seam for outbound HTTP made by the
-//! authenticated services. Shell installs `ShellAuthCredentialProvider` wrapping
-//! `AuthManager` + `TokenRefresher`; callers hold an
-//! `Arc<dyn AuthCredentialProvider>`.
+//! Credential dependency-inversion seam for outbound BYOK HTTP requests.
 
 use reqwest::RequestBuilder;
 
 use crate::visibility::HttpAuth;
 
-/// Snapshot of the currently effective credentials for callers that build
-/// their own authenticated requests or record local 401 diagnostics.
+/// Snapshot of the API key that will be sent on the wire.
 #[derive(Clone, Debug, Default)]
 pub struct CredentialSnapshot {
-    /// Bearer token. `None` when no auth is configured (CI / `--api-key` headless).
+    /// API key. `None` when the provider is intentionally keyless.
     pub token: Option<String>,
-    /// User identifier matching the bearer token's owner. `None` when no auth
-    /// is configured or when the underlying provider has no concept of user
-    /// identity (`StaticAuthCredentialProvider`).
-    pub user_id: Option<String>,
-    /// Team identifier from OAuth. `None` for personal accounts or when
-    /// no auth is configured.
-    pub team_id: Option<String>,
-    /// `uuidv5(NAMESPACE_OID, deployment_key)`, set only for deployment-key auth.
-    pub deployment_id: Option<String>,
-    /// `uuidv5(NAMESPACE_OID, api_key)`, set only for `AuthMode::ApiKey`.
-    pub api_key_id: Option<String>,
-    /// Org id from the OIDC `organizationId` claim; `None` for personal / deployment-key auth.
-    pub organization_id: Option<String>,
 }
 
 /// Source of truth for outbound auth on data-collector requests.
 ///
-/// Supertrait of `HttpAuth` so a single impl satisfies both this trait
-/// (refresh-aware snapshot + 401 recovery) and the visibility seam
-/// (header construction). Callers add headers via `HttpAuth::apply`.
-#[async_trait::async_trait]
+/// Supertrait of `HttpAuth` so a single provider supplies both the raw BYOK
+/// value used by middleware and endpoint-specific header construction.
 pub trait AuthCredentialProvider: HttpAuth + Send + Sync + 'static {
-    /// Return the current credential snapshot. Implementations should
-    /// issue a cheap disk re-read (`AuthManager::refresh`) before
-    /// snapshotting so callers see updates from sibling processes
-    /// (an embedding client or `grow login`). The `token` field MUST mirror
-    /// the bearer that `HttpAuth::apply` would send on the wire so
-    /// 401-attribution prefixes match the actual request.
+    /// Return the current credential snapshot. The token must mirror the
+    /// bearer that `HttpAuth::apply` would send on the wire.
     fn snapshot(&self) -> CredentialSnapshot;
-
-    /// Attempt to obtain a fresh token. Returns `true` if a different
-    /// token was obtained -- caller should retry the failed request once.
-    /// Returns `false` if no refresher is configured or refresh failed.
-    async fn refresh_after_unauthorized(&self) -> bool;
-
-    /// Whether `X-Grow-Token-Auth` should be sent with the bearer token.
-    /// `false` for deployment keys (bare Bearer), `true` for user/OAuth tokens.
-    /// See `ProviderAuthCredentials::apply()` for the wire format contract.
-    fn needs_token_auth_header(&self) -> bool {
-        true
-    }
-
-    /// Whether the provider holds a credential worth a real outbound attempt —
-    /// an unexpired token (in memory or on disk), or a static key. Default
-    /// `true` always attempts.
-    fn has_usable_credential(&self) -> bool {
-        true
-    }
 }
 
-/// Static credential provider. Used by tests and by callers that pass a
-/// raw `&str` token with no `AuthManager` available.
+/// Static credential provider used by callers that already resolved BYOK.
 ///
 /// `apply()` delegates to the underlying `HttpAuth::apply()`.
-/// `refresh_after_unauthorized()` always returns `false`.
-///
 /// `bearer` is the wire bearer the inner `HttpAuth` will send in the
 /// `Authorization` header. Stored alongside the inner so `snapshot().token`
 /// returns the same prefix that goes out on the wire (used by
@@ -101,16 +56,11 @@ impl HttpAuth for StaticAuthCredentialProvider {
     }
 }
 
-#[async_trait::async_trait]
 impl AuthCredentialProvider for StaticAuthCredentialProvider {
     fn snapshot(&self) -> CredentialSnapshot {
         CredentialSnapshot {
             token: self.bearer.clone(),
             ..Default::default()
         }
-    }
-
-    async fn refresh_after_unauthorized(&self) -> bool {
-        false
     }
 }

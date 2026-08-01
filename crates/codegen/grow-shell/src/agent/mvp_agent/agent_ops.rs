@@ -3,38 +3,8 @@
 //! Inherent [`MvpAgent`] helpers (MCP/clients/gateway, settings/models, session ops, spawn).
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
-use crate::auth::PreferredAuthMethod;
 use grow_tools::implementations::grow_build::task::backend::SubagentBackend;
 use xai_tty_utils::ProcessScope;
-/// `preferred` model, else catalog `current`, else first with own credentials.
-fn byok_from_models(
-    models: &indexmap::IndexMap<String, ModelEntry>,
-    preferred: Option<&str>,
-    current: &str,
-) -> Option<String> {
-    preferred
-        .and_then(|id| models.get(id))
-        .and_then(|m| m.own_credential())
-        .or_else(|| models.get(current).and_then(|m| m.own_credential()))
-        .or_else(|| models.values().find_map(|m| m.own_credential()))
-}
-struct MissingSessionCtx {
-    has_session_key: bool,
-    has_own_credentials: bool,
-    is_session_based_auth: bool,
-    preferred: Option<PreferredAuthMethod>,
-}
-/// Warn only when a missing session is a real failure, not on API-key hosts.
-fn should_warn_missing_session(ctx: MissingSessionCtx) -> bool {
-    if ctx.has_session_key || ctx.has_own_credentials {
-        return false;
-    }
-    match ctx.preferred {
-        Some(PreferredAuthMethod::Oidc) => true,
-        Some(PreferredAuthMethod::ApiKey) => false,
-        None => ctx.is_session_based_auth,
-    }
-}
 impl MvpAgent {
     /// Announce a session's new title over ACP. ACP scopes `session/update` to
     /// sessions the client established, and a rename can name a history row it
@@ -100,19 +70,11 @@ impl MvpAgent {
             .session_summary_model
             .clone()
             .unwrap_or_else(|| primary.model.clone());
-        let session_key = self.auth_manager.current_or_expired().map(|a| a.key.clone());
         let models = self.models_manager.models();
-        let endpoints = self.models_manager.endpoints();
-        let (disable_api_key_auth, alpha_test_key) = {
-            let cfg = self.cfg.borrow();
-            (cfg.auth.api_key_auth_disabled(), cfg.endpoints.alpha_test_key.clone())
-        };
+        let alpha_test_key = self.cfg.borrow().endpoints.alpha_test_key.clone();
         let config = match crate::agent::config::resolve_aux_model_sampling_config(
             &slug,
             &models,
-            &endpoints,
-            session_key.as_deref(),
-            disable_api_key_auth,
             alpha_test_key,
         ) {
             Some(mut cfg) => {
@@ -135,68 +97,20 @@ impl MvpAgent {
     }
     fn has_proxy_credentials(&self) -> bool {
         self.cfg.borrow().endpoints.deployment_key.is_some()
-            || self.auth_manager.current_or_expired().is_some_and(|a| a.is_service_auth())
-    }
-    /// `true` for session-based ACP auth methods.
-    fn is_session_based_auth(&self) -> bool {
-        self.auth_method_id
-            .load()
-            .as_deref()
-            .is_some_and(crate::agent::auth_method::is_session_based_method)
     }
     /// Publish the current ACP auth method into the shared live handle so every
     /// running session's per-turn auth gate observes it on its next turn.
     pub(super) fn set_auth_method(&self, id: acp::AuthMethodId) {
         self.auth_method_id.store(Some(std::sync::Arc::new(id)));
     }
-    /// Publish model-owned credentials for tool authentication fallthrough.
-    /// Only [`ModelEntry::own_credential`] — not `sampling_config.api_key` (may be a session JWT).
-    pub(crate) fn sync_process_static_api_key(&self, preferred_model_id: Option<&str>) {
-        if self.cfg.borrow().auth.api_key_auth_disabled() {
-            self.auth_manager.set_process_static_api_key(None);
-            return;
-        }
-        let models = self.models_manager.models();
-        let current = self.models_manager.current_model_id();
-        self.auth_manager
-            .set_process_static_api_key(
-                byok_from_models(&models, preferred_model_id, current.0.as_ref()),
-            );
-    }
-    /// Return auth for sync config construction.
-    pub(super) fn current_or_buffered_auth(&self) -> Option<crate::auth::ProviderAuth> {
-        self.auth_manager
-            .current()
-            .or_else(|| {
-                if self.is_session_based_auth() {
-                    let auth = self.auth_manager.expired_auth();
-                    if auth.is_some() {
-                        grow_diagnostics::unified_log::info(
-                            "auth buffered token fallback",
-                            None,
-                            None,
-                        );
-                    }
-                    auth
-                } else {
-                    None
-                }
-            })
-    }
-    fn has_managed_mcp_auth(&self) -> bool {
-        self.auth_manager
-            .current_or_expired()
-            .is_some_and(|a| a.is_managed_mcp_eligible())
-    }
     /// Requires feature flag and explicitly configured service authentication.
     pub(super) fn can_fetch_managed_mcps(&self) -> bool {
         let cfg = self.cfg.borrow();
-        cfg.managed_mcps_enabled && !cfg.managed_mcp_gateway_tools_enabled
-            && self.has_managed_mcp_auth()
+        let _ = cfg;
+        false
     }
     fn can_fetch_managed_mcp_gateway_tools(&self) -> bool {
-        self.cfg.borrow().managed_mcp_gateway_tools_enabled
-            && self.has_managed_mcp_auth()
+        false
     }
     pub async fn get_managed_mcp_configs(
         &self,
@@ -204,13 +118,7 @@ impl MvpAgent {
         if !self.can_fetch_managed_mcps() {
             return vec![];
         }
-        let proxy_url = self.cfg.borrow().endpoints.proxy_url();
-        crate::session::managed_mcp::fetch_managed_mcp_configs(
-                &self.managed_mcp_cache,
-                &proxy_url,
-                &self.auth_manager,
-            )
-            .await
+        vec![]
     }
     pub async fn get_managed_mcp_gateway_tool_catalog(
         &self,
@@ -219,20 +127,7 @@ impl MvpAgent {
             self.managed_mcp_cache.lock().await.disable_gateway_tools();
             return None;
         }
-        self.managed_mcp_cache.lock().await.enable_gateway_tools();
-        let proxy_url = self.cfg.borrow().endpoints.proxy_url();
-        let auth_key = self
-            .auth_manager
-            .get_valid_token()
-            .await
-            .ok()
-            .or_else(|| self.auth_manager.current_or_expired().map(|a| a.key));
-        crate::session::managed_mcp::get_or_fetch_gateway_tool_catalog(
-                &self.managed_mcp_cache,
-                &proxy_url,
-                auth_key.as_deref(),
-            )
-            .await
+        None
     }
     pub fn managed_mcp_cache(
         &self,
@@ -263,42 +158,7 @@ impl MvpAgent {
             .values()
             .map(|handle| handle.cmd_tx.clone())
             .collect();
-        if !self.can_fetch_managed_mcp_gateway_tools() {
-            self.disable_managed_gateway_tools_and_refresh_sessions_with_txs(
-                session_txs,
-            );
-            return;
-        }
-        let cache = self.managed_mcp_cache.clone();
-        let proxy_url = self.cfg.borrow().endpoints.proxy_url();
-        let auth_manager = self.auth_manager.clone();
-        tokio::task::spawn_local(async move {
-            let auth_key = auth_manager
-                .get_valid_token()
-                .await
-                .ok()
-                .or_else(|| auth_manager.current_or_expired().map(|a| a.key));
-            if !auth_manager
-                .current_or_expired()
-                .is_some_and(|a| a.is_managed_mcp_eligible())
-            {
-                cache.lock().await.disable_gateway_tools();
-                for tx in session_txs {
-                    let _ = tx.send(SessionCommand::RefreshMcpSearchIndex);
-                }
-                return;
-            }
-            cache.lock().await.enable_gateway_tools();
-            crate::session::managed_mcp::get_or_fetch_gateway_tool_catalog(
-                    &cache,
-                    &proxy_url,
-                    auth_key.as_deref(),
-                )
-                .await;
-            for tx in session_txs {
-                let _ = tx.send(SessionCommand::RefreshMcpSearchIndex);
-            }
-        });
+        self.disable_managed_gateway_tools_and_refresh_sessions_with_txs(session_txs);
     }
     /// Push a fresh legacy managed-MCP catalog into live sessions' per-session
     /// `McpServers` (called after `mcp/list` with `cache=false`).
@@ -400,15 +260,12 @@ impl MvpAgent {
     /// Resolve folder trust and load launch-dir MCP configs after `initialize`
     /// returns. The walks are synchronous and expensive in large monorepos; they
     /// must not block the ACP response (embedding clients initialize immediately).
-    pub(super) fn spawn_initialize_launch_mcp_setup(&self, fetch_managed_mcps: bool) {
+    pub(super) fn spawn_initialize_launch_mcp_setup(&self) {
         let cwd = self.launch_cwd.clone();
         let compat = self.cfg.borrow().compat_resolved;
         let remote_settings = self.cfg.borrow().remote_settings.clone();
         let gateway = self.gateway.clone();
         let agent_mcp_state = self.agent_mcp_state.clone();
-        let managed_mcp_cache = self.managed_mcp_cache.clone();
-        let proxy_url = self.cfg.borrow().endpoints.proxy_url();
-        let auth_manager = self.auth_manager.clone();
         tokio::task::spawn_local(async move {
             let local_mcp_servers = match tokio::task::spawn_blocking(move || {
                     let local = crate::util::config::load_mcp_servers(&cwd, &compat);
@@ -436,23 +293,6 @@ impl MvpAgent {
                     &local_mcp_servers,
                 )
                 .await;
-            if !fetch_managed_mcps {
-                return;
-            }
-            let managed = crate::session::managed_mcp::fetch_managed_mcp_configs(
-                    &managed_mcp_cache,
-                    &proxy_url,
-                    &auth_manager,
-                )
-                .await;
-            if !managed.is_empty() {
-                crate::extensions::mcp::notify_servers_updated(
-                        &gateway,
-                        &managed,
-                        &local_mcp_servers,
-                    )
-                    .await;
-            }
         });
     }
     pub fn agent_mcp_state(
@@ -486,23 +326,21 @@ impl MvpAgent {
             "lazily populated plugin registry snapshot"
         );
     }
-    /// Fetch managed configs, merge with client servers, return merged list + earliest expiry.
+    /// Fetch managed configs and merge them with client servers.
     pub(super) async fn resolve_mcp_servers(
         &self,
         client_servers: Vec<acp::McpServer>,
         cwd: &std::path::Path,
-    ) -> (Vec<acp::McpServer>, Option<chrono::DateTime<chrono::Utc>>) {
+    ) -> Vec<acp::McpServer> {
         self.ensure_plugin_registry();
         let managed = self.get_managed_mcp_configs().await;
-        let expires_at = managed.iter().filter_map(|c| c.token_expires_at).min();
-        let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
+        crate::session::managed_mcp::merge_managed_mcp_servers(
             client_servers,
             cwd,
             &managed,
             self.plugin_registry_handle.snapshot().as_deref(),
             &self.cfg.borrow().compat_resolved,
-        );
-        (merged, expires_at)
+        )
     }
     /// Set the memory configuration (called from TUI after config resolution).
     pub fn set_memory_config(&mut self, config: crate::config::MemoryConfig) {
@@ -601,10 +439,6 @@ impl MvpAgent {
             .or_default()
             .turn_number = Some(next);
     }
-    /// Return the current ProviderAuth credentials, if authenticated and not expired.
-    pub(crate) fn current_auth(&self) -> Option<crate::auth::ProviderAuth> {
-        self.auth_manager.current()
-    }
     /// Shared plugin registry handle used by extensions for snapshot/reload.
     pub(crate) fn plugin_registry_handle(
         &self,
@@ -674,91 +508,6 @@ impl MvpAgent {
                 );
         }
         Ok(ops)
-    }
-    /// Derive the current `AuthType` from auth method + auth manager state.
-    ///
-    /// Conceptually, `AuthType` describes *which authentication mechanism this
-    /// session uses*, not *whether we currently have a live bearer*. Bearer
-    /// liveness is tracked by the auth manager; the mechanism is fixed by
-    /// `auth_method_id`.
-    ///
-    /// Returns `SessionToken` when EITHER:
-    ///   - `auth_manager` currently has a live (non-expired) credential, OR
-    ///   - the active auth method is session-based (`cached_token`,
-    ///     `service.example.com`, `oidc`) -- even if the in-memory token is currently
-    ///     expired or missing.
-    ///
-    /// Returns `ApiKey` only when the auth method is BYOK (`provider.api_key`) or
-    ///   no auth method has been selected yet AND no live credential exists.
-    ///
-    /// The session-based clause is load-bearing: without it, chat_state can get
-    /// locked into `auth_type = ApiKey` and skip token refresh on later prompts.
-    pub(crate) fn auth_type(&self) -> grow_chat_state::AuthType {
-        if self.auth_manager.current().is_some() || self.is_session_based_auth() {
-            grow_chat_state::AuthType::SessionToken
-        } else {
-            grow_chat_state::AuthType::ApiKey
-        }
-    }
-    /// When `cached_token` cannot proceed, prefer non-interactive `provider.api_key`
-    /// iff `should_advertise_provider_api_key`; otherwise `service.example.com`. Returns `None`
-    /// when `preferred_method` is pinned (fail-closed — no cross-method fallthrough).
-    pub(super) fn cached_token_fallthrough_method_id(
-        &self,
-    ) -> Option<acp::AuthMethodId> {
-        let preferred = self.cfg.borrow().auth.preferred_method;
-        let id = auth_method::method_id_after_cached_token_unavailable(
-            auth_method::should_advertise_provider_api_key(
-                self.cfg.borrow().auth.api_key_auth_disabled(),
-                self.models_manager.models().values(),
-            ),
-            preferred,
-        )?;
-        Some(acp::AuthMethodId::new(id))
-    }
-    /// Shared exit for missing/expired/legacy `cached_token`: fall through with
-    /// `use_oauth` only when the target is interactive `service.example.com`. When
-    /// `preferred_method` is pinned, fail instead of falling through.
-    pub(super) async fn authenticate_after_cached_token_unavailable(
-        &self,
-        arguments: acp::AuthenticateRequest,
-    ) -> Result<AuthenticateResponse, acp::Error> {
-        let Some(method_id) = self.cached_token_fallthrough_method_id() else {
-            let preferred = self.cfg.borrow().auth.preferred_method;
-            let msg = match preferred {
-                Some(crate::auth::PreferredAuthMethod::ApiKey) => {
-                    auth_method::PREFERRED_API_KEY_UNAVAILABLE
-                }
-                _ => auth_method::PREFERRED_OIDC_UNAVAILABLE,
-            };
-            tracing::info!(%msg, "cached_token unavailable; preferred_method forbids fallthrough");
-            grow_diagnostics::unified_log::warn(
-                "auth cached_token fallthrough blocked by preferred_method",
-                None,
-                Some(
-                    serde_json::json!({
-                    "preferred_method": preferred.map(|p| format!("{p:?}")),
-                }),
-                ),
-            );
-            return Err(acp::Error::auth_required().data(msg));
-        };
-        let meta = if method_id.0.as_ref() == auth_method::PROVIDER_OAUTH_METHOD_ID {
-            serde_json::json!({ "use_oauth": true }).as_object().cloned()
-        } else {
-            arguments.meta
-        };
-        tracing::info!(fallback = %method_id.0, "cached_token fallthrough");
-        grow_diagnostics::unified_log::warn(
-            "auth cached_token fallthrough",
-            None,
-            Some(serde_json::json!({ "fallback": method_id.0.as_ref() })),
-        );
-        acp::Agent::authenticate(
-                self,
-                acp::AuthenticateRequest::new(method_id).meta(meta),
-            )
-            .await
     }
     pub(crate) fn deployment_key(&self) -> Option<String> {
         self.cfg.borrow().endpoints.deployment_key.clone()
@@ -846,68 +595,7 @@ impl MvpAgent {
         model: &ModelEntry,
         origin_client: Option<crate::http::OriginClientInfo>,
     ) -> SamplingConfig {
-        let preferred = self.cfg.borrow().auth.preferred_method;
-        let prefers_oidc = preferred == Some(PreferredAuthMethod::Oidc);
-        let is_session_based_auth = self.is_session_based_auth();
-        let session = match preferred {
-            Some(PreferredAuthMethod::ApiKey) => None,
-            _ if is_session_based_auth => self.auth_manager.current_or_expired(),
-            _ => None,
-        };
-        let has_session_key = session.is_some();
-        let mut credentials = resolve_credentials(
-            model,
-            session.as_ref().map(|a| a.key.as_str()),
-        );
-        if prefers_oidc && !model.has_own_credentials()
-            && credentials.auth_type == grow_chat_state::AuthType::ApiKey
-        {
-            credentials.api_key = None;
-            credentials.auth_type = grow_chat_state::AuthType::SessionToken;
-        }
-        crate::agent::config::enforce_disable_api_key_auth(
-            &mut credentials,
-            self.cfg.borrow().auth.api_key_auth_disabled(),
-            session.as_ref().map(|a| a.key.as_str()),
-        );
-        if !has_session_key && credentials.auth_type == grow_chat_state::AuthType::ApiKey
-            && !model.has_own_credentials() && is_session_based_auth
-        {
-            tracing::info!(
-                model = model.info().model.as_str(),
-                "auth: overriding auth_type to SessionToken (session-based auth method)",
-            );
-            grow_diagnostics::unified_log::info(
-                "auth auth_type override to SessionToken",
-                None,
-                Some(serde_json::json!({ "model": model.info().model.as_str() })),
-            );
-            credentials.auth_type = grow_chat_state::AuthType::SessionToken;
-        }
-        if should_warn_missing_session(MissingSessionCtx {
-            has_session_key,
-            has_own_credentials: model.has_own_credentials(),
-            is_session_based_auth,
-            preferred,
-        }) {
-            tracing::warn!(
-                model = model.info().model.as_str(),
-                is_expired = self.auth_manager.is_expired(),
-                auth_type = ?credentials.auth_type,
-                "auth: prepare_sampling_config has no session key",
-            );
-            grow_diagnostics::unified_log::warn(
-                "auth: prepare_sampling_config has no session key",
-                None,
-                Some(
-                    serde_json::json!({
-                    "model": model.info().model.as_str(),
-                    "is_expired": self.auth_manager.is_expired(),
-                    "auth_type": format!("{:?}", credentials.auth_type),
-                }),
-                ),
-            );
-        }
+        let credentials = resolve_credentials(model);
         let cfg = self.cfg.borrow();
         let alpha_test_key = cfg.endpoints.alpha_test_key.clone();
         drop(cfg);
@@ -942,13 +630,9 @@ impl MvpAgent {
     }
     /// Returns `Err` with a user-facing message on invalid config; the caller at
     /// the process boundary prints it and exits.
-    pub fn new(
-        gateway: GatewaySender,
-        cfg: &AgentConfig,
-        auth_manager: Arc<AuthManager>,
-    ) -> Result<Self, String> {
-        let (cfg, models_manager) = crate::agent::init::bootstrap(cfg, &auth_manager)?;
-        Ok(Self::with_models(gateway, &cfg, auth_manager, models_manager))
+    pub fn new(gateway: GatewaySender, cfg: &AgentConfig) -> Result<Self, String> {
+        let (cfg, models_manager) = crate::agent::init::bootstrap(cfg)?;
+        Ok(Self::with_models(gateway, &cfg, models_manager))
     }
     /// Prepare the web fetch configuration based on feature flags.
     ///
@@ -990,19 +674,10 @@ impl MvpAgent {
     pub fn with_models(
         gateway: GatewaySender,
         cfg: &AgentConfig,
-        auth_manager: Arc<AuthManager>,
         models_manager: crate::agent::models::ModelsManager,
     ) -> Self {
         models_manager.set_gateway(gateway.clone());
         let sampling_config = models_manager.sampling_config();
-        if !cfg.auth.api_key_auth_disabled() {
-            let models = models_manager.models();
-            let current = models_manager.current_model_id();
-            auth_manager
-                .set_process_static_api_key(
-                    byok_from_models(&models, None, current.0.as_ref()),
-                );
-        }
         let default_yolo_mode = cfg.default_yolo_mode;
         let default_auto_mode = cfg.default_auto_mode;
         let config_root = crate::config::load_effective_config().ok();
@@ -1044,8 +719,6 @@ impl MvpAgent {
             cfg: RefCell::new(cfg.clone()),
             auth_method_id: crate::agent::auth_method::new_shared_auth_method_id(None),
             sampling_config: RefCell::new(sampling_config),
-            auth_manager,
-            interactive_auth: Default::default(),
             client_type: RefCell::new(ClientType::default()),
             code_nav_enabled: std::cell::Cell::new(false),
             default_yolo_mode,
@@ -1082,11 +755,6 @@ impl MvpAgent {
             #[cfg(test)]
             supervisor_spawn_count: std::cell::Cell::new(0),
         };
-        instance
-            .auth_manager
-            .configure_refresher(
-                instance.cfg.borrow().auth.auth_provider_command.clone(),
-            );
         instance
     }
     /// Handle `grow/internal/evict_sessions` — the leader server tells us a
@@ -1643,36 +1311,16 @@ impl MvpAgent {
             );
         }
     }
-    /// Seed the global sampling config with login auth when available.
-    ///
-    /// Only sets the `api_key` if missing. Does NOT resolve `base_url` from
-    /// `current_model_id` — that's deferred to session creation time to avoid
-    /// cross-client contamination in leader mode (where `current_model_id` is
-    /// shared mutable state).
+    /// Warn when no model has an explicit BYOK credential. Per-model
+    /// resolution remains deferred to session creation.
     pub(super) fn seed_client_config_auth_if_available(&self) {
-        let mut sampling_config = self.sampling_config.borrow_mut();
-        if sampling_config.api_key.is_none() {
-            if let Some(auth) = self.auth_manager.current_or_expired() {
-                sampling_config.api_key = Some(auth.key);
-                tracing::debug!("auth: seed_client_config set auth (SessionToken)");
-                grow_diagnostics::unified_log::debug(
-                    "auth: seed_client_config set auth (SessionToken)",
-                    None,
-                    None,
-                );
-            } else if !self
-                .models_manager
-                .models()
-                .values()
-                .any(|m| m.has_own_credentials())
-            {
-                tracing::warn!("No credentials found: no login token and no model api_key/env_key");
-                grow_diagnostics::unified_log::warn(
-                    "No credentials found: no login token and no model api_key/env_key",
-                    None,
-                    None,
-                );
-            }
+        if !self
+            .models_manager
+            .models()
+            .values()
+            .any(|m| m.has_own_credentials())
+        {
+            tracing::warn!("No BYOK credentials found: configure model api_key/env_key/auth_provider");
         }
     }
     /// Resolve the agent definition for a session.
@@ -1834,7 +1482,6 @@ impl MvpAgent {
             persisted_workflow_runs,
             persisted_announcement_state,
             session_meta,
-            managed_mcp_expires_at,
             persisted_agent_name,
             session_model_id,
             session_yolo_mode,
@@ -2201,7 +1848,6 @@ impl MvpAgent {
         let path_not_found_hints = self.cfg.borrow().path_not_found_hints;
         let subagent_toggle = self.cfg.borrow().subagent_toggle.clone();
         let handle_display_cwd = prompt_display_cwd.clone();
-        let auth_manager = Some(self.auth_manager.clone());
         let bash_params_json = {
             let cfg = self.cfg.borrow();
             let remote_auto_bg = cfg
@@ -2259,24 +1905,10 @@ impl MvpAgent {
         }
         let (mut handle, permission_events_rx, agent_system_prompt, session_thread) = {
             let _timer = crate::instrumentation_timer!("session.spawn_actor_call");
-            let session_key = self.auth_manager.current_or_expired().map(|a| a.key);
             let credentials = grow_chat_state::Credentials {
                 api_key: sampling_config.api_key.clone(),
-                auth_type: crate::agent::config::resolve_chat_state_auth_type(
-                    sampling_config.model.as_str(),
-                    session_key.as_deref(),
-                    self.auth_type(),
-                ),
                 alpha_test_key: self.alpha_test_key(),
             };
-            let attribution_callback: Option<
-                grow_sampler::SharedAttributionCallback,
-            > = Some(
-                crate::auth::attribution::ShellAttribution::new(
-                    self.auth_manager.clone(),
-                    Some(session_info.id.0.to_string()),
-                ),
-            );
             let agent_hook_registry_override = agent_definition
                 .hooks
                 .as_ref()
@@ -2352,8 +1984,6 @@ impl MvpAgent {
                     sampling_config,
                     credentials,
                     auth_method_id,
-                    auth_manager,
-                    attribution_callback,
                     tool_ctx,
                     mcp_servers,
                     initial_client_mcp_servers,
@@ -2395,7 +2025,6 @@ impl MvpAgent {
                     persisted_announcement_state,
                     self.memory_config.clone(),
                     self.managed_mcp_cache.clone(),
-                    managed_mcp_expires_at,
                     managed_mcp_proxy_url,
                     session_model_id,
                     session_yolo_mode,
@@ -2437,13 +2066,7 @@ impl MvpAgent {
                     Some(self.plugin_registry_handle.clone()),
                     self.models_manager.clone(),
                     None,
-                    Some(
-                        Arc::new(
-                            crate::auth::manager::SharedAuthKeyProvider(
-                                self.auth_manager.clone(),
-                            ),
-                        ),
-                    ),
+                    None,
                     self.resolve_image_description_model(),
                     agent_hook_registry_override,
                     workspace_ops.clone(),

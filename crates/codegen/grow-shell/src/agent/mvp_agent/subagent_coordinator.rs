@@ -247,7 +247,6 @@ impl MvpAgent {
             fs,
             terminal,
             session_env,
-            parent_attribution_callback,
             parent_agent_name,
             parent_subagent_filter,
             parent_managed_mcp_proxy_base_url,
@@ -283,7 +282,6 @@ impl MvpAgent {
                     }),
                 ps.map(|h| h.tool_context.session_env.clone())
                     .unwrap_or_else(|| std::sync::Arc::new(std::collections::HashMap::new())),
-                ps.and_then(|h| h.attribution_callback.clone()),
                 ps.map(|h| h.agent_name.clone()),
                 ps.map(|h| h.subagent_filter.clone()).unwrap_or_default(),
                 ps.map(|h| h.managed_mcp_proxy_base_url.clone()),
@@ -314,7 +312,6 @@ impl MvpAgent {
                 parent.and_then(|h| h.tool_context.process_scope.clone()),
             )
         };
-        let am = self.auth_manager.clone();
         let inference_idle_timeout_secs = {
             let per_model = config::find_model_by_id(&available_models, parent_model_id.0.as_ref())
                 .and_then(|e| e.info.inference_idle_timeout_secs);
@@ -374,7 +371,6 @@ impl MvpAgent {
                 .cloned()
                 .unwrap_or_else(|| acp::AuthMethodId::new("default")),
             model_id: parent_model_id,
-            auth: self.current_or_buffered_auth(),
             parent_cwd: parent_cwd.clone(),
             parent_session_id: parent_session_id.to_string(),
             yolo_mode,
@@ -441,13 +437,8 @@ impl MvpAgent {
                     .map(|h| h.permission_handle.clone())
             },
             worktree_type: self.worktree_type,
-            api_key_provider: Some(Arc::new(crate::auth::manager::SharedAuthKeyProvider(
-                am.clone(),
-            ))),
             image_description_model: self.resolve_image_description_model(),
             workspace_ops: parent_workspace_ops.clone(),
-            auth_manager: am.clone(),
-            attribution_callback: parent_attribution_callback,
             parent_agent_name,
             parent_mcp_configs: {
                 let sessions = self.sessions.borrow();

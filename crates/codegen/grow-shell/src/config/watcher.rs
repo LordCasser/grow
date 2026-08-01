@@ -68,7 +68,6 @@ fn new_filtered_debouncer<F: notify_debouncer_mini::DebounceEventHandler>(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigChangeEvent {
-    AuthChanged,
     GlobalConfigChanged,
     ProjectConfigChanged {
         path: PathBuf,
@@ -92,7 +91,7 @@ pub enum ConfigChangeEvent {
     HomeClaudeJsonChanged,
 }
 
-/// Watches `~/.grow/` for `auth.json` and `config.toml`
+/// Watches `~/.grow/` for `config.toml`
 /// changes, plus any extra paths (project `.grow/config.toml`, `.mcp.json`,
 /// etc.) provided at startup.
 ///
@@ -100,13 +99,13 @@ pub enum ConfigChangeEvent {
 /// editor writes (including write-then-rename patterns).
 ///
 /// Self-write suppression is intentionally omitted. When the agent writes
-/// `auth.json` or `config.toml`, the watcher will fire and the
+/// `config.toml`, the watcher will fire and the
 /// [`ConfigReloader`](super::reloader::ConfigReloader) will re-read the file.
-/// The reloader's own content-based deduplication (auth key hash, toml value
+/// The reloader's own content-based deduplication (toml value
 /// comparison) skips the update when nothing actually changed, so the
 /// redundant read is harmless. This avoids a class of bugs where an
 /// optimistic suppression window accidentally swallows writes from external
-/// processes (e.g. `grow login` in another terminal).
+/// processes.
 ///
 /// Adds two **non-recursive** watches per `cwd` argument:
 /// `<cwd>/` (catches `.mcp.json` and `.claude.json` at the project root) and
@@ -173,9 +172,6 @@ impl ConfigFileWatcher {
                 let parent = path.parent();
 
                 let change = match name {
-                    Some("auth.json") if parent == Some(grow_home_buf.as_path()) => {
-                        Some(ConfigChangeEvent::AuthChanged)
-                    }
                     Some("config.toml") if parent == Some(grow_home_buf.as_path()) => {
                         Some(ConfigChangeEvent::GlobalConfigChanged)
                     }
@@ -1440,31 +1436,6 @@ mod tests {
         );
     }
 
-    #[test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "flaky on macOS: FSEvents does not reliably deliver events in test harness"
-    )]
-    fn watcher_detects_auth_json_change() {
-        let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("auth.json"), "{}").unwrap();
-
-        let (_w, mut rx) =
-            ConfigFileWatcher::start(tmp.path(), &[], None, Some(Duration::from_millis(50)))
-                .expect("watcher should start");
-
-        fs::write(tmp.path().join("auth.json"), r#"{"new":"token"}"#).unwrap();
-        wait_ms(300);
-
-        let mut found = false;
-        while let Ok(evt) = rx.try_recv() {
-            if evt == ConfigChangeEvent::AuthChanged {
-                found = true;
-            }
-        }
-        assert!(found, "should detect auth.json change");
-    }
-
     /// Regression test for the MCP/skills reload storm (feedback loop):
     /// merely *reading* a watched config file must NOT produce a
     /// `ConfigChangeEvent`. Linux inotify delivers `IN_OPEN`/`IN_ACCESS`
@@ -1478,7 +1449,6 @@ mod tests {
     fn watcher_ignores_reads_of_watched_files() {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("config.toml"), "a = 1").unwrap();
-        fs::write(tmp.path().join("auth.json"), "{}").unwrap();
 
         let (_w, mut rx) =
             ConfigFileWatcher::start(tmp.path(), &[], None, Some(Duration::from_millis(50)))
@@ -1490,7 +1460,6 @@ mod tests {
         // files. Repeatedly, to defeat any incidental coalescing.
         for _ in 0..5 {
             let _ = fs::read(tmp.path().join("config.toml")).unwrap();
-            let _ = fs::read(tmp.path().join("auth.json")).unwrap();
             wait_ms(20);
         }
         wait_ms(300);

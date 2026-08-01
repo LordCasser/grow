@@ -19,7 +19,6 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
     let (tx, _rx) = mpsc::unbounded_channel();
     SubagentSpawnContext {
         lsp: None,
-        api_key_provider: None,
         process_scope: None,
         parent_max_turns: None,
         client_hooks: Default::default(),
@@ -48,11 +47,9 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
             compaction_at_tokens: None,
             doom_loop_recovery: None,
         },
-        attribution_callback: None,
         alpha_test_key: None,
         auth_method_id: acp::AuthMethodId::new("test"),
         model_id: acp::ModelId::new("test"),
-        auth: None,
         parent_cwd: PathBuf::from("/tmp"),
         parent_session_id: "test-parent".into(),
         yolo_mode: false,
@@ -101,10 +98,6 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         worktree_type: crate::util::config::WorktreeType::Linked,
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         workspace_ops: grow_workspace::WorkspaceOps::for_test(),
-        auth_manager: Arc::new(crate::auth::AuthManager::new(
-            std::path::Path::new("/tmp/nonexistent-grow-test"),
-            crate::auth::ServiceAuthConfig::default(),
-        )),
         parent_agent_name: None,
         parent_mcp_configs: vec![],
         managed_mcp_state: crate::session::managed_mcp::ManagedMcpStateHandle::default(),

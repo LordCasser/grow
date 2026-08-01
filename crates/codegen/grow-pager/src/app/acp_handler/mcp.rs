@@ -237,7 +237,6 @@ pub(super) fn handle_mcp_server_status(notif: &acp::ExtNotification, app: &mut A
         McpServerStatus::Ready => McpServerDisplayStatus::Ready,
         McpServerStatus::Initializing => McpServerDisplayStatus::Initializing,
         McpServerStatus::Unavailable => McpServerDisplayStatus::Unavailable,
-        McpServerStatus::NeedsAuth => McpServerDisplayStatus::NeedsAuth,
     };
     // Decode `tools` loosely. Shell types this as
     // `Option<serde_json::Value>` (always `null` today;

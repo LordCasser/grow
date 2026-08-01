@@ -16,9 +16,7 @@ use super::handle::SessionHandle;
 use super::notifications::NotificationSender;
 use crate::agent::update_chunk_merge::{BufferingSettings, ReplayBuffer};
 use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
-use crate::extensions::notification::{
-    RetryState, SessionNotification as GrowSessionNotification, is_reauthable_failure,
-};
+use crate::extensions::notification::{RetryState, SessionNotification as GrowSessionNotification};
 use crate::sampling::error::map_sampling_err_to_acp;
 use crate::sampling::types::{ChatRequestMessage, ToolCallResponse, ToolDefinition};
 use crate::sampling::{
@@ -32,7 +30,6 @@ use crate::session::info::Info as SessionInfo;
 use crate::session::mcp_servers::McpInitStrategy;
 use crate::session::mcp_servers::McpMetaConfigMap;
 use crate::session::mcp_servers::McpState;
-use crate::session::mcp_servers::OauthInteractivity;
 use crate::session::mcp_servers::build_pending_clients;
 use crate::session::mcp_servers::mcp_server_name;
 use crate::session::mcp_servers::mcp_target_str;
@@ -80,7 +77,6 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
 use tokio::time::{Duration, sleep};
-use tokio_retry::strategy::ExponentialBackoff;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 const SESSION_LOG: &str = "grow_session";
 #[path = "compaction.rs"]
@@ -91,6 +87,9 @@ mod compaction_segments;
 mod types;
 pub(crate) use types::*;
 pub use types::{TodoGateDecision, TodoGateReason};
+#[path = "acp_session_impl/auth_retry.rs"]
+mod auth_retry;
+use auth_retry::{AuthRetryDecision, AuthRetrySchedule};
 #[path = "acp_session_impl/goal.rs"]
 mod goal;
 #[path = "acp_session_impl/interjection.rs"]
@@ -369,167 +368,6 @@ pub(crate) fn is_session_idle_for_injection(state: &State) -> bool {
 pub(crate) fn state_is_busy(state: &State) -> bool {
     state.running_task.is_some() || !state.pending_inputs.is_empty()
 }
-use crate::auth::AuthManager;
-#[derive(Clone)]
-struct ShellManagedGatewayToolClient {
-    proxy_base_url: String,
-    auth_manager: Arc<AuthManager>,
-}
-#[async_trait::async_trait]
-impl grow_tools::types::resources::ManagedGatewayToolCaller for ShellManagedGatewayToolClient {
-    async fn call_tool(
-        &self,
-        call_id: &str,
-        arguments: serde_json::Value,
-        caller: &str,
-    ) -> Result<
-        grow_tools::types::resources::ManagedGatewayToolCallResponse,
-        xai_tool_runtime::ToolError,
-    > {
-        let auth_key = self
-            .auth_manager
-            .get_valid_token()
-            .await
-            .ok()
-            .or_else(|| self.auth_manager.current_or_expired().map(|a| a.key))
-            .ok_or_else(|| xai_tool_runtime::ToolError::unauthorized("no auth token available"))?;
-        let response = crate::session::managed_mcp::call_gateway_tool(
-            &self.proxy_base_url,
-            &auth_key,
-            call_id,
-            arguments,
-        )
-        .await
-        .map_err(|error| managed_gateway_error_to_tool_error(error, caller))?;
-        Ok(
-            grow_tools::types::resources::ManagedGatewayToolCallResponse {
-                result: response.result,
-                connectors_needing_reauth: response.connectors_needing_reauth,
-            },
-        )
-    }
-}
-fn managed_gateway_error_to_tool_error(
-    error: crate::session::managed_mcp::ManagedMcpFetchError,
-    caller: &str,
-) -> xai_tool_runtime::ToolError {
-    match error {
-        crate::session::managed_mcp::ManagedMcpFetchError::Status { status, message } => {
-            let detail = format!("Managed MCP gateway tool call failed: {message}");
-            let mut err = if status == reqwest::StatusCode::UNAUTHORIZED {
-                xai_tool_runtime::ToolError::unauthorized(detail)
-            } else if status == reqwest::StatusCode::FORBIDDEN {
-                xai_tool_runtime::ToolError::permission_denied(detail)
-            } else {
-                let tool_id = xai_tool_protocol::ToolId::new(caller)
-                    .unwrap_or_else(|_| xai_tool_protocol::ToolId::new("use_tool").expect("valid"));
-                xai_tool_runtime::ToolError::execution(tool_id, detail)
-            };
-            match err.details.as_mut() {
-                Some(serde_json::Value::Object(map)) => {
-                    map.insert(
-                        HTTP_STATUS_DETAILS_KEY.to_string(),
-                        serde_json::json!(status.as_u16()),
-                    );
-                }
-                _ => {
-                    err.details = Some(serde_json::json!({
-                        HTTP_STATUS_DETAILS_KEY: status.as_u16(),
-                    }));
-                }
-            }
-            err
-        }
-        crate::session::managed_mcp::ManagedMcpFetchError::Transport(e) => {
-            xai_tool_runtime::ToolError::network_error(format!(
-                "Managed MCP gateway tool call failed: {}",
-                e.without_url()
-            ))
-        }
-        crate::session::managed_mcp::ManagedMcpFetchError::NoAuth => {
-            xai_tool_runtime::ToolError::unauthorized("no auth token available")
-        }
-    }
-}
-#[cfg(test)]
-mod managed_gateway_error_tests {
-    use super::*;
-    fn status_error(code: u16, message: &str) -> crate::session::managed_mcp::ManagedMcpFetchError {
-        crate::session::managed_mcp::ManagedMcpFetchError::Status {
-            status: reqwest::StatusCode::from_u16(code).unwrap(),
-            message: message.to_string(),
-        }
-    }
-    #[test]
-    fn unauthorized_status_maps_to_unauthorized_and_carries_status() {
-        let err = managed_gateway_error_to_tool_error(status_error(401, "expired"), "use_tool");
-        assert_eq!(err.kind, xai_tool_runtime::ToolErrorKind::Unauthorized);
-        assert!(err.detail.contains("expired"));
-        let details = err.details.as_ref().unwrap();
-        assert_eq!(
-            details.get(HTTP_STATUS_DETAILS_KEY),
-            Some(&serde_json::json!(401))
-        );
-    }
-    #[test]
-    fn forbidden_status_maps_to_permission_denied_and_carries_status() {
-        let err = managed_gateway_error_to_tool_error(status_error(403, "denied"), "use_tool");
-        assert_eq!(err.kind, xai_tool_runtime::ToolErrorKind::PermissionDenied);
-        let details = err.details.as_ref().unwrap();
-        assert_eq!(
-            details.get(HTTP_STATUS_DETAILS_KEY),
-            Some(&serde_json::json!(403))
-        );
-    }
-    #[test]
-    fn general_status_maps_to_execution_with_caller_tool_id() {
-        let err = managed_gateway_error_to_tool_error(status_error(500, "boom"), "CallMcpTool");
-        assert_eq!(err.kind, xai_tool_runtime::ToolErrorKind::Execution);
-        let details = err.details.as_ref().unwrap();
-        assert_eq!(
-            details.get(HTTP_STATUS_DETAILS_KEY),
-            Some(&serde_json::json!(500))
-        );
-        assert_eq!(
-            details.get("tool_id"),
-            Some(&serde_json::json!("CallMcpTool"))
-        );
-    }
-    #[test]
-    fn general_status_falls_back_to_use_tool_for_unknown_caller() {
-        let err = managed_gateway_error_to_tool_error(status_error(500, "boom"), "not a tool id");
-        assert_eq!(err.kind, xai_tool_runtime::ToolErrorKind::Execution);
-        let details = err.details.as_ref().unwrap();
-        assert_eq!(details.get("tool_id"), Some(&serde_json::json!("use_tool")));
-    }
-    #[test]
-    fn no_auth_maps_to_unauthorized() {
-        let err = managed_gateway_error_to_tool_error(
-            crate::session::managed_mcp::ManagedMcpFetchError::NoAuth,
-            "use_tool",
-        );
-        assert_eq!(err.kind, xai_tool_runtime::ToolErrorKind::Unauthorized);
-    }
-    #[tokio::test]
-    async fn transport_error_maps_to_network_error_without_url() {
-        let transport = reqwest::Client::new()
-            .post("http://127.0.0.1:1/mcp/tools/call")
-            .send()
-            .await
-            .expect_err("connection to a dead port should fail");
-        let err = managed_gateway_error_to_tool_error(
-            crate::session::managed_mcp::ManagedMcpFetchError::Transport(transport),
-            "use_tool",
-        );
-        assert_eq!(err.kind, xai_tool_runtime::ToolErrorKind::NetworkError);
-        assert!(err.detail.contains("Managed MCP gateway tool call failed"));
-        assert!(
-            !err.detail.contains("http://"),
-            "transport detail must not leak the proxy URL: {}",
-            err.detail
-        );
-    }
-}
 /// Data carried from prepare_tool_call → dispatch_tool → finalize.
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedToolCall {
@@ -574,11 +412,7 @@ pub(crate) struct ModelAuthMemo {
 /// Phase 3: Post-flight handling after dispatch (inline in execute_tool_calls for now).
 pub(crate) struct SessionActor {
     pub(crate) session_info: SessionInfo,
-    /// Shared live handle to the current ACP auth method. Normal sessions hold a
-    /// clone of `MvpAgent::auth_method_id`, so a mid-session `/login` is picked
-    /// up by the per-turn auth gate without re-spawning; subagents instead get a
-    /// fresh, isolated handle seeded once at spawn (frozen for their lifetime).
-    /// `None` until the agent has selected a method.
+    /// ACP method selected for this BYOK-only session.
     pub(crate) auth_method_id: crate::agent::auth_method::SharedAuthMethodId,
     /// Memoized per-model auth state, read through
     /// [`SessionActor::model_auth_facts`] and
@@ -591,23 +425,6 @@ pub(crate) struct SessionActor {
     /// its id, keying on the id alone is insufficient: each model/credential
     /// chokepoint must clear this memo (`replace(None)`).
     pub(crate) model_auth_memo: std::cell::RefCell<Option<ModelAuthMemo>>,
-    /// 401-attribution callback. Joined with the bearer the
-    /// sampler sends on the wire to emit an `auth 401 attribution`
-    /// event at each of the six `OaiCompatClient` 401 arms in
-    /// `grow-sampler`. Threaded into every `SamplerConfig`
-    /// reconstructed by `reconstruct_full_config`. `None` when the
-    /// session was spawned without an `AuthManager` (BYOK direct
-    /// mode, test fixtures).
-    pub(crate) attribution_callback: Option<grow_sampler::SharedAttributionCallback>,
-    /// Auth manager. Owns the token refresher internally (via
-    /// `configure_refresher()`) and is also used for non-sampler
-    /// 401 attribution sites: the sampler-side path goes through
-    /// `attribution_callback` above, while the idle-resume model
-    /// refresh in this file calls
-    /// `crate::auth::attribution::record_auth_401` directly using
-    /// this handle. `None` for tests / BYOK that don't need refresh
-    /// or the attribution emit.
-    pub(crate) auth_manager: Option<Arc<AuthManager>>,
     pub(crate) state: TokioMutex<State>,
     /// Notification transport: gateway, persistence channel, replay buffer.
     pub(crate) notifications: NotificationSender,
@@ -841,8 +658,6 @@ pub(crate) struct SessionActor {
     pub(crate) goal_classifier_in_flight: std::sync::atomic::AtomicBool,
     /// Agent-level managed MCP config cache (refreshed in background).
     pub(crate) managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
-    /// Earliest managed MCP token expiry; checked before tool dispatch.
-    pub(crate) managed_mcp_expires_at: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     /// Original client-provided MCP servers from session creation.
     /// Retained for re-merge during plugin reload.
     pub(crate) initial_client_mcp_servers: Vec<acp::McpServer>,
@@ -1388,7 +1203,6 @@ mod managed_gateway_descriptor_tests {
                         },
                     ],
                     total_tools: 2,
-                    connectors_needing_reauth: vec![],
                 }
             ));
         }
@@ -1482,7 +1296,6 @@ mod managed_gateway_descriptor_tests {
                         },
                     ],
                     total_tools: 3,
-                    connectors_needing_reauth: vec![],
                 }
             ));
         }
@@ -1726,13 +1539,6 @@ impl Drop for TurnMetrics {
         self.span.record("turn_model_calls", self.turn_model_calls);
     }
 }
-/// Token rotation on the sampler/inference path is owned by the
-/// proactive refresh loop and the per-turn pre-request refresh
-/// (`refresh_token_if_expired`). `handle_sampling_failure` surfaces
-/// auth errors to the caller and never invokes the refresher itself.
-#[cfg(test)]
-#[path = "acp_session_tests/auth_error_no_retry_tests.rs"]
-mod auth_error_no_retry_tests;
 /// Regression coverage for the auto-wake suppression sweep + shutdown
 /// drain. These exercise the helpers added to fix the trailing
 /// `<system-reminder>` chat history bug.
@@ -1776,12 +1582,6 @@ mod parallel_dispatch_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/prompt_context_persistence_tests.rs"]
 mod prompt_context_persistence_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/reactive_managed_reauth_e2e_tests.rs"]
-mod reactive_managed_reauth_e2e_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/reactive_managed_reauth_tests.rs"]
-mod reactive_managed_reauth_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/session_thread_tests.rs"]
 mod session_thread_tests;
@@ -1876,7 +1676,6 @@ mod managed_gateway_tool_tests {
                         },
                     ],
                     total_tools: 2,
-                    connectors_needing_reauth: vec![],
                 }
             ));
         }
@@ -1936,7 +1735,6 @@ mod managed_gateway_tool_tests {
                         },
                     ],
                     total_tools: 3,
-                    connectors_needing_reauth: vec![],
                 }
             ));
         }

@@ -439,51 +439,30 @@ fn auto_respond_to_permissions(
     None
 }
 
-/// "Not signed in" error message, tailored to the session type.
-fn auth_required_message(interactive: bool) -> String {
-    if interactive {
-        "Not signed in. Run `grow login` to authenticate \
-         (or `grow login --device-code` if no browser is available)."
-            .to_string()
-    } else {
-        "Not signed in. To authenticate without a browser, run:\n  \
-         grow login --device-code\n\n\
-         Alternatively, set the GROW_API_KEY environment variable \
-         or run `grow login` on a machine with a browser."
-            .to_string()
-    }
+fn auth_required_message() -> &'static str {
+    "No usable BYOK credential is configured. Set the provider's env_key variable or configure \
+     api_key/auth_provider in ~/.grow/config.toml."
 }
 
 /// Authenticate via the agent's `defaultAuthMethodId`, failing closed when none is available.
-/// Returns whether the selected method is API-key auth.
 async fn authenticate(
     acp_tx: &AcpAgentTx,
     auths: &[acp::AuthMethod],
     default_auth_method_id: Option<&acp::AuthMethodId>,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<()> {
     let method_id = crate::acp::select_eager_auth_method(auths, default_auth_method_id)
-        .ok_or_else(|| {
-            use std::io::IsTerminal;
-            let interactive =
-                std::io::stdin().is_terminal() && !grow_shell::util::clipboard::is_remote_session();
-            anyhow::anyhow!("{}", auth_required_message(interactive))
-        })?;
+        .ok_or_else(|| anyhow::anyhow!(auth_required_message()))?;
     let kind = AuthMethodKind::from_id(&method_id);
-    // Prefer non-interactive methods only; interactive login is not usable headless.
-    if kind.needs_interactive_login() {
-        use std::io::IsTerminal;
-        let interactive =
-            std::io::stdin().is_terminal() && !grow_shell::util::clipboard::is_remote_session();
-        anyhow::bail!("{}", auth_required_message(interactive));
+    if !kind.is_api_key() {
+        anyhow::bail!(auth_required_message());
     }
-    let is_api_key_auth = kind.is_api_key();
     let _resp: acp::AuthenticateResponse = acp_send(
         acp::AuthenticateRequest::new(method_id)
             .meta(serde_json::json!({"headless": true}).as_object().cloned()),
         acp_tx,
     )
     .await?;
-    Ok(is_api_key_auth)
+    Ok(())
 }
 
 fn build_headless_init_request(
@@ -860,19 +839,16 @@ pub async fn run_single_turn(
 
     let t_auth = Instant::now();
     let default_auth_method_id = crate::acp::parse_default_auth_method_id(init_resp.meta.as_ref());
-    let is_api_key_auth = match authenticate(
+    if let Err(error) = authenticate(
         &acp_tx,
         &init_resp.auth_methods,
         default_auth_method_id.as_ref(),
     )
     .await
     {
-        Ok(is_api_key) => is_api_key,
-        Err(e) => {
-            emitter.on_error(&e.to_string(), None);
-            return Err(e);
-        }
-    };
+        emitter.on_error(&error.to_string(), None);
+        return Err(error);
+    }
     tracing::debug!(
         elapsed_ms = t_auth.elapsed().as_millis() as u64,
         "headless: authenticate complete"
@@ -976,7 +952,6 @@ pub async fn run_single_turn(
             permission_mode,
             mcp_servers: mcp_server_names(&session_cwd),
             include_partial_messages: options.include_partial_messages,
-            api_key_auth: is_api_key_auth,
             context_window: session_models.get_context_window(),
         });
     }

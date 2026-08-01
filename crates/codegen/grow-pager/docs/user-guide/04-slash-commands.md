@@ -390,14 +390,6 @@ Create, edit, and delete personas. A subagent can apply a persona to shape how i
 
 ## Account and Usage
 
-### `/login`
-
-Log in or re-authenticate without leaving the session.
-
-### `/logout`
-
-Log out and return to the login screen.
-
 ### `/usage`
 
 View local token and context usage for the current session. Alias: `/cost`.

@@ -1,9 +1,7 @@
-//! Sync `managed_config.toml` + `requirements.toml` from the deployment-config endpoint per principal.
-//! Overwritten per fetch, evicted on a confirmed identity switch, cleared on logout — so config never leaks across principals.
+//! Sync deployment-key managed policy from the deployment-config endpoint.
 
 mod response;
 
-use crate::auth::ProviderAuth;
 pub use response::ManagedConfigError;
 use response::{ApplyOutcome, ManagedConfigResponse, ManagedConfigSource, verify_signed_envelope};
 
@@ -99,67 +97,18 @@ fn remove_managed_path(path: &std::path::Path) -> std::io::Result<bool> {
     }
 }
 
-/// A team principal is eligible to fetch only if non-expired (an expired token
-/// would just 401).
-fn eligible_team_principal(auth: ProviderAuth) -> Option<ProviderAuth> {
-    (auth.is_team_principal() && !crate::auth::is_expired(&auth)).then_some(auth)
-}
-
-/// The eligible team principal in `auth.json`, or `None`. Single-team: managed
-/// config is a service.example.com feature with one service.example.com auth.
-fn read_active_team_auth() -> Option<ProviderAuth> {
-    let home = crate::util::grow_home::grow_home();
-    let store = crate::auth::read_auth_json(&home.join("auth.json")).ok()?;
-    let team = store.values().find(|a| a.is_team_principal())?.clone();
-    eligible_team_principal(team)
-}
-
-pub(crate) fn has_active_team_auth() -> bool {
-    read_active_team_auth().is_some()
-}
-
-/// Whether any team principal is signed in, **ignoring expiry** (a cold-start
-/// expired token is not a logout). `Err` = `auth.json` unreadable: callers must
-/// NOT treat that as a logout — it would wipe enforced policy on a read blip.
-fn team_principal_signed_in() -> std::io::Result<bool> {
-    let home = crate::util::grow_home::grow_home();
-    match crate::auth::read_auth_json(&home.join("auth.json")) {
-        Ok(store) => Ok(store.values().any(|a| a.is_team_principal())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
-    }
-}
-
-/// Clear the synced files when no principal could own them: no deployment key
-/// configured and no team signed in (logout). A configured deployment key keeps
-/// its files (original "never auto-deletes" behavior). Runs at startup and on
-/// logout; best-effort.
-///
-/// **fail_closed:** when the marker or on-disk requirements opt in to fail-closed
-/// (or requirements exist but are unreadable), do **not** wipe. A personal/User
-/// principal (or signed-out auth) must not escape enforced policy by swapping
-/// `auth.json` and letting orphan clear delete the artifacts. Non-fail-closed
-/// team policy still clears on logout as before.
+/// Remove cached managed policy when no deployment key owns it. Fail-closed
+/// artifacts remain on disk so removing a key cannot bypass enforced policy.
 pub fn clear_orphan() {
     if resolve_deployment_key().is_some() {
         return;
     }
-    match team_principal_signed_in() {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(e) => {
-            tracing::warn!(error = %e, "auth.json unreadable; keeping managed config until it recovers");
-            return;
-        }
-    }
     let home = crate::util::grow_home::grow_home();
     let Some(_lock) = try_lock_managed_config(&home) else {
-        return; // another process is syncing; retry next call
+        return;
     };
     if grow_config::fail_closed_policy_armed_at(&home) {
-        tracing::info!(
-            "keeping fail_closed managed policy on disk; no team principal present to own a clear"
-        );
+        tracing::info!("keeping fail_closed managed policy after deployment key removal");
         return;
     }
     remove_managed_config_files(&home);
@@ -186,8 +135,6 @@ fn try_lock_managed_config(home: &std::path::Path) -> Option<std::fs::File> {
 enum SyncBudget {
     /// Background loop and explicit `grow setup`; runs retries to completion.
     Standard,
-    /// Post-login sync; capped because login latency is user-visible.
-    Login,
     /// Session-start refresh; capped so startup never stalls.
     SessionStart,
 }
@@ -197,7 +144,7 @@ impl SyncBudget {
     fn max_attempts(self) -> u32 {
         match self {
             Self::Standard => 5,
-            Self::Login | Self::SessionStart => 2,
+            Self::SessionStart => 2,
         }
     }
 
@@ -205,19 +152,10 @@ impl SyncBudget {
     fn deadline(self) -> Option<std::time::Duration> {
         match self {
             Self::Standard => None,
-            Self::Login => Some(std::time::Duration::from_secs(15)),
             Self::SessionStart => Some(std::time::Duration::from_secs(8)),
         }
     }
 }
-
-/// Budget for the pre-heal `auth()` refresh, so a degraded network can't stall startup;
-/// on timeout the heal proceeds with no refreshed override.
-const SESSION_START_AUTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
-
-/// One retry of the gate purge's lock ([`purge_prior_tenant_on_identity_change`]): a routine
-/// concurrent apply shouldn't become a session-start refusal, but a wedged holder can't stall start.
-const PURGE_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Exponential backoff for retry `attempt` (caller guarantees `attempt >= 1`).
 /// Base is 1s; `GROW_DEPLOYMENT_CONFIG_BACKOFF_MS` overrides it for tests.
@@ -439,7 +377,7 @@ pub fn spawn_sync(cancel: tokio_util::sync::CancellationToken) {
 /// Deployment id associated with `deployment_key` in credential snapshots:
 /// the server GrowDeployment UUID when the managed-config sync marker was
 /// written by this same key (fingerprint match), else UUIDv5 of the key.
-/// `None` key (team/OAuth) → `None`, never a stale marker value.
+/// A missing key returns `None`, never a stale marker value.
 pub fn resolve_deployment_id(deployment_key: Option<&str>) -> Option<String> {
     let key = deployment_key.filter(|k| !k.is_empty())?;
     crate::config::managed_deployment_id(&deployment_key_fingerprint(key))
@@ -484,79 +422,49 @@ pub fn is_fetch_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// Fetch managed config + requirements and write to `~/.grow/`, trying the
-/// deployment key first, then a signed-in team. `Ok(false)` when neither applies.
+/// Fetch managed config + requirements for the configured deployment key.
 pub async fn sync() -> Result<bool, ManagedConfigError> {
-    Ok(sync_with_budget(SyncBudget::Standard, None).await?.wrote)
+    Ok(sync_with_budget(SyncBudget::Standard).await?.wrote)
 }
 
 struct SyncOutcome {
     wrote: bool,
-    /// Server returned a config row for the consulted principal (independent of apply).
     served: bool,
-    /// Apply persisted nothing and recorded no marker — see [`ApplyOutcome::Skipped`].
     skipped: bool,
-    /// Credential consulted (team vs deployment wording for callers).
-    source: Option<ManagedConfigSource>,
-    /// Verification active and envelope rejected — nothing persisted.
     signature_rejected: bool,
 }
 
 impl SyncOutcome {
-    /// Reports only what callers render; marker identity fields live in [`apply_fetched`].
-    fn from_fetch(
-        body: &ManagedConfigResponse,
-        source: ManagedConfigSource,
-        outcome: &ApplyOutcome,
-    ) -> Self {
+    fn from_fetch(body: &ManagedConfigResponse, outcome: &ApplyOutcome) -> Self {
         Self {
             wrote: outcome.wrote(),
             served: body.config_exists(),
             skipped: outcome.skipped(),
-            source: Some(source),
             signature_rejected: outcome.signature_rejected(),
         }
     }
 }
 
-/// Runs a sync under `budget`'s deadline, returning `None` when the deadline
-/// elapses first.
-async fn sync_bounded(
-    budget: SyncBudget,
-    team_override: Option<ProviderAuth>,
-) -> Option<Result<SyncOutcome, ManagedConfigError>> {
-    let sync = sync_with_budget(budget, team_override);
+async fn sync_bounded(budget: SyncBudget) -> Option<Result<SyncOutcome, ManagedConfigError>> {
+    let sync = sync_with_budget(budget);
     match budget.deadline() {
         Some(deadline) => tokio::time::timeout(deadline, sync).await.ok(),
         None => Some(sync.await),
     }
 }
 
-/// A server response paired with the credential that fetched it.
 enum FetchedConfig {
     DeploymentKey {
         key: String,
         body: ManagedConfigResponse,
     },
-    Team {
-        auth: Box<ProviderAuth>,
-        body: ManagedConfigResponse,
-    },
-    /// No deployment key configured and no eligible team signed in.
     NoPrincipal,
 }
 
-/// Fetches the configuration for the current principal without touching disk:
-/// the deployment key first, then a signed-in team. The installing sync and the
-/// read-only `grow setup --json` both build on this.
-async fn fetch_for_principal(
-    budget: SyncBudget,
-    team_override: Option<ProviderAuth>,
-) -> Result<FetchedConfig, ManagedConfigError> {
-    let max_attempts = budget.max_attempts();
-    // Resolve from the merged config (managed_config_url > cli_chat_proxy_base_url,
-    // including the enterprise single-endpoint derivation) so endpoint overrides
-    // are honored and the bearer isn't sent to the public default.
+async fn fetch_for_principal(budget: SyncBudget) -> Result<FetchedConfig, ManagedConfigError> {
+    let Some(key) = resolve_deployment_key() else {
+        return Ok(FetchedConfig::NoPrincipal);
+    };
     let url = crate::agent::config::EndpointsConfig::from_effective_config()
         .resolve_managed_config_url()
         .ok_or_else(|| {
@@ -565,82 +473,29 @@ async fn fetch_for_principal(
                     .to_owned(),
             )
         })?;
-
-    let team_auth = team_override.or_else(read_active_team_auth);
-
-    if let Some(dk) = resolve_deployment_key() {
-        let source = ManagedConfigSource::DeploymentKey;
-        // Echo binds to the deployment this key last synced (marker-bound; None
-        // on first sync or after a key rotation — then there is nothing to echo).
-        let echo_principal = crate::config::managed_deployment_id(&deployment_key_fingerprint(&dk));
-        match fetch_managed_config(&url, &dk, source, max_attempts, echo_principal.as_deref()).await
-        {
-            // A rejected dk (stale env/config) must not starve a valid team
-            // sign-in: fall through. Network/5xx do NOT — same unreachable
-            // server, double the latency for nothing.
-            Err(ManagedConfigError::DeploymentKeyRejected) if team_auth.is_some() => {
-                tracing::warn!("deployment key rejected; falling back to the team session token");
-            }
-            Err(e) => return Err(e),
-            // Fall through to the team only when the dk has no config row: an apply
-            // converges disk to the served set, and the empty dk body must not delete
-            // the team's files. Gate on row existence, not content (which can serve empty).
-            Ok(body) if !body.config_exists() && team_auth.is_some() => {
-                tracing::debug!("deployment key has no config; trying the team principal");
-            }
-            Ok(body) => return Ok(FetchedConfig::DeploymentKey { key: dk, body }),
-        }
-    }
-
-    // The proxy resolves the team from the principal and returns its config.
-    if let Some(auth) = team_auth {
-        let body = fetch_managed_config(
-            &url,
-            &auth.key,
-            ManagedConfigSource::TeamOauth,
-            max_attempts,
-            auth.team_id.as_deref(),
-        )
-        .await?;
-        return Ok(FetchedConfig::Team {
-            auth: Box::new(auth),
-            body,
-        });
-    }
-
-    Ok(FetchedConfig::NoPrincipal)
+    let echo_principal = crate::config::managed_deployment_id(&deployment_key_fingerprint(&key));
+    let body = fetch_managed_config(
+        &url,
+        &key,
+        ManagedConfigSource::DeploymentKey,
+        budget.max_attempts(),
+        echo_principal.as_deref(),
+    )
+    .await?;
+    Ok(FetchedConfig::DeploymentKey { key, body })
 }
 
-/// `team_override` pins a specific team principal (the just-authenticated one,
-/// post-login) instead of re-deriving the team from `auth.json`; `None` uses
-/// [`read_active_team_auth`]. Marker is written under the lock by [`apply_fetched`].
-async fn sync_with_budget(
-    budget: SyncBudget,
-    team_override: Option<ProviderAuth>,
-) -> Result<SyncOutcome, ManagedConfigError> {
-    match fetch_for_principal(budget, team_override).await? {
+async fn sync_with_budget(budget: SyncBudget) -> Result<SyncOutcome, ManagedConfigError> {
+    match fetch_for_principal(budget).await? {
         FetchedConfig::DeploymentKey { key, body } => {
-            let source = ManagedConfigSource::DeploymentKey;
             let fingerprint = deployment_key_fingerprint(&key);
-            let outcome = apply_fetched(
-                &body,
-                source,
-                body.deployment_id.as_deref(),
-                Some(&fingerprint),
-            )?;
-            Ok(SyncOutcome::from_fetch(&body, source, &outcome))
-        }
-        FetchedConfig::Team { auth, body } => {
-            let source = ManagedConfigSource::TeamOauth;
-            // Team identity is bound via principal (team id), not a key fingerprint.
-            let outcome = apply_fetched(&body, source, auth.team_id.as_deref(), None)?;
-            Ok(SyncOutcome::from_fetch(&body, source, &outcome))
+            let outcome = apply_fetched(&body, body.deployment_id.as_deref(), Some(&fingerprint))?;
+            Ok(SyncOutcome::from_fetch(&body, &outcome))
         }
         FetchedConfig::NoPrincipal => Ok(SyncOutcome {
             wrote: false,
             served: false,
             skipped: false,
-            source: None,
             signature_rejected: false,
         }),
     }
@@ -650,14 +505,13 @@ async fn sync_with_budget(
 /// `new_principal` / `new_key_fingerprint` are the serving identity for pre-write eviction.
 fn apply_fetched(
     body: &ManagedConfigResponse,
-    source: ManagedConfigSource,
     new_principal: Option<&str>,
     new_key_fingerprint: Option<&str>,
 ) -> std::io::Result<ApplyOutcome> {
     // Verify before lock/persist: prior trusted policy survives a bad fetch. Pure so a
     // lock-skip never reports Applied for an envelope that would have failed.
     let verified = if grow_config::signed_policy::verification_active() {
-        match verify_signed_envelope(body, active_team_id_any_expiry().as_deref()) {
+        match verify_signed_envelope(body) {
             Ok(verified) => Some(verified),
             Err(e) => {
                 tracing::warn!("managed config signature rejected; not persisting: {e}");
@@ -675,9 +529,10 @@ fn apply_fetched(
         tracing::debug!("managed config locked by another process; skipping apply");
         return Ok(ApplyOutcome::Skipped);
     };
-    // Credential may have vanished mid-fetch (logout → clear_orphan); don't restore it.
-    if !credential_present(source) {
-        tracing::info!("credential gone since fetch started; skipping apply");
+    // The deployment key may have vanished mid-fetch; do not restore policy
+    // whose owner is no longer configured.
+    if resolve_deployment_key().is_none() {
+        tracing::info!("deployment key gone since fetch started; skipping apply");
         return Ok(ApplyOutcome::Skipped);
     }
     // Confirmed switch: evict first so omitted artifacts from the prior principal don't stick.
@@ -708,13 +563,7 @@ fn apply_fetched(
     crate::config::mark_managed_config_synced_at(
         &home,
         crate::config::SyncMarker {
-            // DK: prefer verified payload deployment id (signed-empty only has it there).
-            // Team: always the serving team — a deployment-signed envelope must not rebind it.
-            principal: if new_key_fingerprint.is_some() {
-                signed_deployment_id.as_deref().or(new_principal)
-            } else {
-                new_principal
-            },
+            principal: signed_deployment_id.as_deref().or(new_principal),
             had_managed_config: body.has_managed_config(),
             had_requirements: body.has_requirements(),
             key_fingerprint: new_key_fingerprint,
@@ -724,12 +573,9 @@ fn apply_fetched(
     Ok(ApplyOutcome::Applied { wrote })
 }
 
-/// The principal a verified payload binds: `deployment_id`, else `team_id` (server parity).
+/// The deployment principal a verified payload binds.
 fn served_principal_of(payload: &grow_config::signed_policy::SignedPayload) -> Option<&str> {
-    payload
-        .deployment_id
-        .as_deref()
-        .or(payload.team_id.as_deref())
+    payload.deployment_id.as_deref()
 }
 
 /// The fetched claim envelope, if it verifies and binds to the served principal.
@@ -773,178 +619,35 @@ fn evict_prior_managed_config(home: &std::path::Path) {
     }
 }
 
-/// Whether the credential a fetch used is still present. Mirrors the
-/// expiry-agnostic, fail-safe checks `clear_orphan` uses (an unreadable
-/// `auth.json` keeps, not drops).
-fn credential_present(source: ManagedConfigSource) -> bool {
-    match source {
-        ManagedConfigSource::DeploymentKey => resolve_deployment_key().is_some(),
-        ManagedConfigSource::TeamOauth => team_principal_signed_in().unwrap_or(true),
-    }
-}
-
-/// Outcome of [`post_login_sync`], for the CLI to render. The
-/// TUI/agent path ignores it (the sync is best-effort and detached there).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManagedConfigSync {
-    /// No eligible principal, fetch disabled, or nothing due — no fetch made.
-    Skipped,
-    /// New config was written. `is_team` lets the caller word the confirmation
-    /// (team vs deployment).
-    Updated { is_team: bool },
-    /// Fetch ran; nothing new to write.
-    NoChange,
-    /// Fetch failed or timed out (already logged); the background loop retries.
-    Failed,
-}
-
-/// Post-login hook for `grow login` and the ACP/TUI authenticate flow: clear any
-/// orphaned files, then fetch the new principal's config immediately rather than
-/// waiting for the background tick. `authenticated` pins the just-logged-in
-/// principal (`None` = on-disk team). Latency-bounded by [`SyncBudget::Login`];
-/// failures are logged, not propagated (the background loop retries).
-pub async fn post_login_sync(authenticated: Option<ProviderAuth>) -> ManagedConfigSync {
-    clear_orphan();
-    if !is_fetch_enabled() {
-        return ManagedConfigSync::Skipped;
-    }
-    // The just-authenticated team, else the on-disk one — reused for the gate
-    // and the sync (one auth.json read). With no team, only sync if due anyway.
-    let team = authenticated
-        .and_then(eligible_team_principal)
-        .or_else(read_active_team_auth);
-    if team.is_none() && !crate::config::is_managed_config_stale_for(&current_serving_identity()) {
-        return ManagedConfigSync::Skipped;
-    }
-    match sync_bounded(SyncBudget::Login, team).await {
-        // Nothing was persisted for a rejected envelope — that's a failure to
-        // report, not "no change" (the gate may refuse the next session).
-        Some(Ok(SyncOutcome {
-            signature_rejected: true,
-            ..
-        })) => {
-            tracing::warn!("post-login managed config sync: server envelope rejected");
-            ManagedConfigSync::Failed
-        }
-        Some(Ok(SyncOutcome {
-            wrote: true,
-            source,
-            ..
-        })) => {
-            tracing::info!("post-login managed config sync: updated");
-            ManagedConfigSync::Updated {
-                is_team: source == Some(ManagedConfigSource::TeamOauth),
-            }
-        }
-        Some(Ok(_)) => ManagedConfigSync::NoChange,
-        Some(Err(e)) => {
-            tracing::debug!("post-login managed config sync failed: {e}");
-            ManagedConfigSync::Failed
-        }
-        None => {
-            tracing::debug!("post-login managed config sync timed out");
-            ManagedConfigSync::Failed
-        }
-    }
-}
-
-/// Whether a credential exists that `grow setup` could install config for.
+/// Whether a deployment key exists that `grow setup` can use.
 pub fn has_principal() -> bool {
-    resolve_deployment_key().is_some() || read_active_team_auth().is_some()
+    resolve_deployment_key().is_some()
 }
 
-/// Whether a managed identity owns this machine, IGNORING token expiry (unlike [`has_principal`]) so an
-/// expired/backdated `auth.json` can't disarm the gate. Unreadable → present (fail-safe; the gate ANDs this
-/// with [`crate::config::managed_policy_compromised_for`], which a personal user never satisfies).
 fn managed_principal_present() -> bool {
-    resolve_deployment_key().is_some() || team_principal_signed_in().unwrap_or(true)
+    resolve_deployment_key().is_some()
 }
 
-/// The serving identity for an optional team id: a configured deployment key always
-/// wins (keyed on its fingerprint), else the team, else none. The two public views
-/// differ only in how the team id is resolved (expiry-filtered vs expiry-ignoring).
-fn serving_identity_from(team_id: Option<String>) -> crate::config::ServingIdentity {
-    use crate::config::ServingIdentity;
-    if let Some(key) = resolve_deployment_key() {
-        return ServingIdentity::DeploymentKey {
-            fingerprint: deployment_key_fingerprint(&key),
-        };
-    }
-    // Blank = unknown; trimmed (same rule as the marker write) so whitespace isn't identity.
-    match crate::config::normalize_identity(team_id.as_deref()) {
-        Some(team_id) => ServingIdentity::Team(team_id),
-        None => ServingIdentity::None,
-    }
-}
-
-/// The identity to check the cache against for whoever serves now: a configured deployment key wins
-/// (else the active team, else none).
+/// Deployment-key identity used by cache and fail-closed checks.
 pub fn current_serving_identity() -> crate::config::ServingIdentity {
-    serving_identity_from(read_active_team_auth().and_then(|a| a.team_id))
-}
-
-/// The client's team_id, IGNORING token expiry (the binding must survive the cold-start
-/// expired window). Must NOT special-case a configured deployment key — that would
-/// disable envelope binding for a real team user. Used at fetch time to bind the envelope.
-pub fn active_team_id_any_expiry() -> Option<String> {
-    let home = crate::util::grow_home::grow_home();
-    let store = crate::auth::read_auth_json(&home.join("auth.json")).ok()?;
-    store
-        .values()
-        .find(|a| a.is_team_principal())
-        // Blank → None, trimmed: a malformed/padded auth.json team_id must read as the SAME
-        // identity everywhere it feeds — the gate, the tenant-switch purge, and the envelope
-        // binding (an untrimmed id here would fail `check_fetch_identity` against a trimmed
-        // signed payload forever).
-        .and_then(|a| crate::config::normalize_identity(a.team_id.as_deref()))
-}
-
-/// Like [`current_serving_identity`] but IGNORING token expiry, for the enforcement gate:
-/// a backdated `auth.json` must not resolve the team to `None` and relax the identity
-/// checks. The refetch path stays expiry-filtered (a stray refetch is harmless).
-fn current_serving_identity_any_expiry() -> crate::config::ServingIdentity {
-    serving_identity_from(active_team_id_any_expiry())
-}
-
-/// Best-effort session-start refresh: a bounded token refresh, then a bounded refetch only when the cache is
-/// hard-stale. NEVER fails the session — on failure it continues on cached / OS-protected policy.
-pub async fn ensure_managed_policy_present(
-    auth_manager: &std::sync::Arc<crate::auth::AuthManager>,
-) {
-    // Gated on fetch-enabled, not `cfg!(test)` — that would diverge test behavior from production.
-    if !is_fetch_enabled() {
-        return;
+    match resolve_deployment_key() {
+        Some(key) => crate::config::ServingIdentity::DeploymentKey {
+            fingerprint: deployment_key_fingerprint(&key),
+        },
+        None => crate::config::ServingIdentity::None,
     }
-    // Cheap disk-only gates before any network token refresh, so the boot path doesn't pay
-    // an `auth()` in the common cases. A personal user (no deploy key, and no team in
-    // `auth.json` even ignoring expiry) skips entirely; a usable identity whose cache isn't
-    // hard-stale also skips. Only an expired-but-refreshable team token (identity reads
-    // `None` before the refresh) or a hard-stale cache falls through to `auth()` below.
-    // `auth.json` unreadable (`Err`) is NOT treated as "no principal" — that would skip
-    // enforcement on a transient read blip.
-    if resolve_deployment_key().is_none() && matches!(team_principal_signed_in(), Ok(false)) {
+}
+
+/// Best-effort bounded refresh for a hard-stale deployment-key policy.
+pub async fn ensure_managed_policy_present() {
+    if !is_fetch_enabled() || !has_principal() {
         return;
     }
     let identity = current_serving_identity();
-    if !matches!(identity, crate::config::ServingIdentity::None)
-        && !crate::config::is_managed_config_hard_stale_for(&identity)
-    {
+    if !crate::config::is_managed_config_hard_stale_for(&identity) {
         return;
     }
-    // Refresh before the heal so an expired-but-refreshable team token isn't dropped by
-    // the expiry filter. Bounded; deploy-key machines have no OAuth (auth() → None).
-    let team = tokio::time::timeout(SESSION_START_AUTH_DEADLINE, auth_manager.auth())
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .filter(ProviderAuth::is_team_principal);
-    if !has_principal() {
-        return;
-    }
-    if !crate::config::is_managed_config_hard_stale_for(&current_serving_identity()) {
-        return;
-    }
-    match sync_bounded(SyncBudget::SessionStart, team).await {
+    match sync_bounded(SyncBudget::SessionStart).await {
         Some(Ok(_)) => {}
         Some(Err(e)) => tracing::warn!("session-start managed policy refresh failed: {e}"),
         None => tracing::warn!("session-start managed policy refresh timed out"),
@@ -956,58 +659,21 @@ const MANAGED_POLICY_MISSING_MSG: &str = "Managed policy is required for this ac
 missing or could not be verified, and could not be restored from the server.\nThis check needs \
 network access: reconnect and start again. If you can't reconnect, contact your administrator.";
 
-/// Fail-closed session-start gate for managed principals. On a confirmed offline team
-/// switch, first purges the prior team's artifacts ([`purge_prior_tenant_on_identity_change`]).
+/// Fail-closed session-start gate for deployment-key managed policy.
 /// Without a signing key the user-writable marker is best-effort; root/MDM/signed cache
 /// are the non-forgeable layers. Recovery: reconnect / `grow setup`; ceasing to serve
 /// `fail_closed` rolls back.
 pub fn managed_policy_gate() -> Result<(), String> {
-    // Lib unit tests skip: bootstrap would hit the host's real marker/auth. Pure decision
+    // Lib unit tests skip: bootstrap would hit the host's real marker. Pure decision
     // is unit-tested; integration tests exercise this path.
     if cfg!(test) {
         return Ok(());
     }
-    // Purge first so an offline team switch isn't misread as a substituted cache.
-    purge_prior_tenant_on_identity_change();
-    // Raise the floor after the purge so a purged marker stays absent.
     bump_managed_rollback_floor();
     managed_policy_gate_decision(
         managed_principal_present(),
-        // Expiry-ignoring: a backdated auth.json must not resolve Team→None and relax binding.
-        crate::config::managed_policy_compromised_for(&current_serving_identity_any_expiry()),
+        crate::config::managed_policy_compromised_for(&current_serving_identity()),
     )
-}
-
-/// Purge prior team (A) artifacts on a confirmed offline team switch so the gate admits
-/// team B. Detector is marker-scoped ([`crate::config::confirmed_team_switch`]): key-scoped
-/// markers never purge here; config.toml blips are not switches. Under the managed-config
-/// lock (one retry on contention, else skip like [`clear_orphan`]); a skip may refuse one
-/// signed-build start until the next purge.
-fn purge_prior_tenant_on_identity_change() {
-    let crate::config::ServingIdentity::Team(team_id) = current_serving_identity_any_expiry()
-    else {
-        return;
-    };
-    // Same home for pre-check, lock, detector, and delete.
-    let home = crate::util::grow_home::grow_home();
-    // Unlocked pre-check: common no-switch start takes no lock; re-check under lock before delete.
-    if crate::config::confirmed_team_switch_at(&home, &team_id).is_none() {
-        return;
-    }
-    let Some(_lock) = try_lock_managed_config(&home).or_else(|| {
-        std::thread::sleep(PURGE_LOCK_RETRY_DELAY);
-        try_lock_managed_config(&home)
-    }) else {
-        return; // mid-apply/remove; holder owns the transition
-    };
-    if let Some(evicted) = crate::config::confirmed_team_switch_at(&home, &team_id) {
-        tracing::warn!(
-            team_id = %team_id,
-            evicted_principal = %evicted,
-            "identity changed; purging the prior tenant's managed config"
-        );
-        remove_managed_config_files(&home);
-    }
 }
 
 /// Floor tick (session start + background sync tick), best-effort under the
@@ -1058,13 +724,11 @@ pub enum SetupOutcome {
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetupReport {
-    /// The credential that served: `"deploymentKey"` or `"teamOauth"`, or
-    /// `None` when no principal was available.
+    /// `"deploymentKey"` when a principal was available.
     pub source: Option<&'static str>,
     /// Whether the server has a configuration for the principal.
     pub configured: bool,
     pub deployment_id: Option<String>,
-    pub team_id: Option<String>,
     /// TOML documents exactly as `grow setup` would install them.
     pub managed_config: Option<String>,
     pub requirements: Option<String>,
@@ -1074,16 +738,15 @@ pub struct SetupReport {
 /// Fetches the report behind `grow setup --json` without writing anything:
 /// no artifacts, no signature sidecar, no sync marker.
 pub async fn fetch_setup_report() -> Result<SetupReport, ManagedConfigError> {
-    let (source, body) = match fetch_for_principal(SyncBudget::Standard, None).await? {
+    let (source, body) = match fetch_for_principal(SyncBudget::Standard).await? {
         FetchedConfig::DeploymentKey { body, .. } => (Some("deploymentKey"), body),
-        FetchedConfig::Team { body, .. } => (Some("teamOauth"), body),
         FetchedConfig::NoPrincipal => (None, ManagedConfigResponse::default()),
     };
     // Match the installer's trust decision: a payload `grow setup` would refuse
     // is reported as an error, not printed as installable config.
     if source.is_some()
         && grow_config::signed_policy::verification_active()
-        && let Err(e) = verify_signed_envelope(&body, active_team_id_any_expiry().as_deref())
+        && let Err(e) = verify_signed_envelope(&body)
     {
         tracing::warn!("managed config signature rejected: {e}");
         return Err(ManagedConfigError::SignatureRejected);
@@ -1093,7 +756,6 @@ pub async fn fetch_setup_report() -> Result<SetupReport, ManagedConfigError> {
         configured: body.config_exists(),
         fail_closed: body.requirements_fail_closed(),
         deployment_id: body.deployment_id,
-        team_id: body.team_id,
         managed_config: body.managed_config,
         requirements: body.requirements,
     })
@@ -1102,7 +764,7 @@ pub async fn fetch_setup_report() -> Result<SetupReport, ManagedConfigError> {
 /// Run the `grow setup` sync for the current principal. The caller must check
 /// [`has_principal`] first and render the no-principal guidance.
 pub async fn run_setup() -> SetupOutcome {
-    match sync_with_budget(SyncBudget::Standard, None).await {
+    match sync_with_budget(SyncBudget::Standard).await {
         // A rejected envelope persisted nothing — reporting Installed would mask a
         // fetch the gate is about to refuse.
         Ok(SyncOutcome {

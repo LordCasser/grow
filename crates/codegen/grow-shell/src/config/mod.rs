@@ -643,8 +643,7 @@ impl Default for ModelOverrideConfig {
 /// an explicit pin from "unpinned" (where the client hint may apply), and
 /// whether the pin came from the env
 /// escape hatch. Every effective model except an env pin is catalog-guarded —
-/// when the model is not in the shell's catalog (e.g. `grow-build-0.1` for
-/// OAuth users, whose catalogs exclude it) the per-turn suggestion request is
+/// when the model is not in the shell's catalog the per-turn suggestion request is
 /// skipped entirely rather than fired doomed. The env pin is deliberately
 /// exempt so `GROW_PROMPT_SUGGESTIONS_MODEL` keeps working for models a
 /// catalog does not list (mirrors the pager, which forwards the env value
@@ -773,12 +772,12 @@ impl ToolsConfig {
 pub use grow_config::ConfigLayers;
 pub use grow_config::{
     MDM_REQUIREMENTS_SOURCE, RequirementsLayer, RequirementsSource, ServingIdentity, SyncMarker,
-    claude_managed_settings_probe_path, confirmed_team_switch, confirmed_team_switch_at,
-    is_managed_config_hard_stale_for, is_managed_config_stale_for, load_config_file,
-    load_from_disk, load_managed_config, load_merged_requirements, load_system_managed_config,
-    load_toml_file, managed_config_identity_changed_at, managed_deployment_id,
-    managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
-    normalize_identity, requirements_layers, system_config_dir, user_grow_home,
+    claude_managed_settings_probe_path, is_managed_config_hard_stale_for,
+    is_managed_config_stale_for, load_config_file, load_from_disk, load_managed_config,
+    load_merged_requirements, load_system_managed_config, load_toml_file,
+    managed_config_identity_changed_at, managed_deployment_id, managed_policy_compromised_for,
+    mark_managed_config_synced, mark_managed_config_synced_at, normalize_identity,
+    requirements_layers, system_config_dir, user_grow_home,
 };
 /// Map of "dotted.path" to which config file the value came from.
 pub fn config_origins(

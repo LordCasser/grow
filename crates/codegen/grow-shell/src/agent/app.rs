@@ -19,7 +19,6 @@ use xai_acp_lib::{
 use crate::agent::config::Config as AgentConfig;
 use crate::agent::init::{bootstrap, exit_on_config_error};
 use crate::agent::mvp_agent::MvpAgent;
-use crate::auth::{AuthManager, AuthMode, ProviderAuth, ServiceAuthConfig, run_auth_flow};
 use crate::util::grow_home;
 use dirs;
 
@@ -175,15 +174,13 @@ pub(crate) async fn run_auto_update_checker(
 /// Spawn the agent inside a LocalSet and return a handle to the I/O future.
 fn spawn_agent_local(
     agent_config: AgentConfig,
-    auth_manager: Arc<AuthManager>,
     memory_config: Option<crate::config::MemoryConfig>,
     outgoing: impl futures::AsyncWrite + Unpin + 'static,
     incoming: impl futures::AsyncRead + Unpin + 'static,
 ) -> impl std::future::Future<Output = Result<(), acp::Error>> {
     let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(gw_tx);
-    let mut agent =
-        MvpAgent::new(gateway, &agent_config, auth_manager).unwrap_or_else(exit_on_config_error);
+    let mut agent = MvpAgent::new(gateway, &agent_config).unwrap_or_else(exit_on_config_error);
     if let Some(mc) = memory_config {
         agent.set_memory_config(mc);
     }
@@ -362,27 +359,7 @@ pub async fn run_stdio_agent(
                 let _ = tx.shutdown().await;
             });
 
-            // Create the auth manager here (not in `spawn_agent_local`) so the session-start refresh can
-            // drive a token refresh before bootstrap reads policy; the same manager goes to the agent.
-            let auth_manager = Arc::new(agent_config.create_auth_manager());
-            // Proactive token refresh; runs until process exit.
-            auth_manager.start_proactive_refresh(tokio_util::sync::CancellationToken::new());
-            // Pause refreshes across system sleep so an OIDC refresh can't straddle a
-            // suspend (which can revoke the refresh token and force re-login).
-            // `grow agent stdio` is a local/interactive entrypoint (spawned by
-            // an embedding client), so it needs the gate like the leader and pager paths;
-            // no-op where the OS listener is unavailable.
-            auth_manager.start_system_power_listener();
-
-            // Restore managed policy right before bootstrap reads it (no stale window after prefetch).
-            crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
-            let handle_io = spawn_agent_local(
-                agent_config,
-                auth_manager,
-                memory_config,
-                outgoing,
-                incoming,
-            );
+            let handle_io = spawn_agent_local(agent_config, memory_config, outgoing, incoming);
             handle_io.await?;
             Ok::<(), anyhow::Error>(())
         })
@@ -600,22 +577,8 @@ pub async fn run_leader(
     let agent_to_ipc_tx_clone = agent_to_ipc_tx.clone();
     let cancel_clone = cancel.clone();
 
-    let shared_auth_manager = Arc::new(agent_config_for_spawn.create_auth_manager());
-    // Proactive token refresh for the leader; cancelled on shutdown.
-    shared_auth_manager.start_proactive_refresh(cancel_clone.clone());
-    // Pause refreshes across system sleep on this local (laptop) leader
-    // process so a refresh can't straddle a suspend.
-    shared_auth_manager.start_system_power_listener();
-
-    let auth_manager_for_agent = shared_auth_manager.clone();
-    let auth_manager_for_config = shared_auth_manager.clone();
-
-    // Restore managed policy right before bootstrap reads it (no stale window after the long auth/prefetch phase).
-    crate::managed_config::ensure_managed_policy_present(&auth_manager_for_agent).await;
-
     let (agent_config_for_spawn, shared_models_manager) =
-        bootstrap(&agent_config_for_spawn, &auth_manager_for_agent)
-            .unwrap_or_else(exit_on_config_error);
+        bootstrap(&agent_config_for_spawn).unwrap_or_else(exit_on_config_error);
 
     let models_manager_for_agent = shared_models_manager.clone();
     let models_manager_for_config = shared_models_manager;
@@ -670,7 +633,6 @@ pub async fn run_leader(
                 let mut agent = MvpAgent::with_models(
                     gateway,
                     &agent_config_for_spawn,
-                    auth_manager_for_agent,
                     models_manager_for_agent,
                 );
                 agent.set_activity(agent_activity_for_agent);
@@ -755,17 +717,6 @@ pub async fn run_leader(
             if let Some(home) = dirs::home_dir() {
                 watch_paths.push(home.join(".claude.json"));
             }
-            let auth_scope = agent_config.auth.auth_scope();
-            // Gated on user_grow_home() so a cwd-relative .grow/auth.json is never
-            // read as the user auth store when no home resolves.
-            let initial_auth_key_hash = grow_config::user_grow_home()
-                .map(|g| g.join("auth.json"))
-                .and_then(|auth_path| crate::auth::read_auth_json(&auth_path).ok())
-                .and_then(|store| {
-                    crate::auth::lookup_auth(&store, &auth_scope)
-                        .map(|a| crate::config::reloader::hash_auth_key(&a.key))
-                })
-                .unwrap_or(0);
             let (config_update_tx, mut config_update_rx) =
                 mpsc::unbounded_channel::<crate::config::reloader::ConfigUpdate>();
 
@@ -817,10 +768,7 @@ pub async fn run_leader(
                 let initial_config = crate::config::load_effective_config()
                     .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
                 let reloader = crate::config::reloader::ConfigReloader::new(
-                    grow_home::grow_home(),
-                    initial_auth_key_hash,
                     initial_config,
-                    auth_scope,
                     None, // settings stream in after readiness via background refresh
                     config_update_tx,
                     agent_config.cli_experimental_memory,
@@ -842,49 +790,6 @@ pub async fn run_leader(
                 use crate::config::reloader::ConfigUpdate;
                 while let Some(update) = config_update_rx.recv().await {
                     match update {
-                        ConfigUpdate::Auth(auth) => {
-                            info!(
-                                key_len = auth.key.len(),
-                                expires_at = ?auth.expires_at,
-                                "Auth token hot-reloaded from config watcher"
-                            );
-                            grow_diagnostics::unified_log::info(
-                                "auth hot-swapped from disk",
-                                None,
-                                Some(serde_json::json!({
-                                    "key_len": auth.key.len(),
-                                    "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
-                                })),
-                            );
-                            auth_manager_for_config.hot_swap(*auth);
-                            let line = internal_reload_request_line(
-                                "config-auth-reloaded",
-                                "grow/internal/reload_all_mcp_servers",
-                                serde_json::json!({}),
-                            );
-                            let mut tx = acp_tx_for_config.lock().await;
-                            if let Err(e) = tx.write_all(line.as_bytes()).await {
-                                warn!(error = %e, "failed to inject MCP reload after auth hot-swap");
-                            }
-                        }
-                        ConfigUpdate::AuthCleared => {
-                            auth_manager_for_config.clear_in_memory();
-                            let line = internal_reload_request_line(
-                                "config-auth-cleared",
-                                "grow/internal/auth_cleared",
-                                serde_json::json!({}),
-                            );
-                            let mut tx = acp_tx_for_config.lock().await;
-                            if let Err(e) = tx.write_all(line.as_bytes()).await {
-                                warn!(error = %e, "failed to inject auth-cleared cleanup into ACP stream");
-                            }
-                            grow_diagnostics::unified_log::warn(
-                                "auth cleared from disk",
-                                None,
-                                None,
-                            );
-                            info!("Auth cleared by config watcher");
-                        }
                         ConfigUpdate::McpServersChanged => {
                             info!("MCP server config change detected — reloading active sessions");
                             let line = internal_reload_request_line(
@@ -1069,14 +974,6 @@ mod tests {
         );
         let msg: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(msg["params"]["cwd"], "/repo/x");
-
-        let line = internal_reload_request_line(
-            "config-auth-cleared",
-            "grow/internal/auth_cleared",
-            serde_json::json!({}),
-        );
-        let msg: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
-        assert_eq!(msg["method"], "_grow/internal/auth_cleared");
     }
 
     #[tokio::test]

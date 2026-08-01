@@ -19,16 +19,6 @@ pub enum Command {
     Doctor(crate::doctor_cmd::DoctorArgs),
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
-    /// Sign out one configured OAuth LLM provider
-    Logout {
-        /// Provider name; optional when exactly one OAuth provider is configured.
-        provider: Option<String>,
-    },
-    /// Sign in to an OAuth LLM provider
-    Login {
-        /// Provider name; optional when exactly one OAuth provider is configured.
-        provider: Option<String>,
-    },
     /// Manage MCP server configurations
     Mcp(crate::mcp_cmd::McpArgs),
     /// Manage plugins and marketplace sources
@@ -594,12 +584,6 @@ pub struct PagerArgs {
     /// Write sampling events to ~/.grow/logs/sampling.jsonl.
     #[arg(long = "log-sampling", env = "GROW_LOG_SAMPLING", hide = true)]
     pub log_sampling: bool,
-    /// Show the login screen even when credentials are already available.
-    #[arg(long = "force-login", hide = true)]
-    pub force_login: bool,
-    /// Use OAuth when the welcome screen starts authentication.
-    #[arg(long = "oauth")]
-    pub oauth: bool,
     /// Connect to a shared leader process.
     #[arg(long, conflicts_with = "no_leader", hide = true)]
     pub leader: bool,
@@ -1197,11 +1181,8 @@ mod tests {
     }
     #[test]
     fn subcommand_takes_precedence_over_positional_prompt() {
-        let args = PagerArgs::try_parse_from(["grow", "logout"]).expect("subcommand parses");
-        assert!(matches!(
-            args.command,
-            Some(Command::Logout { provider: None })
-        ));
+        let args = PagerArgs::try_parse_from(["grow", "models"]).expect("subcommand parses");
+        assert!(matches!(args.command, Some(Command::Models)));
         assert!(args.prompt.is_none());
     }
     #[test]

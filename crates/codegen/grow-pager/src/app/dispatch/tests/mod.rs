@@ -1,5 +1,4 @@
 //! Tests for the dispatch module tree: shared fixtures and per-domain test modules.
-mod auth;
 mod cta_e2e;
 mod dashboard;
 mod jump;
@@ -50,9 +49,7 @@ use crate::acp::tracker::AcpUpdateTracker;
 use crate::app::actions::{Action, Effect, PermissionModeKind, SubagentKillOutcome, TaskResult};
 use crate::app::agent::{AgentId, AgentSession, AgentState};
 use crate::app::agent_view::{ActivePane, AgentView, PromptMode};
-use crate::app::app_view::{
-    ActiveView, AppView, AuthMode, AuthState, TrustState, WelcomeAnnouncementState,
-};
+use crate::app::app_view::{ActiveView, AppView, TrustState, WelcomeAnnouncementState};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{SessionEvent, ToolCallBlock};
 use crate::scrollback::state::ScrollbackState;
@@ -65,7 +62,6 @@ fn test_app() -> AppView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     AppView {
         active_view: ActiveView::Welcome,
-        auth_return_view: None,
         agents: IndexMap::new(),
         next_agent_id: 0,
         models: ModelState::default(),
@@ -122,34 +118,14 @@ fn test_app() -> AppView {
         resume_local_miss: None,
         agent_override: None,
         bootstrap_acp_commands: Vec::new(),
-        auth_methods: vec![acp::AuthMethod::Agent(acp::AuthMethodAgent::new(
-            acp::AuthMethodId::new("provider.oauth"),
-            "Configured provider".to_string(),
-        ))],
-        auth_state: AuthState::Done,
         trust_state: TrustState::Done,
-        login_label: None,
-        login_method_id: None,
-        auth_start_mode: AuthMode::Pending,
-        auth_code_input: Default::default(),
-        next_auth_request_seq: 1,
-        auth_url_poll_handle: None,
         deferred_startup: Default::default(),
-        auth_use_oauth: false,
-        auth_clipboard_delivery: None,
-        auth_clipboard_feedback_generation: 0,
-        team_id: None,
-        team_name: None,
-        is_zdr: false,
-        team_role: None,
         show_tips: None,
         auto_update: None,
         ask_user_question_timeout_enabled: None,
-        zdr_access_enabled: false,
         bundle_state: crate::app::bundle::BundleState::default(),
         scroll_debug_hud: crate::views::scroll_debug_hud::ScrollDebugHud::new(),
         fps_hud: crate::views::fps_hud::FpsHud::new(),
-        welcome_prompt: crate::views::prompt_widget::PromptWidget::new(),
         slash_mru: std::rc::Rc::new(std::cell::RefCell::new(
             crate::slash::mru::SlashMru::new_in_memory(),
         )),
@@ -160,15 +136,10 @@ fn test_app() -> AppView {
         last_mouse_pos: None,
         last_scroll_pos: None,
         last_cache_evict_at: None,
-        welcome_auth_url_rect: None,
-        welcome_on_auth_url: false,
         welcome_announcement: WelcomeAnnouncementState::default(),
-        welcome_auth_fallback_rect: None,
         welcome_toast: None,
         welcome_on_promo_cta: false,
         welcome_promo_cta_rect: None,
-        auth_show_raw_url: false,
-        auth_mouse_disabled: false,
         session_picker_entries: None,
         session_picker_loading: false,
         session_picker_state: crate::views::picker::PickerState::with_mode(
@@ -189,7 +160,6 @@ fn test_app() -> AppView {
         welcome_tick: 0,
         welcome_shimmer_frame: 0,
         startup_warnings: Vec::new(),
-        is_api_key_auth: false,
         pending_update_version: None,
         foreign_resume_launch_generation: 0,
         foreign_resume_launch: None,
@@ -381,13 +351,12 @@ fn cta_mcp_server(
     plugin: Option<&str>,
     status: crate::views::mcps_modal::McpServerDisplayStatus,
 ) -> crate::views::mcps_modal::McpServerInfo {
-    use crate::views::mcps_modal::{McpServerDisplayStatus, McpWireSource};
+    use crate::views::mcps_modal::McpWireSource;
     crate::views::mcps_modal::McpServerInfo {
         name: name.into(),
         display_name: None,
         status,
         tool_count: 0,
-        auth_required: matches!(status, McpServerDisplayStatus::NeedsAuth),
         setup_required: false,
         setup: None,
         setup_values: std::collections::HashMap::new(),
@@ -435,14 +404,6 @@ pub(super) fn end_turn() -> Action {
         http_status: None,
         prompt_id: None,
     })
-}
-/// Extract the in-flight auth request sequence, panicking if the auth
-/// state is not `Authenticating`.
-fn authenticating_seq(app: &AppView) -> u64 {
-    match app.auth_state {
-        AuthState::Authenticating { request_seq, .. } => request_seq,
-        ref other => panic!("expected Authenticating, got {other:?}"),
-    }
 }
 /// Extract text from the last system message in an agent's scrollback.
 pub(super) fn last_system_text(app: &AppView, id: AgentId) -> String {

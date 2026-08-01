@@ -36,29 +36,27 @@ api_key = "secret"
 
 Prefer an environment variable so secrets are not stored in the configuration file.
 
-## External auth helper
+## Local key helper
 
-Providers whose bearer token rotates can reference an auth helper. The helper prints the token to
-stdout; status messages may go to stderr. A provider key or populated `env_key` takes precedence over
-the helper.
+Providers may reference a local helper that reads a user-owned key. The helper prints either a bare
+key or `{ "access_token": "...", "expires_in": 3600 }` to stdout; status messages may go to
+stderr. A provider key or populated `env_key` takes precedence over the helper. Grow never accepts a
+refresh token from the helper.
 
-## OAuth
+## No login lifecycle
 
-OAuth is also configured on a provider; Grow has no global inference login. The provider must
-declare `type = "oauth"`, `issuer`, `client_id`, and scopes in its inline `auth` table (or reference
-a named `[auth_provider.<name>]` table). Run `grow login <provider>` to authorize it and
-`grow logout <provider>` to remove only that credential. Logging in never adds models or changes a
-session's selected model.
+Grow is BYOK-only. It does not implement OAuth, OIDC, device login, browser callbacks, credential
+refresh, or `login/logout` commands. Key rotation belongs to the environment, configuration, or
+local helper that owns the key.
 
 ## Local endpoints
 
 An endpoint that requires no authentication may omit `api_key`, `env_key`, and auth helpers.
 
-## Optional service and MCP authentication
+## MCP authentication
 
-Optional service endpoints have no compiled-in default and MCP OAuth remains server-scoped. Those
-credentials authenticate only the explicitly configured service. They are never treated as an
-inference credential for a BYOK provider.
+Remote MCP servers use explicitly configured headers or `bearer_token_env_var`. Grow does not
+discover or perform MCP OAuth.
 
 See [LLM Providers and BYOK](11-custom-models.md) for the complete provider schema and protocol
 selection rules.

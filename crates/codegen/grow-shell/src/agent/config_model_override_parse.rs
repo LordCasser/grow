@@ -643,7 +643,6 @@ mod tests {
             env_key: Some(crate::agent::config::EnvKeys::single("ENV_KEY")),
             auth_provider: Some("corp-gateway".into()),
             model_provider: Some("gateway".into()),
-            api_base_url: Some("https://api.example.com".into()),
             output_limit: Some(1024),
             temperature: Some(0.5),
             top_p: Some(0.9),
@@ -665,7 +664,6 @@ mod tests {
             inference_idle_timeout_secs: Some(60),
             max_retries: Some(3),
             hidden: Some(false),
-            supported_in_api: Some(true),
             reasoning_effort: Some(ReasoningEffort::High),
             supports_reasoning_effort: Some(true),
             reasoning_efforts: vec![ReasoningEffortOption {

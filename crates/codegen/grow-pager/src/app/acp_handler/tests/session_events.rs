@@ -20,7 +20,7 @@
             percentage: 85,
             reason: "threshold".into(),
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback));
         assert!(
             session.in_flight_prompt.is_none(),
             "compaction start implies server activity — cancel must not rewind prompt"
@@ -32,7 +32,7 @@
         );
     }
 
-    /// Compact failure keeps the hold; PromptResponse reauth gate decides stash.
+    /// Compact failure keeps the held prompt for the terminal response path.
     #[test]
     fn apply_compaction_failed_keeps_held_prompt() {
         let mut session = make_session(Some("s1"));
@@ -51,7 +51,7 @@
             let update = GrowSessionUpdate::AutoCompactFailed {
                 error: error.into(),
             };
-            assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback));
             assert_eq!(
                 session.compact_held_prompt.as_ref().map(|p| p.text.as_str()),
                 Some("retry after login"),
@@ -74,7 +74,7 @@
         let update = GrowSessionUpdate::ImageDropped {
             notes: notes.clone(),
         };
-        let changed = apply_session_event(&update, &mut session, &mut scrollback, false);
+        let changed = apply_session_event(&update, &mut session, &mut scrollback);
         assert!(changed);
         assert_eq!(scrollback.len(), before + 1);
         let entry = scrollback.entries_mut().last().expect("entry pushed");
@@ -141,7 +141,7 @@
             max_retries: 3,
             reason: "rate limited".into(),
         };
-        apply_retry_state(&retry, &mut session, &mut scrollback, false);
+        apply_retry_state(&retry, &mut session, &mut scrollback);
         assert!(
             session.in_flight_prompt.is_none(),
             "RetryState bypasses session/update in_flight hook"
@@ -161,7 +161,7 @@
                 is_rate_limited: true,
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback);
         assert!(
             session.rate_limited,
             "rate_limited flag must be set when is_rate_limited is true"
@@ -180,7 +180,7 @@
 
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
-        apply_retry_state(&empty, &mut session, &mut scrollback, false);
+        apply_retry_state(&empty, &mut session, &mut scrollback);
         match last_session_event(&scrollback) {
             Some(SessionEvent::RetryFailed { error, .. }) => {
                 assert_eq!(error, RATE_LIMITED_USER_MESSAGE);
@@ -203,7 +203,7 @@
 
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
-        apply_retry_state(&exhausted, &mut session, &mut scrollback, false);
+        apply_retry_state(&exhausted, &mut session, &mut scrollback);
         match last_session_event(&scrollback) {
             Some(SessionEvent::RetryFailed { error, .. }) => {
                 assert_eq!(error, body);
@@ -225,75 +225,16 @@
                 is_rate_limited: false,
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback);
         assert!(
             !session.rate_limited,
             "rate_limited flag must not be set when is_rate_limited is false"
         );
     }
-    #[test]
-    fn is_reauthable_failure_matrix() {
-        assert!(is_reauthable_failure(Some("reauth_required")));
-        assert!(!is_reauthable_failure(Some("auth")));
-        assert!(!is_reauthable_failure(Some("provider_credentials")));
-        assert!(!is_reauthable_failure(Some("server_error")));
-        assert!(!is_reauthable_failure(None));
-    }
 
-    /// Only an explicitly re-authable failure surfaces the login prompt.
+    /// An untyped provider 401 remains a provider failure.
     #[test]
-    fn apply_retry_state_reauth_required_pushes_reauth_prompt() {
-        let mut session = make_session(Some("s1"));
-        let mut scrollback = ScrollbackState::new();
-        apply_retry_state(
-            &RetryState::Failed {
-                error_type: "reauth_required".into(),
-                message: "Unauthorized (401) from https://service.example.com/v1/messages: \
-                          no auth context"
-                    .into(),
-            },
-            &mut session,
-            &mut scrollback, false);
-        assert!(
-            matches!(
-                last_session_event(&scrollback),
-                Some(SessionEvent::ReAuthRequired)
-            ),
-            "a session-owned auth failure must surface the actionable re-auth prompt"
-        );
-    }
-
-    /// A recoverable auth failure preserves `in_flight_prompt` so the
-    /// PromptResponse handler can stash it for auto-resubmit after re-auth.
-    #[test]
-    fn apply_retry_state_reauth_required_preserves_in_flight_prompt() {
-        let mut session = make_session(Some("s1"));
-        let mut scrollback = ScrollbackState::new();
-        session.in_flight_prompt = Some(InFlightPrompt {
-            text: "retry after login".into(),
-            images: Vec::new(),
-            scrollback_entry: EntryId::new(5),
-            combined_scrollback_entries: Vec::new(),
-            chip_elements: Vec::new(),
-        });
-        apply_retry_state(
-            &RetryState::Failed {
-                error_type: "reauth_required".into(),
-                message: "Unauthorized (401) from https://proxy/v1/messages".into(),
-            },
-            &mut session,
-            &mut scrollback, false);
-        assert!(
-            session.in_flight_prompt.is_some(),
-            "in_flight_prompt must be preserved on a recoverable auth failure"
-        );
-        assert_eq!(session.in_flight_prompt.unwrap().text, "retry after login");
-    }
-
-    /// An untyped provider 401 must not be guessed to be recoverable through
-    /// Grow's login flow.
-    #[test]
-    fn apply_retry_state_401_message_without_reauth_type_keeps_provider_error() {
+    fn apply_retry_state_401_message_keeps_provider_error() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         apply_retry_state(
@@ -303,7 +244,7 @@
                     .into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback);
         assert!(matches!(
             last_session_event(&scrollback),
             Some(SessionEvent::RetryFailed { .. })
@@ -311,7 +252,7 @@
     }
 
     #[test]
-    fn apply_retry_state_byok_rejection_never_prompts_for_login() {
+    fn apply_retry_state_byok_rejection_clears_in_flight_prompt() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         session.in_flight_prompt = Some(InFlightPrompt {
@@ -329,7 +270,6 @@
             },
             &mut session,
             &mut scrollback,
-            true,
         );
         assert!(matches!(
             last_session_event(&scrollback),
@@ -337,7 +277,7 @@
         ));
         assert!(
             session.in_flight_prompt.is_none(),
-            "a BYOK failure cannot be auto-resubmitted by /login"
+            "a rejected BYOK request must not remain in flight"
         );
     }
 
@@ -352,7 +292,7 @@
                 message: "internal server error".into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback);
         assert!(matches!(
             last_session_event(&scrollback),
             Some(SessionEvent::RetryFailed { .. })
@@ -373,7 +313,7 @@
                     .into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback);
         assert!(
             matches!(
                 last_session_event(&scrollback),
@@ -398,7 +338,7 @@
                 message: "the prompt is too long for this model's context window".into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback);
         assert!(
             matches!(
                 last_session_event(&scrollback),
@@ -419,7 +359,7 @@
             elapsed_ms: Some(500),
             summary_preview: None,
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback));
         assert_eq!(
             scrollback.len(),
             0,
@@ -456,7 +396,7 @@
             elapsed_ms: Some(500),
             summary_preview: None,
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback));
         session.finish_turn(&mut scrollback,
         );
         match last_session_event(&scrollback) {
@@ -481,7 +421,7 @@
             elapsed_ms: Some(500),
             summary_preview: None,
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback));
         match last_session_event(&scrollback) {
             Some(SessionEvent::CompactionCompleted { tokens_after, .. }) => {
                 assert_eq!(
@@ -509,7 +449,7 @@
         assert!(apply_session_event(
             &update,
             &mut agent.session,
-            &mut agent.scrollback, false));
+            &mut agent.scrollback));
 
         refresh_context_used(&mut agent, 66_000);
         confirm_context_used(&mut agent, 43_000);
@@ -538,7 +478,7 @@
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         let update = GrowSessionUpdate::MemoryFlushStarted;
-        assert!(!apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert!(!apply_session_event(&update, &mut session, &mut scrollback));
     }
 
     // ── handle_child_session_notification ──────────────────────────────
@@ -561,7 +501,7 @@
             elapsed_ms: Some(300),
             summary_preview: None,
         };
-        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let changed = handle_child_session_notification(update, child_sid, &mut agent);
         assert!(changed);
 
         let info = agent.subagent_sessions.get(child_sid).unwrap();
@@ -601,7 +541,7 @@
             percentage: 72,
             reason: "threshold".into(),
         };
-        let _ = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let _ = handle_child_session_notification(update, child_sid, &mut agent);
 
         let child_view = agent.subagent_views.get(child_sid).unwrap();
         assert_eq!(
@@ -620,7 +560,7 @@
             percentage: 85,
             reason: "threshold".into(),
         };
-        let changed = handle_child_session_notification(update, "unknown-child", &mut agent, false);
+        let changed = handle_child_session_notification(update, "unknown-child", &mut agent);
         assert!(!changed);
     }
 
@@ -639,7 +579,7 @@
             elapsed_ms: Some(300),
             summary_preview: None,
         };
-        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let changed = handle_child_session_notification(update, child_sid, &mut agent);
         // No child_view means nothing visible changed — must not trigger redraw.
         assert!(!changed);
         // SubagentInfo should still be updated (data correctness).
@@ -652,7 +592,7 @@
     fn child_unknown_event_returns_false() {
         let mut agent = make_agent(Some("root-sess"));
         let update = GrowSessionUpdate::MemoryFlushStarted;
-        let changed = handle_child_session_notification(update, "child-1", &mut agent, false);
+        let changed = handle_child_session_notification(update, "child-1", &mut agent);
         assert!(!changed);
     }
 
@@ -671,7 +611,7 @@
                 message: "incompatible history".into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback);
         assert!(
             session.model_incompatible,
             "encrypted_content_mismatch should set model_incompatible flag"
@@ -690,7 +630,7 @@
                 message: "bad request".into(),
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback);
         assert!(
             !session.model_incompatible,
             "non-encrypted_content error types must not set model_incompatible"

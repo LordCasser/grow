@@ -24,7 +24,6 @@ fn apply_writes_and_overwrites_artifacts() {
 
     let body = ManagedConfigResponse {
         deployment_id: None,
-        team_id: None,
         managed_config: Some("[cli]\ntheme = \"dark\"\n".into()),
         requirements: Some("[features]\nweb_fetch = false\n".into()),
         ..Default::default()
@@ -53,7 +52,6 @@ fn apply_removes_artifact_the_server_no_longer_serves() {
     // Response carries managed_config but NOT requirements.
     let body = ManagedConfigResponse {
         deployment_id: None,
-        team_id: None,
         managed_config: Some("[cli]\ntheme = \"dark\"\n".into()),
         requirements: None,
         ..Default::default()
@@ -69,7 +67,6 @@ fn apply_removes_artifact_the_server_no_longer_serves() {
     // EMPTY served content means the same thing as absent: remove.
     let withdrawn = ManagedConfigResponse {
         deployment_id: None,
-        team_id: None,
         managed_config: Some(String::new()),
         requirements: None,
         ..Default::default()
@@ -106,7 +103,6 @@ fn apply_partial_write_failure_keeps_written_artifact() {
 
     let body = ManagedConfigResponse {
         deployment_id: None,
-        team_id: None,
         managed_config: Some("[cli]\ninstaller = \"internal\"\n".into()),
         requirements: Some("[features]\nweb_fetch = false\n".into()),
         ..Default::default()
@@ -135,7 +131,6 @@ fn apply_converges_over_a_squatting_directory() {
     // Overwrite branch clears the dir and writes; removal branch clears the dir.
     let body = ManagedConfigResponse {
         deployment_id: None,
-        team_id: None,
         managed_config: Some("[cli]\ntheme = \"dark\"\n".into()),
         requirements: None,
         ..Default::default()
@@ -394,9 +389,9 @@ fn purge_keeps_marker_when_an_artifact_removal_fails() {
 
 // --- The is-managed claim persist rules ---
 
-/// Deployment id wins over team id (server parity).
+/// Only a deployment id can bind a managed policy; legacy team metadata is ignored.
 #[test]
-fn served_principal_prefers_deployment_id() {
+fn served_principal_requires_deployment_id() {
     use grow_config::signed_policy::SignedPayload;
     let payload = |dep: Option<&str>, team: Option<&str>| SignedPayload {
         typ: grow_config::signed_policy::MANAGED_POLICY_TYP.into(),
@@ -414,10 +409,7 @@ fn served_principal_prefers_deployment_id() {
         served_principal_of(&payload(Some("dep-1"), Some("team-007"))),
         Some("dep-1")
     );
-    assert_eq!(
-        served_principal_of(&payload(None, Some("team-007"))),
-        Some("team-007")
-    );
+    assert_eq!(served_principal_of(&payload(None, Some("team-007"))), None);
     assert_eq!(served_principal_of(&payload(None, None)), None);
 }
 

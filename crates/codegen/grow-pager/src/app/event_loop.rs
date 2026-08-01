@@ -21,7 +21,7 @@ use agent_client_protocol as acp;
 use xai_acp_lib::acp_send;
 
 use super::actions::{Action, Effect, TaskResult};
-use super::app_view::{ActiveView, AppView, AuthState, InputOutcome, PasteProvenance, TrustState};
+use super::app_view::{ActiveView, AppView, InputOutcome, PasteProvenance, TrustState};
 use super::{PagerArgs, PagerTerminal, acp_handler, dispatch, effects};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -762,7 +762,6 @@ pub(crate) async fn run(
     // Agent/dashboard prompts pick the mode up at their creation sites
     // (`apply_app_scoped_gates` / `ensure_dashboard_state`); the welcome prompt
     // already exists, so inject here.
-    app.welcome_prompt.set_screen_mode(term_state.screen_mode);
     if app.screen_mode.is_minimal() && term_state.relaunched_into_minimal {
         app.minimal_state.welcome_pending = true;
     }
@@ -856,15 +855,14 @@ pub(crate) async fn run(
         .as_deref()
         .map(agent_client_protocol::ModelId::new);
     app.cli_effort_token = args.reasoning_effort.clone();
-    app.auth_use_oauth = args.oauth;
     app.show_resolved_model = remote_settings
         .as_ref()
-        .and_then(|s| s.show_resolved_model)
+        .and_then(|settings| settings.show_resolved_model)
         .unwrap_or(true);
     app.plugin_cta_enabled = grow_config::env_bool("GROW_PLUGIN_CTA").unwrap_or(false);
     app.session_picker_grouped = std::env::var("GROW_SESSION_PICKER_GROUPED")
         .ok()
-        .and_then(|v| match v.as_str() {
+        .and_then(|value| match value.as_str() {
             "1" | "true" => Some(true),
             "0" | "false" => Some(false),
             _ => None,
@@ -877,98 +875,13 @@ pub(crate) async fn run(
         .or_else(|| {
             remote_settings
                 .as_ref()
-                .and_then(|s| s.session_picker_grouped)
+                .and_then(|settings| settings.session_picker_grouped)
         })
         .unwrap_or(true);
     app.cancel_rewind_enabled = connection.cancel_rewind_enabled;
     apply_session_recap_available(&mut app, connection.session_recap_available);
 
-    // Preserve auth methods so logout→re-login works without restarting.
-    app.auth_methods = connection.auth_methods.clone();
-
-    // Seed auth state from ACP connection metadata.
-    // --force-login overrides: show the login screen even when credentials exist.
-    let force_login = args.force_login && !connection.auth_methods.is_empty();
-    let needs_interactive_login = connection.needs_login || force_login;
-    if needs_interactive_login {
-        if connection.needs_login {
-            // Normal path: use the metadata from startup_auth_metadata()
-            app.login_label = connection.login_label;
-            app.login_method_id = connection.login_method_id;
-            app.auth_start_mode = match connection.auth_start_mode {
-                crate::acp::AuthStartMode::Pending => super::app_view::AuthMode::Pending,
-                crate::acp::AuthStartMode::Command => super::app_view::AuthMode::Command,
-            };
-        } else {
-            // --force-login: find the provider.oauth method from the advertised list
-            let provider_oauth = connection
-                .auth_methods
-                .iter()
-                .find(|m| m.id().0.as_ref() == "provider.oauth");
-            if let Some(method) = provider_oauth {
-                app.login_label = Some(method.name().to_string());
-                app.login_method_id = Some(method.id().clone());
-                let is_provider = method
-                    .meta()
-                    .as_ref()
-                    .and_then(|v| v.get("external_provider"))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                app.auth_start_mode = if is_provider {
-                    super::app_view::AuthMode::Command
-                } else {
-                    super::app_view::AuthMode::Pending
-                };
-            } else {
-                // No provider.oauth method available, use the first method as fallback
-                let first = &connection.auth_methods[0];
-                app.login_label = Some(first.name().to_string());
-                app.login_method_id = Some(first.id().clone());
-                app.auth_start_mode = super::app_view::AuthMode::Pending;
-            }
-        }
-
-        // Skip the login splash screen — auto-trigger login immediately
-        // by reusing dispatch_login. Effects are stashed and drained after
-        // the initial render so the user sees the auth UI right away.
-        // Empty auth_methods (preferred_method pin with no credentials) is
-        // fail-closed: do not invent provider.oauth / auto-start OIDC.
-        tracing::info!(
-            method_id = ?app.login_method_id,
-            methods_empty = connection.auth_methods.is_empty(),
-            "auto-triggering login at startup"
-        );
-    }
-    // else: auth_state defaults to Done (already authenticated eagerly)
-    // Effects stashed until after the initial render, so the user sees the
-    // welcome/auth UI right away.
-    let post_render_effects = if needs_interactive_login {
-        if connection.auth_methods.is_empty() {
-            // preferred_method pin unavailable — no advertised method to start.
-            app.auth_state = super::app_view::AuthState::Pending {
-                error: Some(
-                    grow_shell::agent::auth_method::PREFERRED_API_KEY_UNAVAILABLE.to_string(),
-                ),
-            };
-            vec![]
-        } else {
-            dispatch::dispatch(Action::Login, &mut app)
-        }
-    } else {
-        vec![]
-    };
-
-    if let Some(meta) = connection.auth_meta.as_ref() {
-        match serde_json::from_value::<grow_shell::auth::AuthMeta>(meta.clone()) {
-            Ok(auth_meta) => app.apply_auth_meta(&auth_meta),
-            Err(e) => tracing::warn!("failed to deserialize auth_meta: {e}"),
-        }
-    } else {
-        // No cached session — check if the API key is the active credential.
-        app.is_api_key_auth = app.auth_methods.iter().any(|m| {
-            m.id().0.as_ref() == grow_shell::agent::auth_method::PROVIDER_API_KEY_METHOD_ID
-        });
-    }
+    let post_render_effects = Vec::new();
 
     // Load persisted per-ID hidden state
     app.hidden_announcement_ids = grow_announcements::read_hidden_announcement_ids().await;
@@ -1002,13 +915,6 @@ pub(crate) async fn run(
             crate::notifications::load_notification_config(raw),
         );
     }
-
-    app.zdr_access_enabled = grow_shell::util::config::resolve_zdr_access_enabled(
-        requirements.as_ref(),
-        user_config.as_ref(),
-        managed_config.as_ref(),
-        remote_settings.as_ref(),
-    );
 
     // Full layered resolve (env/requirements/remote may beat plain `[ui]`).
     crate::appearance::cache::set_show_thinking_blocks(
@@ -1415,18 +1321,15 @@ pub(crate) async fn run(
     // Initial render
     presenter.request_presentation(&mut app, terminal, false);
 
-    // status only; shell auto-syncs post-auth
-    if matches!(app.auth_state, AuthState::Done) {
-        let effs = dispatch::dispatch(Action::RequestBundleStatus, &mut app);
-        if process_effects(effs, &mut tasks, &mut app) {
-            return Ok(make_run_result(&app));
-        }
-        // Fetch changelog off the render path so the welcome screen
-        // can display bullets and /release-notes uses the cached result.
-        let effs = vec![super::actions::Effect::FetchChangelog];
-        if process_effects(effs, &mut tasks, &mut app) {
-            return Ok(make_run_result(&app));
-        }
+    let effs = dispatch::dispatch(Action::RequestBundleStatus, &mut app);
+    if process_effects(effs, &mut tasks, &mut app) {
+        return Ok(make_run_result(&app));
+    }
+    // Fetch changelog off the render path so the welcome screen
+    // can display bullets and /release-notes uses the cached result.
+    let effs = vec![super::actions::Effect::FetchChangelog];
+    if process_effects(effs, &mut tasks, &mut app) {
+        return Ok(make_run_result(&app));
     }
 
     if !post_render_effects.is_empty() && process_effects(post_render_effects, &mut tasks, &mut app)
@@ -1517,16 +1420,11 @@ pub(crate) async fn run(
         presenter.request_presentation(&mut app, terminal, false);
     }
 
-    // Initial prompt from the CLI positional (`grow "fix the bug"`). When
-    // already authenticated, hand it to the shared dispatcher helper (same
-    // `NewSession`/`SendPrompt` path the welcome screen uses). ZDR-blocked
-    // accounts cannot start a session, so drop the prompt — this mirrors the
-    // deferred post-login path, which clears the startup prompt for ZDR-blocked
-    // accounts. When not yet authenticated, stash it for `AuthComplete`.
+    // Initial prompt from the CLI positional (`grow "fix the bug"`).
     if let Some(initial_prompt) = args.initial_prompt() {
         if !app.session_startup_allowed() {
             app.deferred_startup.prompt = Some(initial_prompt.to_string());
-        } else if !app.is_zdr_blocked() {
+        } else {
             let effs = dispatch::dispatch_initial_prompt(&mut app, initial_prompt.to_string());
             if process_effects(effs, &mut tasks, &mut app) {
                 return Ok(make_run_result(&app));
@@ -1548,11 +1446,7 @@ pub(crate) async fn run(
             }
             presenter.request_presentation(&mut app, terminal, false);
         } else {
-            // Not signed in yet — the env var is already consumed, so
-            // without a stash the request would be silently dropped and
-            // the post-login flow would land on the welcome screen.
-            // Defer to the `AuthComplete` handler (mirrors
-            // the deferred session/prompt owner).
+            // Folder trust has not been resolved yet.
             app.deferred_startup.open_dashboard = true;
         }
     }
@@ -1560,28 +1454,18 @@ pub(crate) async fn run(
     // Minimal (scrollback-native) mode has no welcome screen: the live region
     // only renders for an Agent view. If nothing above already started a
     // session (no resume / initial prompt / worktree / dashboard), open an
-    // empty one so the user lands directly at the prompt. Unauthenticated /
-    // ZDR-blocked startup stays on Welcome, where `crate::minimal::live` shows
-    // a sign-in hint instead of a blank region.
-    if term_state.screen_mode.is_minimal()
-        && matches!(app.active_view, ActiveView::Welcome)
-        && !app.is_zdr_blocked()
-    {
+    // empty one so the user lands directly at the prompt.
+    if term_state.screen_mode.is_minimal() && matches!(app.active_view, ActiveView::Welcome) {
         if app.session_startup_allowed() {
-            // Already authenticated + trusted: open the empty session now so the
-            // user lands directly at the prompt.
+            // Open the empty session now so the user lands directly at the prompt.
             let effs = dispatch::dispatch(Action::NewSession, &mut app);
             if process_effects(effs, &mut tasks, &mut app) {
                 return Ok(make_run_result(&app));
             }
             presenter.request_presentation(&mut app, terminal, false);
         } else {
-            // Sign-in (or folder-trust) still pending: minimal renders the
-            // device / external sign-in flow in its live region. Defer the
-            // empty-session creation so the post-auth (or post-trust) drain
-            // (`drain_startup_actions`) opens it — otherwise minimal would
-            // authenticate but never create a session, stranding the user on the
-            // sign-in screen.
+            // Folder trust is still pending; defer the empty session until the
+            // startup-action drain runs.
             app.deferred_startup.new_session = true;
         }
     }
@@ -2240,9 +2124,9 @@ pub(crate) async fn run(
                                     return None;
                                 }
 
-                                let auth_req = acp::AuthenticateRequest::new(acp::AuthMethodId::new(crate::obf::auth::CACHED_TOKEN!()));
+                                let auth_req = acp::AuthenticateRequest::new(acp::AuthMethodId::new(grow_shell::agent::auth_method::PROVIDER_API_KEY_METHOD_ID));
                                 if let Err(e) = acp_send(auth_req, &acp_tx).await {
-                                    tracing::warn!(error = %e, "reconnect: re-authenticate failed");
+                                    tracing::warn!(error = %e, "reconnect: BYOK method selection failed");
                                 }
 
                                 let mut loads = Vec::with_capacity(load_plans.len());
@@ -2481,7 +2365,6 @@ fn apply_session_recap_available(app: &mut AppView, available: bool) {
     for agent in app.agents.values_mut() {
         agent.set_session_recap_available(available);
     }
-    app.welcome_prompt.set_recap_visible(available);
     if let Some(dashboard) = app.dashboard.as_mut() {
         dashboard.set_recap_visible(available);
     }
@@ -3171,34 +3054,10 @@ fn process_effects(
             matches!(app.current_ui.permission_mode.as_deref(), Some("auto")),
         ),
         screen_mode_label: Some(app.screen_mode.meta_label()),
-        is_api_key_auth: app.is_api_key_auth,
         resume_local_miss: app.resume_local_miss.clone(),
     };
     for eff in effs {
-        let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags);
-        // Install auth abort handle if the current auth state still matches.
-        if let Some((seq, abort_handle)) = meta.auth_abort_handle
-            && let super::app_view::AuthState::Authenticating {
-                request_seq,
-                handle,
-                ..
-            } = &mut app.auth_state
-            && *request_seq == seq
-        {
-            *handle = Some(abort_handle);
-        }
-        // Install URL-poll abort handle when the seq still matches (or is the
-        // current Authenticating attempt). Aborted in `abort_prior_auth`.
-        if let Some((seq, abort_handle)) = meta.auth_url_poll_handle {
-            let still_current = matches!(
-                &app.auth_state,
-                super::app_view::AuthState::Authenticating { request_seq, .. }
-                    if *request_seq == seq
-            );
-            if still_current {
-                app.auth_url_poll_handle = Some((seq, abort_handle));
-            }
-        }
+        let (quit, _meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags);
         if quit {
             return true;
         }

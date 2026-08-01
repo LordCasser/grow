@@ -99,8 +99,6 @@ pub enum McpServerStatus {
     /// Transport closed, handshake failed, or the server is
     /// disabled/unconfigured.
     Unavailable,
-    /// OAuth required but not yet acquired.
-    NeedsAuth,
 }
 
 /// Reason a status delta was emitted. Lowercase + snake_case
@@ -120,7 +118,6 @@ pub enum McpServerStatusReason {
     ConfigRemoved,
     ConfigChanged,
     Disabled,
-    AuthExpired,
     /// First-time successful handshake (a new server transitioned
     /// from `Initializing` → `Ready`). Every
     /// `McpClientEvent::Ready` maps to this reason.
@@ -131,11 +128,6 @@ pub enum McpServerStatusReason {
     RestartSucceeded,
     /// The auto-restart path exhausted retries.
     RestartFailed,
-    /// A managed connector's reactive re-auth re-fetched a fresh token,
-    /// swapped the client, and re-handshook successfully. Distinct from
-    /// `RestartSucceeded` (reserved for the transport-close auto-restart
-    /// path) so a recovered managed token is observable on the wire.
-    ManagedTokenRefreshed,
 }
 
 /// Build [`McpServerSource`] from a server name. Mirrors the
@@ -392,22 +384,6 @@ pub fn build_payload(
             McpServerStatusReason::TransportClosed,
             None,
         ),
-        // A managed connector rejected for auth reasons surfaces as
-        // NeedsAuth ("visit service.example.com"), not a generic Unavailable, so a
-        // client consuming only `server_status` (not the `mcp/list`
-        // `auth_required` boolean) shows the correct terminal state. Uses
-        // the same `is_auth_rejection_message` classifier the reroute and
-        // the reactive recovery path key on, so they cannot drift.
-        (McpClientEventKind::HandshakeFailed, McpClientEvent::HandshakeFailed { reason, .. })
-            if source == McpServerSource::Managed
-                && grow_mcp::servers::is_auth_rejection_message(reason) =>
-        {
-            (
-                McpServerStatus::NeedsAuth,
-                McpServerStatusReason::AuthExpired,
-                Some(reason.clone()),
-            )
-        }
         (McpClientEventKind::HandshakeFailed, McpClientEvent::HandshakeFailed { reason, .. }) => {
             let detail = reason.clone();
             (
@@ -984,87 +960,19 @@ mod tests {
         );
     }
 
-    /// Contract: a managed connector whose handshake is rejected for
-    /// auth reasons surfaces as `NeedsAuth`/`auth_expired` ("visit
-    /// service.example.com"), NOT a generic `Unavailable`. Keys on the shared
-    /// `is_auth_rejection_message` classifier.
+    /// Credential rejection is a normal BYOK configuration failure.
     #[test]
-    fn managed_handshake_auth_rejection_maps_to_needs_auth() {
-        let key = (
-            "grow_managed_notion".to_string(),
-            McpClientEventKind::HandshakeFailed,
-        );
-        let ev = McpClientEvent::HandshakeFailed {
-            server: "grow_managed_notion".to_string(),
-            reason: "Auth required, when send initialize request".to_string(),
-        };
-        let payload = build_payload("sess1", &key, &ev);
-        assert_eq!(payload.source, McpServerSource::Managed);
-        assert_eq!(payload.status, McpServerStatus::NeedsAuth);
-        assert_eq!(payload.reason, McpServerStatusReason::AuthExpired);
-        let json = serde_json::to_value(&payload).unwrap();
-        // `McpServerStatus` serializes lowercase (no underscore); the
-        // reason enum serializes snake_case.
-        assert_eq!(json["status"], "needsauth");
-        assert_eq!(json["reason"], "auth_expired");
-    }
-
-    /// A managed handshake failure that is NOT an auth rejection (e.g. a
-    /// 403 policy denial or a 502) must stay `Unavailable` — the
-    /// `NeedsAuth` arm is auth-only.
-    #[test]
-    fn managed_handshake_non_auth_stays_unavailable() {
-        for reason in ["403 Forbidden", "cli-chat-proxy returned 502"] {
-            let key = (
-                "grow_managed_slack".to_string(),
-                McpClientEventKind::HandshakeFailed,
-            );
-            let ev = McpClientEvent::HandshakeFailed {
-                server: "grow_managed_slack".to_string(),
-                reason: reason.to_string(),
+    fn credential_rejection_stays_unavailable() {
+        for server in ["grow_managed_notion", "github"] {
+            let key = (server.to_string(), McpClientEventKind::HandshakeFailed);
+            let event = McpClientEvent::HandshakeFailed {
+                server: server.to_string(),
+                reason: "401 Unauthorized".to_string(),
             };
-            let payload = build_payload("sess1", &key, &ev);
-            assert_eq!(
-                payload.status,
-                McpServerStatus::Unavailable,
-                "non-auth managed failure must stay Unavailable: {reason}",
-            );
+            let payload = build_payload("sess1", &key, &event);
+            assert_eq!(payload.status, McpServerStatus::Unavailable);
             assert_eq!(payload.reason, McpServerStatusReason::HandshakeFailed);
         }
-    }
-
-    /// The `NeedsAuth` arm is managed-only: a local (non-managed) server
-    /// whose handshake error happens to contain auth wording stays
-    /// `Unavailable` (local auth recovery is the OAuth path, not this one).
-    #[test]
-    fn local_handshake_auth_rejection_stays_unavailable() {
-        let key = ("github".to_string(), McpClientEventKind::HandshakeFailed);
-        let ev = McpClientEvent::HandshakeFailed {
-            server: "github".to_string(),
-            reason: "401 Unauthorized".to_string(),
-        };
-        let payload = build_payload("sess1", &key, &ev);
-        assert_eq!(payload.source, McpServerSource::Local);
-        assert_eq!(payload.status, McpServerStatus::Unavailable);
-        assert_eq!(payload.reason, McpServerStatusReason::HandshakeFailed);
-    }
-
-    /// Wire contract: the new `ManagedTokenRefreshed` reason (emitted by
-    /// the reactive re-auth success push) serializes to snake_case.
-    #[test]
-    fn managed_token_refreshed_reason_serializes() {
-        let payload = McpServerStatusPayload {
-            session_id: "sess1".to_string(),
-            name: "grow_managed_linear".to_string(),
-            source: McpServerSource::Managed,
-            status: McpServerStatus::Ready,
-            reason: McpServerStatusReason::ManagedTokenRefreshed,
-            detail: None,
-            tools: None,
-        };
-        let json = serde_json::to_value(&payload).unwrap();
-        assert_eq!(json["status"], "ready");
-        assert_eq!(json["reason"], "managed_token_refreshed");
     }
 
     /// Contract: managed server names (starting with `grow_managed_`)

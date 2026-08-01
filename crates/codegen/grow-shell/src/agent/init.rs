@@ -3,25 +3,19 @@
 //! [`bootstrap`] runs the full init sequence (config resolution, process
 //! singletons, model catalog) and returns a resolved config + `ModelsManager`.
 
-use std::sync::Arc;
-
 use crate::agent::config::{self, Config as AgentConfig};
 use crate::agent::models::ModelsManager;
-use crate::auth::AuthManager;
 
 /// Resolve config, init process singletons, build the model catalog.
 ///
 /// The `ModelsManager` is `Clone + Send`, so callers that need a handle
 /// for the config watcher can clone it before passing it to
 /// `MvpAgent::with_models`.
-pub fn bootstrap(
-    cfg: &AgentConfig,
-    auth_manager: &Arc<AuthManager>,
-) -> Result<(AgentConfig, ModelsManager), String> {
+pub fn bootstrap(cfg: &AgentConfig) -> Result<(AgentConfig, ModelsManager), String> {
     crate::managed_config::managed_policy_gate()?;
-    let cfg = resolve_config(cfg, auth_manager);
+    let cfg = resolve_config(cfg);
     cfg.validate_model_filters()?;
-    init_process(&cfg, auth_manager);
+    init_process(&cfg);
     let models_manager = ModelsManager::from_config(&cfg)?;
 
     Ok((cfg, models_manager))
@@ -39,7 +33,7 @@ pub(crate) fn exit_on_config_error<T>(e: String) -> T {
 }
 
 /// Config transform: apply local managed settings and requirements.
-fn resolve_config(cfg: &AgentConfig, _auth_manager: &AuthManager) -> AgentConfig {
+fn resolve_config(cfg: &AgentConfig) -> AgentConfig {
     let mut cfg = cfg.clone();
 
     if let Ok(layers) = crate::config::ConfigLayers::load()
@@ -86,7 +80,7 @@ fn resolve_config(cfg: &AgentConfig, _auth_manager: &AuthManager) -> AgentConfig
 
 /// Initialize process-level singletons. `Once`-guarded: only the first call
 /// takes effect.
-fn init_process(cfg: &AgentConfig, _auth_manager: &AuthManager) {
+fn init_process(cfg: &AgentConfig) {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {

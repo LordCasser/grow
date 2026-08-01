@@ -11,22 +11,10 @@ impl SessionActor {
         bridge.slash_skills().await
     }
 
-    /// `true` for session-based ACP auth methods.
-    fn is_session_based_auth(&self) -> bool {
-        self.auth_method_id
-            .load()
-            .as_deref()
-            .is_some_and(crate::agent::auth_method::is_session_based_method)
-    }
     pub(super) fn to_acp_error(&self, err: SamplingError) -> acp::Error {
         if err.is_auth_error() {
             let method_guard = self.auth_method_id.load();
             let method = method_guard.as_deref();
-            let msg = if method.is_some_and(crate::agent::auth_method::is_session_based_method) {
-                crate::agent::auth_method::AUTH_ERROR_SESSION_EXPIRED
-            } else {
-                crate::agent::auth_method::AUTH_ERROR_API_KEY
-            };
             grow_diagnostics::unified_log::error(
                 "sampling auth error",
                 Some(self.session_info.id.0.as_ref()),
@@ -35,7 +23,7 @@ impl SessionActor {
                     "error": format!("{err}"),
                 })),
             );
-            return acp::Error::auth_required().data(msg);
+            return acp::Error::auth_required().data(crate::agent::auth_method::AUTH_ERROR_API_KEY);
         }
         map_sampling_err_to_acp(err)
     }

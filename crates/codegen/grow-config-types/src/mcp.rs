@@ -2,7 +2,6 @@
 //! (config dependency inversion).
 
 use agent_client_protocol as acp;
-use grow_mcp::oauth_config::McpOAuthConfig;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,23 +11,6 @@ use std::path::PathBuf;
 /// module keeps its own copy for `PoolConfig`.
 fn default_true() -> bool {
     true
-}
-
-/// Read an MCP OAuth client secret from the named env var. Moved here with
-/// `McpServerConfig` (its only caller).
-fn resolve_oauth_client_secret(env_var: Option<&String>) -> Option<String> {
-    let env_var = env_var?;
-    match std::env::var(env_var) {
-        Ok(secret) => Some(secret),
-        Err(_) => {
-            tracing::warn!(
-                env_var = env_var.as_str(),
-                "MCP OAuth client_secret env var is configured but not set in the environment; \
-                 proceeding without a client secret"
-            );
-            None
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -56,15 +38,6 @@ pub enum McpServerTransportConfig {
         bearer_token_env_var: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         headers: Option<HashMap<String, String>>,
-        /// OAuth client ID for providers that don't support Dynamic Client Registration.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        oauth_client_id: Option<String>,
-        /// Name of the env var holding the OAuth client secret (for BYO credentials).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        oauth_client_secret_env_var: Option<String>,
-        /// OAuth scopes to request during authorization.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        oauth_scopes: Option<Vec<String>>,
     },
 }
 
@@ -99,10 +72,6 @@ pub const KNOWN_MCP_SERVER_FIELDS: &[&str] = &[
     "env",
     "expose_image_base64",
     "headers",
-    "oauth",
-    "oauth_client_id",
-    "oauth_client_secret_env_var",
-    "oauth_scopes",
     "read_only",
     "setup",
     "startup_timeout_sec",
@@ -114,19 +83,6 @@ pub const KNOWN_MCP_SERVER_FIELDS: &[&str] = &[
     "urlTemplate",
     "url_template",
 ];
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct McpJsonOAuthBlock {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_secret_env_var: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scopes: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub callback_port: Option<u16>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpSetupConfig {
@@ -225,8 +181,6 @@ pub struct McpServerConfig {
     /// classification — MCP `annotations`/`readOnlyHint` are never consulted.
     #[serde(default)]
     pub read_only: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oauth: Option<McpJsonOAuthBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<McpSetupConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -490,38 +444,6 @@ impl McpServerConfig {
             }
         }
     }
-
-    /// Extract OAuth configuration for this server, if any OAuth fields are set.
-    pub fn oauth_config(&self) -> Option<McpOAuthConfig> {
-        if let McpServerTransportConfig::StreamableHttp {
-            oauth_client_id,
-            oauth_client_secret_env_var,
-            oauth_scopes,
-            ..
-        } = &self.transport
-            && oauth_client_id.is_some()
-        {
-            return Some(McpOAuthConfig {
-                client_id: oauth_client_id.clone(),
-                client_secret: resolve_oauth_client_secret(oauth_client_secret_env_var.as_ref()),
-                scopes: oauth_scopes.clone(),
-                callback_port: None,
-            });
-        }
-
-        if let Some(block) = &self.oauth
-            && block.client_id.is_some()
-        {
-            return Some(McpOAuthConfig {
-                client_id: block.client_id.clone(),
-                client_secret: resolve_oauth_client_secret(block.client_secret_env_var.as_ref()),
-                scopes: block.scopes.clone(),
-                callback_port: block.callback_port,
-            });
-        }
-
-        None
-    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -608,7 +530,6 @@ mod tests {
             },
             enabled: true,
             read_only: false,
-            oauth: Some(McpJsonOAuthBlock::default()),
             setup: None,
             startup_timeout_sec: Some(10),
             tool_timeout_sec: Some(20),
@@ -621,13 +542,9 @@ mod tests {
                 transport_type: Some("http".into()),
                 bearer_token_env_var: Some("TOK".into()),
                 headers: Some(HashMap::from([("H".into(), "v".into())])),
-                oauth_client_id: Some("id".into()),
-                oauth_client_secret_env_var: Some("SEC".into()),
-                oauth_scopes: Some(vec!["s".into()]),
             },
             enabled: true,
             read_only: false,
-            oauth: None,
             setup: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -746,13 +663,9 @@ mod tests {
                 transport_type: None,
                 bearer_token_env_var: None,
                 headers: None,
-                oauth_client_id: None,
-                oauth_client_secret_env_var: None,
-                oauth_scopes: None,
             },
             enabled: true,
             read_only: false,
-            oauth: None,
             setup: Some(setup),
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -805,13 +718,9 @@ mod tests {
                 transport_type: None,
                 bearer_token_env_var: None,
                 headers: None,
-                oauth_client_id: None,
-                oauth_client_secret_env_var: None,
-                oauth_scopes: None,
             },
             enabled: true,
             read_only: false,
-            oauth: None,
             setup: Some(setup),
             startup_timeout_sec: None,
             tool_timeout_sec: None,

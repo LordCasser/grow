@@ -35,8 +35,6 @@ pub mod history;
 pub mod home;
 pub mod import_claude;
 pub mod jump;
-pub mod login;
-pub mod logout;
 pub mod loop_cmd;
 pub mod mcps;
 pub mod model;
@@ -139,8 +137,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(settings_cmd::SettingsCommand),
         Arc::new(rewind::RewindCommand),
         Arc::new(jump::JumpCommand),
-        Arc::new(login::LoginCommand),
-        Arc::new(logout::LogoutCommand),
         Arc::new(import_claude::ImportClaudeCommand),
         Arc::new(usage::UsageCommand),
         Arc::new(queue::QueueCommand),
@@ -291,8 +287,6 @@ mod tests {
             "howto",
             "import-claude",
             "jump",
-            "login",
-            "logout",
             "log",
             "loop",
             "m",

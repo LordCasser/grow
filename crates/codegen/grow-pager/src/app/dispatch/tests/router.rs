@@ -1,32 +1,6 @@
 //! Tests for the action router, model switching, slash commands, and other cross-cutting dispatch behavior.
 use super::*;
 #[test]
-fn auth_copy_dispatch_preserves_all_delivery_states() {
-    for delivery in [
-        crate::clipboard::ClipboardDelivery::Confirmed,
-        crate::clipboard::ClipboardDelivery::Unverified,
-        crate::clipboard::ClipboardDelivery::Failed,
-    ] {
-        let mut app = test_app();
-        app.auth_state = AuthState::Authenticating {
-            request_seq: 1,
-            handle: None,
-            auth_url: Some("https://service.example.com/auth".to_owned()),
-            mode: AuthMode::Command,
-        };
-        let effects = crate::app::dispatch::router::dispatch_copy_auth_url(&mut app, |url| {
-            assert_eq!(url, "https://service.example.com/auth");
-            delivery
-        });
-        assert_eq!(app.auth_clipboard_delivery, Some(delivery));
-        assert_eq!(app.auth_clipboard_feedback_generation, 1);
-        assert!(matches!(
-            effects.as_slice(),
-            [Effect::ScheduleClearAuthCopyFeedback { generation: 1 }]
-        ));
-    }
-}
-#[test]
 fn external_prompt_editor_arms_typed_request_and_preserves_composer_modes() {
     use crate::app::agent_view::PromptInputMode;
     for mode in [
@@ -372,20 +346,16 @@ fn resume_foreign_session_without_hint_is_noop() {
     assert!(app.foreign_resume_hint().is_none());
 }
 #[test]
-fn resume_foreign_session_stashes_prompt_behind_trust_and_auth() {
+fn resume_foreign_session_stashes_prompt_behind_trust() {
     use grow_workspace::foreign_sessions::ForeignSessionTool;
-    for (tool, prompt, auth_pending) in [
-        (ForeignSessionTool::Codex, "/resume-codex native-id", false),
-        (ForeignSessionTool::Cursor, "/resume-cursor native-id", true),
+    for (tool, prompt) in [
+        (ForeignSessionTool::Codex, "/resume-codex native-id"),
+        (ForeignSessionTool::Cursor, "/resume-cursor native-id"),
     ] {
         let mut app = test_app();
-        if auth_pending {
-            app.auth_state = AuthState::Pending { error: None };
-        } else {
-            app.trust_state = TrustState::Pending {
-                workspace: std::path::PathBuf::from("/work/proj"),
-            };
-        }
+        app.trust_state = TrustState::Pending {
+            workspace: std::path::PathBuf::from("/work/proj"),
+        };
         seed_foreign_resume_hint(&mut app, tool);
         app.deferred_startup.session =
             Some(crate::app::session_startup::DeferredSessionStartup::Load {

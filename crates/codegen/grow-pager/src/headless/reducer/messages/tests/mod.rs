@@ -47,7 +47,6 @@ fn messages(partials: bool) -> MessagesReducer {
             status: "connected".into(),
         }],
         include_partial_messages: partials,
-        api_key_auth: true,
         context_window: Some(256_000),
     });
     r

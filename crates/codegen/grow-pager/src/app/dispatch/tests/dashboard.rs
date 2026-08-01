@@ -2,95 +2,6 @@
 use super::*;
 use crate::app::app_view::InputOutcome;
 use crate::app::dispatch::queue::maybe_drain_queue;
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn auth_complete_opens_deferred_dashboard() {
-    let mut app = test_app();
-    app.auth_state = AuthState::Authenticating {
-        request_seq: 1,
-        handle: None,
-        auth_url: None,
-        mode: AuthMode::Pending,
-    };
-    app.deferred_startup.open_dashboard = true;
-    dispatch(
-        Action::TaskComplete(TaskResult::AuthComplete {
-            request_seq: 1,
-            meta: None,
-        }),
-        &mut app,
-    );
-    assert!(matches!(app.auth_state, AuthState::Done));
-    assert!(
-        matches!(app.active_view, ActiveView::AgentDashboard),
-        "deferred `grow dashboard` must open the dashboard after login",
-    );
-    assert!(
-        !app.deferred_startup.open_dashboard,
-        "the deferred-dashboard flag must be consumed",
-    );
-}
-/// Mid-session re-auth completed from the dashboard still consumes the
-/// stash on the agent that 401'd (auth is global, not per-view).
-#[test]
-fn auth_complete_retries_stashed_prompt_from_dashboard() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    let mut image = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
-        data: vec![1, 2, 3],
-        mime_type: "image/png".into(),
-    });
-    image.display_number = 1;
-    app.agents.get_mut(&id).unwrap().reauth_stashed_prompt =
-        Some(crate::app::agent::InFlightPrompt {
-            text: "retry me [Image #1]".into(),
-            images: vec![image],
-            scrollback_entry: crate::scrollback::EntryId::new(0),
-            combined_scrollback_entries: Vec::new(),
-            chip_elements: vec![crate::app::agent::ChipElement {
-                range: 9..19,
-                kind: crate::views::prompt_widget::KIND_IMAGE,
-                display: None,
-            }],
-        });
-    app.active_view = ActiveView::AgentDashboard;
-    dispatch(Action::Login, &mut app);
-    let seq = authenticating_seq(&app);
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::AuthComplete {
-            request_seq: seq,
-            meta: None,
-        }),
-        &mut app,
-    );
-    assert_eq!(app.active_view, ActiveView::AgentDashboard);
-    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
-    assert!(
-        effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::SendPromptBlocks { .. })),
-        "stash must be retried even when login returns to the dashboard, got: {effects:?}"
-    );
-}
-/// Cancelling a mid-session re-auth from the dashboard also drops the
-/// stash (auth is global, not per-view).
-#[test]
-fn cancel_login_from_dashboard_drops_reauth_stashed_prompt() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    app.agents.get_mut(&id).unwrap().reauth_stashed_prompt =
-        Some(crate::app::agent::InFlightPrompt {
-            text: "stale".into(),
-            images: Vec::new(),
-            scrollback_entry: crate::scrollback::EntryId::new(0),
-            combined_scrollback_entries: Vec::new(),
-            chip_elements: Vec::new(),
-        });
-    app.active_view = ActiveView::AgentDashboard;
-    dispatch(Action::Login, &mut app);
-    dispatch(Action::CancelLogin, &mut app);
-    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
-}
 #[test]
 fn resolve_location_input_expands_and_joins() {
     let cwd = PathBuf::from("/work/dir");
@@ -2936,33 +2847,6 @@ fn dashboard_overlay_cycle_from_unopened_dashboard_configures_state() {
         ),
         "pending_permission must reflect default_yolo, got {:?}",
         d.pending_permission,
-    );
-}
-/// Cycling from a never-opened dashboard honors the auth gate, mirroring
-/// `dispatch_open_dashboard` — no ungated materialization.
-#[serial_test::serial(GROW_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_overlay_cycle_unopened_respects_auth_gate() {
-    let mut app = test_app_with_agent();
-    let id1 = AgentId(0);
-    mark_agent_nonempty(&mut app, id1);
-    let id2 = AgentId(1);
-    let session2 = make_test_agent_session(&app, id2, "second");
-    let mut agent2 = AgentView::new(session2, ScrollbackState::new());
-    agent2.generated_session_title = Some("Second".into());
-    app.agents.insert(id2, agent2);
-    app.active_view = ActiveView::Agent(id1);
-    app.auth_state = AuthState::Pending { error: None };
-    assert!(app.dashboard.is_none());
-    let _ = dispatch_dashboard_overlay_cycle(&mut app, 1);
-    assert!(
-        matches!(app.active_view, ActiveView::Agent(a) if a == id1),
-        "unauthenticated cycle must not switch agents, got {:?}",
-        app.active_view,
-    );
-    assert!(
-        app.dashboard.is_none(),
-        "unauthenticated cycle must not materialize the dashboard",
     );
 }
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]

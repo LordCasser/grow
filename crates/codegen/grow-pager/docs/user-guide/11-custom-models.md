@@ -86,10 +86,9 @@ Available shared options include:
 Endpoints that require no credential, such as a local Ollama-compatible server, may omit both
 `api_key` and `env_key`.
 
-### OAuth provider credentials
+### Command-backed BYOK
 
-OAuth is provider-scoped and optional. It is stored under the configured provider name and only
-used when that provider/model explicitly references the auth configuration:
+A provider can reference a local helper that returns a user-owned API key:
 
 ```toml
 [provider.example]
@@ -97,23 +96,20 @@ api_backend = "responses"
 
 [provider.example.options]
 base_url = "https://api.example.com/v1"
+auth_provider = "example-key"
 
-[provider.example.options.auth]
-type = "oauth"
-issuer = "https://auth.example.com"
-client_id = "public-client-id"
-scopes = ["openid", "profile", "offline_access"]
+[auth_provider.example-key]
+command = "/usr/local/bin/read-example-key"
+timeout_secs = 10
+token_ttl_secs = 3600
 
 [provider.example.models.model-a]
 name = "Model A"
 ```
 
-Run `grow login example` and `grow logout example`. With exactly one configured OAuth provider,
-the name is optional. OAuth does not create models or change session selection. A configured
-`api_key` or resolved `env_key` takes precedence, keeping ordinary BYOK non-interactive.
-
-Command helpers remain available with `type = "command"` (the default) and `command`, `args`,
-`cwd`, `timeout_secs`, and `token_ttl_secs`.
+The helper prints a bare key or `{ "access_token": "...", "expires_in": 3600 }`. A configured
+`api_key` or populated `env_key` takes precedence. Grow does not accept refresh tokens or own a
+provider login lifecycle.
 
 ## Model options
 

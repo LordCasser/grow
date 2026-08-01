@@ -876,10 +876,9 @@ fn deferred_model_switch_applied_on_worktree_session_created() {
             .. } if *a_id == id && *s_id == session_id && *m_id == model_id
     )));
 }
-/// The session-startup gate requires BOTH auth AND trust resolved. Trust is
-/// gated AFTER auth, so either one pending defers session creation.
+/// Session startup is blocked only by the workspace trust gate.
 #[test]
-fn session_startup_allowed_requires_auth_and_trust() {
+fn session_startup_allowed_requires_trust() {
     let mut app = test_app();
     assert!(app.session_startup_allowed());
     app.trust_state = TrustState::Pending {
@@ -889,22 +888,9 @@ fn session_startup_allowed_requires_auth_and_trust() {
         !app.session_startup_allowed(),
         "pending trust must block session startup",
     );
-    app.trust_state = TrustState::Done;
-    app.auth_state = AuthState::Pending { error: None };
-    assert!(
-        !app.session_startup_allowed(),
-        "pending auth must block session startup",
-    );
-    app.trust_state = TrustState::Pending {
-        workspace: PathBuf::from("/x"),
-    };
-    assert!(
-        !app.session_startup_allowed(),
-        "both pending must block session startup",
-    );
 }
 /// Accepting the trust question (its `finish_trust` tail) resolves trust and
-/// replays the deferred startup when auth is already done. (Declining quits
+/// replays the deferred startup. (Declining quits
 /// instead -- see `welcome_trust_decline_keys_quit` in `app_view`.)
 #[test]
 fn finish_trust_resolves_and_replays_startup() {
@@ -950,105 +936,6 @@ fn trust_folder_grants_and_resolves() {
     assert!(
         TrustStore::load().is_trusted(&workspace),
         "accepting must persist the trust grant for the workspace",
-    );
-}
-/// When BOTH auth and trust are pending, `AuthComplete` must NOT replay the
-/// deferred startup -- the trust question renders next, and its answer drains
-/// it. Verifies the symmetric two-gate hand-off.
-#[test]
-fn auth_complete_defers_startup_until_trust_resolved() {
-    let mut app = test_app();
-    app.auth_state = AuthState::Authenticating {
-        request_seq: 1,
-        handle: None,
-        auth_url: None,
-        mode: AuthMode::Pending,
-    };
-    app.trust_state = TrustState::Pending {
-        workspace: PathBuf::from("/x"),
-    };
-    app.deferred_startup.session =
-        Some(crate::app::session_startup::DeferredSessionStartup::Load {
-            session_id: "deferred-session".into(),
-            session_cwd: None,
-        });
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::AuthComplete {
-            request_seq: 1,
-            meta: None,
-        }),
-        &mut app,
-    );
-    assert!(matches!(app.auth_state, AuthState::Done));
-    assert!(
-        matches!(app.trust_state, TrustState::Pending { .. }),
-        "trust stays pending after auth completes",
-    );
-    assert!(
-        app.deferred_startup.session.is_some(),
-        "startup must remain deferred while trust is pending",
-    );
-    assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e, Effect::LoadSession { .. })),
-        "no session may load before trust is answered",
-    );
-    let effects = finish_trust(&mut app);
-    assert!(app.deferred_startup.session.is_none());
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::LoadSession { .. })),
-        "trust answer must replay the deferred startup",
-    );
-}
-/// Symmetric to the above: trust answered FIRST while auth is still pending
-/// exercises `finish_trust`'s `else` (deferred) branch -- it must NOT drain;
-/// the later `AuthComplete` (the last gate) drains.
-#[test]
-fn trust_answered_first_defers_startup_until_auth_completes() {
-    let mut app = test_app();
-    app.auth_state = AuthState::Authenticating {
-        request_seq: 1,
-        handle: None,
-        auth_url: None,
-        mode: AuthMode::Pending,
-    };
-    app.trust_state = TrustState::Pending {
-        workspace: PathBuf::from("/x"),
-    };
-    app.deferred_startup.session =
-        Some(crate::app::session_startup::DeferredSessionStartup::Load {
-            session_id: "deferred-session".into(),
-            session_cwd: None,
-        });
-    let effects = finish_trust(&mut app);
-    assert!(matches!(app.trust_state, TrustState::Done));
-    assert!(
-        app.deferred_startup.session.is_some(),
-        "startup stays deferred while auth is still pending",
-    );
-    assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e, Effect::LoadSession { .. })),
-        "no session may load before auth completes",
-    );
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::AuthComplete {
-            request_seq: 1,
-            meta: None,
-        }),
-        &mut app,
-    );
-    assert!(matches!(app.auth_state, AuthState::Done));
-    assert!(app.deferred_startup.session.is_none());
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::LoadSession { .. })),
-        "auth completion replays the deferred startup",
     );
 }
 /// Regression / negative-space: a session-creating dispatch (e.g. the
@@ -1297,117 +1184,6 @@ fn gated_worktree_with_none_companions_preserves_stashed_label_and_ref() {
     assert!(app.deferred_startup.worktree_label.is_none());
     assert!(app.deferred_startup.session.is_none());
     assert!(!app.deferred_startup.worktree);
-}
-/// `/login` from inside a session must move to the welcome screen (the
-/// only view that renders the auth flow / external-provider URL) and
-/// stash the agent view for restoration. This is the core fix for the
-/// "external auth provider /login does nothing mid-session" bug.
-#[test]
-fn login_mid_session_switches_to_welcome_and_stashes_view() {
-    let mut app = test_app_with_agent();
-    assert_eq!(app.active_view, ActiveView::Agent(AgentId(0)));
-    let effects = dispatch(Action::Login, &mut app);
-    assert_eq!(app.active_view, ActiveView::Welcome);
-    assert_eq!(app.auth_return_view, Some(ActiveView::Agent(AgentId(0))));
-    assert!(matches!(app.auth_state, AuthState::Authenticating { .. }));
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::Authenticate { .. })),
-        "must still kick off the auth flow",
-    );
-}
-/// A mid-session `/login` switches to the welcome view to host the auth
-/// flow; that transition must collapse any expanded announcement so it
-/// can't reappear stale if auth completion lands back on a welcome screen.
-#[test]
-fn login_mid_session_resets_welcome_announcement_expanded() {
-    let mut app = test_app_with_agent();
-    app.welcome_announcement.expanded = true;
-    dispatch(Action::Login, &mut app);
-    assert_eq!(app.active_view, ActiveView::Welcome);
-    assert!(
-        !app.welcome_announcement.expanded,
-        "mid-session login must reset the expanded announcement"
-    );
-}
-/// After a successful mid-session re-auth, the stale `ReAuthRequired`
-/// prompt (pushed when the 401 surfaced) is stripped so the user
-/// returns to a clean session.
-#[test]
-fn auth_complete_strips_reauth_prompt_after_mid_session_login() {
-    use crate::scrollback::block::RenderBlock;
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    app.agents
-        .get_mut(&id)
-        .unwrap()
-        .scrollback
-        .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
-    dispatch(Action::Login, &mut app);
-    let seq = authenticating_seq(&app);
-    dispatch(
-        Action::TaskComplete(TaskResult::AuthComplete {
-            request_seq: seq,
-            meta: None,
-        }),
-        &mut app,
-    );
-    assert_eq!(app.active_view, ActiveView::Agent(id));
-    let sb = &app.agents[&id].scrollback;
-    let has_reauth = (0..sb.len()).any(|i| {
-        matches!(
-            sb.entry(i).map(|e| &e.block),
-            Some(RenderBlock::SessionEvent(ev)) if matches!(ev.event, SessionEvent::ReAuthRequired)
-        )
-    });
-    assert!(
-        !has_reauth,
-        "re-auth prompt must be stripped after successful re-auth"
-    );
-}
-/// After a successful mid-session re-auth, the prompt that failed on the
-/// expired login is auto-resubmitted so the user doesn't have to retype it.
-#[test]
-fn auth_complete_retries_stashed_prompt_after_mid_session_login() {
-    use crate::scrollback::block::RenderBlock;
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    {
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent
-            .scrollback
-            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
-        agent.reauth_stashed_prompt = Some(crate::app::agent::InFlightPrompt {
-            text: "retry me".into(),
-            images: Vec::new(),
-            scrollback_entry: crate::scrollback::EntryId::new(0),
-            combined_scrollback_entries: Vec::new(),
-            chip_elements: Vec::new(),
-        });
-    }
-    dispatch(Action::Login, &mut app);
-    let seq = authenticating_seq(&app);
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::AuthComplete {
-            request_seq: seq,
-            meta: None,
-        }),
-        &mut app,
-    );
-    assert_eq!(app.active_view, ActiveView::Agent(id));
-    let agent = &app.agents[&id];
-    assert!(
-        agent.reauth_stashed_prompt.is_none(),
-        "stashed prompt must be consumed on re-auth"
-    );
-    assert!(
-        effects.iter().any(|e| matches!(
-            e,
-            Effect::SendPrompt { text, .. } if text == "retry me"
-        )),
-        "the stashed prompt must be auto-resubmitted, got: {effects:?}"
-    );
 }
 #[test]
 fn dispatch_new_session_answered_with_persist_never_updates_mode_and_emits_effect() {

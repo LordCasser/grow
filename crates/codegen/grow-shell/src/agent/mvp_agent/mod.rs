@@ -61,7 +61,6 @@ use grow_sampling_types::{
     supports_reasoning_effort_meta,
 };
 use crate::agent::update_chunk_merge;
-use crate::auth::AuthManager;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use grow_diagnostics::session_ctx::log_event;
 use grow_workspace::file_system::{AcpSessionFs, CodebaseIndexManager, LocalFs};
@@ -154,7 +153,6 @@ pub(crate) struct SessionSpawnOptions<'a> {
         crate::session::announcement_state::AnnouncementState,
     >,
     pub session_meta: Option<&'a acp::Meta>,
-    pub managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Persisted Agent identity when reopening a session. New sessions leave
     /// this unset and resolve the global default independently of the model.
     pub persisted_agent_name: Option<&'a str>,
@@ -427,23 +425,13 @@ pub struct MvpAgent {
     pub(crate) gateway: GatewaySender,
     /// Agent configuration. LEADER-SAFE(init-once): never mutated after construction.
     pub(crate) cfg: RefCell<AgentConfig>,
-    /// Current auth method. LEADER-SAFE(shared): all clients share the same auth;
-    /// last authenticate() call wins, which is correct (same user, same creds).
-    /// Held as a shared live handle cloned into every running session so a
-    /// mid-session `authenticate` (`/login`) is observed by each session's
-    /// per-turn auth gate without re-spawning.
+    /// Current ACP auth method. Grow advertises only the BYOK method.
     pub(crate) auth_method_id: crate::agent::auth_method::SharedAuthMethodId,
     /// Global sampling config (API key + default base_url). LEADER-SAFE(shared):
     /// only api_key is written here (same for all clients). Per-session base_url
     /// is resolved at session creation time in `new_session` / `load_session`.
     pub(crate) sampling_config: RefCell<SamplingConfig>,
-    pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) models_manager: crate::agent::models::ModelsManager,
-    /// Single-flight guard for interactive login (device poll / loopback
-    /// wait). Owns the active attempt's cancel token and its code/url
-    /// channels; a new `authenticate` or `grow/auth/cancel` cancels the
-    /// prior attempt.
-    pub(crate) interactive_auth: crate::auth::single_flight::AuthSingleFlight,
     /// Client type. LEADER-SAFE(init-once): set once during `initialize` from
     /// `_meta.clientIdentifier` (injected by the IPC server in leader mode).
     ///
@@ -561,9 +549,8 @@ pub struct MvpAgent {
     plugin_registry_initialized: std::cell::Cell<bool>,
     /// Single-flight guard for the proactive bundle sync background task.
     ///
-    /// `maybe_sync_bundle_in_background` is invoked from each post-auth path
-    /// (initialize, cached-token reauth, oidc) and a rapid reconnect can fire
-    /// all three within the TTL window, giving us multiple concurrent
+    /// Reconnects can invoke `maybe_sync_bundle_in_background` repeatedly
+    /// within the TTL window, giving us multiple concurrent
     /// `tokio::task::spawn_local` tasks racing to extract the tar archive,
     /// rewrite `manifest.json`, and prune stale files. The non-atomic
     /// per-file write/prune semantics in `bundle::extract_bundle_archive`
@@ -715,44 +702,6 @@ pub(crate) fn parse_json_object_env(var: &str) -> Option<serde_json::Value> {
         }
     }
 }
-#[derive(Debug, Default, serde::Deserialize)]
-struct AuthRequestMeta {
-    #[serde(default)]
-    headless: bool,
-    #[serde(default)]
-    reauth: bool,
-    /// `--oauth`: force loopback. The only transport override sent over ACP
-    /// (loopback is the default; device is opt-in via env/config).
-    #[serde(default)]
-    use_oauth: bool,
-    /// When true, skip cached tokens and force the interactive browser login
-    /// flow. Used by the `/login` slash command for mid-session re-auth.
-    /// Unlike `reauth`, this does NOT clear existing credentials — if the
-    /// user abandons the browser flow, the current session continues.
-    #[serde(default)]
-    force_interactive: bool,
-    /// Pager auth `request_seq` for this attempt. Scopes `grow/auth/cancel`
-    /// so a delayed cancel cannot tear down a successor login.
-    #[serde(default)]
-    request_seq: Option<u64>,
-}
-impl AuthRequestMeta {
-    /// `--oauth` → force loopback; otherwise default (loopback).
-    fn login_override(&self) -> crate::auth::LoginTransportOverride {
-        if self.use_oauth {
-            crate::auth::LoginTransportOverride::ForceLoopback
-        } else {
-            crate::auth::LoginTransportOverride::None
-        }
-    }
-    fn from_json(meta: Option<&acp::Meta>) -> Self {
-        meta.cloned()
-            .and_then(|value| {
-                serde_json::from_value(serde_json::Value::Object(value)).ok()
-            })
-            .unwrap_or_default()
-    }
-}
 /// Inject standard proxy headers into an `extra_headers` map.
 ///
 /// Every authenticated request to cli-chat-proxy (web search, image gen, and
@@ -875,33 +824,6 @@ mod agent_ops;
 mod acp_agent;
 pub(crate) use session_lifecycle::RegistrySnapshot;
 pub(super) use super::ext_parsers;
-/// Emit the `auth.lifecycle` login span with optional user id and error
-/// category. Named `auth.lifecycle` (not `auth`) to avoid colliding with the
-/// pre-existing per-request `AuthManager::auth()` `#[instrument]` span.
-fn emit_login_span(
-    success: bool,
-    auth_method: &str,
-    user_id: Option<&str>,
-    error_category: Option<&str>,
-) {
-    let span = tracing::info_span!(
-        "auth.lifecycle",
-        action = "login",
-        success,
-        auth_method,
-        user_id = tracing::field::Empty,
-        error_category = tracing::field::Empty,
-    );
-    if let Some(uid) = user_id
-        .filter(|u| !u.is_empty() && !u.eq_ignore_ascii_case("unknown"))
-    {
-        span.record("user_id", uid);
-    }
-    if let Some(ec) = error_category {
-        span.record("error_category", ec);
-    }
-    span.in_scope(|| {});
-}
 /// Metadata captured from a replayed `task_backgrounded` entry.
 pub(crate) struct OrphanedTask {
     task_id: String,
@@ -1377,30 +1299,6 @@ impl MvpAgent {
         }
         result
     }
-    pub(crate) fn auth_response_with_meta(&self) -> AuthenticateResponse {
-        let show_resolved_model = self
-            .cfg
-            .borrow()
-            .remote_settings
-            .as_ref()
-            .and_then(|settings| settings.show_resolved_model);
-        let meta = self.auth_manager.current().map(|auth| {
-            let auth_meta = crate::auth::AuthMeta {
-                email: auth.email.clone(),
-                auth_mode: Some(format!("{:?}", auth.auth_mode)),
-                team_id: auth.team_id.clone(),
-                team_name: auth.team_name.clone(),
-                is_zdr: auth.is_zdr_team(),
-                team_role: auth.team_role.clone(),
-                show_resolved_model,
-            };
-            serde_json::to_value(auth_meta)
-                .ok()
-                .and_then(|value| value.as_object().cloned())
-                .unwrap_or_default()
-        });
-        AuthenticateResponse::new().meta(meta)
-    }
     /// Resolve current auto-GC policy and run it on the blocking pool.
     pub(super) fn spawn_auto_worktree_gc(&self) {
         let auto_gc_policy = self.cfg.borrow().resolve_worktree_auto_gc();
@@ -1504,17 +1402,14 @@ impl MvpAgent {
                 });
         }
     }
-    /// Spawn a best-effort bundle sync. Re-fires on every call site (init,
-    /// cached_token, service.example.com/oidc); the cheap pre-checks below absorb repeats
-    /// so reconnects are cheap.
+    /// Spawn a best-effort bundle sync when a deployment key is configured.
     ///
     /// Pre-spawn gating order (cheapest first, all synchronous):
     /// 1. Auth gate — avoid spawning a no-op task on every init.
     /// 2. Freshness check — skip the sender snapshot + spawn entirely on
     ///    cache hits, which is the steady-state on every reconnect.
-    /// 3. Single-flight guard — if a previous sync is still in flight (e.g.,
-    ///    initialize + cached_token + oidc fired in quick succession before
-    ///    the first sync's tar extract finished), drop this call to avoid
+    /// 3. Single-flight guard — if a previous sync is still in flight, drop
+    ///    this call to avoid
     ///    racing concurrent extracts that would interleave per-file writes
     ///    against `~/.grow/bundled/` and the manifest.
     pub(crate) fn maybe_sync_bundle_in_background(&self, force: bool) {
@@ -1523,9 +1418,8 @@ impl MvpAgent {
             maybe_sync_bundle_to_root,
         };
         use std::sync::atomic::Ordering;
-        let am = self.auth_manager.clone();
         let deployment_key = self.deployment_key();
-        if !has_bundle_credentials(Some(&am), deployment_key.as_deref()) {
+        if !has_bundle_credentials(deployment_key.as_deref()) {
             return;
         }
         let root = crate::bundle::bundled_root();
@@ -1542,18 +1436,15 @@ impl MvpAgent {
             return;
         }
         let proxy_base_url = self.cli_chat_proxy_base_url();
-        let alpha_test_key = self.alpha_test_key();
         let senders: Vec<
             tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
         > = self.sessions.borrow().values().map(|h| h.cmd_tx.clone()).collect();
         tokio::task::spawn_local(async move {
             let result = maybe_sync_bundle_to_root(
-                    &root,
-                    &proxy_base_url,
-                    Some(&am),
-                    deployment_key.as_deref(),
-                    alpha_test_key.as_deref(),
-                    force,
+                &root,
+                &proxy_base_url,
+                deployment_key.as_deref(),
+                force,
                     BUNDLE_SYNC_TTL,
                 )
                 .await;

@@ -12,7 +12,6 @@
 
 mod common;
 
-use std::path::Path;
 use std::time::Duration;
 
 use grow_shell::leader::{
@@ -47,11 +46,6 @@ async fn wait_for_pid_death(pid: u32, timeout: Duration) -> bool {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     false
-}
-
-fn sandbox_unified_log(home: &Path) -> String {
-    std::fs::read_to_string(home.join(".grow").join("logs").join("unified.jsonl"))
-        .unwrap_or_default()
 }
 
 /// A new client evicts an old leader and the old session survives replay.
@@ -332,99 +326,6 @@ async fn relaunch_for_update_drives_real_old_leader_to_exit() {
                         .wait_for_new_leader(current_pid, Duration::from_secs(60))
                         .await
                         .expect("no re-elected leader after relaunch");
-                })
-            })
-            .await;
-        })
-        .await;
-}
-
-/// Eviction leaves one leader and does not race auth-file ownership.
-#[tokio::test]
-#[ignore = "leader-acceptance: version-skew replacement cleanup needs OS containment or a test-only leader binary"]
-async fn eviction_leaves_single_leader_and_single_auth_owner() {
-    let Some((old_bin, new_bin)) = skew_binaries() else {
-        return;
-    };
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let server = MockInferenceServer::start().await.unwrap();
-            let workdir = git_workdir();
-            let sandbox = TestSandbox::new();
-            let fixture =
-                LeaderFixture::start_with_binary(&old_bin, &server, workdir.workspace(), &sandbox)
-                    .await
-                    .expect("start owned version-skew leader");
-            let mut clients = Vec::new();
-            common::leader::run_with_cleanup(&fixture, &mut clients, |fixture, clients| {
-                Box::pin(async move {
-                    clients.push(
-                        fixture
-                            .spawn_client_with_binary(
-                                &old_bin,
-                                &server,
-                                workdir.workspace(),
-                                &sandbox,
-                            )
-                            .await
-                            .expect("spawn old leader client"),
-                    );
-                    clients[0].initialize().await;
-                    let old_pid = wait_for_live_leader(sandbox.home(), Duration::from_secs(10))
-                        .await
-                        .expect("no live old leader");
-                    let auth_path = sandbox.home().join(".grow").join("auth.json");
-                    let auth_before = std::fs::metadata(&auth_path)
-                        .ok()
-                        .and_then(|metadata| metadata.modified().ok());
-
-                    clients.push(
-                        fixture
-                            .spawn_client_with_binary(
-                                &new_bin,
-                                &server,
-                                workdir.workspace(),
-                                &sandbox,
-                            )
-                            .await
-                            .expect("spawn new leader client"),
-                    );
-                    clients[1].initialize().await;
-                    let _new_pid = fixture
-                        .wait_for_new_leader(old_pid, Duration::from_secs(60))
-                        .await
-                        .expect("no replacement leader after eviction");
-                    assert!(
-                        wait_for_pid_death(old_pid, Duration::from_secs(30)).await,
-                        "evicted leader must exit"
-                    );
-                    assert!(pid_alive(_new_pid), "replacement leader must stay alive");
-                    assert_eq!(read_leader_pid(sandbox.home()), Some(_new_pid));
-
-                    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-                    let mut attributed = false;
-                    while tokio::time::Instant::now() < deadline {
-                        let log = sandbox_unified_log(sandbox.home());
-                        if log.contains("leader.evict.vacate_requested")
-                            || log.contains("leader.spawn.replacement")
-                        {
-                            attributed = true;
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                    }
-                    assert!(
-                        attributed,
-                        "eviction must be attributable in unified.jsonl\nlog:\n{}",
-                        sandbox_unified_log(sandbox.home()),
-                    );
-                    let auth_after = std::fs::metadata(&auth_path)
-                        .ok()
-                        .and_then(|metadata| metadata.modified().ok());
-                    assert_eq!(
-                        auth_before, auth_after,
-                        "auth.json must not be written during an eviction swap"
-                    );
                 })
             })
             .await;

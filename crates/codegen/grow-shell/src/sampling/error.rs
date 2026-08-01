@@ -46,8 +46,8 @@ fn strip_sampling_api_error_prefix(detail: &str) -> &str {
     detail.trim()
 }
 
-/// IC sometimes reuses OAuth free-tier upsell copy on 429s ("upgrade to a Grow
-/// subscription" / grow.com/supergrok). That is wrong for API-key / team auth:
+/// IC sometimes reuses consumer free-tier upsell copy on 429s ("upgrade to a Grow
+/// subscription" / grow.com/supergrok). That is wrong for BYOK traffic:
 /// higher limits come from credits and spend-based rate-limit tiers, not a
 /// personal SuperGrok plan.
 fn pushes_consumer_subscription_upsell(detail: &str) -> bool {
@@ -88,7 +88,7 @@ pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
             // blocks, ZDR-gated operations, remote-settings-blocked users).
             // Surfacing the proxy's message via internal_error keeps the
             // explanation visible to the user without triggering the client's
-            // re-auth flow on -32000.
+            // credential-required handling on -32000.
             StatusCode::FORBIDDEN => acp::Error::internal_error().data(message),
             StatusCode::BAD_REQUEST => acp::Error::invalid_params().data(message),
             StatusCode::NOT_FOUND => acp::Error::resource_not_found(None).data(message),
@@ -472,8 +472,7 @@ mod tests {
     /// the caller's credentials (content-safety blocks like
     /// SAFETY_CHECK_TYPE_DATA_LEAKAGE, ZDR-gated operations, remote settings
     /// blocks). Mapping these to auth_required causes embedding clients to
-    /// tear down the session and kick off silent re-auth on -32000, and
-    /// can race with invalid_grant_threshold to wipe auth.json.
+    /// tear down the session even though replacing the key cannot help.
     #[test]
     fn forbidden_does_not_map_to_auth_required() {
         let err = SamplingError::Api {

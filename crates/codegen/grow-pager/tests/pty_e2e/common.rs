@@ -4,8 +4,8 @@
 
 pub(crate) use grow_pager_pty_harness::{
     AgentTurnExpectation, ContentController, EnvOp, MockModel, PtyExitPoll, PtyHarness,
-    ScriptedResponse, SseEvent, keys, oauth_credential_ops, pager_binary, seed_fake_oauth, sse,
-    wait_for_labels_absent, wait_for_model_via_new_sessions,
+    ScriptedResponse, SseEvent, keys, pager_binary, sse, wait_for_labels_absent,
+    wait_for_model_via_new_sessions,
 };
 pub(crate) use serde_json::json;
 pub(crate) use std::path::{Path, PathBuf};
@@ -148,10 +148,6 @@ pub(crate) fn tall_response(sentinel: &str, rows: usize) -> String {
     s.push_str("```\n");
     s
 }
-
-// ── Fake session-auth (OAuth) seeding ───────────────────────────────────
-// `seed_fake_oauth` / `oauth_credential_ops` live in
-// `grow_pager_pty_harness::flows` (re-exported above).
 
 // ── Agent type mismatch e2e tests ──────────────────────────────────────
 

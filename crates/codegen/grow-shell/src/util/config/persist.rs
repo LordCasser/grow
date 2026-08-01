@@ -206,7 +206,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::super::load::load_config_from_toml;
-    use super::super::mcp::{McpConfig, parse_mcp_config_with_oauth};
     use super::*;
     use toml::Value as TomlValue;
     use toml::map::Map as TomlMap;
@@ -263,48 +262,6 @@ mod tests {
             Some(false),
             "scalar [toolset] must be replaced so the write lands"
         );
-    }
-    #[test]
-    fn transport_oauth_client_id_takes_priority_over_block() {
-        let json = r#"{
-            "mcpServers": {
-                "svc": {
-                    "type": "http",
-                    "url": "https://svc.example/mcp",
-                    "oauth_client_id": "transport-client",
-                    "oauth": { "clientId": "block-client" }
-                }
-            }
-        }"#;
-        let config: McpConfig = serde_json::from_str(json).expect("parse .mcp.json");
-        let svc = config.mcp_servers.get("svc").unwrap();
-        let oauth = svc.oauth_config().expect("oauth_config");
-        assert_eq!(oauth.client_id.as_deref(), Some("transport-client"));
-    }
-    #[test]
-    fn parse_mcp_config_with_oauth_extracts_byo_client_id() {
-        let json = r#"{
-            "mcpServers": {
-                "slack": {
-                    "type": "http",
-                    "url": "https://mcp.slack.example/mcp",
-                    "oauth": { "clientId": "slack-byo-client" }
-                },
-                "plain": {
-                    "type": "http",
-                    "url": "https://plain.example/mcp"
-                }
-            }
-        }"#;
-        let config: McpConfig = serde_json::from_str(json).expect("parse .mcp.json");
-        let (servers, oauth) = parse_mcp_config_with_oauth(&config, "test", &|s| s.to_string());
-        assert_eq!(servers.len(), 2);
-        assert_eq!(oauth.len(), 1);
-        assert_eq!(
-            oauth.get("slack").unwrap().client_id.as_deref(),
-            Some("slack-byo-client")
-        );
-        assert!(!oauth.contains_key("plain"));
     }
     #[test]
     fn merge_section_preserves_unmodeled_fields() {

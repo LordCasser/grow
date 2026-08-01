@@ -7,17 +7,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
-use crate::auth::{ProviderAuth, read_auth_json};
-
 use super::watcher::ConfigChangeEvent;
 
 /// Typed, `Send`-safe messages for the agent to apply inside its `LocalSet`.
 #[derive(Debug)]
 pub enum ConfigUpdate {
-    /// New auth credentials from disk.
-    Auth(Box<ProviderAuth>),
-    /// Auth scope was removed (user logged out).
-    AuthCleared,
     /// A **broadcast** MCP reload — applies to every active session
     /// regardless of cwd. Fires for two cases:
     ///
@@ -78,14 +72,11 @@ pub enum ConfigUpdate {
 /// the file watcher, diffs against last-known state, and sends [`ConfigUpdate`]
 /// messages to the agent via an `mpsc` channel.
 pub struct ConfigReloader {
-    last_auth_key_hash: u64,
     last_global_config: toml::Value,
     last_announcements: Vec<grow_announcements::Announcement>,
     /// Per-cwd content hash of the project MCP config files, used to ignore
     /// mtime-only touches (see `hash_project_mcp_config`).
     last_project_mcp_hashes: HashMap<PathBuf, u64>,
-    grow_home: PathBuf,
-    auth_scope: String,
     remote_settings: Option<crate::util::config::RemoteSettings>,
     config_update_tx: mpsc::UnboundedSender<ConfigUpdate>,
     /// Whether --experimental-memory was passed at startup. Persists across config reloads.
@@ -96,10 +87,7 @@ pub struct ConfigReloader {
 
 impl ConfigReloader {
     pub fn new(
-        grow_home: PathBuf,
-        initial_auth_key_hash: u64,
         initial_config: toml::Value,
-        auth_scope: String,
         remote_settings: Option<crate::util::config::RemoteSettings>,
         config_update_tx: mpsc::UnboundedSender<ConfigUpdate>,
         experimental_memory: bool,
@@ -107,12 +95,9 @@ impl ConfigReloader {
     ) -> Self {
         let last_announcements = crate::util::config::resolve_announcements(&initial_config);
         Self {
-            last_auth_key_hash: initial_auth_key_hash,
             last_global_config: initial_config,
             last_announcements,
             last_project_mcp_hashes: HashMap::new(),
-            grow_home,
-            auth_scope,
             remote_settings,
             config_update_tx,
             experimental_memory,
@@ -142,9 +127,6 @@ impl ConfigReloader {
                 batch.push(evt);
             }
 
-            let has_auth = batch
-                .iter()
-                .any(|e| matches!(e, ConfigChangeEvent::AuthChanged));
             let has_global_config = batch
                 .iter()
                 .any(|e| matches!(e, ConfigChangeEvent::GlobalConfigChanged));
@@ -167,33 +149,6 @@ impl ConfigReloader {
             // project root (rather than the legacy unit
             // `McpServersChanged` that swept every session).
             let project_cwds = collect_project_cwds(&batch);
-
-            if has_auth {
-                let result =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.reload_auth()));
-                match result {
-                    Ok(Err(e)) => {
-                        error!(error = %e, "auth hot-reload failed, keeping previous credentials");
-                        // Whole-file deletion (NotFound) and corrupt JSON
-                        // land here. The resulting memory/disk divergence
-                        // must be visible in unified.jsonl.
-                        let path = self.grow_home.join("auth.json");
-                        grow_diagnostics::unified_log::error(
-                            "auth reload: auth.json unreadable, keeping previous credentials",
-                            None,
-                            Some(serde_json::json!({
-                                "error": e.to_string(),
-                                "path": path.display().to_string(),
-                                "path_exists": path.exists(),
-                            })),
-                        );
-                    }
-                    Err(_) => {
-                        error!("panic in auth reload handler, keeping previous credentials");
-                    }
-                    Ok(Ok(())) => {}
-                }
-            }
 
             if has_config {
                 let result =
@@ -258,47 +213,6 @@ impl ConfigReloader {
                     .send(ConfigUpdate::ProjectMcpServersChanged { cwd });
             }
         }
-    }
-
-    pub(crate) fn reload_auth(&mut self) -> anyhow::Result<()> {
-        let auth_path = self.grow_home.join("auth.json");
-        let store = read_auth_json(&auth_path)?;
-
-        match crate::auth::lookup_auth(&store, &self.auth_scope) {
-            Some(auth) => {
-                let new_hash = hash_auth_key(&auth.key);
-
-                if new_hash == self.last_auth_key_hash {
-                    debug!("auth.json changed but token key is identical, skipping");
-                    return Ok(());
-                }
-
-                self.last_auth_key_hash = new_hash;
-                let _ = self
-                    .config_update_tx
-                    .send(ConfigUpdate::Auth(Box::new(auth.clone())));
-                info!("auth token change detected, sent update to agent");
-            }
-            None => {
-                if self.last_auth_key_hash != 0 {
-                    self.last_auth_key_hash = 0;
-                    let _ = self.config_update_tx.send(ConfigUpdate::AuthCleared);
-                    info!("auth scope removed from auth.json, sent clear to agent");
-                    // AuthCleared makes the agent drop in-memory credentials;
-                    // record what the reloader saw so "entry removed" is
-                    // distinguishable from "file deleted" (the Err path).
-                    grow_diagnostics::unified_log::warn(
-                        "auth reload: scope entry gone, sending AuthCleared",
-                        None,
-                        Some(serde_json::json!({
-                            "scope": &self.auth_scope,
-                            "scopes_on_disk": store.keys().collect::<Vec<_>>(),
-                        })),
-                    );
-                }
-            }
-        }
-        Ok(())
     }
 
     fn reload_config(&mut self) -> anyhow::Result<()> {
@@ -484,12 +398,6 @@ fn hash_project_mcp_config(cwd: &Path) -> Option<u64> {
     Some(hasher.finish())
 }
 
-pub(crate) fn hash_auth_key(key: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    key.hash(&mut hasher);
-    hasher.finish()
-}
-
 /// Extract the `[skills]` table from an effective config.
 ///
 /// Consumers: the reload dispatch above (change detection →
@@ -534,161 +442,6 @@ fn extract_ui_fields(config: &toml::Value) -> (Option<String>, bool, Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::ProviderAuth;
-    use std::collections::BTreeMap;
-
-    fn make_auth(key: &str) -> ProviderAuth {
-        ProviderAuth {
-            key: key.to_string(),
-            email: Some("test@test.com".to_string()),
-            ..ProviderAuth::test_default()
-        }
-    }
-
-    #[tokio::test]
-    async fn reloader_skips_unchanged_auth() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let auth = make_auth("same-key");
-        let mut store = BTreeMap::new();
-        let scope = "https://test.example.com".to_string();
-        store.insert(scope.clone(), auth);
-        let json = serde_json::to_string_pretty(&store).unwrap();
-        std::fs::write(tmp.path().join("auth.json"), &json).unwrap();
-
-        let initial_hash = hash_auth_key("same-key");
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let empty_config = toml::Value::Table(toml::map::Map::new());
-        let mut reloader = ConfigReloader::new(
-            tmp.path().to_path_buf(),
-            initial_hash,
-            empty_config,
-            scope,
-            None,
-            tx,
-            false,
-            false,
-        );
-
-        reloader.reload_auth().unwrap();
-        assert!(
-            rx.try_recv().is_err(),
-            "should not send update when key is unchanged"
-        );
-    }
-
-    #[tokio::test]
-    async fn reloader_detects_new_auth_key() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let auth = make_auth("new-key");
-        let mut store = BTreeMap::new();
-        let scope = "https://test.example.com".to_string();
-        store.insert(scope.clone(), auth);
-        let json = serde_json::to_string_pretty(&store).unwrap();
-        std::fs::write(tmp.path().join("auth.json"), &json).unwrap();
-
-        let old_hash = hash_auth_key("old-key");
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let empty_config = toml::Value::Table(toml::map::Map::new());
-        let mut reloader = ConfigReloader::new(
-            tmp.path().to_path_buf(),
-            old_hash,
-            empty_config,
-            scope,
-            None,
-            tx,
-            false,
-            false,
-        );
-
-        reloader.reload_auth().unwrap();
-        let update = rx.try_recv().expect("should send Auth update");
-        assert!(
-            matches!(update, ConfigUpdate::Auth(a) if a.key == "new-key"), // a is Box<ProviderAuth>, Deref coercion
-            "should contain new key"
-        );
-    }
-
-    #[tokio::test]
-    async fn reloader_detects_auth_cleared() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // Write auth.json with a DIFFERENT scope — our scope is missing
-        let auth = make_auth("other-key");
-        let mut store = BTreeMap::new();
-        store.insert("https://other.example.com".to_string(), auth);
-        let json = serde_json::to_string_pretty(&store).unwrap();
-        std::fs::write(tmp.path().join("auth.json"), &json).unwrap();
-
-        let old_hash = hash_auth_key("had-a-key");
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let empty_config = toml::Value::Table(toml::map::Map::new());
-        let mut reloader = ConfigReloader::new(
-            tmp.path().to_path_buf(),
-            old_hash,
-            empty_config,
-            "https://test.example.com".to_string(),
-            None,
-            tx,
-            false,
-            false,
-        );
-
-        reloader.reload_auth().unwrap();
-        let update = rx.try_recv().expect("should send AuthCleared");
-        assert!(matches!(update, ConfigUpdate::AuthCleared));
-    }
-
-    #[tokio::test]
-    async fn reloader_handles_malformed_auth_json() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("auth.json"), "not valid json{{{").unwrap();
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let empty_config = toml::Value::Table(toml::map::Map::new());
-        let mut reloader = ConfigReloader::new(
-            tmp.path().to_path_buf(),
-            0,
-            empty_config,
-            "https://test.example.com".to_string(),
-            None,
-            tx,
-            false,
-            false,
-        );
-
-        let result = reloader.reload_auth();
-        assert!(result.is_err(), "malformed JSON should return error");
-        assert!(
-            rx.try_recv().is_err(),
-            "should not send update on parse failure"
-        );
-    }
-
-    #[tokio::test]
-    async fn reloader_handles_missing_auth_json() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // No auth.json written
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let empty_config = toml::Value::Table(toml::map::Map::new());
-        let mut reloader = ConfigReloader::new(
-            tmp.path().to_path_buf(),
-            0,
-            empty_config,
-            "https://test.example.com".to_string(),
-            None,
-            tx,
-            false,
-            false,
-        );
-
-        let result = reloader.reload_auth();
-        assert!(result.is_err(), "missing file should return error");
-        assert!(
-            rx.try_recv().is_err(),
-            "should not send update on missing file"
-        );
-    }
-
     /// A project event with unchanged bytes must not re-dispatch a
     /// reload; the first event and a later real edit must both dispatch.
     #[tokio::test]
@@ -701,16 +454,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let empty_config = toml::Value::Table(toml::map::Map::new());
-        let reloader = ConfigReloader::new(
-            tmp.path().to_path_buf(),
-            0,
-            empty_config,
-            "https://test.example.com".to_string(),
-            None,
-            tx,
-            false,
-            false,
-        );
+        let reloader = ConfigReloader::new(empty_config, None, tx, false, false);
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();

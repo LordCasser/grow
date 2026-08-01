@@ -95,8 +95,7 @@ pub(super) fn prompt_style(
 /// Draw the pinned live region (tail + status + prompt) into the inline viewport.
 pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
     let force_todos = minimal_api::minimal_show_todos(app);
-    let auth_hint =
-        crate::auth::minimal_auth_hint(&app.auth_state, &app.trust_state, app.is_zdr_blocked());
+    let auth_hint = crate::startup::minimal_startup_hint(&app.trust_state);
     let pending_hint = minimal_pending_hint(&app.pending_action);
     let transcript_hint = if minimal_api::minimal_ctrl_o_opens_transcript(app) {
         "ctrl+o transcript"
@@ -139,7 +138,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
         Clear.render(area, frame.buffer_mut());
         let agent = agent_id.and_then(|id| agents.get_mut(&id));
         let Some(agent) = agent else {
-            crate::auth::render_auth(frame.buffer_mut(), area, &theme, &auth_hint);
+            crate::startup::render_startup(frame.buffer_mut(), area, &theme, &auth_hint);
             return (None, None);
         };
         agent.active_pane = grow_pager::app::agent_view::AgentPane::Prompt;

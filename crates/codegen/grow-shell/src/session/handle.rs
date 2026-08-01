@@ -131,13 +131,6 @@ pub struct SessionHandle {
     /// Set via `grow/debug/arm_auto_compact`.
     pub force_compact: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub permission_handle: grow_workspace::permission::PermissionHandle,
-    /// The parent SessionActor's live `Auth401AttributionCallback`
-    /// (if any). Exposed on the handle so
-    /// `MvpAgent::build_subagent_spawn_context` can copy it into the
-    /// spawn context, so subagents inherit the parent's callback
-    /// rather than getting a fresh one (preserving the parent's
-    /// session_id on the child's emits).
-    pub attribution_callback: Option<grow_sampler::SharedAttributionCallback>,
     /// The agent definition name for this session.
     pub agent_name: String,
     /// Peer-Agent visibility derived from the active Agent's task-tool policy.
@@ -482,17 +475,6 @@ impl SessionHandle {
         }
         rx.await.unwrap_or_default()
     }
-    pub async fn retry_auth_required_servers(&self) {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(SessionCommand::RetryAuthRequiredServers { respond_to: tx })
-            .is_err()
-        {
-            return;
-        }
-        let _ = rx.await;
-    }
     pub async fn call_mcp_tool(
         &self,
         server_name: String,
@@ -528,32 +510,6 @@ impl SessionHandle {
             .send(SessionCommand::ReadMcpResource {
                 server_name,
                 uri,
-                respond_to: tx,
-            })
-            .is_err()
-        {
-            return Err("session closed".to_string());
-        }
-        rx.await
-            .unwrap_or_else(|_| Err("session closed".to_string()))
-    }
-    pub async fn mcp_auth_status(&self) -> Vec<crate::extensions::mcp::McpAuthStatusEntry> {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(SessionCommand::McpAuthStatus { respond_to: tx })
-            .is_err()
-        {
-            return vec![];
-        }
-        rx.await.unwrap_or_default()
-    }
-    pub async fn mcp_auth_trigger(&self, server_name: String) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(SessionCommand::McpAuthTrigger {
-                server_name,
                 respond_to: tx,
             })
             .is_err()

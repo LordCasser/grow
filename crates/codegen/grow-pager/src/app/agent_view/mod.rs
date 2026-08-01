@@ -570,8 +570,7 @@ pub(crate) struct SessionReload {
 /// Lifecycle of the inline plugin CTA. `Hidden`/`Matched` cover the idle and
 /// prompt-matched states; `Installing`/`Installed`/`Error` cover an in-TUI
 /// install triggered from the CTA. `AwaitingReload`/`AwaitingMcps` cover the
-/// post-install branch (reload plugins, then read MCP servers); a needs-auth
-/// result hands the user into the Extensions modal and settles back to `Hidden`.
+/// post-install branch (reload plugins, then read MCP servers).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum CtaPhase {
     #[default]
@@ -799,11 +798,6 @@ pub struct AgentView {
     /// Stashed normal prompt state while editing a queued prompt.
     /// Restored when editing ends.
     pub stashed_prompt: Option<StashedPrompt>,
-    /// Complete prompt stashed from a turn that failed because the login
-    /// expired (401 / re-auth). Used by the `AuthComplete` handler to
-    /// auto-resubmit the prompt after a successful mid-session re-auth so
-    /// the user doesn't have to retype it.
-    pub reauth_stashed_prompt: Option<crate::app::agent::InFlightPrompt>,
     /// Currently active modal dialog (blocks all other input).
     pub active_modal: Option<ActiveModal>,
     /// Hit areas for modal buttons (from last render).

@@ -37,7 +37,7 @@ pub const STARTUP_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from
 pub const STARTUP_AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Ceiling on a single startup token-refresh round trip, kept separate from
 /// `STARTUP_FETCH_TIMEOUT` so the two tune independently; on timeout the caller
-/// proceeds with cached or no credentials and re-auths later.
+/// proceeds with cached or missing credentials and resolves them later.
 pub const STARTUP_AUTH_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Outer bound on a single settings-reapply task, which drives up to
 /// `SETTINGS_FETCH_MAX_ATTEMPTS` fetches.
@@ -332,13 +332,13 @@ pub fn shared_client() -> reqwest::Client {
         .clone()
 }
 
-/// Wrap a raw client with [`AuthRetryMiddleware`] for automatic 401 retry.
-pub fn with_auth_retry(
+/// Wrap a raw client with the current BYOK Authorization header.
+pub fn with_auth_header(
     client: reqwest::Client,
     credentials: std::sync::Arc<dyn grow_auth::AuthCredentialProvider>,
 ) -> reqwest_middleware::ClientWithMiddleware {
     reqwest_middleware::ClientBuilder::new(client)
-        .with(grow_auth::AuthRetryMiddleware::new(credentials, 1))
+        .with(grow_auth::AuthHeaderMiddleware::new(credentials))
         .build()
 }
 
@@ -661,7 +661,7 @@ mod tests {
             .no_proxy()
             .build()
             .expect("client")
-            .get(format!("http://127.0.0.1:{port}/oauth2/device/code"))
+            .get(format!("http://127.0.0.1:{port}/reset-probe"))
             .send()
             .expect_err("reset must fail the request");
 

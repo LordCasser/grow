@@ -382,7 +382,7 @@ pub enum SessionCommand {
         server_name: String,
         enabled: bool,
         /// Fully-formed server config to add when re-enabling. Built by the
-        /// caller via `merge_managed_mcp_servers` (with OAuth headers injected).
+        /// caller via `merge_managed_mcp_servers` (with explicit headers injected).
         /// `None` when disabling.
         server_config: Option<acp::McpServer>,
         respond_to: oneshot::Sender<Result<(), acp::Error>>,
@@ -436,16 +436,6 @@ pub enum SessionCommand {
         uri: String,
         respond_to:
             oneshot::Sender<Result<crate::extensions::mcp::McpReadResourceResponse, String>>,
-    },
-    McpAuthStatus {
-        respond_to: oneshot::Sender<Vec<crate::extensions::mcp::McpAuthStatusEntry>>,
-    },
-    McpAuthTrigger {
-        server_name: String,
-        respond_to: oneshot::Sender<Result<(), String>>,
-    },
-    RetryAuthRequiredServers {
-        respond_to: oneshot::Sender<()>,
     },
     RefreshMcpSearchIndex,
     /// Move a foreground bash command to background by tool_call_id.

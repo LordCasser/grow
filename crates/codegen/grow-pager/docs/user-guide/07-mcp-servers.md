@@ -154,7 +154,7 @@ url = "https://mcp.linear.app/mcp"
 enabled = true
 ```
 
-When a server exposes a native HTTP/SSE endpoint, prefer the `url` form over wrapping it in a stdio proxy such as `npx mcp-remote <url>`. Grow handles HTTP/SSE and OAuth directly, so the native form avoids an extra subprocess per session. It also registers Grow's own OAuth client with the provider.
+When a server exposes a native HTTP/SSE endpoint, prefer the `url` form over wrapping it in a stdio proxy such as `npx mcp-remote <url>`. The native form avoids an extra subprocess per session. Configure any required credentials explicitly as headers or through `bearer_token_env_var`.
 
 Grow walks from the current directory up to the git repo root, loading `.grow/config.toml` at each level:
 
@@ -196,7 +196,6 @@ From the modal you can:
 - Enable or disable a server with `Space`
 - Expand a server to view the tools it provides
 - Refresh the list with `r` after you edit `config.toml`
-- Authenticate an OAuth server with `i`
 - Add a server with `a`, or remove a local server with `x` (the modal asks for confirmation; press lowercase `y` to remove, or any other key to cancel)
 
 ### Tool Discovery
@@ -225,35 +224,13 @@ The Claude and Cursor MCP sources are scanned by default. To disable scanning fo
 
 ---
 
-## MCP OAuth
-
-For MCP servers that require OAuth authentication, Grow handles the credential flow automatically. When an MCP server requests OAuth credentials, Grow opens a browser-based authorization flow and stores the resulting tokens for future use.
-
----
-
 ## Example Configurations
 
 Use the `url` form for hosted MCP servers and the `command` / `args` form for local stdio tools.
 
-### Native HTTP (hosted services)
+### Native HTTP with BYOK
 
-You must authenticate OAuth-based MCP servers before you can use them. Grow stores the resulting tokens under `~/.grow/mcp_credentials.json` as local plaintext with owner-only file permissions (`0600` on Unix). Prefer full-disk encryption on the host. After you edit `config.toml`, press `r` in the `/mcps` modal to refresh the server list.
-
-```toml
-[mcp_servers.linear]
-url = "https://mcp.linear.app/mcp"
-enabled = true
-
-[mcp_servers.sentry]
-url = "https://mcp.sentry.dev/mcp"
-enabled = true
-
-[mcp_servers.mixpanel]
-url = "https://mcp.mixpanel.com/mcp"
-enabled = true
-```
-
-For internal or self-hosted servers that authenticate with a static bearer token rather than OAuth, set the `Authorization` header explicitly:
+For hosted, internal, or self-hosted servers, set the required authorization header explicitly:
 
 ```toml
 [mcp_servers.internal-tools]
@@ -307,9 +284,6 @@ A partial list of MCP servers you can configure with the `url` or `command` form
 
 | Server | Transport | Endpoint / Package |
 |--------|-----------|--------------------|
-| Linear | HTTP (OAuth) | `https://mcp.linear.app/mcp` |
-| Sentry | HTTP (OAuth) | `https://mcp.sentry.dev/mcp` |
-| Mixpanel | HTTP (OAuth) | `https://mcp.mixpanel.com/mcp` |
 | Filesystem | stdio | `@modelcontextprotocol/server-filesystem` |
 | Git | stdio | `@modelcontextprotocol/server-git` |
 | GitHub | stdio | `@modelcontextprotocol/server-github` |

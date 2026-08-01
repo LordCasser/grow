@@ -119,13 +119,6 @@ pub(super) fn dispatch_open_dashboard(app: &mut AppView) -> Vec<Effect> {
         app.show_toast("Agent dashboard is disabled in this configuration");
         return vec![];
     }
-    // Gate behind auth. Until login completes, the
-    // backend rejects new sessions; activating the dashboard view
-    // visually dismisses the auth UI. Toast and stay put.
-    if !matches!(app.auth_state, crate::app::app_view::AuthState::Done) {
-        app.show_toast("Sign in to open the dashboard");
-        return vec![];
-    }
     // Same rationale for folder trust: opening the dashboard would visually
     // dismiss the trust question with the folder still unanswered. Toast and
     // stay put (mirrors the auth gate above) so the question is resolved first.
@@ -987,11 +980,8 @@ pub(super) fn dispatch_dashboard_overlay_cycle(app: &mut AppView, delta: i32) ->
         Some(d) => crate::views::dashboard::overlay_cycle_order(d, &app.agents),
         None => {
             // Materializing here must honor the same gates as
-            // `dispatch_open_dashboard` (feature flag AND auth), so cycling
-            // can't surface an ungated dashboard on back-out.
-            if !crate::views::dashboard::dashboard_enabled()
-                || !matches!(app.auth_state, crate::app::app_view::AuthState::Done)
-            {
+            // `dispatch_open_dashboard` feature gate.
+            if !crate::views::dashboard::dashboard_enabled() {
                 return vec![];
             }
             let transient = dashboard_state_from_persisted(app);

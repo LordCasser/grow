@@ -30,8 +30,9 @@ const REGISTRATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// The leader signals readiness right after its bounded sign-in
 /// (`STARTUP_AUTH_TIMEOUT`); model/settings prefetch runs off the readiness path
-/// and the leader never opens a browser OAuth flow. This therefore only needs to
-/// cover that bounded auth plus margin, matching the client connect ceiling.
+/// and the leader never opens an interactive credential flow. This therefore
+/// only needs to cover that bounded handshake plus margin, matching the client
+/// connect ceiling.
 const LEADER_READY_TIMEOUT: Duration = crate::http::MIN_CLIENT_CONNECT_TIMEOUT;
 
 /// Reason the client disconnected from the leader server.

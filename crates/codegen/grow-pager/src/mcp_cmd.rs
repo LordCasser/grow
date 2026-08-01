@@ -254,7 +254,6 @@ async fn run_add(args: AddArgs) -> Result<()> {
         transport: resolved.transport,
         enabled: true,
         read_only: false,
-        oauth: None,
         setup: None,
         startup_timeout_sec: None,
         tool_timeout_sec: None,
@@ -396,9 +395,6 @@ fn resolve_add(args: &AddArgs) -> Result<ResolvedAdd> {
                     transport_type: (transport == McpTransport::Sse).then(|| "sse".to_string()),
                     bearer_token_env_var: None,
                     headers: (!headers.is_empty()).then_some(headers),
-                    oauth_client_id: None,
-                    oauth_client_secret_env_var: None,
-                    oauth_scopes: None,
                 },
                 warnings: Vec::new(),
             })

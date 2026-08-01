@@ -1,6 +1,5 @@
 //! Prompt and bash-command submission dispatchers and reload-window helpers.
 
-use super::auth::{scrollback_has_recent_context_too_large, scrollback_has_recent_reauth_prompt};
 use super::ctx::with_active_agent;
 use super::interject;
 use super::permissions::drain_permission_queue;
@@ -22,6 +21,26 @@ use crate::slash::command::DoctorRequest;
 use agent_client_protocol as acp;
 use grow_diagnostics::session_ctx::log_event;
 
+fn scrollback_has_recent_context_too_large(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> bool {
+    for idx in (0..scrollback.len()).rev() {
+        match scrollback.entry(idx).map(|entry| &entry.block) {
+            Some(RenderBlock::SessionEvent(event))
+                if matches!(
+                    event.event,
+                    SessionEvent::ContextTooLarge | SessionEvent::CompactionFailed { .. }
+                ) =>
+            {
+                return true;
+            }
+            Some(RenderBlock::SessionEvent(_)) | Some(RenderBlock::System(_)) => {}
+            _ => break,
+        }
+    }
+    false
+}
+
 /// Enqueue a prompt and try to drain immediately.
 ///
 /// The prompt is always pushed to the queue first. If the agent is idle
@@ -29,9 +48,8 @@ use grow_diagnostics::session_ctx::log_event;
 /// sends it in the same dispatch call — no deferred ticks.
 /// Start (if needed) and submit the initial prompt from `grow "<prompt>"`.
 ///
-/// Shared by the TUI startup path (already authenticated) and the post-login
-/// `AuthComplete` path (deferred via `deferred_startup.prompt`). It does nothing
-/// special for auth or session lifecycle: it reuses the exact `NewSession` /
+/// Shared by the TUI startup path and deferred startup via
+/// `deferred_startup.prompt`. It reuses the exact `NewSession` /
 /// `SendPrompt` actions the welcome screen dispatches, so the normal
 /// session-creation + enqueue/drain machinery carries the prompt (the
 /// prompt waits in the queue until `SessionCreated`/`SessionLoaded` drains
@@ -1057,7 +1075,7 @@ pub(super) fn handle_prompt_response(
     app: &mut AppView,
     agent_id: AgentId,
     result: Result<acp::PromptResponse, String>,
-    http_status: Option<u16>,
+    _http_status: Option<u16>,
     prompt_id: Option<String>,
 ) -> Vec<Effect> {
     // A server-authoritative queued prompt may have drained into
@@ -1174,20 +1192,9 @@ pub(super) fn handle_prompt_response(
             };
         let rate_limited = agent.session.rate_limited;
         let model_incompatible = agent.session.model_incompatible;
-        // Context overflow: the RetryState handler already pushed the actionable
-        // block, so the generic TurnFailed + error toast are redundant. Derived
-        // from the scrollback (mirrors reauth), not a session flag.
+        // The RetryState handler already pushed the actionable context-overflow
+        // block, so the generic TurnFailed + error toast are redundant.
         let context_overflow = scrollback_has_recent_context_too_large(&agent.scrollback);
-        // A 401/auth failure already surfaced an actionable
-        // `ReAuthRequired` prompt via the RetryState handler (which
-        // runs before this PromptResponse). Suppress the redundant
-        // "Turn failed" block + error toast so only the prompt shows.
-        let reauth_prompted = scrollback_has_recent_reauth_prompt(&agent.scrollback)
-            || (http_status == Some(401)
-                && result
-                    .as_ref()
-                    .err()
-                    .is_some_and(|e| e.contains("Unauthorized (401)")));
         let elapsed = agent.turn_elapsed();
 
         {
@@ -1204,19 +1211,6 @@ pub(super) fn handle_prompt_response(
                     "send_now_cancel": send_now_cancel,
                 })),
             );
-        }
-
-        // Stash for AuthComplete after 401. Prefer in_flight; fall back to
-        // compact_held (cleared for cancel-rewind during auto-compact). Skip if both None.
-        if reauth_prompted {
-            let held = agent
-                .session
-                .in_flight_prompt
-                .clone()
-                .or_else(|| agent.session.compact_held_prompt.clone());
-            if let Some(prompt) = held {
-                agent.reauth_stashed_prompt = Some(prompt);
-            }
         }
 
         // qtrace: turn end on this client. This clears current_prompt_id
@@ -1260,12 +1254,10 @@ pub(super) fn handle_prompt_response(
                 // form here — only wake markers use the honest `None` form.
                 elapsed: Some(elapsed.unwrap_or_default()),
             }),
-            (Err(_), _)
-                if rate_limited || model_incompatible || reauth_prompted || context_overflow =>
-            {
+            (Err(_), _) if rate_limited || model_incompatible || context_overflow => {
                 // Skip TurnFailed when a dedicated prompt already shows the
-                // error (rate limit, model incompatibility, 401 re-auth, or a
-                // terminal context-window overflow).
+                // error (rate limit, model incompatibility, or a terminal
+                // context-window overflow).
                 None
             }
             (Err(err), _) => Some(SessionEvent::TurnFailed {
@@ -1289,12 +1281,7 @@ pub(super) fn handle_prompt_response(
                 };
                 Some((NotificationEventKind::TurnComplete, body))
             }
-            (Err(err), _)
-                if !rate_limited
-                    && !model_incompatible
-                    && !reauth_prompted
-                    && !context_overflow =>
-            {
+            (Err(err), _) if !rate_limited && !model_incompatible && !context_overflow => {
                 Some((NotificationEventKind::AgentError, format!("Error: {err}")))
             }
             _ => None,

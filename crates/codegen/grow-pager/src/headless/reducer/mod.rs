@@ -301,8 +301,6 @@ pub(crate) struct SessionContext {
     pub permission_mode: Option<String>,
     pub mcp_servers: Vec<McpServer>,
     pub include_partial_messages: bool,
-    /// True when the session authenticated with an API key (vs OAuth).
-    pub api_key_auth: bool,
     /// The current model's total context window in tokens, when known.
     pub context_window: Option<u64>,
 }

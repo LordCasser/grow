@@ -104,7 +104,6 @@ pub(crate) async fn apply(
     // The catalog manager owns the global default used by future sessions.
     // A switch—whether user initiated or performed while restoring a session—
     // updates only this session's handle and persisted state.
-    agent.sync_process_static_api_key(Some(model_id.0.as_ref()));
     Ok(acp::SetSessionModelResponse::new().meta(
         serde_json::json!({
             "model": updated_model,

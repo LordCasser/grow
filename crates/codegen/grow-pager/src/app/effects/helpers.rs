@@ -37,8 +37,7 @@ pub(super) const CLIPBOARD_PROBE_TIMEOUT_SECS: u64 = 10;
 /// Picker search debounce ([`Effect::DebounceSessionSearch`]):
 /// long enough to coalesce a typing burst, short enough to feel live.
 pub(super) const SESSION_SEARCH_DEBOUNCE_MS: u64 = 250;
-/// Run the post-CTA-install `grow/mcp/list` read (uncached, which also nudges
-/// the shell to retry auth-required servers) and map it into a
+/// Run the post-CTA-install uncached `grow/mcp/list` read and map it into a
 /// `TaskResult::PluginCtaMcpsLoaded`. Shared by the immediate fetch and the
 /// delayed re-probe.
 pub(super) async fn fetch_plugin_cta_mcps(
@@ -82,7 +81,7 @@ pub(super) async fn fetch_plugin_cta_mcps(
 /// Rate-limit errors preserve provider detail and use a provider-neutral
 /// fallback when the response has no detail.
 /// All other errors are sanitized to remove internal service names and jargon.
-pub(super) fn format_acp_error(err: &acp::Error, _is_api_key_auth: bool) -> String {
+pub(super) fn format_acp_error(err: &acp::Error) -> String {
     if i32::from(err.code) == RATE_LIMITED_ERROR_CODE {
         let detail = err.data.as_ref().and_then(error_detail_from_data);
         return sanitize_user_error(&format_rate_limited_user_message(detail.as_deref()));
@@ -234,9 +233,6 @@ pub(crate) struct SessionFlags {
     /// diagnostics. `None` (key omitted) only under `Default` in tests; real
     /// launches always know their mode.
     pub screen_mode_label: Option<&'static str>,
-    /// Active auth is API key (not OAuth/session). Drives rate-limit copy in
-    /// `format_acp_error`. Default `false` (OAuth copy) for tests.
-    pub is_api_key_auth: bool,
     /// Startup resume target deferred to the worktree handler after missing
     /// local id/title resolution. Worktree failure messages append the
     /// no-match hint only when the failing target equals this value.
@@ -270,18 +266,8 @@ impl SessionFlags {
         if meta.is_empty() { None } else { Some(meta) }
     }
 }
-/// Metadata returned from effect execution so the event loop can patch
-/// state that requires a spawned task handle (e.g., auth AbortHandle).
 #[derive(Default)]
-pub(crate) struct EffectMeta {
-    /// Auth abort handle + its request sequence. The event loop must
-    /// install this into `AppView.auth_state` if the current auth state
-    /// still matches the sequence.
-    pub auth_abort_handle: Option<(u64, tokio::task::AbortHandle)>,
-    /// Auth URL poll abort handle + request sequence (installed on
-    /// `AppView.auth_url_poll_handle` when the seq still matches).
-    pub auth_url_poll_handle: Option<(u64, tokio::task::AbortHandle)>,
-}
+pub(crate) struct EffectMeta;
 /// Extract the first user prompt text from a session's `chat_history.jsonl`.
 ///
 /// Returns the first line of the `<user_query>` content (if present),
@@ -516,71 +502,6 @@ pub(super) fn session_picker_entry_to_roster(
             kind: e.source.clone(),
             host: e.hostname.clone(),
         },
-    }
-}
-pub(super) async fn send_logout(tx: &AcpAgentTx) {
-    let req = acp::ExtRequest::new(
-        "grow/auth/logout",
-        serde_json::value::to_raw_value(&serde_json::json!({}))
-            .expect("serialize auth/logout params")
-            .into(),
-    );
-    if let Err(e) = acp_send(req, tx).await {
-        tracing::warn!(error = %e, "logout failed");
-    }
-}
-/// Best-effort `grow/auth/cancel`: stops the shell's device/loopback wait so a
-/// later login is single-flight. Errors are ignored — UI already left
-/// `Authenticating`. `request_seq` scopes the cancel to the abandoned attempt.
-pub(super) async fn send_auth_cancel(tx: &AcpAgentTx, request_seq: u64) -> TaskResult {
-    let req = acp::ExtRequest::new(
-        "grow/auth/cancel",
-        serde_json::value::to_raw_value(
-                &serde_json::json!({ "request_seq": request_seq }),
-            )
-            .expect("serialize auth/cancel params")
-            .into(),
-    );
-    if let Err(e) = acp_send(req, tx).await {
-        tracing::debug!(error = %e, "auth cancel ext request failed (ignored)");
-    }
-    TaskResult::AuthCancelComplete
-}
-pub(super) async fn send_authenticate(
-    tx: &AcpAgentTx,
-    request_seq: u64,
-    method_id: acp::AuthMethodId,
-    use_oauth: bool,
-    force_interactive: bool,
-) -> TaskResult {
-    let mut meta = serde_json::json!({
-        "use_oauth": use_oauth,
-        "request_seq": request_seq,
-    });
-    if force_interactive {
-        meta["force_interactive"] = serde_json::json!(true);
-    }
-    let req = acp::AuthenticateRequest::new(method_id).meta(meta.as_object().cloned());
-    match acp_send(req, tx).await {
-        Ok(resp) => {
-            ulog::info("auth completed", None, None);
-            TaskResult::AuthComplete {
-                request_seq,
-                meta: resp.meta.map(serde_json::Value::Object),
-            }
-        }
-        Err(e) => {
-            let error = sanitize_user_error(&e.to_string());
-            ulog::error(
-                "auth failed",
-                None,
-                Some(serde_json::json!({"error": &error})),
-            );
-            TaskResult::AuthFailed {
-                request_seq,
-                error,
-            }
-        }
     }
 }
 /// Translate a settings-registry key + value into the matching shell

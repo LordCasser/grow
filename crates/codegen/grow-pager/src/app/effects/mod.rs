@@ -37,7 +37,7 @@ pub(crate) fn execute(
     cwd: &Path,
     session_flags: &SessionFlags,
 ) -> (bool, EffectMeta) {
-    let mut meta = EffectMeta::default();
+    let meta = EffectMeta;
     let effect_is_send_now = matches!(effect, Effect::SendPromptNow { .. });
     match effect {
         Effect::RegisterActiveSession { session_id, cwd } => {
@@ -63,37 +63,6 @@ pub(crate) fn execute(
             if let Err(e) = std::env::set_current_dir(&path) {
                 tracing::warn!(error = %e, "project picker: failed to set_current_dir");
             }
-        }
-        Effect::ScheduleClearAuthCopyFeedback { generation } => {
-            tasks
-                .spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    TaskResult::AuthCopyFeedbackTimeout {
-                        generation,
-                    }
-                });
-        }
-        Effect::Logout => {
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    send_logout(&tx).await;
-                    TaskResult::LogoutComplete
-                });
-        }
-        Effect::CancelAuth { request_seq } => {
-            let tx = acp_tx.clone();
-            tasks.spawn(async move { send_auth_cancel(&tx, request_seq).await });
-        }
-        Effect::SwitchAccount { request_seq, method_id, use_oauth } => {
-            let tx = acp_tx.clone();
-            let abort_handle = tasks
-                .spawn(async move {
-                    send_logout(&tx).await;
-                    send_authenticate(&tx, request_seq, method_id, use_oauth, false)
-                        .await
-                });
-            meta.auth_abort_handle = Some((request_seq, abort_handle));
         }
         Effect::CreateSession {
             agent_id,
@@ -858,7 +827,6 @@ pub(crate) fn execute(
         } => {
             let tx = acp_tx.clone();
             let screen_mode = session_flags.screen_mode_label;
-            let is_api_key_auth = session_flags.is_api_key_auth;
             tasks
                 .spawn(async move {
                     ulog::info(
@@ -902,7 +870,7 @@ pub(crate) fn execute(
                     TaskResult::PromptResponse {
                         agent_id,
                         result: result
-                            .map_err(|e| format_acp_error(&e, is_api_key_auth)),
+                            .map_err(|e| format_acp_error(&e)),
                         http_status,
                         prompt_id: Some(prompt_id),
                     }
@@ -913,7 +881,6 @@ pub(crate) fn execute(
             let send_now = effect_is_send_now;
             let tx = acp_tx.clone();
             let screen_mode = session_flags.screen_mode_label;
-            let is_api_key_auth = session_flags.is_api_key_auth;
             tasks
                 .spawn(async move {
                     ulog::info(
@@ -955,7 +922,7 @@ pub(crate) fn execute(
                             agent_id,
                             session_id,
                             prompt_id,
-                            error: format_acp_error(e, is_api_key_auth),
+                            error: format_acp_error(e),
                             blocks,
                         };
                     }
@@ -966,7 +933,7 @@ pub(crate) fn execute(
                     TaskResult::PromptResponse {
                         agent_id,
                         result: result
-                            .map_err(|e| format_acp_error(&e, is_api_key_auth)),
+                            .map_err(|e| format_acp_error(&e)),
                         http_status,
                         prompt_id: Some(prompt_id),
                     }
@@ -1265,7 +1232,6 @@ pub(crate) fn execute(
         } => {
             let tx = acp_tx.clone();
             let screen_mode = session_flags.screen_mode_label;
-            let is_api_key_auth = session_flags.is_api_key_auth;
             tasks
                 .spawn(async move {
                     let mode_req = acp::SetSessionModeRequest::new(
@@ -1339,7 +1305,7 @@ pub(crate) fn execute(
                     TaskResult::PromptResponse {
                         agent_id,
                         result: result
-                            .map_err(|e| format_acp_error(&e, is_api_key_auth)),
+                            .map_err(|e| format_acp_error(&e)),
                         http_status,
                         prompt_id: Some(prompt_id),
                     }
@@ -1892,106 +1858,6 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::Authenticate {
-            request_seq,
-            method_id,
-            use_oauth,
-            force_interactive,
-        } => {
-            let tx = acp_tx.clone();
-            let abort_handle = tasks
-                .spawn(async move {
-                    send_authenticate(
-                            &tx,
-                            request_seq,
-                            method_id,
-                            use_oauth,
-                            force_interactive,
-                        )
-                        .await
-                });
-            meta.auth_abort_handle = Some((request_seq, abort_handle));
-        }
-        Effect::PollAuthUrl { request_seq } => {
-            let tx = acp_tx.clone();
-            let abort_handle = tasks
-                .spawn(async move {
-                    let mut auth_url: Option<String> = None;
-                    let mut external = false;
-                    let mut mode: Option<String> = None;
-                    for i in 0..60 {
-                        if i > 0 {
-                            tokio::time::sleep(std::time::Duration::from_millis(50))
-                                .await;
-                        }
-                        let params = serde_json::json!({});
-                        let req = acp::ExtRequest::new(
-                            "grow/auth/get_url",
-                            serde_json::value::to_raw_value(&params)
-                                .expect("serialize auth_url params")
-                                .into(),
-                        );
-                        if let Ok(resp) = acp_send(req, &tx).await {
-                            let v: serde_json::Value = serde_json::from_str(resp.0.get())
-                                .unwrap_or_default();
-                            external = v
-                                .get("external_provider")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
-                            mode = v
-                                .get("mode")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                            auth_url = v
-                                .get("auth_url")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                        }
-                        if auth_url.is_some() {
-                            break;
-                        }
-                    }
-                    TaskResult::AuthUrlReady {
-                        request_seq,
-                        auth_url,
-                        external,
-                        mode,
-                    }
-                });
-            meta.auth_url_poll_handle = Some((request_seq, abort_handle));
-        }
-        Effect::SubmitAuthCode { request_seq, code } => {
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    let params = serde_json::json!({ "code": code });
-                    let req = acp::ExtRequest::new(
-                        "grow/auth/submit_code",
-                        serde_json::value::to_raw_value(&params)
-                            .expect("serialize auth code params")
-                            .into(),
-                    );
-                    match acp_send(req, &tx).await {
-                        Ok(_) => {
-                            TaskResult::AuthCodeSubmitted {
-                                request_seq,
-                            }
-                        }
-                        Err(e) => {
-                            let error = e.to_string();
-                            ulog::error(
-                                "auth failed",
-                                None,
-                                Some(serde_json::json!({"error": &error})),
-                            );
-                            TaskResult::AuthFailed {
-                                request_seq,
-                                error,
-                            }
-                        }
-                    }
-                });
-        }
         Effect::FetchMcpsList { agent_id, session_id, cache } => {
             let tx = acp_tx.clone();
             tasks
@@ -2031,72 +1897,6 @@ pub(crate) fn execute(
                     };
                     TaskResult::McpsListLoaded {
                         agent_id,
-                        result,
-                    }
-                });
-        }
-        Effect::McpAuthTrigger { agent_id, session_id, server_name } => {
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    let params = serde_json::json!({
-                    "session_id": session_id.0.to_string(),
-                    "server_name": server_name,
-                });
-                    let req = acp::ExtRequest::new(
-                        "grow/mcp/auth_trigger",
-                        serde_json::value::to_raw_value(&params)
-                            .expect("serialize mcp/auth_trigger params")
-                            .into(),
-                    );
-                    let result = match acp_send(req, &tx).await {
-                        Ok(resp) => {
-                            let wrapper: serde_json::Value = serde_json::from_str(
-                                    resp.0.get(),
-                                )
-                                .unwrap_or_default();
-                            let result_obj = wrapper.get("result");
-                            let status = result_obj
-                                .and_then(|r| r.get("status"))
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("unknown");
-                            if status == "authenticated" {
-                                Ok(
-                                    crate::app::actions::McpAuthTriggerOutcome::Authenticated,
-                                )
-                            } else if status == "setup_required" {
-                                let setup = result_obj
-                                    .and_then(|r| r.get("setup"))
-                                    .cloned()
-                                    .and_then(|value| {
-                                        serde_json::from_value::<
-                                            crate::views::mcps_modal::McpSetupConfig,
-                                        >(value)
-                                            .ok()
-                                    })
-                                    .ok_or_else(|| "setup required".to_string());
-                                setup
-                                    .map(
-                                        crate::app::actions::McpAuthTriggerOutcome::SetupRequired,
-                                    )
-                            } else {
-                                let detail = result_obj
-                                    .and_then(|r| r.get("error"))
-                                    .and_then(|e| e.as_str())
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| format!("auth status: {status}"));
-                                Err(detail)
-                            }
-                        }
-                        Err(e) => {
-                            Err(
-                                sanitize_user_error(&format!("authentication failed: {e}")),
-                            )
-                        }
-                    };
-                    TaskResult::McpAuthTriggerDone {
-                        agent_id,
-                        server_name,
                         result,
                     }
                 });
@@ -2883,7 +2683,6 @@ pub(crate) fn execute(
         }
         Effect::ToggleMcpServer { agent_id, session_id, server_name, enabled } => {
             let tx = acp_tx.clone();
-            let is_api_key_auth = session_flags.is_api_key_auth;
             tasks
                 .spawn(async move {
                     let params = serde_json::json!({
@@ -2899,7 +2698,7 @@ pub(crate) fn execute(
                     );
                     let result = match acp_send(req, &tx).await {
                         Ok(_) => Ok(()),
-                        Err(e) => Err(format_acp_error(&e, is_api_key_auth)),
+                        Err(e) => Err(format_acp_error(&e)),
                     };
                     TaskResult::McpToggleDone {
                         agent_id,
@@ -2965,7 +2764,6 @@ pub(crate) fn execute(
                 });
         }
         Effect::ShowSessionInfo { agent_id, session_id, show_resolved_model } => {
-            let is_api_key_auth = session_flags.is_api_key_auth;
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -2976,7 +2774,6 @@ pub(crate) fn execute(
                                 &info,
                                 title.as_deref(),
                                 show_resolved_model,
-                                is_api_key_auth,
                             );
                             TaskResult::SessionInfoComplete {
                                 agent_id,
@@ -4048,7 +3845,6 @@ fn format_session_info(
     info: &SessionInfoResponse,
     title: Option<&str>,
     show_resolved_model: bool,
-    is_api_key_auth: bool,
 ) -> String {
     let session_id = &info.session_id;
     let cwd = &info.cwd;
@@ -4099,20 +3895,9 @@ fn format_session_info(
     let version_display = grow_version::display_version(
         grow_update::channel_label(),
     );
-    let auth_lines = format_auth_lines(is_api_key_auth);
     format!(
-        "{title_line}  Shell version: {version_display}\n{auth_lines}  Session ID: {session_id}{conversation_line}\n  Working directory: {cwd}\n  Model: {model_display}{model_hash_line}{backend_line}{sandbox_line}{turn_line}\n  Context: {used} / {total} tokens ({pct}%)"
+        "{title_line}  Shell version: {version_display}\n  Auth method: provider BYOK\n  Session ID: {session_id}{conversation_line}\n  Working directory: {cwd}\n  Model: {model_display}{model_hash_line}{backend_line}{sandbox_line}{turn_line}\n  Context: {used} / {total} tokens ({pct}%)"
     )
-}
-/// Auth section for `/session-info` — active login method.
-///
-/// This reflects the process login / ACP auth method, not per-model sampling
-/// credentials (a model `api_key`/`env_key` can still own the turn).
-fn format_auth_lines(is_api_key_auth: bool) -> String {
-    if is_api_key_auth {
-        return "  Auth method: provider API key\n".to_owned();
-    }
-    String::from("  Auth method: provider OAuth\n")
 }
 /// Build the single text content block for a plain `Effect::SendPrompt`.
 ///

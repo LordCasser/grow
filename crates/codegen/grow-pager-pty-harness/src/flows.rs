@@ -67,47 +67,6 @@ pub fn inference_request_count(content: &ContentController) -> usize {
         .count()
 }
 
-/// Seed a fake provider OAuth entry into the isolated home's `auth.json` so the
-/// shell has session auth (the harness's `GROW_API_KEY` is ApiKey/BYOK mode
-/// and never enters the auth manager). Load-bearing details: the scope key
-/// must be `<issuer>::<client_id>`, `auth_mode` must be `oidc`,
-/// `expires_at` must be far-future so no network refresh is attempted, and
-/// The mock server accepts any bearer. Pair with [`oauth_credential_ops`].
-pub fn seed_fake_oauth(content: &ContentController, user: &str) {
-    seed_fake_oauth_raw(content, user);
-}
-
-/// Shared auth.json template writer.
-fn seed_fake_oauth_raw(content: &ContentController, user: &str) {
-    let grow_home = content.home().join(".grow");
-    std::fs::create_dir_all(&grow_home).expect("create temp .grow");
-    std::fs::write(
-        grow_home.join("auth.json"),
-        format!(
-            r#"{{
-  "https://login.example.com::b1a00492-073a-47ea-816f-4c329264a828": {{
-    "key": "pty-test-oauth-token",
-    "auth_mode": "oidc",
-    "create_time": "2026-01-01T00:00:00Z",
-    "user_id": "{user}",
-    "email": "{user}@test.invalid",
-    "expires_at": "2030-01-01T00:00:00Z",
-    "refresh_token": "pty-test-refresh-token",
-    "oidc_issuer": "https://login.example.com",
-    "oidc_client_id": "b1a00492-073a-47ea-816f-4c329264a828"
-  }}
-}}"#
-        ),
-    )
-    .expect("seed fake oauth auth.json");
-}
-
-/// Remove only the sandbox's fake API-key credential, allowing the `auth.json`
-/// entry written by [`seed_fake_oauth`] to determine the advertised auth method.
-pub fn oauth_credential_ops() -> [crate::EnvOp<'static>; 1] {
-    [crate::EnvOp::remove("GROW_API_KEY")]
-}
-
 /// Drive `/new` until `model` shows on screen. Campaigns apply to **new
 /// sessions only** and the pager's settings prefetch is deliberately 2s-capped,
 /// so on a loaded runner the first session can legitimately open pre-campaign;

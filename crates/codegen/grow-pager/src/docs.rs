@@ -54,7 +54,7 @@ pub static USER_GUIDE: &[Doc] = &[
     guide!(
         "02-authentication.md",
         "Authentication",
-        "Browser login, API keys, OIDC, external auth providers"
+        "Provider API keys and command-backed BYOK"
     ),
     guide!(
         "03-keyboard-shortcuts.md",

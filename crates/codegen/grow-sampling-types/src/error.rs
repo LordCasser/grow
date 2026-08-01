@@ -224,14 +224,13 @@ impl SamplingError {
 
     pub fn is_auth_error(&self) -> bool {
         // Only 401 Unauthorized means the credentials themselves were rejected
-        // and warrant a token refresh / re-auth. 403 Forbidden means the
+        // and warrants rereading the provider's BYOK source. 403 Forbidden means the
         // request was authenticated successfully but the action is not
         // permitted (e.g. content-safety blocks, ZDR-blocked operations,
         // or other policy denials unrelated to credentials). Treating 403
-        // as an auth error triggers a pointless
-        // OIDC refresh and then surfaces as acp::Error::auth_required on
-        // the client, which in embedding clients may tear down the session and
-        // can race with invalid_grant_threshold to wipe auth.json.
+        // as an auth error triggers a pointless credential retry and then surfaces
+        // as acp::Error::auth_required, which embedding clients may treat as a
+        // reason to tear down the session.
         matches!(
             self,
             SamplingError::Auth { .. }
@@ -909,10 +908,9 @@ mod tests {
     /// error. The proxy returns 403 for policy denials that are unrelated
     /// to the caller's credentials (content-safety blocks, ZDR-gated
     /// operations, or other usage-policy blocks). Misclassifying these as
-    /// auth errors triggers a pointless OIDC
-    /// refresh and surfaces as acp::Error::auth_required on the client,
-    /// tearing down the session and risking an
-    /// `invalid_grant_threshold`-triggered wipe of auth.json.
+    /// auth errors triggers a pointless BYOK reread and surfaces as
+    /// acp::Error::auth_required on the client, potentially tearing down the
+    /// session even though a different credential cannot help.
     #[test]
     fn forbidden_is_not_auth_error() {
         let err = SamplingError::Api {

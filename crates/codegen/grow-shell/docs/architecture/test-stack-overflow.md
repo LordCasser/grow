@@ -14,7 +14,7 @@
 macOS 上 libtest 的测试线程**默认栈约 2.03MB**（实测区域
 `[0x16fe04000-0x17000c000)`，即 0x208000 字节，远小于 Linux 上的 8MB 默认），
 而**深链测试**（完整 turn 处理 → `maybe_compact_on_model_switch` →
-`refresh_token_if_expired` → `with_resolved_model` → `load_effective_config` →
+`with_resolved_model` → `load_effective_config` →
 `new_from_toml_cfg` → TOML/JSON 解析）在 **debug 构建（无优化）** 下的栈需求约
 **2.04-2.4MB**——刚好超出 2.03MB。async 状态机帧在 debug 下可以很大
 （单帧 50-430KB 很常见），所以这是"余量仅几百字节"的边缘场景：

@@ -74,7 +74,7 @@ fn messages_init_skills_fallback_is_empty() {
 }
 
 #[test]
-fn messages_init_maps_permission_mode_and_api_key_source() {
+fn messages_init_maps_permission_mode_and_byok_source() {
     let mut r = MessagesReducer::new();
     r.begin(SessionContext {
         session_id: "s".into(),
@@ -83,12 +83,11 @@ fn messages_init_maps_permission_mode_and_api_key_source() {
         permission_mode: Some("auto".into()),
         mcp_servers: Vec::new(),
         include_partial_messages: false,
-        api_key_auth: false,
         context_window: None,
     });
     let out = r.reduce(StreamEvent::AgentMessage("hi".into()));
     assert_eq!(out[0]["permissionMode"], "default");
-    assert_eq!(out[0]["apiKeySource"], "oauth");
+    assert_eq!(out[0]["apiKeySource"], "user");
     assert!(out[0]["model"].is_string(), "{:?}", out[0]["model"]);
 }
 

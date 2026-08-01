@@ -300,7 +300,7 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
         cancel_subagents,
         // Consume the gesture hint set by the key/mouse handler (persists
         // through the subagent picker until this final build). `None` for
-        // non-gesture callers (login/reauth flows).
+        // non-gesture callers.
         trigger: agent.cancel_trigger_hint.take(),
         // Mirror the local rewind on the wire: when we restored the prompt to
         // the composer above, ask the shell to trim its pristine copy too so a

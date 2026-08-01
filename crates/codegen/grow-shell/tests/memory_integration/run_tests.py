@@ -166,7 +166,6 @@ class IsolatedEnv:
     """Creates a fully isolated grow environment with custom $HOME.
 
     The agent subprocess gets a fake $HOME with:
-      ~/.grow/auth.json   (copied from real home)
       ~/.grow/memory/     (pre-populated by tests)
       ~/.grow/logs/       (memory.log appears here)
 
@@ -186,11 +185,6 @@ class IsolatedEnv:
         self.logs_dir = os.path.join(self.grow_home, "logs")
         os.makedirs(self.memory_dir)
         os.makedirs(self.logs_dir)
-
-        # Copy auth from real home
-        real_auth = os.path.expanduser("~/.grow/auth.json")
-        if os.path.isfile(real_auth):
-            shutil.copy2(real_auth, os.path.join(self.grow_home, "auth.json"))
 
     def write_config(self, toml_str):
         """Write global ~/.grow/config.toml (where the agent reads config)."""

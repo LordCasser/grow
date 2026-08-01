@@ -289,7 +289,7 @@ pub struct PluginsListResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpServerSource {
-    /// Managed by the platform (e.g., OAuth connectors).
+    /// Managed by the platform.
     Managed,
     /// Locally configured (config.toml, .mcp.json, plugins, etc.).
     Local,

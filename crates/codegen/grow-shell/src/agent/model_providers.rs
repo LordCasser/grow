@@ -81,7 +81,6 @@ pub(crate) fn normalize_provider_config(raw_config: &toml::Value) -> Result<toml
 #[serde(default)]
 pub struct ModelProviderConfig {
     pub base_url: Option<String>,
-    pub api_base_url: Option<String>,
     pub env_key: Option<EnvKeys>,
     pub api_key: Option<String>,
     pub api_backend: Option<ApiBackend>,
@@ -106,22 +105,10 @@ pub(crate) fn auth_config_issues(
     let mut issues = Vec::new();
     if !config.is_usable() {
         issues.push((
-            if config.is_oauth() {
-                "issuer/client_id"
-            } else {
-                "command"
-            },
+            "command",
             ConfigWarningKind::InvalidValue,
-            if config.is_oauth() {
-                "OAuth providers require non-empty issuer and client_id; models resolve with no credential"
-                    .to_owned()
-            } else {
-                "missing or empty command; models resolve with no credential".to_owned()
-            },
+            "missing or empty command; models resolve with no credential".to_owned(),
         ));
-    }
-    if config.is_oauth() {
-        return issues;
     }
     let skew = crate::auth::PROVIDER_TOKEN_EXPIRY_SKEW_SECS;
     if config.token_ttl_secs.is_some_and(|ttl| ttl <= skew) {
@@ -260,7 +247,6 @@ impl ConfigModelOverride {
     ) -> Self {
         let ModelProviderConfig {
             base_url,
-            api_base_url,
             env_key,
             api_key,
             api_backend,
@@ -275,7 +261,6 @@ impl ConfigModelOverride {
         let mut merged = self.clone();
         merged.model_provider = None;
         merged.base_url = merged.base_url.or_else(|| base_url.clone());
-        merged.api_base_url = merged.api_base_url.or_else(|| api_base_url.clone());
         merged.api_backend = merged.api_backend.or_else(|| api_backend.clone());
         merged.context_window = merged.context_window.or(*context_window);
         // Inherited wholesale only when the model sets none of its own.
@@ -351,9 +336,7 @@ mod tests {
             crate::sampling::ApiBackend::ChatCompletions
         );
         assert_eq!(
-            resolve_credentials(model, Some("product-session-token"))
-                .api_key
-                .as_deref(),
+            resolve_credentials(model).api_key.as_deref(),
             Some("secret")
         );
     }
@@ -380,10 +363,7 @@ mod tests {
             .expect("keyless local providers are valid BYOK");
         let models = resolve_model_list(&cfg);
         let model = models.get("local/model").unwrap();
-        assert_eq!(
-            resolve_credentials(model, Some("product-session-token")).api_key,
-            None
-        );
+        assert_eq!(resolve_credentials(model).api_key, None);
     }
 
     #[test]

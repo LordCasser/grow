@@ -171,8 +171,6 @@ pub(super) struct SessionState {
     pub(super) model: Option<String>,
     pub(super) cwd: String,
     pub(super) permission_mode: Option<String>,
-    /// True when the session authenticated with an API key (vs OAuth).
-    pub(super) api_key_auth: bool,
     pub(super) mcp_servers: Vec<McpServer>,
     pub(super) include_partials: bool,
     /// The current model's total context window in tokens, when known.

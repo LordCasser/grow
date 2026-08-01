@@ -11,11 +11,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use grow_shell::{
-    agent::{MvpAgent, activity::SESSION_FLUSH_GRACE, config::Config as AgentConfig},
-    auth::AuthManager,
-    util::grow_home::grow_home,
-};
+use grow_shell::agent::{MvpAgent, activity::SESSION_FLUSH_GRACE, config::Config as AgentConfig};
 use xai_acp_lib::{
     AcpAgentChannel, AcpClientChannel, AcpClientTx, AcpGatewayReceiver, AcpGatewaySender,
     acp_channels,
@@ -37,9 +33,6 @@ pub struct SpawnedAgent {
     pub thread_handle: thread::JoinHandle<Result<()>>,
     pub channel: AcpClientChannel,
     pub cancel: CancellationToken,
-    /// The agent's `AuthManager`, shared so pager-side authenticated consumers
-    /// channel) resolve the same refreshing bearer as chat traffic.
-    pub auth_manager: std::sync::Arc<AuthManager>,
 }
 
 /// The single teardown mechanism for an in-process agent: cancels the worker
@@ -172,32 +165,15 @@ pub async fn spawn_grow_shell(
     cancel: &CancellationToken,
     memory_config: Option<grow_shell::config::MemoryConfig>,
 ) -> Result<SpawnedAgent> {
-    let auth_manager =
-        std::sync::Arc::new(AuthManager::new(&grow_home(), agent_config.auth.clone()));
-    auth_manager.configure_refresher(agent_config.auth.auth_provider_command.clone());
-    // Pause token refreshes across system sleep so an OIDC refresh can't
-    // straddle a suspend (which can revoke the refresh token and force
-    // re-login). No-op where the OS listener is unavailable.
-    auth_manager.start_system_power_listener();
-
-    // Best-effort refresh of managed policy before bootstrap reads it (repairs a
-    // wrong-identity/missing cache). Never errors — the OS-protected system/MDM
-    // layers still apply, and every network step inside is bounded
-    // (SESSION_START_AUTH_DEADLINE / SyncBudget::SessionStart).
-    grow_shell::managed_config::ensure_managed_policy_present(&auth_manager).await;
+    grow_shell::managed_config::ensure_managed_policy_present().await;
 
     // Run the full bootstrap sequence: config resolution, process-level
     // singletons, and model catalog construction.
     let (agent_config, models_manager) =
-        grow_shell::agent::init::bootstrap(&agent_config, &auth_manager)
-            .map_err(|e| anyhow::anyhow!(e))?;
+        grow_shell::agent::init::bootstrap(&agent_config).map_err(|e| anyhow::anyhow!(e))?;
 
     let agent_cancel = cancel.child_token();
     let (acp_client, acp_agent) = acp_channels();
-
-    // Clone before `auth_manager` is moved into the agent closure below, so the
-    // pager-side consumers can share the same refreshing bearer.
-    let auth_manager_for_pager = auth_manager.clone();
 
     let skills_paths = agent_config.skills.paths.clone();
 
@@ -205,8 +181,7 @@ pub async fn spawn_grow_shell(
         Box::new(move |client_tx| {
             let gateway = AcpGatewaySender::new(client_tx);
 
-            let mut agent =
-                MvpAgent::with_models(gateway, &agent_config, auth_manager, models_manager);
+            let mut agent = MvpAgent::with_models(gateway, &agent_config, models_manager);
             if let Some(mc) = memory_config {
                 agent.set_memory_config(mc);
             }
@@ -222,7 +197,6 @@ pub async fn spawn_grow_shell(
         thread_handle: handle,
         channel: acp_client,
         cancel: agent_cancel,
-        auth_manager: auth_manager_for_pager,
     })
 }
 

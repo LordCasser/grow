@@ -32,7 +32,7 @@
 //!    for anything other than `TransportClosed` / `HandshakeFailed`. The
 //!    auto-restart loop does not see other kinds (it's never invoked for
 //!    them), so this gate appears only at schedule time.
-//! 2. **HTTP / HttpAuth** — auto-restart is **stdio-only**. HTTP/OAuth
+//! 2. **HTTP / SSE** — auto-restart is **stdio-only**. Remote
 //!    transports go through `reset_transport` on the next tool call,
 //!    which is the existing and correct recovery path. The single
 //!    [`RestartActions::is_stdio_server_configured`] question returns
@@ -198,12 +198,11 @@ pub trait RestartActions {
     /// `Arc<McpClient>` into `McpState::owned_clients`.
     ///
     /// **Stdio-only.** Callers gate on
-    /// [`Self::is_stdio_server_configured`]; HTTP / HttpAuth never
+    /// [`Self::is_stdio_server_configured`]; HTTP / SSE never
     /// reach this method. Failure modes (returned as a sanitized
     /// `Err`) are:
     /// 1. No matching stdio config entry — racy concurrent removal.
-    /// 2. `start_mcp_server` failed — spawn / OAuth-discovery /
-    ///    transport-build error.
+    /// 2. `start_mcp_server` failed — spawn or transport-build error.
     /// 3. `ensure_initialized` failed — handshake error.
     /// 4. Post-handshake re-check of the configured
     ///    set found the server disabled/removed during the (multi-

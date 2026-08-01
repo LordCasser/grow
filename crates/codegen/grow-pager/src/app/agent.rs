@@ -715,7 +715,6 @@ pub struct AgentSession {
     /// the input box if the user cancels before any response arrives.
     /// `None` for skill-injected prompts (cannot be reversed) and bash/cron.
     pub in_flight_prompt: Option<InFlightPrompt>,
-    /// Prompt held across auto-compact for reauth resubmit after `/login`.
     /// `in_flight_prompt` is cleared on compact start so cancel cannot rewind.
     pub compact_held_prompt: Option<InFlightPrompt>,
     /// Stable id for the prompt currently in flight. Generated client-side

@@ -46,7 +46,6 @@
                     display_name: None,
                     status: McpServerDisplayStatus::Initializing,
                     tool_count: 0,
-                    auth_required: false,
                     setup_required: false,
                     setup: None,
                     setup_values: std::collections::HashMap::new(),
@@ -487,20 +486,15 @@
             session_id: "s".into(),
             name: "alpha".into(),
             source: McpServerSource::Local,
-            status: McpServerStatus::NeedsAuth,
-            reason: McpServerStatusReason::AuthExpired,
-            detail: Some("token expired".into()),
+            status: McpServerStatus::Ready,
+            reason: McpServerStatusReason::Initialized,
+            detail: None,
             tools: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         let roundtripped: McpServerStatusPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(payload, roundtripped);
-        // `needsAuth` must be on the wire as the lowercase form, not
-        // mixed-case — verifies the rename_all = lowercase contract.
-        assert!(
-            json.contains("\"needsauth\""),
-            "wire form must be lowercase 'needsauth'; got {json}"
-        );
+        assert!(json.contains("\"ready\""));
     }
 
     /// `servers_updated` has NO `sessionId` on the wire. The handler
@@ -519,7 +513,6 @@
                     display_name: None,
                     status: crate::views::mcps_modal::McpServerDisplayStatus::Initializing,
                     tool_count: 0,
-                    auth_required: false,
                     setup_required: false,
                     setup: None,
                     setup_values: std::collections::HashMap::new(),
@@ -730,4 +723,3 @@
             "legacy fallback targets the foregrounded agent"
         );
     }
-

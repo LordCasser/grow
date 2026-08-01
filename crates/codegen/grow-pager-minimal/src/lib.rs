@@ -11,7 +11,7 @@
 //!   commit-to-scrollback pass.
 //! - [`live`] — the pinned live region (tail + todos + `/btw` + status + prompt).
 //! - [`todo`] — the persistent todo panel shown above the prompt.
-//! - [`auth`] — the in-region sign-in flow shown before a session exists.
+//! - [`startup`] — the in-region folder-trust/startup state before a session exists.
 //! - [`overlay`] — the inline-overlay host (prompt-anchored dropdowns; grows /
 //!   shrinks the live viewport).
 //!
@@ -25,13 +25,13 @@
 //! startup to register this crate's [`draw`] entry point. When the seam is not
 //! installed the pager's minimal-mode branches are inert.
 
-pub mod auth;
 pub mod commit;
 pub mod full_view;
 pub mod live;
 pub mod overlay;
 pub mod panel;
 pub mod plan;
+pub mod startup;
 pub mod todo;
 pub mod welcome;
 

@@ -33,7 +33,7 @@ fn set_mode_then_prompt_only_accepts_an_applied_behavior_change() {
 #[test]
 fn format_acp_error_reads_detail_from_wrapped_data() {
     let bare = acp::Error::invalid_params().data("model does not support tools");
-    assert_eq!(format_acp_error(&bare, false), "model does not support tools");
+    assert_eq!(format_acp_error(&bare), "model does not support tools");
     let wrapped = acp::Error::invalid_params()
         .data(
             serde_json::json!({
@@ -41,7 +41,7 @@ fn format_acp_error_reads_detail_from_wrapped_data() {
             "promptUsage": { "inputTokens": 12, "outputTokens": 0, "numTurns": 1 }
         }),
         );
-    assert_eq!(format_acp_error(&wrapped, false), "model does not support tools");
+    assert_eq!(format_acp_error(&wrapped), "model does not support tools");
 }
 #[test]
 fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
@@ -49,12 +49,10 @@ fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
     let body = "The provider is temporarily at capacity. Please retry shortly.";
     let detailed = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
         .data(format!("API error (status 429 Too Many Requests): {body}"));
-    assert_eq!(format_acp_error(&detailed, false), body);
-    assert_eq!(format_acp_error(&detailed, true), body);
+    assert_eq!(format_acp_error(&detailed), body);
 
     let empty = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited");
-    assert_eq!(format_acp_error(&empty, false), RATE_LIMITED_USER_MESSAGE);
-    assert_eq!(format_acp_error(&empty, true), RATE_LIMITED_USER_MESSAGE);
+    assert_eq!(format_acp_error(&empty), RATE_LIMITED_USER_MESSAGE);
 }
 /// Non-empty token ranges ride the wire block meta as `skillTokenRanges`
 /// byte pairs; the text itself is untouched.
@@ -1432,42 +1430,36 @@ fn make_session_info(
     }
 }
 #[test]
-fn format_session_info_reports_provider_oauth() {
+fn format_session_info_reports_provider_byok() {
     let info = make_session_info("auto", None, 1000, 10000);
-    let text = format_session_info(&info, None, false, false);
-    assert!(text.contains("Auth method: provider OAuth"), "{text}");
-}
-#[test]
-fn format_session_info_reports_provider_api_key() {
-    let info = make_session_info("auto", None, 1000, 10000);
-    let text = format_session_info(&info, None, false, true);
-    assert!(text.contains("Auth method: provider API key"), "{text}");
+    let text = format_session_info(&info, None, false);
+    assert!(text.contains("Auth method: provider BYOK"), "{text}");
 }
 #[test]
 fn format_session_info_shows_conversation_id_when_present() {
     let mut info = make_session_info("auto", None, 1000, 10000);
     info.data.conversation_id = Some("conv_abc123".into());
-    let text = format_session_info(&info, None, false, false);
+    let text = format_session_info(&info, None, false);
     assert!(text.contains("Conversation ID: conv_abc123"));
     assert!(text.contains("Session ID: test-session-id"));
 }
 #[test]
 fn format_session_info_shows_resolved_when_enabled_and_different() {
     let info = make_session_info("grow-4.5", Some("grow-4.3"), 1000, 10000);
-    let text = format_session_info(&info, None, true, false);
+    let text = format_session_info(&info, None, true);
     assert!(text.contains("Model: grow-4.5 (grow-4.3)"));
 }
 #[test]
 fn format_session_info_hides_resolved_when_disabled() {
     let info = make_session_info("grow-4.5", Some("grow-4.3"), 1000, 10000);
-    let text = format_session_info(&info, None, false, false);
+    let text = format_session_info(&info, None, false);
     assert!(text.contains("Model: grow-4.5"));
     assert!(!text.contains("grow-4.3"));
 }
 #[test]
 fn format_session_info_no_parens_when_resolved_matches_requested() {
     let info = make_session_info("grow-4.5", Some("grow-4.5"), 1000, 10000);
-    let text = format_session_info(&info, None, true, false);
+    let text = format_session_info(&info, None, true);
     assert!(text.contains("Model: grow-4.5"));
     assert!(!text.contains("(grow-4.5)"));
 }
@@ -1476,7 +1468,7 @@ fn format_session_info_shows_model_hash_when_catalog_flag_set() {
     let mut info = make_session_info("v9", None, 1000, 10000);
     info.data.model_fingerprint = Some("abc123".into());
     info.data.show_model_fingerprint = true;
-    let text = format_session_info(&info, None, false, false);
+    let text = format_session_info(&info, None, false);
     assert!(text.contains("Model Hash: abc123"));
 }
 #[test]
@@ -1484,7 +1476,7 @@ fn format_session_info_hides_model_hash_for_noncoding_without_flag() {
     let mut info = make_session_info("v9", None, 1000, 10000);
     info.data.model_fingerprint = Some("abc123".into());
     info.data.show_model_fingerprint = false;
-    let text = format_session_info(&info, None, false, false);
+    let text = format_session_info(&info, None, false);
     assert!(!text.contains("Model Hash"));
 }
 #[test]
@@ -1492,7 +1484,7 @@ fn format_session_info_shows_model_hash_for_coding_slug_without_flag() {
     let mut info = make_session_info("grow-build", None, 1000, 10000);
     info.data.model_fingerprint = Some("abc123".into());
     info.data.show_model_fingerprint = false;
-    let text = format_session_info(&info, None, false, false);
+    let text = format_session_info(&info, None, false);
     assert!(text.contains("Model Hash: abc123"));
 }
 #[test]

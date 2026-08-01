@@ -19,29 +19,10 @@ pub(crate) const BUNDLE_SYNC_TTL: Duration = Duration::from_secs(60 * 60);
 ///
 /// Hoisted to a constant so the user-facing wording stays in lockstep
 /// across `sync_bundle`, `sync_bundle_to_root`, and any future call sites.
-pub(crate) const NO_BUNDLE_CREDENTIALS_ERROR: &str =
-    "bundle sync requires either an authenticated cli-chat-proxy session or a deployment key";
-/// Whether the caller has any source of authentication that the
-/// cli-chat-proxy `/v1/subagents/bundle` endpoint will accept.
-///
-/// Centralised so the auth gate predicate stays consistent across:
-/// - `sync_bundle` (user-triggered ACP entrypoint)
-/// - `sync_bundle_to_root` (defense-in-depth on the public function)
-/// - `maybe_sync_bundle_to_root` (proactive wrapper, silent skip on miss)
-/// - `MvpAgent::maybe_sync_bundle_in_background` (post-auth pre-spawn gate)
-///
-/// All four call sites previously inlined the same predicate; a future
-/// auth-source addition (e.g., service-account token) only needs to land
-/// here.
+pub(crate) const NO_BUNDLE_CREDENTIALS_ERROR: &str = "bundle sync requires a deployment key";
 #[inline]
-pub(crate) fn has_bundle_credentials(
-    auth_manager: Option<&std::sync::Arc<crate::auth::AuthManager>>,
-    deployment_key: Option<&str>,
-) -> bool {
-    auth_manager
-        .as_ref()
-        .is_some_and(|am| am.current_or_expired().is_some())
-        || deployment_key.is_some()
+pub(crate) fn has_bundle_credentials(deployment_key: Option<&str>) -> bool {
+    deployment_key.is_some_and(|key| !key.is_empty())
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -123,15 +104,13 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 }
 async fn sync_bundle(agent: &MvpAgent, req: BundleSyncRequest) -> anyhow::Result<BundleSyncResult> {
     let deployment_key = agent.deployment_key();
-    if !has_bundle_credentials(Some(&agent.auth_manager), deployment_key.as_deref()) {
+    if !has_bundle_credentials(deployment_key.as_deref()) {
         anyhow::bail!(NO_BUNDLE_CREDENTIALS_ERROR);
     }
     sync_bundle_to_root(
         &bundle::bundled_root(),
         &agent.cli_chat_proxy_base_url(),
-        Some(&agent.auth_manager),
         deployment_key.as_deref(),
-        agent.alpha_test_key().as_deref(),
         req.force,
     )
     .await
@@ -163,7 +142,7 @@ pub(crate) fn bundle_cache_is_fresh(root: &Path, ttl: Duration) -> bool {
     }
     matches!(bundle::read_cached_manifest(root), Ok(Some(_)))
 }
-/// Proactive variant of [`sync_bundle_to_root`] that respects an auth gate
+/// Proactive variant of [`sync_bundle_to_root`] that respects the credential gate
 /// and a TTL guard.
 ///
 /// Returns:
@@ -173,14 +152,12 @@ pub(crate) fn bundle_cache_is_fresh(root: &Path, ttl: Duration) -> bool {
 pub(crate) async fn maybe_sync_bundle_to_root(
     root: &Path,
     proxy_base_url: &str,
-    auth_manager: Option<&std::sync::Arc<crate::auth::AuthManager>>,
     deployment_key: Option<&str>,
-    alpha_test_key: Option<&str>,
     force: bool,
     ttl: Duration,
 ) -> anyhow::Result<Option<BundleSyncResult>> {
-    if !has_bundle_credentials(auth_manager, deployment_key) {
-        tracing::debug!("proactive bundle sync skipped: no auth and no deployment key");
+    if !has_bundle_credentials(deployment_key) {
+        tracing::debug!("proactive bundle sync skipped: no deployment key");
         return Ok(None);
     }
     if !force && bundle_cache_is_fresh(root, ttl) {
@@ -190,30 +167,20 @@ pub(crate) async fn maybe_sync_bundle_to_root(
         );
         return Ok(None);
     }
-    sync_bundle_to_root(
-        root,
-        proxy_base_url,
-        auth_manager,
-        deployment_key,
-        alpha_test_key,
-        force,
-    )
-    .await
-    .map(Some)
+    sync_bundle_to_root(root, proxy_base_url, deployment_key, force)
+        .await
+        .map(Some)
 }
 pub(crate) async fn sync_bundle_to_root(
     root: &Path,
     proxy_base_url: &str,
-    auth_manager: Option<&std::sync::Arc<crate::auth::AuthManager>>,
     deployment_key: Option<&str>,
-    alpha_test_key: Option<&str>,
     _force: bool,
 ) -> anyhow::Result<BundleSyncResult> {
-    if !has_bundle_credentials(auth_manager, deployment_key) {
+    if !has_bundle_credentials(deployment_key) {
         anyhow::bail!(NO_BUNDLE_CREDENTIALS_ERROR);
     }
-    let fetched =
-        fetch_bundle(proxy_base_url, auth_manager, deployment_key, alpha_test_key).await?;
+    let fetched = fetch_bundle(proxy_base_url, deployment_key).await?;
     match fetched {
         FetchedBundle::Archive(bytes) => {
             let root_owned = root.to_path_buf();
@@ -462,47 +429,9 @@ mod tests {
             .insert("review".to_string(), "# Review skill\n".to_string());
         bundle
     }
-    fn test_auth() -> crate::auth::ProviderAuth {
-        crate::auth::ProviderAuth {
-            key: "token".to_string(),
-            auth_mode: crate::auth::AuthMode::Oidc,
-            create_time: chrono::Utc::now(),
-            user_id: "user-1".to_string(),
-            email: Some("test@example.com".to_string()),
-            first_name: None,
-            last_name: None,
-            profile_image_asset_id: None,
-            principal_type: None,
-            principal_id: None,
-            team_id: None,
-            team_name: None,
-            team_role: None,
-            organization_id: None,
-            organization_name: None,
-            organization_role: None,
-            user_blocked_reason: None,
-            team_blocked_reasons: vec![],
-            refresh_token: None,
-            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
-            oidc_issuer: None,
-            oidc_client_id: None,
-        }
-    }
-    fn test_auth_manager() -> Arc<crate::auth::AuthManager> {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr =
-            crate::auth::AuthManager::new(dir.path(), crate::auth::ServiceAuthConfig::default());
-        mgr.hot_swap(test_auth());
-        std::mem::forget(dir);
-        Arc::new(mgr)
-    }
     #[derive(Debug, Default, Clone)]
     struct SeenHeaders {
         authorization: Option<String>,
-        token_auth: Option<String>,
-        user_id: Option<String>,
-        email: Option<String>,
-        alpha_test_key: Option<String>,
     }
     #[derive(Clone)]
     struct BundleServerState {
@@ -536,22 +465,6 @@ mod tests {
                                 .get("authorization")
                                 .and_then(|v| v.to_str().ok())
                                 .map(str::to_owned),
-                            token_auth: headers
-                                .get("x-grow-token-auth")
-                                .and_then(|v| v.to_str().ok())
-                                .map(str::to_owned),
-                            user_id: headers
-                                .get("x-userid")
-                                .and_then(|v| v.to_str().ok())
-                                .map(str::to_owned),
-                            email: headers
-                                .get("x-email")
-                                .and_then(|v| v.to_str().ok())
-                                .map(str::to_owned),
-                            alpha_test_key: {
-                                let _ = &headers;
-                                None
-                            },
                         });
                         (state.status_code, axum::Json(state.body))
                     },
@@ -611,8 +524,7 @@ mod tests {
             serde_json::to_value(&bundle).unwrap(),
         )
         .await;
-        let am = test_auth_manager();
-        let result = sync_bundle_to_root(&root, &proxy_base_url, Some(&am), None, None, false)
+        let result = sync_bundle_to_root(&root, &proxy_base_url, Some("deploy-key"), false)
             .await
             .unwrap();
         assert_eq!(result.version, "bundle-v1");
@@ -633,11 +545,10 @@ mod tests {
         let bundle = sample_bundle();
         let (proxy_base_url, _seen_headers, server) =
             start_bundle_server(StatusCode::OK, serde_json::to_value(&bundle).unwrap()).await;
-        let am = test_auth_manager();
-        let normal = sync_bundle_to_root(&root, &proxy_base_url, Some(&am), None, None, false)
+        let normal = sync_bundle_to_root(&root, &proxy_base_url, Some("deploy-key"), false)
             .await
             .unwrap();
-        let forced = sync_bundle_to_root(&root, &proxy_base_url, Some(&am), None, None, true)
+        let forced = sync_bundle_to_root(&root, &proxy_base_url, Some("deploy-key"), true)
             .await
             .unwrap();
         assert_eq!(forced, normal);
@@ -653,8 +564,7 @@ mod tests {
             serde_json::json!({"error": "unauthorized"}),
         )
         .await;
-        let am = test_auth_manager();
-        let error = sync_bundle_to_root(&root, &proxy_base_url, Some(&am), None, None, false)
+        let error = sync_bundle_to_root(&root, &proxy_base_url, Some("deploy-key"), false)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("401"));
@@ -668,25 +578,13 @@ mod tests {
         let bundle = sample_bundle();
         let (proxy_base_url, seen_headers, server) =
             start_bundle_server(StatusCode::OK, serde_json::to_value(&bundle).unwrap()).await;
-        let am = test_auth_manager();
-        let result = sync_bundle_to_root(
-            &root,
-            &proxy_base_url,
-            Some(&am),
-            Some("deploy-key"),
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        let result = sync_bundle_to_root(&root, &proxy_base_url, Some("deploy-key"), false)
+            .await
+            .unwrap();
         assert_eq!(result.version, "bundle-v1");
         let headers = seen_headers.lock().unwrap();
         let headers = headers.last().unwrap();
         assert_eq!(headers.authorization.as_deref(), Some("Bearer deploy-key"));
-        assert_eq!(headers.token_auth, None);
-        assert_eq!(headers.user_id, None);
-        assert_eq!(headers.email, None);
-        assert_eq!(headers.alpha_test_key, None);
         server.abort();
     }
     #[test]
@@ -738,21 +636,17 @@ mod tests {
     }
     #[test]
     #[serial]
-    fn sync_requires_auth_or_deployment_key() {
+    fn sync_requires_deployment_key() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("bundled");
         let error = futures::executor::block_on(sync_bundle_to_root(
             &root,
             "http://127.0.0.1:1/v1",
             None,
-            None,
-            None,
             false,
         ))
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("bundle sync requires either an authenticated cli-chat-proxy session or a deployment key"));
+        assert!(error.to_string().contains(NO_BUNDLE_CREDENTIALS_ERROR));
     }
     #[test]
     #[serial]
@@ -879,16 +773,9 @@ mod tests {
         let bundle = sample_bundle_with_skills();
         let (proxy_base_url, _seen_headers, server) =
             start_bundle_server(StatusCode::OK, serde_json::to_value(&bundle).unwrap()).await;
-        let result = sync_bundle_to_root(
-            &root,
-            &proxy_base_url,
-            Some(&test_auth_manager()),
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        let result = sync_bundle_to_root(&root, &proxy_base_url, Some("deploy-key"), false)
+            .await
+            .unwrap();
         assert_eq!(result.skills_count, 2);
         assert_eq!(result.personas_count, 1);
         assert_eq!(result.roles_count, 1);
@@ -953,16 +840,9 @@ mod tests {
             ("skills/commit/SKILL.md", b"# Commit skill"),
         ]);
         let (proxy_base_url, server) = start_archive_bundle_server(archive).await;
-        let result = sync_bundle_to_root(
-            &root,
-            &proxy_base_url,
-            Some(&test_auth_manager()),
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        let result = sync_bundle_to_root(&root, &proxy_base_url, Some("deploy-key"), false)
+            .await
+            .unwrap();
         assert_eq!(result.version, "archive-v1");
         assert_eq!(result.personas_count, 1);
         assert_eq!(result.roles_count, 1);
@@ -980,16 +860,9 @@ mod tests {
         let bundle = sample_bundle_with_skills();
         let (proxy_base_url, _seen_headers, server) =
             start_bundle_server(StatusCode::OK, serde_json::to_value(&bundle).unwrap()).await;
-        let result = sync_bundle_to_root(
-            &root,
-            &proxy_base_url,
-            Some(&test_auth_manager()),
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        let result = sync_bundle_to_root(&root, &proxy_base_url, Some("deploy-key"), false)
+            .await
+            .unwrap();
         assert_eq!(result.version, "bundle-v1");
         assert_eq!(result.personas_count, 1);
         assert_eq!(result.skills_count, 2);
@@ -1007,7 +880,7 @@ mod tests {
             .expect("set manifest mtime");
     }
     #[tokio::test(flavor = "current_thread")]
-    async fn maybe_sync_skips_without_auth_or_deployment_key() {
+    async fn maybe_sync_skips_without_deployment_key() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("bundled");
         let (proxy_base_url, seen_headers, server) = start_bundle_server(
@@ -1015,21 +888,14 @@ mod tests {
             serde_json::to_value(sample_bundle()).unwrap(),
         )
         .await;
-        let result = maybe_sync_bundle_to_root(
-            &root,
-            &proxy_base_url,
-            None,
-            None,
-            None,
-            false,
-            BUNDLE_SYNC_TTL,
-        )
-        .await
-        .unwrap();
+        let result =
+            maybe_sync_bundle_to_root(&root, &proxy_base_url, None, false, BUNDLE_SYNC_TTL)
+                .await
+                .unwrap();
         assert!(result.is_none(), "expected sync skipped");
         assert!(
             seen_headers.lock().unwrap().is_empty(),
-            "auth-gated sync must not hit the network"
+            "credential-gated sync must not hit the network"
         );
         server.abort();
     }
@@ -1046,9 +912,7 @@ mod tests {
         let result = maybe_sync_bundle_to_root(
             &root,
             &proxy_base_url,
-            Some(&test_auth_manager()),
-            None,
-            None,
+            Some("deploy-key"),
             false,
             BUNDLE_SYNC_TTL,
         )
@@ -1075,9 +939,7 @@ mod tests {
         let outcome = maybe_sync_bundle_to_root(
             &root,
             &proxy_base_url,
-            Some(&test_auth_manager()),
-            None,
-            None,
+            Some("deploy-key"),
             false,
             BUNDLE_SYNC_TTL,
         )
@@ -1101,9 +963,7 @@ mod tests {
         let outcome = maybe_sync_bundle_to_root(
             &root,
             &proxy_base_url,
-            Some(&test_auth_manager()),
-            None,
-            None,
+            Some("deploy-key"),
             true,
             BUNDLE_SYNC_TTL,
         )
@@ -1126,9 +986,7 @@ mod tests {
         let outcome = maybe_sync_bundle_to_root(
             &root,
             &proxy_base_url,
-            Some(&test_auth_manager()),
-            None,
-            None,
+            Some("deploy-key"),
             false,
             BUNDLE_SYNC_TTL,
         )

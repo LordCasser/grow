@@ -50,18 +50,9 @@ impl SessionActor {
                 stream_tool_calls: Some(sampling_config.stream_tool_calls),
             });
         let existing = self.chat_state_handle.get_credentials().await;
-        let session_key = self
-            .auth_manager
-            .as_ref()
-            .and_then(|am| am.current_or_expired().map(|a| a.key));
         self.chat_state_handle
             .update_credentials(grow_chat_state::Credentials {
                 api_key: sampling_config.api_key.clone(),
-                auth_type: crate::agent::config::resolve_chat_state_auth_type(
-                    sampling_config.model.as_str(),
-                    session_key.as_deref(),
-                    existing.auth_type,
-                ),
                 alpha_test_key: existing.alpha_test_key,
             });
         self.invalidate_model_auth_memo();

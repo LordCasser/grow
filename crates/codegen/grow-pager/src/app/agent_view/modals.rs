@@ -281,7 +281,7 @@ impl AgentView {
             }
             ButtonAction::ToggleSelectedMcpServer
             | ButtonAction::RemoveSelectedMcpServer
-            | ButtonAction::McpAuthTrigger => {
+            | ButtonAction::SetupSelectedMcpServer => {
                 let TabDataState::Loaded(ref servers) = state.mcps_data else {
                     return (None, None);
                 };
@@ -521,21 +521,6 @@ impl AgentView {
                         .and_then(|k| k.as_ref())
                         .cloned()
                     {
-                        if state.mcp_auth_intercept_on_expand() {
-                            let (target, enabled) = Self::extensions_action_target(
-                                state,
-                                &crate::views::extensions_modal::ButtonAction::McpAuthTrigger,
-                            );
-                            self.log_extensions_modal_action_with(
-                                "auth",
-                                grow_diagnostics::events::ExtensionsInputMethod::Keyboard,
-                                target,
-                                enabled,
-                            );
-                            return self.execute_modal_button_action(
-                                crate::views::extensions_modal::ButtonAction::McpAuthTrigger,
-                            );
-                        }
                         if self.extensions_modal_set_collapsed(sel, &gk, false) {
                             self.log_extensions_modal_action(
                                 "expand",
@@ -718,9 +703,7 @@ impl AgentView {
             }
             crate::views::picker::PickerOutcome::Selected(_)
             | crate::views::picker::PickerOutcome::Expand(_) => self
-                .extensions_modal_expand_or_auth(
-                    grow_diagnostics::events::ExtensionsInputMethod::Keyboard,
-                ),
+                .extensions_modal_expand(grow_diagnostics::events::ExtensionsInputMethod::Keyboard),
             crate::views::picker::PickerOutcome::Collapse(_) => {
                 self.extensions_modal_toggle_fold(
                     grow_diagnostics::events::ExtensionsInputMethod::Keyboard,
@@ -945,7 +928,7 @@ impl AgentView {
 
         // Modal overlay covers picker rows but not their hit-rects: dismiss
         // on any mouse-down so a click-through doesn't re-trigger the row
-        // underneath (which can re-fire OAuth on [needs auth] rows).
+        // underneath (which can re-fire actions on the selected row).
         if state.modal_message.is_some()
             && matches!(
                 mouse.kind,
@@ -1082,10 +1065,9 @@ impl AgentView {
                 InputOutcome::Changed
             }
             crate::views::picker::PickerOutcome::Selected(_)
-            | crate::views::picker::PickerOutcome::Expand(_) => self
-                .extensions_modal_expand_or_auth(
-                    grow_diagnostics::events::ExtensionsInputMethod::Mouse,
-                ),
+            | crate::views::picker::PickerOutcome::Expand(_) => {
+                self.extensions_modal_expand(grow_diagnostics::events::ExtensionsInputMethod::Mouse)
+            }
             crate::views::picker::PickerOutcome::NonSelectableClick(idx) => {
                 self.extensions_modal_toggle_mcp_section_at(
                     idx,
@@ -1174,31 +1156,11 @@ impl AgentView {
             .collect()
     }
 
-    /// Expand/collapse the selected row, or trigger MCP OAuth when the server needs auth.
-    fn extensions_modal_expand_or_auth(
+    /// Expand or collapse the selected row.
+    fn extensions_modal_expand(
         &mut self,
         input_method: grow_diagnostics::events::ExtensionsInputMethod,
     ) -> InputOutcome {
-        if self
-            .extensions_modal
-            .as_ref()
-            .is_some_and(|s| s.mcp_auth_intercept_on_expand())
-        {
-            let (target, enabled) = self
-                .extensions_modal
-                .as_ref()
-                .map(|s| {
-                    Self::extensions_action_target(
-                        s,
-                        &crate::views::extensions_modal::ButtonAction::McpAuthTrigger,
-                    )
-                })
-                .unwrap_or((None, None));
-            self.log_extensions_modal_action_with("auth", input_method, target, enabled);
-            return self.execute_modal_button_action(
-                crate::views::extensions_modal::ButtonAction::McpAuthTrigger,
-            );
-        }
         self.extensions_modal_toggle_fold(input_method);
         InputOutcome::Changed
     }
@@ -1404,13 +1366,9 @@ impl AgentView {
                 }
                 InputOutcome::Action(Action::ExecutePluginsAction(plugins_action))
             }
-            ButtonAction::McpAuthTrigger => {
+            ButtonAction::SetupSelectedMcpServer => {
                 if let Some(ref mut state) = self.extensions_modal {
                     state.modal_message = None;
-                    // `selected_data_index()` resolves to the parent server for
-                    // both server and tool rows, so `i` from a tool row
-                    // intentionally auths the parent. (Mouse path is stricter
-                    // to avoid accidental clicks on indented rows.)
                     if let TabDataState::Loaded(ref servers) = state.mcps_data
                         && let Some(idx) = state.selected_data_index()
                         && let Some(server) = servers.get(idx)
@@ -1423,18 +1381,6 @@ impl AgentView {
                             state.picker_state.search_active = false;
                             return InputOutcome::Changed;
                         }
-                        // Drop repeats while an action is in flight on the same
-                        // row to avoid double-spawning the OAuth browser flow.
-                        let sel = state.picker_state.selected;
-                        if state.pending_action.is_some() && state.pending_entry_index == Some(sel)
-                        {
-                            return InputOutcome::Unchanged;
-                        }
-                        state.pending_action = Some("authenticating...".into());
-                        state.pending_entry_index = Some(sel);
-                        return InputOutcome::Action(Action::McpAuthTrigger {
-                            server_name: server.name.clone(),
-                        });
                     }
                 }
                 InputOutcome::Changed
@@ -2151,7 +2097,6 @@ mod extensions_action_target_tests {
             display_name: None,
             status: crate::views::mcps_modal::McpServerDisplayStatus::Initializing,
             tool_count: 0,
-            auth_required: false,
             setup_required: false,
             setup: None,
             setup_values: std::collections::HashMap::new(),
@@ -2305,7 +2250,7 @@ mod extensions_action_target_tests {
     }
 
     #[test]
-    fn mcp_toggle_auth_remove_resolve_server_name() {
+    fn mcp_toggle_setup_remove_resolve_server_name() {
         let mut modal = ExtensionsModalState::new(ExtensionsTab::McpServers);
         modal.mcps_data = TabDataState::Loaded(vec![server_info("my-server", false)]);
         modal.entry_data_indices = vec![Some(0)];
@@ -2318,7 +2263,7 @@ mod extensions_action_target_tests {
         assert_eq!(enabled, Some(true));
 
         let (target, enabled) =
-            AgentView::extensions_action_target(&modal, &ButtonAction::McpAuthTrigger);
+            AgentView::extensions_action_target(&modal, &ButtonAction::SetupSelectedMcpServer);
         assert_eq!(target.as_deref(), Some("my-server"));
         assert_eq!(enabled, None);
 
@@ -2760,7 +2705,6 @@ mod extensions_modal_confirmation_tests {
             display_name: None,
             status: crate::views::mcps_modal::McpServerDisplayStatus::Initializing,
             tool_count: 0,
-            auth_required: false,
             setup_required: false,
             setup: None,
             setup_values: std::collections::HashMap::new(),

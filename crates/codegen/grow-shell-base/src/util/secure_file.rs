@@ -44,8 +44,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 /// ```ignore
 /// use grow_shell_base::util::secure_file::write_secure_file;
 ///
-/// let token = "secret_token";
-/// write_secure_file("/path/to/auth.json", token.as_bytes())?;
+/// let policy = "managed = true";
+/// write_secure_file("/path/to/managed-policy.json", policy.as_bytes())?;
 /// ```
 pub fn write_secure_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     // Ensure parent directory exists
@@ -91,7 +91,7 @@ pub fn open_secure_file(path: &Path) -> io::Result<File> {
 /// propagate so callers can fail closed when tightening a secret store.
 ///
 /// Use on **load** of credential files so a hand-copied or restored
-/// world-readable `auth.json` is tightened before the process continues.
+/// a world-readable managed-policy file is tightened before the process continues.
 pub fn ensure_owner_only_permissions(path: &Path) -> io::Result<()> {
     match ensure_owner_only_permissions_inner(path) {
         Ok(()) => Ok(()),

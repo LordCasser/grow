@@ -123,8 +123,7 @@ pub struct MemoryBackendParams {
 }
 
 impl MemoryBackendParams {
-    /// Async so `current_api_key_async` can drive the AuthManager
-    /// refresh chain; reindex loops outlive the OIDC TTL.
+    /// Async because command-backed BYOK providers resolve per request.
     pub async fn make_embedding_provider(&self) -> Option<super::embedding::ApiEmbeddingProvider> {
         build_embedding_provider(
             self.embed_config.as_ref(),
@@ -1336,9 +1335,8 @@ mod tests {
         );
     }
 
-    /// A trusted, URL-matching endpoint builds the provider from the
-    /// refresh-capable session credential and never consults the per-call
-    /// api-key provider. The api-key provider panics if resolved.
+    /// A trusted, URL-matching endpoint uses its scoped BYOK credential and
+    /// never consults the fallback API-key provider.
     #[tokio::test]
     async fn test_trusted_endpoint_prefers_session_credential() {
         struct StubAuth;
@@ -1351,13 +1349,9 @@ mod tests {
                 builder
             }
         }
-        #[async_trait::async_trait]
         impl grow_auth::AuthCredentialProvider for StubAuth {
             fn snapshot(&self) -> grow_auth::CredentialSnapshot {
                 grow_auth::CredentialSnapshot::default()
-            }
-            async fn refresh_after_unauthorized(&self) -> bool {
-                false
             }
         }
 

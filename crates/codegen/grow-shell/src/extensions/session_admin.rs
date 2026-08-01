@@ -13,7 +13,6 @@
 //! - `grow/internal/reload_skills`          skills file watcher fan-out
 //! - `grow/internal/reload_models`          model list hot-reload from config.toml
 //! - `grow/internal/reload_announcements`   local announcement hot-reload
-//! - `grow/internal/auth_cleared`           auth hot-clear cleanup
 //! - `grow/plugins/reload`                  rebuild shared plugin registry
 //! - `grow/commands/list`                   list slash commands
 
@@ -46,7 +45,6 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "grow/internal/reload_workflows" => handle_reload_workflows(agent),
         "grow/internal/reload_models" => handle_reload_models(agent),
         "grow/internal/reload_announcements" => handle_reload_announcements(agent, args),
-        "grow/internal/auth_cleared" => handle_auth_cleared(agent),
         "grow/plugins/reload" => handle_plugins_reload(agent).await,
         "grow/commands/list" => handle_commands_list(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
@@ -445,18 +443,9 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     let merged_config = agent.cfg.borrow().clone();
 
     agent.models_manager.apply_config(merged_config);
-    agent.sync_process_static_api_key(None);
-
     let count = agent.models_manager.models().len();
     tracing::info!(count, "model list reloaded from config.toml");
     ExtMethodResult::success(serde_json::json!({ "models": count }))
-        .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
-}
-
-fn handle_auth_cleared(agent: &MvpAgent) -> ExtResult {
-    agent.disable_managed_gateway_tools_and_refresh_sessions();
-    ExtMethodResult::success(serde_json::json!({ "ok": true }))
         .to_ext_response()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
@@ -514,7 +503,6 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
             compat,
             false,
             Some("chat"),
-            Some(agent.auth_manager.clone()),
         )
         .await?;
         return Ok(acp::ExtResponse::new(Arc::from(
@@ -581,7 +569,6 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         compat,
         false,
         req.kind.as_deref(),
-        Some(agent.auth_manager.clone()),
     )
     .await?;
     Ok(acp::ExtResponse::new(Arc::from(

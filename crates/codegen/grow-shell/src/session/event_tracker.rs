@@ -130,7 +130,7 @@ impl EventTracker {
             tool_call_id,
             dispatch_duration_ms,
         });
-        // Re-entry (e.g. after reauth adds retry wall time) only refreshes duration.
+        // Re-entry after a retry only refreshes duration.
         if is_new {
             self.turn_tool_count.set(self.turn_tool_count.get() + 1);
         }

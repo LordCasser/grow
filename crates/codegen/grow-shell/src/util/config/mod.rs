@@ -1,5 +1,3 @@
-// `McpOAuthConfig` / `McpOAuthConfigMap` re-exported via `mcp` (see `mcp.rs`).
-
 mod announcements;
 mod campaigns;
 mod hints;

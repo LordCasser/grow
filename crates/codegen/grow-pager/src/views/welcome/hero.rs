@@ -404,7 +404,6 @@ pub(super) fn render_hero(
         layout.version,
         buf,
         theme,
-        None,
         0,
         super::VersionBadgeMode::HeroInline,
     );

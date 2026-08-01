@@ -248,11 +248,7 @@ pub async fn dispatch_mcp_tool(
             .0
             .call_tool(&source.call_id, tool_input, caller)
             .await?;
-        tracing::debug!(
-            tool_name = %tool_name,
-            reauth = response.connectors_needing_reauth.len(),
-            "Managed MCP gateway tool call completed"
-        );
+        tracing::debug!(tool_name = %tool_name, "Managed MCP gateway tool call completed");
         return Ok(gateway_response_to_output(
             tool_name,
             source,
@@ -629,7 +625,6 @@ mod tests {
             *self.captured.lock().unwrap() = Some(arguments);
             Ok(crate::types::resources::ManagedGatewayToolCallResponse {
                 result: self.result.clone(),
-                connectors_needing_reauth: vec![],
             })
         }
     }

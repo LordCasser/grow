@@ -1,34 +1,13 @@
 //! Model auth providers (`[auth_provider.<name>]`).
 //!
-//! A model opts in with `auth_provider = "<name>"`; the named table declares
-//! either a command credential helper or an OAuth provider. Both resolve to a
-//! bearer token through the same cache and request path.
+//! A model opts in with `auth_provider = "<name>"`; the named table declares a
+//! command credential helper that returns a user-owned API key.
 //!
 //! The minted token stays in memory only ([`AUTH_PROVIDER_SLOTS`] and chat
-//! state, never `auth.json`); the command is a credential helper that owns its
-//! own durable storage and OAuth2 refresh. See "Where model auth providers fit
-//! (and don't)"
-//! in `docs/internal/AUTH.md`.
-//!
-//! This is distinct from the `AuthCredentialProvider` HTTP consumers in
-//! [`crate::auth::credential_provider`].
+//! state, never a persistent account store). Grow does not own login or token
+//! lifecycle state; a helper is only an alternate way to read BYOK material.
 
 use super::token_output::{expiry_after_seconds, parse_token_output};
-
-fn default_oauth_scopes() -> Vec<String> {
-    ["openid", "profile", "email", "offline_access"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthProviderKind {
-    #[default]
-    Command,
-    Oauth,
-}
 
 /// One named `[auth_provider.<name>]` table, honored only from the trusted
 /// config layers (`parse_auth_providers`). A new field here needs a
@@ -36,10 +15,6 @@ pub enum AuthProviderKind {
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(default)]
 pub struct AuthProviderConfig {
-    /// Credential mechanism. `command` is the default; `oauth` uses the
-    /// issuer/client configuration below and `grow login <provider>`.
-    #[serde(rename = "type")]
-    pub kind: AuthProviderKind,
     /// Command to run; without `args` it uses the platform shell, with `args` it execs directly.
     pub command: String,
     /// Command arguments; when set (even empty) the command execs directly.
@@ -50,49 +25,11 @@ pub struct AuthProviderConfig {
     pub timeout_secs: Option<u64>,
     /// Working directory for the command; a leading `~` expands to home.
     pub cwd: Option<String>,
-    /// OAuth/OIDC issuer URL (`type = "oauth"`).
-    pub issuer: Option<String>,
-    /// Public OAuth client ID (`type = "oauth"`).
-    pub client_id: Option<String>,
-    /// OAuth scopes requested during login.
-    #[serde(default = "default_oauth_scopes")]
-    pub scopes: Vec<String>,
 }
 
 impl AuthProviderConfig {
     pub(crate) fn is_usable(&self) -> bool {
-        match self.kind {
-            AuthProviderKind::Command => !self.command.trim().is_empty(),
-            AuthProviderKind::Oauth => {
-                self.issuer.as_deref().is_some_and(|v| !v.trim().is_empty())
-                    && self
-                        .client_id
-                        .as_deref()
-                        .is_some_and(|v| !v.trim().is_empty())
-            }
-        }
-    }
-
-    pub fn is_oauth(&self) -> bool {
-        self.kind == AuthProviderKind::Oauth
-    }
-
-    pub(crate) fn oauth_service_config(&self) -> Option<super::ServiceAuthConfig> {
-        if !self.is_oauth() || !self.is_usable() {
-            return None;
-        }
-        let mut service = super::ServiceAuthConfig::default();
-        service.oidc = None;
-        service.oauth2 = Some(super::OAuth2ProviderConfig {
-            issuer: self.issuer.as_deref()?.trim().to_owned(),
-            client_id: self.client_id.as_deref()?.trim().to_owned(),
-            scopes: self.scopes.clone(),
-            principal_type: None,
-            principal_id: None,
-            referrer: Some("grow".to_owned()),
-        });
-        service.auth_provider_command = None;
-        Some(service)
+        !self.command.trim().is_empty()
     }
 }
 
@@ -211,8 +148,6 @@ impl std::fmt::Debug for AuthProviderRef {
 
 struct MintedProviderToken {
     token: String,
-    /// Handed back to the command on the next run; never sent on the wire.
-    refresh_token: Option<String>,
     /// Drives the 401 fresh-mint guard.
     minted_at: std::time::Instant,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -266,37 +201,15 @@ const PROVIDER_STDERR_CAP_BYTES: u64 = 64 << 10; // 64 KiB
 /// (editing it never invalidates).
 fn token_identity(
     config: &AuthProviderConfig,
-) -> (
-    AuthProviderKind,
-    &str,
-    Option<&[String]>,
-    Option<u64>,
-    Option<&str>,
-    Option<&str>,
-    Option<&str>,
-    &[String],
-) {
+) -> (&str, Option<&[String]>, Option<u64>, Option<&str>) {
     let AuthProviderConfig {
-        kind,
         command,
         args,
         token_ttl_secs,
         timeout_secs: _,
         cwd,
-        issuer,
-        client_id,
-        scopes,
     } = config;
-    (
-        *kind,
-        command,
-        args.as_deref(),
-        *token_ttl_secs,
-        cwd.as_deref(),
-        issuer.as_deref(),
-        client_id.as_deref(),
-        scopes,
-    )
+    (command, args.as_deref(), *token_ttl_secs, cwd.as_deref())
 }
 
 fn minted_token_is_stale(minted: &MintedProviderToken, config: &AuthProviderConfig) -> bool {
@@ -435,34 +348,6 @@ async fn mint_provider_token(
 
     let name = &provider.name;
     let config = &provider.config;
-    if config.is_oauth() {
-        let service = config.oauth_service_config().ok_or_else(|| {
-            anyhow::anyhow!("OAuth provider requires non-empty issuer and client_id")
-        })?;
-        let manager = std::sync::Arc::new(super::AuthManager::new_scoped(
-            &crate::util::grow_home::grow_home(),
-            service.clone(),
-            format!("provider::{name}"),
-        ));
-        manager.configure_refresher(None);
-        if mark_expired {
-            let _ = manager
-                .try_recover_unauthorized(super::recovery::RecoverySource::Background)
-                .await;
-        }
-        let auth = manager.auth().await.map_err(|error| {
-            anyhow::anyhow!(
-                "OAuth credentials unavailable for provider '{name}': {error}; run `grow login {name}`"
-            )
-        })?;
-        return Ok(MintedProviderToken {
-            token: auth.key,
-            refresh_token: None,
-            minted_at: std::time::Instant::now(),
-            expires_at: auth.expires_at,
-            minted_with: config.clone(),
-        });
-    }
     // Clamp to [1, ceiling]: the slot lock is held across the run, so an
     // unbounded timeout would let one hung helper stall every turn sharing this
     // provider name. The ceiling is a hard bound, not just a parse warning.
@@ -506,13 +391,10 @@ async fn mint_provider_token(
     if mark_expired {
         cmd.env("GROW_AUTH_EXPIRED", "1");
     }
-    // Git-credential-helper handback: give the command the last stored
-    // credential so it can refresh instead of re-authenticating.
+    // Give the helper its previous result as context. The helper remains a
+    // BYOK reader, not an account or credential-rotation protocol.
     if let Some(prev) = previous {
         cmd.env("GROW_AUTH_PROVIDER_ACCESS_TOKEN", &prev.token);
-        if let Some(refresh) = &prev.refresh_token {
-            cmd.env("GROW_AUTH_PROVIDER_REFRESH_TOKEN", refresh);
-        }
         if let Some(expires_at) = prev.expires_at {
             cmd.env("GROW_AUTH_PROVIDER_EXPIRES_AT", expires_at.to_rfc3339());
         }
@@ -536,8 +418,7 @@ async fn mint_provider_token(
     };
     let expires_at = parsed
         .expires_at
-        .or_else(|| config.token_ttl_secs.and_then(expiry_after_seconds))
-        .or_else(|| crate::auth::parse_jwt_expiration(&parsed.access_token));
+        .or_else(|| config.token_ttl_secs.and_then(expiry_after_seconds));
     tracing::info!(
         provider = %name,
         mark_expired,
@@ -546,7 +427,6 @@ async fn mint_provider_token(
     );
     Ok(MintedProviderToken {
         token: parsed.access_token,
-        refresh_token: parsed.refresh_token,
         minted_at: std::time::Instant::now(),
         expires_at,
         minted_with: config.clone(),
@@ -626,10 +506,25 @@ impl AuthProviderRef {
             .map(|m| m.token.clone())
     }
 
+    /// Request-time view of the provider slot. A provider-backed request must
+    /// use this resolver so a token rotated between sampler construction and
+    /// request construction replaces the chat-state snapshot. An empty/stale
+    /// slot deliberately yields no credential instead of falling back to a
+    /// rejected key.
+    pub(crate) fn bearer_resolver(&self) -> grow_sampler::SharedBearerResolver {
+        #[derive(Debug)]
+        struct Resolver(AuthProviderRef);
+        impl grow_sampler::BearerResolver for Resolver {
+            fn current_bearer(&self) -> Option<String> {
+                self.0.cached_token()
+            }
+        }
+        std::sync::Arc::new(Resolver(self.clone()))
+    }
+
     /// The token that should replace `current_key` on the wire: serves the
-    /// fresh cached token when chat-state lags behind a rotation, mints when
-    /// the cache is cold or stale. Mints or rotates a bearer; unrelated to an
-    /// OAuth refresh token.
+    /// fresh cached key when chat-state lags behind a rotation, and invokes the
+    /// helper when the cache is cold or stale.
     pub(crate) async fn ensure_fresh_token(
         &self,
         current_key: Option<&str>,
@@ -697,8 +592,8 @@ impl AuthProviderRef {
                 );
                 // The server rejected the cached token and the re-mint failed;
                 // mark it stale so it is not re-served next turn (fail closed).
-                // The entry stays so its refresh token still feeds the next
-                // handback attempt.
+                // Keep the rejected value only as helper context; it is marked
+                // stale and can never be served on the wire again.
                 if let Some(minted) = slot.as_mut() {
                     minted.expires_at = Some(chrono::Utc::now());
                 }

@@ -770,7 +770,6 @@ pub(crate) async fn list_commands(
     compat: grow_tools::types::compat::CompatConfig,
     include_project_workflows: bool,
     kind: Option<&str>,
-    auth: Option<std::sync::Arc<crate::auth::AuthManager>>,
 ) -> Result<ListCommandsResponse, acp::Error> {
     if kind == Some("chat") {
         return Err(acp::Error::invalid_params()

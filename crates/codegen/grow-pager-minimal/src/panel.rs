@@ -557,7 +557,6 @@ mod tests {
             display_name: None,
             status,
             tool_count: tools,
-            auth_required: false,
             setup_required: false,
             setup: None,
             setup_values: std::collections::HashMap::new(),

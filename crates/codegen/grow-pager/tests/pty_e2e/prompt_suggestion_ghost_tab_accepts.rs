@@ -25,8 +25,7 @@ async fn prompt_suggestion_ghost_tab_accepts() {
     // The suggestion model (`grow-build-0.1`, the shell's built-in default)
     // must be in the mock catalog: the shell catalog-guards the effective
     // suggestion model and *skips the request entirely* when it is not
-    // sampleable (`prompt_suggest::effective_suggest_model`), exactly as it
-    // does for OAuth users whose catalogs exclude it. Listing it exercises
+    // sampleable (`prompt_suggest::effective_suggest_model`). Listing it exercises
     // the real guarded path end-to-end: pager hints the model from its
     // catalog → shell guard passes → request fires → ghost renders.
     // `test-model` stays first so it remains the session's default model.
