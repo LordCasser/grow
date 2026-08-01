@@ -222,7 +222,11 @@ async fn run_actor_test_full<F, Fut>(
                 vec![],
                 initial_yolo,
                 None,
-                false,
+                // MCP always-allow persistence tests need the approval
+                // gate ON: with the gate off, build_options strips the
+                // `allow-always-mcp` option and the scripted selection
+                // maps to an unknown-option error.
+                true,
             );
             body(handle, gw, cwd).await;
         })
