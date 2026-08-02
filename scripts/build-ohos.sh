@@ -196,7 +196,7 @@ if [ "$ok" -ne 1 ]; then
   exit 1
 fi
 
-BIN="$CARGO_TARGET_DIR/release/grow"
+BIN="$CARGO_TARGET_DIR/$CARGO_PROFILE/grow"
 if [ ! -x "$BIN" ]; then
   echo "error: binary not found at $BIN" >&2
   exit 1
