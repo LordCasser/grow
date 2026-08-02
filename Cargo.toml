@@ -6,6 +6,11 @@ async-openai = { git = "https://github.com/our-forks/async-openai.git", rev = "9
 # seccomp ioctl request constants portable across glibc and musl.
 # See third_party/nono/Cargo.toml for patch and upgrade notes.
 nono = { path = "third_party/nono" }
+# vendored in third_party/nix-ohos: nix 0.26.x predates OpenHarmony support;
+# the patch treats target_env="ohos" as musl so its libc-gated branches
+# compile against OHOS's musl-shaped libc. Versions 0.28+/0.30 support ohos
+# natively and keep using the registry. See third_party/nix-ohos/README.md.
+nix = { path = "third_party/nix-ohos" }
 # sqlite-vec 0.1.10-alpha.4 contains the musl fix, but its crates.io archive
 # omits C files included by sqlite-vec.c. See the vendoring notes.
 sqlite-vec = { path = "third_party/sqlite-vec" }

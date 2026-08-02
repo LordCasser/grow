@@ -12,6 +12,12 @@
 #   src/sandbox/linux.rs: type seccomp ioctl request literals as u32 before
 #   casting to libc::Ioctl. That alias is c_int on musl and c_ulong on glibc;
 #   untyped high-bit literals overflow i32 on both musl release targets.
+#   src/trust/{bundle,signing}.rs + Cargo.toml: dropped the sigstore
+#   verification/signing stack (sigstore-verify/sigstore-trust-root). Grow's
+#   sandbox crate only uses nono's sandbox/landlock/seccomp surfaces, never
+#   file attestation; removing it also drops the aws-lc-rs crypto chain
+#   (sigstore-crypto) that otherwise drags a cmake-based C build into the
+#   graph. trust/{base64,digest,dsse,policy,types}.rs are unaffected.
 # Upgrade checklist: first re-check the workspace MSRV against the newest
 # release, then re-copy upstream source. Re-apply the riscv64 block if upstream
 # still supports only x86_64/aarch64. The ioctl literal fix is present on
@@ -107,13 +113,6 @@ features = ["preserve_order"]
 
 [dependencies.sha2]
 version = "0.11"
-
-[dependencies.sigstore-trust-root]
-version = "=0.6.3"
-
-[dependencies.sigstore-verify]
-version = "0.6"
-default-features = false
 
 [dependencies.thiserror]
 version = "2"
