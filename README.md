@@ -11,7 +11,7 @@ Grow 自己的边界。
 Grow 不是 xAI 官方产品，也不会内置 Grok 模型、推理端点或产品凭据。所有模型都由用户通过
 BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 
-当前源码版本为 `1.1.0`。完整配置参考 [config.example.toml](config.example.toml)，分主题文档见
+当前源码版本为 `1.1.1`。完整配置参考 [config.example.toml](config.example.toml)，分主题文档见
 [Grow User Guide](crates/codegen/pager/docs/user-guide/README.md)。
 
 ## Fork 之后改了什么
@@ -29,7 +29,7 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 | 数据与网络 | 删除遥测上传、计费订阅、远程会话同步、托管搜索、远程公告和媒体生成等产品服务链。模型请求只访问当前 Provider。 |
 | 分发 | GitHub Release 是唯一官方二进制渠道，产物内嵌固定版本 `rg`，覆盖 macOS、GNU/musl Linux 与 Windows 的 x86_64/arm64，并额外提供 Linux riscv64。 |
 
-### 1.1.0 重点
+### 1.1.1 重点
 
 - 权限弹窗不会再因为 pager、gateway 或 leader 丢包永久挂起。交互会话默认等待 60 秒，非交互
   会话默认等待 10 秒；超时后取消当前 turn，工具不执行，迟到的 Allow 无效。
@@ -42,7 +42,7 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 - Release 扩展为九个目标：macOS、GNU/musl Linux 与 Windows 的 x86_64/arm64，加 Linux
   riscv64；只有整组资产全部验证后才公开 Release。
 
-版本级变更见 [1.1.0 release notes](crates/codegen/shell/changelogs/1.1.0.md)。
+版本级变更见 [1.1.1 release notes](crates/codegen/shell/changelogs/1.1.1.md)。
 
 ## 安装
 
@@ -53,20 +53,20 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 
 | 平台 | Release 资产 |
 | --- | --- |
-| macOS Apple Silicon | `grow-1.1.0-macos-aarch64.tar.gz` |
-| macOS Intel | `grow-1.1.0-macos-x86_64.tar.gz` |
-| Linux x86_64 | `grow-1.1.0-linux-x86_64.tar.gz` |
-| Linux arm64 | `grow-1.1.0-linux-aarch64.tar.gz` |
-| Linux riscv64 | `grow-1.1.0-linux-riscv64.tar.gz` |
-| Linux x86_64（musl） | `grow-1.1.0-linux-x86_64-musl.tar.gz` |
-| Linux arm64（musl） | `grow-1.1.0-linux-aarch64-musl.tar.gz` |
-| Windows x86_64 | `grow-1.1.0-windows-x86_64.tar.gz` |
-| Windows arm64 | `grow-1.1.0-windows-aarch64.tar.gz` |
+| macOS Apple Silicon | `grow-1.1.1-macos-aarch64.tar.gz` |
+| macOS Intel | `grow-1.1.1-macos-x86_64.tar.gz` |
+| Linux x86_64 | `grow-1.1.1-linux-x86_64.tar.gz` |
+| Linux arm64 | `grow-1.1.1-linux-aarch64.tar.gz` |
+| Linux riscv64 | `grow-1.1.1-linux-riscv64.tar.gz` |
+| Linux x86_64（musl） | `grow-1.1.1-linux-x86_64-musl.tar.gz` |
+| Linux arm64（musl） | `grow-1.1.1-linux-aarch64-musl.tar.gz` |
+| Windows x86_64 | `grow-1.1.1-windows-x86_64.tar.gz` |
+| Windows arm64 | `grow-1.1.1-windows-aarch64.tar.gz` |
 
 选择对应资产后安装：
 
 ```sh
-GROW_VERSION=1.1.0
+GROW_VERSION=1.1.1
 GROW_ASSET="grow-${GROW_VERSION}-macos-aarch64.tar.gz" # 按上表替换
 
 curl -fLO "https://github.com/LordCasser/grow/releases/download/v${GROW_VERSION}/${GROW_ASSET}"
@@ -79,7 +79,7 @@ grow --version
 Windows PowerShell：
 
 ```powershell
-$GrowVersion = "1.1.0"
+$GrowVersion = "1.1.1"
 $GrowAsset = "grow-$GrowVersion-windows-x86_64.tar.gz" # arm64 时替换资产名
 
 Invoke-WebRequest `
@@ -358,7 +358,7 @@ cargo build --locked --release -p cli --bin grow --target <target>
 Release workflow 另外构建 `riscv64gc-unknown-linux-gnu`。GNU 资产以 glibc 2.28 为最低基线，
 musl 与 riscv64 通过 `cross` 构建；Windows 使用静态 CRT。
 
-## 1.1.0 发布准备
+## 1.1.1 发布准备
 
 Grow 的可发布应用 crate 继承根 workspace 版本；部分内部 leaf crate 仍保持自己的 `0.1.0`
 版本。tag 必须与 `cli` / workspace 版本一致。
@@ -376,18 +376,18 @@ cargo test --locked -p shell --lib -- --test-threads=4
 cargo test --locked -p pager --lib
 cargo test --locked -p shell --test test_mcp_permission_persistence
 
-GROW_VERSION=1.1.0 GROW_TOOLS_BUNDLE_RG_PATH="$(command -v rg)" \
+GROW_VERSION=1.1.1 GROW_TOOLS_BUNDLE_RG_PATH="$(command -v rg)" \
   cargo build --locked --profile release-dist -p cli --bin grow
 ./target/release-dist/grow --version
 ```
 
 release commit 完成且工作区干净后，可以用 `scripts/act-release.sh validate` 在本地校验 tag/version
-契约；脚本会在缺少 `v1.1.0` 时只创建本地 tag，不会推送。
+契约；脚本会在缺少 `v1.1.1` 时只创建本地 tag，不会推送。
 
 正式发布流程：
 
 1. 提交版本、lockfile、release notes 和文档。
-2. 创建并推送 annotated tag `v1.1.0`，不要提前创建公开 Release。
+2. 创建并推送 annotated tag `v1.1.1`，不要提前创建公开 Release。
 3. [release workflow](.github/workflows/release.yml) 通过 matrix 构建九个目标，并嵌入固定版本
    `rg`。
 4. workflow 先创建隐藏 draft Release，验证九个 updater 约定资产均已上传后再一次性公开。

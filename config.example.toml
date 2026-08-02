@@ -1,4 +1,4 @@
-# Grow 1.1.0 完整配置示例
+# Grow 1.1.1 完整配置示例
 #
 # 用法：
 #   1. 复制到 ~/.grow/config.toml。
@@ -32,9 +32,9 @@ worktree_type = "linked"            # linked | standalone | git
 session_picker_grouped = true       # session picker 按仓库分组
 
 # 以下版本边界均为 SemVer。minimum/maximum 约束更新器；required_* 约束启动。
-# minimum_version = "1.1.0"
+# minimum_version = "1.1.1"
 # maximum_version = "1.9.0"
-# required_minimum_version = "1.1.0"
+# required_minimum_version = "1.1.1"
 # required_maximum_version = "1.9.0"
 
 # -----------------------------------------------------------------------------

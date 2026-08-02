@@ -520,9 +520,9 @@ environment override that can only tighten the bound, for CI and testing.
 
 ```toml
 [cli]
-minimum_version = "1.1.0"          # updater won't downgrade below this
+minimum_version = "1.1.1"          # updater won't downgrade below this
 maximum_version = "1.9.0"          # updater won't install above this
-required_minimum_version = "1.1.0" # refuse to start below this
+required_minimum_version = "1.1.1" # refuse to start below this
 required_maximum_version = "1.9.0" # refuse to start above this
 ```
 
