@@ -5,21 +5,15 @@
 # container: `brew install -s --include-test grow` builds in ~14 min with
 # the stock superenv environment (no cmake/OHOS SDK env needed since
 # aws-lc-rs was removed from the graph; the SDK clang is found via the
-# /bin cc shims).
-#
-# NOTE: the `url`/`sha256` below are LOCAL TEST values (a git-archive of the
-# ohos-adaptation branch served over http://127.0.0.1:8000). The real PR must
-# point at the official release tarball:
-#   url "https://github.com/LordCasser/grow/archive/refs/tags/v1.1.0.tar.gz"
-# with the matching sha256, once v1.1.0 (or the merged OHOS work) is tagged.
-# Drop `depends_on "zsh"` only after the POSIX shell backend lands.
+# /bin cc shims). Ready for the PR: url/sha256 point at the official
+# v1.1.1 tag tarball.
 class Grow < Formula
   desc "Terminal-based AI coding agent with a Rust TUI (fork of xAI Grok Build)"
   homepage "https://github.com/LordCasser/grow"
-  url "http://127.0.0.1:8000/grow-ohos-test.tar.gz"
-  sha256 "fbf5f3b2cd056d8b03580e2d09d2ba8484659b520cb11f8eca42b7840ef71948"
+  url "https://github.com/LordCasser/grow/archive/refs/tags/v1.1.1.tar.gz"
+  sha256 "2bbc6fada4bfa1bcc5eaaaa7bee6b791ff044703752101b77c2fb2e658961dd7"
   license "Apache-2.0"
-  head "https://github.com/LordCasser/grow.git", branch: "ohos-adaptation"
+  head "https://github.com/LordCasser/grow.git", branch: "main"
 
   depends_on "rust" => :build
   depends_on "ripgrep"
