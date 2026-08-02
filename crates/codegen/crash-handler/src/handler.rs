@@ -802,10 +802,10 @@ mod win {
         CRASH_HANDLE.store(handle, Ordering::Relaxed);
 
         unsafe {
-            let version = &mut *std::ptr::addr_of_mut!(APP_VERSION);
-            version.fill(0);
+            let version_buffer = &mut *std::ptr::addr_of_mut!(APP_VERSION);
+            version_buffer.fill(0);
             let copy_len = version.len().min(format::VERSION_STRING_LEN);
-            version[..copy_len].copy_from_slice(&version.as_bytes()[..copy_len]);
+            version_buffer[..copy_len].copy_from_slice(&version.as_bytes()[..copy_len]);
         }
 
         unsafe {
