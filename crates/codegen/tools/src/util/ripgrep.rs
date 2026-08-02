@@ -82,6 +82,26 @@ pub fn rg_path() -> PathBuf {
         .clone()
 }
 
+/// Whether a usable ripgrep is available at runtime.
+///
+/// Release builds embed the binary; source builds fall back to `RG_BIN_PATH`
+/// or `rg` on PATH. When this returns `false`, search surfaces degrade to
+/// plain `grep` with a note (see the grep tool) or return an actionable
+/// error (workspace content search), and `/doctor` reports the gap.
+pub fn rg_available() -> bool {
+    #[cfg(bundle_rg)]
+    {
+        true
+    }
+    #[cfg(not(bundle_rg))]
+    {
+        if std::env::var_os("RG_BIN_PATH").is_some_and(|p| !p.is_empty()) {
+            return true;
+        }
+        which::which("rg").is_ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(bundle_rg)]

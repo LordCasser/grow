@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 // Re-export the shared GrowIntegerSchema from types module
 pub use crate::types::GrowIntegerSchema;
-use crate::util::ripgrep::rg_path;
+use crate::util::ripgrep::{rg_available, rg_path};
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -744,6 +744,19 @@ async fn prepare_grep(
 
     let output_mode = input.output_mode.clone().unwrap_or(OutputMode::Content);
     let effective_head_limit = resolve_effective_head_limit(input, &output_mode);
+
+    // ripgrep is required: without it the search cannot start. OHOS builds
+    // carry no bundled rg and rely on PATH, so surface a clear install hint
+    // instead of a raw ENOENT from spawn.
+    if !rg_available() {
+        return Ok(GrepStep::Early(GrepSearchOutput {
+            stdout: Vec::new(),
+            stderr: b"Error calling tool: ripgrep not found on PATH. Install ripgrep (brew install ripgrep) or set RG_BIN_PATH to enable search.".to_vec(),
+            exit_code: -1,
+            match_count: 0,
+            file_matches: Vec::new(),
+        }));
+    }
 
     let rg_exec = rg_path();
 

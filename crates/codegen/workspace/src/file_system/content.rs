@@ -141,6 +141,14 @@ where
     let max_files = params.max_files.unwrap_or(DEFAULT_MAX_FILES);
     let max_matches = params.max_matches.unwrap_or(DEFAULT_MAX_MATCHES);
 
+    // ripgrep is required; OHOS builds carry no bundled rg and rely on PATH,
+    // so surface a clear install hint instead of a raw spawn ENOENT.
+    if !tools::util::ripgrep::rg_available() {
+        return Err(anyhow::anyhow!(
+            "ripgrep not found on PATH. Install ripgrep (brew install ripgrep) or set RG_BIN_PATH to enable content search."
+        ));
+    }
+
     let mut cmd = build_ripgrep_command(root, params);
     #[allow(clippy::disallowed_methods)] // waited on below; killed when cancelled
     let mut child = cmd
