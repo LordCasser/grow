@@ -2,7 +2,7 @@
 #
 # Upstream:  warpdotdev/mermaid-to-svg (MIT) —
 #            https://github.com/warpdotdev/mermaid-to-svg
-#            rev 40cecf2be376e47e15053eadbfb782a531777420
+#            rev 8d3f789c2eb49335d7bf247a06bb649f59b6d4ed
 #
 # Why vendored (not a crates.io pin): the engine renders untrusted model output
 # and is a young dependency. Vendoring gives a full audit surface and immunity to
@@ -70,12 +70,11 @@
 #     local estimators in `sequence_diagram.rs` / `xychart_diagram.rs` /
 #     `mindmap_diagram.rs`; ASCII measurement is unchanged. Covered by the
 #     `test_cjk_*` tests in src/lib.rs.
-#  9. LOCAL MODIFICATION (src/parser.rs): support Mermaid's open edge-label
-#     syntax (`A -- text --> B`, `-- text ---`, `== text ==>`, `== text ===`,
-#     `-. text .-`; upstream only parsed the `|text|` form plus `-. text .->`),
-#     and make `find_edge_start` bracket/quote-aware so edge tokens inside node
-#     labels (`A["x --> y"]`) are not treated as edges. Upstream parsed
-#     `B -- 是 --> C` as a literal node named "B -- 是". Covered by the
+#  9. LOCAL MODIFICATION (src/parser.rs): extend upstream's open edge-label
+#     syntax (`A -- text --> B`, `-- text ---`, `== text ==>`, `== text ===`)
+#     with dotted `-. text .-` / `-. text .->` forms, and make
+#     `find_edge_start` bracket/quote-aware so edge tokens inside node labels
+#     (`A["x --> y"]`) are not treated as edges. Covered by the
 #     `test_open_edge_label_*` / `test_edge_tokens_inside_node_labels_*` tests
 #     in src/lib.rs.
 # 10. LOCAL MODIFICATION (src/text_wrap.rs): a single unbreakable token (a

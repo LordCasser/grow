@@ -4,7 +4,7 @@
 #            warpdotdev/mermaid-to-svg `crates/dagre_rust` ("vendored from 0.0.5
 #            with fixes" per upstream Cargo.toml).
 # Source of truth: https://github.com/warpdotdev/mermaid-to-svg (rev
-#            40cecf2be376e47e15053eadbfb782a531777420), crates/dagre_rust/.
+#            8d3f789c2eb49335d7bf247a06bb649f59b6d4ed), crates/dagre_rust/.
 #            Base crate: https://crates.io/crates/dagre_rust/0.0.5
 #
 # Why vendored: the Rust port of dagre.js (the same layout engine mermaid.js

@@ -260,18 +260,25 @@ impl<'a> LayoutEngine<'a> {
         let (mut dagre_graph, edge_map) =
             self.build_dagre_graph(rank_dir, node_sep, rank_sep, &cluster_analysis, &back_edges);
         dagre_layout(&mut dagre_graph);
-        let (mut positions, edge_points, edge_label_positions) =
+        let (mut positions, mut edge_points, mut edge_label_positions) =
             self.extract_layout_from_dagre(&dagre_graph, &edge_map);
-        if self.is_state_diagram {
-            self.snap_state_ranks(&mut positions, &back_edges);
-            self.align_state_terminal_singletons(&mut positions, &back_edges);
-        }
         let is_vertical = matches!(
             self.graph.direction,
             GraphDirection::TopToBottom | GraphDirection::BottomToTop
         );
+        self.fix_subgraph_internal_ranks(&mut positions, is_vertical);
+        if self.is_state_diagram {
+            self.snap_state_ranks(&mut positions, &back_edges);
+            self.align_state_terminal_singletons(&mut positions, &back_edges);
+        }
         if center_subgraph_nodes {
             self.center_nodes_in_subgraphs(&mut positions, is_vertical);
+            self.resolve_subgraph_overlaps(
+                &mut positions,
+                &mut edge_points,
+                &mut edge_label_positions,
+                is_vertical,
+            );
         }
         let (width, height) = self.compute_bounds(&positions);
         let layout_nodes: HashMap<String, LayoutNode> = positions
@@ -310,6 +317,26 @@ impl<'a> LayoutEngine<'a> {
                     self.graph.direction,
                     GraphDirection::TopToBottom | GraphDirection::BottomToTop
                 );
+
+                if e.from == e.to {
+                    let mut points = Self::compute_self_loop_points(&from_node, is_vertical);
+                    self.clip_edge_to_boundaries(&mut points, &from_node, &to_node);
+                    let label_pos = e.label.as_ref().and_then(|label| {
+                        if label.trim().is_empty() {
+                            None
+                        } else {
+                            Some(Self::edge_label_midpoint(&points))
+                        }
+                    });
+                    return Some(LayoutEdge {
+                        from: e.from.clone(),
+                        to: e.to.clone(),
+                        label: e.label.clone(),
+                        style: e.style,
+                        points,
+                        label_pos,
+                    });
+                }
 
                 let dagre_points = edge_points.get(&idx).cloned().unwrap_or_else(|| {
                     self.compute_edge_points_with_obstacles(&from_node, &to_node, &layout_nodes)
@@ -540,6 +567,7 @@ impl<'a> LayoutEngine<'a> {
 
             // Shift each subgraph's nodes so the subgraph center matches the
             // group center, preserving relative offsets within each subgraph.
+            let mut proposed_shifts: Vec<(String, Vec<String>, f64)> = Vec::new();
             for sg_id in &group {
                 let sg_nodes: Vec<String> = self
                     .node_to_subgraph
@@ -560,17 +588,272 @@ impl<'a> LayoutEngine<'a> {
                 }
                 let sg_avg = sg_coords.iter().sum::<f64>() / sg_coords.len() as f64;
                 let shift = group_avg - sg_avg;
-                for node_id in &sg_nodes {
+                proposed_shifts.push((sg_id.clone(), sg_nodes, shift));
+            }
+            if self.shifts_cause_subgraph_overlap(&proposed_shifts, positions, is_vertical) {
+                continue;
+            }
+            for (_, sg_nodes, shift) in &proposed_shifts {
+                for node_id in sg_nodes {
                     if let Some((x, y)) = positions.get_mut(node_id) {
                         if is_vertical {
-                            *x += shift;
+                            *x += *shift;
                         } else {
-                            *y += shift;
+                            *y += *shift;
                         }
                     }
                 }
             }
         }
+    }
+
+    /// Returns true if applying the proposed cross-axis shifts would make any
+    /// two non-nested subgraph bounding rects in the group overlap. Rects are
+    /// estimated from direct node bounds plus subgraph padding and title height.
+    fn shifts_cause_subgraph_overlap(
+        &self,
+        proposed_shifts: &[(String, Vec<String>, f64)],
+        positions: &PositionMap,
+        is_vertical: bool,
+    ) -> bool {
+        let mut rects: Vec<(String, f64, f64, f64, f64)> = Vec::new();
+        for (sg_id, sg_nodes, shift) in proposed_shifts {
+            let mut min_x = f64::INFINITY;
+            let mut min_y = f64::INFINITY;
+            let mut max_x = f64::NEG_INFINITY;
+            let mut max_y = f64::NEG_INFINITY;
+            for node_id in sg_nodes {
+                let Some(&(x, y)) = positions.get(node_id) else {
+                    continue;
+                };
+                let Some(info) = self.nodes.get(node_id) else {
+                    continue;
+                };
+                let (x, y) = if is_vertical {
+                    (x + shift, y)
+                } else {
+                    (x, y + shift)
+                };
+                min_x = min_x.min(x - info.width / 2.0);
+                max_x = max_x.max(x + info.width / 2.0);
+                min_y = min_y.min(y - info.height / 2.0);
+                max_y = max_y.max(y + info.height / 2.0);
+            }
+            if min_x.is_infinite() {
+                continue;
+            }
+            let title_height = self
+                .subgraphs
+                .iter()
+                .find(|s| s.id == *sg_id)
+                .and_then(|s| s.title.as_deref())
+                .map(|title| self.subgraph_title_height(title))
+                .unwrap_or(0.0);
+            rects.push((
+                sg_id.clone(),
+                min_x - SUBGRAPH_PADDING,
+                min_y - SUBGRAPH_PADDING - title_height,
+                max_x + SUBGRAPH_PADDING,
+                max_y + SUBGRAPH_PADDING,
+            ));
+        }
+        for i in 0..rects.len() {
+            for j in (i + 1)..rects.len() {
+                let (ref a_id, ax1, ay1, ax2, ay2) = rects[i];
+                let (ref b_id, bx1, by1, bx2, by2) = rects[j];
+                if self.is_subgraph_ancestor(a_id, b_id) || self.is_subgraph_ancestor(b_id, a_id) {
+                    continue;
+                }
+                if ax1 < bx2 && bx1 < ax2 && ay1 < by2 && by1 < ay2 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Pushes overlapping sibling subgraphs apart along the cross axis until no
+    /// two non-nested subgraph bounding rects intersect.
+    fn resolve_subgraph_overlaps(
+        &self,
+        positions: &mut PositionMap,
+        edge_points: &mut EdgePointMap,
+        edge_label_positions: &mut EdgeLabelPosMap,
+        is_vertical: bool,
+    ) {
+        let ordered = self.subgraph_ids_in_mermaid_order();
+        if ordered.len() < 2 {
+            return;
+        }
+        let max_iterations = ordered.len() * ordered.len();
+        for _ in 0..max_iterations {
+            let mut moved = false;
+            for i in 0..ordered.len() {
+                for j in (i + 1)..ordered.len() {
+                    let a_id = &ordered[i];
+                    let b_id = &ordered[j];
+                    if self.is_subgraph_ancestor(a_id, b_id)
+                        || self.is_subgraph_ancestor(b_id, a_id)
+                    {
+                        continue;
+                    }
+                    let Some(a_rect) = self.estimated_subgraph_rect(a_id, positions) else {
+                        continue;
+                    };
+                    let Some(b_rect) = self.estimated_subgraph_rect(b_id, positions) else {
+                        continue;
+                    };
+                    let (ax1, ay1, ax2, ay2) = a_rect;
+                    let (bx1, by1, bx2, by2) = b_rect;
+                    if !(ax1 < bx2 && bx1 < ax2 && ay1 < by2 && by1 < ay2) {
+                        continue;
+                    }
+                    let (overlap, a_center, b_center) = if is_vertical {
+                        (
+                            ax2.min(bx2) - ax1.max(bx1),
+                            (ax1 + ax2) / 2.0,
+                            (bx1 + bx2) / 2.0,
+                        )
+                    } else {
+                        (
+                            ay2.min(by2) - ay1.max(by1),
+                            (ay1 + ay2) / 2.0,
+                            (by1 + by2) / 2.0,
+                        )
+                    };
+                    let delta = overlap + SUBGRAPH_GAP;
+                    let move_id = if a_center > b_center { a_id } else { b_id };
+                    self.shift_subgraph(
+                        move_id,
+                        delta,
+                        is_vertical,
+                        positions,
+                        edge_points,
+                        edge_label_positions,
+                    );
+                    moved = true;
+                }
+            }
+            if !moved {
+                return;
+            }
+        }
+    }
+
+    /// Estimates the rendered bounding rect of a subgraph from the positions of
+    /// all nodes in its subtree, expanded by padding and title height.
+    fn estimated_subgraph_rect(
+        &self,
+        sg_id: &str,
+        positions: &PositionMap,
+    ) -> Option<(f64, f64, f64, f64)> {
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for node_id in self.subgraph_subtree_nodes(sg_id) {
+            let Some(&(x, y)) = positions.get(&node_id) else {
+                continue;
+            };
+            let Some(info) = self.nodes.get(&node_id) else {
+                continue;
+            };
+            min_x = min_x.min(x - info.width / 2.0);
+            max_x = max_x.max(x + info.width / 2.0);
+            min_y = min_y.min(y - info.height / 2.0);
+            max_y = max_y.max(y + info.height / 2.0);
+        }
+        if min_x.is_infinite() {
+            return None;
+        }
+        let title_height = self
+            .subgraphs
+            .iter()
+            .find(|s| s.id == sg_id)
+            .and_then(|s| s.title.as_deref())
+            .map(|title| self.subgraph_title_height(title))
+            .unwrap_or(0.0);
+        Some((
+            min_x - SUBGRAPH_PADDING,
+            min_y - SUBGRAPH_PADDING - title_height,
+            max_x + SUBGRAPH_PADDING,
+            max_y + SUBGRAPH_PADDING,
+        ))
+    }
+
+    /// Returns all node ids directly or transitively contained in the subgraph.
+    fn subgraph_subtree_nodes(&self, sg_id: &str) -> Vec<String> {
+        self.node_to_subgraph
+            .iter()
+            .filter(|(_, direct_id)| {
+                *direct_id == sg_id || self.is_subgraph_ancestor(sg_id, direct_id)
+            })
+            .map(|(node_id, _)| node_id.clone())
+            .collect()
+    }
+
+    /// Shifts a subgraph's subtree nodes by `delta` along the cross axis,
+    /// moving dagre points and label positions of fully-contained edges with it.
+    fn shift_subgraph(
+        &self,
+        sg_id: &str,
+        delta: f64,
+        is_vertical: bool,
+        positions: &mut PositionMap,
+        edge_points: &mut EdgePointMap,
+        edge_label_positions: &mut EdgeLabelPosMap,
+    ) {
+        let subtree: HashSet<String> = self.subgraph_subtree_nodes(sg_id).into_iter().collect();
+        for node_id in &subtree {
+            if let Some((x, y)) = positions.get_mut(node_id) {
+                if is_vertical {
+                    *x += delta;
+                } else {
+                    *y += delta;
+                }
+            }
+        }
+        for (idx, edge) in self.edges.iter().enumerate() {
+            if !subtree.contains(&edge.from) || !subtree.contains(&edge.to) {
+                continue;
+            }
+            if let Some(points) = edge_points.get_mut(&idx) {
+                for (x, y) in points.iter_mut() {
+                    if is_vertical {
+                        *x += delta;
+                    } else {
+                        *y += delta;
+                    }
+                }
+            }
+            if let Some((x, y)) = edge_label_positions.get_mut(&idx) {
+                if is_vertical {
+                    *x += delta;
+                } else {
+                    *y += delta;
+                }
+            }
+        }
+    }
+
+    /// Returns true if `ancestor_id` is a (transitive) parent subgraph of `descendant_id`.
+    fn is_subgraph_ancestor(&self, ancestor_id: &str, descendant_id: &str) -> bool {
+        let mut current = self
+            .subgraphs
+            .iter()
+            .find(|s| s.id == descendant_id)
+            .and_then(|s| s.parent_subgraph_id.clone());
+        while let Some(id) = current {
+            if id == ancestor_id {
+                return true;
+            }
+            current = self
+                .subgraphs
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| s.parent_subgraph_id.clone());
+        }
+        false
     }
 
     fn find_connected_subgraph_groups(&self) -> Vec<HashSet<String>> {
@@ -861,7 +1144,14 @@ impl<'a> LayoutEngine<'a> {
             );
         }
 
-        for (node_id, sg_id) in &self.node_to_subgraph {
+        let mut parented_nodes: Vec<_> = self.node_to_subgraph.iter().collect();
+        parented_nodes.sort_by_key(|(node_id, _)| {
+            self.nodes
+                .get(*node_id)
+                .map(|info| info.order)
+                .unwrap_or(usize::MAX)
+        });
+        for (node_id, sg_id) in parented_nodes {
             let _ = g.set_parent(node_id, Some(sg_id.clone()));
         }
 
@@ -3043,6 +3333,167 @@ impl<'a> LayoutEngine<'a> {
             }
         }
         false
+    }
+
+    fn fix_subgraph_internal_ranks(&self, positions: &mut PositionMap, is_vertical: bool) {
+        for sg in &self.subgraphs {
+            let sg_id = &sg.id;
+
+            let sg_nodes: Vec<String> = self
+                .node_to_subgraph
+                .iter()
+                .filter(|(_, id)| *id == sg_id)
+                .map(|(node_id, _)| node_id.clone())
+                .collect();
+
+            if sg_nodes.len() < 2 {
+                continue;
+            }
+
+            let sg_node_set: HashSet<String> = sg_nodes.iter().cloned().collect();
+
+            let internal_edges: Vec<&EdgeInfo> = self
+                .edges
+                .iter()
+                .filter(|e| {
+                    e.from != e.to && sg_node_set.contains(&e.from) && sg_node_set.contains(&e.to)
+                })
+                .collect();
+
+            if internal_edges.is_empty() {
+                continue;
+            }
+
+            let collapsed = internal_edges.iter().any(|e| {
+                let fc = positions
+                    .get(&e.from)
+                    .map(|(x, y)| if is_vertical { *y } else { *x });
+                let tc = positions
+                    .get(&e.to)
+                    .map(|(x, y)| if is_vertical { *y } else { *x });
+                matches!((fc, tc), (Some(f), Some(t)) if (f - t).abs() < 1.0)
+            });
+
+            if !collapsed {
+                continue;
+            }
+
+            let mut ranks: HashMap<String, i32> =
+                sg_nodes.iter().map(|id| (id.clone(), 0)).collect();
+            let mut indegree: HashMap<String, usize> =
+                sg_nodes.iter().map(|id| (id.clone(), 0)).collect();
+            for e in &internal_edges {
+                *indegree.entry(e.to.clone()).or_insert(0) += 1;
+            }
+            let mut queue: Vec<String> = indegree
+                .iter()
+                .filter(|(_, &d)| d == 0)
+                .map(|(id, _)| id.clone())
+                .collect();
+            queue.sort_by_key(|id| self.nodes.get(id).map(|n| n.order).unwrap_or(usize::MAX));
+
+            while !queue.is_empty() {
+                let node = queue.remove(0);
+                let node_rank = *ranks.get(&node).unwrap_or(&0);
+                for e in &internal_edges {
+                    if e.from != node {
+                        continue;
+                    }
+                    let new_rank = node_rank + 1;
+                    let entry = ranks.entry(e.to.clone()).or_insert(0);
+                    if new_rank > *entry {
+                        *entry = new_rank;
+                    }
+                    if let Some(d) = indegree.get_mut(&e.to) {
+                        *d = d.saturating_sub(1);
+                        if *d == 0 {
+                            queue.push(e.to.clone());
+                            queue.sort_by_key(|id| {
+                                self.nodes.get(id).map(|n| n.order).unwrap_or(usize::MAX)
+                            });
+                        }
+                    }
+                }
+            }
+
+            let max_rank = ranks.values().copied().max().unwrap_or(0);
+            if max_rank == 0 {
+                continue;
+            }
+
+            let mut rank_sizes: Vec<f64> = vec![0.0; (max_rank + 1) as usize];
+            for node_id in &sg_nodes {
+                let rank = *ranks.get(node_id).unwrap_or(&0) as usize;
+                if let Some(info) = self.nodes.get(node_id) {
+                    let size = if is_vertical { info.height } else { info.width };
+                    rank_sizes[rank] = rank_sizes[rank].max(size);
+                }
+            }
+
+            let mut rank_centers: Vec<f64> = vec![0.0; (max_rank + 1) as usize];
+            let mut pos = 0.0_f64;
+            for rank in 0..=(max_rank as usize) {
+                if rank == 0 {
+                    pos = rank_sizes[0] / 2.0;
+                } else {
+                    pos += rank_sizes[rank - 1] / 2.0 + RANK_SEP + rank_sizes[rank] / 2.0;
+                }
+                rank_centers[rank] = pos;
+            }
+
+            let layout_span_center = (rank_centers[0] + rank_centers[max_rank as usize]) / 2.0;
+
+            let coords: Vec<f64> = sg_nodes
+                .iter()
+                .filter_map(|id| positions.get(id))
+                .map(|(x, y)| if is_vertical { *y } else { *x })
+                .collect();
+            if coords.is_empty() {
+                continue;
+            }
+            let sg_center = coords.iter().sum::<f64>() / coords.len() as f64;
+            let offset = sg_center - layout_span_center;
+
+            for node_id in &sg_nodes {
+                let rank = *ranks.get(node_id).unwrap_or(&0) as usize;
+                let new_coord = offset + rank_centers[rank];
+                if let Some((x, y)) = positions.get_mut(node_id) {
+                    if is_vertical {
+                        *y = new_coord;
+                    } else {
+                        *x = new_coord;
+                    }
+                }
+            }
+        }
+    }
+
+    fn compute_self_loop_points(node: &LayoutNode, is_vertical: bool) -> Vec<(f64, f64)> {
+        let loop_size = 40.0_f64.max(node.width * 0.35).min(60.0);
+        let hw = node.width / 2.0;
+        let hh = node.height / 2.0;
+
+        if is_vertical {
+            let right_x = node.x + hw;
+            let h4 = hh / 2.0;
+            vec![
+                (right_x, node.y - h4),
+                (right_x + loop_size * 0.8, node.y - loop_size * 0.6),
+                (right_x + loop_size * 1.2, node.y),
+                (right_x + loop_size * 0.8, node.y + loop_size * 0.6),
+                (right_x, node.y + h4),
+            ]
+        } else {
+            let top_y = node.y - hh;
+            let w4 = hw / 2.0;
+            vec![
+                (node.x - w4, top_y),
+                (node.x - loop_size * 0.6, top_y - loop_size * 0.8),
+                (node.x, top_y - loop_size * 1.2),
+                (node.x + loop_size * 0.6, top_y - loop_size * 0.8),
+                (node.x + w4, top_y),
+            ]
+        }
     }
 
     fn build_smooth_u_path(

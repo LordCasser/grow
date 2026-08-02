@@ -197,12 +197,15 @@ fn dfs_assign_low_lim(
     let mut next_lim = next_lim_.clone();
 
     visited.entry(v.clone()).or_insert(true);
-    let neighbors_ = tree.neighbors(v);
-    if let Some(neighbors) = neighbors_ {
-        for w in neighbors.into_iter() {
-            if !visited.contains_key(&w) {
-                next_lim = dfs_assign_low_lim(tree, visited, next_lim.clone(), &w, Some(v));
-            }
+    let mut neighbors: Vec<String> = tree.predecessors(v).unwrap_or_default();
+    for w in tree.successors(v).unwrap_or_default() {
+        if !neighbors.contains(&w) {
+            neighbors.push(w);
+        }
+    }
+    for w in neighbors.into_iter() {
+        if !visited.contains_key(&w) {
+            next_lim = dfs_assign_low_lim(tree, visited, next_lim.clone(), &w, Some(v));
         }
     }
 
