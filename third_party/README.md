@@ -33,7 +33,7 @@ mermaid
               └── ordered_hashmap
 
 sandbox
-  └── nono                    (Apache-2.0, riscv64 syscall-table patch)
+  └── nono                    (Apache-2.0, riscv64 + musl patches)
 ```
 
 ## Notices and ancestry

@@ -58,8 +58,8 @@ Upstream:   https://github.com/always-further/nono
 Version:    0.53.0
 crates.io:  https://crates.io/crates/nono/0.53.0
 Local patch: adds the riscv64 SYS_OPENAT/SYS_OPENAT2 syscall table
-             (see Cargo.toml header) — required to build on riscv64;
-             no effect on other targets.
+             and makes seccomp ioctl request literals portable to musl
+             (see Cargo.toml header) — required for riscv64 and musl builds.
 
 --------------------------------------------------------------------------------
 End of notices for vendored third_party/ crates.

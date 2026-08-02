@@ -777,10 +777,13 @@ const SECCOMP_FILTER_FLAG_NEW_LISTENER: libc::c_uint = 1 << 3;
 const SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV: libc::c_uint = 1 << 4;
 
 // ioctl request codes for seccomp notifications
-const SECCOMP_IOCTL_NOTIF_RECV: libc::Ioctl = 0xc0502100 as libc::Ioctl;
-const SECCOMP_IOCTL_NOTIF_SEND: libc::Ioctl = 0xc0182101 as libc::Ioctl;
-const SECCOMP_IOCTL_NOTIF_ID_VALID: libc::Ioctl = 0x40082102 as libc::Ioctl;
-const SECCOMP_IOCTL_NOTIF_ADDFD: libc::Ioctl = 0x40182103 as libc::Ioctl;
+// `libc::Ioctl` is `c_ulong` on glibc but `c_int` on musl. Keep the request
+// codes unsigned until the final cast so their bit patterns compile unchanged
+// for both ABIs.
+const SECCOMP_IOCTL_NOTIF_RECV: libc::Ioctl = 0xc050_2100_u32 as libc::Ioctl;
+const SECCOMP_IOCTL_NOTIF_SEND: libc::Ioctl = 0xc018_2101_u32 as libc::Ioctl;
+const SECCOMP_IOCTL_NOTIF_ID_VALID: libc::Ioctl = 0x4008_2102_u32 as libc::Ioctl;
+const SECCOMP_IOCTL_NOTIF_ADDFD: libc::Ioctl = 0x4018_2103_u32 as libc::Ioctl;
 
 // Seccomp addfd flags
 const SECCOMP_ADDFD_FLAG_SEND: u32 = 1 << 1;
