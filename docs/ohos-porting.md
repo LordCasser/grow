@@ -208,6 +208,8 @@ end
 | 13 | DockerHarmony 最小容器（mksh-only）：同套冒烟 | ✅ 全部通过（非交互路径不依赖 bash/zsh） |
 | 14 | PTY/TUI：python pty fork 启动 grow（zsh 与 mksh-only 两种 PATH） | ✅ TUI 正常启动渲染、键盘输入处理正常（portable-pty/forkpty 在 OHOS 容器可用） |
 | 15 | Rust 官方平台页 | ✅ `aarch64-unknown-linux-ohos` = Tier 2 with host tools |
+| 16 | **复核构建**（用户提交后：sqlite-vec vendor 0.1.10-alpha.4、nono musl 修复、v1.1.0）：**去掉 libc 补丁 + CFLAGS**，仅 nix 0.26.4 补丁 + 关 jemalloc | ✅ BUILD OK（10m37s），169MB；冒烟（version/sessions/doctor）✅ —— 最小补丁集收敛为 2 项 |
+| 17 | **aws-lc-rs 移除**：rmcp 去 `reqwest` feature（reqwest 0.13 → rustls-no-provider）；vendored nono 删 sigstore 栈 | ✅ `cargo tree -i aws-lc-rs` 为空；rustls 仅 ring provider；host check（sandbox+mcp）通过；sigstore 链 ~10 crate 出图 |
 
 ## 7. 风险清单
 
@@ -224,15 +226,64 @@ end
 
 ## 7b. 容器测试结论（2026-08-02 实测）
 
-- **编译**：依赖图可编译 ✅（含 ring、aws-lc-sys、libgit2-sys、libsqlite3-sys、zstd-sys、mimalloc 全部 C 依赖经 OHOS clang 编译通过；rg 嵌入 + 构建期 exec-check 通过）。
+- **编译**：依赖图可编译 ✅（ring、libgit2-sys、libsqlite3-sys、zstd-sys、mimalloc 等 C 依赖经 OHOS clang 编译通过；rg 嵌入 + 构建期 exec-check 通过）。**aws-lc-sys 已从依赖图移除**（2026-08-02）：rmcp 的 `reqwest` feature 改为 no-provider（mcp crate 自有 reqwest 已是 `rustls-no-provider`，运行期由 cli 的 ring provider 安装覆盖），vendored nono 删除 sigstore 验证/签名栈（`trust/{bundle,signing}.rs` + sigstore 依赖，grow 只使用 nono 的 sandbox 面）—— TLS 栈统一为 ring，C 依赖不再需要 cmake/SDK env。
 - **运行**：OHOS 原生二进制在 ci-runner 与 DockerHarmony 两种 OHOS 用户态均可运行 ✅。
 - **冒烟**：`--version`、`inspect --json`、`doctor`（优雅降级）、`sessions list`（SQLite 初始化）、vendor rg 解包执行、zsh backend、PTY/TUI 启动 ✅。
-- **必须的改动（测试中实证）**：
-  1. `[patch.crates-io] libc`（vendor）加 4 个 ohos/musl 缺失常量（`O_FSYNC`、`__fsword_t`、`XFS_SUPER_MAGIC`、`ST_RELATIME`）；
-  2. nix 0.26.4 补丁：`target_env = "musl"` → `any(target_env = "musl", target_env = "ohos")`（0.28/0.30 原生支持，勿动）；
-  3. 关 jemalloc；sqlite-vec 加 `-Du_int{8,16,32,64}_t` CFLAGS（或上游补丁）；
-  4. 运行时需 `libz.so`（libz-sys 动态链）—— 发布时静态链或走包管理器依赖。
+- **必须的改动（测试中实证，2026-08-02 复核后最小集）**：
+  1. **nix 0.26.4 补丁**（唯一源码层补丁）：`target_env = "musl"` → `any(target_env = "musl", target_env = "ohos")`（0.28/0.30 原生支持 ohos，勿动）；
+  2. **关 jemalloc**（`--no-default-features --features sandbox-enforce`）；
+  3. 运行时需 `libz.so`（libz-sys 动态链）—— 发布时静态链或走包管理器依赖。
+- **已随用户提交消化的补丁**（复核构建不再需要）：
+  - `libc` 补丁（4 个缺失常量）：nix 补丁把 glibc 分支门掉后 libc 常量不再被引用 —— **无需 vendor libc**；
+  - sqlite-vec CFLAGS 宏：用户 vendor 的 `third_party/sqlite-vec`（0.1.10-alpha.4，musl 兼容 C 源码）已修复 —— **无需 CFLAGS**；
+  - nono seccomp ioctls musl 兼容（`c1cf337`）：沙箱通知路径编译期受益。
 - 测试方法备注：补丁打在**容器内 workspace 副本**（`/storage/Users/currentUser/grow-test`）与 registry 源码（cargo ≥1.83 不再校验 .cargo-checksum.json，可临时改源码验证）；仓库本体未改动。
+
+## 9. 路线图：下一步（第一阶段完成后）
+
+> 阶段定义：**第一阶段 = 仓库本体在 docker 编译通过**（已完成并验证）。以下按依赖排序。
+
+### Step 0 — 提交第一阶段改动（立即）
+`third_party/nix-ohos/`（vendor）+ `Cargo.toml`（patch 条目）+ `Cargo.lock`（nix 0.26.4 → path）+ 本文档更新。没有这一步，后续全部为空谈。
+
+### Step 1 — 代码闭环（让产物可分发，参照 atomcode）
+| # | 改动 | 参照 |
+|---|---|---|
+| 1a | `update` 的 `detect_platform()` 增加 `ohos-aarch64` 分支（`cfg!(all(target_os="linux", target_env="ohos", target_arch="aarch64"))`，置于 linux 分支之前）+ 测试 cfg 门 | atomcode updater 的 `cfg(target_env="ohos")` 编译期判定 |
+| 1b | 新增 `distro-pm` cargo feature：编译期关闭自更新（`/upgrade` 引导 `brew upgrade grow`）—— **Harmonybrew formula 的前置条件** | atomcode `--features distro-pm` |
+| 1c | tools crate 的 rg 内嵌策略落定：standalone 渠道内嵌（构建时注入 + 先签后嵌）；formula 渠道不内嵌走 PATH | 本文 §4.2 双渠道表 |
+
+### Step 2 — 发布链（standalone 渠道，参照 dockerharmony + atomcode）
+- release.yml 新增 `asset_platform: ohos-aarch64`（`target: aarch64-unknown-linux-ohos`，`runner: ubuntu-24.04-arm`，`builder: ohos`：`docker run` ci-runner 容器内构建 —— dockerharmony README 的 GitHub workflow 模式；不要整 job 进容器，Node actions 需要 OHOS Node）；
+- rg 产物：容器内 `cargo build` rg 15.0.0（或 ohos-ripgrep 15.1.0 产物）+ `GROW_TOOLS_BUNDLE_RG_PATH` + `GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1`；
+- 2 处 required 资产清单 9→10：`grow-${version}-ohos-aarch64.tar.gz`；
+- **签名决策（需用户拍板）**：链接器签名（复用 Harmonybrew `ohos-sdk` formula 的 `ld.lld --code-sign` wrapper）或流水线二进制签名工具；密钥管理单独设计。
+
+### Step 3 — Harmonybrew formula（主分发路径，per contribute-formula.md）
+- 上游 homebrew-core **无 grow**（已核实 404）→ 手写 formula（B 路径，无命名冲突）；
+- `depends_on "rust" => :build`、`depends_on "ripgrep"`（PATH rg，已签名）、`depends_on "zsh"`（持久 shell 后端，HiShell 自带；Posix backend 落地后可改 optional）；
+- `cargo install`（或 build+拷贝），flags 与第一阶段验证一致：`--no-default-features --features sandbox-enforce`（+ Step 1b 的 `distro-pm`）；
+- 构建必须在 ci-runner 容器内复现（环境对齐是硬性要求）；PR 遵循"一个 PR → 一个 commit → 一个 formula"；
+- 备选策略：先录入上游 homebrew-core 再从上游搬运（贡献指南推荐路径；grow 可移植性满足，属可选加分项）。
+
+### Step 4 — 真机验证（Tier 2 门槛，需鸿蒙 PC/开发板）
+清单：HiShell 中 TUI/键盘/信号；HMDFS 文件语义（SQLite WAL/锁/mmap、原子 rename、`~/.grow/vendor` exec）；下载后签名执行；剪贴板降级提示；沙箱 capability；登录与浏览器跳转；时区。产出 device checklist + 冒烟脚本（复用容器冒烟脚本改造）。
+
+### Step 5（可选）— lycium++ / HNP 打包（开发板渠道，per ohos-ripgrep）
+HPKBUILD（`buildtools=cargo`、`source`=grow 仓库 tag tarball、`cargo build -p cli --bin grow --release --locked`、`package()` 装 bin + `hnp.json`、`hnpcli` 打包）；设备侧需自行签名。与 formula 渠道互补，非必须。
+
+### 依赖与并行
+```text
+Step 0 ──▶ Step 1 ──▶ Step 2 ═╗（可并行）
+                  └────▶ Step 3 ╝
+Step 4 依赖 Step 2/3 的产物；Step 5 独立
+```
+
+### 需要用户决策
+1. 主分发渠道：Harmonybrew formula（推荐，流水线签名）/ standalone release（需自管签名）/ 两者并行；
+2. standalone 签名方案与密钥管理；
+3. 是否先上游化 homebrew-core（可选加分项）；
+4. 真机资源（鸿蒙 PC / 开发板）何时可用 —— 决定 Step 4 排期。
 
 ## 8. 对上一版草稿的修正记录
 
