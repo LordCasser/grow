@@ -73,6 +73,8 @@ crash_handler = true                   # local crash capture; Grow has no teleme
 [session]
 auto_compact_threshold_percent = 85    # auto-compact at this % of context window (default: 85)
 load_envrc = true                      # load .envrc environment variables
+permission_prompt_timeout_secs = 60    # interactive permission response deadline
+non_interactive_permission_prompt_timeout_secs = 10 # headless/CI deadline; both values must be > 0
 
 [tools]
 respect_gitignore = false              # default: false; set true to make every tool skip gitignored files
@@ -326,7 +328,7 @@ explore = true                        # enable/disable specific types
 plan = false
 
 [subagents.models]
-explore = "grow-build"               # route to different models
+explore = "deepseek/deepseek-chat"   # route to a configured provider/model
 ```
 
 To pin the model a subagent uses, set its entry under `[subagents.models]`.
@@ -518,9 +520,9 @@ environment override that can only tighten the bound, for CI and testing.
 
 ```toml
 [cli]
-minimum_version = "1.0.0"          # updater won't downgrade below this
+minimum_version = "1.1.0"          # updater won't downgrade below this
 maximum_version = "1.9.0"          # updater won't install above this
-required_minimum_version = "1.0.0" # refuse to start below this
+required_minimum_version = "1.1.0" # refuse to start below this
 required_maximum_version = "1.9.0" # refuse to start above this
 ```
 
@@ -554,7 +556,6 @@ default = "company/company-coder"
 output_limit = 65536
 
 [auth_provider.company]
-type = "command"
 command = "/usr/local/bin/my-company-auth-provider"
 token_ttl_secs = 3600
 
@@ -570,6 +571,9 @@ name = "Company Coder"
 context_window = 128000
 output_limit = 65536
 ```
+
+The helper may return a bare key/JWT or JSON with `access_token` and `expires_in`. Expiry precedence
+is `expires_in`, `token_ttl_secs`, then the JWT `exp` claim.
 
 ---
 

@@ -17,12 +17,18 @@ fn resolve_bundled_rg() -> std::io::Result<PathBuf> {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
-    let path = crate::util::grow_home().join("vendor").join(concat!(
+    let binary_name = concat!(
         "rg-",
         env!("GROW_TOOLS_RG_VER"),
         "-",
         env!("GROW_TOOLS_RG_TARGET")
-    ));
+    );
+    let binary_name = if cfg!(windows) {
+        format!("{binary_name}.exe")
+    } else {
+        binary_name.to_string()
+    };
+    let path = crate::util::grow_home().join("vendor").join(binary_name);
     if !path.exists() {
         fs::create_dir_all(path.parent().expect("vendor path has a parent"))?;
         fs::write(&path, RG_BYTES)?;

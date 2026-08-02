@@ -109,7 +109,8 @@ name = "Model A"
 
 The helper prints a bare key or `{ "access_token": "...", "expires_in": 3600 }`. A configured
 `api_key` or populated `env_key` takes precedence. Grow does not accept refresh tokens or own a
-provider login lifecycle.
+provider login lifecycle. Token cache expiry resolves in this order: helper `expires_in`, configured
+`token_ttl_secs`, then a bare JWT's `exp` claim.
 
 ## Model options
 

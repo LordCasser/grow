@@ -1,4 +1,4 @@
-# Grow 1.0.0 完整配置示例
+# Grow 1.1.0 完整配置示例
 #
 # 用法：
 #   1. 复制到 ~/.grow/config.toml。
@@ -32,9 +32,9 @@ worktree_type = "linked"            # linked | standalone | git
 session_picker_grouped = true       # session picker 按仓库分组
 
 # 以下版本边界均为 SemVer。minimum/maximum 约束更新器；required_* 约束启动。
-# minimum_version = "1.0.0"
+# minimum_version = "1.1.0"
 # maximum_version = "1.9.0"
-# required_minimum_version = "1.0.0"
+# required_minimum_version = "1.1.0"
 # required_maximum_version = "1.9.0"
 
 # -----------------------------------------------------------------------------
@@ -237,6 +237,7 @@ cwd = "~"
 
 # Grow 仅支持 BYOK，不实现 OAuth/OIDC、设备登录或 refresh token。
 # helper 只应返回用户自有 key；密钥生命周期由 Grow 外部管理。
+# 缓存期限优先级：helper JSON 的 expires_in > token_ttl_secs > 裸 JWT 的 exp claim。
 
 # -----------------------------------------------------------------------------
 # 主 Agent 与子 Agent
@@ -328,6 +329,8 @@ mcp_recursive_config_watch = true    # 名称保留；实际控制 cwd 配置监
 [session]
 auto_compact_threshold_percent = 85
 load_envrc = true
+permission_prompt_timeout_secs = 60
+non_interactive_permission_prompt_timeout_secs = 10
 
 [compaction.memory_flush]
 enabled = true
@@ -574,10 +577,10 @@ strategist_every = 3
 reverify_after = 2
 
 # 若关闭 use_current_model_only，可给 Goal 内部角色显式路由模型与 harness。
-# planner_model = { model = "deepseek/deepseek-chat", agent_type = "grow-build" }
-# strategist_model = { model = "deepseek/deepseek-chat", agent_type = "grow-build" }
+# planner_model = { model = "deepseek/deepseek-chat", agent_type = "grow" }
+# strategist_model = { model = "deepseek/deepseek-chat", agent_type = "grow" }
 # skeptic_models = [
-#   { model = "deepseek/deepseek-chat", agent_type = "grow-build" },
+#   { model = "deepseek/deepseek-chat", agent_type = "grow" },
 # ]
 
 [workflows]

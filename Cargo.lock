@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "agent"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "config",
@@ -198,7 +198,7 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "announcements"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "serde",
@@ -709,7 +709,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auth"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "http",
@@ -1240,7 +1240,7 @@ dependencies = [
 
 [[package]]
 name = "chat-state"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "compaction",
  "indexmap",
@@ -1357,7 +1357,7 @@ checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
 
 [[package]]
 name = "cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "acp-transport",
  "anyhow",
@@ -1390,7 +1390,7 @@ dependencies = [
 
 [[package]]
 name = "client-support"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1582,7 +1582,7 @@ dependencies = [
 
 [[package]]
 name = "compaction"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1604,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "base64",
  "blake3",
@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "config-types"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "agent-client-protocol",
  "config",
@@ -2278,7 +2278,7 @@ dependencies = [
 
 [[package]]
 name = "diagnostics"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4250,7 +4250,7 @@ dependencies = [
 
 [[package]]
 name = "grow-http"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "auth",
  "diagnostics",
@@ -4408,7 +4408,7 @@ dependencies = [
 
 [[package]]
 name = "hooks"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "config",
  "fastrand",
@@ -5400,7 +5400,7 @@ dependencies = [
 
 [[package]]
 name = "markdown"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anstyle",
  "anstyle-lossy",
@@ -5483,7 +5483,7 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -5562,7 +5562,7 @@ dependencies = [
 
 [[package]]
 name = "memory"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5593,7 +5593,7 @@ dependencies = [
 
 [[package]]
 name = "mermaid"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "fontdb",
  "image",
@@ -6284,7 +6284,7 @@ checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 
 [[package]]
 name = "pager"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "acp-transport",
  "agent",
@@ -6371,7 +6371,7 @@ dependencies = [
 
 [[package]]
 name = "pager-minimal"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "crossterm",
@@ -6388,7 +6388,7 @@ dependencies = [
 
 [[package]]
 name = "pager-pty-harness"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -6413,7 +6413,7 @@ dependencies = [
 
 [[package]]
 name = "pager-render"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "agent-client-protocol",
  "anstyle",
@@ -6506,7 +6506,7 @@ checksum = "b867cad97c0791bbd3aaa6472142568c6c9e8f71937e98379f584cfb0cf35bec"
 
 [[package]]
 name = "paths"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "camino",
  "serde",
@@ -6900,7 +6900,7 @@ dependencies = [
 
 [[package]]
 name = "plugin-marketplace"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "agent",
  "chrono",
@@ -8086,7 +8086,7 @@ dependencies = [
 
 [[package]]
 name = "sampler"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-openai",
  "async-stream",
@@ -8109,7 +8109,7 @@ dependencies = [
 
 [[package]]
 name = "sampling-types"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "assert_matches",
  "async-openai",
@@ -8125,7 +8125,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8572,7 +8572,7 @@ dependencies = [
 
 [[package]]
 name = "shell"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "acp-transport",
  "agent",
@@ -8690,7 +8690,7 @@ dependencies = [
 
 [[package]]
 name = "shell-base"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "client-support",
@@ -9505,7 +9505,7 @@ dependencies = [
 
 [[package]]
 name = "test-support"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "acp-transport",
  "agent-client-protocol",
@@ -9978,7 +9978,7 @@ dependencies = [
 
 [[package]]
 name = "tools"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -10564,7 +10564,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "update"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -10703,7 +10703,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "semver",
 ]
@@ -11862,7 +11862,7 @@ dependencies = [
 
 [[package]]
 name = "workspace"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "acp-transport",
  "agent",
@@ -11933,7 +11933,7 @@ dependencies = [
 
 [[package]]
 name = "workspace-types"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "base64",
  "chrono",

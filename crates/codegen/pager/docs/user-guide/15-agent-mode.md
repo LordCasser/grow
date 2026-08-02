@@ -57,15 +57,14 @@ Typical clients: IDE extensions (Zed, Neovim, Emacs), custom tools, and ACP SDKs
 Agent options apply to the `stdio`, `serve`, and internal `leader` transports. They go after `agent` and before the mode name. Mode-specific flags go after the mode (for example `serve --bind`).
 
 ```bash
-grow agent --always-approve --model grow-build stdio
+grow agent --always-approve --model deepseek/deepseek-chat stdio
 grow agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
 ```
 
 | Flag | Description |
 | ---- | ----------- |
-| `-m, --model <MODEL>` | Model ID (for example `grow-build`). |
+| `-m, --model <MODEL>` | Configured provider/model ID (for example `deepseek/deepseek-chat`). |
 | `--always-approve` | Run without interactive tool-permission prompts. Alias: `--yolo`. |
-| `--reauth` | Authenticate before the agent starts. |
 | `--agent-profile <PATH>` | Load an agent profile from a file. |
 | `--leader` / `--no-leader` | Connect to a shared leader process, or force a local agent. When a non-`off` sandbox profile is requested, leader mode is refused so tools stay in-process (see [Sandbox Mode](18-sandbox.md)). |
 

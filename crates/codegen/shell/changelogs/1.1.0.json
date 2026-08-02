@@ -1,0 +1,37 @@
+[
+  {
+    "category": "breaking",
+    "description": "**认证收敛为 BYOK-only。** Provider 凭据只来自 `api_key`、`env_key` 或本地密钥 helper，不再保留 OAuth/OIDC 和 refresh-token 生命周期。",
+    "breaking_change": true
+  },
+  {
+    "category": "breaking",
+    "description": "**Session 只保留 Grow 本地语义。** 外部产品 session 扫描和 vendor tool mode 已删除。",
+    "breaking_change": true
+  },
+  {
+    "category": "features",
+    "description": "**权限提示现在有强制期限。** 交互 session 默认 60 秒，非交互 session 默认 10 秒；超时取消当前 turn 且不执行工具。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Agent、Behavior 与 Permission 已解耦。** Role 定义职责，Behavior 定义推进协议，Permission 独立负责工具授权。",
+    "breaking_change": false
+  },
+  {
+    "category": "reliability",
+    "description": "**长 session 恢复更稳定。** 支持截断续写、context overflow 压缩恢复、进程树回收和已解决权限交互清理。",
+    "breaking_change": false
+  },
+  {
+    "category": "reliability",
+    "description": "**BYOK helper 的 token 刷新更可靠。** 裸 JWT 的 `exp` 会作为刷新期限，并服从 `expires_in`、配置 TTL、JWT claim 的明确优先级。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Release 扩展为九个目标。** 官方资产覆盖 macOS、GNU/musl Linux 与 Windows 的 x86_64/arm64，并额外提供 Linux riscv64。",
+    "breaking_change": false
+  }
+]

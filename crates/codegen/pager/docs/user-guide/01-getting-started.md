@@ -12,7 +12,7 @@ Install Rust and `ripgrep`, then build the composition root. Source builds use `
 official GitHub Release binaries embed it:
 
 ```bash
-cargo build -p cli --release
+cargo build --locked -p cli --release
 ./target/release/grow --version
 ```
 
@@ -150,8 +150,8 @@ grow --rules "Always use TypeScript. Prefer functional components."
 # Auto-approve all tool executions
 grow --yolo
 
-# Use a specific model
-grow -m grow-build
+# Use a configured provider/model
+grow -m deepseek/deepseek-chat
 
 # Resume a previous session
 grow --resume <session-id>

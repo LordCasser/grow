@@ -41,7 +41,8 @@ Prefer an environment variable so secrets are not stored in the configuration fi
 Providers may reference a local helper that reads a user-owned key. The helper prints either a bare
 key or `{ "access_token": "...", "expires_in": 3600 }` to stdout; status messages may go to
 stderr. A provider key or populated `env_key` takes precedence over the helper. Grow never accepts a
-refresh token from the helper.
+refresh token from the helper. For cache expiry, `expires_in` takes precedence over the configured
+`token_ttl_secs`, which takes precedence over a bare JWT's `exp` claim.
 
 ## No login lifecycle
 

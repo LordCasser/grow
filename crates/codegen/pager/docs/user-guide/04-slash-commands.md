@@ -111,9 +111,9 @@ The selector commands below open a compact picker when invoked without arguments
 Switch models. Accepts a model ID or display name (case-insensitive), and for reasoning models you can add an effort level as a second argument. Alias: `/m`.
 
 ```
-/model grow-build
-/model Grow
-/model Reasoning X high
+/model deepseek/deepseek-chat
+/model DeepSeek Chat
+/model deepseek/deepseek-chat max
 ```
 
 ### `/agent [agent]`
@@ -122,7 +122,7 @@ Switch the current session's Agent without changing Behavior, model, or permissi
 
 ### `/effort [level]`
 
-Set reasoning effort on the **current** model without reselecting it. Levels are `low`, `medium`, `high`, and `xhigh`, and it only applies when the active model supports reasoning effort.
+Set reasoning effort on the **current** model without reselecting it. The accepted values come from that model's configured `reasoning_efforts`; Grow does not assume every model supports the same levels.
 
 ```
 /effort high

@@ -670,21 +670,52 @@ pub async fn run_install_script(
     })
 }
 
-/// Detect the current platform (os, arch) for binary downloads.
-pub(crate) fn detect_platform() -> Result<(&'static str, &'static str)> {
+/// Return the release asset platform selected by this binary's compile target.
+pub(crate) fn detect_platform() -> Result<&'static str> {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        return Ok(("macos", "aarch64"));
+        return Ok("macos-aarch64");
     }
-    if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-        return Ok(("linux", "aarch64"));
+    if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        return Ok("macos-x86_64");
     }
-    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        return Ok(("linux", "x86_64"));
+    if cfg!(all(
+        target_os = "linux",
+        target_env = "musl",
+        target_arch = "aarch64"
+    )) {
+        return Ok("linux-aarch64-musl");
+    }
+    if cfg!(all(
+        target_os = "linux",
+        target_env = "musl",
+        target_arch = "x86_64"
+    )) {
+        return Ok("linux-x86_64-musl");
+    }
+    if cfg!(all(
+        target_os = "linux",
+        target_env = "gnu",
+        target_arch = "aarch64"
+    )) {
+        return Ok("linux-aarch64");
+    }
+    if cfg!(all(
+        target_os = "linux",
+        target_env = "gnu",
+        target_arch = "x86_64"
+    )) {
+        return Ok("linux-x86_64");
     }
     if cfg!(all(target_os = "linux", target_arch = "riscv64")) {
-        return Ok(("linux", "riscv64"));
+        return Ok("linux-riscv64");
     }
-    anyhow::bail!("Grow releases currently support macOS arm64 and Linux arm64/amd64/riscv64")
+    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        return Ok("windows-x86_64");
+    }
+    if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        return Ok("windows-aarch64");
+    }
+    anyhow::bail!("this compile target has no Grow release asset")
 }
 
 /// Age past which a leftover `.tmp` download file (or a freshly-renamed
@@ -1759,7 +1790,7 @@ async fn agent_exe_differs(
 /// Upper bound for the one decompressed executable in a release archive.
 const RELEASE_BINARY_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Extract the single `grow` executable from an official `.tar.gz` asset.
+/// Extract the single platform-native executable from an official `.tar.gz` asset.
 ///
 /// Release archives are deliberately a one-file format. Rejecting every other
 /// path and entry type keeps extraction independent of archive paths and avoids
@@ -1787,10 +1818,13 @@ async fn extract_release_archive(
             if entry.header().entry_type() != tar::EntryType::Regular {
                 anyhow::bail!("release archive entry is not a regular file");
             }
+            let expected_name = if cfg!(windows) { "grow.exe" } else { "grow" };
             if entry.path().context("invalid release archive path")?.as_ref()
-                != std::path::Path::new("grow")
+                != std::path::Path::new(expected_name)
             {
-                anyhow::bail!("release archive must contain exactly one file named grow");
+                anyhow::bail!(
+                    "release archive must contain exactly one file named {expected_name}"
+                );
             }
 
             let size = entry.header().size().context("invalid release binary size")?;
@@ -1843,8 +1877,7 @@ async fn extract_release_archive(
 /// Uses the public release asset URL directly; no GitHub CLI or account is
 /// required for a public release.
 async fn install_gh_release(target: Option<&str>) -> Result<()> {
-    let (os, arch) = detect_platform()?;
-    let platform = format!("{}-{}", os, arch);
+    let platform = detect_platform()?;
 
     let version = match target {
         Some(v) => v.to_string(),
@@ -1857,9 +1890,14 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
     tokio::fs::create_dir_all(&download_dir).await?;
     tokio::fs::create_dir_all(&bin_dir).await?;
 
-    let binary_name = format!("grow-{}-{}", version, platform);
+    let binary_stem = format!("grow-{}-{}", version, platform);
+    let binary_name = if cfg!(windows) {
+        format!("{binary_stem}.exe")
+    } else {
+        binary_stem.clone()
+    };
     let binary_path = download_dir.join(&binary_name);
-    let asset_name = format!("{binary_name}.tar.gz");
+    let asset_name = format!("{binary_stem}.tar.gz");
     // Per-attempt archive paths avoid concurrent updaters deleting or replacing
     // an archive another task is still extracting. `.tmp` also lets the normal
     // stale-download sweep collect a file left by a crashed updater.
@@ -2215,7 +2253,8 @@ mod tests {
         let archive = dir.path().join("grow.tar.gz");
         let binary = dir.path().join("grow-1.2.3-linux-x86_64");
         let body = b"release-binary";
-        write_release_archive(&archive, "grow", body);
+        let executable_name = if cfg!(windows) { "grow.exe" } else { "grow" };
+        write_release_archive(&archive, executable_name, body);
 
         extract_release_archive(&archive, &binary).await.unwrap();
 
@@ -3611,39 +3650,48 @@ mod tests {
 
     #[cfg(any(
         all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
         all(target_os = "linux", target_arch = "aarch64"),
         all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "linux", target_arch = "riscv64")
+        all(target_os = "linux", target_arch = "riscv64"),
+        all(target_os = "windows", target_arch = "aarch64"),
+        all(target_os = "windows", target_arch = "x86_64")
     ))]
     #[test]
     fn test_detect_platform_returns_known_os() {
-        let (os, arch) = detect_platform().unwrap();
-        assert!(os == "macos" || os == "linux", "got os={os}");
+        let platform = detect_platform().unwrap();
         assert!(
-            arch == "x86_64" || arch == "aarch64" || arch == "riscv64",
-            "got arch={arch}"
+            platform.starts_with("macos-")
+                || platform.starts_with("linux-")
+                || platform.starts_with("windows-")
         );
     }
 
     #[cfg(any(
         all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
         all(target_os = "linux", target_arch = "aarch64"),
-        all(target_os = "linux", target_arch = "x86_64")
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "aarch64"),
+        all(target_os = "windows", target_arch = "x86_64")
     ))]
     #[test]
     fn test_detect_platform_matches_compile_time_cfg() {
-        let (os, arch) = detect_platform().unwrap();
+        let platform = detect_platform().unwrap();
         if cfg!(target_os = "macos") {
-            assert_eq!(os, "macos");
+            assert!(platform.starts_with("macos-"));
         }
         if cfg!(target_os = "linux") {
-            assert_eq!(os, "linux");
+            assert!(platform.starts_with("linux-"));
+        }
+        if cfg!(target_os = "windows") {
+            assert!(platform.starts_with("windows-"));
         }
         if cfg!(target_arch = "x86_64") {
-            assert_eq!(arch, "x86_64");
+            assert!(platform.contains("x86_64"));
         }
         if cfg!(target_arch = "aarch64") {
-            assert_eq!(arch, "aarch64");
+            assert!(platform.contains("aarch64"));
         }
     }
 

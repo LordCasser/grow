@@ -12,14 +12,14 @@ Agents and personas both customize behavior, but they operate at different level
 
 | | **Agents** | **Personas** |
 |---|---|---|
-| **What they configure** | The whole session: model, tools, prompt mode, system prompt | A behavioral overlay added to a subagent's prompt |
+| **What they configure** | A role prompt and tool policy | A behavioral overlay added to a subagent's prompt |
 | **Scope** | Primary session or subagent | Subagents only |
 | **How you set them** | At startup, or with agent definitions (`.md` files in `.grow/agents/` or `~/.grow/agents/`) | In `config.toml` (`[subagents.personas]`) or `.toml` files under `.grow/personas/`; applied during subagent resolution |
-| **What they control** | Model, tool availability, prompt body, skills | Tone, output format, task focus, and input/output contracts |
+| **What they control** | Role instructions, tool availability, prompt body, and skills | Tone, output format, task focus, and input/output contracts |
 | **Who edits them** | You -- create, delete, or toggle them in the agents modal or by editing files | You -- define custom personas in config or files; bundled personas are read-only |
-| **Examples** | `grow-build`, `explore`, `plan` | `researcher`, `concise` |
+| **Examples** | `grow`, `general-purpose`, `explore` | `researcher`, `concise` |
 
-An agent defines the session itself. A persona shapes how a subagent behaves within a session. A subagent always runs as an agent type (for example, `general-purpose`), and resolution can layer a persona on top.
+An Agent supplies the role used by a session; the session separately owns its model, Behavior, and Permission state. A persona shapes how a subagent behaves within that role. A subagent always runs as an Agent type (for example, `general-purpose`), and resolution can layer a persona on top.
 
 Manage both in the agents modal. Open it with `/config-agents` (alias `/agents`), or open the Personas tab directly with `/personas`. The modal has two tabs: **Agents** and **Personas**.
 
@@ -243,7 +243,7 @@ explore = true                       # default -- omit to keep enabled
 plan = false                         # disable the plan subagent
 
 [subagents.models]
-explore = "grow-build"               # route explore to a specific model
+explore = "deepseek/deepseek-chat"   # route explore to a configured model
 ```
 
 Per-type model overrides apply for any parent. Without an override, a subagent inherits the parent's model.
@@ -256,7 +256,7 @@ Define custom roles with their own capability and model defaults:
 [subagents.roles.researcher]
 description = "Deep research agent"
 default_capability_mode = "read-only"
-model = "grow-build"
+model = "deepseek/deepseek-chat"
 prompt_file = ".grow/prompts/researcher.md"
 ```
 

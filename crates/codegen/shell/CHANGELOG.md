@@ -1,5 +1,43 @@
 # Changelog
 
+# 1.1.0 — 2026-08-02
+
+## Breaking Changes
+
+- **认证正式收敛为 BYOK-only。** Provider 凭据只能来自 `api_key`、`env_key` 或本地密钥
+  helper；遗留 OAuth/OIDC、设备登录和 refresh-token 生命周期已删除。
+- **Session 只保留 Grow 本地语义。** 外部产品 session 扫描、vendor tool mode 和相关兼容
+  恢复路径已删除；已有 Grow session 仍按保存的 Agent、模型和 reasoning effort 恢复。
+- **Agent 定义不再承载运行时状态。** Provider、model、Behavior 和 Permission 属于 session；
+  Agent Markdown 使用严格 frontmatter，未知或越界字段会直接报错。
+
+## Features
+
+- **权限提示强制超时。** 交互 session 默认 60 秒，非交互 session 默认 10 秒；超时以
+  `permission_timed_out` 取消当前 turn，工具不执行，迟到授权不会持久化。两个期限可在
+  `[session]` 配置，但不能设为 `0`。
+- **Agent、Behavior 与 Permission 完成解耦。** Role 只定义职责和工具范围，Behavior 只定义
+  当前任务的推进协议，Permission 独立决定工具授权；TUI selector 与 slash command 共用同一
+  状态源。
+- **模型与恢复更可预测。** 模型目录完全由用户 Provider 配置生成；已有 session 恢复保存的
+  Agent/模型/effort，新 session 使用全局默认值。
+- **Release 扩展为九个目标。** 官方分发覆盖 macOS、GNU/musl Linux 与 Windows 的
+  x86_64/arm64，并额外提供 Linux riscv64；九个最终资产齐全后才公开 Release。
+
+## Reliability
+
+- 截断响应可自动续写，context overflow 可按预算压缩并恢复原请求。
+- 会话关闭会回收 bash、后台命令、Hook、LSP、stdio MCP、PTY 和子 Agent 的进程树。
+- 权限 pending interaction 在超时、取消或应答后统一关闭，leader 重连不会重放已经解决的弹窗。
+- BYOK helper 返回裸 JWT 时会读取 `exp` 作为刷新期限，并保持 `expires_in`、配置 TTL、JWT
+  claim 的明确优先级，避免近过期 token 被长期缓存。
+- Session 搜索缓存损坏可自愈，启动线程耗尽会降级，crash handler 增加 SIGABRT 捕获。
+
+## Maintenance
+
+- 第一方 crate 按实际复用和所有权重新收敛，删除无消费者的产品 service、scanner、协议和依赖。
+- Release helper、tag/version 校验、updater 平台选择与九目标 matrix workflow 对齐。
+
 # 1.0.0+upstream — 2026-08-01
 
 ## Upstream Sync (grok-build 8d69c91f, curated)

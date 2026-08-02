@@ -74,7 +74,7 @@ members = [
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
-version = "1.0.0"
+version = "1.1.0"
 
 [workspace.dependencies]
 agent-client-protocol = { version = "0.10.4", features = ["unstable"] }
@@ -276,8 +276,9 @@ panic = "abort"
 #
 # Hardening: thin LTO for cross-crate optimization with reasonable link times,
 # codegen-units=1 maximizes optimization (whole-program analysis, no CGU boundaries).
-# debug=1 emits line-tables DWARF; strip=false keeps symbols so CI can extract
-# .debug sidecars (Linux) or .dSYM bundles (macOS) before stripping post-build.
+# debug=1 emits line tables during linking; strip=false leaves platform-specific
+# stripping to the release workflow. The final archives contain only the stripped
+# Unix executable or the Windows executable without its separate PDB.
 # Linker flags (RELRO, NX stack) are set per-target in .cargo/config.toml.
 [profile.release-dist]
 inherits = "release"

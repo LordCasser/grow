@@ -4,25 +4,31 @@
 # Usage:
 #   scripts/act-release.sh                  # validate job only (fast)
 #   scripts/act-release.sh validate
-#   scripts/act-release.sh build            # linux-aarch64 matrix only
+#   scripts/act-release.sh build            # linux-x86_64 matrix entry
+#   scripts/act-release.sh build <asset>    # another Linux matrix entry
 #   scripts/act-release.sh publish          # needs prior artifacts; dry upload
 #   scripts/act-release.sh list
 #
-# Requires: act, docker, gh (optional, for GITHUB_TOKEN), tag v1.0.0 matching
-# workspace version (created locally if missing, not pushed).
+# Requires: act, docker, gh (optional, for GITHUB_TOKEN), and a committed tree.
+# A missing release tag is created locally at clean HEAD and is never pushed.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-TAG="${ACT_RELEASE_TAG:-v1.0.0}"
+TAG="${ACT_RELEASE_TAG:-v1.1.0}"
 EVENT="${ROOT}/.github/act/workflow_dispatch.json"
 WF="${ROOT}/.github/workflows/release.yml"
 JOB="${1:-validate}"
+ASSET_PLATFORM="${2:-linux-x86_64}"
 
 if ! command -v act >/dev/null; then
   echo "act not found; install: brew install act" >&2
   exit 1
+fi
+if [[ "$JOB" == "list" ]]; then
+  act -W "$WF" -l
+  exit 0
 fi
 if ! docker info >/dev/null 2>&1; then
   echo "docker is not running" >&2
@@ -44,6 +50,11 @@ PY
 
 # act checkout needs the release tag to resolve in this clone.
 if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+  if [[ -n "$(git status --porcelain)" ]]; then
+    echo "Refusing to create ${TAG}: commit or stash the release tree first" >&2
+    git status --short >&2
+    exit 1
+  fi
   expected="${TAG#v}"
   actual="$(
     cargo metadata --locked --no-deps --format-version 1 \
@@ -81,34 +92,45 @@ if [[ -n "$token" ]]; then
 fi
 
 case "$JOB" in
-  list)
-    act -W "$WF" -l
-    ;;
   validate)
     "${common[@]}" -j validate
     ;;
   build)
-    # Host is typically arm64; run the matching Linux matrix entry only.
-    "${common[@]}" -j build --matrix asset_platform:linux-aarch64
-    ;;
-  build-amd64)
-    # Drop arm64 default; force amd64 container + matrix entry.
-    act workflow_dispatch \
-      -W "$WF" \
-      -e "$tmp_event" \
-      --bind \
-      --env "RELEASE_TAG=${TAG}" \
-      --env "ACT=true" \
-      --container-architecture linux/amd64 \
-      -P "ubuntu-24.04=catthehacker/ubuntu:act-latest" \
-      ${token:+-s "GITHUB_TOKEN=${token}"} \
-      -j build --matrix asset_platform:linux-x86_64
+    case "$ASSET_PLATFORM" in
+      linux-x86_64|linux-riscv64|linux-x86_64-musl|linux-aarch64-musl)
+        container_arch=linux/amd64
+        ;;
+      linux-aarch64)
+        container_arch=linux/arm64
+        ;;
+      *)
+        echo "act build supports Linux entries only; got: $ASSET_PLATFORM" >&2
+        exit 1
+        ;;
+    esac
+    build_args=(
+      act workflow_dispatch
+      -W "$WF"
+      -e "$tmp_event"
+      --bind
+      --env "RELEASE_TAG=${TAG}"
+      --env "ACT=true"
+      --container-architecture "$container_arch"
+      -P "ubuntu-24.04=catthehacker/ubuntu:act-latest"
+      -P "ubuntu-24.04-arm=catthehacker/ubuntu:act-latest"
+      -j build
+      --matrix "asset_platform:${ASSET_PLATFORM}"
+    )
+    if [[ -n "$token" ]]; then
+      build_args+=(-s "GITHUB_TOKEN=${token}")
+    fi
+    "${build_args[@]}"
     ;;
   publish)
     "${common[@]}" -j publish
     ;;
   *)
-    echo "Unknown job: $JOB (validate|build|build-amd64|publish|list)" >&2
+    echo "Unknown job: $JOB (validate|build [linux asset]|publish|list)" >&2
     exit 1
     ;;
 esac

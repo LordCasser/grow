@@ -247,11 +247,9 @@ fn bundle_rg() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
-    // The release pipeline validates the bundled rg on the build runner itself
-    // (workflow "Prepare bundled ripgrep" step) and compiles inside an old-glibc
-    // container (AlmaLinux 8, glibc 2.28) where the aarch64 gnu rg sidecar cannot
-    // run — even though it is valid for the actual deployment targets (distros
-    // with newer glibc). Skip the in-container exec check when the pipeline says so.
+    // The release pipeline validates native sidecars on the runner and also
+    // builds in containers that may not be able to execute the target binary.
+    // Skip the redundant build-script exec check when the pipeline says so.
     let skip_exec_check = env::var_os("GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK").is_some();
 
     let target = env::var("TARGET")?;

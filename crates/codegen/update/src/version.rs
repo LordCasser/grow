@@ -219,7 +219,7 @@ pub fn installed_on_disk_version() -> Option<String> {
 /// Shared by the disk-version probe above and `cleanup_old_downloads` in
 /// `auto_update` — keep it the single place that understands this naming.
 pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -> Option<String> {
-    const PLATFORM_OS: &[&str] = &["macos", "linux"];
+    const PLATFORM_OS: &[&str] = &["macos", "linux", "windows"];
     let suffix = name.strip_prefix(bin_prefix)?.strip_prefix('-')?;
     let parts: Vec<&str> = suffix.split('-').collect();
     let platform_start = parts
@@ -334,6 +334,8 @@ mod tests {
         let cases: &[(&str, Option<&str>)] = &[
             ("grow-0.2.46-macos-aarch64", Some("0.2.46")),
             ("grow-0.1.220-linux-x86_64", Some("0.1.220")),
+            ("grow-0.1.220-linux-aarch64-musl", Some("0.1.220")),
+            ("grow-0.1.220-windows-x86_64.exe", Some("0.1.220")),
             // Pre-releases must round-trip whole — truncating to "0.1.220"
             // would make an alpha install masquerade as the release and
             // mask alpha → stable updates.

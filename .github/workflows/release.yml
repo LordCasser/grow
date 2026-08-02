@@ -1,18 +1,6 @@
-# Official Grow release assets for the four supported platforms:
-#   macos-aarch64, linux-x86_64, linux-aarch64, linux-riscv64
-# Asset names must stay grow-{version}-{asset_platform}.tar.gz for update;
-# each archive contains exactly one executable named grow.
-#
-# A Release stays private until every updater-visible asset is ready. Publishing
-# first would let the updater select a version whose binary still returns 404.
-# Each platform is its own job; artifacts land per job and a failed target can
-# be repaired by re-running this workflow for the same tag.
-#
-# Linux amd64/arm64 builds run inside an AlmaLinux 8 container (glibc 2.28
-# baseline) so the shipped binaries work on older distros than the
-# ubuntu-24.04 runner provides. The container only links: the toolchain
-# (rustc) comes from the host rustup install, mounted into the container
-# (official rustc builds run on glibc >= 2.17).
+# Official Grow release targets. Updater-visible assets use
+# grow-{version}-{asset_platform}.tar.gz and contain exactly one executable:
+# `grow` on Unix, `grow.exe` on Windows.
 name: Build release assets
 
 on:
@@ -22,14 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to build (for example v1.0.0)
+        description: Existing release tag to build (for example v1.1.0)
         required: true
         type: string
-      skip-macos:
-        description: Skip the macOS build job and keep the existing macOS asset (Linux assets only)
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: write
@@ -51,10 +34,6 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      # Real GHA: fetch the release tag from the remote.
-      # Local act: bind-mount the clone and skip actions/checkout — that action
-      # cleans the workdir and re-fetches origin, which wipes uncommitted work
-      # and fails when the tag exists only locally.
       - uses: actions/checkout@v6
         if: ${{ !env.ACT }}
         with:
@@ -65,11 +44,15 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${ACT:-}" == "true" ]]; then
-            updater_repo="$(git show "${RELEASE_TAG}:crates/codegen/update/src/version.rs" \
-              | sed -n 's/^pub const GH_RELEASE_REPO: &str = "\([^"]*\)";/\1/p')"
+            updater_repo="$(
+              git show "${RELEASE_TAG}:crates/codegen/update/src/version.rs" \
+                | sed -n 's/^pub const GH_RELEASE_REPO: &str = "\([^"]*\)";/\1/p'
+            )"
           else
-            updater_repo="$(sed -n 's/^pub const GH_RELEASE_REPO: &str = "\([^"]*\)";/\1/p' \
-              crates/codegen/update/src/version.rs)"
+            updater_repo="$(
+              sed -n 's/^pub const GH_RELEASE_REPO: &str = "\([^"]*\)";/\1/p' \
+                crates/codegen/update/src/version.rs
+            )"
           fi
           test -n "$updater_repo"
           if [[ "$updater_repo" != "$RELEASE_REPO" ]]; then
@@ -81,7 +64,7 @@ jobs:
             exit 1
           fi
 
-      - name: Act — use bind-mounted workspace
+      - name: Act — verify bind-mounted workspace
         if: ${{ env.ACT }}
         shell: bash
         run: |
@@ -89,7 +72,6 @@ jobs:
           git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null
           echo "ACT workspace HEAD=$(git rev-parse --short HEAD) tag=${RELEASE_TAG}→$(git rev-parse --short "${RELEASE_TAG}^{commit}")"
 
-      # cargo metadata needs a toolchain (not preinstalled on GHA / act images).
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.92.0"
@@ -100,7 +82,6 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${ACT:-}" == "true" ]]; then
-            # Read workspace version from the tagged tree without checkout wipe.
             version="$(git show "${RELEASE_TAG}:Cargo.toml" \
               | awk '
                   $0 == "[workspace.package]" { in_pkg=1; next }
@@ -121,15 +102,118 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  # ── Linux amd64 ────────────────────────────────────────────────────────
-  build-linux-x86_64:
-    name: Build linux-x86_64
+  build:
+    name: Build ${{ matrix.asset_platform }}
     needs: validate
     timeout-minutes: 180
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     env:
-      TARGET_TRIPLE: x86_64-unknown-linux-gnu
-      ASSET_PLATFORM: linux-x86_64
+      ASSET_PLATFORM: ${{ matrix.asset_platform }}
+      TARGET_TRIPLE: ${{ matrix.target }}
+      GROW_VERSION: ${{ needs.validate.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset_platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            builder: alma
+            smoke: true
+            rg_repository: BurntSushi/ripgrep
+            rg_tag: 15.0.0
+            rg_archive: ripgrep-15.0.0-x86_64-unknown-linux-musl.tar.gz
+            rg_sha256: 253ad0fd5fef0d64cba56c70dccdacc1916d4ed70ad057cc525fcdb0c3bbd2a7
+            rg_strip_components: 1
+            rg_runnable: true
+          - asset_platform: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            builder: alma
+            smoke: true
+            rg_repository: microsoft/ripgrep-prebuilt
+            rg_tag: v15.0.0
+            rg_archive: ripgrep-v15.0.0-aarch64-unknown-linux-musl.tar.gz
+            rg_sha256: 47c6ea56f4d18bc26778eaca9b9c3f6e201b7c7d78d5ebc528dfda47e0e8f1ba
+            rg_strip_components: 0
+            rg_runnable: true
+          - asset_platform: linux-riscv64
+            target: riscv64gc-unknown-linux-gnu
+            runner: ubuntu-24.04
+            builder: cross
+            smoke: false
+            rg_repository: microsoft/ripgrep-prebuilt
+            rg_tag: v15.0.0
+            rg_archive: ripgrep-v15.0.0-riscv64gc-unknown-linux-gnu.tar.gz
+            rg_sha256: 49d7a681e4d22ffc523185682719332763ae182256e7360b9f621dc3268e7d08
+            rg_strip_components: 0
+            rg_runnable: false
+          - asset_platform: linux-x86_64-musl
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            builder: cross
+            smoke: false
+            rg_repository: BurntSushi/ripgrep
+            rg_tag: 15.0.0
+            rg_archive: ripgrep-15.0.0-x86_64-unknown-linux-musl.tar.gz
+            rg_sha256: 253ad0fd5fef0d64cba56c70dccdacc1916d4ed70ad057cc525fcdb0c3bbd2a7
+            rg_strip_components: 1
+            rg_runnable: true
+          - asset_platform: linux-aarch64-musl
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04
+            builder: cross
+            smoke: false
+            rg_repository: microsoft/ripgrep-prebuilt
+            rg_tag: v15.0.0
+            rg_archive: ripgrep-v15.0.0-aarch64-unknown-linux-musl.tar.gz
+            rg_sha256: 47c6ea56f4d18bc26778eaca9b9c3f6e201b7c7d78d5ebc528dfda47e0e8f1ba
+            rg_strip_components: 0
+            rg_runnable: false
+          - asset_platform: macos-aarch64
+            target: aarch64-apple-darwin
+            runner: macos-15
+            builder: macos
+            smoke: true
+            rg_repository: BurntSushi/ripgrep
+            rg_tag: 15.0.0
+            rg_archive: ripgrep-15.0.0-aarch64-apple-darwin.tar.gz
+            rg_sha256: 98bb2e61e7277ba0ea72d2ae2592497fd8d2940934a16b122448d302a6637e3b
+            rg_strip_components: 1
+            rg_runnable: true
+          - asset_platform: macos-x86_64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+            builder: macos
+            smoke: true
+            rg_repository: BurntSushi/ripgrep
+            rg_tag: 15.0.0
+            rg_archive: ripgrep-15.0.0-x86_64-apple-darwin.tar.gz
+            rg_sha256: 44128c733d127ddbda461e01225a68b5f9997cfe7635242a797f645ca674a71a
+            rg_strip_components: 1
+            rg_runnable: true
+          - asset_platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            builder: windows
+            smoke: true
+            rg_repository: BurntSushi/ripgrep
+            rg_tag: 15.0.0
+            rg_archive: ripgrep-15.0.0-x86_64-pc-windows-msvc.zip
+            rg_sha256: 21a98bf42c4da97ca543c010e764cc6dec8b9b7538d05f8d21874016385e0860
+            rg_strip_components: 1
+            rg_runnable: true
+          - asset_platform: windows-aarch64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            builder: windows
+            smoke: true
+            rg_repository: BurntSushi/ripgrep
+            rg_tag: 15.0.0
+            rg_archive: ripgrep-15.0.0-aarch64-pc-windows-msvc.zip
+            rg_sha256: 572709c8770cb7f9385d725cb06d2bcd9537ec24d4dd17b1be1d65a876f8b591
+            rg_strip_components: 1
+            rg_runnable: true
     steps:
       - uses: actions/checkout@v6
         if: ${{ !env.ACT }}
@@ -137,548 +221,167 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Act — checkout tagged tree on bind mount
-        if: ${{ env.ACT }}
+        if: ${{ env.ACT && runner.os == 'Linux' }}
         shell: bash
         run: |
           set -euo pipefail
           git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null
           if [[ -n "$(git status --porcelain)" ]]; then
-            echo "act build requires a clean worktree (bind mount shares the host clone)" >&2
+            echo "act build requires a clean worktree" >&2
             git status --short >&2
             exit 1
           fi
-          # Remember how to restore after the job (always step below).
           if branch="$(git symbolic-ref -q --short HEAD 2>/dev/null)"; then
-            echo "ACT_RESTORE_REF=${branch}" >> "$GITHUB_ENV"
+            echo "ACT_RESTORE_REF=$branch" >> "$GITHUB_ENV"
           else
             echo "ACT_RESTORE_REF=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           fi
           git checkout --detach "${RELEASE_TAG}"
-          echo "ACT build tree=$(git rev-parse --short HEAD) (${RELEASE_TAG})"
-
-      # Toolchain on the host: rustc/rustup (official builds, glibc >= 2.17) run
-      # fine inside the AlmaLinux 8 container; the container provides the linker
-      # (gcc 8.5) so the binary's glibc baseline is the container's 2.28.
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.92.0"
-          targets: x86_64-unknown-linux-gnu
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-linux-x86_64
-          shared-key: release-dist
-
-      - name: Prepare bundled ripgrep
-        shell: bash
-        env:
-          RG_VERSION: "15.0.0"
-          RG_TARGET: "x86_64-unknown-linux-musl"
-          RG_SHA256: "253ad0fd5fef0d64cba56c70dccdacc1916d4ed70ad057cc525fcdb0c3bbd2a7"
-        run: |
-          set -euo pipefail
-          archive="${RUNNER_TEMP}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
-          # Under $GITHUB_WORKSPACE so the Linux build container sees it.
-          bundle_dir="${GITHUB_WORKSPACE}/.build-tools/rg/ripgrep-${RG_VERSION}-${RG_TARGET}"
-          url="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
-
-          curl --fail --location --retry 5 --retry-all-errors \
-            --connect-timeout 30 --max-time 300 \
-            --output "$archive" "$url"
-          actual_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
-          test "$actual_sha256" = "$RG_SHA256"
-
-          mkdir -p "$bundle_dir"
-          tar -xzf "$archive" --strip-components=1 -C "$bundle_dir"
-          test -x "$bundle_dir/rg"
-          "$bundle_dir/rg" --version >/dev/null
-          echo "GROW_TOOLS_BUNDLE_RG_PATH=$bundle_dir/rg" >> "$GITHUB_ENV"
-
-      - name: Build Grow (AlmaLinux 8 container, glibc 2.28 baseline)
-        shell: bash
-        env:
-          GROW_VERSION: ${{ needs.validate.outputs.version }}
-          GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK: "1"
-        run: |
-          set -euo pipefail
-          # rustup/cargo default to $HOME/.cargo and $HOME/.rustup when the
-          # env vars are unset (dtolnay/rust-toolchain does not export them).
-          CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
-          RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
-          docker run --rm \
-            -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
-            -v "${CARGO_HOME}:${CARGO_HOME}" -v "${RUSTUP_HOME}:${RUSTUP_HOME}" \
-            -e "PATH=${CARGO_HOME}/bin:${PATH}" \
-            -e "CARGO_HOME=${CARGO_HOME}" -e "RUSTUP_HOME=${RUSTUP_HOME}" \
-            -e "GROW_VERSION=${GROW_VERSION}" \
-            -e "GROW_TOOLS_BUNDLE_RG_PATH=${GROW_TOOLS_BUNDLE_RG_PATH}" \
-            -e "GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1" \
-            -e "TARGET_TRIPLE=${TARGET_TRIPLE}" \
-            -e "CARGO_INCREMENTAL=0" \
-            almalinux:8 bash -euo pipefail -c '
-              dnf install -y gcc gcc-c++ make cmake git perl pkgconf >/dev/null
-              cargo build --locked --profile release-dist \
-                -p cli --bin grow --target "${TARGET_TRIPLE}"
-            '
-
-      # Minimal release assets: the unstripped release-dist build ships
-      # ~600 MB of DWARF + symbols (the profile keeps them for debug sidecars
-      # this pipeline never produces). Full strip removes both for the
-      # smallest artifact; RUST_BACKTRACE then shows raw addresses instead of
-      # symbol names.
-      - name: Smoke-test binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          BIN="target/${TARGET_TRIPLE}/release-dist/grow"
-          test -x "$BIN"
-          test -s "$BIN"
-          version_out="$("$BIN" --version)"
-          echo "$version_out"
-          echo "$version_out" | grep -F "${{ needs.validate.outputs.version }}"
-
-      - name: Strip and package release asset
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The container build runs as root, so target/ is root-owned and not
-          # writable by the runner — strip cannot rewrite the binary in place
-          # (GNU strip needs to create a temp file next to it).
-          mkdir -p dist
-          stage_dir="$(mktemp -d "${RUNNER_TEMP}/grow-release.XXXXXX")"
-          trap 'rm -rf "$stage_dir"' EXIT
-          cp "target/${TARGET_TRIPLE}/release-dist/grow" "$stage_dir/grow"
-          strip --strip-all "$stage_dir/grow"
-          ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}.tar.gz"
-          COPYFILE_DISABLE=1 tar -C "$stage_dir" -czf "$ASSET" grow
-          test "$(tar -tzf "$ASSET")" = "grow"
-          ls -la "$ASSET"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: grow-${{ env.ASSET_PLATFORM }}
-          path: dist/grow-*
-          if-no-files-found: error
-          retention-days: 3
-
-      - name: Act — restore bind-mounted branch
-        if: ${{ always() && env.ACT }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -n "${ACT_RESTORE_REF:-}" ]]; then
-            git checkout -f "${ACT_RESTORE_REF}"
-            echo "restored ${ACT_RESTORE_REF}"
-          fi
-
-  # ── Linux arm64 ────────────────────────────────────────────────────────
-  build-linux-aarch64:
-    name: Build linux-aarch64
-    needs: validate
-    timeout-minutes: 180
-    runs-on: ubuntu-24.04-arm
-    env:
-      TARGET_TRIPLE: aarch64-unknown-linux-gnu
-      ASSET_PLATFORM: linux-aarch64
-    steps:
-      - uses: actions/checkout@v6
-        if: ${{ !env.ACT }}
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-
-      - name: Act — checkout tagged tree on bind mount
-        if: ${{ env.ACT }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null
-          if [[ -n "$(git status --porcelain)" ]]; then
-            echo "act build requires a clean worktree (bind mount shares the host clone)" >&2
-            git status --short >&2
-            exit 1
-          fi
-          # Remember how to restore after the job (always step below).
-          if branch="$(git symbolic-ref -q --short HEAD 2>/dev/null)"; then
-            echo "ACT_RESTORE_REF=${branch}" >> "$GITHUB_ENV"
-          else
-            echo "ACT_RESTORE_REF=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          fi
-          git checkout --detach "${RELEASE_TAG}"
-          echo "ACT build tree=$(git rev-parse --short HEAD) (${RELEASE_TAG})"
-
-      # Toolchain on the host: rustc/rustup (official builds, glibc >= 2.17) run
-      # fine inside the AlmaLinux 8 container; the container provides the linker
-      # (gcc 8.5) so the binary's glibc baseline is the container's 2.28.
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.92.0"
-          targets: aarch64-unknown-linux-gnu
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-linux-aarch64
-          shared-key: release-dist
-
-      # Official ripgrep has no aarch64-musl asset for 15.0.0, so embed the gnu
-      # build (extracted sidecar; runnable on any distro with glibc >= the rg
-      # build baseline).
-      - name: Prepare bundled ripgrep
-        shell: bash
-        env:
-          RG_VERSION: "15.0.0"
-          RG_TARGET: "aarch64-unknown-linux-gnu"
-          RG_SHA256: "15f8cc2fab12d88491c54d49f38589922a9d6a7353c29b0a0856727bcdf80754"
-        run: |
-          set -euo pipefail
-          archive="${RUNNER_TEMP}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
-          # Under $GITHUB_WORKSPACE so the Linux build container sees it.
-          bundle_dir="${GITHUB_WORKSPACE}/.build-tools/rg/ripgrep-${RG_VERSION}-${RG_TARGET}"
-          url="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
-
-          curl --fail --location --retry 5 --retry-all-errors \
-            --connect-timeout 30 --max-time 300 \
-            --output "$archive" "$url"
-          actual_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
-          test "$actual_sha256" = "$RG_SHA256"
-
-          mkdir -p "$bundle_dir"
-          tar -xzf "$archive" --strip-components=1 -C "$bundle_dir"
-          test -x "$bundle_dir/rg"
-          # Validate runnability on the native runner (the gnu rg sidecar needs
-          # newer glibc than the AlmaLinux 8 build container provides; that is
-          # fine for real deployment targets, see tools build.rs).
-          "$bundle_dir/rg" --version >/dev/null
-          echo "GROW_TOOLS_BUNDLE_RG_PATH=$bundle_dir/rg" >> "$GITHUB_ENV"
-
-      - name: Build Grow (AlmaLinux 8 container, glibc 2.28 baseline)
-        shell: bash
-        env:
-          GROW_VERSION: ${{ needs.validate.outputs.version }}
-          GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK: "1"
-        run: |
-          set -euo pipefail
-          # rustup/cargo default to $HOME/.cargo and $HOME/.rustup when the
-          # env vars are unset (dtolnay/rust-toolchain does not export them).
-          CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
-          RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
-          docker run --rm \
-            -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
-            -v "${CARGO_HOME}:${CARGO_HOME}" -v "${RUSTUP_HOME}:${RUSTUP_HOME}" \
-            -e "PATH=${CARGO_HOME}/bin:${PATH}" \
-            -e "CARGO_HOME=${CARGO_HOME}" -e "RUSTUP_HOME=${RUSTUP_HOME}" \
-            -e "GROW_VERSION=${GROW_VERSION}" \
-            -e "GROW_TOOLS_BUNDLE_RG_PATH=${GROW_TOOLS_BUNDLE_RG_PATH}" \
-            -e "GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1" \
-            -e "TARGET_TRIPLE=${TARGET_TRIPLE}" \
-            -e "CARGO_INCREMENTAL=0" \
-            almalinux:8 bash -euo pipefail -c '
-              dnf install -y gcc gcc-c++ make cmake git perl pkgconf >/dev/null
-              cargo build --locked --profile release-dist \
-                -p cli --bin grow --target "${TARGET_TRIPLE}"
-            '
-
-      # Minimal release assets: the unstripped release-dist build ships
-      # ~600 MB of DWARF + symbols (the profile keeps them for debug sidecars
-      # this pipeline never produces). Full strip removes both for the
-      # smallest artifact; RUST_BACKTRACE then shows raw addresses instead of
-      # symbol names.
-      - name: Smoke-test binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          BIN="target/${TARGET_TRIPLE}/release-dist/grow"
-          test -x "$BIN"
-          test -s "$BIN"
-          version_out="$("$BIN" --version)"
-          echo "$version_out"
-          echo "$version_out" | grep -F "${{ needs.validate.outputs.version }}"
-
-      - name: Strip and package release asset
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The container build runs as root, so target/ is root-owned and not
-          # writable by the runner — strip cannot rewrite the binary in place
-          # (GNU strip needs to create a temp file next to it).
-          mkdir -p dist
-          stage_dir="$(mktemp -d "${RUNNER_TEMP}/grow-release.XXXXXX")"
-          trap 'rm -rf "$stage_dir"' EXIT
-          cp "target/${TARGET_TRIPLE}/release-dist/grow" "$stage_dir/grow"
-          strip --strip-all "$stage_dir/grow"
-          ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}.tar.gz"
-          COPYFILE_DISABLE=1 tar -C "$stage_dir" -czf "$ASSET" grow
-          test "$(tar -tzf "$ASSET")" = "grow"
-          ls -la "$ASSET"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: grow-${{ env.ASSET_PLATFORM }}
-          path: dist/grow-*
-          if-no-files-found: error
-          retention-days: 3
-
-      - name: Act — restore bind-mounted branch
-        if: ${{ always() && env.ACT }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -n "${ACT_RESTORE_REF:-}" ]]; then
-            git checkout -f "${ACT_RESTORE_REF}"
-            echo "restored ${ACT_RESTORE_REF}"
-          fi
-
-  # ── Linux riscv64 ──────────────────────────────────────────────────────
-  # Cross-compiled on an amd64 runner via `cross` (no riscv64 GitHub runners,
-  # and riscv64-musl C toolchain is not available). The glibc baseline comes
-  # from the cross image, not the AlmaLinux 8 container. Official ripgrep has
-  # no riscv64 asset, so the sidecar is pulled from the riscv64 prebuilt
-  # builds in microsoft/ripgrep-prebuilt (same v15.0.0 as the other platforms).
-  build-linux-riscv64:
-    name: Build linux-riscv64
-    needs: validate
-    timeout-minutes: 180
-    runs-on: ubuntu-24.04
-    env:
-      TARGET_TRIPLE: riscv64gc-unknown-linux-gnu
-      ASSET_PLATFORM: linux-riscv64
-    steps:
-      - uses: actions/checkout@v6
-        if: ${{ !env.ACT }}
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-
-      - name: Act — checkout tagged tree on bind mount
-        if: ${{ env.ACT }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null
-          if [[ -n "$(git status --porcelain)" ]]; then
-            echo "act build requires a clean worktree (bind mount shares the host clone)" >&2
-            git status --short >&2
-            exit 1
-          fi
-          # Remember how to restore after the job (always step below).
-          if branch="$(git symbolic-ref -q --short HEAD 2>/dev/null)"; then
-            echo "ACT_RESTORE_REF=${branch}" >> "$GITHUB_ENV"
-          else
-            echo "ACT_RESTORE_REF=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          fi
-          git checkout --detach "${RELEASE_TAG}"
-          echo "ACT build tree=$(git rev-parse --short HEAD) (${RELEASE_TAG})"
 
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.92.0"
-          targets: riscv64gc-unknown-linux-gnu
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-linux-riscv64
+          key: release-${{ matrix.asset_platform }}
           shared-key: release-dist
 
-      # `cross` provides the riscv64 cross C toolchain + sysroot via its
-      # container image (ghcr.io/cross-rs/riscv64gc-unknown-linux-gnu).
       - name: Install cross
+        if: ${{ matrix.builder == 'cross' }}
         shell: bash
-        run: cargo install cross --locked
-
-      # Official ripgrep releases have no riscv64 asset, so use the riscv64
-      # prebuilt from microsoft/ripgrep-prebuilt (pinned v15.0.0, the same
-      # version embedded on the other platforms). The tarball holds a single
-      # top-level `rg`; it cannot be executed on the amd64 runner, so the
-      # build step sets GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1.
-      - name: Prepare bundled ripgrep (riscv64)
-        shell: bash
-        env:
-          RG_VERSION: "15.0.0"
-          RG_TARGET: "riscv64gc-unknown-linux-gnu"
-          RG_SHA256: "49d7a681e4d22ffc523185682719332763ae182256e7360b9f621dc3268e7d08"
-        run: |
-          set -euo pipefail
-          archive="${RUNNER_TEMP}/ripgrep-v${RG_VERSION}-${RG_TARGET}.tar.gz"
-          # Under $GITHUB_WORKSPACE so the Linux build container sees it.
-          bundle_dir="${GITHUB_WORKSPACE}/.build-tools/rg/ripgrep-${RG_VERSION}-${RG_TARGET}"
-          url="https://github.com/microsoft/ripgrep-prebuilt/releases/download/v${RG_VERSION}/ripgrep-v${RG_VERSION}-${RG_TARGET}.tar.gz"
-
-          curl --fail --location --retry 5 --retry-all-errors \
-            --connect-timeout 30 --max-time 300 \
-            --output "$archive" "$url"
-          actual_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
-          test "$actual_sha256" = "$RG_SHA256"
-
-          mkdir -p "$bundle_dir"
-          tar -xzf "$archive" -C "$bundle_dir"
-          test -x "$bundle_dir/rg"
-          echo "GROW_TOOLS_BUNDLE_RG_PATH=$bundle_dir/rg" >> "$GITHUB_ENV"
-
-      - name: Build Grow (riscv64 cross-compile)
-        shell: bash
-        env:
-          GROW_VERSION: ${{ needs.validate.outputs.version }}
-        run: |
-          set -euo pipefail
-          # `cross` mounts the workspace into the container, but the mount
-          # point is not guaranteed (/project on older cross, host path on
-          # newer), so the tools dir is mounted explicitly at a fixed
-          # container path and referenced from there. Options must stay
-          # single-space separated: cross splits CROSS_CONTAINER_OPTS on ' '.
-          export CROSS_CONTAINER_OPTS="-v ${GITHUB_WORKSPACE}/.build-tools:/opt/tools:ro \
-          -e GROW_TOOLS_BUNDLE_RG_PATH=/opt/tools/rg/ripgrep-15.0.0-riscv64gc-unknown-linux-gnu/rg \
-          -e GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1"
-          cross build --locked --profile release-dist \
-            -p cli --bin grow --target riscv64gc-unknown-linux-gnu
-
-      # Full strip, same as the other Linux jobs (release-dist keeps DWARF +
-      # symbols; the pipeline ships no debug sidecars). The amd64 runner's
-      # GNU strip (binutils) has no riscv64 BFD target — it fails with
-      # "Unable to recognise the format of the input file" — so use
-      # llvm-strip (ships with the LLVM 18 toolchain on ubuntu-24.04
-      # runners), which is architecture-agnostic.
-      # The riscv64 binary cannot execute on the amd64 runner; build success
-      # is the acceptance bar for this target.
-
-      - name: Strip and package release asset (llvm-strip)
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The container build runs as root, so target/ is root-owned and not
-          # writable by the runner — strip cannot rewrite the binary in place
-          # (GNU strip needs to create a temp file next to it).
-          mkdir -p dist
-          stage_dir="$(mktemp -d "${RUNNER_TEMP}/grow-release.XXXXXX")"
-          trap 'rm -rf "$stage_dir"' EXIT
-          cp "target/${TARGET_TRIPLE}/release-dist/grow" "$stage_dir/grow"
-          STRIP="$(command -v llvm-strip || command -v llvm-strip-18 || true)"
-          test -n "$STRIP" || { echo "llvm-strip not found on runner" >&2; exit 1; }
-          "$STRIP" --strip-all "$stage_dir/grow"
-          ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}.tar.gz"
-          COPYFILE_DISABLE=1 tar -C "$stage_dir" -czf "$ASSET" grow
-          test "$(tar -tzf "$ASSET")" = "grow"
-          ls -la "$ASSET"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: grow-${{ env.ASSET_PLATFORM }}
-          path: dist/grow-*
-          if-no-files-found: error
-          retention-days: 3
-
-      - name: Act — restore bind-mounted branch
-        if: ${{ always() && env.ACT }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -n "${ACT_RESTORE_REF:-}" ]]; then
-            git checkout -f "${ACT_RESTORE_REF}"
-            echo "restored ${ACT_RESTORE_REF}"
-          fi
-
-  # ── macOS ──────────────────────────────────────────────────────────────
-  build-macos:
-    name: Build macos-aarch64
-    needs: validate
-    # Skip on explicit workflow_dispatch request; tag pushes always build.
-    # Use github.event.inputs (raw event payload): the `inputs` context is not
-    # hydrated in job-level `if` for workflow_dispatch, so `inputs.skip-macos`
-    # evaluates empty there. Guard both string ('true') and boolean (true)
-    # forms — gh CLI and the raw API deliver the boolean input differently.
-    if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.skip-macos != 'true' && github.event.inputs.skip-macos != true) }}
-    timeout-minutes: 180
-    runs-on: macos-15
-    env:
-      TARGET_TRIPLE: aarch64-apple-darwin
-      ASSET_PLATFORM: macos-aarch64
-    steps:
-      - uses: actions/checkout@v6
-        if: ${{ !env.ACT }}
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-
-      - name: Act — checkout tagged tree on bind mount
-        if: ${{ env.ACT }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null
-          if [[ -n "$(git status --porcelain)" ]]; then
-            echo "act build requires a clean worktree (bind mount shares the host clone)" >&2
-            git status --short >&2
-            exit 1
-          fi
-          # Remember how to restore after the job (always step below).
-          if branch="$(git symbolic-ref -q --short HEAD 2>/dev/null)"; then
-            echo "ACT_RESTORE_REF=${branch}" >> "$GITHUB_ENV"
-          else
-            echo "ACT_RESTORE_REF=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          fi
-          git checkout --detach "${RELEASE_TAG}"
-          echo "ACT build tree=$(git rev-parse --short HEAD) (${RELEASE_TAG})"
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.92.0"
-          targets: aarch64-apple-darwin
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-macos-aarch64
-          shared-key: release-dist
+        run: cargo install cross --locked --version 0.2.5
 
       - name: Prepare bundled ripgrep
+        if: ${{ matrix.builder != 'windows' }}
         shell: bash
         env:
-          RG_VERSION: "15.0.0"
-          RG_TARGET: "aarch64-apple-darwin"
-          RG_SHA256: "98bb2e61e7277ba0ea72d2ae2592497fd8d2940934a16b122448d302a6637e3b"
+          RG_REPOSITORY: ${{ matrix.rg_repository }}
+          RG_TAG: ${{ matrix.rg_tag }}
+          RG_ARCHIVE: ${{ matrix.rg_archive }}
+          RG_SHA256: ${{ matrix.rg_sha256 }}
+          RG_STRIP_COMPONENTS: ${{ matrix.rg_strip_components }}
+          RG_RUNNABLE: ${{ matrix.rg_runnable }}
         run: |
           set -euo pipefail
-          archive="${RUNNER_TEMP}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
-          bundle_dir="${GITHUB_WORKSPACE}/.build-tools/rg/ripgrep-${RG_VERSION}-${RG_TARGET}"
-          url="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
+          archive="${RUNNER_TEMP}/${RG_ARCHIVE}"
+          bundle_dir="${GITHUB_WORKSPACE}/.build-tools/rg/${ASSET_PLATFORM}"
+          url="https://github.com/${RG_REPOSITORY}/releases/download/${RG_TAG}/${RG_ARCHIVE}"
 
           curl --fail --location --retry 5 --retry-all-errors \
-            --connect-timeout 30 --max-time 300 \
-            --output "$archive" "$url"
+            --connect-timeout 30 --max-time 300 --output "$archive" "$url"
           actual_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
           test "$actual_sha256" = "$RG_SHA256"
 
           mkdir -p "$bundle_dir"
-          tar -xzf "$archive" --strip-components=1 -C "$bundle_dir"
+          if [[ "$RG_STRIP_COMPONENTS" == "1" ]]; then
+            tar -xzf "$archive" --strip-components=1 -C "$bundle_dir"
+          else
+            tar -xzf "$archive" -C "$bundle_dir"
+          fi
           test -x "$bundle_dir/rg"
-          "$bundle_dir/rg" --version >/dev/null
+          if [[ "$RG_RUNNABLE" == "true" ]]; then
+            "$bundle_dir/rg" --version >/dev/null
+          fi
           echo "GROW_TOOLS_BUNDLE_RG_PATH=$bundle_dir/rg" >> "$GITHUB_ENV"
+
+      - name: Prepare bundled ripgrep
+        if: ${{ matrix.builder == 'windows' }}
+        shell: pwsh
+        env:
+          RG_REPOSITORY: ${{ matrix.rg_repository }}
+          RG_TAG: ${{ matrix.rg_tag }}
+          RG_ARCHIVE: ${{ matrix.rg_archive }}
+          RG_SHA256: ${{ matrix.rg_sha256 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path $env:RUNNER_TEMP $env:RG_ARCHIVE
+          $expanded = Join-Path $env:RUNNER_TEMP "ripgrep-expanded"
+          $bundleDir = Join-Path $env:GITHUB_WORKSPACE ".build-tools/rg/$env:ASSET_PLATFORM"
+          $url = "https://github.com/$env:RG_REPOSITORY/releases/download/$env:RG_TAG/$env:RG_ARCHIVE"
+
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne $env:RG_SHA256) {
+            throw "ripgrep SHA-256 mismatch: expected $env:RG_SHA256, got $actual"
+          }
+          Expand-Archive -Path $archive -DestinationPath $expanded
+          $rg = Get-ChildItem -Path $expanded -Recurse -Filter rg.exe | Select-Object -First 1
+          if (-not $rg) { throw "rg.exe not found in $archive" }
+          New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
+          $bundledRg = Join-Path $bundleDir "rg.exe"
+          Copy-Item $rg.FullName $bundledRg
+          & $bundledRg --version | Out-Null
+          "GROW_TOOLS_BUNDLE_RG_PATH=$bundledRg" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build Grow (AlmaLinux 8, glibc 2.28 baseline)
+        if: ${{ matrix.builder == 'alma' }}
+        shell: bash
+        env:
+          GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK: "1"
+        run: |
+          set -euo pipefail
+          CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
+          RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
+            -v "${CARGO_HOME}:${CARGO_HOME}" -v "${RUSTUP_HOME}:${RUSTUP_HOME}" \
+            -e "PATH=${CARGO_HOME}/bin:${PATH}" \
+            -e "CARGO_HOME=${CARGO_HOME}" -e "RUSTUP_HOME=${RUSTUP_HOME}" \
+            -e "GROW_VERSION=${GROW_VERSION}" \
+            -e "GROW_TOOLS_BUNDLE_RG_PATH=${GROW_TOOLS_BUNDLE_RG_PATH}" \
+            -e "GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1" \
+            -e "TARGET_TRIPLE=${TARGET_TRIPLE}" -e "CARGO_INCREMENTAL=0" \
+            almalinux:8 bash -euo pipefail -c '
+              dnf install -y gcc gcc-c++ make cmake git perl pkgconf >/dev/null
+              cargo build --locked --profile release-dist \
+                -p cli --bin grow --target "${TARGET_TRIPLE}"
+            '
+
+      - name: Build Grow (cross)
+        if: ${{ matrix.builder == 'cross' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CROSS_CONTAINER_OPTS="-v ${GITHUB_WORKSPACE}/.build-tools:/opt/tools:ro -e GROW_VERSION=${GROW_VERSION} -e GROW_TOOLS_BUNDLE_RG_PATH=/opt/tools/rg/${ASSET_PLATFORM}/rg -e GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1"
+          cross build --locked --profile release-dist \
+            -p cli --bin grow --target "${TARGET_TRIPLE}"
 
       - name: Build Grow (macOS)
+        if: ${{ matrix.builder == 'macos' }}
         shell: bash
-        env:
-          GROW_VERSION: ${{ needs.validate.outputs.version }}
         run: |
+          set -euo pipefail
           cargo build --locked --profile release-dist \
             -p cli --bin grow --target "${TARGET_TRIPLE}"
 
-      # Minimal release assets on macOS too: Apple strip (no flags) removes
-      # debug symbols + local symbols from the Mach-O.
-      - name: Strip for minimal size
+      - name: Build Grow (Windows)
+        if: ${{ matrix.builder == 'windows' }}
+        shell: pwsh
+        run: cargo build --locked --profile release-dist -p cli --bin grow --target $env:TARGET_TRIPLE
+
+      - name: Smoke-test native binary
+        if: ${{ matrix.smoke && matrix.builder != 'windows' }}
         shell: bash
         run: |
           set -euo pipefail
-          BIN="target/${TARGET_TRIPLE}/release-dist/grow"
-          strip "$BIN"
-          ls -la "$BIN"
+          bin="target/${TARGET_TRIPLE}/release-dist/grow"
+          test -x "$bin"
+          test -s "$bin"
+          "$bin" --version | tee /dev/stderr | grep -F "${GROW_VERSION}"
 
-      - name: Smoke-test binary
-        shell: bash
+      - name: Smoke-test native binary
+        if: ${{ matrix.smoke && matrix.builder == 'windows' }}
+        shell: pwsh
         run: |
-          set -euo pipefail
-          BIN="target/${TARGET_TRIPLE}/release-dist/grow"
-          test -x "$BIN"
-          test -s "$BIN"
-          version_out="$("$BIN" --version)"
-          echo "$version_out"
-          echo "$version_out" | grep -F "${{ needs.validate.outputs.version }}"
+          $bin = "target/$env:TARGET_TRIPLE/release-dist/grow.exe"
+          if (-not (Test-Path $bin)) { throw "missing $bin" }
+          $version = & $bin --version
+          if ($version -notlike "*$env:GROW_VERSION*") { throw "unexpected version: $version" }
 
-      - name: Package release asset
+      - name: Package Unix release asset
+        if: ${{ matrix.builder != 'windows' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -686,41 +389,62 @@ jobs:
           stage_dir="$(mktemp -d "${RUNNER_TEMP}/grow-release.XXXXXX")"
           trap 'rm -rf "$stage_dir"' EXIT
           cp "target/${TARGET_TRIPLE}/release-dist/grow" "$stage_dir/grow"
-          ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}.tar.gz"
-          COPYFILE_DISABLE=1 tar -C "$stage_dir" -czf "$ASSET" grow
-          test "$(tar -tzf "$ASSET")" = "grow"
-          ls -la "$ASSET"
+
+          case "${{ matrix.builder }}" in
+            alma)
+              strip --strip-all "$stage_dir/grow"
+              ;;
+            cross)
+              strip_bin="$(command -v llvm-strip || command -v llvm-strip-18 || true)"
+              test -n "$strip_bin" || { echo "llvm-strip not found" >&2; exit 1; }
+              "$strip_bin" --strip-all "$stage_dir/grow"
+              ;;
+            macos)
+              strip "$stage_dir/grow"
+              ;;
+          esac
+
+          asset="dist/grow-${GROW_VERSION}-${ASSET_PLATFORM}.tar.gz"
+          COPYFILE_DISABLE=1 tar -C "$stage_dir" -czf "$asset" grow
+          test "$(tar -tzf "$asset")" = "grow"
+          ls -la "$asset"
+
+      - name: Package Windows release asset
+        if: ${{ matrix.builder == 'windows' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $stageDir = Join-Path $env:RUNNER_TEMP "grow-release"
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          Copy-Item "target/$env:TARGET_TRIPLE/release-dist/grow.exe" (Join-Path $stageDir "grow.exe")
+          $asset = "dist/grow-$env:GROW_VERSION-$env:ASSET_PLATFORM.tar.gz"
+          tar -C $stageDir -czf $asset grow.exe
+          $entries = (tar -tzf $asset).Trim()
+          if ($entries -ne "grow.exe") { throw "invalid archive entry: $entries" }
+          Get-Item $asset
 
       - uses: actions/upload-artifact@v7
         with:
-          name: grow-${{ env.ASSET_PLATFORM }}
+          name: grow-${{ matrix.asset_platform }}
           path: dist/grow-*
           if-no-files-found: error
           retention-days: 3
 
       - name: Act — restore bind-mounted branch
-        if: ${{ always() && env.ACT }}
+        if: ${{ always() && env.ACT && runner.os == 'Linux' }}
         shell: bash
         run: |
           set -euo pipefail
           if [[ -n "${ACT_RESTORE_REF:-}" ]]; then
             git checkout -f "${ACT_RESTORE_REF}"
-            echo "restored ${ACT_RESTORE_REF}"
           fi
 
-  # Intermediate build outputs stay on the Actions run (upload-artifact).
-  # The GitHub Release page only gets final grow tarballs for end users.
   publish:
     name: Publish release assets
     needs:
       - validate
-      - build-linux-x86_64
-      - build-linux-aarch64
-      - build-linux-riscv64
-      - build-macos
-    # Run as long as no build failed. A skipped macOS rebuild is allowed only
-    # when the existing Release already has the exact macOS asset updater needs.
-    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') }}
+      - build
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v8
@@ -731,59 +455,56 @@ jobs:
 
       - name: Verify staged binaries
         working-directory: dist
+        shell: bash
         run: |
           set -euo pipefail
           version="${{ needs.validate.outputs.version }}"
-          allowed=(
+          required=(
             "grow-${version}-linux-x86_64.tar.gz"
             "grow-${version}-linux-aarch64.tar.gz"
             "grow-${version}-linux-riscv64.tar.gz"
+            "grow-${version}-linux-x86_64-musl.tar.gz"
+            "grow-${version}-linux-aarch64-musl.tar.gz"
             "grow-${version}-macos-aarch64.tar.gz"
+            "grow-${version}-macos-x86_64.tar.gz"
+            "grow-${version}-windows-x86_64.tar.gz"
+            "grow-${version}-windows-aarch64.tar.gz"
           )
-          mapfile -t assets < <(find . -maxdepth 1 -type f -name 'grow-*' | sort)
-
-          # Local act often runs a single build job. Still reject any name the
-          # updater cannot derive, rather than accepting an arbitrary grow-* file.
-          if [[ "${ACT:-}" == "true" ]]; then
-            test "${#assets[@]}" -ge 1
-          elif [[ "${{ needs.build-macos.result }}" == "skipped" ]]; then
-            expected=("${allowed[@]:0:3}")
-          else
-            expected=("${allowed[@]}")
-          fi
+          mapfile -t assets < <(find . -maxdepth 1 -type f -name 'grow-*' -printf '%f\n' | sort)
 
           if [[ "${ACT:-}" != "true" ]]; then
-            test "${#assets[@]}" -eq "${#expected[@]}"
-            for name in "${expected[@]}"; do
+            test "${#assets[@]}" -eq "${#required[@]}"
+            for name in "${required[@]}"; do
               test -s "$name"
             done
+          else
+            test "${#assets[@]}" -ge 1
           fi
 
-          for f in "${assets[@]}"; do
-            test -s "$f"
-            name="${f#./}"
+          for name in "${assets[@]}"; do
             known=false
-            for allowed_name in "${allowed[@]}"; do
-              if [[ "$name" == "$allowed_name" ]]; then
+            for required_name in "${required[@]}"; do
+              if [[ "$name" == "$required_name" ]]; then
                 known=true
                 break
               fi
             done
-            if [[ "$known" != "true" ]]; then
+            [[ "$known" == "true" ]] || {
               echo "asset name is outside the updater contract: $name" >&2
               exit 1
+            }
+            expected_entry=grow
+            if [[ "$name" == *-windows-*.tar.gz ]]; then
+              expected_entry=grow.exe
             fi
-            if [[ "$(tar -tzf "$f")" != "grow" ]]; then
-              echo "release archive must contain exactly one grow executable: $name" >&2
+            if [[ "$(tar -tzf "$name")" != "$expected_entry" ]]; then
+              echo "$name must contain exactly one $expected_entry executable" >&2
               exit 1
             fi
-            echo "release asset: $name ($(wc -c <"$f") bytes)"
+            echo "release asset: $name ($(wc -c <"$name") bytes)"
           done
           sha256sum grow-*
 
-      # Keep a new Release draft-only until all updater-visible assets have
-      # uploaded and been verified. Unauthenticated updater requests cannot
-      # observe drafts, so the version pointer and its binaries appear together.
       - name: Prepare hidden GitHub Release
         if: ${{ !env.ACT }}
         env:
@@ -798,52 +519,29 @@ jobs:
           fi
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "reusing existing Release $RELEASE_TAG"
             if [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" != "true" ]]; then
-              # Hide published assets while --clobber replaces them. A failed
-              # repair then cannot expose an incomplete asset set as latest.
               gh release edit "$RELEASE_TAG" --draft
             fi
           else
-            if [[ "${{ needs.build-macos.result }}" == "skipped" ]]; then
-              echo "cannot skip macOS when $RELEASE_TAG has no existing Release asset" >&2
-              exit 1
-            fi
-            release_args=(
-              --verify-tag
-              --draft
-              --title "$RELEASE_TAG"
-              --generate-notes
-            )
+            release_args=(--verify-tag --draft --title "$RELEASE_TAG" --generate-notes)
             if [[ "$expected_prerelease" == "true" ]]; then
-              # update's stable channel excludes GitHub prereleases. Keep that
-              # GitHub flag aligned with the semver prerelease component.
               release_args+=(--prerelease)
             fi
             gh release create "$RELEASE_TAG" "${release_args[@]}"
           fi
 
-          actual_prerelease="$(
-            gh release view "$RELEASE_TAG" --json isPrerelease --jq '.isPrerelease'
-          )"
+          actual_prerelease="$(gh release view "$RELEASE_TAG" --json isPrerelease --jq '.isPrerelease')"
           if [[ "$actual_prerelease" != "$expected_prerelease" ]]; then
             gh release edit "$RELEASE_TAG" --prerelease="$expected_prerelease"
           fi
 
-          if [[ "${{ needs.build-macos.result }}" == "skipped" ]]; then
-            mac_asset="grow-${version}-macos-aarch64.tar.gz"
-            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' \
-              | grep -Fqx "$mac_asset"
-          fi
-
-      - name: Upload grow binaries to GitHub Release
+      - name: Upload Grow binaries
         if: ${{ !env.ACT }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ env.RELEASE_REPO }}
         run: |
           set -euo pipefail
-          # Only grow-{version}-{platform}.tar.gz packages — no sidecars.
           gh release upload "$RELEASE_TAG" dist/grow-* --clobber
 
       - name: Verify and publish GitHub Release
@@ -858,7 +556,12 @@ jobs:
             "grow-${version}-linux-x86_64.tar.gz"
             "grow-${version}-linux-aarch64.tar.gz"
             "grow-${version}-linux-riscv64.tar.gz"
+            "grow-${version}-linux-x86_64-musl.tar.gz"
+            "grow-${version}-linux-aarch64-musl.tar.gz"
             "grow-${version}-macos-aarch64.tar.gz"
+            "grow-${version}-macos-x86_64.tar.gz"
+            "grow-${version}-windows-x86_64.tar.gz"
+            "grow-${version}-windows-aarch64.tar.gz"
           )
           remote_assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
           remote_asset_count="$(sed '/^$/d' <<<"$remote_assets" | wc -l | tr -d ' ')"
@@ -873,7 +576,6 @@ jobs:
               exit 1
             }
           done
-
           if [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" == "true" ]]; then
             gh release edit "$RELEASE_TAG" --draft=false
           fi
@@ -881,7 +583,5 @@ jobs:
       - name: Act dry-run summary
         if: ${{ env.ACT }}
         working-directory: dist
-        run: |
-          set -euo pipefail
-          echo "ACT=true: skipping gh release upload. Staged assets:"
-          ls -la grow-*
+        shell: bash
+        run: ls -la grow-*
