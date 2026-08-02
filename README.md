@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="grow.png" alt="Grow">
+</p>
+
 # Grow
 
 Grow 是一个从 xAI Grok Build 分叉并独立演进的终端 AI 编程 Agent。它保留了成熟的 Rust
