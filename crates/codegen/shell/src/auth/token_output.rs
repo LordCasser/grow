@@ -23,6 +23,27 @@ pub(crate) fn expiry_after_seconds(secs: u64) -> Option<chrono::DateTime<chrono:
     chrono::Utc::now().checked_add_signed(chrono::Duration::try_seconds(secs)?)
 }
 
+/// Read a compact JWT's `exp` claim as a cache-expiry hint. The signature is
+/// deliberately not verified here: the helper already owns the bearer value,
+/// and this timestamp can only make Grow refresh it sooner or later.
+pub(crate) fn jwt_expiry(token: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use base64::Engine;
+
+    let mut segments = token.split('.');
+    let _header = segments.next()?;
+    let claims = segments.next()?;
+    let _signature = segments.next()?;
+    if segments.next().is_some() {
+        return None;
+    }
+
+    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(claims)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&claims).ok()?;
+    chrono::DateTime::from_timestamp(claims.get("exp")?.as_i64()?, 0)
+}
+
 pub(crate) struct ParsedTokenOutput {
     pub access_token: String,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -112,5 +133,20 @@ mod tests {
         // malformed token can never reach an HTTP header.
         assert!(parse_token_output(&ok("{\"access_token\":\"tok\\ninjected\"}")).is_err());
         assert!(parse_token_output(&ok("tok\ninjected")).is_err());
+    }
+
+    #[test]
+    fn jwt_expiry_reads_only_valid_compact_numeric_claims() {
+        use base64::Engine;
+
+        let claims =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"exp":1234567890}"#);
+        let token = format!("header.{claims}.signature");
+        assert_eq!(jwt_expiry(&token).unwrap().timestamp(), 1_234_567_890);
+
+        assert_eq!(jwt_expiry("opaque-token"), None);
+        assert_eq!(jwt_expiry("header.not-base64.signature"), None);
+        assert_eq!(jwt_expiry("header.e30.signature"), None);
+        assert_eq!(jwt_expiry("a.b.c.d"), None);
     }
 }

@@ -7,7 +7,7 @@
 //! state, never a persistent account store). Grow does not own login or token
 //! lifecycle state; a helper is only an alternate way to read BYOK material.
 
-use super::token_output::{expiry_after_seconds, parse_token_output};
+use super::token_output::{expiry_after_seconds, jwt_expiry, parse_token_output};
 
 /// One named `[auth_provider.<name>]` table, honored only from the trusted
 /// config layers (`parse_auth_providers`). A new field here needs a
@@ -418,7 +418,8 @@ async fn mint_provider_token(
     };
     let expires_at = parsed
         .expires_at
-        .or_else(|| config.token_ttl_secs.and_then(expiry_after_seconds));
+        .or_else(|| config.token_ttl_secs.and_then(expiry_after_seconds))
+        .or_else(|| jwt_expiry(&parsed.access_token));
     tracing::info!(
         provider = %name,
         mark_expired,
