@@ -25,7 +25,7 @@ reqwest-middleware = { workspace = true }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = { workspace = true }
 # sqlite-vec: vec0 virtual table for KNN vector search.
-sqlite-vec = "=0.1.7-alpha.2"
+sqlite-vec = "=0.1.10-alpha.4"
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 tracing = { workspace = true }
 auth = { workspace = true }

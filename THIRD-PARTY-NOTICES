@@ -12078,7 +12078,7 @@ Additional requirements / notices:
   Upstream license expression: Apache-2.0 OR MIT. For this distribution, obligations are satisfied under: MIT.
 
 --------------------------------------------------------------------------------
-sqlite-vec 0.1.7-alpha.2
+sqlite-vec 0.1.10-alpha.4
 --------------------------------------------------------------------------------
 Source:  https://github.com/asg017/sqlite-vec
 License: MIT  (upstream declares: MIT/Apache-2.0)
@@ -12091,6 +12091,7 @@ License text: see Part II — MIT
 
 Additional requirements / notices:
   Upstream license expression: MIT/Apache-2.0. For this distribution, obligations are satisfied under: MIT.
+  Source is vendored at third_party/sqlite-vec with four missing package files restored from the same upstream tag.
 
 --------------------------------------------------------------------------------
 sqlx 0.8.6

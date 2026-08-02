@@ -6,6 +6,9 @@ async-openai = { git = "https://github.com/our-forks/async-openai.git", rev = "9
 # seccomp ioctl request constants portable across glibc and musl.
 # See third_party/nono/Cargo.toml for patch and upgrade notes.
 nono = { path = "third_party/nono" }
+# sqlite-vec 0.1.10-alpha.4 contains the musl fix, but its crates.io archive
+# omits C files included by sqlite-vec.c. See the vendoring notes.
+sqlite-vec = { path = "third_party/sqlite-vec" }
 
 [workspace]
 resolver = "2"
