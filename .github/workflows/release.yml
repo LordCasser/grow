@@ -245,8 +245,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.asset_platform }}
-          shared-key: release-dist
+          shared-key: release-${{ matrix.asset_platform }}
 
       - name: Install cross
         if: ${{ matrix.builder == 'cross' }}
@@ -324,18 +323,22 @@ jobs:
           set -euo pipefail
           CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
           RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
+          HOST_UID="$(id -u)"
+          HOST_GID="$(id -g)"
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
             -v "${CARGO_HOME}:${CARGO_HOME}" -v "${RUSTUP_HOME}:${RUSTUP_HOME}" \
             -e "PATH=${CARGO_HOME}/bin:${PATH}" \
+            -e "HOME=${HOME}" -e "HOST_UID=${HOST_UID}" -e "HOST_GID=${HOST_GID}" \
             -e "CARGO_HOME=${CARGO_HOME}" -e "RUSTUP_HOME=${RUSTUP_HOME}" \
             -e "GROW_VERSION=${GROW_VERSION}" \
             -e "GROW_TOOLS_BUNDLE_RG_PATH=${GROW_TOOLS_BUNDLE_RG_PATH}" \
             -e "GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1" \
             -e "TARGET_TRIPLE=${TARGET_TRIPLE}" -e "CARGO_INCREMENTAL=0" \
             almalinux:8 bash -euo pipefail -c '
-              dnf install -y gcc gcc-c++ make cmake git perl pkgconf >/dev/null
-              cargo build --locked --profile release-dist \
+              dnf install -y gcc gcc-c++ make cmake git perl pkgconf util-linux >/dev/null
+              setpriv --reuid="${HOST_UID}" --regid="${HOST_GID}" --clear-groups \
+                cargo build --locked --profile release-dist \
                 -p cli --bin grow --target "${TARGET_TRIPLE}"
             '
 
