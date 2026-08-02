@@ -70,9 +70,15 @@ if ! command -v brew >/dev/null 2>&1; then
   echo "error: brew not found; this script targets the Harmonybrew ci-runner image" >&2
   exit 1
 fi
-if ! brew --prefix rust >/dev/null 2>&1; then
+RUST_PREFIX="$(brew --prefix rust 2>/dev/null || true)"
+# Harmonybrew reports a formula's prospective prefix even when the formula is
+# not installed. Validate the toolchain layout instead of trusting that query.
+if [ -z "$RUST_PREFIX" ] \
+  || [ ! -x "$RUST_PREFIX/bin/rustc" ] \
+  || [ ! -d "$RUST_PREFIX/lib/rustlib" ]; then
   log "Installing rust via Harmonybrew (official OHOS-host dist, rpath-patched)"
   HOMEBREW_NO_AUTO_UPDATE=1 brew install rust
+  RUST_PREFIX="$(brew --prefix rust)"
 fi
 if ! command -v rustup >/dev/null 2>&1 && [ ! -x "$CARGO_HOME/bin/rustup" ]; then
   log "Installing rustup (default toolchain none; the musl host rustc is broken on OHOS)"
@@ -83,7 +89,7 @@ fi
 export PATH="$CARGO_HOME/bin:$PATH"
 
 log "Linking brew rust as rustup toolchain 'system'"
-rustup toolchain link system "$(brew --prefix rust)"
+rustup toolchain link system "$RUST_PREFIX"
 export RUSTUP_TOOLCHAIN=system
 cargo --version
 rustc --version

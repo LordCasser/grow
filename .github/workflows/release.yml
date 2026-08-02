@@ -399,7 +399,7 @@ jobs:
         shell: bash
         env:
           GROW_VERSION: ${{ needs.validate.outputs.version }}
-          CI_RUNNER: swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner:latest
+          CI_RUNNER: swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner@sha256:0ef61139a01b93f7ca08c31ab1da030e9137f956a68505d284a4e37b70e5c691
         run: |
           set -euo pipefail
           docker run --rm \
