@@ -3029,6 +3029,29 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::ExecuteSlashCommand {
+            agent_id,
+            session_id,
+            command,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "sessionId": session_id.0.to_string(),
+                    "command": command,
+                });
+                let request = acp::ExtRequest::new(
+                    "grow/commands/execute",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize commands/execute params")
+                        .into(),
+                );
+                let error = acp_send(request, &tx).await.err().map(|error| {
+                    sanitize_user_error(&format!("couldn't execute command: {error}"))
+                });
+                TaskResult::SlashCommandExecuted { agent_id, error }
+            });
+        }
         Effect::FetchCatalogEntry { kind, name } => {
             let tx = acp_tx.clone();
             tasks

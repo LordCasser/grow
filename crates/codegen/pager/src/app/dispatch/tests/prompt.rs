@@ -2542,15 +2542,23 @@ fn slash_compact_with_context_enqueues_command() {
 }
 
 #[test]
-fn slash_unknown_command_passthrough_enqueues_prompt() {
+fn slash_unknown_command_is_never_enqueued_as_model_input() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
 
     let effects = dispatch(Action::SendPrompt("/unknown-cmd arg1".into()), &mut app);
-    // Unknown slash command → PassThrough → enqueue as prompt.
-    assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "/unknown-cmd arg1"));
+    assert!(effects.is_empty());
     assert!(app.agents[&id].prompt.text().is_empty());
+    assert_eq!(app.agents[&id].session.queue_len(), 0);
+    let last = app.agents[&id]
+        .scrollback
+        .get(app.agents[&id].scrollback.len() - 1)
+        .unwrap();
+    assert!(
+        last.block
+            .searchable_text()
+            .is_some_and(|text| text.contains("Unknown command"))
+    );
 }
 
 #[test]
@@ -2972,7 +2980,7 @@ fn agent_paste_completion_after_switch_does_not_send_to_other_agent() {
 }
 
 #[test]
-fn slash_passthrough_in_non_project_dir_creates_session() {
+fn unknown_slash_in_non_project_dir_does_not_create_session() {
     let mut app = project_picker_app();
     dispatch(Action::NewSession, &mut app);
     let id = AgentId(0);
@@ -2980,14 +2988,9 @@ fn slash_passthrough_in_non_project_dir_creates_session() {
     let effects =
         dispatch_send_prompt_inner(&mut app, "/notarealcommandxyz".into(), true, false, false);
 
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::CreateSession { .. })),
-        "picker-bypassing pass-through must create the deferred session"
-    );
+    assert!(effects.is_empty());
     assert!(app.project_picker_shown);
-    assert_eq!(app.agents[&id].session.queue_len(), 1);
+    assert_eq!(app.agents[&id].session.queue_len(), 0);
 }
 
 #[test]
@@ -3398,9 +3401,8 @@ fn queue_interject_shared_arms_expectation_while_running() {
     );
 }
 
-/// During an active goal the shell promotes a send-now WITHOUT cancelling, so
-/// neither `SendPromptNow` nor a server-row send-now may arm the expectation —
-/// a stale arm would mute a later real cancel's marker.
+/// During an active goal, Send now is a true interjection and does not arm the
+/// cancel expectation. A stale arm would mute a later real cancel's marker.
 #[test]
 fn send_now_during_active_goal_does_not_arm_expectation() {
     let mut app = test_app_with_agent();
@@ -3416,10 +3418,10 @@ fn send_now_during_active_goal_does_not_arm_expectation() {
         },
         &mut app,
     );
-    assert!(matches!(effects.as_slice(), [Effect::SendPromptNow { .. }]));
+    assert!(matches!(effects.as_slice(), [Effect::SendInterject { .. }]));
     assert!(
         app.agents[&id].expect_send_now_cancel.is_none(),
-        "goal turns promote without cancelling; the expectation must stay unarmed"
+        "goal interjections do not cancel; the expectation must stay unarmed"
     );
 
     let effects = dispatch(

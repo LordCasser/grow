@@ -80,9 +80,9 @@ pub(super) fn dispatch_interject(
     }]
 }
 
-/// Cancel-and-send: send `text` (+ images) as a fresh `sendNow` prompt so the
-/// shell cancels the running turn and runs it next. The user block paints at
-/// dispatch (the arm hides the queue echo; the adoption reuses the block).
+/// Send-now routing. Active goals receive a true mid-turn interjection so the
+/// running goal can incorporate steering immediately. Other turns retain the
+/// cancel-and-send behavior.
 pub(super) fn dispatch_send_prompt_now(
     app: &mut AppView,
     text: String,
@@ -92,6 +92,15 @@ pub(super) fn dispatch_send_prompt_now(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let goal_active = app.agents.get(&id).is_some_and(|agent| {
+        agent
+            .goal_state
+            .as_ref()
+            .is_some_and(|goal| matches!(goal.status, crate::app::agent::GoalDisplayStatus::Active))
+    });
+    if goal_active {
+        return dispatch_interject(app, text, images);
+    }
     let reconnect_pending = app.reconnect_pending;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];

@@ -182,6 +182,14 @@ pub enum SessionCommand {
         /// re-parsing. The session sends on this channel right after parsing.
         parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
     },
+    /// Execute a host slash command through the actor mailbox instead of the
+    /// prompt queue. This keeps commands responsive while a model turn is
+    /// running and guarantees that slash-prefixed text never reaches the
+    /// model as user input.
+    ExecuteSlashCommand {
+        command: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
     SessionMode {
         session_mode: acp::SessionModeId,
         responds_to: oneshot::Sender<crate::session::behavior::BehaviorChangeOutcome>,

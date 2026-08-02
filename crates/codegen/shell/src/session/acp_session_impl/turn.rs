@@ -487,39 +487,7 @@ impl SessionActor {
                     BuiltinAction::GoalBudget { token_budget } => {
                         ::diagnostics::session_ctx::log_event(slash_used);
                         self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-                        let msg = {
-                            let mut tracker = self.goal_tracker.lock();
-                            if tracker.snapshot().is_none() {
-                                "当前没有活跃目标。使用 /goal set <objective> 开始。".to_string()
-                            } else if let Some(b) = token_budget {
-                                if tracker.status()
-                                    == Some(crate::session::goal_tracker::GoalStatus::Complete)
-                                {
-                                    "Goal is already complete. Use /goal set <objective> to start a new one."
-                                        .to_string()
-                                } else {
-                                    let was_budget_limited = tracker.status()
-                                        == Some(
-                                            crate::session::goal_tracker::GoalStatus::BudgetLimited,
-                                        );
-                                    let updated = tracker.set_token_budget(Some(b));
-                                    debug_assert!(updated);
-                                    // `persist_goal_state` is synchronous (sends a
-                                    // snapshot clone into the persistence channel),
-                                    // so it can run under the tracker lock.
-                                    self.goal_notify_sender().persist_goal_state(&tracker);
-                                    if was_budget_limited {
-                                        format!(
-                                            "Goal token budget updated to {b} tokens. 使用 /goal resume 继续。"
-                                        )
-                                    } else {
-                                        format!("Goal token budget updated to {b} tokens.")
-                                    }
-                                }
-                            } else {
-                                "Usage: /goal budget <tokens>".to_string()
-                            }
-                        };
+                        let msg = self.update_goal_token_budget(token_budget);
                         self.send_host_turn_slash_command_output(&msg).await;
                         return ok_end_turn(0, None);
                     }

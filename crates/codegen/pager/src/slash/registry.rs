@@ -144,7 +144,7 @@ impl CommandRegistry {
         hidden.insert("auto".to_string());
         // `/share` starts menu-hidden (still dispatchable) until
         // `set_share_visible(true)`. Menu-only so typed `/share` can
-        // surface a client disable message rather than PassThrough.
+        // surface a client disable message rather than host execution.
         let mut menu_hidden = HashSet::new();
         menu_hidden.insert("share".to_string());
         let mut reg = Self {
@@ -253,7 +253,7 @@ impl CommandRegistry {
     /// True when `key` (canonical name or alias, `/` and case ignored)
     /// names a command the tier deny list blocks from [`Self::get`]. Lets
     /// the dispatcher distinguish a restricted invocation (upsell) from a
-    /// genuinely unknown one (pass through to the shell/model).
+    /// genuinely unknown one (reported locally and never sent to the model).
     ///
     /// Deliberately scans `commands` instead of `key_to_index`: a
     /// restricted command can still be missing from the key map for

@@ -15,6 +15,7 @@
 //! - `grow/internal/reload_announcements`   local announcement hot-reload
 //! - `grow/plugins/reload`                  rebuild shared plugin registry
 //! - `grow/commands/list`                   list slash commands
+//! - `grow/commands/execute`                execute a slash command out of band
 
 use std::path::Path;
 use std::sync::Arc;
@@ -47,6 +48,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "grow/internal/reload_announcements" => handle_reload_announcements(agent, args),
         "grow/plugins/reload" => handle_plugins_reload(agent).await,
         "grow/commands/list" => handle_commands_list(agent, args).await,
+        "grow/commands/execute" => handle_command_execute(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
 }
@@ -484,6 +486,27 @@ async fn handle_plugins_reload(agent: &MvpAgent) -> ExtResult {
 }
 
 // commands/list
+
+async fn handle_command_execute(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ExecuteCommandRequest {
+        session_id: String,
+        command: String,
+    }
+
+    let request: ExecuteCommandRequest = parse_params(args)?;
+    let session_id = acp::SessionId::new(Arc::from(request.session_id.as_str()));
+    let Some(handle) = agent.session_handle_waiting_for_load(&session_id).await else {
+        return Err(acp::Error::invalid_request()
+            .data(format!("unknown session id: {}", request.session_id)));
+    };
+    handle
+        .execute_slash_command(request.command)
+        .await
+        .map_err(|message| acp::Error::invalid_request().data(message))?;
+    to_raw_response(&serde_json::json!({ "status": "executed" }))
+}
 
 async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req: crate::session::slash_commands::ListCommandsRequest = parse_params(args)?;

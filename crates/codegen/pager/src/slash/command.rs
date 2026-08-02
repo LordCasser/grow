@@ -4,7 +4,7 @@
 //!
 //! - `run()` is synchronous (no `async_trait`). Commands that need async work
 //!   return `CommandResult::Action(action)` and let the dispatch layer handle it.
-//! - `CommandResult` has additional variants: `Action`, `QueueCommand`, `PassThrough`.
+//! - `CommandResult` has additional variants: `Action`, `QueueCommand`, `HostCommand`.
 //! - Trait methods return `&str` (not `&'static str`) to support ACP-sourced commands.
 //! - `args_required()` added for the two-bit completeness model.
 //! - `validate_args()` intentionally omitted in phase 1 (folded into `run()`).
@@ -73,17 +73,10 @@ pub enum CommandResult {
         /// arrives from the shell).
         scheduled_task_preview: Option<ScheduledTaskPreview>,
     },
-    /// Command text should be sent as a regular prompt. The shell resolves it.
-    ///
-    /// Phase-1 simplification: this intentionally covers two semantically
-    /// different cases in a single variant:
-    /// 1. ACP-advertised commands (shell explicitly supports them)
-    /// 2. Unknown commands (pager doesn't know them, shell might)
-    ///
-    /// Both are sent identically today. If behavior ever needs to diverge
-    /// (e.g., different UX confidence, error messaging, or diagnostics),
-    /// split into `AcpPassThrough` and `UnknownPassThrough` variants.
-    PassThrough(String),
+    /// ACP-advertised command owned by the shell. During a running turn this
+    /// uses the out-of-band command channel; while idle it may use the normal
+    /// turn path when the command intentionally starts inference.
+    HostCommand(String),
 }
 
 /// A suggestion item for command argument completion.

@@ -1000,6 +1000,29 @@ fn dashboard_slash_model_stages_pending_model() {
         "staging must update the snapshot's current selection",
     );
 }
+
+#[serial_test::serial(GROW_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_unknown_slash_never_spawns_model_input() {
+    let mut app = three_agent_app();
+    open_dashboard(&mut app);
+    let before = app.agents.len();
+
+    let effects =
+        dispatch_dashboard_dispatch_slash(&mut app, "/definitely-unknown explain this".into());
+
+    assert!(effects.is_empty());
+    assert_eq!(app.agents.len(), before);
+    let dashboard = app.dashboard.as_ref().unwrap();
+    assert_eq!(dashboard.dispatch.text(), "");
+    assert!(
+        dashboard
+            .error_toast
+            .as_deref()
+            .is_some_and(|toast| toast.contains("Unknown command"))
+    );
+}
+
 /// A slash command that fails (`CommandResult::Error`) surfaces on
 /// the dashboard with the `✗` error prefix — command error strings
 /// carry no glyph of their own, and the feedback badge paints the

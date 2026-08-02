@@ -1300,8 +1300,8 @@ pub fn parse_invocation(line: &str) -> Option<SlashInvocation<'_>> {
 /// | `true`      | `false`        | Executes          |
 /// | `true`      | `true`         | Blocks            |
 ///
-/// Unknown commands (not in registry) are treated as complete -- they will
-/// pass through to the shell.
+/// Unknown commands (not in registry) are treated as complete so dispatch can
+/// reject them immediately instead of blocking submission.
 pub fn is_command_complete(line: &str, registry: &CommandRegistry) -> bool {
     let Some(invocation) = parse_invocation(line) else {
         return false;
@@ -1310,7 +1310,7 @@ pub fn is_command_complete(line: &str, registry: &CommandRegistry) -> bool {
     // `CommandRegistry::get_for_dispatch`): menu-hidden commands still run
     // on Enter, so their arg contract gates completeness the same way.
     let Some(command) = registry.get_for_dispatch(invocation.token) else {
-        // Unknown command -- treat as complete (will PassThrough).
+        // Unknown command -- treat as complete so dispatch can surface it.
         return true;
     };
     if !command.takes_args() {
@@ -1556,7 +1556,7 @@ mod tests {
     #[test]
     fn unknown_command_is_complete() {
         let reg = test_registry();
-        // Unknown commands pass through.
+        // Dispatch, rather than the completeness gate, owns the error.
         assert!(is_command_complete("/unknown", &reg));
         assert!(is_command_complete("/foo bar", &reg));
     }

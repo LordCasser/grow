@@ -135,6 +135,7 @@ async fn make_planner_actor(
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
     actor.events = crate::session::events::EventTracker::new(tmp.path());
     actor.goal_enabled = true;
+    actor.goal_classifier_enabled = true;
     set_goal_harness_for_tests(&actor);
     actor.goal_planner_enabled = planner_enabled;
     actor.goal_tracker = Arc::new(parking_lot::Mutex::new(
@@ -165,6 +166,7 @@ async fn make_planner_actor_capturing(
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
     actor.events = crate::session::events::EventTracker::new(tmp.path());
     actor.goal_enabled = true;
+    actor.goal_classifier_enabled = true;
     set_goal_harness_for_tests(&actor);
     actor.goal_planner_enabled = planner_enabled;
     actor.goal_tracker = Arc::new(parking_lot::Mutex::new(
@@ -202,6 +204,108 @@ fn create_test_goal(actor: &SessionActor) {
         "2026-01-01T00:00:00Z".into(),
         None,
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn out_of_band_goal_controls_execute_without_entering_prompt_queue() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _tmp) = make_planner_actor(None, false).await;
+            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+            create_test_goal(&actor);
+
+            let cancel = actor
+                .execute_out_of_band_slash_command("/goal status".to_string())
+                .await
+                .expect("status command");
+            assert!(!cancel);
+            assert!(actor.state.lock().await.pending_inputs.is_empty());
+
+            let cancel = actor
+                .execute_out_of_band_slash_command("/goal budget 1234".to_string())
+                .await
+                .expect("budget command");
+            assert!(!cancel);
+            assert_eq!(
+                actor
+                    .goal_tracker
+                    .lock()
+                    .snapshot()
+                    .and_then(|goal| goal.token_budget),
+                Some(1234)
+            );
+
+            let cancel = actor
+                .execute_out_of_band_slash_command("/goal pause".to_string())
+                .await
+                .expect("pause command");
+            assert!(cancel, "pausing an active goal must stop its running turn");
+            assert_eq!(
+                actor.goal_tracker.lock().status(),
+                Some(crate::session::goal_tracker::GoalStatus::UserPaused)
+            );
+            assert!(actor.state.lock().await.pending_inputs.is_empty());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn out_of_band_unknown_slash_is_rejected_before_model_input() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _tmp) = make_planner_actor(None, false).await;
+            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+
+            let error = actor
+                .execute_out_of_band_slash_command("/definitely-unknown".to_string())
+                .await
+                .expect_err("unknown slash must be rejected");
+            assert!(error.contains("Unknown Grow command"));
+            assert!(actor.state.lock().await.pending_inputs.is_empty());
+            assert!(actor.pending_interjections.is_empty());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn out_of_band_goal_set_queues_resolved_work_not_raw_slash_text() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _tmp) = make_planner_actor(None, false).await;
+            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+            create_test_goal(&actor);
+
+            let cancel = actor
+                .execute_out_of_band_slash_command(
+                    "/goal set replacement objective --budget 2048".to_string(),
+                )
+                .await
+                .expect("goal set command");
+            assert!(cancel, "replacing an active goal must stop old work");
+            let snapshot = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(snapshot.objective, "replacement objective");
+            assert_eq!(snapshot.token_budget, Some(2048));
+
+            let state = actor.state.lock().await;
+            assert_eq!(state.pending_inputs.len(), 1);
+            let queued_text = state.pending_inputs[0]
+                .prompt_blocks
+                .iter()
+                .find_map(|block| match block {
+                    acp::ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(queued_text.contains("<system-reminder>"));
+            assert!(!queued_text.contains("/goal set"));
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]

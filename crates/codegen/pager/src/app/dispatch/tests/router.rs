@@ -830,7 +830,7 @@ fn acp_bootstrap_command_appears_in_autocomplete() {
     );
 }
 #[test]
-fn acp_bootstrap_command_executes_as_passthrough() {
+fn acp_bootstrap_command_uses_turn_path_while_idle() {
     let mut app = test_app();
     app.bootstrap_acp_commands = vec![acp::AvailableCommand::new(
         "flush".to_string(),
@@ -851,8 +851,40 @@ fn acp_bootstrap_command_executes_as_passthrough() {
     assert_eq!(effects.len(), 1);
     assert!(
         matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "/flush"),
-        "ACP command should passthrough, got: {effects:?}"
+        "idle ACP command should use the established turn path, got: {effects:?}"
     );
+}
+
+#[test]
+fn acp_bootstrap_command_uses_control_plane_while_running() {
+    let mut app = test_app();
+    app.bootstrap_acp_commands = vec![acp::AvailableCommand::new(
+        "goal".to_string(),
+        "Manage the active goal".to_string(),
+    )];
+    dispatch(Action::NewSession, &mut app);
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.session_id = Some("sess-1".into());
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.prompt.sync_acp_commands(
+            &agent.session.available_commands,
+            agent.session.available_tools.as_ref(),
+            &agent.session.models,
+        );
+    }
+    let _ = dispatch(Action::SendPrompt("working".into()), &mut app);
+
+    let effects = dispatch(Action::SendPrompt("/goal status".into()), &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ExecuteSlashCommand {
+            session_id,
+            command,
+            ..
+        }] if session_id.0.as_ref() == "sess-1" && command == "/goal status"
+    ));
+    assert_eq!(app.agents[&id].session.queue_len(), 0);
 }
 #[test]
 fn acp_runtime_update_replaces_commands_in_autocomplete() {
@@ -962,7 +994,7 @@ fn acp_command_with_arg_hint_shows_placeholder() {
     assert_eq!(search_cmd.arg_placeholder(), Some("<query>"));
 }
 #[test]
-fn acp_command_with_args_passthrough_includes_args() {
+fn acp_command_with_args_preserves_args_on_idle_turn_path() {
     let mut app = test_app();
     app.bootstrap_acp_commands = vec![
         acp::AvailableCommand::new("search".to_string(), "Search codebase".to_string()).input(
@@ -986,7 +1018,7 @@ fn acp_command_with_args_passthrough_includes_args() {
     assert_eq!(effects.len(), 1);
     assert!(
         matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "/search find bugs"),
-        "ACP passthrough should preserve args, got: {effects:?}"
+        "idle ACP command should preserve args, got: {effects:?}"
     );
 }
 #[test]

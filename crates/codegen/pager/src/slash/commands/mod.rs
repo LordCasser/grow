@@ -747,13 +747,13 @@ mod tests {
         assert!(matches!(result, CommandResult::Action(Action::OpenGboom)));
     }
     #[test]
-    fn gboom_with_args_passes_through_to_shell() {
+    fn gboom_with_args_returns_usage_error() {
         let models = ModelState::default();
         let mut ctx = make_ctx(&models);
-        match gboom::GboomCommand.run(&mut ctx, "guide me") {
-            CommandResult::PassThrough(text) => assert_eq!(text, "/gboom guide me"),
-            other => panic!("expected PassThrough, got {other:?}"),
-        }
+        assert!(matches!(
+            gboom::GboomCommand.run(&mut ctx, "guide me"),
+            CommandResult::Error(message) if message == "Usage: /gboom"
+        ));
     }
     #[test]
     fn recap_returns_manual_send_recap_action() {

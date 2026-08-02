@@ -596,12 +596,10 @@ pub(super) fn dispatch_send_prompt_inner(
                         command.run(&mut ctx, invocation.args)
                     }
                 } else {
-                    // Unknown command -- pass through to shell.
-                    CommandResult::PassThrough(text.clone())
+                    CommandResult::Error(format!("Unknown command: /{}", invocation.token))
                 }
             } else {
-                // Bare `/` or malformed -- pass through.
-                CommandResult::PassThrough(text.clone())
+                CommandResult::Error("Unknown command: /".to_string())
             }
         };
 
@@ -701,15 +699,33 @@ pub(super) fn dispatch_send_prompt_inner(
                     );
                 }
             }
-            CommandResult::PassThrough(pass_text) => {
-                // A recognized token later in the passthrough text still styles the echo.
+            CommandResult::HostCommand(command_text) => {
+                let execute_out_of_band = agent.session.state.is_turn_running()
+                    || agent.goal_state.as_ref().is_some_and(|goal| {
+                        matches!(goal.status, crate::app::agent::GoalDisplayStatus::Active)
+                    });
+                if execute_out_of_band && let Some(session_id) = agent.session.session_id.clone() {
+                    if consume_input {
+                        agent.prompt.set_text("");
+                    }
+                    agent
+                        .scrollback
+                        .push_block(RenderBlock::user_prompt(command_text.clone()));
+                    return vec![Effect::ExecuteSlashCommand {
+                        agent_id: id,
+                        session_id,
+                        command: command_text,
+                    }];
+                }
+                // Idle commands retain the established turn path because a
+                // subset intentionally starts inference (/goal set/resume).
                 let skill_token_ranges = agent
                     .prompt
                     .slash_controller
-                    .recognized_token_ranges(&pass_text, &agent.session.models);
+                    .recognized_token_ranges(&command_text, &agent.session.models);
                 agent
                     .session
-                    .enqueue_prompt_with_skill_tokens(pass_text, skill_token_ranges);
+                    .enqueue_prompt_with_skill_tokens(command_text, skill_token_ranges);
             }
         }
         if consume_input {

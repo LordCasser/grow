@@ -1743,7 +1743,7 @@ impl acp::Agent for MvpAgent {
             | "grow/internal/reload_project_mcp_servers" | "grow/internal/reload_skills"
             | "grow/internal/reload_workflows" | "grow/internal/reload_models"
             | "grow/internal/reload_announcements"
-            | "grow/plugins/reload" | "grow/commands/list" => {
+            | "grow/plugins/reload" | "grow/commands/list" | "grow/commands/execute" => {
                 crate::extensions::session_admin::handle(self, &args).await
             }
             "grow/session/repair" => crate::extensions::repair::handle(self, &args).await,

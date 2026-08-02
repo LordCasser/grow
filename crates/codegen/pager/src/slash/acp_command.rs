@@ -1,13 +1,13 @@
 //! Wrapper that turns an ACP `AvailableCommand` into a `SlashCommand`.
 //!
-//! ACP-advertised commands appear in the dropdown but pass through to the
-//! shell for execution. The wrapper stores `String` fields -- consistent
-//! with the `&str` trait design.
+//! ACP-advertised commands appear in the dropdown and remain owned by the
+//! shell. The wrapper stores `String` fields -- consistent with the `&str`
+//! trait design.
 //!
 //! Skill commands (those with `meta.path` + `meta.scope`) are handled
 //! client-side: pager reads the SKILL.md, applies substitutions, and
-//! sends structured prompt blocks directly. Non-skill ACP commands
-//! pass through to the shell as before.
+//! sends structured prompt blocks directly. Non-skill ACP commands are
+//! classified for the shell command plane.
 
 use agent_client_protocol as acp;
 use tools::implementations::skills::types::SkillScope;
@@ -18,7 +18,7 @@ use super::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashComman
 ///
 /// For skill commands (has `skill_path` + `skill_scope`), execution reads
 /// the SKILL.md client-side and produces `CommandResult::InjectSkill`.
-/// For non-skill commands, execution produces `CommandResult::PassThrough`.
+/// For non-skill commands, execution produces `CommandResult::HostCommand`.
 pub struct AcpSlashCommand {
     name: String,
     description: String,
@@ -125,14 +125,14 @@ impl SlashCommand for AcpSlashCommand {
             return CommandResult::Error(format!("Malformed skill metadata for /{}", self.name));
         }
 
-        // Non-skill ACP commands: pass through to the shell as before.
+        // Non-skill ACP commands are owned by the shell command plane.
         if self.skill_path.is_none() || self.skill_scope.is_none() {
             let text = if args.trim().is_empty() {
                 format!("/{}", self.name)
             } else {
                 format!("/{} {}", self.name, args)
             };
-            return CommandResult::PassThrough(text);
+            return CommandResult::HostCommand(text);
         }
 
         // --- Pass skill through to the shell for expansion ---
@@ -171,7 +171,7 @@ impl From<&acp::AvailableCommand> for AcpSlashCommand {
         // Parse skill metadata from ACP `_meta`:
         //   { "scope": "local", "path": "/path/to/SKILL.md" }
         //
-        // Missing meta → non-skill ACP command (PassThrough).
+        // Missing meta → non-skill ACP command (HostCommand).
         // Present but malformed meta → meta_malformed = true (Error on run()).
         let (skill_path, skill_scope, meta_malformed) = match cmd.meta.as_ref() {
             None => (None, None, false),
@@ -254,10 +254,10 @@ mod tests {
             pager_state: crate::settings::PagerLocalSnapshot::default(),
         };
         match acp_cmd.run(&mut ctx, "fix the branch") {
-            CommandResult::PassThrough(text) => {
+            CommandResult::HostCommand(text) => {
                 assert_eq!(text, "/pr-cleanup fix the branch");
             }
-            other => panic!("expected PassThrough, got {other:?}"),
+            other => panic!("expected HostCommand, got {other:?}"),
         }
     }
 
@@ -397,7 +397,7 @@ mod tests {
         };
         let mut ctx = make_exec_ctx();
         let result = cmd.run(&mut ctx, "");
-        assert!(matches!(result, CommandResult::PassThrough(t) if t == "/flush"));
+        assert!(matches!(result, CommandResult::HostCommand(t) if t == "/flush"));
     }
 
     #[test]
@@ -572,8 +572,8 @@ mod tests {
 
     #[test]
     fn run_skill_substitutes_skill_dir() {
-        // The pager no longer does substitutions — it passes through to the shell.
-        // This test verifies the pass-through behavior.
+        // The pager preserves the invocation as structured model work; the
+        // shell owns expansion and substitution.
         let cmd = make_skill_cmd("config", "/some/path/SKILL.md", "local");
         let mut ctx = make_exec_ctx();
         let result = cmd.run(&mut ctx, "");

@@ -1,6 +1,195 @@
 use super::*;
+use tools::implementations::grow_build::LoopFireMode;
 
 impl SessionActor {
+    /// Resolve and execute a slash command from the out-of-band command plane.
+    ///
+    /// Only goal controls are allowed to mutate a session while a turn is in
+    /// flight. Other host commands receive an explicit response instead of
+    /// being reclassified as model input. The returned flag asks the actor
+    /// loop to cancel the current turn after the command's durable state change.
+    pub(super) async fn execute_out_of_band_slash_command(
+        self: &Arc<Self>,
+        command: String,
+    ) -> Result<bool, String> {
+        let command = command.trim().to_string();
+        if !command.starts_with('/') {
+            return Err("Grow commands must start with '/'.".to_string());
+        }
+
+        let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+            command.clone(),
+        ))];
+        let slash_skills = self.slash_skills_for_resolve().await;
+        let availability = self.command_availability().await;
+        let (_, workflows) = self.named_workflow_snapshot();
+        let loop_fire_mode = if self.rebuild_spec.scheduler_background_loops {
+            LoopFireMode::Detached
+        } else {
+            LoopFireMode::InSession
+        };
+        let action = match slash_commands::resolve(
+            blocks,
+            &slash_skills,
+            availability,
+            slash_commands::SkillSlashRewrite::RewriteToRun,
+            &workflows,
+            loop_fire_mode,
+        ) {
+            Err(SlashCommandOutcome::Builtin(action)) => action,
+            Err(SlashCommandOutcome::InvokeSkill { .. }) => {
+                return Err(format!(
+                    "{command} starts model work and cannot run inside an active turn. Queue it for the next turn."
+                ));
+            }
+            Ok(_) => return Err(format!("Unknown Grow command: {command}")),
+        };
+
+        match action {
+            BuiltinAction::GoalSet {
+                objective,
+                token_budget,
+            } => {
+                ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
+                    command: "goal".to_string(),
+                    args_provided: true,
+                });
+                use crate::session::behavior::BehaviorChangeOutcome;
+                match self
+                    .request_behavior_change(acp::SessionModeId::new("goal"))
+                    .await
+                {
+                    BehaviorChangeOutcome::Applied => {}
+                    BehaviorChangeOutcome::ConfirmationRequired { message, .. }
+                    | BehaviorChangeOutcome::Rejected { message } => {
+                        self.send_host_turn_slash_command_output(&message).await;
+                        return Ok(false);
+                    }
+                }
+                let reminder = self.setup_goal(&objective, token_budget).await;
+                // Replacing an active goal must stop work on the old objective.
+                // Queue the new reminder behind the running front; the actor
+                // cancels after this method returns and promotes it immediately.
+                self.queue_interjection_fallback_prompt(reminder, vec![], true)
+                    .await;
+                self.send_host_turn_slash_command_output(
+                    "Goal updated. Starting the new objective.",
+                )
+                .await;
+                Ok(true)
+            }
+            BuiltinAction::GoalEnter | BuiltinAction::GoalResume => {
+                ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
+                    command: "goal".to_string(),
+                    args_provided: false,
+                });
+                use crate::session::behavior::BehaviorChangeOutcome;
+                match self
+                    .request_behavior_change(acp::SessionModeId::new("goal"))
+                    .await
+                {
+                    BehaviorChangeOutcome::Applied => {}
+                    BehaviorChangeOutcome::ConfirmationRequired { message, .. }
+                    | BehaviorChangeOutcome::Rejected { message } => {
+                        self.send_host_turn_slash_command_output(&message).await;
+                        return Ok(false);
+                    }
+                }
+                match self.resume_goal().await {
+                    GoalResumeOutcome::Inference { reminder, user_msg } => {
+                        self.send_host_turn_slash_command_output(&user_msg).await;
+                        let turn_running = self
+                            .current_prompt_id
+                            .lock()
+                            .ok()
+                            .and_then(|guard| guard.clone())
+                            .is_some();
+                        if turn_running {
+                            self.pending_interjections.push(PendingInterjection {
+                                text: reminder,
+                                attachments: vec![],
+                            });
+                        } else {
+                            self.queue_interjection_fallback_prompt(reminder, vec![], true)
+                                .await;
+                        }
+                    }
+                    GoalResumeOutcome::Message(message) => {
+                        self.send_host_turn_slash_command_output(&message).await;
+                    }
+                }
+                Ok(false)
+            }
+            BuiltinAction::GoalBudget { token_budget } => {
+                ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
+                    command: "goal".to_string(),
+                    args_provided: token_budget.is_some(),
+                });
+                let message = self.update_goal_token_budget(token_budget);
+                self.send_host_turn_slash_command_output(&message).await;
+                Ok(false)
+            }
+            action @ (BuiltinAction::GoalStatus | BuiltinAction::GoalPause) => {
+                let was_active = matches!(action, BuiltinAction::GoalPause)
+                    && self.goal_tracker.lock().status()
+                        == Some(crate::session::goal_tracker::GoalStatus::Active);
+                self.execute_builtin_slash_command(action)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let is_still_active = self.goal_tracker.lock().status()
+                    == Some(crate::session::goal_tracker::GoalStatus::Active);
+                Ok(was_active && !is_still_active)
+            }
+            action @ BuiltinAction::GoalClear => {
+                let was_active = self.goal_tracker.lock().status()
+                    == Some(crate::session::goal_tracker::GoalStatus::Active);
+                self.execute_builtin_slash_command(action)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let is_still_active = self.goal_tracker.lock().status()
+                    == Some(crate::session::goal_tracker::GoalStatus::Active);
+                Ok(was_active && !is_still_active)
+            }
+            other => {
+                ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
+                    command: other.command_name().to_string(),
+                    args_provided: other.args_provided(),
+                });
+                Err(format!(
+                    "/{} cannot run inside an active turn. Stop the turn first.",
+                    other.command_name()
+                ))
+            }
+        }
+    }
+
+    pub(super) fn update_goal_token_budget(&self, token_budget: Option<i64>) -> String {
+        let mut tracker = self.goal_tracker.lock();
+        if tracker.snapshot().is_none() {
+            "当前没有活跃目标。使用 /goal set <objective> 开始。".to_string()
+        } else if let Some(budget) = token_budget {
+            if tracker.status() == Some(crate::session::goal_tracker::GoalStatus::Complete) {
+                "Goal is already complete. Use /goal set <objective> to start a new one."
+                    .to_string()
+            } else {
+                let was_budget_limited = tracker.status()
+                    == Some(crate::session::goal_tracker::GoalStatus::BudgetLimited);
+                let updated = tracker.set_token_budget(Some(budget));
+                debug_assert!(updated);
+                self.goal_notify_sender().persist_goal_state(&tracker);
+                if was_budget_limited {
+                    format!(
+                        "Goal token budget updated to {budget} tokens. 使用 /goal resume 继续。"
+                    )
+                } else {
+                    format!("Goal token budget updated to {budget} tokens.")
+                }
+            }
+        } else {
+            "Usage: /goal budget <tokens>".to_string()
+        }
+    }
+
     /// Execute a built-in slash command (e.g. `/compact`, `/yolo`).
     pub(super) async fn execute_builtin_slash_command(
         self: &Arc<Self>,

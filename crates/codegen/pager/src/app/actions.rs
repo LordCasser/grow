@@ -1781,6 +1781,13 @@ pub enum Effect {
         /// interjections — the wire shape stays byte-identical to legacy.
         blocks: Option<Vec<acp::ContentBlock>>,
     },
+    /// Execute an ACP-advertised slash command on the shell control plane.
+    /// This never enters the model prompt queue.
+    ExecuteSlashCommand {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        command: String,
+    },
     /// Register the current session in the active-sessions crash-recovery
     /// registry (`~/.grow/active_sessions.json`).
     RegisterActiveSession {
@@ -2389,6 +2396,11 @@ pub enum TaskResult {
         error: String,
         text: String,
         blocks: Option<Vec<agent_client_protocol::ContentBlock>>,
+    },
+    /// Out-of-band slash-command acknowledgement or transport/command error.
+    SlashCommandExecuted {
+        agent_id: AgentId,
+        error: Option<String>,
     },
     /// Available commands refreshed from the shell.
     AvailableCommandsRefreshed {

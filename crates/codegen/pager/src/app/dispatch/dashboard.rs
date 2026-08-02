@@ -1199,16 +1199,17 @@ pub(super) fn dispatch_dashboard_dispatch(
 ///     get the `✗` prefix via `set_error_toast`; `Message` strings are
 ///     stored verbatim (they carry their own glyph).
 ///   - `CommandResult::Handled` / `HandledNoOp` clear the input.
-///   - `CommandResult::PassThrough` (unknown commands, ACP-advertised
-///     pass-throughs, `CommandResult::QueueCommand`, and
-///     `InjectSkill`) fall back to dispatching a new session with the
+///   - ACP-advertised `CommandResult::HostCommand` values,
+///     `CommandResult::QueueCommand`, and `InjectSkill` fall back to
+///     dispatching a new session with the
 ///     text as its first prompt — the dashboard treats them like a
 ///     bare free-text dispatch. This keeps the user's typing from
 ///     being silently dropped on the floor when they invoke a
-///     plugin/skill from the dashboard surface.
+///     plugin/skill from the dashboard surface. Unknown slash commands are
+///     errors and never take this path.
 ///
 /// Offer / execute tri-state (matches completion's [`command_offered`]):
-///   - **Unknown** token → [`dispatch_dashboard_dispatch`] (new session prompt).
+///   - **Unknown** token → local error; never a new-session prompt.
 ///   - **Registered, session-scoped** (hidden on this surface) → clear
 ///     dispatch + error toast; do **not** spawn with the slash as a prompt.
 ///   - **Registered, not visible** (auth/feature gate, e.g. `/usage` on
@@ -1266,9 +1267,11 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         }
 
         let Some(command) = reg.get(invocation.token).cloned() else {
-            // Unknown command. Fall back to the regular dispatch
-            // path so the text becomes a new session's prompt.
-            return dispatch_dashboard_dispatch(app, text, /* attach */ false);
+            if let Some(dashboard) = app.dashboard.as_mut() {
+                dashboard.dispatch.set_text("");
+                dashboard.set_error_toast(&format!("Unknown command: /{}", invocation.token));
+            }
+            return vec![];
         };
         // Registered but not offered on this surface:
         //   - session-scoped → toast; never spawn with the slash as a prompt
@@ -1492,7 +1495,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         }
         CommandResult::QueueCommand(_)
         | CommandResult::InjectSkill { .. }
-        | CommandResult::PassThrough(_) => {
+        | CommandResult::HostCommand(_) => {
             // These results all expect an agent session to consume
             // them. The dashboard has none, so route the original
             // text through the normal "new session with this text as

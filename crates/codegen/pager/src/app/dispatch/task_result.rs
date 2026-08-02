@@ -1071,6 +1071,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::SlashCommandExecuted { agent_id, error } => {
+            if let Some(error) = error
+                && let Some(agent) = app.agents.get_mut(&agent_id)
+            {
+                agent.show_toast(&error);
+            }
+            vec![]
+        }
         TaskResult::AvailableCommandsRefreshed { agent_id, commands } => {
             if !commands.is_empty()
                 && let Some(agent) = app.agents.get_mut(&agent_id)

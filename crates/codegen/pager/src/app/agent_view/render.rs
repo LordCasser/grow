@@ -4592,7 +4592,11 @@ mod empty_state_logo_tests {
             None,
             "too narrow for the small logo"
         );
-        assert_eq!(pick_empty_logo(54, 25), None, "too short for the small logo");
+        assert_eq!(
+            pick_empty_logo(54, 25),
+            None,
+            "too short for the small logo"
+        );
         assert_eq!(pick_empty_logo(54, 26), Some(LogoSize::Small));
         assert_eq!(
             pick_empty_logo(83, 50),

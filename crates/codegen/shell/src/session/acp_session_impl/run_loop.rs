@@ -651,6 +651,25 @@ pub(super) async fn run_session(
                             }
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
+                        SessionCommand::ExecuteSlashCommand { command, respond_to } => {
+                            session.persist_host_turn_user_echo(&command, "command-plane");
+                            let result = session
+                                .execute_out_of_band_slash_command(command)
+                                .await;
+                            if matches!(result, Ok(true)) {
+                                // Preserve user steering that reached the
+                                // interjection buffer before a control command
+                                // paused/replaced the running goal.
+                                session.flush_stranded_interjections().await;
+                                session.cancel_turn_for_send_now(&mut replay_buffer).await;
+                            }
+                            SessionActor::maybe_start_running_task(
+                                session.clone(),
+                                completion_tx.clone(),
+                            )
+                            .await;
+                            let _ = respond_to.send(result.map(|_| ()));
+                        }
                         SessionCommand::SessionMode { session_mode, responds_to } => {
                             let outcome = session.request_behavior_change(session_mode).await;
                             let _ = responds_to.send(outcome);
