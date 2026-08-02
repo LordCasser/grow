@@ -2691,11 +2691,13 @@ mod tests {
         let settings = build_agent_list(cwd.path(), &HashMap::new());
         assert!(settings.iter().any(|entry| entry.name == "general-purpose"));
         assert!(settings.iter().any(|entry| entry.name == "explore"));
+        assert!(settings.iter().any(|entry| entry.name == "browser-use"));
 
         let primary = build_switch_agent_catalog(cwd.path());
         assert!(primary.iter().any(|entry| entry.name == DEFAULT_AGENT_TYPE));
         assert!(!primary.iter().any(|entry| entry.name == "general-purpose"));
         assert!(!primary.iter().any(|entry| entry.name == "explore"));
+        assert!(!primary.iter().any(|entry| entry.name == "browser-use"));
     }
     #[test]
     fn agents_tab_next_prev_roundtrip() {

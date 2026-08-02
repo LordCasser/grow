@@ -1,6 +1,7 @@
 ---
 name: browser-use
 description: Web browsing and interaction Agent.
+subagentOnly: true
 promptComposition: full
 toolPreset: grow-build
 additionalTools: []

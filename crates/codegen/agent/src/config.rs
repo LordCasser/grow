@@ -2322,12 +2322,17 @@ description: Test default tool config
     #[test]
     fn test_builtin_agent_name_subagent_variants() {
         let variants = BuiltinAgentName::subagent_variants();
-        assert_eq!(variants.len(), 2);
+        assert_eq!(variants.len(), 3);
         assert!(variants.contains(&BuiltinAgentName::GeneralPurpose));
         assert!(variants.contains(&BuiltinAgentName::Explore));
+        assert!(variants.contains(&BuiltinAgentName::BrowserUse));
         assert_eq!(
             variants,
-            vec![BuiltinAgentName::GeneralPurpose, BuiltinAgentName::Explore]
+            vec![
+                BuiltinAgentName::GeneralPurpose,
+                BuiltinAgentName::Explore,
+                BuiltinAgentName::BrowserUse
+            ]
         );
     }
     #[test]
