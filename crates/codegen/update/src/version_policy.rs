@@ -1,6 +1,7 @@
 //! Startup enforcement of the version policy. The hard `required_*` bounds gate
 //! startup; `minimum`/`maximum` are updater-only. Every knob fails open.
 
+#[cfg(not(feature = "distro-pm"))]
 use crate::version::get_installed_version;
 use semver::Version;
 use shell::util::config::VersionPolicy;
@@ -24,6 +25,7 @@ pub(crate) enum VersionPolicyError {
 
 /// Fails open: a contradictory range or an unparseable running version yields
 /// `InRange`.
+#[cfg_attr(feature = "distro-pm", allow(dead_code))]
 fn evaluate_required_range(current_version: &str, policy: &VersionPolicy) -> RequiredRangeDecision {
     if policy.has_contradictory_required_range() {
         warn!(
@@ -75,6 +77,7 @@ pub(crate) fn check_install_target(
     Ok(())
 }
 
+#[cfg_attr(feature = "distro-pm", allow(dead_code))]
 fn required_range_message(decision: &RequiredRangeDecision) -> Option<String> {
     match decision {
         RequiredRangeDecision::InRange => None,
