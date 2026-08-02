@@ -332,6 +332,12 @@ impl MvpAgent {
             let sessions = self.sessions.borrow();
             sessions.get(&parent_sid).and_then(|h| h.max_turns)
         };
+        let permission_prompt_timeout = {
+            let sessions = self.sessions.borrow();
+            sessions
+                .get(&parent_sid)
+                .map(|h| h.permission_prompt_timeout)?
+        };
         let ask_user_question_enabled = {
             let sessions = self.sessions.borrow();
             sessions
@@ -378,6 +384,7 @@ impl MvpAgent {
             parent_depth,
             subagents_max_depth: self.cfg.borrow().subagents_max_depth,
             inference_idle_timeout_secs,
+            permission_prompt_timeout,
             auto_compact_threshold_tiers:
                 crate::agent::subagent::AutoCompactThresholdTiers::capture(&self.cfg.borrow()),
             hunk_tracker_handle,

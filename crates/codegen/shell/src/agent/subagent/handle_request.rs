@@ -906,6 +906,7 @@ pub(crate) async fn run_shell_child(
             ..Default::default()
         },
         workspace::permission::ClientType::Generic,
+        ctx.permission_prompt_timeout,
         ctx.resolve_auto_compact_threshold_percent(&subagent_model_id),
         agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
         chat_state::CompactionMode::Summary,

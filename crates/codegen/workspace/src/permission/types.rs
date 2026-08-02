@@ -21,10 +21,10 @@ pub struct PermissionEvent {
     pub auto_approved: bool,
     /// Whether the user was prompted for this decision
     pub user_prompted: bool,
-    /// The final decision (allow, reject)
+    /// The final decision (allow, reject, cancelled, timed_out, followup)
     pub decision: String,
-    /// The user's choice when prompted (allow_once, allow_always, reject_once,
-    /// etc.); None on auto/non-prompt decisions. The trigger lives in `decision_reason`.
+    /// The prompt resolution (allow_once, reject_once, timed_out, etc.);
+    /// None on auto/non-prompt decisions. The trigger lives in `decision_reason`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_outcome: Option<String>,
     /// Rejection reason if rejected
@@ -55,7 +55,7 @@ pub struct PermissionEvent {
     /// auto_classifier_timeout, auto_classifier_unavailable, auto_denial_limit,
     /// sandbox_auto, persisted_grant, session_grant, static_allowlist, safe_command,
     /// session_deny, prompt_deny, needs_user, bash_request_floor, opaque_shell,
-    /// requester_gone.
+    /// requester_gone, permission_timeout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_reason: Option<String>,
     /// Auto-classifier path: "llm" | "heuristic" | "timeout" |
@@ -182,6 +182,10 @@ pub enum Decision {
     /// The user cancelled the turn (e.g. Cmd+C during permission prompt).
     /// Distinguished from `Reject` so the caller can return `StopReason::Cancelled`.
     Cancelled,
+    /// The permission client did not answer before the session deadline.
+    /// The tool must not execute and the current turn is cancelled without
+    /// attributing the cancellation to the user.
+    TimedOut,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EditPolicy {

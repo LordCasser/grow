@@ -91,6 +91,9 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         parent_depth: 0,
         subagents_max_depth: tools::implementations::grow_build::task::MAX_SUBAGENT_DEPTH,
         inference_idle_timeout_secs: 600,
+        permission_prompt_timeout: std::time::Duration::from_secs(
+            crate::agent::config::DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECS,
+        ),
         auto_compact_threshold_tiers: crate::agent::subagent::AutoCompactThresholdTiers::default(),
         permission_handle: None,
         worktree_type: crate::util::config::WorktreeType::Linked,

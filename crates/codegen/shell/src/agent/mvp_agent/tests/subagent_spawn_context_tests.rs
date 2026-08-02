@@ -8,6 +8,7 @@ use acp_transport::AcpAgentGatewaySender as GatewaySender;
 
 /// Subagents inherit the parent permission handle, so a managed `Read(**/.env)`
 /// deny still blocks the child — direct read and the `cat .env` shell equivalent.
+#[tokio::test]
 async fn subagent_spawn_context_inherits_parent_permission_handle() {
     use workspace::permission::types::{
         PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
@@ -20,6 +21,7 @@ async fn subagent_spawn_context_inherits_parent_permission_handle() {
             let sid = acp::SessionId::new("parent-permission");
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
             let gateway = GatewaySender::new(tx);
+            let permission_prompt_timeout = std::time::Duration::from_secs(17);
             let cwd = paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp"))
                 .expect("absolute cwd");
             let (permission_handle, _events_rx) =
@@ -28,6 +30,7 @@ async fn subagent_spawn_context_inherits_parent_permission_handle() {
                     gateway,
                     cwd,
                     workspace::permission::types::ClientType::Generic,
+                    permission_prompt_timeout,
                     Some(PermissionConfig::new(vec![PermissionRule {
                         action: RuleAction::Deny,
                         tool: ToolFilter::Read,
@@ -42,10 +45,12 @@ async fn subagent_spawn_context_inherits_parent_permission_handle() {
                 );
 
             let mut handle = make_test_handle("test-model", false, None);
+            handle.permission_prompt_timeout = permission_prompt_timeout;
             handle.permission_handle = permission_handle;
             agent.sessions.borrow_mut().insert(sid.clone(), handle);
 
             let ctx = agent.build_subagent_spawn_context(sid.0.as_ref());
+            assert_eq!(ctx.permission_prompt_timeout, permission_prompt_timeout);
             let inherited = ctx
                 .permission_handle
                 .expect("subagent context must inherit parent permission handle");

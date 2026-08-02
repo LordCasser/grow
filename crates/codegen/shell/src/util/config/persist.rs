@@ -415,6 +415,7 @@ mod tests {
         let cfg = crate::agent::config::SessionConfig {
             auto_compact_threshold_percent: Some(70),
             load_envrc: None,
+            ..Default::default()
         };
         merge_section(&mut table, "session", &cfg);
         let session = table.get("session").unwrap().as_table().unwrap();
@@ -879,6 +880,7 @@ auto_update = true
         let cfg = crate::agent::config::SessionConfig {
             load_envrc: Some(true),
             auto_compact_threshold_percent: None,
+            ..Default::default()
         };
         merge_section(&mut table, "session", &cfg);
         let s = table.get("session").unwrap().as_table().unwrap();

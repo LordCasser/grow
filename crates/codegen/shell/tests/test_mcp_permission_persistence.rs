@@ -217,6 +217,7 @@ async fn run_actor_test_full<F, Fut>(
                 gw.sender.clone(),
                 cwd.clone(),
                 client_type,
+                std::time::Duration::from_secs(60),
                 policy,
                 vec![], // deny_read_globs
                 vec![],
@@ -368,6 +369,7 @@ async fn policy_ask_suppresses_mcp_tool_allowlist() {
                 gw.sender.clone(),
                 cwd.clone(),
                 ClientType::GrowPager,
+                std::time::Duration::from_secs(60),
                 Some(policy),
                 vec![], // deny_read_globs
                 vec![],
@@ -418,6 +420,7 @@ async fn policy_ask_suppresses_mcp_server_allowlist() {
                 gw.sender.clone(),
                 cwd.clone(),
                 ClientType::GrowPager,
+                std::time::Duration::from_secs(60),
                 Some(policy),
                 vec![], // deny_read_globs
                 vec![],
@@ -462,6 +465,7 @@ async fn policy_deny_takes_precedence_over_mcp_allowlist() {
                 gw.sender.clone(),
                 cwd.clone(),
                 ClientType::GrowPager,
+                std::time::Duration::from_secs(60),
                 Some(policy),
                 vec![], // deny_read_globs
                 vec![],

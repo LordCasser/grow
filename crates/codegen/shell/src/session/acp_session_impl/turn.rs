@@ -2706,6 +2706,17 @@ impl SessionActor {
                         context: None,
                     });
                 }
+                Ok(ToolLoop::PermissionTimedOut { tool_name }) => {
+                    return Ok(TurnOutcome::Cancelled {
+                        category: Some(
+                            crate::session::events::CancellationCategory::PermissionTimedOut,
+                        ),
+                        context: Some(serde_json::json!({
+                            "tool_name": tool_name,
+                            "reason": "permission request timed out",
+                        })),
+                    });
+                }
                 Ok(ToolLoop::FollowupMessage(followup_message)) => {
                     self.add_followup_message_as_user_turn(&followup_message)
                         .await;

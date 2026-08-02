@@ -61,6 +61,9 @@ pub struct SessionHandle {
     /// Resolved turn limit for this session; lets a spawned subagent inherit
     /// the parent's limit. `None` = unlimited.
     pub max_turns: Option<usize>,
+    /// Permission response deadline selected when this session was created.
+    /// Child sessions inherit it together with the shared permission manager.
+    pub permission_prompt_timeout: std::time::Duration,
     /// Handle to the hunk tracker for this session
     pub hunk_tracker_handle: HunkTrackerHandle,
     /// Actor-based chat state handle — lets callers inspect final conversation state.

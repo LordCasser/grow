@@ -28,6 +28,7 @@ fn install_real_permissions(actor: &mut SessionActor) {
         dummy_gateway(),
         cwd,
         ClientType::Generic,
+        std::time::Duration::from_secs(60),
         None,
         vec![],
         vec![],

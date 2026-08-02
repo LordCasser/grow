@@ -2195,6 +2195,21 @@ mod cancellation_error_message_tests {
         assert!(msg.contains("user cancelled a permission prompt"));
     }
     #[test]
+    fn permission_timed_out_is_not_reported_as_user_cancellation() {
+        let ctx = CancellationContext {
+            tool_name: Some("run_terminal_cmd".into()),
+            reason: Some("permission request timed out".into()),
+            ..Default::default()
+        };
+        let msg = cancellation_error_message(
+            Some(CancellationCategory::PermissionTimedOut),
+            Some(&ctx),
+        );
+        assert!(msg.contains("permission request timed out"));
+        assert!(msg.contains("run_terminal_cmd"));
+        assert!(!msg.contains("user cancelled"));
+    }
+    #[test]
     fn hook_denied_with_context() {
         let ctx = CancellationContext {
             tool_name: Some("run_terminal_cmd".into()),

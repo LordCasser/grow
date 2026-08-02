@@ -45,6 +45,8 @@ ACP clients can set `"_meta": { "yoloMode": true }` on `session/new`. See [Agent
 
 **Interactive TUI:** `Ctrl+X P` or `/permission` opens the current-session selector; `/ask`, `/auto`, and `/always-approve` select directly. `/settings` changes defaults for future sessions ([shortcuts](03-keyboard-shortcuts.md), [commands](04-slash-commands.md)).
 
+Permission prompts always have a response deadline so a disconnected pager, gateway, or leader cannot block the session forever. Configure `[session] permission_prompt_timeout_secs` for interactive sessions (default `60`) and `[session] non_interactive_permission_prompt_timeout_secs` for headless/CI sessions (default `10`). Both values must be positive; a timeout cancels the current turn without running the tool, and a late approval is ignored.
+
 **CLI:**
 
 ```bash

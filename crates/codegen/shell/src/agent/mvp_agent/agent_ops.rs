@@ -1682,6 +1682,11 @@ impl MvpAgent {
                 model.map(|e| &e.info),
             )
         };
+        let permission_prompt_timeout = self
+            .cfg
+            .borrow()
+            .session
+            .permission_prompt_timeout(startup_hints.non_interactive);
         let system_prompt_label = {
             let cfg = self.cfg.borrow();
             let models = self.models_manager.models();
@@ -1999,6 +2004,7 @@ impl MvpAgent {
                     initial_total_tokens,
                     startup_hints,
                     client_type,
+                    permission_prompt_timeout,
                     auto_compact_threshold_percent,
                     system_prompt_label,
                     compaction_mode,

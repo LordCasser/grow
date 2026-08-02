@@ -1215,7 +1215,29 @@ pub struct AgentSelectionConfig {
     pub system_prompt_label: Option<String>,
 }
 /// Configuration for session behavior.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub const DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECS: u64 = 60;
+pub const DEFAULT_NON_INTERACTIVE_PERMISSION_PROMPT_TIMEOUT_SECS: u64 = 10;
+
+fn deserialize_positive_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    if value == 0 {
+        return Err(serde::de::Error::custom("value must be greater than 0"));
+    }
+    Ok(value)
+}
+
+fn is_default_permission_prompt_timeout(value: &u64) -> bool {
+    *value == DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECS
+}
+
+fn is_default_non_interactive_permission_prompt_timeout(value: &u64) -> bool {
+    *value == DEFAULT_NON_INTERACTIVE_PERMISSION_PROMPT_TIMEOUT_SECS
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionConfig {
     /// Context window usage percentage (0-100) at which auto-compact is triggered.
@@ -1236,6 +1258,41 @@ pub struct SessionConfig {
     /// round-trips as absent on disk (managed config wins over default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_envrc: Option<bool>,
+    /// Maximum time to wait for an interactive permission prompt response.
+    #[serde(
+        deserialize_with = "deserialize_positive_u64",
+        skip_serializing_if = "is_default_permission_prompt_timeout"
+    )]
+    pub permission_prompt_timeout_secs: u64,
+    /// Maximum time to wait for a permission response in non-interactive sessions.
+    #[serde(
+        deserialize_with = "deserialize_positive_u64",
+        skip_serializing_if = "is_default_non_interactive_permission_prompt_timeout"
+    )]
+    pub non_interactive_permission_prompt_timeout_secs: u64,
+}
+
+impl SessionConfig {
+    pub fn permission_prompt_timeout(&self, non_interactive: bool) -> std::time::Duration {
+        let seconds = if non_interactive {
+            self.non_interactive_permission_prompt_timeout_secs
+        } else {
+            self.permission_prompt_timeout_secs
+        };
+        std::time::Duration::from_secs(seconds)
+    }
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            auto_compact_threshold_percent: None,
+            load_envrc: None,
+            permission_prompt_timeout_secs: DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECS,
+            non_interactive_permission_prompt_timeout_secs:
+                DEFAULT_NON_INTERACTIVE_PERMISSION_PROMPT_TIMEOUT_SECS,
+        }
+    }
 }
 /// Configuration for change-archive deduplication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4808,6 +4865,51 @@ reasoning_effort = "low"
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
         assert_eq!(cfg.session.auto_compact_threshold_percent, Some(75));
+    }
+    #[test]
+    fn permission_prompt_timeouts_resolve_defaults_and_session_kind() {
+        let session = SessionConfig::default();
+        assert_eq!(
+            session.permission_prompt_timeout(false),
+            std::time::Duration::from_secs(DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            session.permission_prompt_timeout(true),
+            std::time::Duration::from_secs(DEFAULT_NON_INTERACTIVE_PERMISSION_PROMPT_TIMEOUT_SECS)
+        );
+    }
+    #[test]
+    fn parses_custom_permission_prompt_timeouts() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [session]
+            permission_prompt_timeout_secs = 120
+            non_interactive_permission_prompt_timeout_secs = 7
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        assert_eq!(cfg.session.permission_prompt_timeout_secs, 120);
+        assert_eq!(
+            cfg.session.non_interactive_permission_prompt_timeout_secs,
+            7
+        );
+    }
+    #[test]
+    fn rejects_zero_permission_prompt_timeouts() {
+        for field in [
+            "permission_prompt_timeout_secs",
+            "non_interactive_permission_prompt_timeout_secs",
+        ] {
+            let raw_config: toml::Value =
+                toml::from_str(&format!("[session]\n{field} = 0\n")).unwrap();
+            let error = Config::new_from_toml_cfg(&raw_config)
+                .expect_err("zero must not restore an infinite wait");
+            assert!(
+                error.contains("greater than 0"),
+                "unexpected error: {error}"
+            );
+        }
     }
     #[test]
     fn compaction_mode_precedence_env_over_config_over_remote_over_default() {

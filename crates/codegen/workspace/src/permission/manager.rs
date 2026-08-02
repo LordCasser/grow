@@ -60,6 +60,7 @@ pub(crate) mod reasons {
     pub const BASH_REQUEST_FLOOR: &str = "bash_request_floor";
     pub const OPAQUE_SHELL: &str = "opaque_shell";
     pub const REQUESTER_GONE: &str = "requester_gone";
+    pub const PERMISSION_TIMEOUT: &str = "permission_timeout";
 }
 
 pub const AUTO_DENY_CONSECUTIVE_LIMIT: u32 = 3;
@@ -1171,6 +1172,7 @@ pub fn spawn_permission_manager(
     gateway: GatewaySender,
     cwd: AbsPathBuf,
     client_type: ClientType,
+    prompt_timeout: std::time::Duration,
     permission_config: Option<crate::permission::types::PermissionConfig>,
     deny_read_globs: Vec<String>,
     web_fetch_allowed_domains: Vec<String>,
@@ -1183,6 +1185,7 @@ pub fn spawn_permission_manager(
         gateway,
         cwd,
         client_type,
+        prompt_timeout,
         permission_config,
         deny_read_globs,
         web_fetch_allowed_domains,
@@ -1199,6 +1202,7 @@ fn spawn_permission_manager_with_pin(
     gateway: GatewaySender,
     cwd: AbsPathBuf,
     client_type: ClientType,
+    prompt_timeout: std::time::Duration,
     permission_config: Option<crate::permission::types::PermissionConfig>,
     deny_read_globs: Vec<String>,
     web_fetch_allowed_domains: Vec<String>,
@@ -1268,8 +1272,13 @@ fn spawn_permission_manager_with_pin(
             persist_state(&cwd, &state, client_id_ref).await;
         }
 
-        let prompter = AcpPrompter::new(session_id.clone(), gateway.clone(), client_type)
-            .with_remember_tool_approvals(remember_tool_approvals);
+        let prompter = AcpPrompter::new(
+            session_id.clone(),
+            gateway.clone(),
+            client_type,
+            prompt_timeout,
+        )
+        .with_remember_tool_approvals(remember_tool_approvals);
         let mut yolo_mode = initial_yolo;
         let mut auto_mode = seed_auto;
         if seed_auto {
@@ -1366,7 +1375,7 @@ fn spawn_permission_manager_with_pin(
                     subagent_description: request_subagent_description,
                 } => {
                     // wait_ms timer; starts at dequeue so it excludes time queued behind others.
-                    let request_received = std::time::Instant::now();
+                    let request_received = tokio::time::Instant::now();
                     // Effective mode (yolo wins); stable for the arm (single-threaded actor).
                     let permission_mode = if yolo_mode {
                         diagnostics::enums::PermissionMode::AlwaysApprove
@@ -1419,6 +1428,7 @@ fn spawn_permission_manager_with_pin(
                                 }
                                 Decision::FollowupMessage(_) => ("followup".to_string(), None),
                                 Decision::Cancelled => ("cancelled".to_string(), None),
+                                Decision::TimedOut => ("timed_out".to_string(), None),
                             };
 
                             let diagnostics = diagnostics.get();
@@ -2103,6 +2113,7 @@ fn spawn_permission_manager_with_pin(
                                     )
                                 }
                                 PromptOutcome::Cancelled => (Decision::Cancelled, "cancelled"),
+                                PromptOutcome::TimedOut => (Decision::TimedOut, "timed_out"),
                                 PromptOutcome::FollowupMessage(msg) => {
                                     (Decision::FollowupMessage(msg), "followup")
                                 }
@@ -2231,6 +2242,7 @@ fn spawn_permission_manager_with_pin(
                                     "reject_once",
                                 ),
                                 PromptOutcome::Cancelled => (Decision::Cancelled, "cancelled"),
+                                PromptOutcome::TimedOut => (Decision::TimedOut, "timed_out"),
                                 PromptOutcome::Error(e) => (
                                     Decision::Reject(format!(
                                         "Failed to request permission from user: {e}"
@@ -2266,7 +2278,10 @@ fn spawn_permission_manager_with_pin(
                     }
                     let requester_gone =
                         matches!(decision, Decision::Cancelled) && respond_to.is_closed();
-                    if user_prompted && outcome_str != "error" && !requester_gone {
+                    if user_prompted
+                        && !matches!(outcome_str, "error" | "timed_out")
+                        && !requester_gone
+                    {
                         auto_consecutive_denials = 0;
                         diagnostics.set(
                             diagnostics
@@ -2274,7 +2289,9 @@ fn spawn_permission_manager_with_pin(
                                 .with_auto_denials(auto_consecutive_denials, auto_total_denials),
                         );
                     }
-                    let trigger = if requester_gone {
+                    let trigger = if matches!(decision, Decision::TimedOut) {
+                        reasons::PERMISSION_TIMEOUT
+                    } else if requester_gone {
                         tracing::info!(tool = %tool_name, "permission requester gone; open prompt abandoned");
                         reasons::REQUESTER_GONE
                     } else {
@@ -2363,6 +2380,7 @@ mod tests {
             GatewaySender::new(tx),
             cwd.clone(),
             ClientType::Generic,
+            std::time::Duration::from_secs(60),
             None,
             vec![], // deny_read_globs
             vec![],
@@ -2384,6 +2402,7 @@ mod tests {
             GatewaySender::new(tx),
             cwd.clone(),
             ClientType::Generic,
+            std::time::Duration::from_secs(60),
             Some(config),
             vec![], // deny_read_globs
             vec![],
@@ -2929,6 +2948,7 @@ mod tests {
                     GatewaySender::new(tx),
                     cwd,
                     ClientType::Generic,
+                    std::time::Duration::from_secs(60),
                     None,
                     globs.clone(),
                     vec![],
@@ -3098,6 +3118,7 @@ mod tests {
             gateway,
             cwd.clone(),
             client_type,
+            std::time::Duration::from_secs(60),
             config,
             vec![], // deny_read_globs
             vec![],
@@ -3809,6 +3830,7 @@ mod tests {
                 gateway,
                 cwd.clone(),
                 ClientType::Generic,
+                std::time::Duration::from_secs(60),
                 None,
                 vec![],
                 web_fetch_allowed_domains,
@@ -5023,6 +5045,7 @@ mod tests {
                     gateway,
                     cwd.clone(),
                     ClientType::Generic,
+                    std::time::Duration::from_secs(60),
                     None,
                     vec![],
                     vec![],
@@ -5078,6 +5101,70 @@ mod tests {
                     2,
                     "both prompts open; only the dead one is abandoned"
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prompt_timeout_is_distinct_and_actor_accepts_next_request() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let prompts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                let client = HangingFirstPromptClient {
+                    prompts: prompts.clone(),
+                };
+                let (gateway, receiver) = acp_transport::acp_gateway::<acp::AgentSide, _>(client);
+                tokio::task::spawn_local(receiver.run());
+                let timeout = std::time::Duration::from_secs(5);
+                let (mgr, mut events) = spawn_permission_manager_with_pin(
+                    acp::SessionId::new(Arc::from("test-session")),
+                    gateway,
+                    cwd,
+                    ClientType::Generic,
+                    timeout,
+                    None,
+                    vec![],
+                    vec![],
+                    false,
+                    None,
+                    true,
+                    None,
+                );
+
+                let first = mgr
+                    .request(
+                        AccessKind::Bash("curl http://example.com".into()),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert_eq!(first, Decision::TimedOut);
+                let event = events.recv().await.expect("timeout event must be emitted");
+                assert_eq!(event.decision, "timed_out");
+                assert_eq!(event.prompt_outcome.as_deref(), Some("timed_out"));
+                assert_eq!(
+                    event.decision_reason.as_deref(),
+                    Some(reasons::PERMISSION_TIMEOUT)
+                );
+                assert_eq!(event.wait_ms, Some(timeout.as_millis() as u64));
+                assert!(event.user_prompted);
+
+                let second = mgr
+                    .request(
+                        AccessKind::Bash("curl http://example.org".into()),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert!(matches!(second, Decision::Reject(_)));
+                assert_eq!(prompts.borrow().len(), 2);
             })
             .await;
     }
@@ -5214,6 +5301,7 @@ mod tests {
                     gateway,
                     cwd.clone(),
                     ClientType::Generic,
+                    std::time::Duration::from_secs(60),
                     None,
                     vec![],
                     vec![],

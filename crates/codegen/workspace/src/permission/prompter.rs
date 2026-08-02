@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::Duration;
 
 use crate::permission::{
     bash_command_splitting::{BashCommandHighlights, primary_command_from_script},
@@ -292,6 +292,7 @@ pub enum PromptOutcome {
     RejectOnce,
     RejectAlwaysBashCommand(String),
     Cancelled,
+    TimedOut,
     // If the user provided a followup message instead of an action, the string here will
     // have it
     // TODO: Should the string here be prompt parts instead and should we allow @ and other
@@ -304,6 +305,7 @@ pub struct AcpPrompter {
     session_id: acp::SessionId,
     gateway: GatewaySender,
     client_type: ClientType,
+    prompt_timeout: Duration,
     edit_options: IndexMap<acp::PermissionOptionId, acp::PermissionOption>,
     bash_options: IndexMap<acp::PermissionOptionId, acp::PermissionOption>,
     /// Generic bash options for non-TUI clients - shows complete command with approve/reject always
@@ -357,6 +359,7 @@ impl AcpPrompter {
         session_id: acp::SessionId,
         gateway: GatewaySender,
         client_type: ClientType,
+        prompt_timeout: Duration,
     ) -> Self {
         let mut edit_options: IndexMap<acp::PermissionOptionId, acp::PermissionOption> =
             IndexMap::new();
@@ -472,6 +475,7 @@ impl AcpPrompter {
             session_id,
             gateway,
             client_type,
+            prompt_timeout,
             edit_options,
             bash_options,
             generic_bash_options,
@@ -701,7 +705,6 @@ impl AcpPrompter {
         protected_edit: Option<crate::permission::ProtectedEditReason>,
     ) -> PromptOutcome {
         let tool_name = tool_name_for_access(access);
-        let _prompt_start = Instant::now();
 
         let permission_options = self.build_options(access);
         let req = acp::RequestPermissionRequest::new(
@@ -710,8 +713,9 @@ impl AcpPrompter {
             permission_options.values().cloned().collect(),
         )
         .meta(self.permission_request_meta(access, protected_edit));
-        match self.gateway.request_permission(req).await {
-            Ok(resp) => match resp.outcome {
+        match tokio::time::timeout(self.prompt_timeout, self.gateway.request_permission(req)).await
+        {
+            Ok(Ok(resp)) => match resp.outcome {
                 acp::RequestPermissionOutcome::Cancelled => PromptOutcome::Cancelled,
                 acp::RequestPermissionOutcome::Selected(selected) => map_selected_outcome(
                     &permission_options,
@@ -721,9 +725,18 @@ impl AcpPrompter {
                 ),
                 _ => PromptOutcome::Error("unknown permission outcome".to_owned()),
             },
-            Err(error) => {
+            Ok(Err(error)) => {
                 tracing::error!(?error, "failed to request permission");
                 PromptOutcome::Error("failed to request permission".to_owned())
+            }
+            Err(_) => {
+                tracing::warn!(
+                    session_id = %self.session_id.0,
+                    tool = %tool_name,
+                    timeout_secs = self.prompt_timeout.as_secs(),
+                    "permission request timed out"
+                );
+                PromptOutcome::TimedOut
             }
         }
     }
@@ -901,6 +914,7 @@ mod tests {
             acp::SessionId::new(Arc::from("test-session")),
             gateway,
             client_type,
+            Duration::from_secs(60),
         )
         .with_remember_tool_approvals(remember)
     }
@@ -1476,6 +1490,7 @@ mod tests {
             acp::SessionId::new(Arc::from("sess-perm")),
             gateway,
             ClientType::Generic,
+            Duration::from_secs(60),
         );
         let access = AccessKind::Read(Some("/etc/hosts".to_owned()));
         let tool_call_update = acp::ToolCallUpdate::new(
@@ -1484,5 +1499,75 @@ mod tests {
         );
         let outcome = prompter.request(&access, &tool_call_update, None).await;
         assert!(matches!(outcome, PromptOutcome::Error(_)));
+    }
+
+    fn timeout_test_request() -> (AccessKind, acp::ToolCallUpdate) {
+        (
+            AccessKind::Bash("cargo test".to_owned()),
+            acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(Arc::from("tc-timeout")),
+                acp::ToolCallUpdateFields::default(),
+            ),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn request_times_out_and_discards_late_allow() {
+        let timeout = Duration::from_secs(5);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let prompter = AcpPrompter::new(
+            acp::SessionId::new(Arc::from("sess-timeout")),
+            GatewaySender::new(tx),
+            ClientType::Generic,
+            timeout,
+        );
+        let (access, update) = timeout_test_request();
+        let mut request = Box::pin(prompter.request(&access, &update, None));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        let acp_transport::AcpClientMessage::RequestPermission(args) =
+            rx.try_recv().expect("permission request must be sent")
+        else {
+            panic!("expected permission request");
+        };
+
+        tokio::time::advance(timeout).await;
+        assert!(matches!(request.await, PromptOutcome::TimedOut));
+
+        let response =
+            acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(
+                acp::SelectedPermissionOutcome::new("allow-once"),
+            ));
+        assert!(
+            args.response_tx.send(Ok(response)).is_err(),
+            "the timed-out request receiver must be gone, so a late allow cannot execute the tool"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn request_accepts_response_before_deadline() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let prompter = AcpPrompter::new(
+            acp::SessionId::new(Arc::from("sess-response")),
+            GatewaySender::new(tx),
+            ClientType::Generic,
+            Duration::from_secs(5),
+        );
+        let (access, update) = timeout_test_request();
+        let mut request = Box::pin(prompter.request(&access, &update, None));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        let acp_transport::AcpClientMessage::RequestPermission(args) =
+            rx.try_recv().expect("permission request must be sent")
+        else {
+            panic!("expected permission request");
+        };
+        args.response_tx
+            .send(Ok(acp::RequestPermissionResponse::new(
+                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                    "allow-once",
+                )),
+            )))
+            .expect("request must still be waiting");
+
+        assert!(matches!(request.await, PromptOutcome::AllowOnce));
     }
 }

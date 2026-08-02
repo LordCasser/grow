@@ -430,6 +430,12 @@ impl SessionActor {
                             call.function.name
                         )
                     }
+                    Some(ToolLoop::PermissionTimedOut { .. }) => {
+                        format!(
+                            "Tool execution cancelled due to an earlier permission timeout for tool `{}`",
+                            call.function.name
+                        )
+                    }
                     Some(ToolLoop::FollowupMessage(_)) => {
                         format!(
                             "Tool execution cancelled due to earlier user followup message for tool `{}`",
@@ -458,6 +464,7 @@ impl SessionActor {
                         let error_reason = match &tool_loop {
                             ToolLoop::PermissionReject { reason, .. } => reason.clone(),
                             ToolLoop::Cancelled => "cancelled".to_string(),
+                            ToolLoop::PermissionTimedOut { .. } => "permission_timeout".to_string(),
                             ToolLoop::FollowupMessage(_) => "followup".to_string(),
                             ToolLoop::HookDenied { hook_name, .. } => {
                                 format!("hook_denied:{hook_name}")
@@ -469,6 +476,7 @@ impl SessionActor {
                         tool_loop,
                         ToolLoop::PermissionReject { .. }
                             | ToolLoop::Cancelled
+                            | ToolLoop::PermissionTimedOut { .. }
                             | ToolLoop::FollowupMessage(_)
                     ) && final_result.is_none()
                     {
@@ -740,6 +748,9 @@ impl SessionActor {
                     crate::session::events::ToolOutcome::PermissionRejected
                 }
                 ToolLoop::Cancelled => crate::session::events::ToolOutcome::PermissionCancelled,
+                ToolLoop::PermissionTimedOut { .. } => {
+                    crate::session::events::ToolOutcome::PermissionTimedOut
+                }
                 ToolLoop::FollowupMessage(_) => crate::session::events::ToolOutcome::Followup,
                 ToolLoop::HookDenied { .. } => crate::session::events::ToolOutcome::HookDenied,
                 ToolLoop::NonExistingTool | ToolLoop::ToolParsingError => {
@@ -790,6 +801,7 @@ impl SessionActor {
             match &tool_loop {
                 ToolLoop::PermissionReject { .. }
                 | ToolLoop::Cancelled
+                | ToolLoop::PermissionTimedOut { .. }
                 | ToolLoop::FollowupMessage(_) => {
                     if final_result.is_none() {
                         *final_result = Some(tool_loop);
@@ -1151,6 +1163,7 @@ impl SessionActor {
                         Decision::Allow | Decision::Ask => PermissionDecision::Allow,
                         Decision::Reject(_) | Decision::PolicyDeny(_) => PermissionDecision::Deny,
                         Decision::Cancelled => PermissionDecision::Cancelled,
+                        Decision::TimedOut => PermissionDecision::TimedOut,
                         Decision::FollowupMessage(_) => PermissionDecision::Followup,
                     }
                 },
@@ -1166,6 +1179,7 @@ impl SessionActor {
                     Some(reason.to_string()),
                 ),
                 Decision::Cancelled => (::diagnostics::events::PermissionOutcome::Cancelled, None),
+                Decision::TimedOut => (::diagnostics::events::PermissionOutcome::TimedOut, None),
                 Decision::FollowupMessage(_) => {
                     (::diagnostics::events::PermissionOutcome::Followup, None)
                 }
@@ -1242,6 +1256,17 @@ impl SessionActor {
                     self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                         .await?;
                     return Ok(Err(ToolLoop::Cancelled));
+                }
+                Decision::TimedOut => {
+                    let message = format!(
+                        "Permission request timed out; tool `{}` was not executed",
+                        call.function.name
+                    );
+                    self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                        .await?;
+                    return Ok(Err(ToolLoop::PermissionTimedOut {
+                        tool_name: call.function.name.clone(),
+                    }));
                 }
                 Decision::FollowupMessage(followup_message) => {
                     let message = format!(

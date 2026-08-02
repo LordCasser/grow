@@ -169,7 +169,9 @@ impl EventTracker {
     /// *next* real user prompt can be tagged. Overwrites any prior value (latest
     /// cause wins).
     pub fn set_prior_interrupt_category(&self, category: CancellationCategory) {
-        self.prior_interrupt_category.set(Some(category));
+        if super::events::prior_turn_interrupt_from_cancellation(category).is_some() {
+            self.prior_interrupt_category.set(Some(category));
+        }
     }
 
     /// Take (and clear) the recorded prior-turn interrupt cause.
@@ -250,6 +252,10 @@ mod tests {
             t.take_prior_interrupt_category(),
             Some(CancellationCategory::MidTurnAbort)
         );
+        assert_eq!(t.take_prior_interrupt_category(), None);
+
+        // Automatic cancellation is never stored in the user-interrupt slot.
+        t.set_prior_interrupt_category(CancellationCategory::PermissionTimedOut);
         assert_eq!(t.take_prior_interrupt_category(), None);
 
         // Interrupt-reminder flag is consumed exactly once.

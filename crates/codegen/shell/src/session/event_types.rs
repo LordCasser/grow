@@ -553,6 +553,8 @@ pub enum ToolOutcome {
     PermissionRejected,
     /// User cancelled the permission prompt (Cmd+C).
     PermissionCancelled,
+    /// The permission client did not answer before the session deadline.
+    PermissionTimedOut,
     /// User provided a followup message instead of approving.
     Followup,
     /// A user-configured hook blocked execution.
@@ -570,6 +572,7 @@ impl From<ToolOutcome> for ::diagnostics::events::ToolOutcome {
             ToolOutcome::Error => Self::Error,
             ToolOutcome::PermissionRejected => Self::PermissionRejected,
             ToolOutcome::PermissionCancelled => Self::PermissionCancelled,
+            ToolOutcome::PermissionTimedOut => Self::PermissionTimedOut,
             ToolOutcome::Followup => Self::Followup,
             ToolOutcome::HookDenied => Self::HookDenied,
             ToolOutcome::InvalidTool => Self::InvalidTool,
@@ -610,6 +613,7 @@ pub enum PermissionDecision {
     Allow,
     Deny,
     Cancelled,
+    TimedOut,
     Followup,
 }
 
@@ -622,6 +626,7 @@ pub enum CancellationCategory {
     HookDenied,
     PermissionRejected,
     PermissionCancelled,
+    PermissionTimedOut,
     MidTurnAbort,
 }
 
@@ -640,6 +645,7 @@ mod tests {
             CancellationCategory::HookDenied,
             CancellationCategory::PermissionRejected,
             CancellationCategory::PermissionCancelled,
+            CancellationCategory::PermissionTimedOut,
             CancellationCategory::MidTurnAbort,
         ] {
             let value = serde_json::to_value(variant).unwrap();
@@ -660,6 +666,10 @@ mod tests {
             (
                 CancellationCategory::PermissionCancelled,
                 "\"permission_cancelled\"",
+            ),
+            (
+                CancellationCategory::PermissionTimedOut,
+                "\"permission_timed_out\"",
             ),
             (CancellationCategory::MidTurnAbort, "\"mid_turn_abort\""),
         ] {

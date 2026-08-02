@@ -19,6 +19,7 @@ pub(crate) fn permission_decision_source(decision: &Decision, is_yolo: bool) -> 
         Decision::PolicyDeny(_) => "config",
         Decision::Reject(_) => "user_reject",
         Decision::Cancelled => "user_abort",
+        Decision::TimedOut => "timeout",
         Decision::FollowupMessage(_) => "user_followup",
         Decision::Allow | Decision::Ask if is_yolo => "config",
         Decision::Allow | Decision::Ask => "allowed",

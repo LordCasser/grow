@@ -561,6 +561,9 @@ fn make_test_handle(
             cwd: "/tmp".to_string(),
         },
         max_turns: None,
+        permission_prompt_timeout: std::time::Duration::from_secs(
+            crate::agent::config::DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECS,
+        ),
         hunk_tracker_handle,
         chat_state_handle: chat_state::ChatStateHandle::noop(),
         signals_handle: crate::session::signals::SessionSignalsHandle::new(),

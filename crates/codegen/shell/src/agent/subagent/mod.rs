@@ -127,6 +127,8 @@ pub(crate) struct SubagentSpawnContext {
     pub subagents_max_depth: u32,
     /// Inference idle timeout (secs), resolved from the parent's model config at spawn-context creation time.
     pub inference_idle_timeout_secs: u64,
+    /// Permission response deadline inherited from the root session.
+    pub permission_prompt_timeout: std::time::Duration,
     /// Tier inputs for resolving `auto_compact_threshold_percent` at
     /// spawn time — once the subagent's actual model id is known.
     /// Lazy because the subagent may be assigned a different model from
@@ -1636,6 +1638,12 @@ fn cancellation_error_message(
         }
         (Some(CancellationCategory::PermissionCancelled), _) => {
             "Subagent turn was cancelled: user cancelled a permission prompt".to_string()
+        }
+        (Some(CancellationCategory::PermissionTimedOut), Some(d)) => {
+            format!("Subagent turn was cancelled: permission request timed out — {d}")
+        }
+        (Some(CancellationCategory::PermissionTimedOut), None) => {
+            "Subagent turn was cancelled: permission request timed out".to_string()
         }
         (Some(CancellationCategory::HookDenied), Some(d)) => {
             format!("Subagent turn was cancelled: hook denied — {d}")

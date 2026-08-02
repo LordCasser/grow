@@ -86,6 +86,10 @@ pub(crate) enum ToolLoop {
     },
     /// The user cancelled the turn (e.g. Cmd+C during a permission prompt).
     Cancelled,
+    /// The permission client did not answer before the session deadline.
+    PermissionTimedOut {
+        tool_name: String,
+    },
     /// User provided a followup message instead of approving the tool execution.
     /// The string contains the followup message to be added as a user turn.
     FollowupMessage(String),

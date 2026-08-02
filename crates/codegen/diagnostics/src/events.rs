@@ -94,6 +94,7 @@ pub enum PermissionOutcome {
     Allow,
     Deny,
     Cancelled,
+    TimedOut,
     Followup,
 }
 
@@ -104,6 +105,7 @@ impl PermissionOutcome {
             Self::Allow => "allow",
             Self::Deny => "deny",
             Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
             Self::Followup => "followup",
         }
     }
@@ -166,6 +168,7 @@ pub enum ToolOutcome {
     Error,
     PermissionRejected,
     PermissionCancelled,
+    PermissionTimedOut,
     Followup,
     HookDenied,
     InvalidTool,
