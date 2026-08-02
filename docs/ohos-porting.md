@@ -242,7 +242,7 @@ end
 ## 9. 路线图：下一步（第一阶段完成后）
 
 > 阶段定义：**第一阶段 = 仓库本体在 docker 编译通过**（已完成并验证）。
-> **进展（2026-08-02）**：Step 0/1 已完成（nix vendor、aws-lc 移除、build 脚本、distro-pm 已合入 main）；**v1.1.1 已打 tag 并推送**（release workflow 已在 GitHub 运行 9 平台构建）；Step 3 的 formula 已用**真实 v1.1.1 tag tarball 端到端验证**（`brew install -s --include-test grow` ≈12min、`brew test` 通过、style/audit 零问题），草稿存于 `packaging/harmonybrew/grow.rb`，待提交 Harmonybrew/core PR。以下按依赖排序。
+> **进展（2026-08-02）**：Step 0/1 已完成（nix vendor、aws-lc 移除、build 脚本、distro-pm 已合入 main）；**v1.1.1 已打 tag 并推送**（release workflow 九平台全绿）；Step 3 的 Harmonybrew formula 已用**真实 v1.1.1 tag tarball 端到端验证**并通过门禁（PR #15676 → 替代 PR #15677 评审中）；**上游 homebrew-core 提交（PR #296588）因"仓库知名度"机械门槛（<225 stars/90 forks/90 watchers，grow 仓库刚公开为 0/0/0）主动关闭**，formula 变体保留在 `packaging/homebrew-core/grow.rb`，待项目知名度达标后重新提交。以下按依赖排序。
 
 ### Step 0 — 提交第一阶段改动（立即）
 `third_party/nix-ohos/`（vendor）+ `Cargo.toml`（patch 条目）+ `Cargo.lock`（nix 0.26.4 → path）+ 本文档更新。没有这一步，后续全部为空谈。
