@@ -241,7 +241,8 @@ end
 
 ## 9. 路线图：下一步（第一阶段完成后）
 
-> 阶段定义：**第一阶段 = 仓库本体在 docker 编译通过**（已完成并验证）。以下按依赖排序。
+> 阶段定义：**第一阶段 = 仓库本体在 docker 编译通过**（已完成并验证）。
+> **进展（2026-08-02）**：Step 0/1 已完成（nix vendor、aws-lc 移除、build 脚本、distro-pm 均已提交到 `ohos-adaptation` 分支）；Step 3 的 formula 草稿已在 ci-runner 内**端到端验证通过**（`brew install -s --include-test grow` ≈14min、`brew test` 通过、自更新经 distro-pm 关闭），草稿存于 `packaging/harmonybrew/grow.rb`。以下按依赖排序。
 
 ### Step 0 — 提交第一阶段改动（立即）
 `third_party/nix-ohos/`（vendor）+ `Cargo.toml`（patch 条目）+ `Cargo.lock`（nix 0.26.4 → path）+ 本文档更新。没有这一步，后续全部为空谈。
