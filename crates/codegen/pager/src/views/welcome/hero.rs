@@ -5,11 +5,11 @@
 //! ([`compute_hero`]) from rendering ([`render_hero`]).
 //!
 //! Layout modes (picked by content-area width **and** height, calibrated to
-//! the measured assets — big logo 80×35, small logo 30×15):
+//! the measured assets — big logo 80×35, small logo 50×22):
 //!
 //! - `w ≥ 143 && h ≥ 39` → side-by-side with the **big** logo.
-//! - `w ≥ 93 && h ≥ 19` → side-by-side with the **small** logo.
-//! - `w ≥ 34 && h ≥ 19` → stacked (logo above the text group).
+//! - `w ≥ 113 && h ≥ 26` → side-by-side with the **small** logo.
+//! - `w ≥ 54 && h ≥ 26` → stacked (logo above the text group).
 //! - smaller → text-only (no logo — a logo that can't fit or would deform
 //!   the content is never shown).
 //!
@@ -120,7 +120,7 @@ fn big_gate() -> (u16, u16) {
     )
 }
 
-/// Side-by-side gate for the small logo: 93 cols × 19 rows.
+/// Side-by-side gate for the small logo: 113 cols × 26 rows.
 fn small_gate() -> (u16, u16) {
     (
         logo::visual_width(logo::LOGO_SMALL) + 2 * logo::H_PAD + logo::RIGHT_COL_MIN,
@@ -128,7 +128,7 @@ fn small_gate() -> (u16, u16) {
     )
 }
 
-/// Stacked gate for the small logo: logo width + padding only (34 cols × 19 rows).
+/// Stacked gate for the small logo: logo width + padding only (54 cols × 26 rows).
 fn stacked_gate() -> (u16, u16) {
     (
         logo::visual_width(logo::LOGO_SMALL) + 2 * logo::H_PAD,
@@ -735,14 +735,16 @@ managed devices and accounts. Report security incidents";
         assert_eq!(layout(142, 45).mode, HeroMode::SideBySide(LogoSize::Small));
         // Height matters: one row short of the big gate → small.
         assert_eq!(layout(150, 38).mode, HeroMode::SideBySide(LogoSize::Small));
-        // Small: ≥ 93 wide AND ≥ 19 tall.
-        assert_eq!(layout(93, 19).mode, HeroMode::SideBySide(LogoSize::Small));
-        assert_eq!(layout(93, 40).mode, HeroMode::SideBySide(LogoSize::Small));
+        // Small: ≥ 113 wide AND ≥ 26 tall.
+        assert_eq!(layout(113, 26).mode, HeroMode::SideBySide(LogoSize::Small));
+        assert_eq!(layout(113, 40).mode, HeroMode::SideBySide(LogoSize::Small));
         // Stacked: small logo on top of the text group.
-        assert_eq!(layout(92, 30).mode, HeroMode::Stacked(LogoSize::Small));
-        assert_eq!(layout(80, 23).mode, HeroMode::Stacked(LogoSize::Small));
+        assert_eq!(layout(112, 30).mode, HeroMode::Stacked(LogoSize::Small));
+        assert_eq!(layout(80, 30).mode, HeroMode::Stacked(LogoSize::Small));
         // None: too narrow or too short for even the small logo.
         assert_eq!(layout(33, 30).mode, HeroMode::TextOnly);
+        assert_eq!(layout(53, 40).mode, HeroMode::TextOnly);
+        assert_eq!(layout(100, 25).mode, HeroMode::TextOnly);
         assert_eq!(layout(100, 18).mode, HeroMode::TextOnly);
     }
 
@@ -751,7 +753,7 @@ managed devices and accounts. Report security incidents";
         // A tip eats the rows the small logo needs — the mode degrades rather
         // than overflow (logo first, then the announcement slot).
         let with_tip = compute_hero(HeroLayoutInput {
-            content_area: Rect::new(0, 0, 100, 21),
+            content_area: Rect::new(0, 0, 120, 28),
             menu_height: 4,
             tip_height: 2,
             with_menu: true,
@@ -760,7 +762,7 @@ managed devices and accounts. Report security incidents";
         assert_eq!(with_tip.mode, HeroMode::TextOnly);
 
         let without_tip = compute_hero(HeroLayoutInput {
-            content_area: Rect::new(0, 0, 100, 21),
+            content_area: Rect::new(0, 0, 120, 28),
             menu_height: 4,
             with_menu: true,
             ..Default::default()
@@ -772,21 +774,21 @@ managed devices and accounts. Report security incidents";
     fn hero_announcement_clamped_to_fit() {
         let a = ann(Some("Heads up"), Some(LONG_MSG));
         let layout = compute_hero(HeroLayoutInput {
-            content_area: Rect::new(0, 0, 120, 24),
+            content_area: Rect::new(0, 0, 120, 30),
             menu_height: 4,
             announcement: Some(&a),
             with_menu: true,
             with_info: true,
             ..Default::default()
         });
-        // Side-by-side small: block = 19 rows; 5 remain for the info slot
-        // (spacer + up to 4 announcement rows).
+        // Side-by-side small: block = 26 rows; 4 remain for the info slot
+        // (spacer + up to 3 announcement rows).
         assert_eq!(layout.mode, HeroMode::SideBySide(LogoSize::Small));
         assert!(layout.info.height > 0);
         assert!(layout.info.height <= 4);
         // The block still fits: hero + info + flex within the content area.
         let block_bottom = layout.hero.y + layout.hero.height;
-        assert!(block_bottom <= 24, "hero overflows: {block_bottom}");
+        assert!(block_bottom <= 30, "hero overflows: {block_bottom}");
     }
 
     // ── Geometry ──────────────────────────────────────────────────────────
@@ -809,8 +811,8 @@ managed devices and accounts. Report security incidents";
     fn hero_stacked_geometry() {
         let l = layout(80, 30);
         assert_eq!(l.mode, HeroMode::Stacked(LogoSize::Small));
-        assert_eq!(l.logo.width, 30);
-        assert_eq!(l.logo.x, 25, "stacked logo horizontally centered");
+        assert_eq!(l.logo.width, 50);
+        assert_eq!(l.logo.x, 15, "stacked logo horizontally centered");
         assert_eq!(l.text.y, l.logo.y + l.logo.height + 1);
         assert_eq!(l.text.width, 51, "stacked text group uses the stable width");
     }
@@ -828,7 +830,7 @@ managed devices and accounts. Report security incidents";
 
     #[test]
     fn hero_keeps_version_subtitle_menu_order() {
-        let l = layout(100, 40);
+        let l = layout(120, 40);
         assert_eq!(l.mode, HeroMode::SideBySide(LogoSize::Small));
         assert!(l.version.y == l.text.y);
         assert!(l.subtitle.y == l.text.y + 1);

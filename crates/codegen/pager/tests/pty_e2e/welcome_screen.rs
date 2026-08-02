@@ -82,8 +82,9 @@ async fn typing_any_character_starts_session_and_leaves_home() {
 
 /// 1e. **Agent empty-state logo.**
 /// A fresh session has an empty scrollback: the agent view shows only the
-/// centered Grow logo (small tier at the default size). Once the mock
-/// response streams into the scrollback, the logo disappears.
+/// centered Grow logo (big tier at the default size — the agent pane is 39+
+/// rows tall). Once the mock response streams into the scrollback, the logo
+/// disappears.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn agent_empty_state_logo_shows_until_content_streams() {
@@ -105,11 +106,11 @@ async fn agent_empty_state_logo_shows_until_content_streams() {
         .wait_for_text_absent(WELCOME_SCREEN_SENTINEL, Duration::from_secs(10))
         .expect("left the welcome screen");
 
-    // The empty session shows the small logo centered in the scrollback
-    // (~col 54 at 120 cols — the home hero's side-by-side slot puts the same
-    // motif at ~col 25, so this column can only be the agent empty state).
+    // The empty session shows the logo centered in the scrollback (~col 56 at
+    // 120 cols — the agent pane is 39+ rows tall, so the BIG tier renders;
+    // the home hero's side-by-side slot is capped at the 113-col small gate).
     let screen = harness.screen_contents();
-    let (row, col) = locate_screen_text(&screen, WELCOME_SMALL_LOGO_MOTIF)
+    let (row, col) = locate_screen_text(&screen, WELCOME_BIG_LOGO_MOTIF)
         .unwrap_or_else(|| panic!("empty-state logo not found\nscreen:\n{screen}"));
     assert!(
         col >= 40,
@@ -124,7 +125,7 @@ async fn agent_empty_state_logo_shows_until_content_streams() {
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("response streamed");
     assert!(
-        !harness.contains_text(WELCOME_SMALL_LOGO_MOTIF),
+        !harness.contains_text(WELCOME_BIG_LOGO_MOTIF),
         "empty-state logo must disappear once the scrollback has content\nscreen:\n{}",
         harness.screen_contents()
     );

@@ -2,7 +2,7 @@
 //!
 //! Two assets, measured at compile time by the helpers below:
 //! - [`LOGO`] (`grow-big.txt`): 80 cols × 35 rows — the large wordmark.
-//! - [`LOGO_SMALL`] (`grow-small.txt`): 30 cols × 15 rows — the small wordmark.
+//! - [`LOGO_SMALL`] (`grow-small.txt`): 50 cols × 22 rows — the small wordmark.
 //!
 //! [`pick_logo`] tiers by **both** width and height (the stacked gate screens
 //! need a width dimension too, so a tall-but-narrow terminal no longer gets a
@@ -221,10 +221,11 @@ mod tests {
     fn logo_picks_by_width_and_height() {
         // The stacked gate screens require both dimensions: big needs
         // w ≥ 84 && h ≥ 42 (35 rows + 2*V_PAD + chrome slack); small needs
-        // w ≥ 34 && h ≥ 22 (15 rows + 2*V_PAD + chrome slack).
+        // w ≥ 54 && h ≥ 29 (22 rows + 2*V_PAD + chrome slack).
         assert_eq!(pick_logo(33, 50), None, "too narrow for any logo");
-        assert_eq!(pick_logo(34, 21), None, "too short for the small logo");
-        assert_eq!(pick_logo(34, 22), Some(LOGO_SMALL));
+        assert_eq!(pick_logo(53, 40), None, "too narrow for the small logo");
+        assert_eq!(pick_logo(54, 28), None, "too short for the small logo");
+        assert_eq!(pick_logo(54, 29), Some(LOGO_SMALL));
         assert_eq!(
             pick_logo(83, 50),
             Some(LOGO_SMALL),
@@ -250,11 +251,11 @@ mod tests {
         }
 
         assert!(LOGO.contains("⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣥"));
-        assert!(LOGO_SMALL.contains("⣹⣷⣶⣼⣿⣿⣷"));
+        assert!(LOGO_SMALL.contains("⢿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠃"));
         assert_eq!(visual_width(LOGO), 80);
         assert_eq!(count_lines(LOGO), 35);
-        assert_eq!(visual_width(LOGO_SMALL), 30);
-        assert_eq!(count_lines(LOGO_SMALL), 15);
+        assert_eq!(visual_width(LOGO_SMALL), 50);
+        assert_eq!(count_lines(LOGO_SMALL), 22);
     }
 
     #[test]
@@ -262,10 +263,10 @@ mod tests {
         // Side-by-side gates = logo extent + padding + the minimum text column.
         assert_eq!(visual_width(LOGO) + 2 * H_PAD + RIGHT_COL_MIN, 143);
         assert_eq!(count_lines(LOGO) + 2 * V_PAD, 39);
-        assert_eq!(visual_width(LOGO_SMALL) + 2 * H_PAD + RIGHT_COL_MIN, 93);
-        assert_eq!(count_lines(LOGO_SMALL) + 2 * V_PAD, 19);
+        assert_eq!(visual_width(LOGO_SMALL) + 2 * H_PAD + RIGHT_COL_MIN, 113);
+        assert_eq!(count_lines(LOGO_SMALL) + 2 * V_PAD, 26);
         // Stacked small-logo gate = logo extent + padding only.
-        assert_eq!(visual_width(LOGO_SMALL) + 2 * H_PAD, 34);
+        assert_eq!(visual_width(LOGO_SMALL) + 2 * H_PAD, 54);
     }
 
     #[test]

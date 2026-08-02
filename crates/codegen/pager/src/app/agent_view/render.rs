@@ -4243,7 +4243,7 @@ const EMPTY_LOGO_PAD: u16 = 2;
 /// (a bare centered logo, no chrome).
 ///
 /// Big needs `w ≥ 80 + 2·PAD && h ≥ 35 + 2·PAD` (84×39); small needs
-/// `w ≥ 30 + 2·PAD && h ≥ 15 + 2·PAD` (34×19). Smaller areas render no logo —
+/// `w ≥ 50 + 2·PAD && h ≥ 22 + 2·PAD` (54×26). Smaller areas render no logo —
 /// a logo that would deform is never shown.
 fn pick_empty_logo(w: u16, h: u16) -> Option<LogoSize> {
     if w >= LogoSize::Big.width() + 2 * EMPTY_LOGO_PAD
@@ -4483,11 +4483,11 @@ mod empty_state_logo_tests {
     use crate::scrollback::render::ScratchBuffer;
 
     /// Long `⣿` run present in the big art (`grow-big.txt`) but not in the
-    /// small art (its longest run is `⣿⣿⣷`) — presence proves the big logo.
+    /// small art (its longest run is 8 `⣿`s) — presence proves the big logo.
     const BIG_MOTIF: &str = "⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣥";
     /// Motif from the small art (`grow-small.txt`) — presence proves the
     /// small logo.
-    const SMALL_MOTIF: &str = "⣹⣷⣶⣼⣿⣿⣷";
+    const SMALL_MOTIF: &str = "⢿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠃";
 
     fn draw(agent: &mut AgentView, area: Rect) -> Buffer {
         let mut buf = Buffer::empty(area);
@@ -4561,15 +4561,15 @@ mod empty_state_logo_tests {
     #[test]
     fn medium_area_renders_small_logo_only() {
         let mut agent = make_agent();
-        let buf = draw(&mut agent, Rect::new(0, 0, 40, 30));
+        let buf = draw(&mut agent, Rect::new(0, 0, 60, 40));
         let rows = rendered_rows(&buf);
         assert!(
             shows_motif(&rows, SMALL_MOTIF),
-            "a 40×30 area must fit the small logo"
+            "a 60×40 area must fit the small logo"
         );
         assert!(
             !shows_motif(&rows, BIG_MOTIF),
-            "a 40×30 area must not fit the big logo"
+            "a 60×40 area must not fit the big logo"
         );
     }
 
@@ -4588,11 +4588,12 @@ mod empty_state_logo_tests {
     fn pick_empty_logo_tiers_by_area() {
         assert_eq!(pick_empty_logo(33, 50), None, "too narrow for any logo");
         assert_eq!(
-            pick_empty_logo(34, 18),
+            pick_empty_logo(53, 40),
             None,
-            "too short for the small logo"
+            "too narrow for the small logo"
         );
-        assert_eq!(pick_empty_logo(34, 19), Some(LogoSize::Small));
+        assert_eq!(pick_empty_logo(54, 25), None, "too short for the small logo");
+        assert_eq!(pick_empty_logo(54, 26), Some(LogoSize::Small));
         assert_eq!(
             pick_empty_logo(83, 50),
             Some(LogoSize::Small),

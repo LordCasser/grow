@@ -5,9 +5,9 @@ use super::common::*;
 /// 1b. **Welcome home page renders the small logo at the default terminal size.**
 ///
 /// The borderless hero tiers the logo by the content area: at 120 cols the
-/// side-by-side left column is `max(60, 34)` = 60 wide (≥ the 34-col small
-/// gate) and 50 rows clears the 19-row gate, so the small art
-/// (`grow-small.txt`, 30×15) is selected — the big art (80×35) must not
+/// side-by-side left column is `max(60, 54)` = 60 wide (≥ the 54-col small
+/// gate) and 50 rows clears the 26-row gate, so the small art
+/// (`grow-small.txt`, 50×22) is selected — the big art (80×35) must not
 /// appear.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
