@@ -90,3 +90,6 @@ default-bazel = [
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc-ctl"]
 sandbox-enforce = ["pager/sandbox-enforce"]
 release-dist = ["pager/release-dist"]
+# Package-manager-managed build (e.g. the Harmonybrew formula): self-update
+# disabled; upgrades via the package manager.
+distro-pm = ["update/distro-pm"]

@@ -325,7 +325,19 @@ fn disk_version_for_installer(installer: &str) -> Option<String> {
 }
 
 pub async fn get_installer() -> Option<&'static str> {
-    Some("gh-release")
+    #[cfg(feature = "distro-pm")]
+    {
+        // Package-manager-managed build (e.g. the Harmonybrew formula): the
+        // package manager owns upgrades. Returning None short-circuits every
+        // updater entry point (run_update_if_available, check_update_background,
+        // check_update_status, ensure_latest_on_disk, run_update) through their
+        // existing no-installer paths, so self-update is fully disabled.
+        return None;
+    }
+    #[cfg(not(feature = "distro-pm"))]
+    {
+        Some("gh-release")
+    }
 }
 
 fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: bool) -> Option<bool> {

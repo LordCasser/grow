@@ -30,3 +30,9 @@ tempfile = { workspace = true }
 time = { workspace = true, features = ["serde"] }
 tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "test-util"] }
 wiremock = { workspace = true }
+
+[features]
+# Package-manager-managed build (e.g. the Harmonybrew formula): disables
+# self-update entirely — get_installer() returns None and the startup
+# version-range block is skipped. Upgrades are the package manager's job.
+distro-pm = []

@@ -96,13 +96,23 @@ fn required_range_message(decision: &RequiredRangeDecision) -> Option<String> {
 /// Refuse to start when the running version is outside the required range.
 /// Recovery subcommands return before this, so they stay usable.
 pub fn enforce_version_policy_or_exit() {
-    let policy = VersionPolicy::resolve();
-    let current = get_installed_version();
-    let decision = evaluate_required_range(&current, &policy);
-    if let Some(message) = required_range_message(&decision) {
-        warn!(?decision, "required version range: refusing to start");
-        eprintln!("{message}");
-        std::process::exit(1);
+    #[cfg(feature = "distro-pm")]
+    {
+        // Package-manager-managed build (e.g. the Harmonybrew formula): the
+        // package manager owns versioning, so the startup range block is
+        // skipped.
+        return;
+    }
+    #[cfg(not(feature = "distro-pm"))]
+    {
+        let policy = VersionPolicy::resolve();
+        let current = get_installed_version();
+        let decision = evaluate_required_range(&current, &policy);
+        if let Some(message) = required_range_message(&decision) {
+            warn!(?decision, "required version range: refusing to start");
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
     }
 }
 
