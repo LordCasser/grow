@@ -684,6 +684,17 @@ pub async fn run_install_script(
 
 /// Return the release asset platform selected by this binary's compile target.
 pub(crate) fn detect_platform() -> Result<&'static str> {
+    // OpenHarmony reports target_os = "linux" with target_env = "ohos", so
+    // the ohos branch MUST come before the generic linux branches, which
+    // would otherwise claim it (as a linux-aarch64 asset that does not run
+    // on OHOS).
+    if cfg!(all(
+        target_os = "linux",
+        target_env = "ohos",
+        target_arch = "aarch64"
+    )) {
+        return Ok("ohos-aarch64");
+    }
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         return Ok("macos-aarch64");
     }
@@ -3667,7 +3678,8 @@ mod tests {
         all(target_os = "linux", target_arch = "x86_64"),
         all(target_os = "linux", target_arch = "riscv64"),
         all(target_os = "windows", target_arch = "aarch64"),
-        all(target_os = "windows", target_arch = "x86_64")
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "linux", target_env = "ohos", target_arch = "aarch64")
     ))]
     #[test]
     fn test_detect_platform_returns_known_os() {
@@ -3676,6 +3688,7 @@ mod tests {
             platform.starts_with("macos-")
                 || platform.starts_with("linux-")
                 || platform.starts_with("windows-")
+                || platform.starts_with("ohos-")
         );
     }
 
@@ -3685,7 +3698,8 @@ mod tests {
         all(target_os = "linux", target_arch = "aarch64"),
         all(target_os = "linux", target_arch = "x86_64"),
         all(target_os = "windows", target_arch = "aarch64"),
-        all(target_os = "windows", target_arch = "x86_64")
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "linux", target_env = "ohos", target_arch = "aarch64")
     ))]
     #[test]
     fn test_detect_platform_matches_compile_time_cfg() {
@@ -3693,11 +3707,17 @@ mod tests {
         if cfg!(target_os = "macos") {
             assert!(platform.starts_with("macos-"));
         }
-        if cfg!(target_os = "linux") {
+        // On OHOS rustc reports target_os = "linux" too; the ohos branch must
+        // win over the generic linux branches, so the linux assertion is
+        // scoped to non-ohos builds.
+        if cfg!(all(target_os = "linux", not(target_env = "ohos"))) {
             assert!(platform.starts_with("linux-"));
         }
         if cfg!(target_os = "windows") {
             assert!(platform.starts_with("windows-"));
+        }
+        if cfg!(all(target_os = "linux", target_env = "ohos")) {
+            assert!(platform.starts_with("ohos-"));
         }
         if cfg!(target_arch = "x86_64") {
             assert!(platform.contains("x86_64"));

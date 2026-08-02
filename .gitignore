@@ -10,3 +10,4 @@
 # Local IDE / act machine config (not shared)
 .idea/
 .actrc
+/target-ohos/

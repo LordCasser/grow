@@ -214,6 +214,26 @@ jobs:
             rg_sha256: 572709c8770cb7f9385d725cb06d2bcd9537ec24d4dd17b1be1d65a876f8b591
             rg_strip_components: 1
             rg_runnable: true
+          # OpenHarmony (aarch64-unknown-linux-ohos): built natively inside the
+          # Harmonybrew ci-runner container (OHOS userland) on an arm64 runner.
+          # OHOS releases do NOT bundle ripgrep (no GitHub prebuilt exists for
+          # this target); the binary resolves `rg` from PATH at runtime and
+          # search tools error with an install hint when it is missing. The
+          # shared "Prepare bundled ripgrep" download step is skipped for this
+          # builder. Smoke runs inside the container (the binary cannot run on
+          # the ubuntu runner), so `smoke: false` keeps the shared runner
+          # smoke off.
+          - asset_platform: ohos-aarch64
+            target: aarch64-unknown-linux-ohos
+            runner: ubuntu-24.04-arm
+            builder: ohos
+            smoke: false
+            rg_repository: BurntSushi/ripgrep
+            rg_tag: 15.0.0
+            rg_archive: (not bundled; no GitHub asset for this target)
+            rg_sha256: (not bundled; no GitHub asset for this target)
+            rg_strip_components: 0
+            rg_runnable: false
     steps:
       - uses: actions/checkout@v6
         if: ${{ !env.ACT }}
@@ -253,7 +273,7 @@ jobs:
         run: cargo install cross --locked --version 0.2.5
 
       - name: Prepare bundled ripgrep
-        if: ${{ matrix.builder != 'windows' }}
+        if: ${{ matrix.builder != 'windows' && matrix.builder != 'ohos' }}
         shell: bash
         env:
           RG_REPOSITORY: ${{ matrix.rg_repository }}
@@ -364,6 +384,36 @@ jobs:
         shell: pwsh
         run: cargo build --locked --profile release-dist -p cli --bin grow --target $env:TARGET_TRIPLE
 
+      # OpenHarmony build: runs scripts/build-ohos.sh inside the Harmonybrew
+      # ci-runner container (arm64 OHOS userland with ohos-sdk + brew rust).
+      # The script bootstraps the toolchain and installs the rsproxy cargo
+      # mirror (crates.io/USTC TLS is flaky), then builds with jemalloc off
+      # (its configure does not know the ohos triplet) and WITHOUT a bundled
+      # ripgrep (runtime resolves `rg` from PATH; search tools error with an
+      # install hint when missing). CARGO_TARGET_DIR lives under the mounted
+      # workspace so the runner can package the artifact. The binary is
+      # stripped with the SDK's llvm-strip and smoke-tested inside the
+      # container (it cannot run on the ubuntu runner).
+      - name: Build Grow (OHOS container)
+        if: ${{ matrix.builder == 'ohos' }}
+        shell: bash
+        env:
+          GROW_VERSION: ${{ needs.validate.outputs.version }}
+          CI_RUNNER: swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner:latest
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/workspace/grow" -w /workspace/grow \
+            -e "GROW_VERSION=${GROW_VERSION}" \
+            -e "CARGO_PROFILE=release-dist" \
+            -e "CARGO_TARGET_DIR=/workspace/grow/target-ohos" \
+            "${CI_RUNNER}" sh -euo pipefail -c '
+              scripts/build-ohos.sh
+              BIN="${CARGO_TARGET_DIR}/${CARGO_PROFILE}/grow"
+              test -x "$BIN"
+              /opt/ohos-sdk/ohos/native/llvm/bin/llvm-strip --strip-all "$BIN"
+              scripts/build-ohos.sh --smoke
+            '
       - name: Smoke-test native binary
         if: ${{ matrix.smoke && matrix.builder != 'windows' }}
         shell: bash
@@ -391,7 +441,14 @@ jobs:
           mkdir -p dist
           stage_dir="$(mktemp -d "${RUNNER_TEMP}/grow-release.XXXXXX")"
           trap 'rm -rf "$stage_dir"' EXIT
-          cp "target/${TARGET_TRIPLE}/release-dist/grow" "$stage_dir/grow"
+          # OHOS builds into target-ohos (container CARGO_TARGET_DIR under the
+          # workspace); all other builders use target/${TARGET_TRIPLE}.
+          if [[ "${{ matrix.builder }}" == "ohos" ]]; then
+            bin_path="target-ohos/release-dist/grow"
+          else
+            bin_path="target/${TARGET_TRIPLE}/release-dist/grow"
+          fi
+          cp "$bin_path" "$stage_dir/grow"
 
           case "${{ matrix.builder }}" in
             alma)
@@ -404,6 +461,9 @@ jobs:
               ;;
             macos)
               strip "$stage_dir/grow"
+              ;;
+            ohos)
+              : # already stripped in-container by the build step
               ;;
           esac
 
@@ -472,6 +532,7 @@ jobs:
             "grow-${version}-macos-x86_64.tar.gz"
             "grow-${version}-windows-x86_64.tar.gz"
             "grow-${version}-windows-aarch64.tar.gz"
+            "grow-${version}-ohos-aarch64.tar.gz"
           )
           mapfile -t assets < <(find . -maxdepth 1 -type f -name 'grow-*' -printf '%f\n' | sort)
 
@@ -565,6 +626,7 @@ jobs:
             "grow-${version}-macos-x86_64.tar.gz"
             "grow-${version}-windows-x86_64.tar.gz"
             "grow-${version}-windows-aarch64.tar.gz"
+            "grow-${version}-ohos-aarch64.tar.gz"
           )
           remote_assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
           remote_asset_count="$(sed '/^$/d' <<<"$remote_assets" | wc -l | tr -d ' ')"

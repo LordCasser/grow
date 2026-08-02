@@ -145,6 +145,9 @@ if [ -n "${GROW_TOOLS_BUNDLE_RG_PATH:-}" ]; then
   export GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1
   echo "embedding rg from: $GROW_TOOLS_BUNDLE_RG_PATH"
 else
+  # OHOS releases intentionally do NOT bundle rg: runtime resolution falls
+  # back to `rg` on PATH (installed via Harmonybrew), and search tools error
+  # with an install hint when it is missing.
   echo "no GROW_TOOLS_BUNDLE_RG_PATH: runtime rg falls back to PATH"
 fi
 
