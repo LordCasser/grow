@@ -1,6 +1,8 @@
-//! Signed deployment-config envelope: the wire contract between the
-//! cli-chat-proxy signer and the client verifier. Shared so a field rename
-//! breaks at compile time on both sides instead of silently failing verification.
+//! Signed managed-policy wire types owned by the client verifier.
+//!
+//! The remote signer is not part of this workspace. Keeping these types beside
+//! verification makes the persisted and HTTP contract explicit without
+//! pretending there is a shared in-repository service boundary.
 
 use serde::{Deserialize, Serialize};
 
@@ -20,8 +22,8 @@ pub const MANAGED_CONFIG_NONCE_ECHO_HEADER: &str = "x-grow-managed-config-nonce"
 
 /// Shape of a server-minted nonce (16 random bytes as hex): what `fresh_nonce`
 /// produces and the only shape the client echoes (hex is HTTP-header-safe).
-/// Shared so a mint change cannot silently disable the echo: the proxy pins
-/// its mint against this, the client gates its echo on it.
+/// The client gates its echo on this shape so malformed values never become
+/// request headers.
 pub fn is_server_nonce_shape(nonce: &str) -> bool {
     nonce.len() == 32 && nonce.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -123,7 +125,7 @@ impl FailClosedFlag {
     }
 }
 
-/// Shared `fail_closed` parse (signer + client). Bad TOML → False; non-bool key → Invalid.
+/// Canonical client-side `fail_closed` parse. Bad TOML → False; non-bool key → Invalid.
 pub fn fail_closed_flag_status(requirements: &str) -> FailClosedFlag {
     let Ok(v) = toml::from_str::<toml::Value>(requirements) else {
         return FailClosedFlag::False;

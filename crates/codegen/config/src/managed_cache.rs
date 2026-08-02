@@ -186,7 +186,7 @@ pub fn fail_closed_policy_armed_at(home: &Path) -> bool {
     }
     // Defense in depth: files remain after a stripped/corrupt marker.
     match std::fs::read_to_string(home.join(crate::loader::REQUIREMENTS_FILENAME)) {
-        Ok(s) => prod_mc_cli_chat_proxy_types::fail_closed_flag_status(&s).is_enabled(),
+        Ok(s) => crate::signed_policy::fail_closed_flag_status(&s).is_enabled(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => {
             // File present but unreadable: do not allow clear_orphan to wipe.

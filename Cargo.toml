@@ -65,7 +65,6 @@ members = [
     "crates/common/tool-protocol",
     "crates/common/tool-runtime",
     "crates/common/tool-types",
-    "prod/mc/cli-chat-proxy-types",
     "third_party/dagre_rust",
     "third_party/graphlib_rust",
     "third_party/mermaid-to-svg",

@@ -42,8 +42,9 @@ Web Search 由用户配置 MCP Server 提供。
 准备 release 时：
 
 1. 确认 `cargo metadata --locked --no-deps` 中所有 Grow 第一方包均为 `1.0.0`。
-2. 按本文的 release 构建方式验证三个支持目标，并确认产物内嵌 `rg`。
-3. 创建并发布 `v1.0.0` GitHub Release；workflow 会校验 tag、构建三个平台的 `grow` 二进制并挂到 Release。
+2. 按本文的 release 构建方式验证四个支持目标，并确认产物内嵌 `rg`。
+3. 创建并推送 `v1.0.0` tag；不要预先公开 Release。workflow 会校验 tag，构建并验证四个平台的
+   `grow` 二进制，在 draft Release 中上传完整资产后再一次性公开。
 
 完整可复制配置见 [config.example.toml](config.example.toml)。示例不包含真实密钥，默认通过
 `env_key` 读取环境变量。
@@ -78,6 +79,8 @@ Grow 只在存在独立复用契约、依赖倒置、可部署产物或明确编
 跨进程协议也遵循同一标准：只有实际存在独立进程、稳定 wire contract 或多语言消费者时才引入
 protobuf/gRPC。纯 Rust 进程内边界直接使用 Rust 类型，需要落盘或外部交换时使用已有 Serde
 协议。workspace 依赖必须有生产代码或测试消费者；失去消费者的生成器、转换层和依赖应一并删除。
+仅由一个 runtime 消费的远程载荷类型归该 runtime 的 owner 模块，不为已经不存在的服务保留
+`prod` 目录或独立 contract crate。
 目前保留的单消费者 crate 仅限有明确收益的边界：`workflow` 提供独立执行语义，`memory`
 隔离存储与向量依赖，`mermaid` 隔离不可信渲染和 vendored layout 栈，`pager-render` 隔离
 大体量渲染编译单元。单一调用方本身不是建立 crate 的理由。
@@ -499,19 +502,24 @@ env GROW_TOOLS_BUNDLE_RG_PATH=/absolute/path/to/rg \
 对应产物位于 `target/release-dist/grow`。
 
 当前官方 release 构建四个目标：macOS arm64、Linux arm64、Linux amd64 和 Linux riscv64
-（无 Windows / x86_64 macOS / 其他架构）。创建并发布 `v<crate-version>` GitHub Release 后，
-[release workflow](.github/workflows/release.yml) 会构建这些目标。Linux amd64/arm64 产物在
+（无 Windows / x86_64 macOS / 其他架构）。将 `v<crate-version>` tag 推送到
+`LordCasser/grow` 后，[release workflow](.github/workflows/release.yml) 会构建这些目标；
+Release 在四个 updater 约定资产上传并验证完成前保持 draft，避免自动更新看到尚未具备完整
+下载项的新版本；带 semver 预发布段的版本会同步标记为 GitHub prerelease，避免 stable channel
+选中 alpha 版本。Linux amd64/arm64 产物在
 AlmaLinux 8 容器内以 `*-unknown-linux-gnu` 构建，glibc 基线 2.28（覆盖 RHEL 8 / Ubuntu
 20.04+ / Debian 10+ 等），构建成功后对产物做版本烟雾测试（`grow --version`）；Linux
 riscv64 在 amd64 runner 上通过 `cross` 交叉编译（官方无 riscv64 预编译 rg，
 rg sidecar 由 CI 准备），产物不做本机烟雾测试；ripgrep sidecar 在构建前
 staging 到工作区供容器使用。
 
-GitHub Release 页面**只挂最终 `grow` 二进制**（`grow-{version}-linux-x86_64` /
-`grow-{version}-linux-aarch64` / `grow-{version}-linux-riscv64` /
-`grow-{version}-macos-aarch64`），与 auto-update 契约一致；
+GitHub Release 页面**只挂四个最终 `.tar.gz` 包**（`grow-{version}-linux-x86_64.tar.gz` /
+`grow-{version}-linux-aarch64.tar.gz` / `grow-{version}-linux-riscv64.tar.gz` /
+`grow-{version}-macos-aarch64.tar.gz`），每个包内仅包含名为 `grow` 的可执行文件，与 auto-update
+契约一致；
 ripgrep 下载包、Actions artifact 等只出现在 CI 过程中，不会作为 Release 下载项。
-CI 会在构建时把固定版本 ripgrep 嵌入二进制，并跑 `grow --version` 烟雾测试。
+CI 会在构建时把固定版本 ripgrep 嵌入二进制，并跑 `grow --version` 烟雾测试。手动重跑已有
+tag 时可以只修复 Linux 资产，但 `skip-macos` 要求对应 Release 已存在精确命名的 macOS 资产。
 
 自动更新只读取 [`LordCasser/grow` Releases](https://github.com/LordCasser/grow/releases)，且默认关闭：
 

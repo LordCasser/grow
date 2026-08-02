@@ -389,13 +389,13 @@ fn list_cached_skill_entries(root: &Path, manifest: &BundleManifest) -> Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bundle::SubagentBundle;
     use axum::{
         Router,
         extract::State,
         http::{HeaderMap, StatusCode},
         routing::get,
     };
-    use prod_mc_cli_chat_proxy_types::SubagentBundle;
     use serial_test::serial;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;

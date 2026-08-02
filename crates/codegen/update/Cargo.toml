@@ -6,6 +6,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+flate2 = { workspace = true }
 futures = { workspace = true }
 indicatif = { workspace = true }
 reqwest = { workspace = true }
@@ -17,6 +18,7 @@ time = { workspace = true, features = ["serde"] }
 tokio = { workspace = true, features = ["fs", "process", "io-util", "macros", "time"] }
 tracing = { workspace = true }
 shell = { workspace = true }
+tar = { workspace = true }
 tools = { workspace = true }
 version = { workspace = true }
 

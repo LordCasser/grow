@@ -1,6 +1,6 @@
 //! HTTP client for deployment-key backend resources.
 
-use prod_mc_cli_chat_proxy_types::SubagentBundle;
+use crate::bundle::SubagentBundle;
 
 async fn parse_json_response<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,

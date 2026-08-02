@@ -1756,6 +1756,88 @@ async fn agent_exe_differs(
     }
 }
 
+/// Upper bound for the one decompressed executable in a release archive.
+const RELEASE_BINARY_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Extract the single `grow` executable from an official `.tar.gz` asset.
+///
+/// Release archives are deliberately a one-file format. Rejecting every other
+/// path and entry type keeps extraction independent of archive paths and avoids
+/// turning a compromised release asset into an arbitrary filesystem writer.
+async fn extract_release_archive(
+    archive_path: &std::path::Path,
+    binary_path: &std::path::Path,
+) -> Result<()> {
+    let archive_path = archive_path.to_owned();
+    let binary_tmp = tmp_download_path(binary_path);
+    let binary_tmp_for_worker = binary_tmp.clone();
+
+    let extraction = tokio::task::spawn_blocking(move || -> Result<()> {
+        let archive_file = std::fs::File::open(&archive_path)
+            .with_context(|| format!("failed to open release archive {}", archive_path.display()))?;
+        let decoder = flate2::read::GzDecoder::new(std::io::BufReader::new(archive_file));
+        let mut archive = tar::Archive::new(decoder);
+        let mut extracted = false;
+
+        for entry in archive.entries().context("failed to read release archive")? {
+            let mut entry = entry.context("failed to read release archive entry")?;
+            if extracted {
+                anyhow::bail!("release archive contains more than one entry");
+            }
+            if entry.header().entry_type() != tar::EntryType::Regular {
+                anyhow::bail!("release archive entry is not a regular file");
+            }
+            if entry.path().context("invalid release archive path")?.as_ref()
+                != std::path::Path::new("grow")
+            {
+                anyhow::bail!("release archive must contain exactly one file named grow");
+            }
+
+            let size = entry.header().size().context("invalid release binary size")?;
+            if size == 0 || size > RELEASE_BINARY_MAX_BYTES {
+                anyhow::bail!(
+                    "release binary size {size} is outside the allowed range (1..={RELEASE_BINARY_MAX_BYTES})"
+                );
+            }
+
+            let mut output = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&binary_tmp_for_worker)
+                .with_context(|| {
+                    format!(
+                        "failed to create extracted binary {}",
+                        binary_tmp_for_worker.display()
+                    )
+                })?;
+            let written = std::io::copy(&mut entry, &mut output)
+                .context("failed to extract release binary")?;
+            if written != size {
+                anyhow::bail!("release binary size mismatch: expected {size}, extracted {written}");
+            }
+            output.flush().context("failed to flush extracted release binary")?;
+            extracted = true;
+        }
+
+        if !extracted {
+            anyhow::bail!("release archive is empty");
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("release extraction task panicked: {e}"))?;
+
+    if let Err(error) = extraction {
+        let _ = tokio::fs::remove_file(&binary_tmp).await;
+        return Err(error);
+    }
+    if let Err(error) = publish_downloaded_artifact(&binary_tmp, binary_path).await {
+        let _ = tokio::fs::remove_file(&binary_tmp).await;
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Download and install Grow from this fork's GitHub Releases.
 ///
 /// Uses the public release asset URL directly; no GitHub CLI or account is
@@ -1777,6 +1859,11 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
 
     let binary_name = format!("grow-{}-{}", version, platform);
     let binary_path = download_dir.join(&binary_name);
+    let asset_name = format!("{binary_name}.tar.gz");
+    // Per-attempt archive paths avoid concurrent updaters deleting or replacing
+    // an archive another task is still extracting. `.tmp` also lets the normal
+    // stale-download sweep collect a file left by a crashed updater.
+    let archive_path = unique_temp_sibling(&binary_path, "archive.tmp");
     let tag = format!("v{}", version);
 
     eprintln!(
@@ -1788,20 +1875,16 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
         "https://github.com/{}/releases/download/{}/{}",
         crate::version::GH_RELEASE_REPO,
         tag,
-        binary_name
+        asset_name
     );
-    download_with_progress(&asset_url, &binary_path).await?;
+    download_with_progress(&asset_url, &archive_path).await?;
+    let extraction = extract_release_archive(&archive_path, &binary_path).await;
+    let _ = tokio::fs::remove_file(&archive_path).await;
+    extraction?;
 
     if !smoke_test_binary(&binary_path).await {
         let _ = tokio::fs::remove_file(&binary_path).await;
         anyhow::bail!("downloaded GitHub release binary failed to run");
-    }
-
-    // chmod +x
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755)).await?;
     }
 
     // Atomic swap of ~/.grow/bin/{grow,agent} -> downloaded binary.
@@ -2078,6 +2161,19 @@ async fn refresh_deployment_config() {
 mod tests {
     use super::*;
 
+    fn write_release_archive(path: &std::path::Path, entry_name: &str, body: &[u8]) {
+        let file = std::fs::File::create(path).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive.append_data(&mut header, entry_name, body).unwrap();
+        let encoder = archive.into_inner().unwrap();
+        encoder.finish().unwrap();
+    }
+
     #[test]
     fn test_tmp_download_path_is_unique_per_version_and_per_attempt() {
         // The old `with_extension("tmp")` collapsed every 0.1.x versioned
@@ -2111,6 +2207,45 @@ mod tests {
             std::path::Path::new("/home/u/.grow/downloads").into(),
             "temp file must stay in the destination directory for atomic rename"
         );
+    }
+
+    #[tokio::test]
+    async fn extract_release_archive_accepts_exact_grow_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("grow.tar.gz");
+        let binary = dir.path().join("grow-1.2.3-linux-x86_64");
+        let body = b"release-binary";
+        write_release_archive(&archive, "grow", body);
+
+        extract_release_archive(&archive, &binary).await.unwrap();
+
+        assert_eq!(std::fs::read(&binary).unwrap(), body);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(
+                std::fs::metadata(&binary).unwrap().permissions().mode() & 0o111,
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn extract_release_archive_rejects_unexpected_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("grow.tar.gz");
+        let binary = dir.path().join("grow-1.2.3-linux-x86_64");
+        write_release_archive(&archive, "bin/grow", b"release-binary");
+
+        let error = extract_release_archive(&archive, &binary)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("exactly one file named grow"),
+            "unexpected error: {error:#}"
+        );
+        assert!(!binary.exists());
     }
 
     #[test]

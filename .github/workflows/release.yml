@@ -1,10 +1,12 @@
 # Official Grow release assets for the four supported platforms:
 #   macos-aarch64, linux-x86_64, linux-aarch64, linux-riscv64
-# Asset names must stay grow-{version}-{asset_platform} for update.
+# Asset names must stay grow-{version}-{asset_platform}.tar.gz for update;
+# each archive contains exactly one executable named grow.
 #
-# Each platform is its own job: a failing target does not block the others
-# (artifacts land per job; publish collects whatever succeeds and can be
-# re-run after fixing a single target).
+# A Release stays private until every updater-visible asset is ready. Publishing
+# first would let the updater select a version whose binary still returns 404.
+# Each platform is its own job; artifacts land per job and a failed target can
+# be repaired by re-running this workflow for the same tag.
 #
 # Linux amd64/arm64 builds run inside an AlmaLinux 8 container (glibc 2.28
 # baseline) so the shipped binaries work on older distros than the
@@ -14,8 +16,9 @@
 name: Build release assets
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -32,13 +35,14 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  group: release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
   cancel-in-progress: false
 
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_RELEASE_DIST_INCREMENTAL: "false"
-  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  RELEASE_REPO: LordCasser/grow
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
 
 jobs:
   validate:
@@ -55,6 +59,27 @@ jobs:
         if: ${{ !env.ACT }}
         with:
           ref: ${{ env.RELEASE_TAG }}
+
+      - name: Match updater release repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${ACT:-}" == "true" ]]; then
+            updater_repo="$(git show "${RELEASE_TAG}:crates/codegen/update/src/version.rs" \
+              | sed -n 's/^pub const GH_RELEASE_REPO: &str = "\([^"]*\)";/\1/p')"
+          else
+            updater_repo="$(sed -n 's/^pub const GH_RELEASE_REPO: &str = "\([^"]*\)";/\1/p' \
+              crates/codegen/update/src/version.rs)"
+          fi
+          test -n "$updater_repo"
+          if [[ "$updater_repo" != "$RELEASE_REPO" ]]; then
+            echo "release workflow repo $RELEASE_REPO does not match updater repo $updater_repo" >&2
+            exit 1
+          fi
+          if [[ "${ACT:-}" != "true" && "$GITHUB_REPOSITORY" != "$RELEASE_REPO" ]]; then
+            echo "official release workflow only runs in $RELEASE_REPO (current: $GITHUB_REPOSITORY)" >&2
+            exit 1
+          fi
 
       - name: Act — use bind-mounted workspace
         if: ${{ env.ACT }}
@@ -212,18 +237,21 @@ jobs:
           echo "$version_out"
           echo "$version_out" | grep -F "${{ needs.validate.outputs.version }}"
 
-      - name: Strip and stage release asset
+      - name: Strip and package release asset
         shell: bash
         run: |
           set -euo pipefail
           # The container build runs as root, so target/ is root-owned and not
           # writable by the runner — strip cannot rewrite the binary in place
-          # (GNU strip needs to create a temp file next to it). Stage a copy
-          # in dist/ (runner-owned) and strip that instead.
+          # (GNU strip needs to create a temp file next to it).
           mkdir -p dist
-          ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
-          cp "target/${TARGET_TRIPLE}/release-dist/grow" "$ASSET"
-          strip --strip-all "$ASSET"
+          stage_dir="$(mktemp -d "${RUNNER_TEMP}/grow-release.XXXXXX")"
+          trap 'rm -rf "$stage_dir"' EXIT
+          cp "target/${TARGET_TRIPLE}/release-dist/grow" "$stage_dir/grow"
+          strip --strip-all "$stage_dir/grow"
+          ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}.tar.gz"
+          COPYFILE_DISABLE=1 tar -C "$stage_dir" -czf "$ASSET" grow
+          test "$(tar -tzf "$ASSET")" = "grow"
           ls -la "$ASSET"
 
       - uses: actions/upload-artifact@v7
@@ -365,18 +393,21 @@ jobs:
           echo "$version_out"
           echo "$version_out" | grep -F "${{ needs.validate.outputs.version }}"
 
-      - name: Strip and stage release asset
+      - name: Strip and package release asset
         shell: bash
         run: |
           set -euo pipefail
           # The container build runs as root, so target/ is root-owned and not
           # writable by the runner — strip cannot rewrite the binary in place
-          # (GNU strip needs to create a temp file next to it). Stage a copy
-          # in dist/ (runner-owned) and strip that instead.
+          # (GNU strip needs to create a temp file next to it).
           mkdir -p dist
-          ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
-          cp "target/${TARGET_TRIPLE}/release-dist/grow" "$ASSET"
-          strip --strip-all "$ASSET"
+          stage_dir="$(mktemp -d "${RUNNER_TEMP}/grow-release.XXXXXX")"
+          trap 'rm -rf "$stage_dir"' EXIT
+          cp "target/${TARGET_TRIPLE}/release-dist/grow" "$stage_dir/grow"
+          strip --strip-all "$stage_dir/grow"
+          ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}.tar.gz"
+          COPYFILE_DISABLE=1 tar -C "$stage_dir" -czf "$ASSET" grow
+          test "$(tar -tzf "$ASSET")" = "grow"
           ls -la "$ASSET"
 
       - uses: actions/upload-artifact@v7
@@ -507,20 +538,23 @@ jobs:
       # The riscv64 binary cannot execute on the amd64 runner; build success
       # is the acceptance bar for this target.
 
-      - name: Strip and stage release asset (llvm-strip)
+      - name: Strip and package release asset (llvm-strip)
         shell: bash
         run: |
           set -euo pipefail
           # The container build runs as root, so target/ is root-owned and not
           # writable by the runner — strip cannot rewrite the binary in place
-          # (GNU strip needs to create a temp file next to it). Stage a copy
-          # in dist/ (runner-owned) and strip that instead.
+          # (GNU strip needs to create a temp file next to it).
           mkdir -p dist
-          ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
-          cp "target/${TARGET_TRIPLE}/release-dist/grow" "$ASSET"
+          stage_dir="$(mktemp -d "${RUNNER_TEMP}/grow-release.XXXXXX")"
+          trap 'rm -rf "$stage_dir"' EXIT
+          cp "target/${TARGET_TRIPLE}/release-dist/grow" "$stage_dir/grow"
           STRIP="$(command -v llvm-strip || command -v llvm-strip-18 || true)"
           test -n "$STRIP" || { echo "llvm-strip not found on runner" >&2; exit 1; }
-          "$STRIP" --strip-all "$ASSET"
+          "$STRIP" --strip-all "$stage_dir/grow"
+          ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}.tar.gz"
+          COPYFILE_DISABLE=1 tar -C "$stage_dir" -czf "$ASSET" grow
+          test "$(tar -tzf "$ASSET")" = "grow"
           ls -la "$ASSET"
 
       - uses: actions/upload-artifact@v7
@@ -544,7 +578,7 @@ jobs:
   build-macos:
     name: Build macos-aarch64
     needs: validate
-    # Skip on explicit workflow_dispatch request; release events always build.
+    # Skip on explicit workflow_dispatch request; tag pushes always build.
     # Use github.event.inputs (raw event payload): the `inputs` context is not
     # hydrated in job-level `if` for workflow_dispatch, so `inputs.skip-macos`
     # evaluates empty there. Guard both string ('true') and boolean (true)
@@ -644,12 +678,18 @@ jobs:
           echo "$version_out"
           echo "$version_out" | grep -F "${{ needs.validate.outputs.version }}"
 
-      - name: Stage release asset
+      - name: Package release asset
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p dist
-          cp "target/${TARGET_TRIPLE}/release-dist/grow" \
-            "dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}"
+          stage_dir="$(mktemp -d "${RUNNER_TEMP}/grow-release.XXXXXX")"
+          trap 'rm -rf "$stage_dir"' EXIT
+          cp "target/${TARGET_TRIPLE}/release-dist/grow" "$stage_dir/grow"
+          ASSET="dist/grow-${{ needs.validate.outputs.version }}-${ASSET_PLATFORM}.tar.gz"
+          COPYFILE_DISABLE=1 tar -C "$stage_dir" -czf "$ASSET" grow
+          test "$(tar -tzf "$ASSET")" = "grow"
+          ls -la "$ASSET"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -669,7 +709,7 @@ jobs:
           fi
 
   # Intermediate build outputs stay on the Actions run (upload-artifact).
-  # The GitHub Release page only gets final grow binaries for end users.
+  # The GitHub Release page only gets final grow tarballs for end users.
   publish:
     name: Publish release assets
     needs:
@@ -678,8 +718,8 @@ jobs:
       - build-linux-aarch64
       - build-linux-riscv64
       - build-macos
-    # Run as long as no build failed; a skipped build-macos (skip-macos=true)
-    # is fine — the three Linux assets are uploaded on their own.
+    # Run as long as no build failed. A skipped macOS rebuild is allowed only
+    # when the existing Release already has the exact macOS asset updater needs.
     if: ${{ !cancelled() && !contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-24.04
     steps:
@@ -693,33 +733,150 @@ jobs:
         working-directory: dist
         run: |
           set -euo pipefail
-          # Official CI: exactly four platform assets.
-          # Local act often runs a single job (e.g. one build target) — require ≥1.
+          version="${{ needs.validate.outputs.version }}"
+          allowed=(
+            "grow-${version}-linux-x86_64.tar.gz"
+            "grow-${version}-linux-aarch64.tar.gz"
+            "grow-${version}-linux-riscv64.tar.gz"
+            "grow-${version}-macos-aarch64.tar.gz"
+          )
           mapfile -t assets < <(find . -maxdepth 1 -type f -name 'grow-*' | sort)
+
+          # Local act often runs a single build job. Still reject any name the
+          # updater cannot derive, rather than accepting an arbitrary grow-* file.
           if [[ "${ACT:-}" == "true" ]]; then
             test "${#assets[@]}" -ge 1
           elif [[ "${{ needs.build-macos.result }}" == "skipped" ]]; then
-            # workflow_dispatch with skip-macos=true: the three Linux assets.
-            test "${#assets[@]}" -eq 3
+            expected=("${allowed[@]:0:3}")
           else
-            test "${#assets[@]}" -eq 4
+            expected=("${allowed[@]}")
           fi
+
+          if [[ "${ACT:-}" != "true" ]]; then
+            test "${#assets[@]}" -eq "${#expected[@]}"
+            for name in "${expected[@]}"; do
+              test -s "$name"
+            done
+          fi
+
           for f in "${assets[@]}"; do
             test -s "$f"
-            echo "release asset: ${f#./} ($(wc -c <"$f") bytes)"
+            name="${f#./}"
+            known=false
+            for allowed_name in "${allowed[@]}"; do
+              if [[ "$name" == "$allowed_name" ]]; then
+                known=true
+                break
+              fi
+            done
+            if [[ "$known" != "true" ]]; then
+              echo "asset name is outside the updater contract: $name" >&2
+              exit 1
+            fi
+            if [[ "$(tar -tzf "$f")" != "grow" ]]; then
+              echo "release archive must contain exactly one grow executable: $name" >&2
+              exit 1
+            fi
+            echo "release asset: $name ($(wc -c <"$f") bytes)"
           done
           sha256sum grow-*
 
-      # Never touch a real GitHub Release from local act runs.
+      # Keep a new Release draft-only until all updater-visible assets have
+      # uploaded and been verified. Unauthenticated updater requests cannot
+      # observe drafts, so the version pointer and its binaries appear together.
+      - name: Prepare hidden GitHub Release
+        if: ${{ !env.ACT }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ env.RELEASE_REPO }}
+        run: |
+          set -euo pipefail
+          version="${{ needs.validate.outputs.version }}"
+          expected_prerelease=false
+          if [[ "$version" == *-* ]]; then
+            expected_prerelease=true
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "reusing existing Release $RELEASE_TAG"
+            if [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" != "true" ]]; then
+              # Hide published assets while --clobber replaces them. A failed
+              # repair then cannot expose an incomplete asset set as latest.
+              gh release edit "$RELEASE_TAG" --draft
+            fi
+          else
+            if [[ "${{ needs.build-macos.result }}" == "skipped" ]]; then
+              echo "cannot skip macOS when $RELEASE_TAG has no existing Release asset" >&2
+              exit 1
+            fi
+            release_args=(
+              --verify-tag
+              --draft
+              --title "$RELEASE_TAG"
+              --generate-notes
+            )
+            if [[ "$expected_prerelease" == "true" ]]; then
+              # update's stable channel excludes GitHub prereleases. Keep that
+              # GitHub flag aligned with the semver prerelease component.
+              release_args+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" "${release_args[@]}"
+          fi
+
+          actual_prerelease="$(
+            gh release view "$RELEASE_TAG" --json isPrerelease --jq '.isPrerelease'
+          )"
+          if [[ "$actual_prerelease" != "$expected_prerelease" ]]; then
+            gh release edit "$RELEASE_TAG" --prerelease="$expected_prerelease"
+          fi
+
+          if [[ "${{ needs.build-macos.result }}" == "skipped" ]]; then
+            mac_asset="grow-${version}-macos-aarch64.tar.gz"
+            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' \
+              | grep -Fqx "$mac_asset"
+          fi
+
       - name: Upload grow binaries to GitHub Release
         if: ${{ !env.ACT }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
+          GH_REPO: ${{ env.RELEASE_REPO }}
         run: |
           set -euo pipefail
-          # Only grow-{version}-{platform} binaries — no checksum files, no archives.
+          # Only grow-{version}-{platform}.tar.gz packages — no sidecars.
           gh release upload "$RELEASE_TAG" dist/grow-* --clobber
+
+      - name: Verify and publish GitHub Release
+        if: ${{ !env.ACT }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ env.RELEASE_REPO }}
+        run: |
+          set -euo pipefail
+          version="${{ needs.validate.outputs.version }}"
+          required=(
+            "grow-${version}-linux-x86_64.tar.gz"
+            "grow-${version}-linux-aarch64.tar.gz"
+            "grow-${version}-linux-riscv64.tar.gz"
+            "grow-${version}-macos-aarch64.tar.gz"
+          )
+          remote_assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
+          remote_asset_count="$(sed '/^$/d' <<<"$remote_assets" | wc -l | tr -d ' ')"
+          if [[ "$remote_asset_count" -ne "${#required[@]}" ]]; then
+            echo "Release must contain exactly ${#required[@]} updater assets; found $remote_asset_count" >&2
+            printf '%s\n' "$remote_assets" >&2
+            exit 1
+          fi
+          for name in "${required[@]}"; do
+            grep -Fqx "$name" <<<"$remote_assets" || {
+              echo "Release is missing updater asset: $name" >&2
+              exit 1
+            }
+          done
+
+          if [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" == "true" ]]; then
+            gh release edit "$RELEASE_TAG" --draft=false
+          fi
 
       - name: Act dry-run summary
         if: ${{ env.ACT }}

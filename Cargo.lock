@@ -1610,7 +1610,6 @@ dependencies = [
  "blake3",
  "core-foundation",
  "dunce",
- "prod-mc-cli-chat-proxy-types",
  "ring",
  "semver",
  "serde",
@@ -7118,16 +7117,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prod-mc-cli-chat-proxy-types"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "toml",
-]
-
-[[package]]
 name = "prodash"
 version = "31.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8648,7 +8637,6 @@ dependencies = [
  "portable-pty",
  "pretty_assertions",
  "process-wrap",
- "prod-mc-cli-chat-proxy-types",
  "prompt-queue",
  "regex",
  "reqwest 0.12.24",
@@ -10579,6 +10567,7 @@ name = "update"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "flate2",
  "futures",
  "indicatif",
  "reqwest 0.12.24",
@@ -10587,6 +10576,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "shell",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "time",

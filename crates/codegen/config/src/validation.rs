@@ -7,11 +7,11 @@ use crate::loader::{apply_version_overrides_with_registered, load_toml_file};
 use crate::paths::{system_config_dir, user_grow_home};
 use crate::version_overrides::{VersionOverrideError, apply_version_overrides};
 
-use prod_mc_cli_chat_proxy_types::FAIL_CLOSED_KEY;
+use crate::signed_policy::FAIL_CLOSED_KEY;
 
 /// `fail_closed` from a requirements table; non-bool → warn once and treat as false.
 fn fail_closed_flag(requirements: &toml::Value) -> bool {
-    use prod_mc_cli_chat_proxy_types::{FailClosedFlag, fail_closed_flag_status_from_value};
+    use crate::signed_policy::{FailClosedFlag, fail_closed_flag_status_from_value};
     let status = fail_closed_flag_status_from_value(requirements);
     if matches!(status, FailClosedFlag::Invalid) {
         static WARN_ONCE: std::sync::Once = std::sync::Once::new();

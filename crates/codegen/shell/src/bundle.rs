@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, bail};
-use prod_mc_cli_chat_proxy_types::SubagentBundle;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -16,6 +15,30 @@ const ARCHIVE_MAX_ENTRY_SIZE: u64 = 1024 * 1024;
 #[derive(Deserialize)]
 struct ArchiveBundleMetadata {
     version: String,
+}
+
+/// Legacy JSON bundle returned when the archive endpoint is unavailable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentBundle {
+    pub version: String,
+    pub personas: HashMap<String, String>,
+    pub roles: HashMap<String, String>,
+    pub agents: HashMap<String, String>,
+    #[serde(default)]
+    pub skills: HashMap<String, String>,
+}
+
+impl SubagentBundle {
+    pub fn empty(version: impl Into<String>) -> Self {
+        Self {
+            version: version.into(),
+            personas: HashMap::new(),
+            roles: HashMap::new(),
+            agents: HashMap::new(),
+            skills: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -507,6 +530,56 @@ mod tests {
 
     fn cache_root(tmp: &TempDir) -> PathBuf {
         tmp.path().join("bundled")
+    }
+
+    #[test]
+    fn legacy_bundle_serializes_expected_shape() {
+        let bundle = SubagentBundle {
+            version: "bundle-v1".to_owned(),
+            personas: HashMap::from([("researcher".to_owned(), "persona body".to_owned())]),
+            roles: HashMap::from([("reviewer".to_owned(), "role body".to_owned())]),
+            agents: HashMap::from([("default".to_owned(), "agent body".to_owned())]),
+            skills: HashMap::from([("commit".to_owned(), "skill body".to_owned())]),
+        };
+
+        assert_eq!(
+            serde_json::to_value(bundle).unwrap(),
+            serde_json::json!({
+                "version": "bundle-v1",
+                "personas": { "researcher": "persona body" },
+                "roles": { "reviewer": "role body" },
+                "agents": { "default": "agent body" },
+                "skills": { "commit": "skill body" }
+            })
+        );
+    }
+
+    #[test]
+    fn legacy_bundle_defaults_missing_skills() {
+        let bundle: SubagentBundle = serde_json::from_value(serde_json::json!({
+            "version": "bundle-v1",
+            "personas": {},
+            "roles": {},
+            "agents": {}
+        }))
+        .unwrap();
+
+        assert!(bundle.skills.is_empty());
+        assert!(SubagentBundle::empty("v1").skills.is_empty());
+    }
+
+    #[test]
+    fn legacy_bundle_round_trips_with_skills() {
+        let mut bundle = SubagentBundle::empty("v2");
+        bundle
+            .skills
+            .insert("commit".to_owned(), "# Commit".to_owned());
+
+        let json = serde_json::to_string(&bundle).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SubagentBundle>(&json).unwrap(),
+            bundle
+        );
     }
 
     #[test]

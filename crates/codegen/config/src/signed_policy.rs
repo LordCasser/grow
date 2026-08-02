@@ -8,10 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::Engine;
 
-// Shared wire types with the deployment-config server: a field rename breaks compile on both sides.
-pub use prod_mc_cli_chat_proxy_types::{
-    MANAGED_CONFIG_NONCE_ECHO_HEADER, MANAGED_IDENTITY_TYP, MANAGED_POLICY_TYP,
-    ManagedIdentityClaim, SignatureEnvelope, SignedPayload, is_server_nonce_shape, now_unix,
+mod types;
+
+pub use types::{
+    FAIL_CLOSED_KEY, FailClosedFlag, MANAGED_CONFIG_NONCE_ECHO_HEADER, MANAGED_IDENTITY_TYP,
+    MANAGED_POLICY_TYP, ManagedIdentityClaim, SIGNED_PAYLOAD_VERSION, SignatureEnvelope,
+    SignedPayload, fail_closed_flag_status, fail_closed_flag_status_from_value,
+    is_server_nonce_shape, now_unix,
 };
 
 /// Compiled-in trusted keys `(key_id, raw 32 bytes)`. Prod `v1`. Empty = dark (no verification).
@@ -158,7 +161,7 @@ fn with_embedded_keys<R>(f: impl FnOnce(&[(&str, &[u8])]) -> R) -> R {
 pub const SIGNATURE_SIDECAR_FILE: &str = "managed_config.sig.json";
 
 /// The is-managed claim's own sidecar (see
-/// [`prod_mc_cli_chat_proxy_types::ManagedIdentityClaim`]).
+/// [`ManagedIdentityClaim`]).
 pub const MANAGED_IDENTITY_SIDECAR_FILE: &str = "managed_identity.sig.json";
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
