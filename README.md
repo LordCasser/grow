@@ -410,8 +410,8 @@ CLI composition root 位于 `crates/codegen/cli`，TUI 位于 `pager`，Agent/se
 
 ## 来源与许可证
 
-Grow 基于 xAI Grok Build 的开源代码分叉，`SOURCE_REV` 记录当前策展同步所基于的上游提交。
-上游名称只保留在来源说明、许可证和历史 changelog 中。
+Grow 基于 xAI Grok Build 的开源代码分叉。上游名称只保留在来源说明、许可证和历史
+changelog 中。
 
 第一方代码使用 Apache License 2.0，见 [LICENSE](LICENSE)。第三方与 vendored 代码沿用各自
 许可证，见 [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES) 和
