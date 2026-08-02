@@ -18,8 +18,6 @@ truth when re-vendoring.
 |-------|---------|---------|----------|-------------------|
 | [`mermaid-to-svg`](./mermaid-to-svg/) | (path) | MIT | [warpdotdev/mermaid-to-svg](https://github.com/warpdotdev/mermaid-to-svg) | [`LICENSE`](./mermaid-to-svg/LICENSE) |
 | [`dagre_rust`](./dagre_rust/) | 0.0.5 | Apache-2.0 | [r3alst/dagre-rust](https://github.com/r3alst/dagre-rust) / Warp re-vendor | [`LICENCE`](./dagre_rust/LICENCE) |
-| [`graphlib_rust`](./graphlib_rust/) | 0.0.2 | Apache-2.0 | [r3alst/graphlib-rust](https://github.com/r3alst/graphlib-rust) | [`LICENCE`](./graphlib_rust/LICENCE) |
-| [`ordered_hashmap`](./ordered_hashmap/) | 0.0.3 | Apache-2.0 | [r3alst/ordered-hashmap](https://github.com/r3alst/ordered-hashmap) | [`LICENCE`](./ordered_hashmap/LICENCE) |
 | [`nono`](./nono/) | 0.53.0 | Apache-2.0 | [always-further/nono](https://github.com/always-further/nono) | [`LICENSE`](./nono/LICENSE) |
 | [`sqlite-vec`](./sqlite-vec/) | 0.1.10-alpha.4 | MIT OR Apache-2.0 | [asg017/sqlite-vec](https://github.com/asg017/sqlite-vec) | [`LICENSE-MIT`](./sqlite-vec/LICENSE-MIT), [`LICENSE-APACHE`](./sqlite-vec/LICENSE-APACHE) |
 
@@ -29,10 +27,9 @@ Dependency shape:
 mermaid
   └── mermaid-to-svg          (MIT)
         ├── dagre_rust        (Apache-2.0)
-        │     ├── graphlib_rust
-        │     └── ordered_hashmap
-        └── graphlib_rust     (Apache-2.0)
-              └── ordered_hashmap
+        │     ├── graphlib_rust =0.0.2  (crates.io)
+        │     └── ordered_hashmap =0.0.3 (crates.io)
+        └── graphlib_rust =0.0.2         (crates.io)
 
 sandbox
   └── nono                    (Apache-2.0, riscv64 + musl patches)
@@ -69,10 +66,12 @@ unchanged. The audited dependency stack does not currently have such a member:
 |-------|---------------------------|--------------------------|
 | `mermaid-to-svg` | `8d3f789c2eb49335d7bf247a06bb649f59b6d4ed` (current upstream `main`) | Grow carries parser, CJK sizing, wrapping, sequence/XY chart and hermetic-rendering changes. |
 | `dagre_rust` | `mermaid-to-svg`'s copy at the same revision | Grow replaces an unsynchronized `static mut` id counter with `AtomicUsize`. |
-| `graphlib_rust` | 0.0.2, as pinned by current `mermaid-to-svg` | Source is semantically unchanged after rustfmt, but 0.0.4 moves to a breaking dependency API and the declared Git repository is unavailable. |
-| `ordered_hashmap` | 0.0.3, as pinned by current `mermaid-to-svg` | Source is semantically unchanged after rustfmt, but latest 0.0.4 replaces `OrderedHashMap` with the incompatible `VecHashMap` API. |
 | `nono` | 0.53.0 | This is the newest release compatible with the workspace's Rust 1.92 toolchain; Grow also carries riscv64 and musl portability patches. |
 | `sqlite-vec` | 0.1.10-alpha.4 | The published crate omits four C files included by `sqlite-vec.c`; Grow adds the byte-identical files from the same tag. The repository root is not a Cargo package, so it cannot be consumed unchanged as a submodule. |
+
+`graphlib_rust =0.0.2` and `ordered_hashmap =0.0.3` are exact crates.io
+dependencies. Their former in-tree copies had no semantic patches and were
+removed after verifying the registry sources against the Grow test suite.
 
 The sqlite-vec vendor should be removed once upstream publishes a self-contained
 crate that retains the musl portability fix.

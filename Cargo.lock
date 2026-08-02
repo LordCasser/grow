@@ -4228,6 +4228,8 @@ dependencies = [
 [[package]]
 name = "graphlib_rust"
 version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b47de2c5685b5bb3689d6b0977f38959f3d7d82d3556627cfebbfaa42eda05ea"
 dependencies = [
  "ordered_hashmap",
 ]
@@ -6265,6 +6267,8 @@ dependencies = [
 [[package]]
 name = "ordered_hashmap"
 version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb1ea499d242299d564879c8b375c11285f5a26d62d8010768909d6d099c4c5a"
 
 [[package]]
 name = "os_pipe"

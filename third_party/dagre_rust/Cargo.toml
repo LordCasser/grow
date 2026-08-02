@@ -19,8 +19,7 @@
 #  1. `cargo fmt` (rustfmt) applied so the crate satisfies the workspace fmt
 #     gate; no semantic change. Otherwise the library source (`src/**`, incl. one
 #     in-source unit test in `src/layout/util.rs`) is the `mermaid-to-svg`
-#     in-repo copy; the `graphlib_rust` / `ordered_hashmap` deps are repointed to
-#     the sibling vendored crates.
+#     in-repo copy; `graphlib_rust` / `ordered_hashmap` are exact crates.io pins.
 #  2. UNSAFE REMOVAL (src/layout/util.rs): the upstream unique-id counter was a
 #     `static mut UNIQUE_STARTER` incremented inside an `unsafe` block with no
 #     synchronization — a data race whenever the engine renders on more than one
@@ -46,8 +45,8 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
-graphlib_rust = { path = "../graphlib_rust" }
-ordered_hashmap = { path = "../ordered_hashmap" }
+graphlib_rust = "=0.0.2"
+ordered_hashmap = "=0.0.3"
 
 # Clippy lints local/path crates (this vendored crate is one) under the
 # workspace's `-D warnings`. We do not restyle upstream third-party code, so

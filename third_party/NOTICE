@@ -30,26 +30,6 @@ Version:    0.0.5
 crates.io:  https://crates.io/crates/dagre_rust/0.0.5
 
 --------------------------------------------------------------------------------
-graphlib_rust
---------------------------------------------------------------------------------
-Path:       third_party/graphlib_rust/
-License:    Apache License 2.0
-License file: third_party/graphlib_rust/LICENCE
-Upstream:   https://github.com/r3alst/graphlib-rust
-Version:    0.0.2
-crates.io:  https://crates.io/crates/graphlib_rust/0.0.2
-
---------------------------------------------------------------------------------
-ordered_hashmap
---------------------------------------------------------------------------------
-Path:       third_party/ordered_hashmap/
-License:    Apache License 2.0
-License file: third_party/ordered_hashmap/LICENCE
-Upstream:   https://github.com/r3alst/ordered-hashmap
-Version:    0.0.3
-crates.io:  https://crates.io/crates/ordered_hashmap/0.0.3
-
---------------------------------------------------------------------------------
 nono
 --------------------------------------------------------------------------------
 Path:       third_party/nono/

@@ -125,11 +125,10 @@
 #    Text metrics are font-free (fixed char-width in `src/text_wrap.rs`), so the
 #    engine performs NO system-font enumeration or on-disk font cache — glyph
 #    rasterization is the separate, bundled-font `mermaid::rasterize`.
-#  - SIBLING VENDORED LAYOUT DEPS (this header is the audit source-of-truth for
-#    the whole stack): `ordered_hashmap` retains two `unsafe` raw-pointer blocks
-#    in `iter_mut`/`values_mut` (documented + re-audited in its own Cargo.toml);
-#    `dagre_rust` and `graphlib_rust` contain no `unsafe` (dagre's upstream
-#    `static mut` counter was replaced with an `AtomicUsize` — see its Cargo.toml).
+#  - LAYOUT DEPS: `graphlib_rust =0.0.2` and its `ordered_hashmap =0.0.3`
+#    dependency resolve from crates.io with Cargo.lock checksums. The vendored
+#    `dagre_rust` contains no `unsafe`: its upstream `static mut` counter was
+#    replaced with an `AtomicUsize` (see its Cargo.toml).
 #  - YAML frontmatter parsing (`src/config.rs`, `src/kanban_diagram.rs`) uses the
 #    workspace `serde_yaml`; it parses in-memory source only (no file/URL refs).
 [package]
@@ -149,7 +148,7 @@ doctest = false
 [dependencies]
 thiserror = "2"
 dagre_rust = { path = "../dagre_rust" }
-graphlib_rust = { path = "../graphlib_rust" }
+graphlib_rust = "=0.0.2"
 unicode-segmentation = "1"
 unicode-width = "0.2"
 serde_yaml = "0.9"

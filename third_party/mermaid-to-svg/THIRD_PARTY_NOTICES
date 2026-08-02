@@ -60,7 +60,7 @@ SOFTWARE.
 graphlib.js
 https://github.com/dagrejs/graphlib
 
-Ancestry of the vendored graphlib_rust port (third_party/graphlib_rust/).
+Ancestry of graphlib_rust 0.0.2 (resolved from crates.io).
 
 The MIT License (MIT)
 

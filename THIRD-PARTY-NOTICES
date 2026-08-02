@@ -2966,7 +2966,7 @@ License text: see Part II — Apache-2.0
 
 Additional requirements / notices:
   VENDORED WITH LOCAL MODIFICATIONS:
-  Vendored at third_party/dagre_rust/. Local modifications: rustfmt only (no semantic change); replaced unsynchronized static mut unique-id counter with AtomicUsize in src/layout/util.rs. Dependency paths repointed to sibling vendored crates. See Cargo.toml VENDORING NOTES.
+  Vendored at third_party/dagre_rust/. Local modifications: rustfmt only (no semantic change); replaced unsynchronized static mut unique-id counter with AtomicUsize in src/layout/util.rs. graphlib_rust and ordered_hashmap are exact crates.io pins. See Cargo.toml VENDORING NOTES.
   Apache-2.0 change notice: this package was modified as described above. Modified files remain under the Apache License 2.0.
 
 --------------------------------------------------------------------------------
@@ -5670,11 +5670,6 @@ Copyright notice:
 
 License text: see Part II — Apache-2.0
 
-Additional requirements / notices:
-  VENDORED WITH LOCAL MODIFICATIONS:
-  Vendored at third_party/graphlib_rust/. Local modifications: rustfmt only (no semantic change); ordered_hashmap dependency repointed to sibling vendored crate. See Cargo.toml VENDORING NOTES.
-  Apache-2.0 change notice: this package was modified as described above. Modified files remain under the Apache License 2.0.
-
 --------------------------------------------------------------------------------
 grid 1.0.1
 --------------------------------------------------------------------------------
@@ -7718,7 +7713,7 @@ License text: see Part II — MIT
 
 Additional requirements / notices:
   VENDORED WITH LOCAL MODIFICATIONS:
-  Vendored at third_party/mermaid-to-svg/. Local modifications vs upstream warpdotdev/mermaid-to-svg: dropped CLI binary and most snapshot tests; hermetic patch so experimental layout port stays disabled; dependency paths repointed to sibling vendored crates. See Cargo.toml VENDORING NOTES and third_party/mermaid-to-svg/THIRD_PARTY_NOTICES for further ancestry (mermaid.js, dagre.js, etc.).
+  Vendored at third_party/mermaid-to-svg/. Local modifications vs upstream warpdotdev/mermaid-to-svg: dropped CLI binary and most snapshot tests; hermetic patch so experimental layout port stays disabled; dagre repointed to the sibling vendored crate and graphlib exact-pinned to crates.io. See Cargo.toml VENDORING NOTES and third_party/mermaid-to-svg/THIRD_PARTY_NOTICES for further ancestry (mermaid.js, dagre.js, etc.).
   Further third-party ancestry notices from the upstream project (excerpt — full file at third_party/mermaid-to-svg/THIRD_PARTY_NOTICES):
   This project includes code derived from or inspired by the following
   third-party projects.
@@ -8840,11 +8835,6 @@ Copyright notice:
   Copyright 2023 Ameer Hamza
 
 License text: see Part II — Apache-2.0
-
-Additional requirements / notices:
-  VENDORED WITH LOCAL MODIFICATIONS:
-  Vendored at third_party/ordered_hashmap/. Local modifications: rustfmt only (no semantic change); upstream integration tests not vendored. See Cargo.toml VENDORING NOTES.
-  Apache-2.0 change notice: this package was modified as described above. Modified files remain under the Apache License 2.0.
 
 --------------------------------------------------------------------------------
 os_info 3.14.0
