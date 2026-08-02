@@ -2,6 +2,10 @@
 #
 # Upstream:  graphlib_rust 0.0.2 (Apache-2.0)
 # Source of truth: https://crates.io/crates/graphlib_rust/0.0.2
+# Upstream `mermaid-to-svg` still pins 0.0.2. The newer 0.0.4 release switches
+# to the breaking `ordered_hashmap` 0.0.4 API, and the repository URL declared
+# by the crate is no longer publicly available, so there is no usable Git
+# repository to track as a submodule.
 #
 # Why vendored: the Rust port of dagre.js's graphlib, used by the vendored
 # `dagre_rust` layout engine and directly by the Warp `mermaid-to-svg` engine.
@@ -14,8 +18,9 @@
 # ============================================================================
 # Local modifications to the upstream source:
 #  1. `cargo fmt` (rustfmt) applied so the crate satisfies the workspace fmt
-#     gate; no semantic change. The `ordered_hashmap` dep is repointed to the
-#     sibling vendored crate (path dep below).
+#     gate; after formatting, `src/**` is byte-identical to the published 0.0.2
+#     crate. The `ordered_hashmap` dep is repointed to the sibling vendored
+#     crate (path dep below).
 #
 # Re-audit checklist:
 #  - No `unsafe`, no filesystem / env / network I/O in the vendored source.

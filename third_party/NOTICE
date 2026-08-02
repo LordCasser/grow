@@ -12,6 +12,7 @@ Path:       third_party/mermaid-to-svg/
 License:    MIT
 License file: third_party/mermaid-to-svg/LICENSE
 Upstream:   https://github.com/warpdotdev/mermaid-to-svg
+Revision:   8d3f789c2eb49335d7bf247a06bb649f59b6d4ed
 Copyright:  Copyright (c) 2025-2026 Denver Technologies, Inc. (see LICENSE)
 
 Further ancestry (mermaid.js, dagre.js, and related) is listed in:
@@ -60,6 +61,19 @@ crates.io:  https://crates.io/crates/nono/0.53.0
 Local patch: adds the riscv64 SYS_OPENAT/SYS_OPENAT2 syscall table
              and makes seccomp ioctl request literals portable to musl
              (see Cargo.toml header) — required for riscv64 and musl builds.
+
+--------------------------------------------------------------------------------
+sqlite-vec
+--------------------------------------------------------------------------------
+Path:       third_party/sqlite-vec/
+License:    MIT OR Apache License 2.0
+License files: third_party/sqlite-vec/LICENSE-MIT
+               third_party/sqlite-vec/LICENSE-APACHE
+Upstream:   https://github.com/asg017/sqlite-vec
+Revision:   04d28bd21773981e2d266bbf6aa4efbd011eb4f6 (v0.1.10-alpha.4)
+crates.io:  https://crates.io/crates/sqlite-vec/0.1.10-alpha.4
+Local patch: adds four C implementation files omitted from the published crate
+             but included by sqlite-vec.c; each is unchanged from the same tag.
 
 --------------------------------------------------------------------------------
 End of notices for vendored third_party/ crates.
