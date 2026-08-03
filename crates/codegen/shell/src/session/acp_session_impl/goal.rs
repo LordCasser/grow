@@ -3,12 +3,14 @@
 use super::*;
 
 impl SessionActor {
-    fn finish_goal_behavior_after_verified_achievement(&self) {
+    async fn finish_goal_behavior_after_verified_achievement(&self) {
         if self.behavior.lock().behavior() != Some(tool_types::BehaviorId::Goal) {
             return;
         }
         self.behavior.lock().select_behavior(None);
         *self.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
+        self.retag_queued_goal_user_prompts(crate::session::behavior::PromptMode::Agent)
+            .await;
         self.persist_behavior_state();
         self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
             tools::types::SessionMode::Default.as_id(),
@@ -333,7 +335,7 @@ impl SessionActor {
                     tracker.complete_verified();
                     notify.emit_goal_updated(&mut tracker, tokens_used, finished);
                 }
-                self.finish_goal_behavior_after_verified_achievement();
+                self.finish_goal_behavior_after_verified_achievement().await;
                 self.maybe_run_goal_summarizer(attempt).await;
             }
             GoalClassifierOutcome::NotAchieved {
@@ -894,7 +896,34 @@ impl SessionActor {
             );
         }
 
-        self.maybe_run_goal_planner(objective).await;
+        // Planning is model work and this method runs inside a prompt task,
+        // never inline in the actor mailbox. If `/goal set` revises the
+        // definition while planning is in flight, the stale result is
+        // discarded and planning is retried for the latest definition before
+        // the implementer starts. A no-op/failure under the same definition
+        // terminates the loop, so disabled or unavailable planners cannot
+        // spin.
+        let mut planned_definition = self.goal_tracker.lock().definition_key();
+        let mut planning_objective = objective.to_owned();
+        loop {
+            self.maybe_run_goal_planner(&planning_objective).await;
+            let retry = {
+                let tracker = self.goal_tracker.lock();
+                let Some(snapshot) = tracker.snapshot() else {
+                    break;
+                };
+                let current_definition = (snapshot.goal_id.clone(), snapshot.definition_revision);
+                (snapshot.status == crate::session::goal_tracker::GoalStatus::Active
+                    && snapshot.plan_file.is_none()
+                    && Some(current_definition.clone()) != planned_definition)
+                    .then_some((current_definition, snapshot.objective.clone()))
+            };
+            let Some((definition, latest_objective)) = retry else {
+                break;
+            };
+            planned_definition = Some(definition);
+            planning_objective = latest_objective;
+        }
 
         let names = self.resolve_goal_tool_names().await;
         let planner_enabled = self.goal_planner_enabled;
@@ -908,7 +937,7 @@ impl SessionActor {
             let scratch = scratch_dir.to_string_lossy();
             if self.goal_runs_on_workflow_engine() {
                 render_goal_rules(
-                    objective,
+                    &o.objective,
                     &names,
                     "",
                     "",
@@ -918,7 +947,7 @@ impl SessionActor {
                 )
             } else {
                 render_goal_rules_foreground(
-                    objective,
+                    &o.objective,
                     &names,
                     "",
                     "",
@@ -2157,7 +2186,7 @@ impl SessionActor {
                     notify.emit_goal_updated(&mut tracker, tokens_used, finished_marginal);
                     details_path
                 };
-                self.finish_goal_behavior_after_verified_achievement();
+                self.finish_goal_behavior_after_verified_achievement().await;
                 self.maybe_run_goal_summarizer(attempt).await;
                 UpdateGoalAck::ClassifierAchieved { details_path }
             }

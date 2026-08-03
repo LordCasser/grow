@@ -38,7 +38,11 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
   `status`、`resume` 和 `set` 都不会取消当前 turn，只有显式 `/goal pause` 会中断执行。活跃 Goal
   必须先 pause 才能 clear。
 - `/goal set` 原位修订当前非终态 Goal，保留 Goal 身份、执行状态和资源统计，并用单调 revision
-  隔离旧的异步验证结果；输入 `/goal set` 后按 Tab 可补全当前目标以便编辑。
+  隔离旧的异步规划与验证结果；输入 `/goal set` 后按 Tab 可补全当前目标以便编辑。命令会立即把
+  右下角 Behavior 同步为 Goal，但 planning 始终在隐藏 turn 中运行，不会阻塞 actor mailbox。
+- 通过 `Ctrl+X`、`B` 选择 Goal 后，首条普通文本按 `/goal set` 处理。pause、budget 限制、目标
+  修订和自动 back-off 都保留 Goal Behavior；只有 `/goal clear` 或 verifier 确认完成后自动回到
+  Normal。
 - 未知斜杠命令现在直接报错，不会降级成用户提示词发送给模型。
 - `read_file` 的图片和 PDF 页面拥有明确的模型路由：未配置 `[models].image_description` 时保留
   主模型多模态内容；显式配置后由该辅助模型生成文字描述，失败会明确显示且不会静默换回主模型。

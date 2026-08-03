@@ -886,6 +886,46 @@ fn goal_command_uses_control_plane_while_idle_without_user_echo() {
 }
 
 #[test]
+fn first_prompt_after_selecting_goal_is_goal_set_control() {
+    let mut app = test_app();
+    app.bootstrap_acp_commands = vec![acp::AvailableCommand::new(
+        "goal".to_string(),
+        "Manage the active goal".to_string(),
+    )];
+    dispatch(Action::NewSession, &mut app);
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some("sess-1".into());
+        agent.behavior_mode = tools::types::SessionMode::Goal;
+        agent.goal_state = None;
+        agent.prompt.sync_acp_commands(
+            &agent.session.available_commands,
+            agent.session.available_tools.as_ref(),
+            &agent.session.models,
+        );
+    }
+    let before = app.agents[&id].scrollback.len();
+
+    let effects = dispatch(
+        Action::SendPrompt("finish the release safely".into()),
+        &mut app,
+    );
+
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ExecuteSlashCommand { command, .. }]
+            if command == "/goal set finish the release safely"
+    ));
+    assert_eq!(app.agents[&id].scrollback.len(), before);
+    assert_eq!(app.agents[&id].session.queue_len(), 0);
+    assert_eq!(
+        app.agents[&id].behavior_mode,
+        tools::types::SessionMode::Goal
+    );
+}
+
+#[test]
 fn acp_bootstrap_command_uses_control_plane_while_running() {
     let mut app = test_app();
     app.bootstrap_acp_commands = vec![acp::AvailableCommand::new(

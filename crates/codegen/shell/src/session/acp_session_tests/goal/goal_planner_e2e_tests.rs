@@ -295,6 +295,11 @@ async fn out_of_band_goal_set_steers_running_goal_without_cancelling() {
                 .current_prompt_id
                 .lock()
                 .expect("current_prompt_id mutex poisoned") = Some("running".into());
+            let running = tokio::task::spawn_local(std::future::pending::<()>());
+            actor.state.lock().await.running_task = Some(AgentTask {
+                prompt_id: "running".into(),
+                handle: running.abort_handle(),
+            });
 
             let cancel = actor
                 .execute_out_of_band_slash_command(
@@ -315,6 +320,227 @@ async fn out_of_band_goal_set_steers_running_goal_without_cancelling() {
                 "the updated objective must enter the hidden reminder channel"
             );
             assert!(actor.pending_interjections.is_empty());
+            running.abort();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn out_of_band_fresh_goal_set_defers_planning_to_hidden_turn() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (coordinator_tx, spawn_count) =
+                spawn_planner_coordinator(SpawnBehaviour::WritePlanThenDone { body: b"# Plan\n" });
+            let (actor, _tmp) = make_planner_actor(Some(coordinator_tx), true).await;
+            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+
+            let cancel = actor
+                .execute_out_of_band_slash_command(
+                    "/goal set fresh objective --budget 2048".to_string(),
+                )
+                .await
+                .expect("goal set command");
+
+            assert!(!cancel);
+            assert!(
+                actor.goal_tracker.lock().snapshot().is_none(),
+                "the actor control plane must not start Goal setup inline"
+            );
+            assert_eq!(
+                spawn_count.load(SeqOrd::SeqCst),
+                0,
+                "planner work must run only after hidden-turn promotion"
+            );
+            let state = actor.state.lock().await;
+            assert_eq!(state.pending_inputs.len(), 1);
+            assert_eq!(
+                actor.behavior.lock().behavior(),
+                Some(tool_types::BehaviorId::Goal),
+                "Goal behavior must commit before deferred model work"
+            );
+            assert_eq!(
+                *actor.current_prompt_mode.lock(),
+                crate::session::behavior::PromptMode::Goal
+            );
+            assert_eq!(
+                state.pending_inputs[0].prompt_mode,
+                crate::session::behavior::PromptMode::Goal
+            );
+            assert_eq!(
+                state.pending_inputs[0].origin,
+                crate::session::PromptOrigin::GoalControl
+            );
+            let queued_text = state.pending_inputs[0]
+                .prompt_blocks
+                .iter()
+                .find_map(|block| match block {
+                    acp::ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .expect("hidden command text");
+            assert_eq!(queued_text, "/goal set fresh objective --budget 2048");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn out_of_band_goal_set_revises_paused_goal_without_resuming_it() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _tmp) = make_planner_actor(None, false).await;
+            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+            create_test_goal(&actor);
+            actor
+                .goal_tracker
+                .lock()
+                .pause(crate::session::goal_tracker::GoalPauseReason::User);
+            actor.behavior.lock().select_behavior(None);
+            *actor.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
+
+            let cancel = actor
+                .execute_out_of_band_slash_command(
+                    "/goal set revised while paused --budget 4096".to_string(),
+                )
+                .await
+                .expect("goal set command");
+
+            assert!(!cancel);
+            let snapshot = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(snapshot.objective, "revised while paused");
+            assert_eq!(snapshot.token_budget, Some(4096));
+            assert_eq!(
+                snapshot.status,
+                crate::session::goal_tracker::GoalStatus::UserPaused,
+                "definition edits and Behavior selection must not mutate lifecycle state"
+            );
+            assert_eq!(
+                actor.behavior.lock().behavior(),
+                Some(tool_types::BehaviorId::Goal)
+            );
+            assert_eq!(
+                *actor.current_prompt_mode.lock(),
+                crate::session::behavior::PromptMode::Goal
+            );
+            assert!(actor.state.lock().await.pending_inputs.is_empty());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn paused_goal_admits_user_prompt_without_promoting_it() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _tmp) = make_planner_actor(None, false).await;
+            create_test_goal(&actor);
+            actor
+                .goal_tracker
+                .lock()
+                .pause(crate::session::goal_tracker::GoalPauseReason::User);
+            actor
+                .behavior
+                .lock()
+                .select_behavior(Some(tool_types::BehaviorId::Goal));
+            *actor.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Goal;
+            actor
+                .state
+                .lock()
+                .await
+                .pending_inputs
+                .push_back(user_item("held-user", "test"));
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            SessionActor::maybe_start_running_task(actor.clone(), completion_tx).await;
+
+            let state = actor.state.lock().await;
+            assert!(state.running_task.is_none());
+            assert_eq!(state.pending_inputs.len(), 1);
+            assert_eq!(state.pending_inputs[0].prompt_id, "held-user");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn leaving_goal_retags_only_queued_user_messages() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _tmp) = make_planner_actor(None, false).await;
+            let mut user = user_item("goal-user", "test");
+            user.prompt_mode = crate::session::behavior::PromptMode::Goal;
+            let (mut control, _rx) = input_with_origin_rx(
+                "goal-control-test",
+                crate::session::PromptOrigin::GoalControl,
+            );
+            control.prompt_mode = crate::session::behavior::PromptMode::Goal;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user);
+                state.pending_inputs.push_back(control);
+            }
+
+            actor
+                .retag_queued_goal_user_prompts(crate::session::behavior::PromptMode::Agent)
+                .await;
+
+            let state = actor.state.lock().await;
+            assert_eq!(
+                state.pending_inputs[0].prompt_mode,
+                crate::session::behavior::PromptMode::Agent
+            );
+            assert_eq!(
+                state.pending_inputs[1].prompt_mode,
+                crate::session::behavior::PromptMode::Goal,
+                "durable Goal controls retain their own execution mode"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn out_of_band_resume_with_missing_plan_defers_retry_to_hidden_turn() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (coordinator_tx, spawn_count) =
+                spawn_planner_coordinator(SpawnBehaviour::WritePlanThenDone { body: b"# Plan\n" });
+            let (actor, _tmp) = make_planner_actor(Some(coordinator_tx), true).await;
+            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+            create_test_goal(&actor);
+            actor
+                .goal_tracker
+                .lock()
+                .pause(crate::session::goal_tracker::GoalPauseReason::User);
+
+            let cancel = actor
+                .execute_out_of_band_slash_command("/goal resume".to_string())
+                .await
+                .expect("goal resume command");
+
+            assert!(!cancel);
+            assert_eq!(
+                actor.goal_tracker.lock().status(),
+                Some(crate::session::goal_tracker::GoalStatus::UserPaused),
+                "the actor control plane must not resume or plan inline"
+            );
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 0);
+            let state = actor.state.lock().await;
+            assert_eq!(state.pending_inputs.len(), 1);
+            assert_eq!(
+                state.pending_inputs[0].prompt_mode,
+                crate::session::behavior::PromptMode::Goal
+            );
+            assert_eq!(
+                state.pending_inputs[0].origin,
+                crate::session::PromptOrigin::GoalControl
+            );
         })
         .await;
 }
@@ -1109,6 +1335,71 @@ async fn setup_goal_reminder_is_plan_aware_when_planner_enabled() {
                     && reminder.contains("TEST PROACTIVELY:"),
                 "discipline + TEST PROACTIVELY must survive in the consolidated block:\n{reminder}"
             );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn setup_goal_replans_latest_definition_after_mid_planning_revision() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (coordinator_tx, mut coordinator_rx) =
+                tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
+            let (actor, _tmp) = make_planner_actor(Some(coordinator_tx), true).await;
+            let actor_for_coordinator = StdArc::clone(&actor);
+            let spawn_count = StdArc::new(AtomicUsize::new(0));
+            let count_for_coordinator = StdArc::clone(&spawn_count);
+
+            tokio::task::spawn_local(async move {
+                while let Some(SubagentEvent::Spawn(req)) = coordinator_rx.recv().await {
+                    let attempt = count_for_coordinator.fetch_add(1, SeqOrd::SeqCst);
+                    if attempt == 0 {
+                        assert!(req.prompt.contains("initial objective"));
+                        assert!(
+                            actor_for_coordinator
+                                .goal_tracker
+                                .lock()
+                                .revise_goal("revised objective".into(), None)
+                        );
+                    } else {
+                        assert!(req.prompt.contains("revised objective"));
+                    }
+                    let plan_path = req.prompt.find("/plan.md").map(|end_idx| {
+                        let end = end_idx + "/plan.md".len();
+                        let start = req.prompt[..end_idx]
+                            .rfind(|c: char| !c.is_ascii_graphic() || c == '`')
+                            .map(|i| i + 1)
+                            .unwrap_or(0);
+                        req.prompt[start..end].to_string()
+                    });
+                    if let Some(path) = plan_path {
+                        let path = std::path::Path::new(&path);
+                        let _ = std::fs::create_dir_all(path.parent().unwrap());
+                        let _ = std::fs::write(path, b"# Current plan\n");
+                    }
+                    let subagent_id = req.id.clone();
+                    let child_session_id = subagent_id.clone();
+                    let _ = req.result_tx.send(SubagentResult {
+                        success: true,
+                        output: StdArc::from("Done"),
+                        subagent_id,
+                        child_session_id,
+                        ..Default::default()
+                    });
+                }
+            });
+
+            let reminder = actor.setup_goal("initial objective", None).await;
+
+            assert_eq!(spawn_count.load(SeqOrd::SeqCst), 2);
+            let snapshot = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(snapshot.objective, "revised objective");
+            assert_eq!(snapshot.definition_revision, 1);
+            assert!(snapshot.plan_file.is_some());
+            assert!(reminder.contains("revised objective"));
+            assert!(!reminder.contains("initial objective"));
         })
         .await;
 }

@@ -9,6 +9,10 @@
   `/goal pause` 会取消当前 turn。
 - `/goal set` 原位修订目标并支持当前内容 Tab 补全；异步 Goal 角色结果受 definition revision
   约束，不能提交到已修改的目标。
+- Goal 命令的状态提交与模型工作分离：Behavior 立即同步，planner 通过隐藏 turn 运行，避免 actor
+  mailbox 在 `Planning` 状态自锁。Behavior picker 进入 Goal 后的首条文本等价于 `/goal set`。
+- pause、budget 限制、目标修订和自动 back-off 保留 Goal Behavior；仅 clear 或 verifier 确认完成
+  自动回到 Normal，暂停/取消边界上尚未消费的用户 steering 会保留到队列。
 - `read_file` 图片与渲染后的 PDF 页面按 `[models].image_description` 显式路由：未配置时交给
   主模型，配置后由指定辅助模型描述且失败不回退。
 

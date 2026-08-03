@@ -670,6 +670,11 @@ pub(super) async fn run_session(
                         }
                         SessionCommand::SessionMode { session_mode, responds_to } => {
                             let outcome = session.request_behavior_change(session_mode).await;
+                            SessionActor::maybe_start_running_task(
+                                session.clone(),
+                                completion_tx.clone(),
+                            )
+                            .await;
                             let _ = responds_to.send(outcome);
                         }
                         SessionCommand::SetSessionModel { model_id, sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
@@ -967,9 +972,18 @@ pub(super) async fn run_session(
                             if let Some(notification) = replay_buffer.flush() {
                                 session.emit_buffered(notification).await;
                             }
-                            // Clear pending interjections — the turn is being
-                            // cancelled, so they have no active turn to inject into.
-                            session.pending_interjections.clear();
+                            // A Goal cancel is also a pause: steering that
+                            // missed the final model boundary remains user
+                            // work for a later resume instead of disappearing.
+                            // Other modes retain the established cancel/drop
+                            // policy.
+                            if session.goal_tracker.lock().status()
+                                == Some(crate::session::goal_tracker::GoalStatus::Active)
+                            {
+                                session.flush_stranded_interjections().await;
+                            } else {
+                                session.pending_interjections.clear();
+                            }
                             let suppress_task_wakes = trigger.as_deref() == Some("ctrl_c");
                             session
                                 .cancel_running_task(

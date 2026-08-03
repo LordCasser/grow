@@ -170,6 +170,25 @@ impl SessionActor {
             return;
         }
 
+        // A paused Goal is a lifecycle barrier, not an input rejection. Keep
+        // user prompts and ordinary wakes queued until an explicit Goal
+        // control resumes or clears the Goal. GoalControl is inserted at the
+        // front and is the sole synthetic turn allowed through this barrier.
+        let goal_paused = self.behavior.lock().behavior() == Some(tool_types::BehaviorId::Goal)
+            && self
+                .goal_tracker
+                .lock()
+                .status()
+                .is_some_and(|status| status.is_paused());
+        if goal_paused
+            && !matches!(
+                state.pending_inputs.front().map(|item| &item.origin),
+                Some(super::PromptOrigin::GoalControl)
+            )
+        {
+            return;
+        }
+
         // Note: Auto-compact is now handled inline during process_conversation_turn,
         // so we no longer need to check for queued auto-compact here.
 

@@ -81,6 +81,63 @@ impl SessionActor {
             Ok(_) => return Err(format!("Unknown Grow command: {command}")),
         };
 
+        // Behavior selection is control-plane state, not model work. Commit it
+        // before deciding whether Goal execution needs a hidden turn so the
+        // client receives the authoritative CurrentModeUpdate immediately.
+        // The hidden turn may call the same transition again; that is an
+        // idempotent reconciliation, not a second state transition.
+        if matches!(
+            &action,
+            BuiltinAction::GoalSet { .. } | BuiltinAction::GoalEnter | BuiltinAction::GoalResume
+        ) {
+            use crate::session::behavior::BehaviorChangeOutcome;
+            match self
+                .request_behavior_change(acp::SessionModeId::new("goal"))
+                .await
+            {
+                BehaviorChangeOutcome::Applied => {}
+                BehaviorChangeOutcome::ConfirmationRequired { message, .. }
+                | BehaviorChangeOutcome::Rejected { message } => {
+                    self.send_host_turn_slash_command_output(&message).await;
+                    return Ok(false);
+                }
+            }
+        }
+
+        // The actor mailbox is the control-plane serializer. It must never
+        // await model work: Goal planning dispatches subagent events back
+        // through this same mailbox, so running `setup_goal` / a planner retry
+        // here would self-deadlock at "Planning". Defer every Goal command
+        // that may need a model turn into the existing hidden prompt path.
+        //
+        // In-place controls for an already-active Goal remain synchronous:
+        // they only revise state or enqueue a safe-boundary reminder and do
+        // not invoke the planner.
+        let turn_running = self.state.lock().await.running_task.is_some();
+        let goal_status = self.goal_tracker.lock().status();
+        let defer_model_work = match &action {
+            BuiltinAction::GoalSet { .. } => match goal_status {
+                None | Some(crate::session::goal_tracker::GoalStatus::Complete) => true,
+                Some(crate::session::goal_tracker::GoalStatus::Active) => !turn_running,
+                Some(_) => false,
+            },
+            BuiltinAction::GoalEnter | BuiltinAction::GoalResume => match goal_status {
+                Some(crate::session::goal_tracker::GoalStatus::Active) => !turn_running,
+                Some(status)
+                    if status.is_paused()
+                        && status != crate::session::goal_tracker::GoalStatus::BudgetLimited =>
+                {
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        if defer_model_work {
+            self.queue_goal_control_prompt(command, true).await;
+            return Ok(false);
+        }
+
         match action {
             BuiltinAction::GoalSet {
                 objective,
@@ -90,18 +147,6 @@ impl SessionActor {
                     command: "goal".to_string(),
                     args_provided: true,
                 });
-                use crate::session::behavior::BehaviorChangeOutcome;
-                match self
-                    .request_behavior_change(acp::SessionModeId::new("goal"))
-                    .await
-                {
-                    BehaviorChangeOutcome::Applied => {}
-                    BehaviorChangeOutcome::ConfirmationRequired { message, .. }
-                    | BehaviorChangeOutcome::Rejected { message } => {
-                        self.send_host_turn_slash_command_output(&message).await;
-                        return Ok(false);
-                    }
-                }
                 let existing_status = self.goal_tracker.lock().status();
                 let revising = existing_status.is_some()
                     && existing_status != Some(crate::session::goal_tracker::GoalStatus::Complete);
@@ -131,20 +176,12 @@ impl SessionActor {
                 } else {
                     Some(self.setup_goal(&objective, token_budget).await)
                 };
-                let turn_running = self
-                    .current_prompt_id
-                    .lock()
-                    .ok()
-                    .and_then(|guard| guard.clone())
-                    .is_some();
-                if turn_running && let Some(reminder) = reminder {
+                if let Some(reminder) = reminder {
                     // Goal controls are hidden control-plane state, not user
                     // interjections. Flush at the next safe model boundary.
                     self.pending_system_reminders
                         .lock()
                         .push(ConversationItem::system_reminder(reminder));
-                } else if let Some(reminder) = reminder {
-                    self.queue_goal_control_prompt(reminder, true).await;
                 }
                 self.send_host_turn_slash_command_output(&format!(
                     "User set current goal objective to: {objective}"
@@ -157,34 +194,12 @@ impl SessionActor {
                     command: "goal".to_string(),
                     args_provided: false,
                 });
-                use crate::session::behavior::BehaviorChangeOutcome;
-                match self
-                    .request_behavior_change(acp::SessionModeId::new("goal"))
-                    .await
-                {
-                    BehaviorChangeOutcome::Applied => {}
-                    BehaviorChangeOutcome::ConfirmationRequired { message, .. }
-                    | BehaviorChangeOutcome::Rejected { message } => {
-                        self.send_host_turn_slash_command_output(&message).await;
-                        return Ok(false);
-                    }
-                }
                 match self.resume_goal().await {
                     GoalResumeOutcome::Inference { reminder, user_msg } => {
                         self.send_host_turn_slash_command_output(&user_msg).await;
-                        let turn_running = self
-                            .current_prompt_id
+                        self.pending_system_reminders
                             .lock()
-                            .ok()
-                            .and_then(|guard| guard.clone())
-                            .is_some();
-                        if turn_running {
-                            self.pending_system_reminders
-                                .lock()
-                                .push(ConversationItem::system_reminder(reminder));
-                        } else {
-                            self.queue_goal_control_prompt(reminder, true).await;
-                        }
+                            .push(ConversationItem::system_reminder(reminder));
                     }
                     GoalResumeOutcome::Message(message) => {
                         self.send_host_turn_slash_command_output(&message).await;
@@ -1183,6 +1198,8 @@ impl SessionActor {
                 self.clear_pending_classifier_completions();
                 self.behavior.lock().select_behavior(None);
                 *self.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
+                self.retag_queued_goal_user_prompts(crate::session::behavior::PromptMode::Agent)
+                    .await;
                 self.persist_behavior_state();
                 self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
                     tools::types::SessionMode::Default.as_id(),

@@ -96,7 +96,7 @@ impl SessionActor {
                     && state.running_prompt_id() != Some(i.prompt_id.as_str())
             });
             if preempt_armed {
-                let dropped = state.sweep_pending_inputs(|i| i.origin.is_synthetic());
+                let dropped = state.sweep_pending_inputs(|i| i.origin.is_preemptible_wake());
                 if let Some(reservations) = &self.tool_context.task_completion_reservations {
                     for task_id in dropped
                         .iter()

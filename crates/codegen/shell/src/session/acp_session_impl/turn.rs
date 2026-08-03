@@ -336,12 +336,24 @@ impl SessionActor {
             }
             acc
         });
-        let prompt_blocks = if self.behavior.lock().behavior() == Some(tool_types::BehaviorId::Goal)
+        let implicit_goal_set = self.behavior.lock().behavior()
+            == Some(tool_types::BehaviorId::Goal)
             && self.goal_tracker.lock().snapshot().is_none()
             && !original_prompt_text.trim_start().starts_with('/')
-            && !original_prompt_text.trim().is_empty()
-        {
+            && !original_prompt_text.trim().is_empty();
+        let prompt_blocks = if implicit_goal_set {
             let reminder = self.setup_goal(original_prompt_text.trim(), None).await;
+            let response = format!(
+                "User set current goal objective to: {}",
+                original_prompt_text.trim()
+            );
+            if self.goal_tracker.lock().status()
+                != Some(crate::session::goal_tracker::GoalStatus::Active)
+            {
+                self.send_host_turn_slash_command_output(&response).await;
+                return ok_end_turn(0, None);
+            }
+            self.send_slash_command_output(&response).await;
             vec![acp::ContentBlock::Text(acp::TextContent::new(reminder))]
         } else {
             prompt_blocks
@@ -437,8 +449,53 @@ impl SessionActor {
                                 return ok_end_turn(0, None);
                             }
                         }
-                        let reminder = self.setup_goal(&objective, token_budget).await;
-                        vec![text_block(reminder)]
+                        let existing_status = self.goal_tracker.lock().status();
+                        let revising = existing_status.is_some()
+                            && existing_status
+                                != Some(crate::session::goal_tracker::GoalStatus::Complete);
+                        let response = format!("User set current goal objective to: {objective}");
+                        if revising {
+                            let revised = self
+                                .goal_tracker
+                                .lock()
+                                .revise_goal(objective, token_budget);
+                            debug_assert!(revised);
+                            let current_tokens =
+                                self.chat_state_handle.get_total_tokens().await as i64;
+                            let (tokens_used, finished) = self.goal_tokens(current_tokens);
+                            self.goal_notify_sender().emit_goal_updated(
+                                &mut self.goal_tracker.lock(),
+                                tokens_used,
+                                finished,
+                            );
+                            if self.goal_tracker.lock().status()
+                                == Some(crate::session::goal_tracker::GoalStatus::Active)
+                            {
+                                match self.resume_goal().await {
+                                    GoalResumeOutcome::Inference { reminder, .. } => {
+                                        self.send_slash_command_output(&response).await;
+                                        vec![text_block(reminder)]
+                                    }
+                                    GoalResumeOutcome::Message(message) => {
+                                        self.send_host_turn_slash_command_output(&message).await;
+                                        return ok_end_turn(0, None);
+                                    }
+                                }
+                            } else {
+                                self.send_host_turn_slash_command_output(&response).await;
+                                return ok_end_turn(0, None);
+                            }
+                        } else {
+                            let reminder = self.setup_goal(&objective, token_budget).await;
+                            if self.goal_tracker.lock().status()
+                                != Some(crate::session::goal_tracker::GoalStatus::Active)
+                            {
+                                self.send_host_turn_slash_command_output(&response).await;
+                                return ok_end_turn(0, None);
+                            }
+                            self.send_slash_command_output(&response).await;
+                            vec![text_block(reminder)]
+                        }
                     }
                     BuiltinAction::GoalEnter => {
                         ::diagnostics::session_ctx::log_event(slash_used);
@@ -648,7 +705,7 @@ impl SessionActor {
             "promptIndex".into(),
             serde_json::json!(current_prompt_index),
         );
-        if origin.hide_user_echo_from_scrollback() {
+        if origin.hide_user_echo_from_scrollback() || implicit_goal_set {
             chunk_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
         }
         let user_chunk_meta = Some(chunk_meta);
@@ -667,7 +724,11 @@ impl SessionActor {
         self.file_state_tracker
             .begin_prompt(current_prompt_index)
             .await;
-        let echo_mode = user_echo_mode(prompt_id);
+        let echo_mode = if implicit_goal_set {
+            UserEchoMode::PersistOnly
+        } else {
+            user_echo_mode(prompt_id)
+        };
         for block in prompt_blocks.iter() {
             let update = acp::SessionUpdate::UserMessageChunk(
                 acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
@@ -850,42 +911,46 @@ impl SessionActor {
             if matches!(origin, super::super::PromptOrigin::User) {
                 self.maybe_inject_interrupt_reminder().await;
             }
-            let mut user_chat = match &origin {
-                super::super::PromptOrigin::TaskCompleted { .. } => {
-                    ConversationItem::task_completed(user_message)
-                }
-                super::super::PromptOrigin::SubagentCompleted { .. } => {
-                    ConversationItem::subagent_completed(user_message)
-                }
-                super::super::PromptOrigin::WorkflowCompleted { .. } => {
-                    ConversationItem::notification_drain(user_message)
-                }
-                super::super::PromptOrigin::NotificationDrain => {
-                    ConversationItem::notification_drain(user_message)
-                }
-                super::super::PromptOrigin::GoalSummary => {
-                    ConversationItem::goal_summary(user_message)
-                }
-                super::super::PromptOrigin::GoalControl => {
-                    ConversationItem::system_reminder(user_message)
-                }
-                super::super::PromptOrigin::GoalClassifierNudge => {
-                    ConversationItem::goal_classifier_nudge(user_message)
-                }
-                super::super::PromptOrigin::SchedulerFired => {
-                    ConversationItem::scheduler_fired(user_message)
-                }
-                super::super::PromptOrigin::PlanResume => ConversationItem::user(user_message),
-                super::super::PromptOrigin::User => {
-                    let mut item = ConversationItem::user(user_message);
-                    if let Some(interrupt) = self
-                        .events
-                        .take_prior_interrupt_category()
-                        .and_then(crate::session::events::prior_turn_interrupt_from_cancellation)
-                    {
-                        item.set_prior_turn_interrupt(interrupt);
+            let mut user_chat = if implicit_goal_set {
+                ConversationItem::system_reminder(user_message)
+            } else {
+                match &origin {
+                    super::super::PromptOrigin::TaskCompleted { .. } => {
+                        ConversationItem::task_completed(user_message)
                     }
-                    item
+                    super::super::PromptOrigin::SubagentCompleted { .. } => {
+                        ConversationItem::subagent_completed(user_message)
+                    }
+                    super::super::PromptOrigin::WorkflowCompleted { .. } => {
+                        ConversationItem::notification_drain(user_message)
+                    }
+                    super::super::PromptOrigin::NotificationDrain => {
+                        ConversationItem::notification_drain(user_message)
+                    }
+                    super::super::PromptOrigin::GoalSummary => {
+                        ConversationItem::goal_summary(user_message)
+                    }
+                    super::super::PromptOrigin::GoalControl => {
+                        ConversationItem::system_reminder(user_message)
+                    }
+                    super::super::PromptOrigin::GoalClassifierNudge => {
+                        ConversationItem::goal_classifier_nudge(user_message)
+                    }
+                    super::super::PromptOrigin::SchedulerFired => {
+                        ConversationItem::scheduler_fired(user_message)
+                    }
+                    super::super::PromptOrigin::PlanResume => ConversationItem::user(user_message),
+                    super::super::PromptOrigin::User => {
+                        let mut item = ConversationItem::user(user_message);
+                        if let Some(interrupt) =
+                            self.events.take_prior_interrupt_category().and_then(
+                                crate::session::events::prior_turn_interrupt_from_cancellation,
+                            )
+                        {
+                            item.set_prior_turn_interrupt(interrupt);
+                        }
+                        item
+                    }
                 }
             };
             user_chat.set_prompt_index(current_prompt_index);
@@ -931,15 +996,17 @@ impl SessionActor {
                 self.chat_state_handle.push_user_message(user_chat);
             }
         }
-        self.dispatch_hook(
-            ::hooks::event::HookEventName::UserPromptSubmit,
-            ::hooks::event::HookPayload::UserPromptSubmit {
-                prompt: Some(prompt_text_for_hook),
-            },
-            Some(prompt_id),
-            None,
-        )
-        .await;
+        if !implicit_goal_set && !matches!(origin, super::super::PromptOrigin::GoalControl) {
+            self.dispatch_hook(
+                ::hooks::event::HookEventName::UserPromptSubmit,
+                ::hooks::event::HookPayload::UserPromptSubmit {
+                    prompt: Some(prompt_text_for_hook),
+                },
+                Some(prompt_id),
+                None,
+            )
+            .await;
+        }
         let turn_scope_guard =
             TurnSubagentScopeGuard::new(self.current_prompt_id.clone(), prompt_id.to_string());
         self.open_subagent_spawn_admission();

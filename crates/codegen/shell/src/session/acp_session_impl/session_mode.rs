@@ -39,6 +39,22 @@ pub(super) fn filter_cursor_tools_by_plan_mode(
         .collect()
 }
 impl SessionActor {
+    /// Rebase queued user messages that were captured under Goal when Goal is
+    /// intentionally exited. Queue entries retain their submission mode in
+    /// general, but a terminal/cleared Goal can no longer consume Goal-bound
+    /// supplements; leaving them pinned would immediately switch the session
+    /// back to a completed or missing Goal when they promote.
+    pub(super) async fn retag_queued_goal_user_prompts(&self, target: PromptMode) {
+        let mut state = self.state.lock().await;
+        for input in &mut state.pending_inputs {
+            if matches!(input.origin, crate::session::PromptOrigin::User)
+                && input.prompt_mode == PromptMode::Goal
+            {
+                input.prompt_mode = target;
+            }
+        }
+    }
+
     /// Synchronize the selected primary-session Behavior into the fixed system
     /// prompt layer: Mandatory Core → Audience → Role → Behavior → Runtime.
     pub(super) async fn sync_active_behavior_prompt(&self) {
@@ -274,6 +290,11 @@ impl SessionActor {
             }
             if goal_active {
                 use crate::session::goal_tracker::GoalPauseReason;
+                // Preserve steering that arrived just before the confirmed
+                // switch. It can no longer enter the cancelled Goal turn, so
+                // convert it to queued user work; the target-mode retag below
+                // makes it run under the Behavior the user selected.
+                self.flush_stranded_interjections().await;
                 self.cancel_running_task(true, false, false, Some("behavior_switch".to_string()))
                     .await;
                 let changed = self.goal_tracker.lock().pause(GoalPauseReason::User);
@@ -298,19 +319,10 @@ impl SessionActor {
         }
         *self.current_prompt_mode.lock() = prompt_mode;
         self.behavior.lock().select_behavior(prompt_mode.behavior());
-        if mode == SessionMode::Goal
-            && self.goal_tracker.lock().status().is_some_and(|s| {
-                s.is_paused() && s != crate::session::goal_tracker::GoalStatus::BudgetLimited
-            })
+        if current_behavior == Some(tool_types::BehaviorId::Goal)
+            && target_behavior != Some(tool_types::BehaviorId::Goal)
         {
-            self.goal_tracker.lock().resume();
-            let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-            let (tokens_used, finished) = self.goal_tokens(current_tokens);
-            self.goal_notify_sender().emit_goal_updated(
-                &mut self.goal_tracker.lock(),
-                tokens_used,
-                finished,
-            );
+            self.retag_queued_goal_user_prompts(prompt_mode).await;
         }
         self.persist_behavior_state();
         self.enqueue_current_mode_update(session_mode_id.clone());

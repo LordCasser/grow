@@ -1065,6 +1065,13 @@ impl GoalTracker {
                     .saturating_add(since.elapsed().as_millis() as u64);
             }
             o.status = reason.to_status();
+            // A paused Goal owns no live planner/verifier stage. Explicit
+            // pause cancels the turn that owns those futures; clearing the
+            // transient latches as part of the lifecycle transition prevents
+            // an aborted future from leaving the UI stuck on Planning or
+            // Verifying.
+            o.planning_in_flight = false;
+            o.verifying_in_flight = false;
             if message.is_some() {
                 o.pause_message = message;
             }
@@ -2049,6 +2056,22 @@ mod tests {
         assert!(t.resume());
         assert_eq!(t.status(), Some(GoalStatus::Active));
         assert!(t.is_active());
+    }
+
+    #[test]
+    fn pause_clears_transient_stage_latches() {
+        let mut tracker = make_tracker();
+        activate_tracker(&mut tracker);
+        {
+            let goal = tracker.snapshot_mut().unwrap();
+            goal.planning_in_flight = true;
+            goal.verifying_in_flight = true;
+        }
+
+        assert!(tracker.pause(GoalPauseReason::User));
+        let goal = tracker.snapshot().unwrap();
+        assert!(!goal.planning_in_flight);
+        assert!(!goal.verifying_in_flight);
     }
 
     #[test]

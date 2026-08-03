@@ -127,6 +127,21 @@ impl PromptOrigin {
     pub fn is_synthetic(&self) -> bool {
         !matches!(self, Self::User)
     }
+    /// Synthetic wake work that a newer user prompt may replace. Durable
+    /// control turns (`GoalControl`), scheduled work, and Plan resume turns
+    /// are commands with their own semantics and must never be swept merely
+    /// because a completion wake shares the queue.
+    pub fn is_preemptible_wake(&self) -> bool {
+        matches!(
+            self,
+            Self::TaskCompleted { .. }
+                | Self::SubagentCompleted { .. }
+                | Self::WorkflowCompleted { .. }
+                | Self::NotificationDrain
+                | Self::GoalSummary
+                | Self::GoalClassifierNudge
+        )
+    }
     /// Whether a `UserMessageChunk` echo for this origin must stay out of
     /// client scrollback (live and on resume). Model-only / side-channel
     /// content — UI already surfaces it via task pane, monitor gutter, etc.
@@ -182,6 +197,20 @@ mod tests {
         );
         assert!(origin.is_synthetic());
         assert_eq!(origin.completion_id(), Some("abc-123"));
+    }
+
+    #[test]
+    fn durable_synthetic_controls_are_not_preemptible_wakes() {
+        assert!(!PromptOrigin::GoalControl.is_preemptible_wake());
+        assert!(!PromptOrigin::SchedulerFired.is_preemptible_wake());
+        assert!(!PromptOrigin::PlanResume.is_preemptible_wake());
+        assert!(PromptOrigin::NotificationDrain.is_preemptible_wake());
+        assert!(
+            PromptOrigin::TaskCompleted {
+                task_id: "t".into()
+            }
+            .is_preemptible_wake()
+        );
     }
     #[test]
     fn from_prompt_id_subagent_completed() {
