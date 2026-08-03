@@ -182,8 +182,15 @@ any configured default is considered.
 
 ## Auxiliary models
 
-Session summaries and image descriptions inherit the active session model when their setting is
-absent. Prompt suggestions are disabled unless explicitly assigned a configured catalog model:
+Session summaries inherit the active session model when their setting is absent. Image reading is
+different: when `image_description` is absent, images returned by `read_file` and rendered PDF
+pages remain multimodal tool-result content for the active model. Setting `image_description`
+routes that content to the configured auxiliary model and stores its textual description in model
+context; resolution, transport, and empty-response failures are surfaced as text and never silently
+fall back to another model. User message attachments and PDF `format="text"` are independent of
+this setting.
+
+Prompt suggestions are disabled unless explicitly assigned a configured catalog model:
 
 ```toml
 [models]

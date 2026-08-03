@@ -32,12 +32,16 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 ### 1.1.2 重点
 
 - Goal 执行中继续接受普通输入：Enter 进入 shell 权威 FIFO 队列，不再要求先点击 Stop。
-- Goal 执行中的 Send now 改为真正的 mid-turn interjection，在下一个安全边界注入；若 turn
-  已结束则自动转为下一条队列消息，不会丢失。
-- 斜杠输入与模型提示词彻底分流。活跃 turn 中的 host command 通过独立控制面执行，`/goal
-  status`、`budget`、`pause`、`resume`、`clear` 和目标替换都能及时响应。
-- 未知斜杠命令现在直接报错，不会降级成用户提示词发送给模型；暂停或替换目标前，尚未消费的
-  interjection 会恢复到队列。
+- Goal 执行中的 Send now 改为真正的 mid-turn interjection：shell 在同一个状态锁内将消息从
+  权威队列移入注入缓冲，在下一个安全边界交给当前 turn；它不会中断 Goal，也不会随后重复执行。
+- 斜杠输入与模型提示词彻底分流。Goal 命令始终通过独立控制面执行，只显示响应日志；`budget`、
+  `status`、`resume` 和 `set` 都不会取消当前 turn，只有显式 `/goal pause` 会中断执行。活跃 Goal
+  必须先 pause 才能 clear。
+- `/goal set` 原位修订当前非终态 Goal，保留 Goal 身份、执行状态和资源统计，并用单调 revision
+  隔离旧的异步验证结果；输入 `/goal set` 后按 Tab 可补全当前目标以便编辑。
+- 未知斜杠命令现在直接报错，不会降级成用户提示词发送给模型。
+- `read_file` 的图片和 PDF 页面拥有明确的模型路由：未配置 `[models].image_description` 时保留
+  主模型多模态内容；显式配置后由该辅助模型生成文字描述，失败会明确显示且不会静默换回主模型。
 - 官方 Release workflow 构建并验证 10 个目标，包括 OHOS arm64；完整资产齐全后才公开 Release。
 
 版本级变更见 [1.1.2 release notes](crates/codegen/shell/changelogs/1.1.2.md)。
@@ -402,6 +406,8 @@ SemVer 预发布段的版本分别进入 stable / prerelease 更新通道。
 - [Agent 定义](crates/codegen/agent/README.md)
 - [Session 与恢复](crates/codegen/pager/docs/user-guide/17-sessions.md)
 - [Sandbox](crates/codegen/pager/docs/user-guide/18-sandbox.md)
+- [输入路由架构](docs/architecture/input-routing.md)
+- [图片与 PDF 阅读架构](crates/codegen/shell/docs/architecture/image-reading.md)
 
 CLI composition root 位于 `crates/codegen/cli`，TUI 位于 `pager`，Agent/session runtime 位于
 `shell`，工作区与权限位于 `workspace`，工具实现位于 `tools`。更细的依赖边界以各模块源码和

@@ -1,5 +1,19 @@
 # Changelog
 
+# 1.1.2 — 2026-08-03
+
+## Behavior Changes
+
+- Goal 执行中接受普通排队输入；Send now 原子移入 mid-turn interjection，不取消当前 Goal。
+- Goal 斜杠命令通过独立控制面执行并显示响应日志；`budget`、`resume`、`set` 不打断执行，只有
+  `/goal pause` 会取消当前 turn。
+- `/goal set` 原位修订目标并支持当前内容 Tab 补全；异步 Goal 角色结果受 definition revision
+  约束，不能提交到已修改的目标。
+- `read_file` 图片与渲染后的 PDF 页面按 `[models].image_description` 显式路由：未配置时交给
+  主模型，配置后由指定辅助模型描述且失败不回退。
+
+完整发布说明见 [changelogs/1.1.2.md](changelogs/1.1.2.md)。
+
 # 1.1.1 — 2026-08-02
 
 ## Breaking Changes
