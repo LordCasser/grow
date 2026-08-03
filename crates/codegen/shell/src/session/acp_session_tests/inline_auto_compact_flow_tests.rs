@@ -143,7 +143,7 @@ async fn create_test_actor(
         max_retries: 3,
         max_turns: None,
         pending_interjections: InterjectionBuffer::new(),
-        pending_skill_reminders: Mutex::new(Vec::new()),
+        pending_system_reminders: Mutex::new(Vec::new()),
         idle_flush_timeout: None,
         dream_check_timeout: None,
         last_idle_flush_conversation_len: std::sync::atomic::AtomicUsize::new(0),
@@ -226,7 +226,7 @@ async fn create_test_actor(
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         turn_stream_drained: parking_lot::Mutex::new(None),
         sampler_handle: sampler::SamplerHandle::noop(),
-        image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+        image_description_model: None,
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace::WorkspaceOps::for_test(),
@@ -610,7 +610,7 @@ async fn create_test_actor_with_memory(
         max_retries: 3,
         max_turns: None,
         pending_interjections: InterjectionBuffer::new(),
-        pending_skill_reminders: Mutex::new(Vec::new()),
+        pending_system_reminders: Mutex::new(Vec::new()),
         idle_flush_timeout: memory_config
             .as_ref()
             .and_then(|mc| mc.flush.idle_timeout_secs)
@@ -704,7 +704,7 @@ async fn create_test_actor_with_memory(
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         turn_stream_drained: parking_lot::Mutex::new(None),
         sampler_handle: sampler::SamplerHandle::noop(),
-        image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+        image_description_model: None,
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace::WorkspaceOps::for_test(),

@@ -53,12 +53,8 @@ impl MvpAgent {
         }
         session_ids.len()
     }
-    pub(super) fn resolve_image_description_model(&self) -> String {
-        self.cfg
-            .borrow()
-            .image_description_model
-            .clone()
-            .unwrap_or_default()
+    pub(super) fn resolve_image_description_model(&self) -> Option<String> {
+        self.cfg.borrow().image_description_model.clone()
     }
     pub(super) fn build_summary_client(
         &self,

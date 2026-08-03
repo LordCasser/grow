@@ -573,15 +573,11 @@ pub enum SessionCommand {
     ReleaseCombineEdit {
         id: String,
     },
-    /// Atomically interject a queued (not-yet-running) prompt into the running
-    /// turn: the actor removes it from `pending_inputs` and pushes
-    /// its text into `pending_interjections` in a single mailbox op, so the
-    /// in-flight turn merges it at the next safe point and the prompt can never
-    /// both interject *and* later run as its own turn. Versioned + idempotent
-    /// like [`RemoveQueuedPrompt`]. A benign no-op (the prompt stays queued and
-    /// runs normally) when no turn is running, the id names the running turn, is
-    /// stale/already-drained, or `owner` doesn't match. The rebroadcast of
-    /// `grow/queue/changed` is the truth signal for every attached client.
+    /// Send a queued (not-yet-running) prompt now. During an active Goal the
+    /// actor atomically removes it from `pending_inputs` and pushes it into
+    /// `pending_interjections`, preserving the current turn. Other modes keep
+    /// cancel-and-promote semantics. Versioned + idempotent like
+    /// [`RemoveQueuedPrompt`]; `grow/queue/changed` remains authoritative.
     InterjectQueuedPrompt {
         id: String,
         expected_version: u64,

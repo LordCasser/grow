@@ -236,6 +236,10 @@ async fn out_of_band_goal_controls_execute_without_entering_prompt_queue() {
                     .and_then(|goal| goal.token_budget),
                 Some(1234)
             );
+            assert_eq!(
+                actor.update_goal_token_budget(Some(2345)),
+                "User set current goal budget to 2345 tokens."
+            );
 
             let cancel = actor
                 .execute_out_of_band_slash_command("/goal pause".to_string())
@@ -273,13 +277,24 @@ async fn out_of_band_unknown_slash_is_rejected_before_model_input() {
 
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn out_of_band_goal_set_queues_resolved_work_not_raw_slash_text() {
+async fn out_of_band_goal_set_steers_running_goal_without_cancelling() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let (actor, _tmp) = make_planner_actor(None, false).await;
             *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
             create_test_goal(&actor);
+            let original_goal_id = actor
+                .goal_tracker
+                .lock()
+                .snapshot()
+                .unwrap()
+                .goal_id
+                .clone();
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("running".into());
 
             let cancel = actor
                 .execute_out_of_band_slash_command(
@@ -287,23 +302,19 @@ async fn out_of_band_goal_set_queues_resolved_work_not_raw_slash_text() {
                 )
                 .await
                 .expect("goal set command");
-            assert!(cancel, "replacing an active goal must stop old work");
+            assert!(!cancel, "editing an active goal must not stop its turn");
             let snapshot = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(snapshot.goal_id, original_goal_id);
             assert_eq!(snapshot.objective, "replacement objective");
+            assert_eq!(snapshot.definition_revision, 1);
             assert_eq!(snapshot.token_budget, Some(2048));
-
-            let state = actor.state.lock().await;
-            assert_eq!(state.pending_inputs.len(), 1);
-            let queued_text = state.pending_inputs[0]
-                .prompt_blocks
-                .iter()
-                .find_map(|block| match block {
-                    acp::ContentBlock::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .unwrap();
-            assert!(queued_text.contains("<system-reminder>"));
-            assert!(!queued_text.contains("/goal set"));
+            assert!(actor.state.lock().await.pending_inputs.is_empty());
+            assert_eq!(
+                actor.pending_system_reminders.lock().len(),
+                1,
+                "the updated objective must enter the hidden reminder channel"
+            );
+            assert!(actor.pending_interjections.is_empty());
         })
         .await;
 }

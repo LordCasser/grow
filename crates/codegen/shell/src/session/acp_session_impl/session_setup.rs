@@ -293,15 +293,15 @@ impl SessionActor {
             |guard| guard.is_some(),
         );
         if turn_running {
-            self.pending_skill_reminders.lock().push(item);
+            self.pending_system_reminders.lock().push(item);
         } else {
             self.chat_state_handle.push_user_message(item);
             self.persist_announcement_state().await;
         }
     }
-    pub(super) async fn flush_pending_skill_reminders(&self) {
+    pub(super) async fn flush_pending_system_reminders(&self) {
         let items: Vec<ConversationItem> =
-            std::mem::take(&mut *self.pending_skill_reminders.lock());
+            std::mem::take(&mut *self.pending_system_reminders.lock());
         if items.is_empty() {
             return;
         }

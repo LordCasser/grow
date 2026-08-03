@@ -108,9 +108,7 @@ impl SessionActor {
     }
     /// Normalize interjection images for injection (shared pipeline above);
     /// notices append to `wrapped` (TEXT side only). Returns the images to
-    /// attach structurally. Sessions whose template rejects inline images
-    /// instead transcribe normalized survivors into the text via the existing
-    /// describe pipeline, or drop them with a notice.
+    /// attach structurally after normalization.
     async fn prepare_interjection_images(
         &self,
         wrapped: &mut String,
@@ -119,26 +117,8 @@ impl SessionActor {
         if images.is_empty() {
             return images;
         }
-        let is_cursor = self.is_cursor_harness();
-        let images = self
-            .normalize_images_with_notices(wrapped, images, is_cursor)
-            .await;
-        if !is_cursor {
-            return images;
-        }
-        if !images.is_empty() {
-            match self.transcribe_user_images(wrapped.clone(), &images).await {
-                Ok(new_text) => *wrapped = new_text,
-                Err(e) => {
-                    tracing::warn!(?e, "interjection image processing failed; dropping images");
-                    wrapped.push_str(
-                        "\n\n[Note: the user attached image(s) to this message, but they could \
-                         not be processed in this session and were dropped.]",
-                    );
-                }
-            }
-        }
-        Vec::new()
+        self.normalize_images_with_notices(wrapped, images, false)
+            .await
     }
 
     /// Broadcast a mid-turn interjection to every attached client.

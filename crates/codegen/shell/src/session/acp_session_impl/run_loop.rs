@@ -652,14 +652,12 @@ pub(super) async fn run_session(
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::ExecuteSlashCommand { command, respond_to } => {
-                            session.persist_host_turn_user_echo(&command, "command-plane");
                             let result = session
                                 .execute_out_of_band_slash_command(command)
                                 .await;
                             if matches!(result, Ok(true)) {
                                 // Preserve user steering that reached the
-                                // interjection buffer before a control command
-                                // paused/replaced the running goal.
+                                // interjection buffer before `/goal pause`.
                                 session.flush_stranded_interjections().await;
                                 session.cancel_turn_for_send_now(&mut replay_buffer).await;
                             }
@@ -944,7 +942,9 @@ pub(super) async fn run_session(
                             state.combine_edit_holds.remove(&id);
                         }
                         SessionCommand::InterjectQueuedPrompt { id, expected_version, owner, new_text } => {
-                            // Send-now: the handler promoted the row; cancel the running turn and start it.
+                            // The actor owns mode-aware admission: active Goal
+                            // rows inject in place; other turns promote and
+                            // request cancel-and-send.
                             let cancel_for_send_now = session.handle_interject_queued_prompt(&id, expected_version, owner.as_deref(), new_text.as_deref()).await;
                             if cancel_for_send_now {
                                 session.cancel_turn_for_send_now(&mut replay_buffer).await;

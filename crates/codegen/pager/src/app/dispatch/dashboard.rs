@@ -100,6 +100,7 @@ fn configure_dashboard_state(app: &mut AppView) {
             d.pending_behavior,
             false,
             false,
+            None,
             app.auto_mode_gate,
             d.pending_permission.as_canonical(),
         );
@@ -1418,6 +1419,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                     mode,
                     false,
                     false,
+                    None,
                     app.auto_mode_gate,
                     d.pending_permission.as_canonical(),
                 );
@@ -1473,6 +1475,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                     d.pending_behavior,
                     false,
                     false,
+                    None,
                     app.auto_mode_gate,
                     permission.as_canonical(),
                 );

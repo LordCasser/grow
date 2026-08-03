@@ -700,7 +700,10 @@ pub(super) fn dispatch_send_prompt_inner(
                 }
             }
             CommandResult::HostCommand(command_text) => {
-                let execute_out_of_band = agent.session.state.is_turn_running()
+                let is_goal_control = crate::slash::parse_invocation(&command_text)
+                    .is_some_and(|invocation| invocation.token.eq_ignore_ascii_case("goal"));
+                let execute_out_of_band = is_goal_control
+                    || agent.session.state.is_turn_running()
                     || agent.goal_state.as_ref().is_some_and(|goal| {
                         matches!(goal.status, crate::app::agent::GoalDisplayStatus::Active)
                     });
@@ -708,17 +711,16 @@ pub(super) fn dispatch_send_prompt_inner(
                     if consume_input {
                         agent.prompt.set_text("");
                     }
-                    agent
-                        .scrollback
-                        .push_block(RenderBlock::user_prompt(command_text.clone()));
                     return vec![Effect::ExecuteSlashCommand {
                         agent_id: id,
                         session_id,
                         command: command_text,
                     }];
                 }
-                // Idle commands retain the established turn path because a
-                // subset intentionally starts inference (/goal set/resume).
+                // Non-Goal idle commands retain the established turn path.
+                // Goal set/resume start any required inference from the
+                // shell-owned control plane, keeping the command itself out of
+                // the user-message stream.
                 let skill_token_ranges = agent
                     .prompt
                     .slash_controller

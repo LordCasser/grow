@@ -68,16 +68,29 @@ impl SlashCommand for AcpSlashCommand {
     /// Non-goal commands return `None` (identical to the trait default).
     /// `set` and `budget` carry a trailing space in `insert_text` so the
     /// prompt keeps accepting input (the objective / budget value); the
-    /// other subcommands are leaf words. Once the user has typed `set` and
-    /// moved into the objective, the args are free text and suggestions are
-    /// suppressed entirely.
-    fn suggest_args(&self, _ctx: &AppCtx, args_query: &str) -> Option<Vec<ArgItem>> {
+    /// other subcommands are leaf words. At the start of `set`, an existing
+    /// objective is offered once for editing; after the user types objective
+    /// text, the args are free text and suggestions are suppressed.
+    fn suggest_args(&self, ctx: &AppCtx, args_query: &str) -> Option<Vec<ArgItem>> {
         if !self.name.eq_ignore_ascii_case("goal") {
             return None;
         }
         let t = args_query.trim_start();
         if t == "set" || t.starts_with("set ") {
-            return None; // objective entry: free text, no subcommand suggestions
+            let typed_objective = t.strip_prefix("set").unwrap_or_default().trim_start();
+            if typed_objective.is_empty()
+                && let Some(objective) = ctx
+                    .current_goal_objective
+                    .filter(|objective| !objective.trim().is_empty())
+            {
+                return Some(vec![ArgItem {
+                    display: objective.to_string(),
+                    match_text: objective.to_string(),
+                    insert_text: format!("set {objective}"),
+                    description: "Edit the current goal objective".into(),
+                }]);
+            }
+            return None; // objective entry: free text after the initial fill
         }
         Some(vec![
             ArgItem {
@@ -608,6 +621,7 @@ mod tests {
             behavior_mode: tools::types::SessionMode::Default,
             deep_research_available: false,
             goal_available: false,
+            current_goal_objective: None,
             auto_permission_available: false,
             current_permission: "ask",
             cwd: std::path::Path::new("."),
@@ -652,9 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_set_phase_suppresses_subcommands() {
-        // Once the user has committed to `set`, the args are the goal
-        // objective -- free text, no subcommand suggestions.
+    fn goal_set_phase_suppresses_subcommands_without_current_goal() {
         let cmd = AcpSlashCommand::from(&make_cmd("goal", None));
         let ctx = make_ctx();
         for query in ["set", "set ", "set 修复登录模块的bug"] {
@@ -663,6 +675,26 @@ mod tests {
                 "query {query:?} must suppress subcommand suggestions"
             );
         }
+    }
+
+    #[test]
+    fn goal_set_tab_offer_fills_current_objective_for_editing() {
+        let cmd = AcpSlashCommand::from(&make_cmd("goal", None));
+        let mut ctx = make_ctx();
+        ctx.current_goal_objective = Some("修复登录流程");
+
+        for query in ["set", "set "] {
+            let items = cmd
+                .suggest_args(&ctx, query)
+                .expect("current objective should be offered");
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].display, "修复登录流程");
+            assert_eq!(items[0].insert_text, "set 修复登录流程");
+        }
+        assert!(
+            cmd.suggest_args(&ctx, "set 新目标").is_none(),
+            "typed edits are free text and must not be overwritten"
+        );
     }
 
     #[test]

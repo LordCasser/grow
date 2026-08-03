@@ -1532,7 +1532,7 @@ fn model_overrides_local_image_description_wins_over_remote() {
     );
 }
 #[test]
-fn model_overrides_default_image_description_uses_active_model() {
+fn model_overrides_default_image_description_is_unconfigured() {
     with_model_overrides_env(
         None,
         None,
@@ -1718,7 +1718,7 @@ fn model_overrides_env_image_description_overrides_local() {
     );
 }
 #[test]
-fn model_overrides_empty_image_description_toml_uses_active_model() {
+fn model_overrides_empty_image_description_toml_is_unconfigured() {
     with_model_overrides_env(
         None,
         None,
@@ -1736,7 +1736,7 @@ fn model_overrides_empty_image_description_toml_uses_active_model() {
     );
 }
 #[test]
-fn model_overrides_empty_image_description_remote_uses_active_model() {
+fn model_overrides_empty_image_description_remote_is_unconfigured() {
     with_model_overrides_env(
         None,
         None,

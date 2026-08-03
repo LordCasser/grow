@@ -131,7 +131,8 @@ stream_tool_calls = true
 # top_p = 0.95
 # extra_headers = { "X-Request-Tags" = "team=example" }
 
-# 辅助模型必须同样存在于 provider/model catalog。留空或删除以使用默认行为。
+# 辅助模型必须同样存在于 provider/model catalog。未配置 image_description 时，
+# read_file 读取的图片和 PDF 页面直接交给当前主模型。
 # session_summary = "deepseek/deepseek-chat"
 # image_description = "vision/provider-model"
 # prompt_suggestion = "deepseek/deepseek-chat"

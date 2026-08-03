@@ -242,7 +242,7 @@ pub(crate) struct SubagentSpawnContext {
     pub hook_registry: Option<std::sync::Arc<::hooks::discovery::HookRegistry>>,
     pub permission_handle: Option<workspace::permission::PermissionHandle>,
     pub worktree_type: crate::util::config::WorktreeType,
-    pub image_description_model: String,
+    pub image_description_model: Option<String>,
     /// Dual-mode workspace operations handle.
     pub workspace_ops: workspace::WorkspaceOps,
     /// Parent session's agent name (e.g. "grow-build").

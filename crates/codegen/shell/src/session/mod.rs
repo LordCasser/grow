@@ -75,6 +75,10 @@ pub enum PromptOrigin {
     /// system reminder into context and then triggers a model turn so the
     /// model can print a visible progress update.
     GoalSummary,
+    /// Hidden prompt turn created by the Goal command control plane when a
+    /// set/resume command needs to start model work from idle. The command is
+    /// surfaced separately as an agent response log, never as user input.
+    GoalControl,
     /// Verification-stage nudge injected after the verification stage
     /// achieved — keep working" system-reminder body alongside the
     /// path to the persisted details file. The variant name retains
@@ -107,6 +111,8 @@ impl PromptOrigin {
             Self::NotificationDrain
         } else if prompt_id.starts_with("goal-summary-") {
             Self::GoalSummary
+        } else if prompt_id.starts_with("goal-control-") {
+            Self::GoalControl
         } else if prompt_id.starts_with("goal-classifier-nudge-") {
             Self::GoalClassifierNudge
         } else if prompt_id.starts_with("scheduler-fired-") {
@@ -135,6 +141,7 @@ impl PromptOrigin {
             | Self::WorkflowCompleted { .. }
             | Self::NotificationDrain
             | Self::GoalSummary
+            | Self::GoalControl
             | Self::GoalClassifierNudge => true,
         }
     }
@@ -146,6 +153,7 @@ impl PromptOrigin {
             Self::User
             | Self::NotificationDrain
             | Self::GoalSummary
+            | Self::GoalControl
             | Self::GoalClassifierNudge
             | Self::SchedulerFired
             | Self::PlanResume => None,
@@ -254,6 +262,7 @@ mod tests {
                 .hide_user_echo_from_scrollback()
         );
         assert!(PromptOrigin::from_prompt_id("goal-summary-1").hide_user_echo_from_scrollback());
+        assert!(PromptOrigin::from_prompt_id("goal-control-1").hide_user_echo_from_scrollback());
         assert!(
             PromptOrigin::from_prompt_id("goal-classifier-nudge-1")
                 .hide_user_echo_from_scrollback()

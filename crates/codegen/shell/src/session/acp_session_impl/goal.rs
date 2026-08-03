@@ -255,22 +255,31 @@ impl SessionActor {
             self.auto_pause_for_classifier_cap(attempts, "", "").await;
             return;
         }
+        let Some(definition_key) = self.goal_tracker.lock().definition_key() else {
+            return;
+        };
         let Some(attempt) = self.reserve_classifier_attempt_slot(&policy) else {
             return;
         };
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         self.emit_goal_verifying(current_tokens);
         let outcome = {
-            let _latch = TrackerDropGuard::new(&self.goal_tracker, |tracker| {
-                if let Some(snapshot) = tracker.snapshot_mut() {
+            let goal_id = definition_key.0.clone();
+            let revision = definition_key.1;
+            let _latch = TrackerDropGuard::new(&self.goal_tracker, move |tracker| {
+                if tracker.definition_is_current(&goal_id, revision)
+                    && let Some(snapshot) = tracker.snapshot_mut()
+                {
                     snapshot.verifying_in_flight = false;
                 }
             });
             self.run_verification_stage_for_drain(attempt).await
         };
-        if self.goal_tracker.lock().status()
-            != Some(crate::session::goal_tracker::GoalStatus::Active)
-        {
+        let tracker = self.goal_tracker.lock();
+        let stale = !tracker.definition_is_current(&definition_key.0, definition_key.1);
+        let inactive = tracker.status() != Some(crate::session::goal_tracker::GoalStatus::Active);
+        drop(tracker);
+        if stale || inactive {
             return;
         }
         if let GoalClassifierOutcome::VerificationUnavailable { reason, .. } = outcome {
@@ -532,6 +541,7 @@ impl SessionActor {
             prior_gaps,
             first_final_response,
             scratch_dir_ready,
+            definition_key,
         ) = {
             let tracker = self.goal_tracker.lock();
             let Some(o) = tracker.snapshot() else {
@@ -551,6 +561,7 @@ impl SessionActor {
                 o.last_classifier_gaps.clone(),
                 o.first_final_response.clone(),
                 o.scratch_dir_ready,
+                (o.goal_id.clone(), o.definition_revision),
             )
         };
 
@@ -604,7 +615,9 @@ impl SessionActor {
         } else {
             let assignment = {
                 let mut tracker = self.goal_tracker.lock();
-                match tracker.snapshot_mut() {
+                match tracker.snapshot_mut().filter(|o| {
+                    o.goal_id == definition_key.0 && o.definition_revision == definition_key.1
+                }) {
                     Some(o) => {
                         let expanded = crate::session::goal_classifier::expand_skeptic_assignment(
                             &o.skeptic_model_assignment,
@@ -681,12 +694,15 @@ impl SessionActor {
         };
 
         let result = run_verification_stage(spawner, inputs).await;
-        if result.panel_ran
-            && let Some(o) = self.goal_tracker.lock().snapshot_mut()
-        {
-            o.skeptic0_session_id = result.skeptic0_session_id;
-            if let Some(anchor) = anchor_to_persist {
-                o.first_final_response = Some(anchor);
+        if result.panel_ran {
+            let mut tracker = self.goal_tracker.lock();
+            if tracker.definition_is_current(&definition_key.0, definition_key.1)
+                && let Some(o) = tracker.snapshot_mut()
+            {
+                o.skeptic0_session_id = result.skeptic0_session_id;
+                if let Some(anchor) = anchor_to_persist {
+                    o.first_final_response = Some(anchor);
+                }
             }
         }
         result.outcome
@@ -961,9 +977,13 @@ impl SessionActor {
             ResumeTransition::Resumed {
                 previous_status,
                 previous_pause_message,
-            } => ("Goal resumed.", previous_status, previous_pause_message),
+            } => (
+                "User resumed current goal.",
+                previous_status,
+                previous_pause_message,
+            ),
             ResumeTransition::Nudge => (
-                "Goal nudged — refreshing context.",
+                "User refreshed current goal context.",
                 GoalStatus::Active,
                 None,
             ),
@@ -1334,9 +1354,26 @@ impl SessionActor {
         ) {
             return GoalRoundDecision::EndTurn;
         }
+        let Some(definition_key) = self.goal_tracker.lock().definition_key() else {
+            return GoalRoundDecision::EndTurn;
+        };
         let verdict = match self.evaluate_goal_round().await {
             Ok(verdict) => verdict,
             Err(error) => {
+                if !self
+                    .goal_tracker
+                    .lock()
+                    .definition_is_current(&definition_key.0, definition_key.1)
+                {
+                    return self
+                        .prepare_goal_continuation(
+                            self.chat_state_handle.get_total_tokens().await as i64,
+                        )
+                        .await
+                        .map_or(GoalRoundDecision::EndTurn, |plan| {
+                            GoalRoundDecision::Continue(plan.directive)
+                        });
+                }
                 self.record_goal_round_progress(&error, true);
                 self.auto_pause_goal_if_active_with_message(
                     crate::session::goal_tracker::GoalPauseReason::Infra,
@@ -1350,6 +1387,18 @@ impl SessionActor {
                 return GoalRoundDecision::EndTurn;
             }
         };
+        if !self
+            .goal_tracker
+            .lock()
+            .definition_is_current(&definition_key.0, definition_key.1)
+        {
+            return self
+                .prepare_goal_continuation(self.chat_state_handle.get_total_tokens().await as i64)
+                .await
+                .map_or(GoalRoundDecision::EndTurn, |plan| {
+                    GoalRoundDecision::Continue(plan.directive)
+                });
+        }
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         if self.enforce_goal_token_budget(current_tokens).await {
             return GoalRoundDecision::EndTurn;
@@ -1864,6 +1913,17 @@ impl SessionActor {
                 flag: &self.goal_classifier_in_flight,
             };
             let fire_started = std::time::Instant::now();
+            let Some(definition_key) = self.goal_tracker.lock().definition_key() else {
+                try_send_ack(
+                    ack_tx,
+                    UpdateGoalAck::Rejected {
+                        reason: RejectReason::OrchestrationVanished,
+                        detail: "Goal orchestration vanished before classifier could start"
+                            .to_string(),
+                    },
+                );
+                continue;
+            };
 
             let Some(attempt) = self.reserve_classifier_attempt_slot(&policy) else {
                 self.events
@@ -1887,32 +1947,44 @@ impl SessionActor {
 
             self.emit_goal_verifying(current_tokens);
 
-            let mut slot_guard = TrackerDropGuard::new(&self.goal_tracker, |t| {
+            let slot_goal_id = definition_key.0.clone();
+            let slot_revision = definition_key.1;
+            let mut slot_guard = TrackerDropGuard::new(&self.goal_tracker, move |t| {
                 use crate::session::goal_tracker::GoalStatus;
-                if !matches!(
-                    t.status(),
-                    Some(
-                        GoalStatus::BackOffPaused
-                            | GoalStatus::NoProgressPaused
-                            | GoalStatus::Blocked
-                    ),
-                ) {
+                if t.definition_is_current(&slot_goal_id, slot_revision)
+                    && !matches!(
+                        t.status(),
+                        Some(
+                            GoalStatus::BackOffPaused
+                                | GoalStatus::NoProgressPaused
+                                | GoalStatus::Blocked
+                        ),
+                    )
+                {
                     t.rollback_classifier_attempt();
                 }
             });
 
             let outcome = {
-                let _verifying_latch = TrackerDropGuard::new(&self.goal_tracker, |t| {
-                    if let Some(o) = t.snapshot_mut() {
+                let latch_goal_id = definition_key.0.clone();
+                let latch_revision = definition_key.1;
+                let _verifying_latch = TrackerDropGuard::new(&self.goal_tracker, move |t| {
+                    if t.definition_is_current(&latch_goal_id, latch_revision)
+                        && let Some(o) = t.snapshot_mut()
+                    {
                         o.verifying_in_flight = false;
                     }
                 });
                 self.run_verification_stage_for_drain(attempt).await
             };
 
-            let status_changed = self.goal_tracker.lock().status()
-                != Some(crate::session::goal_tracker::GoalStatus::Active);
-            if status_changed {
+            let tracker = self.goal_tracker.lock();
+            let definition_changed =
+                !tracker.definition_is_current(&definition_key.0, definition_key.1);
+            let status_changed =
+                tracker.status() != Some(crate::session::goal_tracker::GoalStatus::Active);
+            drop(tracker);
+            if definition_changed || status_changed {
                 self.events
                     .emit(crate::session::events::Event::GoalVerificationUnavailable {
                     reason:
@@ -1925,7 +1997,11 @@ impl SessionActor {
                     ack_tx,
                     UpdateGoalAck::Rejected {
                         reason: RejectReason::StatusChangedDuringClassifier,
-                        detail: "Goal transitioned to non-Active during classifier run".to_string(),
+                        detail: if definition_changed {
+                            "Goal definition changed during classifier run".to_string()
+                        } else {
+                            "Goal transitioned to non-Active during classifier run".to_string()
+                        },
                     },
                 );
                 continue;

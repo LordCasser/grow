@@ -567,7 +567,7 @@ impl SessionActor {
         // live in tool futures owned by the drainer task / subagent spawn
         // task). Until they do, `queue_input` would read a stale depth > 0 and
         self.tool_context.blocking_wait_depth.reset();
-        self.flush_pending_skill_reminders().await;
+        self.flush_pending_system_reminders().await;
 
         // No multi-second drain here (actor loop would block RecordSubagentUsage).
         // Same UsageDrainOutcome policy as freeze via finalize_usage_from_outcome.

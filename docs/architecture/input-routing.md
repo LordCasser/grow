@@ -7,12 +7,15 @@ Goal, plan, and future behaviors therefore share the same admission rules.
 
 1. Plain input submitted with Enter is a user prompt. The shell owns its FIFO
    queue, so input remains accepted while another turn is running.
-2. Send now is an interjection. It enters the active model loop at the next
-   safe boundary; if the turn ends first, the shell converts it to the next
-   queued prompt instead of dropping it.
-3. Leading-slash input is a Grow command. Known host commands use the
-   `grow/commands/execute` control plane while a turn or goal is active. They
-   never enter the model prompt queue.
+2. Send now during an active Goal is an interjection. For a previously queued
+   row, the session actor atomically removes the authoritative queue item and
+   moves its payload into the interjection buffer. It cannot both inject and
+   later run as a standalone prompt. Outside Goal mode, Send now retains the
+   normal cancel-and-promote behavior.
+3. Leading-slash input is a Grow command. Goal commands always use the
+   `grow/commands/execute` control plane, including while idle; other known host
+   commands use it while a turn or Goal is active. The raw command is never a
+   user message. Command acknowledgement is an agent response log.
 4. Unknown leading-slash input is an error. It is never downgraded to a user
    prompt.
 5. Skill and workflow commands that intentionally start model work may be
@@ -27,9 +30,21 @@ state, and turn cancellation. Control commands share the actor mailbox with
 prompt admission, which serializes state changes without blocking on the model
 task.
 
-Goal controls that only inspect or update state (`status`, `budget`) execute in
-place. `pause` and `clear` persist their state transition before cancelling the
-running turn. Any interjections not yet consumed are first converted back into
-queued prompts, preserving user input across the cancellation. Replacing an
-active goal cancels work on the old objective and promotes the new goal
-reminder as the next turn.
+Goal definition, lifecycle, and resource constraints are orthogonal:
+
+- `set` revises a non-terminal Goal definition in place. It preserves Goal
+  identity, execution state, elapsed/token accounting, and the existing budget
+  unless a new budget is explicit. It increments a monotonic definition
+  revision; planner/evaluator/verifier/strategist results captured under an old
+  revision are discarded at commit.
+- `budget` changes only the resource constraint and never cancels a turn.
+- `pause` is the sole Goal command that cancels the running turn. Pending user
+  interjections are converted back to queued prompts before cancellation.
+- `resume` changes lifecycle state and schedules a hidden system reminder; it
+  is never represented as user input.
+- `clear` is rejected while a Goal is active, so it cannot become an implicit
+  second cancellation command.
+
+Hidden Goal reminders and skill announcements share the session's buffered
+system-reminder channel and drain at model-safe boundaries. User corrections
+use the distinct interjection channel and remain real user messages.

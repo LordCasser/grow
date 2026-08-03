@@ -123,6 +123,7 @@ fn goal_event_as_str(event: &crate::session::goal_tracker::GoalEvent) -> &'stati
     use crate::session::goal_tracker::GoalEvent;
     match event {
         GoalEvent::GoalCreated => "goal_created",
+        GoalEvent::GoalRevised => "goal_revised",
         GoalEvent::PlanningStarted => "planning_started",
         GoalEvent::PlanningCompleted => "planning_completed",
         GoalEvent::PlanningFailed => "planning_failed",

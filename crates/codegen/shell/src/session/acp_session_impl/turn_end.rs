@@ -179,7 +179,7 @@ impl SessionActor {
             current_prompt_id.is_none()
         };
         if became_idle {
-            self.flush_pending_skill_reminders().await;
+            self.flush_pending_system_reminders().await;
             // Idle-gated: a stale completion must not clobber the promoted turn's resources.
             self.agent
                 .borrow()

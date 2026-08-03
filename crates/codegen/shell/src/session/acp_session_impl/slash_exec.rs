@@ -2,12 +2,48 @@ use super::*;
 use tools::implementations::grow_build::LoopFireMode;
 
 impl SessionActor {
+    /// Queue hidden Goal control work as a synthetic prompt turn. Unlike an
+    /// interjection fallback this is not user input: it stays out of prompt
+    /// history/queue UI and its persisted echo is marked hidden.
+    async fn queue_goal_control_prompt(&self, text: String, front: bool) {
+        let prompt_id = format!("goal-control-{}", uuid::Uuid::now_v7());
+        let prompt_mode = *self.current_prompt_mode.lock();
+        let (respond_to, _) = tokio::sync::oneshot::channel();
+        let item = InputItem {
+            prompt_id,
+            prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
+            prompt_mode,
+            client_identifier: None,
+            screen_mode: None,
+            verbatim: true,
+            json_schema: None,
+            origin: crate::session::PromptOrigin::GoalControl,
+            task_wake_fallback: None,
+            respond_to,
+            persist_ack: None,
+            parsed_prompt_tx: None,
+            queue_meta: None,
+            send_now: front,
+        };
+        let mut state = self.state.lock().await;
+        let insert_at = if front {
+            usize::from(matches!(
+                (state.pending_inputs.front(), state.running_prompt_id()),
+                (Some(front_item), Some(running)) if front_item.prompt_id == running
+            ))
+        } else {
+            state.pending_inputs.len()
+        };
+        state.pending_inputs.insert(insert_at, item);
+    }
+
     /// Resolve and execute a slash command from the out-of-band command plane.
     ///
     /// Only goal controls are allowed to mutate a session while a turn is in
     /// flight. Other host commands receive an explicit response instead of
     /// being reclassified as model input. The returned flag asks the actor
-    /// loop to cancel the current turn after the command's durable state change.
+    /// loop to cancel the current turn. Only an explicit `/goal pause` may do
+    /// that; all other Goal controls mutate or steer the running goal in place.
     pub(super) async fn execute_out_of_band_slash_command(
         self: &Arc<Self>,
         command: String,
@@ -66,17 +102,55 @@ impl SessionActor {
                         return Ok(false);
                     }
                 }
-                let reminder = self.setup_goal(&objective, token_budget).await;
-                // Replacing an active goal must stop work on the old objective.
-                // Queue the new reminder behind the running front; the actor
-                // cancels after this method returns and promotes it immediately.
-                self.queue_interjection_fallback_prompt(reminder, vec![], true)
-                    .await;
-                self.send_host_turn_slash_command_output(
-                    "Goal updated. Starting the new objective.",
-                )
+                let existing_status = self.goal_tracker.lock().status();
+                let revising = existing_status.is_some()
+                    && existing_status != Some(crate::session::goal_tracker::GoalStatus::Complete);
+                let reminder = if revising {
+                    let revised = self
+                        .goal_tracker
+                        .lock()
+                        .revise_goal(objective.clone(), token_budget);
+                    debug_assert!(revised);
+                    let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+                    let (tokens_used, finished) = self.goal_tokens(current_tokens);
+                    self.goal_notify_sender().emit_goal_updated(
+                        &mut self.goal_tracker.lock(),
+                        tokens_used,
+                        finished,
+                    );
+                    if self.goal_tracker.lock().status()
+                        == Some(crate::session::goal_tracker::GoalStatus::Active)
+                    {
+                        match self.resume_goal().await {
+                            GoalResumeOutcome::Inference { reminder, .. } => Some(reminder),
+                            GoalResumeOutcome::Message(_) => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(self.setup_goal(&objective, token_budget).await)
+                };
+                let turn_running = self
+                    .current_prompt_id
+                    .lock()
+                    .ok()
+                    .and_then(|guard| guard.clone())
+                    .is_some();
+                if turn_running && let Some(reminder) = reminder {
+                    // Goal controls are hidden control-plane state, not user
+                    // interjections. Flush at the next safe model boundary.
+                    self.pending_system_reminders
+                        .lock()
+                        .push(ConversationItem::system_reminder(reminder));
+                } else if let Some(reminder) = reminder {
+                    self.queue_goal_control_prompt(reminder, true).await;
+                }
+                self.send_host_turn_slash_command_output(&format!(
+                    "User set current goal objective to: {objective}"
+                ))
                 .await;
-                Ok(true)
+                Ok(false)
             }
             BuiltinAction::GoalEnter | BuiltinAction::GoalResume => {
                 ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
@@ -105,13 +179,11 @@ impl SessionActor {
                             .and_then(|guard| guard.clone())
                             .is_some();
                         if turn_running {
-                            self.pending_interjections.push(PendingInterjection {
-                                text: reminder,
-                                attachments: vec![],
-                            });
+                            self.pending_system_reminders
+                                .lock()
+                                .push(ConversationItem::system_reminder(reminder));
                         } else {
-                            self.queue_interjection_fallback_prompt(reminder, vec![], true)
-                                .await;
+                            self.queue_goal_control_prompt(reminder, true).await;
                         }
                     }
                     GoalResumeOutcome::Message(message) => {
@@ -141,14 +213,19 @@ impl SessionActor {
                 Ok(was_active && !is_still_active)
             }
             action @ BuiltinAction::GoalClear => {
-                let was_active = self.goal_tracker.lock().status()
-                    == Some(crate::session::goal_tracker::GoalStatus::Active);
+                if self.goal_tracker.lock().status()
+                    == Some(crate::session::goal_tracker::GoalStatus::Active)
+                {
+                    self.send_host_turn_slash_command_output(
+                        "Pause the current goal before clearing it.",
+                    )
+                    .await;
+                    return Ok(false);
+                }
                 self.execute_builtin_slash_command(action)
                     .await
                     .map_err(|error| error.to_string())?;
-                let is_still_active = self.goal_tracker.lock().status()
-                    == Some(crate::session::goal_tracker::GoalStatus::Active);
-                Ok(was_active && !is_still_active)
+                Ok(false)
             }
             other => {
                 ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
@@ -179,10 +256,10 @@ impl SessionActor {
                 self.goal_notify_sender().persist_goal_state(&tracker);
                 if was_budget_limited {
                     format!(
-                        "Goal token budget updated to {budget} tokens. 使用 /goal resume 继续。"
+                        "User set current goal budget to {budget} tokens. Use /goal resume to continue."
                     )
                 } else {
-                    format!("Goal token budget updated to {budget} tokens.")
+                    format!("User set current goal budget to {budget} tokens.")
                 }
             }
         } else {
@@ -1052,7 +1129,10 @@ impl SessionActor {
                     match tracker.status() {
                         Some(GoalStatus::Active) => {
                             tracker.pause(GoalPauseReason::User);
-                            ("Goal paused. Use /goal resume to continue.", true)
+                            (
+                                "User paused current goal. Use /goal resume to continue.",
+                                true,
+                            )
                         }
                         Some(GoalStatus::BudgetLimited) => ("Goal is budget-limited.", false),
                         Some(status) if status.is_paused() => ("Goal is already paused.", false),

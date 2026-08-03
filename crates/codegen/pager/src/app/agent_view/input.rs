@@ -1302,7 +1302,7 @@ impl AgentView {
         }
     }
 
-    fn sync_command_selection_context(&mut self) {
+    pub(super) fn sync_command_selection_context(&mut self) {
         let behavior = self.behavior_mode_pending.unwrap_or(self.behavior_mode);
         let deep_research = self
             .prompt
@@ -1334,6 +1334,7 @@ impl AgentView {
             behavior,
             deep_research,
             goal,
+            self.goal_state.as_ref().map(|goal| goal.objective.clone()),
             auto_permission,
             permission,
         );

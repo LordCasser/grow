@@ -97,7 +97,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         auto_compact_threshold_tiers: crate::agent::subagent::AutoCompactThresholdTiers::default(),
         permission_handle: None,
         worktree_type: crate::util::config::WorktreeType::Linked,
-        image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+        image_description_model: None,
         workspace_ops: workspace::WorkspaceOps::for_test(),
         parent_agent_name: None,
         parent_mcp_configs: vec![],

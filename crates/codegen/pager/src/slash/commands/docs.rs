@@ -213,6 +213,7 @@ mod tests {
             behavior_mode: tools::types::SessionMode::Default,
             deep_research_available: false,
             goal_available: false,
+            current_goal_objective: None,
             auto_permission_available: false,
             current_permission: "ask",
             cwd,

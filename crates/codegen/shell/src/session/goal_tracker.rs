@@ -153,6 +153,7 @@ pub enum GoalClassifierVerdict {
 #[serde(rename_all = "snake_case")]
 pub enum GoalEvent {
     GoalCreated,
+    GoalRevised,
     PlanningStarted,
     PlanningCompleted,
     PlanningFailed,
@@ -385,6 +386,10 @@ pub(crate) fn skeptic_scratch_dir(verifier_id: &str, idx: u32) -> PathBuf {
 pub struct GoalOrchestration {
     pub goal_id: String,
     pub objective: String,
+    /// Monotonic definition generation. Async Goal work captures this before
+    /// awaiting and may commit only while it still matches.
+    #[serde(default)]
+    pub definition_revision: u64,
     pub status: GoalStatus,
     pub phase: GoalPhase,
     pub token_budget: Option<i64>,
@@ -904,6 +909,7 @@ impl GoalTracker {
         self.orchestration = Some(GoalOrchestration {
             goal_id,
             objective,
+            definition_revision: 0,
             status: GoalStatus::Active,
             phase: GoalPhase::Executing,
             token_budget,
@@ -955,6 +961,66 @@ impl GoalTracker {
         });
         self.active_since = Some(Instant::now());
         self.record_event(GoalEvent::GoalCreated, None);
+    }
+
+    /// Revise the current non-terminal goal without replacing its execution.
+    ///
+    /// Goal identity, elapsed time, token accounting, scratch ownership, and
+    /// pause state are preserved. An omitted budget stays unchanged. Evidence
+    /// produced for the previous definition is invalidated, and the monotonic
+    /// revision makes concurrent async results stale at their commit boundary.
+    pub fn revise_goal(&mut self, objective: String, token_budget: Option<i64>) -> bool {
+        let Some(o) = self.orchestration.as_mut() else {
+            return false;
+        };
+        if o.status == GoalStatus::Complete {
+            return false;
+        }
+
+        let objective_changed = o.objective != objective;
+        let budget_changed = token_budget.is_some_and(|budget| o.token_budget != Some(budget));
+        if !objective_changed && !budget_changed {
+            return true;
+        }
+
+        o.objective = objective;
+        o.definition_revision = o.definition_revision.saturating_add(1);
+        if let Some(budget) = token_budget {
+            o.token_budget = Some(budget);
+            o.budget_limit_reported = false;
+            if o.status == GoalStatus::BudgetLimited {
+                o.status = GoalStatus::UserPaused;
+            }
+        }
+
+        o.classifier_runs_attempted = 0;
+        o.rounds_since_verify = 0;
+        o.last_classifier_verdict = None;
+        o.last_classifier_details_path = None;
+        o.last_classifier_at = None;
+        o.last_classifier_gaps = None;
+        o.first_final_response = None;
+        o.skeptic0_session_id = None;
+        o.skeptic_model_assignment.clear();
+        o.verifying_in_flight = false;
+        o.planning_in_flight = false;
+        o.reset_classifier_stall_fields();
+        o.reset_strategist_fields();
+        o.reset_evaluator_blocker_fields();
+        self.record_event(GoalEvent::GoalRevised, None);
+        true
+    }
+
+    pub fn definition_key(&self) -> Option<(String, u64)> {
+        self.orchestration
+            .as_ref()
+            .map(|o| (o.goal_id.clone(), o.definition_revision))
+    }
+
+    pub fn definition_is_current(&self, goal_id: &str, revision: u64) -> bool {
+        self.orchestration
+            .as_ref()
+            .is_some_and(|o| o.goal_id == goal_id && o.definition_revision == revision)
     }
 
     pub fn set_phase(&mut self, phase: GoalPhase) {
@@ -1345,6 +1411,7 @@ pub(crate) fn make_base_orchestration() -> GoalOrchestration {
     GoalOrchestration {
         goal_id: "g-test".into(),
         objective: "test objective".into(),
+        definition_revision: 0,
         status: GoalStatus::Active,
         phase: GoalPhase::Idle,
         token_budget: None,
@@ -1430,6 +1497,40 @@ mod tests {
         assert_eq!(t.objective(), Some("Build a widget"));
         assert_eq!(t.token_budget(), Some(100_000));
         assert!(t.active_since.is_some());
+    }
+
+    #[test]
+    fn revise_goal_preserves_execution_and_invalidates_old_evidence() {
+        let mut t = make_tracker();
+        t.create_goal(
+            "g1".into(),
+            "old objective".into(),
+            Some(1000),
+            10,
+            "now".into(),
+            None,
+        );
+        {
+            let o = t.snapshot_mut().unwrap();
+            o.elapsed_ms = 42;
+            o.last_classifier_verdict = Some(GoalClassifierVerdict::NotAchieved);
+            o.last_classifier_gaps = Some("old gap".into());
+        }
+
+        assert!(t.revise_goal("new objective".into(), None));
+        let o = t.snapshot().unwrap();
+        assert_eq!(o.goal_id, "g1");
+        assert_eq!(o.objective, "new objective");
+        assert_eq!(o.definition_revision, 1);
+        assert_eq!(o.status, GoalStatus::Active);
+        assert_eq!(o.token_budget, Some(1000), "omitted budget is preserved");
+        assert!(o.elapsed_ms >= 42);
+        assert!(o.last_classifier_verdict.is_none());
+        assert!(o.last_classifier_gaps.is_none());
+        assert!(matches!(
+            o.history.last().map(|entry| &entry.event),
+            Some(GoalEvent::GoalRevised)
+        ));
     }
 
     #[test]

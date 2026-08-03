@@ -739,6 +739,57 @@ async fn interject_queued_prompt_stale_version_noop() {
         .await;
 }
 
+/// A queued user correction sent now during an active Goal is removed from
+/// the authoritative queue and injected into the current turn. It neither
+/// requests cancellation nor remains available to run as a later prompt.
+#[tokio::test]
+async fn interject_queued_prompt_during_active_goal_injects_without_cancel() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (queued, queued_rx) = user_item_with_rx("p1", "A");
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.pending_inputs.push_back(queued);
+                state.running_task = Some(running_task_stub("running"));
+            }
+            actor.goal_tracker.lock().create_goal(
+                "g1".into(),
+                "active goal".into(),
+                None,
+                0,
+                "now".into(),
+                None,
+            );
+
+            let cancel = actor
+                .handle_interject_queued_prompt("p1", 0, None, None)
+                .await;
+
+            assert!(!cancel, "a goal correction must not cancel its turn");
+            let state = actor.state.lock().await;
+            assert!(
+                actor.build_queue_wire(&state).is_empty(),
+                "the injected row must leave the queue"
+            );
+            drop(state);
+            let pending = actor.pending_interjections.drain_all();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].text, "text for p1");
+            assert!(pending[0].attachments.is_empty());
+            assert!(matches!(
+                queued_rx.await.expect("injected prompt RPC must resolve"),
+                Ok(crate::session::commands::PromptTurnOk {
+                    completion_kind: PromptCompletionKind::RemovedFromQueue,
+                    ..
+                })
+            ));
+        })
+        .await;
+}
+
 /// Interject in the cancel gap (turn cleared, next prompt not started) must do nothing: no buffer
 /// into `pending_interjections` (no drain), prompt stays queued to run alone; queue rebroadcasts.
 #[tokio::test]

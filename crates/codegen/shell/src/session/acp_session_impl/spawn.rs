@@ -277,7 +277,7 @@ pub(crate) async fn spawn_session_actor(
     models_manager: crate::agent::models::ModelsManager,
     inherited_permission_handle: Option<workspace::permission::PermissionHandle>,
     api_key_provider: Option<tools::types::SharedApiKeyProvider>,
-    image_description_model: String,
+    image_description_model: Option<String>,
     hook_registry_override: Option<std::sync::Arc<::hooks::discovery::HookRegistry>>,
     workspace_ops: workspace::WorkspaceOps,
     cli_permission_rules: Vec<workspace::permission::types::PermissionRule>,
@@ -1478,7 +1478,7 @@ pub(crate) async fn spawn_session_actor(
         max_turns,
         max_retries: sampler::resolve_max_retries(max_retries),
         pending_interjections: InterjectionBuffer::new(),
-        pending_skill_reminders: Mutex::new(Vec::new()),
+        pending_system_reminders: Mutex::new(Vec::new()),
         idle_flush_timeout: memory_config
             .as_ref()
             .and_then(|mc| mc.flush.idle_timeout_secs)
@@ -2044,7 +2044,7 @@ pub(crate) async fn spawn_session_on_thread(
     models_manager: crate::agent::models::ModelsManager,
     inherited_permission_handle: Option<workspace::permission::PermissionHandle>,
     api_key_provider: Option<tools::types::SharedApiKeyProvider>,
-    image_description_model: String,
+    image_description_model: Option<String>,
     hook_registry_override: Option<std::sync::Arc<::hooks::discovery::HookRegistry>>,
     workspace_ops: workspace::WorkspaceOps,
     cli_permission_rules: Vec<workspace::permission::types::PermissionRule>,

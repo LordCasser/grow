@@ -195,7 +195,7 @@ async fn create_test_actor_with_memory(
         max_retries: 3,
         max_turns: None,
         pending_interjections: InterjectionBuffer::new(),
-        pending_skill_reminders: Mutex::new(Vec::new()),
+        pending_system_reminders: Mutex::new(Vec::new()),
         idle_flush_timeout: memory_config
             .as_ref()
             .and_then(|mc| mc.flush.idle_timeout_secs)
@@ -287,7 +287,7 @@ async fn create_test_actor_with_memory(
         turn_stream_drained: parking_lot::Mutex::new(None),
         sampler_handle: sampler::SamplerHandle::noop(),
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
-        image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+        image_description_model: None,
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace::WorkspaceOps::for_test(),

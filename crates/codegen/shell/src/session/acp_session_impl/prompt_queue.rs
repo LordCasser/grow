@@ -166,10 +166,8 @@ impl SessionActor {
         // unpopped). Auto send-now only if blocked wait + empty held queue.
         let running_front_id = state.running_prompt_id().map(str::to_string);
         let turn_running = running_front_id.is_some();
-        let goal_active = self
-            .tool_context
-            .goal_loop_active_gate
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let goal_active = self.goal_tracker.lock().status()
+            == Some(crate::session::goal_tracker::GoalStatus::Active);
         let blocked_in_wait = self.tool_context.blocking_wait_depth.depth() > 0;
         let held_user_queue = state.pending_inputs.iter().any(|queued| {
             !queued.origin.is_synthetic()
@@ -451,13 +449,13 @@ impl SessionActor {
         self.broadcast_queue_changed(&state);
     }
 
-    /// Atomically interject a queued (not-yet-running) prompt into the running
-    /// turn. In a single state-lock hold the actor removes the
-    /// prompt from `pending_inputs` and pushes its text into
-    /// `pending_interjections`, so the in-flight turn merges it at the next safe
-    /// point (`drain_pending_interjections`) and the prompt can never both
-    /// interject AND later run as its own turn — the race the client-side
-    /// "interject + queue/remove" pair could not avoid.
+    /// Send a queued (not-yet-running) prompt now.
+    ///
+    /// During an active Goal this is a true interjection: in one state-lock
+    /// hold the actor removes the prompt from `pending_inputs` and pushes it to
+    /// `pending_interjections`, so the current goal turn keeps running and the
+    /// prompt can never both interject and later run as its own turn. Outside
+    /// Goal mode it retains the normal cancel-and-promote behavior.
     ///
     /// Mirrors [`handle_remove_queued_prompt`]'s versioned/owner gate and
     /// [`SessionCommand::Interject`]'s broadcast-then-buffer. Benign **no-op**
@@ -466,7 +464,8 @@ impl SessionActor {
     ///   buffering into nothing would strand the text), or
     /// - `id` names the running turn, is already drained/removed, carries a
     ///   stale `expected_version`, or is owned by another client, or
-    /// - the row is not a plain prompt (it would reach the model as prompt text).
+    /// - under an active Goal, the row is not a plain prompt (it cannot safely
+    ///   be represented as a user correction).
     ///
     /// Always re-broadcasts `grow/queue/changed` so every client reconciles
     /// (the row vanishes on success, is unchanged on a no-op).
@@ -483,13 +482,14 @@ impl SessionActor {
         owner: Option<&str>,
         new_text: Option<&str>,
     ) -> bool {
+        // GoalTracker is the semantic authority. Read it before the queue lock
+        // so queue operations never invert the tracker -> state lock order
+        // used by turn orchestration.
+        let goal_active = self.goal_tracker.lock().status()
+            == Some(crate::session::goal_tracker::GoalStatus::Active);
         let mut state = self.state.lock().await;
         let running_front_id = state.running_prompt_id().map(str::to_string);
         let turn_running = running_front_id.is_some();
-        let goal_active = self
-            .tool_context
-            .goal_loop_active_gate
-            .load(std::sync::atomic::Ordering::Relaxed);
         let row_matches = |item: &InputItem| {
             item.queue_meta.as_ref().is_some_and(|m| {
                 m.id == id
@@ -511,34 +511,71 @@ impl SessionActor {
             if let Some(new_text) = new_text.filter(|t| !t.trim().is_empty()) {
                 Self::apply_queued_prompt_edit(&mut item, new_text.to_string(), owner);
             }
-            // Send-now: promote the row to run as the next turn, not an
-            // interjection. Land behind earlier send-now prompts still queued
-            // (FIFO among sends), mirroring `queue_input`.
-            item.send_now = true;
-            let mut insert_at = usize::from(matches!(
-                (state.pending_inputs.front(), running_front_id.as_deref()),
-                (Some(front_item), Some(running)) if front_item.prompt_id == running
-            ));
-            while state
-                .pending_inputs
-                .get(insert_at)
-                .is_some_and(|queued| queued.send_now)
-            {
-                insert_at += 1;
+            let plain_prompt = item
+                .queue_meta
+                .as_ref()
+                .is_some_and(|meta| meta.kind == "prompt")
+                && Self::extract_bash_command(&item.prompt_blocks).is_none()
+                && item.prompt_blocks.iter().all(|block| {
+                    matches!(
+                        block,
+                        acp::ContentBlock::Text(_) | acp::ContentBlock::Image(_)
+                    )
+                });
+            if turn_running && goal_active && plain_prompt {
+                let text = Self::queue_text_from_blocks(&item.prompt_blocks);
+                let attachments = item
+                    .prompt_blocks
+                    .drain(..)
+                    .filter_map(|block| match block {
+                        acp::ContentBlock::Image(image) => Some(image),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let image_count = attachments.len() as u32;
+                Self::respond_removed_prompt(item.respond_to);
+                self.pending_interjections.push(PendingInterjection {
+                    text: text.clone(),
+                    attachments,
+                });
+                self.broadcast_interjection(&text, Some(id));
+                self.events
+                    .emit(crate::session::events::Event::Interjected {
+                        source: crate::session::events::InterjectionSource::Queue,
+                        image_count,
+                        redirect_kind: crate::session::events::RedirectKind::Interjection,
+                    });
+                tracing::info!(queued_id = %id, "send-now: injected queued prompt into active goal");
+            } else {
+                // Normal send-now: promote the row to run as the next turn.
+                // Land behind earlier send-now prompts still queued (FIFO
+                // among sends), mirroring `queue_input`.
+                item.send_now = true;
+                let mut insert_at = usize::from(matches!(
+                    (state.pending_inputs.front(), running_front_id.as_deref()),
+                    (Some(front_item), Some(running)) if front_item.prompt_id == running
+                ));
+                while state
+                    .pending_inputs
+                    .get(insert_at)
+                    .is_some_and(|queued| queued.send_now)
+                {
+                    insert_at += 1;
+                }
+                state.pending_inputs.insert(insert_at, item);
+                cancel_running_turn = turn_running && !goal_active;
+                ::diagnostics::unified_log::info(
+                    "shell.prompt.send_now_cancels_turn",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "prompt_id": id,
+                        "from_queue_row": true,
+                        "cancels_turn": cancel_running_turn,
+                        "goal_active": goal_active,
+                    })),
+                );
+                tracing::info!(queued_id = %id, cancel_running_turn, "send-now: promoted queued prompt to run next");
             }
-            state.pending_inputs.insert(insert_at, item);
-            cancel_running_turn = turn_running && !goal_active;
-            ::diagnostics::unified_log::info(
-                "shell.prompt.send_now_cancels_turn",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({
-                    "prompt_id": id,
-                    "from_queue_row": true,
-                    "cancels_turn": cancel_running_turn,
-                    "goal_active": goal_active,
-                })),
-            );
-            tracing::info!(queued_id = %id, cancel_running_turn, "send-now: promoted queued prompt to run next");
         } else if let Some(new_text) = new_text
             && !new_text.trim().is_empty()
             && !running_is_row

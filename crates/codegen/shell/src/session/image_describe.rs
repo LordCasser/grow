@@ -1,23 +1,8 @@
-//! Image processing helpers for sessions with image inputs.
+//! Auxiliary vision-model support for images returned by `read_file`.
 //!
-//! That harness uses a separate vision endpoint to describe images
-//! rather than passing them inline. When a user message contains image
-//! content blocks, the session calls a vision-capable Grow model
-//! (defaults to the agent's current model unless explicitly overridden)
-//! to produce text descriptions that are injected into the turn. Per-image
-//! requests are deduplicated via [`ImageDescribeCache`] (same bytes +
-//! same describe prompt fingerprint).
-//!
-//! This module owns the **pure** building blocks: the deterministic
-//! conversation outline assembled from prior real user messages, the
-//! describe-prompt template, and the final user-message envelope sent to
-//! the coding model. The sampling round-trip and the wiring inside
-//! `handle_prompt` live in `acp_session.rs`.
-//!
-//! The pipeline is wired into `SessionActor::handle_prompt` so a user
-//! turn that contains image blocks is routed through the vision model
-//! before being pushed onto chat state. If the describe call fails the
-//! whole turn fails -- we never silently drop the images.
+//! The auxiliary route is opt-in. When no image-description model is
+//! configured, the session keeps the original multimodal tool-result path and
+//! lets the active model inspect the image directly.
 use crate::sampling::{Client as OaiCompatClient, ConversationRequest};
 use agent_client_protocol::ImageContent;
 use base64::Engine as _;
@@ -27,8 +12,7 @@ use sampling_types::conversation::{ContentPart, ConversationItem, UserItem};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tools::util::truncate::truncate_middle;
-/// Per-entry character cap for the conversation outline sent to the
-/// vision model. Mirrors the compat-harness behavior.
+/// Per-entry character cap for the conversation outline sent to the vision model.
 pub const OUTLINE_PER_ENTRY_CAP: usize = 1_500;
 /// Total character cap for the assembled outline block.
 pub const OUTLINE_TOTAL_CAP: usize = 4_000;
@@ -38,74 +22,12 @@ pub const OUTLINE_MAX_ENTRIES: usize = 5;
 /// describe prompt. Prevents pathological prompts from blowing up the
 /// vision request.
 pub const CURRENT_QUERY_CAP: usize = 12_000;
-/// Maximum number of images that will be captioned per turn. Only the
-/// **last** N images are described; older ones receive
-/// [`SKIPPED_IMAGE_MARKER`]. Default 16.
-pub const IMAGE_DESCRIPTION_PROCESSING_LIMIT: usize = 16;
-/// Placeholder stamped on images that fall outside
-/// [`IMAGE_DESCRIPTION_PROCESSING_LIMIT`].
-pub const SKIPPED_IMAGE_MARKER: &str = "[skipped-due-to-limit]";
-/// Empty twin: no optional template is compiled in, nothing extra to strip.
-const OPTIONAL_CONTEXT_TAGS: &[&str] = &[];
-/// Strip template-specific context tags from text before it reaches the
-/// image-description prompt. Uses attribute-aware matching so tags like
-/// `<always_applied_workspace_rules type="...">` are caught.
-///
-/// Runs **after** `extract_user_query` (which handles the shared tags),
-/// so this only needs to cover the template-specific additions.
-pub fn strip_template_context_tags(text: &str) -> String {
-    let mut result = text.to_string();
-    for tag in OPTIONAL_CONTEXT_TAGS {
-        while let Some(open_start) = result.find(&format!("<{tag}")) {
-            let after_tag = open_start + 1 + tag.len();
-            if after_tag >= result.len() {
-                break;
-            }
-            let next_char = result.as_bytes()[after_tag];
-            if next_char != b'>' && next_char != b' ' && next_char != b'\t' && next_char != b'\n' {
-                break;
-            }
-            let open_end = match result[after_tag..].find('>') {
-                Some(rel) => after_tag + rel + 1,
-                None => break,
-            };
-            let close_tag = format!("</{tag}>");
-            let close_start = match result[open_end..].find(&close_tag) {
-                Some(rel) => open_end + rel,
-                None => break,
-            };
-            let close_end = close_start + close_tag.len();
-            result.replace_range(open_start..close_end, "");
-        }
-    }
-    collapse_newlines(&result)
-}
-/// Collapse runs of 3+ newlines into `\n\n` and trim.
-fn collapse_newlines(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut newline_count = 0u32;
-    for ch in s.chars() {
-        if ch == '\n' {
-            newline_count += 1;
-            if newline_count <= 2 {
-                result.push(ch);
-            }
-        } else {
-            newline_count = 0;
-            result.push(ch);
-        }
-    }
-    result.trim().to_string()
-}
-/// Build the deterministic conversation outline from prior user
-/// messages.
+/// Split conversation context into the current real user query and a bounded
+/// outline of earlier real user messages for a `read_file` describe request.
 ///
 /// Rules:
 /// - Source = `extract_real_user_queries(conversation)` (already filters
 ///   synthetic, auto-continue, and disclaimer turns).
-/// - The caller passes the conversation snapshot **before** pushing the
-///   current turn, so we naturally exclude the latest user request --
-///   that text is rendered separately inside `<user_query>`.
 /// - Keep at most the last [`OUTLINE_MAX_ENTRIES`] real user messages.
 /// - Strip wrapper tags via [`extract_user_query`] (idempotent on already-
 ///   stripped text).
@@ -113,13 +35,12 @@ fn collapse_newlines(s: &str) -> String {
 /// - Join with blank lines and cap the joined string at
 ///   [`OUTLINE_TOTAL_CAP`] characters.
 ///
-/// Returns `None` when no prior user messages exist, so callers can omit
-/// the entire `<conversation_history_outline>` block from the prompt.
-pub fn build_conversation_outline(prior_conversation: &[ConversationItem]) -> Option<String> {
-    let queries = extract_real_user_queries(prior_conversation);
-    if queries.is_empty() {
-        return None;
-    }
+pub fn build_read_context(conversation: &[ConversationItem]) -> (Option<String>, String) {
+    let mut queries = extract_real_user_queries(conversation);
+    let current_query = queries
+        .pop()
+        .map(|query| extract_user_query(&query))
+        .unwrap_or_default();
     let recent: Vec<String> = queries
         .into_iter()
         .rev()
@@ -128,17 +49,17 @@ pub fn build_conversation_outline(prior_conversation: &[ConversationItem]) -> Op
         .into_iter()
         .rev()
         .map(|q| {
-            let stripped = strip_template_context_tags(&extract_user_query(&q));
+            let stripped = extract_user_query(&q);
             truncate_middle(&stripped, OUTLINE_PER_ENTRY_CAP)
         })
         .filter(|s| !s.is_empty())
         .collect();
-    if recent.is_empty() {
-        return None;
-    }
-    let joined = recent.join("\n\n");
-    let capped = truncate_middle(&joined, OUTLINE_TOTAL_CAP);
-    Some(capped)
+    let outline = if recent.is_empty() {
+        None
+    } else {
+        Some(truncate_middle(&recent.join("\n\n"), OUTLINE_TOTAL_CAP))
+    };
+    (outline, current_query)
 }
 /// Render the system/user prompt text shown to the image-description
 /// model. The actual image bytes/URLs are attached as separate content
@@ -147,7 +68,11 @@ pub fn build_conversation_outline(prior_conversation: &[ConversationItem]) -> Op
 /// `current_query` should be the extracted user query text (without
 /// `<user_query>` wrappers); we wrap it here to keep the template owned
 /// in one place.
-pub fn build_describe_prompt(outline: Option<&str>, current_query: &str) -> String {
+pub fn build_describe_prompt(
+    outline: Option<&str>,
+    current_query: &str,
+    source_context: &str,
+) -> String {
     let capped_query = truncate_middle(current_query, CURRENT_QUERY_CAP);
     let mut parts: Vec<String> = Vec::with_capacity(6);
     parts
@@ -173,6 +98,10 @@ pub fn build_describe_prompt(outline: Option<&str>, current_query: &str) -> Stri
             "<conversation_history_outline>\n{outline}\n</conversation_history_outline>\n"
         ));
     }
+    parts.push(format!(
+        "<image_source>\n{}\n</image_source>",
+        scrub_envelope_body(source_context)
+    ));
     parts.push(format!("<user_query>\n{capped_query}\n</user_query>"));
     parts
         .push(
@@ -232,8 +161,8 @@ pub fn scrub_envelope_body(s: &str) -> String {
     }
     out
 }
-/// Build the `<image>...<image_description>...</image>` envelope that
-/// gets prepended to the user message sent to the coding model. The
+/// Build the `<image>...<image_description>...</image>` envelope stored in a
+/// configured auxiliary route's `read_file` tool result. The
 /// `description` is scrubbed via [`scrub_envelope_body`] (preserves
 /// newlines for paragraph structure, strips `<`/`>`/`\r`/`\0`) so a
 /// vision-model output containing a literal `</image_description>` or
@@ -248,7 +177,11 @@ pub fn render_image_description_block(description: &str) -> String {
 /// Stable fingerprint of the text passed to the vision model (outline +
 /// current user query). When this changes, cached descriptions for the
 /// same image bytes are not reused.
-pub fn describe_prompt_fingerprint(outline: Option<&str>, current_query: &str) -> String {
+pub fn describe_prompt_fingerprint(
+    outline: Option<&str>,
+    current_query: &str,
+    source_context: &str,
+) -> String {
     let mut hasher = blake3::Hasher::new();
     if let Some(o) = outline {
         hasher.update(b"outline:");
@@ -257,29 +190,29 @@ pub fn describe_prompt_fingerprint(outline: Option<&str>, current_query: &str) -
     }
     hasher.update(b"query:");
     hasher.update(current_query.as_bytes());
+    hasher.update(b"\nsource:");
+    hasher.update(source_context.as_bytes());
     hasher.finalize().to_hex().to_string()
 }
-/// Raw blake3 digest for binary cache keys; use [`content_fingerprint`]
-/// for log lines and on-disk paths.
+/// Raw blake3 digest for binary cache keys.
 pub fn content_fingerprint_bytes(bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }
-/// Blake3 hex digest of raw image (or other binary) bytes.
-pub fn content_fingerprint(bytes: &[u8]) -> String {
-    blake3::Hash::from_bytes(content_fingerprint_bytes(bytes))
-        .to_hex()
-        .to_string()
+fn content_fingerprint_many(images: &[(Vec<u8>, String)]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for (bytes, mime_type) in images {
+        hasher.update(mime_type.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(bytes);
+        hasher.update(b"\0");
+    }
+    hasher.finalize().to_hex().to_string()
 }
-/// Distinguishes cache namespaces (user attachment vs tool read).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ImageDescribeSource {
-    UserAttachment,
-}
-/// Session-scoped cache for auxiliary image outputs: keyed by source, stable
-/// path label, content hash, and prompt fingerprint.
+/// Session-scoped cache for auxiliary image outputs: keyed by stable path,
+/// image content, and describe-prompt fingerprint.
 #[derive(Debug, Default)]
 pub struct ImageDescribeCache {
-    inner: Mutex<HashMap<(ImageDescribeSource, String, String, String), String>>,
+    inner: Mutex<HashMap<(String, String, String), String>>,
 }
 impl ImageDescribeCache {
     pub fn new() -> Self {
@@ -287,34 +220,37 @@ impl ImageDescribeCache {
             inner: Mutex::new(HashMap::new()),
         }
     }
-    /// Returns a cached description when `(source, path_key, bytes, prompt)`
+    /// Returns a cached description when `(path, bytes, prompt)`
     /// matches a prior successful describe; otherwise calls the vision
     /// model, stores the result, and returns it.
     pub async fn get_or_describe(
         &self,
         client: sampler::SamplingClient,
         model: &str,
-        raw_bytes: &[u8],
-        mime_type: &str,
+        images: &[(Vec<u8>, String)],
         outline: Option<&str>,
         current_query: &str,
-        source: ImageDescribeSource,
+        source_context: &str,
         path_key: &str,
     ) -> Result<String, DescribeError> {
-        let content_fp = content_fingerprint(raw_bytes);
-        let prompt_fp = describe_prompt_fingerprint(outline, current_query);
-        let cache_key = (source, path_key.to_owned(), content_fp, prompt_fp);
+        let content_fp = content_fingerprint_many(images);
+        let prompt_fp = describe_prompt_fingerprint(outline, current_query, source_context);
+        let cache_key = (path_key.to_owned(), content_fp, prompt_fp);
         if let Some(d) = self.inner.lock().get(&cache_key).cloned() {
             return Ok(d);
         }
-        let url = format!(
-            "data:{};base64,{}",
-            mime_type,
-            base64::engine::general_purpose::STANDARD.encode(raw_bytes)
-        );
-        let prompt_text = build_describe_prompt(outline, current_query);
-        let description =
-            describe_user_images(client, model, prompt_text, std::slice::from_ref(&url)).await?;
+        let image_urls: Vec<String> = images
+            .iter()
+            .map(|(bytes, mime_type)| {
+                format!(
+                    "data:{};base64,{}",
+                    mime_type,
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )
+            })
+            .collect();
+        let prompt_text = build_describe_prompt(outline, current_query, source_context);
+        let description = describe_images(client, model, prompt_text, &image_urls).await?;
         self.inner.lock().insert(cache_key, description.clone());
         Ok(description)
     }
@@ -340,29 +276,16 @@ pub fn render_image_files_block(paths: &[String]) -> Option<String> {
     out.push_str("\nThese images can be copied for use in other locations.\n</image_files>");
     Some(out)
 }
-/// Result of persisting one user-supplied image to the session's
-/// `assets/` directory.
-#[derive(Debug, Clone)]
-pub struct PersistedImage {
-    /// Absolute path on disk; surfaced to the coding model in the
-    /// `<image_files>` block.
-    pub path: PathBuf,
-    /// Raw image bytes (decoded from the user attachment). Used for
-    /// session-local describe caching keyed by content + describe context.
-    pub raw_bytes: Vec<u8>,
-    /// MIME type from the original [`ImageContent`].
-    pub mime_type: String,
-}
 /// Persist a batch of normalized images to `<session_dir>/assets/`.
 ///
 /// Each file is written as `image-<uuid>.<ext>` where `<ext>` is
 /// inferred from `mime_type` (falling back to `png`). Returns one
-/// [`PersistedImage`] per input, in input order, so callers can render
-/// the `<image_files>` list deterministically.
+/// path per input, in input order, so callers can render the `<image_files>`
+/// list deterministically.
 pub fn persist_user_images(
     session_dir: &Path,
     images: &[ImageContent],
-) -> std::io::Result<Vec<PersistedImage>> {
+) -> std::io::Result<Vec<PathBuf>> {
     if images.is_empty() {
         return Ok(Vec::new());
     }
@@ -377,12 +300,7 @@ pub fn persist_user_images(
         let filename = format!("image-{}.{ext}", uuid::Uuid::new_v4());
         let path = assets_dir.join(&filename);
         std::fs::write(&path, &bytes)?;
-        let mime_type = img.mime_type.clone();
-        out.push(PersistedImage {
-            path,
-            raw_bytes: bytes,
-            mime_type,
-        });
+        out.push(path);
     }
     Ok(out)
 }
@@ -398,14 +316,13 @@ fn mime_to_extension(mime: &str) -> &'static str {
 }
 /// Errors surfaced by the image describe round-trip.
 ///
-/// Variants are kept distinct so the caller in `acp_session.rs` can branch
+/// Variants are kept distinct so the tool-result caller can branch
 /// — e.g. a [`Self::Sampling`] error is a transport problem that may
 /// resolve on retry, while [`Self::EmptyResponse`] indicates the vision
 /// model returned blank text and any retry will likely repeat the same
-/// outcome. Degradation policy (whether to abort, retry, or emit a
-/// stub `ToolResult` with the raw image bytes inline) is the caller's
-/// responsibility; this module never silently fakes a successful
-/// description.
+/// outcome. The caller owns degradation policy; the configured auxiliary
+/// route surfaces a text failure and never silently falls back to inline image
+/// content or fakes a successful description.
 #[derive(Debug, thiserror::Error)]
 pub enum DescribeError {
     /// The describe sampling call itself failed (transport error, auth
@@ -413,31 +330,20 @@ pub enum DescribeError {
     /// rendered with `{e}` — opaque to this module but useful for the
     /// caller's log line and the model-facing degraded message.
     ///
-    /// Recommended caller behaviour: treat the round-trip as unavailable
-    /// for this turn; fall back to attaching the raw image bytes inline
-    /// when the surface supports it.
     #[error("image describe call failed: {0}")]
     Sampling(String),
     /// The vision model returned blank text after `trim()`. This is a
     /// soft failure (the call itself succeeded) but the description is
     /// unusable.
     ///
-    /// Recommended caller behaviour: treat transcription as unavailable
-    /// for this image; do not retry on the same bytes; surface the
-    /// failure to the coding model as a degraded `ToolResult` (image
-    /// bytes inline if supported, otherwise a text-only "transcription
-    /// unavailable" note) rather than abort the turn.
     #[error("image describe model returned no content")]
     EmptyResponse,
 }
 /// Call the vision model and return its description text.
 ///
-/// `image_urls` should be the cached URLs from
-/// [`persist_user_images`] (`uri` if present on the original
-/// [`ImageContent`], otherwise the `data:<mime>;base64,...` URI). The
-/// caller is responsible for outline + prompt assembly so this stays a
-/// pure transport helper.
-pub async fn describe_user_images(
+/// The caller is responsible for prompt assembly and data URLs so this stays
+/// a pure transport helper.
+pub async fn describe_images(
     client: OaiCompatClient,
     model: &str,
     prompt_text: String,
@@ -481,30 +387,11 @@ pub async fn describe_user_images(
     }
     Ok(trimmed.to_owned())
 }
-/// Compose the final user-message text shown to the coding model when a
-/// turn includes images. The order matches the compat-harness wire format:
-/// `<image>` block(s), `<image_files>` block, then the original
-/// `<user_query>`-wrapped user text.
-pub fn render_image_user_message(
-    description: &str,
-    image_paths: &[String],
-    original_user_message: &str,
-) -> String {
-    let mut parts: Vec<String> = Vec::with_capacity(3);
-    parts.push(render_image_description_block(description));
-    if let Some(files_block) = render_image_files_block(image_paths) {
-        parts.push(files_block);
-    }
-    parts.push(original_user_message.to_owned());
-    parts.join("\n\n")
-}
 /// Persist attachments under `<session_dir>/assets/` and prepend an
 /// `<image_files>` block so the coding model has real on-disk paths for
 /// `Read` / `read_file` (and does not invent cloud paths like
 /// `/home/workdir/attachments/image.png`).
 ///
-/// Used by other harnesses that still pass images inline as
-/// multimodal parts — persistence is independent of vision describe.
 pub fn persist_and_prepend_image_files(
     session_dir: &Path,
     images: &[ImageContent],
@@ -513,7 +400,7 @@ pub fn persist_and_prepend_image_files(
     let persisted = persist_user_images(session_dir, images)?;
     let image_paths: Vec<String> = persisted
         .iter()
-        .map(|p| p.path.to_string_lossy().into_owned())
+        .map(|p| p.to_string_lossy().into_owned())
         .collect();
     Ok(match render_image_files_block(&image_paths) {
         Some(files_block) => format!("{files_block}\n\n{original_user_message}"),
@@ -550,32 +437,37 @@ mod tests {
         })
     }
     #[test]
-    fn outline_empty_when_no_prior_user_messages() {
-        assert!(build_conversation_outline(&[]).is_none());
+    fn read_context_empty_without_user_messages() {
+        assert_eq!(build_read_context(&[]), (None, String::new()));
     }
     #[test]
     fn outline_keeps_last_five_in_order() {
         let convo: Vec<_> = (0..7)
             .map(|i| user(&format!("<user_query>\nq{i}\n</user_query>")))
             .collect();
-        let outline = build_conversation_outline(&convo).unwrap();
+        let (outline, current) = build_read_context(&convo);
+        let outline = outline.unwrap();
         assert!(!outline.contains("q0"));
-        assert!(!outline.contains("q1"));
-        for i in 2..7 {
+        for i in 1..6 {
             assert!(
                 outline.contains(&format!("q{i}")),
                 "missing q{i}: {outline}"
             );
         }
-        let pos2 = outline.find("q2").unwrap();
-        let pos6 = outline.find("q6").unwrap();
-        assert!(pos2 < pos6, "outline must be chronological");
+        assert_eq!(current, "q6");
+        let pos1 = outline.find("q1").unwrap();
+        let pos5 = outline.find("q5").unwrap();
+        assert!(pos1 < pos5, "outline must be chronological");
     }
     #[test]
     fn outline_per_entry_cap_truncates() {
         let big = "x".repeat(OUTLINE_PER_ENTRY_CAP + 200);
-        let convo = vec![user(&format!("<user_query>\n{big}\n</user_query>"))];
-        let outline = build_conversation_outline(&convo).unwrap();
+        let convo = vec![
+            user(&format!("<user_query>\n{big}\n</user_query>")),
+            user("<user_query>\ncurrent\n</user_query>"),
+        ];
+        let (outline, _) = build_read_context(&convo);
+        let outline = outline.unwrap();
         assert!(
             outline.chars().count() <= OUTLINE_PER_ENTRY_CAP,
             "entry not truncated: {} chars",
@@ -585,10 +477,12 @@ mod tests {
     #[test]
     fn outline_total_cap_truncates_joined() {
         let entry = "y".repeat(OUTLINE_PER_ENTRY_CAP);
-        let convo: Vec<_> = (0..OUTLINE_MAX_ENTRIES)
+        let mut convo: Vec<_> = (0..OUTLINE_MAX_ENTRIES)
             .map(|_| user(&format!("<user_query>\n{entry}\n</user_query>")))
             .collect();
-        let outline = build_conversation_outline(&convo).unwrap();
+        convo.push(user("<user_query>\ncurrent\n</user_query>"));
+        let (outline, _) = build_read_context(&convo);
+        let outline = outline.unwrap();
         assert!(
             outline.chars().count() <= OUTLINE_TOTAL_CAP,
             "outline exceeded total cap: {}",
@@ -597,15 +491,21 @@ mod tests {
     }
     #[test]
     fn describe_prompt_includes_outline_when_present() {
-        let prompt = build_describe_prompt(Some("prev1\n\nprev2"), "fix the bug");
+        let prompt = build_describe_prompt(
+            Some("prev1\n\nprev2"),
+            "fix the bug",
+            "Image file: /workspace/error.png",
+        );
         assert!(prompt.contains("<conversation_history_outline>"));
         assert!(prompt.contains("prev1"));
         assert!(prompt.contains("<user_query>\nfix the bug\n</user_query>"));
+        assert!(prompt.contains("<image_source>"));
+        assert!(prompt.contains("/workspace/error.png"));
         assert!(prompt.contains("Please be thorough"));
     }
     #[test]
     fn describe_prompt_omits_outline_when_absent() {
-        let prompt = build_describe_prompt(None, "what is this");
+        let prompt = build_describe_prompt(None, "what is this", "Image file: x.png");
         assert!(!prompt.contains("<conversation_history_outline>"));
         assert!(!prompt.contains("outline of the conversation"));
         assert!(prompt.contains("<user_query>\nwhat is this\n</user_query>"));
@@ -613,7 +513,7 @@ mod tests {
     #[test]
     fn describe_prompt_caps_current_query() {
         let huge = "a".repeat(CURRENT_QUERY_CAP + 500);
-        let prompt = build_describe_prompt(None, &huge);
+        let prompt = build_describe_prompt(None, &huge, "Image file: x.png");
         let start = prompt.find("<user_query>\n").unwrap() + "<user_query>\n".len();
         let end = prompt.find("\n</user_query>").unwrap();
         let query_slice = &prompt[start..end];
@@ -621,6 +521,99 @@ mod tests {
             query_slice.chars().count() <= CURRENT_QUERY_CAP,
             "current query not capped: {} chars",
             query_slice.chars().count()
+        );
+    }
+    #[tokio::test]
+    async fn configured_describer_sends_all_pdf_page_images() {
+        use axum::Router;
+        use axum::response::sse::{Event, Sse};
+        use axum::routing::post;
+        use futures_util::stream;
+        use sampling_types::ApiBackend;
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        let (request_tx, request_rx) = oneshot::channel::<serde_json::Value>();
+        let request_tx = std::sync::Arc::new(parking_lot::Mutex::new(Some(request_tx)));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let request_tx = request_tx.clone();
+                move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let request_tx = request_tx.clone();
+                    async move {
+                        if let Some(tx) = request_tx.lock().take() {
+                            let _ = tx.send(body);
+                        }
+                        let events = vec![
+                            Event::default().data(
+                                serde_json::json!({
+                                    "id": "chatcmpl-image",
+                                    "object": "chat.completion.chunk",
+                                    "created": 1,
+                                    "model": "vision-model",
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {"role": "assistant", "content": "Pages contain scanned invoices."},
+                                        "finish_reason": "stop"
+                                    }]
+                                })
+                                .to_string(),
+                            ),
+                            Event::default().data("[DONE]"),
+                        ];
+                        Sse::new(stream::iter(
+                            events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                        ))
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = sampler::SamplingClient::new(sampler::SamplerConfig {
+            api_key: Some("test-key".to_owned()),
+            base_url: format!("http://{addr}/v1"),
+            model: "vision-model".to_owned(),
+            api_backend: ApiBackend::ChatCompletions,
+            ..Default::default()
+        })
+        .unwrap();
+        let cache = ImageDescribeCache::new();
+        let images = vec![
+            (vec![1, 2, 3], "image/png".to_owned()),
+            (vec![4, 5, 6], "image/jpeg".to_owned()),
+        ];
+
+        let description = cache
+            .get_or_describe(
+                client,
+                "vision-model",
+                &images,
+                Some("Earlier request"),
+                "Extract invoice totals",
+                "Rendered PDF pages 2 and 3",
+                "/workspace/scan.pdf",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(description, "Pages contain scanned invoices.");
+        let request = request_rx.await.unwrap();
+        let content = request["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(
+            content
+                .iter()
+                .filter(|part| part["type"] == "image_url")
+                .count(),
+            2
+        );
+        assert!(
+            content[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("PDF pages 2 and 3")
         );
     }
     #[test]
@@ -721,32 +714,6 @@ mod tests {
         assert!(block.contains("\n\nSecond paragraph with more detail."));
     }
     #[test]
-    fn render_image_user_message_orders_blocks() {
-        let rendered = render_image_user_message(
-            "A red square.",
-            &["/ws/assets/a.png".to_owned()],
-            "<user_query>\nwhats this\n</user_query>",
-        );
-        let img_pos = rendered.find("<image>").unwrap();
-        let files_pos = rendered.find("<image_files>").unwrap();
-        let query_pos = rendered.find("<user_query>").unwrap();
-        assert!(
-            img_pos < files_pos && files_pos < query_pos,
-            "expected <image> < <image_files> < <user_query> ordering, got: {rendered}"
-        );
-    }
-    #[test]
-    fn render_image_user_message_omits_files_block_when_empty() {
-        let rendered = render_image_user_message(
-            "A red square.",
-            &[],
-            "<user_query>\nwhats this\n</user_query>",
-        );
-        assert!(!rendered.contains("<image_files>"));
-        assert!(rendered.contains("<image>"));
-        assert!(rendered.contains("<user_query>"));
-    }
-    #[test]
     fn persist_user_images_writes_files_and_returns_paths() {
         use base64::Engine as _;
         let dir = tempfile::tempdir().unwrap();
@@ -764,14 +731,14 @@ mod tests {
         let persisted = persist_user_images(dir.path(), &[img]).unwrap();
         assert_eq!(persisted.len(), 1);
         let p = &persisted[0];
-        assert!(p.path.starts_with(dir.path().join("assets")));
-        assert!(p.path.extension().and_then(|s| s.to_str()) == Some("png"));
-        assert!(p.path.exists(), "image file should be written to disk");
-        let on_disk = std::fs::read(&p.path).unwrap();
+        assert!(p.starts_with(dir.path().join("assets")));
+        assert!(p.extension().and_then(|s| s.to_str()) == Some("png"));
+        assert!(p.exists(), "image file should be written to disk");
+        let on_disk = std::fs::read(p).unwrap();
         assert_eq!(on_disk, png_bytes);
     }
     #[test]
-    fn persist_user_images_uses_uri_passthrough_when_present() {
+    fn persist_user_images_ignores_remote_uri_when_inline_bytes_exist() {
         use base64::Engine as _;
         let dir = tempfile::tempdir().unwrap();
         let img = ImageContent::new(
@@ -780,8 +747,7 @@ mod tests {
         )
         .uri(Some("https://example.com/x.png".to_owned()));
         let persisted = persist_user_images(dir.path(), &[img]).unwrap();
-        assert_eq!(persisted[0].raw_bytes, vec![0u8]);
-        assert_eq!(persisted[0].mime_type, "image/png");
+        assert_eq!(std::fs::read(&persisted[0]).unwrap(), vec![0u8]);
     }
     #[test]
     fn persist_user_images_empty_input_returns_empty() {
@@ -789,15 +755,5 @@ mod tests {
         let out = persist_user_images(dir.path(), &[]).unwrap();
         assert!(out.is_empty());
         assert!(!dir.path().join("assets").exists());
-    }
-    #[test]
-    fn strip_template_tags_preserves_non_matching_content() {
-        let input = "just a normal user query with no tags";
-        assert_eq!(strip_template_context_tags(input), input);
-    }
-    #[test]
-    fn strip_template_tags_does_not_false_match_prefix() {
-        let input = "<rules_extra>keep me</rules_extra>";
-        assert_eq!(strip_template_context_tags(input), input);
     }
 }

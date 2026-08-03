@@ -192,7 +192,7 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                         max_retries: 3,
                         max_turns: None,
                         pending_interjections: InterjectionBuffer::new(),
-                        pending_skill_reminders: Mutex::new(Vec::new()),
+                        pending_system_reminders: Mutex::new(Vec::new()),
                         idle_flush_timeout: None,
                         dream_check_timeout: None,
                         last_idle_flush_conversation_len: std::sync::atomic::AtomicUsize::new(0),
@@ -277,7 +277,7 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                         turn_stream_drained: parking_lot::Mutex::new(None),
                         sampler_handle: sampler::SamplerHandle::noop(),
                         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
-                        image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+                        image_description_model: None,
                         image_describe_cache: Arc::new(
                             crate::session::image_describe::ImageDescribeCache::new(),
                         ),
@@ -632,7 +632,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 max_retries: 3,
                 max_turns: None,
                 pending_interjections: InterjectionBuffer::new(),
-                pending_skill_reminders: Mutex::new(Vec::new()),
+                pending_system_reminders: Mutex::new(Vec::new()),
                 idle_flush_timeout: None,
                 dream_check_timeout: None,
                 last_idle_flush_conversation_len: std::sync::atomic::AtomicUsize::new(0),
@@ -717,7 +717,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 sampler_handle: sampler::SamplerHandle::noop(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
-                image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+                image_description_model: None,
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),
                 ),
@@ -879,7 +879,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 max_retries: 3,
                 max_turns: None,
                 pending_interjections: InterjectionBuffer::new(),
-                pending_skill_reminders: Mutex::new(Vec::new()),
+                pending_system_reminders: Mutex::new(Vec::new()),
                 idle_flush_timeout: None,
                 dream_check_timeout: None,
                 last_idle_flush_conversation_len: std::sync::atomic::AtomicUsize::new(0),
@@ -964,7 +964,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 sampler_handle: sampler::SamplerHandle::noop(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
-                image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+                image_description_model: None,
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),
                 ),
@@ -2060,7 +2060,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 max_retries: 3,
                 max_turns: None,
                 pending_interjections: InterjectionBuffer::new(),
-                pending_skill_reminders: Mutex::new(Vec::new()),
+                pending_system_reminders: Mutex::new(Vec::new()),
                 idle_flush_timeout: None,
                 dream_check_timeout: None,
                 last_idle_flush_conversation_len: std::sync::atomic::AtomicUsize::new(0),
@@ -2145,7 +2145,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 sampler_handle: sampler_handle.clone(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
-                image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+                image_description_model: None,
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),
                 ),
@@ -2236,7 +2236,7 @@ async fn skill_reminder_deferred_while_turn_running_flushed_when_idle() {
                 .expect("current_prompt_id mutex poisoned") = Some("p1".to_string());
             actor.apply_skill_update_effects(effects()).await;
             assert_eq!(
-                actor.pending_skill_reminders.lock().len(),
+                actor.pending_system_reminders.lock().len(),
                 1,
                 "reminder must be stashed while a turn is running"
             );
@@ -2249,9 +2249,9 @@ async fn skill_reminder_deferred_while_turn_running_flushed_when_idle() {
                 .current_prompt_id
                 .lock()
                 .expect("current_prompt_id mutex poisoned") = None;
-            actor.flush_pending_skill_reminders().await;
+            actor.flush_pending_system_reminders().await;
             assert!(
-                actor.pending_skill_reminders.lock().is_empty(),
+                actor.pending_system_reminders.lock().is_empty(),
                 "flush must drain the stash once the turn is over"
             );
             assert_eq!(
@@ -2261,7 +2261,7 @@ async fn skill_reminder_deferred_while_turn_running_flushed_when_idle() {
             );
             actor.apply_skill_update_effects(effects()).await;
             assert!(
-                actor.pending_skill_reminders.lock().is_empty(),
+                actor.pending_system_reminders.lock().is_empty(),
                 "idle apply must push immediately, not stash"
             );
             assert_eq!(

@@ -619,8 +619,8 @@ pub struct ModelsConfig {
     pub default_reasoning_effort: Option<ReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_summary: Option<String>,
-    /// Vision model used to transcribe user-supplied
-    /// images via a separate endpoint.
+    /// Optional vision model used to describe images returned by `read_file`.
+    /// When unset, the active model receives those images directly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_description: Option<String>,
     /// Model pin for next-prompt suggestions (tab-autocomplete ghost text).
@@ -1111,7 +1111,7 @@ pub struct Config {
     /// Session title model. `None` means use the active model.
     #[serde(skip)]
     pub session_summary_model: Option<String>,
-    /// Image description model. `None` means use the active model.
+    /// Image description model. `None` keeps image reads on the active model.
     #[serde(skip)]
     pub image_description_model: Option<String>,
     /// Next-prompt suggestion model pin (`env > [models] prompt_suggestion >
@@ -3679,35 +3679,6 @@ pub fn stamp_session_local_sampler_fields(
     }
     cfg.max_retries = max_retries;
 }
-/// Finalize image-describe model + sampler config for user attachments.
-/// Shared so the aux resolve happy path and the `None` fallback cannot
-/// diverge between those entry points.
-///
-/// On aux resolve `Some`, stamp session-local fields onto the helper config.
-/// On `None`, fall back to the active session model and full config (not
-/// forcing `image_description_model` onto the agent endpoint, which 404s on
-/// BYOK / non-proxy routes for internal slugs like `grow-build`).
-pub fn finalize_image_describe_sampler_config(
-    resolved_aux: Option<SamplerConfig>,
-    active_session_config: &SamplerConfig,
-    max_retries: Option<u32>,
-) -> (String, SamplerConfig) {
-    match resolved_aux {
-        Some(mut describe_cfg) => {
-            stamp_session_local_sampler_fields(
-                &mut describe_cfg,
-                active_session_config,
-                max_retries,
-            );
-            let model = describe_cfg.model.clone();
-            (model, describe_cfg)
-        }
-        None => {
-            let model = active_session_config.model.clone();
-            (model, active_session_config.clone())
-        }
-    }
-}
 pub fn sampling_config_for_model(
     model: &ModelEntry,
     credentials: ResolvedCredentials,
@@ -4049,32 +4020,6 @@ reasoning_effort = "low"
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
         assert_eq!(cfg.toolset.bash.timeout_secs, Some(30.5));
-    }
-    #[test]
-    fn finalize_image_describe_sampler_none_uses_active_session_model_not_forced_helper() {
-        let active = SamplerConfig {
-            model: "composer-session-model".into(),
-            ..Default::default()
-        };
-        let (model, cfg) = finalize_image_describe_sampler_config(None, &active, Some(3));
-        assert_eq!(model, "composer-session-model");
-        assert_eq!(cfg.model, "composer-session-model");
-        assert_ne!(cfg.model, "grow-build");
-    }
-    #[test]
-    fn finalize_image_describe_sampler_some_stamps_session_fields() {
-        let active = SamplerConfig {
-            model: "composer-session-model".into(),
-            ..Default::default()
-        };
-        let aux = SamplerConfig {
-            model: "grow-build".into(),
-            ..Default::default()
-        };
-        let (model, cfg) = finalize_image_describe_sampler_config(Some(aux), &active, Some(7));
-        assert_eq!(model, "grow-build");
-        assert_eq!(cfg.model, "grow-build");
-        assert_eq!(cfg.max_retries, Some(7));
     }
     #[test]
     fn resolve_aux_model_honors_grow_build_override() {

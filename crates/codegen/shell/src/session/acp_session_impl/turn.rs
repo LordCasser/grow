@@ -828,9 +828,6 @@ impl SessionActor {
         self.inject_workflow_status_reminder().await;
         let user_message = if user_images.is_empty() {
             user_message
-        } else if self.is_cursor_harness() {
-            self.transcribe_user_images(user_message, &user_images)
-                .await?
         } else {
             let session_dir =
                 crate::session::persistence::session_dir(&crate::session::info::Info {
@@ -869,6 +866,9 @@ impl SessionActor {
                 super::super::PromptOrigin::GoalSummary => {
                     ConversationItem::goal_summary(user_message)
                 }
+                super::super::PromptOrigin::GoalControl => {
+                    ConversationItem::system_reminder(user_message)
+                }
                 super::super::PromptOrigin::GoalClassifierNudge => {
                     ConversationItem::goal_classifier_nudge(user_message)
                 }
@@ -889,13 +889,11 @@ impl SessionActor {
                 }
             };
             user_chat.set_prompt_index(current_prompt_index);
-            if !self.is_cursor_harness() {
-                for image in &user_images {
-                    user_chat.add_image(pick_user_image_url(image));
-                }
-                for image in &extra_images {
-                    user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
-                }
+            for image in &user_images {
+                user_chat.add_image(pick_user_image_url(image));
+            }
+            for image in &extra_images {
+                user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
             }
             if let Some(ack) = persist_ack {
                 if self
@@ -2074,7 +2072,7 @@ impl SessionActor {
                 self.push_system_reminder(&reminder);
             }
             self.drain_pending_interjections().await;
-            self.flush_pending_skill_reminders().await;
+            self.flush_pending_system_reminders().await;
             self.inject_pending_monitor_events().await;
             let memory_reminder = self.first_turn_memory_reminder().await;
             if memory_reminder.is_some() {

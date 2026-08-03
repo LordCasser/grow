@@ -271,6 +271,7 @@ pub struct SlashController {
     behavior_mode: tools::types::SessionMode,
     deep_research_available: bool,
     goal_available: bool,
+    current_goal_objective: Option<String>,
     auto_permission_available: bool,
     current_permission: String,
     /// Effective render mode of this process (immutable after startup — it only
@@ -319,6 +320,7 @@ impl SlashController {
             behavior_mode: tools::types::SessionMode::Default,
             deep_research_available: false,
             goal_available: false,
+            current_goal_objective: None,
             auto_permission_available: false,
             current_permission: "ask".to_string(),
             screen_mode: crate::app::ScreenMode::Fullscreen,
@@ -372,6 +374,7 @@ impl SlashController {
         behavior_mode: tools::types::SessionMode,
         deep_research_available: bool,
         goal_available: bool,
+        current_goal_objective: Option<String>,
         auto_permission_available: bool,
         current_permission: impl Into<String>,
     ) {
@@ -379,6 +382,7 @@ impl SlashController {
         self.behavior_mode = behavior_mode;
         self.deep_research_available = deep_research_available;
         self.goal_available = goal_available;
+        self.current_goal_objective = current_goal_objective;
         self.auto_permission_available = auto_permission_available;
         self.current_permission = current_permission.into();
     }
@@ -400,6 +404,7 @@ impl SlashController {
             behavior_mode: self.behavior_mode,
             deep_research_available: self.deep_research_available,
             goal_available: self.goal_available,
+            current_goal_objective: self.current_goal_objective.as_deref(),
             auto_permission_available: self.auto_permission_available,
             current_permission: &self.current_permission,
             cwd: &self.cwd,

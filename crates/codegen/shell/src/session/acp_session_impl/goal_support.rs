@@ -1061,14 +1061,17 @@ impl SessionActor {
             tracing::debug!("goal planner: no subagent coordinator channel; skipping");
             return;
         };
-        let plan_file = {
+        let (plan_file, definition_key) = {
             let tracker = self.goal_tracker.lock();
             match tracker.snapshot() {
                 Some(o) if o.plan_file.is_some() => {
                     tracing::debug!("goal planner: plan already present; skipping");
                     return;
                 }
-                Some(_) => tracker.plan_path(),
+                Some(o) => (
+                    tracker.plan_path(),
+                    (o.goal_id.clone(), o.definition_revision),
+                ),
                 None => return,
             }
         };
@@ -1144,6 +1147,15 @@ impl SessionActor {
             },
         )
         .await;
+
+        if !self
+            .goal_tracker
+            .lock()
+            .definition_is_current(&definition_key.0, definition_key.1)
+        {
+            tracing::info!("goal planner: discarded stale result after goal revision");
+            return;
+        }
 
         match outcome {
             crate::session::goal_planner::GoalPlannerOutcome::Planned { plan_file, .. } => {
@@ -1221,8 +1233,15 @@ impl SessionActor {
         // The claim granted the cap bonus up front; every exit that delivers
         // no restructure (early return, FailOpen, future dropped by a turn
         // cancel) must give it back.
-        let mut bonus_guard = TrackerDropGuard::new(&self.goal_tracker, |t| {
-            t.revoke_strategist_cap_bonus();
+        let Some(definition_key) = self.goal_tracker.lock().definition_key() else {
+            return;
+        };
+        let guard_goal_id = definition_key.0.clone();
+        let guard_revision = definition_key.1;
+        let mut bonus_guard = TrackerDropGuard::new(&self.goal_tracker, move |t| {
+            if t.definition_is_current(&guard_goal_id, guard_revision) {
+                t.revoke_strategist_cap_bonus();
+            }
         });
         let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {
             tracing::debug!("goal strategist: no subagent coordinator channel; skipping");
@@ -1308,6 +1327,16 @@ impl SessionActor {
         )
         .await;
 
+        if !self
+            .goal_tracker
+            .lock()
+            .definition_is_current(&definition_key.0, definition_key.1)
+        {
+            tracing::info!("goal strategist: discarded stale result after goal revision");
+            bonus_guard.disarm();
+            return;
+        }
+
         // Fail-OPEN: persist on success; any other exit leaves `bonus_guard`
         // armed (the runner already emitted diagnostics + warning).
         if let crate::session::goal_strategist::GoalStrategistOutcome::Advised {
@@ -1343,7 +1372,7 @@ impl SessionActor {
         };
 
         // Snapshot inputs under one scoped lock, dropped before the awaits.
-        let (objective, plan_file, details_file) = {
+        let (objective, plan_file, details_file, definition_key) = {
             let tracker = self.goal_tracker.lock();
             let Some(o) = tracker.snapshot() else {
                 return;
@@ -1352,6 +1381,7 @@ impl SessionActor {
                 o.objective.clone(),
                 tracker.plan_path(),
                 o.last_classifier_details_path.clone(),
+                (o.goal_id.clone(), o.definition_revision),
             )
         };
 
@@ -1395,6 +1425,15 @@ impl SessionActor {
             },
         )
         .await;
+
+        if !self
+            .goal_tracker
+            .lock()
+            .definition_is_current(&definition_key.0, definition_key.1)
+        {
+            tracing::info!("goal summarizer: discarded stale result after goal revision");
+            return;
+        }
 
         // Fail-OPEN: surface the summary on success; any other outcome already
         // emitted diagnostics and is skipped. The chunk persists via

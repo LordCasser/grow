@@ -207,6 +207,7 @@ mod tests {
             behavior_mode: tools::types::SessionMode::Default,
             deep_research_available: true,
             goal_available: true,
+            current_goal_objective: None,
             auto_permission_available: false,
             current_permission: "ask",
             cwd: std::path::Path::new("."),

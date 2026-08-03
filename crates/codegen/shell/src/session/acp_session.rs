@@ -490,10 +490,10 @@ pub(crate) struct SessionActor {
     /// Pushed by `SessionCommand::Interject` handler, drained at safe
     /// points in `process_conversation_turn`. Internally synchronized.
     pub(crate) pending_interjections: InterjectionBuffer<acp::ImageContent>,
-    /// Skill-announcement reminders that arrived while a turn was running,
-    /// flushed at the same safe points as `pending_interjections` plus on
-    /// cancel/idle.
-    pub(crate) pending_skill_reminders: Mutex<Vec<ConversationItem>>,
+    /// Hidden system reminders that arrived while a turn was running (skill
+    /// announcements and Goal control-plane revisions). Flushed at the same
+    /// safe points as `pending_interjections` plus on cancel/idle.
+    pub(crate) pending_system_reminders: Mutex<Vec<ConversationItem>>,
     /// Idle flush timeout: `None` = disabled, `Some(duration)` = flush after inactivity.
     pub(crate) idle_flush_timeout: Option<std::time::Duration>,
     /// Periodic dream check interval: `None` = disabled.
@@ -777,9 +777,9 @@ pub(crate) struct SessionActor {
     /// See [`crate::session::agent_rebuild`] for the canonical-construction
     /// invariant.
     pub(crate) rebuild_spec: Arc<crate::session::agent_rebuild::AgentRebuildSpec>,
-    /// Configured vision model ID for auxiliary image processing. Empty means
-    /// inherit the active session sampler, including after a model switch.
-    pub(crate) image_description_model: String,
+    /// Explicitly configured vision model for `read_file` image/PDF results.
+    /// `None` leaves those images on the active session model path.
+    pub(crate) image_description_model: Option<String>,
     /// Cache auxiliary image outputs by content and prompt fingerprint.
     pub(crate) image_describe_cache: Arc<crate::session::image_describe::ImageDescribeCache>,
     /// Per-subagent token state keyed by `subagent_id`; sums into
@@ -1357,6 +1357,9 @@ mod prompt_mode_transition_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/prompt_queue_actor_tests.rs"]
 mod prompt_queue_actor_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/read_file_image_description_tests.rs"]
+mod read_file_image_description_tests;
 /// Regression coverage for the per-turn `record_token_usage` path.
 #[cfg(test)]
 #[path = "acp_session_tests/record_response_token_usage_tests.rs"]

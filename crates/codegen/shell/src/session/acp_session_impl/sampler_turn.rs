@@ -390,8 +390,10 @@ impl SessionActor {
         );
     }
     /// Resolve a standalone aux-model `SamplerConfig` from the configured
-    /// provider catalog. `None` (including an empty model ID) means the caller
-    /// inherits the active session sampler.
+    /// provider catalog. `None` (including an empty model ID) leaves fallback
+    /// policy to the caller: optional classifiers may inherit the active
+    /// sampler, while explicitly configured image description must fail
+    /// visibly instead of switching models.
     pub(super) async fn resolve_aux_sampler_config(
         &self,
         slug: &str,

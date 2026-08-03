@@ -401,7 +401,7 @@ impl SessionActor {
             }
         }
         self.drain_pending_interjections().await;
-        self.flush_pending_skill_reminders().await;
+        self.flush_pending_system_reminders().await;
         if let Some(final_result) = final_result {
             return Ok(final_result);
         }
@@ -2211,6 +2211,48 @@ impl SessionActor {
                 had_commit_in_session: false,
             });
     }
+
+    async fn describe_read_file_images(
+        &self,
+        configured_model: &str,
+        path: &str,
+        images: Vec<(Vec<u8>, String)>,
+        source_context: String,
+    ) -> Result<String, String> {
+        let mut sampler_config = self
+            .resolve_aux_sampler_config(configured_model)
+            .await
+            .ok_or_else(|| {
+                format!(
+                    "configured image description model `{configured_model}` could not be resolved"
+                )
+            })?;
+        let active_session_config = self.reconstruct_full_config().await;
+        crate::agent::config::stamp_session_local_sampler_fields(
+            &mut sampler_config,
+            &active_session_config,
+            Some(self.max_retries),
+        );
+        let model = sampler_config.model.clone();
+        let client = sampler::SamplingClient::new(sampler_config)
+            .map_err(|e| format!("failed to build image description client: {e}"))?;
+        let conversation = self.chat_state_handle.get_conversation().await;
+        let (outline, current_query) =
+            crate::session::image_describe::build_read_context(&conversation);
+        self.image_describe_cache
+            .get_or_describe(
+                client,
+                &model,
+                &images,
+                outline.as_deref(),
+                &current_query,
+                &source_context,
+                path,
+            )
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     pub(super) async fn handle_bridge_tool_success(
         &self,
         tool_call_id: &acp::ToolCallId,
@@ -2297,8 +2339,7 @@ impl SessionActor {
             self.send_update(acp::SessionUpdate::Plan(acp_plan), None)
                 .await;
         }
-        #[allow(unused_mut)]
-        let mut prompt_text = if concatenated_json_count > 0 && !self.is_cursor_harness() {
+        let mut prompt_text = if concatenated_json_count > 0 {
             let remaining = concatenated_json_count - 1;
             format!(
                 "{}\n\n<system-reminder>\nIMPORTANT: Your tool call contained {} concatenated JSON \
@@ -2317,12 +2358,11 @@ impl SessionActor {
             result.prompt_text
         };
         let mut inline_images: Vec<ContentPart> = Vec::new();
-        let extraction = if !self.is_cursor_harness()
-            && !matches!(
-                result.output,
-                ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(_))
-                    | ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(_))
-            ) {
+        let extraction = if !matches!(
+            result.output,
+            ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(_))
+                | ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(_))
+        ) {
             tools::util::base64_images::extract_base64_images(prompt_text)
         } else {
             tools::util::base64_images::ExtractionResult {
@@ -2332,15 +2372,12 @@ impl SessionActor {
         };
         let mut extracted_images = extraction.images;
         let prompt_text = extraction.text;
-        if !self.is_cursor_harness()
-            && let ToolsToolOutput::ReadFile(ReadFileOutput::FileContent(ref fc)) = result.output
-        {
+        if let ToolsToolOutput::ReadFile(ReadFileOutput::FileContent(ref fc)) = result.output {
             extracted_images.extend(fc.extracted_images.iter().cloned());
         }
         let mut prompt_text = maybe_rewrite(path_rewriter.as_ref(), prompt_text);
-        if !self.is_cursor_harness()
-            && let ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(ref image_content)) =
-                result.output
+        if let ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(ref image_content)) =
+            result.output
         {
             let path = tool_parsed_args
                 .get("target_file")
@@ -2360,36 +2397,113 @@ impl SessionActor {
                     );
                 }
                 InlineAttachVerdict::Attach => {
-                    let url = format!(
-                        "data:{};base64,{}",
-                        image_content.mime_type, image_content.data
-                    );
-                    inline_images.push(ContentPart::Image {
-                        url: std::sync::Arc::<str>::from(url),
-                    });
-                    prompt_text = format!("Read image file: {path}");
+                    if let Some(configured_model) = self.image_description_model.as_deref() {
+                        use base64::Engine as _;
+                        let described = base64::engine::general_purpose::STANDARD
+                            .decode(&image_content.data)
+                            .map_err(|e| format!("invalid image payload: {e}"))
+                            .map(|bytes| (bytes, image_content.mime_type.clone()));
+                        prompt_text = match described {
+                            Ok(image) => match self
+                                .describe_read_file_images(
+                                    configured_model,
+                                    path,
+                                    vec![image],
+                                    format!("Image file: {path}"),
+                                )
+                                .await
+                            {
+                                Ok(description) => format!(
+                                    "Read image file: {path}\n\n{}",
+                                    crate::session::image_describe::render_image_description_block(
+                                        &description
+                                    )
+                                ),
+                                Err(e) => {
+                                    format!("[Configured image description failed for {path}: {e}]")
+                                }
+                            },
+                            Err(e) => {
+                                format!("[Configured image description failed for {path}: {e}]")
+                            }
+                        };
+                    } else {
+                        let url = format!(
+                            "data:{};base64,{}",
+                            image_content.mime_type, image_content.data
+                        );
+                        inline_images.push(ContentPart::Image {
+                            url: std::sync::Arc::<str>::from(url),
+                        });
+                        prompt_text = format!("Read image file: {path}");
+                    }
                 }
             }
         }
-        if !self.is_cursor_harness()
-            && let ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(ref pdf)) = result.output
-        {
-            for page in &pdf.pages {
-                let url = format!("data:{};base64,{}", page.mime_type, page.data);
-                inline_images.push(ContentPart::Image {
-                    url: std::sync::Arc::<str>::from(url),
-                });
-            }
+        if let ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(ref pdf)) = result.output {
             let path = tool_parsed_args
                 .get("target_file")
                 .or_else(|| tool_parsed_args.get("path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            prompt_text = format!(
-                "Read PDF file: {path} ({} pages rendered, {} total)",
-                pdf.pages.len(),
-                pdf.total_pages,
-            );
+            if let Some(configured_model) = self.image_description_model.as_deref() {
+                use base64::Engine as _;
+                let images: Result<Vec<_>, _> = pdf
+                    .pages
+                    .iter()
+                    .map(|page| {
+                        base64::engine::general_purpose::STANDARD
+                            .decode(&page.data)
+                            .map(|bytes| (bytes, page.mime_type.clone()))
+                    })
+                    .collect();
+                let page_numbers = pdf
+                    .pages
+                    .iter()
+                    .map(|page| page.page_number.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                prompt_text = match images {
+                    Ok(images) => match self
+                        .describe_read_file_images(
+                            configured_model,
+                            path,
+                            images,
+                            format!(
+                                "Rendered PDF pages from {path}, in attachment order. Page numbers: {page_numbers}."
+                            ),
+                        )
+                        .await
+                    {
+                        Ok(description) => format!(
+                            "Read PDF file: {path} ({} pages rendered, {} total)\n\n{}",
+                            pdf.pages.len(),
+                            pdf.total_pages,
+                            crate::session::image_describe::render_image_description_block(
+                                &description
+                            )
+                        ),
+                        Err(e) => format!(
+                            "[Configured image description failed for PDF {path}: {e}]"
+                        ),
+                    },
+                    Err(e) => format!(
+                        "[Configured image description failed for PDF {path}: invalid page image payload: {e}]"
+                    ),
+                };
+            } else {
+                for page in &pdf.pages {
+                    let url = format!("data:{};base64,{}", page.mime_type, page.data);
+                    inline_images.push(ContentPart::Image {
+                        url: std::sync::Arc::<str>::from(url),
+                    });
+                }
+                prompt_text = format!(
+                    "Read PDF file: {path} ({} pages rendered, {} total)",
+                    pdf.pages.len(),
+                    pdf.total_pages,
+                );
+            }
         }
         let tool_chat = if inline_images.is_empty() {
             ConversationItem::tool_result(call_id.to_string(), prompt_text)
@@ -2414,12 +2528,8 @@ impl SessionActor {
                 .into_iter()
                 .map(|img| agent_client_protocol::ImageContent::new(img.data, img.mime_type))
                 .collect();
-            let is_cursor_for_tool_result = self.is_cursor_harness();
-            let mut norm_result = crate::session::image_normalize::normalize_images(
-                acp_images,
-                is_cursor_for_tool_result,
-            )
-            .await;
+            let mut norm_result =
+                crate::session::image_normalize::normalize_images(acp_images, false).await;
             if !norm_result.re_encode_fallbacks.is_empty() {
                 tracing::warn!(
                     session_id = %self.session_info.id,
@@ -2429,7 +2539,7 @@ impl SessionActor {
             }
             if let Some((notice, notes)) = crate::session::image_normalize::dropped_to_envelope(
                 std::mem::take(&mut norm_result.dropped),
-                is_cursor_for_tool_result,
+                false,
             ) {
                 deferred_followups.push(ConversationItem::user(notice));
                 self.send_grow_notification(GrowSessionUpdate::ImageDropped { notes })

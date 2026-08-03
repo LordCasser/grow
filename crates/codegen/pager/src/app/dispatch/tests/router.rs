@@ -830,7 +830,7 @@ fn acp_bootstrap_command_appears_in_autocomplete() {
     );
 }
 #[test]
-fn acp_bootstrap_command_uses_turn_path_while_idle() {
+fn non_goal_acp_bootstrap_command_uses_turn_path_while_idle() {
     let mut app = test_app();
     app.bootstrap_acp_commands = vec![acp::AvailableCommand::new(
         "flush".to_string(),
@@ -856,6 +856,36 @@ fn acp_bootstrap_command_uses_turn_path_while_idle() {
 }
 
 #[test]
+fn goal_command_uses_control_plane_while_idle_without_user_echo() {
+    let mut app = test_app();
+    app.bootstrap_acp_commands = vec![acp::AvailableCommand::new(
+        "goal".to_string(),
+        "Manage the active goal".to_string(),
+    )];
+    dispatch(Action::NewSession, &mut app);
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.session_id = Some("sess-1".into());
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.prompt.sync_acp_commands(
+            &agent.session.available_commands,
+            agent.session.available_tools.as_ref(),
+            &agent.session.models,
+        );
+    }
+    let before = app.agents[&id].scrollback.len();
+
+    let effects = dispatch(Action::SendPrompt("/goal budget 4096".into()), &mut app);
+
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ExecuteSlashCommand { command, .. }] if command == "/goal budget 4096"
+    ));
+    assert_eq!(app.agents[&id].scrollback.len(), before);
+    assert_eq!(app.agents[&id].session.queue_len(), 0);
+}
+
+#[test]
 fn acp_bootstrap_command_uses_control_plane_while_running() {
     let mut app = test_app();
     app.bootstrap_acp_commands = vec![acp::AvailableCommand::new(
@@ -874,6 +904,7 @@ fn acp_bootstrap_command_uses_control_plane_while_running() {
         );
     }
     let _ = dispatch(Action::SendPrompt("working".into()), &mut app);
+    let before = app.agents[&id].scrollback.len();
 
     let effects = dispatch(Action::SendPrompt("/goal status".into()), &mut app);
     assert!(matches!(
@@ -884,6 +915,11 @@ fn acp_bootstrap_command_uses_control_plane_while_running() {
             ..
         }] if session_id.0.as_ref() == "sess-1" && command == "/goal status"
     ));
+    assert_eq!(
+        app.agents[&id].scrollback.len(),
+        before,
+        "control commands render only their response log"
+    );
     assert_eq!(app.agents[&id].session.queue_len(), 0);
 }
 #[test]
