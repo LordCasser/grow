@@ -41,15 +41,10 @@ pub(crate) const LAZINESS_MIN_USER_TURNS: usize = 5;
 /// back-and-forth to interpret a one-word reply.
 pub(crate) const LAZINESS_MIN_ASSISTANT_TURNS: usize = 5;
 
-/// Output cap on the classifier's response. Tight because the schema
-/// is one short JSON object.
-pub(crate) const LAZINESS_MAX_OUTPUT_TOKENS: u32 = 150;
-
 /// Wall-clock cap on the classifier's sampler call. Past this we emit
 /// `LAZINESS_ABORT_TIMEOUT` and drop the request via the
 /// `SamplerHandle::submit_and_collect` RAII guard. Chosen as a coarse
-/// upper bound — the prompt is small and `reasoning_effort: None`, so
-/// in practice the call completes well under 10s; the budget exists
+/// upper bound; the budget exists
 /// to surface stuck calls in diagnostics rather than silently hang.
 /// User input arriving during the call is observed within ~100ms via
 /// `LAZINESS_ABORT_POLL_INTERVAL_MS` and short-circuits this cap, so

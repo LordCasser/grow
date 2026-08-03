@@ -2659,20 +2659,6 @@ pub fn find_model_by_id<'a>(
         .get(model_id)
         .or_else(|| models.values().find(|m| m.model == model_id))
 }
-/// Whether the EFFECTIVE Auto-mode classifier model supports reasoning effort:
-/// the model actually routed to (`aux_model` when the aux sampler resolved) else
-/// the session model the worker falls back to. Not-found-in-catalog ⇒ `false`
-/// (conservative; also covers the Tier-2 synthetic proxy entry). Drives the
-/// built-in `low` effort default.
-pub fn effective_classifier_supports_re(
-    aux_model: Option<&str>,
-    session_model: &str,
-    models: &IndexMap<String, ModelEntry>,
-) -> bool {
-    find_model_by_id(models, aux_model.unwrap_or(session_model))
-        .map(|e| e.info().supports_reasoning_effort)
-        .unwrap_or(false)
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEntryConfig {
     /// Stable unique identifier for this catalog entry. When present,
@@ -3080,8 +3066,8 @@ impl ModelInfo {
         }
     }
     /// Derive the legacy effort gate and an explicitly marked model default
-    /// from `reasoning_efforts`. Broader fallbacks (global, then lowest offered)
-    /// are resolved later by the catalog so a model-level default always wins.
+    /// from `reasoning_efforts`. A configured global fallback is resolved later
+    /// by the catalog so a model-level default always wins.
     /// The empty-list path leaves both legacy fields untouched.
     fn derive_reasoning_effort_fields(&mut self) {
         if self.reasoning_efforts.is_empty() {
@@ -3311,8 +3297,8 @@ pub struct WorkflowsConfig {
 /// the two stay 1:1. All fields are plain scalars/enums, so they deserialize
 /// cleanly from both formats (no custom tolerant deser needed). Unset fields stay
 /// `None` here; the wire fn applies the built-in defaults once auto mode is
-/// enabled (current model, `low` effort if the model supports it, `just_command`
-/// prompt). Precedence: local config > remote > those built-in defaults.
+/// enabled (current model, upstream reasoning default, `full` prompt).
+/// Precedence: local config > remote > those built-in defaults.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutoModeConfig {
@@ -3321,7 +3307,7 @@ pub struct AutoModeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     /// How much context the classifier prompt includes. `None` ⇒ the wire fn's
-    /// built-in default (`just_command`).
+    /// built-in default (`full`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_type: Option<workspace::permission::ClassifierPromptType>,
     /// Routing slug for a dedicated classifier model. `None` ⇒ inherit the
@@ -3332,8 +3318,8 @@ pub struct AutoModeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub classify_timeout_ms: Option<u64>,
     /// Classifier reasoning effort. Applies on BOTH the routed-model path and the
-    /// inherited session-model path; `None` ⇒ the wire fn's built-in default
-    /// (`low` if the effective model supports reasoning effort, else unset).
+    /// inherited session-model path; `None` leaves the field unset so model
+    /// configuration or the upstream service can choose the default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
 }
@@ -4494,31 +4480,6 @@ reasoning_effort = "low"
             env_key: env_key.map(EnvKeys::single),
             auth_provider: None,
         }
-    }
-    /// The effective-model RE-support lookup must use the model ACTUALLY used:
-    /// the resolved aux model when present, else the session model (an
-    /// unresolvable slug ⇒ aux `None` ⇒ session model's capability wins).
-    #[test]
-    fn effective_classifier_supports_re_uses_actually_used_model() {
-        let mut re_model = test_model_entry("v9", "https://x/v1", None, None, None);
-        re_model.info.supports_reasoning_effort = true;
-        let no_re_model = test_model_entry("legacy", "https://x/v1", None, None, None);
-        let mut models = IndexMap::new();
-        models.insert("v9".to_string(), re_model);
-        models.insert("legacy".to_string(), no_re_model);
-        assert!(effective_classifier_supports_re(
-            Some("v9"),
-            "legacy",
-            &models
-        ));
-        assert!(effective_classifier_supports_re(None, "v9", &models));
-        assert!(!effective_classifier_supports_re(None, "legacy", &models));
-        assert!(!effective_classifier_supports_re(
-            Some("typo-slug"),
-            "v9",
-            &models
-        ));
-        assert!(!effective_classifier_supports_re(None, "missing", &models));
     }
     #[test]
     fn sampling_config_uses_model_api_key_over_fallback() {

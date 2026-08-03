@@ -175,9 +175,9 @@ fn merge_auto_mode_config(
 /// Resolve the full Auto-mode config for the rare classifier-wiring read. Loads
 /// the effective `config.toml` ONCE and reads the remote cache ONCE, then merges
 /// field-wise: `[auto_mode]` config > cached remote settings `auto_mode` > `None`
-/// (unset fields stay `None`; the wire fn applies the built-in defaults). No env
-/// layer (mirrors goal's model resolvers); the gate's own env layer is handled by
-/// the disk gate reader.
+/// (unset sampling fields stay `None`; only prompt shape and timeout have local
+/// defaults). No env layer (mirrors goal's model resolvers); the gate's own env
+/// layer is handled by the disk gate reader.
 pub fn resolve_auto_mode_config_from_disk() -> crate::agent::config::AutoModeConfig {
     let effective = crate::config::load_effective_config().ok();
     let config = auto_mode_config_from_toml(effective.as_ref()).unwrap_or_default();
@@ -211,17 +211,13 @@ pub fn auto_mode_classify_timeout(
     std::time::Duration::from_millis(bounded)
 }
 
-/// Apply the built-in Auto-mode classifier defaults to a resolved config (these
-/// take effect once auto mode is enabled): an unset `prompt_type` defaults to
-/// `full` (v9-traffic eval: transcript context cuts the residual block rate
-/// ~1/3 and lets explicit user authorization satisfy the prompt's
-/// confirmation clause); an unset `reasoning_effort` defaults to `low` ONLY
-/// when the effective model supports reasoning effort (else stays `None` —
-/// provider default). Explicit config/remote values always win. Returns the
-/// `(prompt_type, reasoning_effort)` the classifier wiring should use.
+/// Apply the built-in Auto-mode prompt default to a resolved config. An unset
+/// `prompt_type` defaults to `full` (v9-traffic eval: transcript context cuts
+/// the residual block rate ~1/3 and lets explicit user authorization satisfy
+/// the prompt's confirmation clause). Sampling preferences remain unset unless
+/// explicitly configured so the upstream model can choose its own defaults.
 pub fn auto_mode_classifier_defaults(
     cfg: &crate::agent::config::AutoModeConfig,
-    effective_supports_reasoning_effort: bool,
 ) -> (
     workspace::permission::ClassifierPromptType,
     Option<sampling_types::ReasoningEffort>,
@@ -229,10 +225,7 @@ pub fn auto_mode_classifier_defaults(
     let prompt_type = cfg
         .prompt_type
         .unwrap_or(workspace::permission::ClassifierPromptType::Full);
-    let reasoning_effort = cfg.reasoning_effort.or_else(|| {
-        effective_supports_reasoning_effort.then_some(sampling_types::ReasoningEffort::Low)
-    });
-    (prompt_type, reasoning_effort)
+    (prompt_type, cfg.reasoning_effort)
 }
 
 #[cfg(test)]
@@ -500,21 +493,17 @@ mod auto_permission_mode_gate_tests {
         use crate::agent::config::AutoModeConfig;
         use sampling_types::ReasoningEffort;
         use workspace::permission::ClassifierPromptType;
-        // Unset + RE-supporting effective model ⇒ full (transcript) + low.
-        let (pt, eff) = auto_mode_classifier_defaults(&AutoModeConfig::default(), true);
-        assert_eq!(pt, ClassifierPromptType::Full);
-        assert_eq!(eff, Some(ReasoningEffort::Low));
-        // Unset + non-RE model ⇒ full + None (no effort override).
-        let (pt, eff) = auto_mode_classifier_defaults(&AutoModeConfig::default(), false);
+        // Unset sampling preferences stay unset for the upstream model.
+        let (pt, eff) = auto_mode_classifier_defaults(&AutoModeConfig::default());
         assert_eq!(pt, ClassifierPromptType::Full);
         assert_eq!(eff, None);
-        // Explicit values win over the defaults, even on a RE-supporting model.
+        // Explicit values remain configurable.
         let cfg = AutoModeConfig {
             prompt_type: Some(ClassifierPromptType::JustCommand),
             reasoning_effort: Some(ReasoningEffort::High),
             ..AutoModeConfig::default()
         };
-        let (pt, eff) = auto_mode_classifier_defaults(&cfg, true);
+        let (pt, eff) = auto_mode_classifier_defaults(&cfg);
         assert_eq!(pt, ClassifierPromptType::JustCommand);
         assert_eq!(eff, Some(ReasoningEffort::High));
     }

@@ -23,10 +23,10 @@ use serde::{Deserialize, Serialize};
 use crate::session::{
     CollectedTodoGateInput, DebugDecision, LAZINESS_CLASSIFIER_PROMPT,
     LAZINESS_CLASSIFIER_TIMEOUT_MS, LAZINESS_CONTEXT_ITEM_LIMIT, LAZINESS_DEFAULT_MIN_CONFIDENCE,
-    LAZINESS_INCLUDE_REASONING, LAZINESS_MAX_OUTPUT_TOKENS, LAZINESS_MIN_ASSISTANT_TURNS,
-    LAZINESS_MIN_USER_TURNS, LAZINESS_USER_PREAMBLE, TodoGateDecision, TodoGateReason,
-    classify_debug_decision, evaluate_todo_gate, flatten_transcript_for_classifier,
-    format_runtime_state_line, laziness_window_start, parse_classifier_output,
+    LAZINESS_INCLUDE_REASONING, LAZINESS_MIN_ASSISTANT_TURNS, LAZINESS_MIN_USER_TURNS,
+    LAZINESS_USER_PREAMBLE, TodoGateDecision, TodoGateReason, classify_debug_decision,
+    evaluate_todo_gate, flatten_transcript_for_classifier, format_runtime_state_line,
+    laziness_window_start, parse_classifier_output,
 };
 use crate::tools::todo::{TodoItem, TodoPriority, TodoState, TodoStatus};
 
@@ -550,8 +550,7 @@ impl ClassifierClient for SamplerClassifierClient {
 
 /// Build the two-item `[System, User]` classifier request. Matches
 /// `maybe_fire_laziness_check` exactly: same prompt, same wrapper
-/// text ([`LAZINESS_USER_PREAMBLE`]), same `temperature: 0.0`, same
-/// `reasoning_effort: None`.
+/// text ([`LAZINESS_USER_PREAMBLE`]) and same omitted sampling preferences.
 ///
 /// `classifier_backing_task_count` is the *Layer-3* count (terminal
 /// tasks only — no subagents); see [`BackingCounts`] and F1.
@@ -590,8 +589,6 @@ pub fn build_classifier_request(
         tools: vec![],
         tool_choice: None,
         model: Some(model_id.to_owned()),
-        temperature: Some(0.0),
-        max_output_tokens: Some(LAZINESS_MAX_OUTPUT_TOKENS),
         reasoning_effort: None,
         ..ConversationRequest::default()
     }
@@ -1037,7 +1034,6 @@ async fn build_sampler_client(
         api_key: Some(resolved),
         base_url,
         model,
-        output_limit: Some(LAZINESS_MAX_OUTPUT_TOKENS),
         ..sampler::SamplerConfig::default()
     };
     sampler::SamplingClient::new(config).map_err(|e| anyhow!("build SamplingClient: {e}"))
@@ -1781,8 +1777,8 @@ mod tests {
         assert!(user_text.ends_with("=== END TRANSCRIPT ===\n"));
 
         assert_eq!(req.model.as_deref(), Some("fidelity-model"));
-        assert_eq!(req.temperature, Some(0.0));
-        assert_eq!(req.max_output_tokens, Some(LAZINESS_MAX_OUTPUT_TOKENS));
+        assert!(req.temperature.is_none());
+        assert!(req.max_output_tokens.is_none());
         assert!(req.reasoning_effort.is_none());
         assert!(req.tools.is_empty());
         assert!(req.tool_choice.is_none());

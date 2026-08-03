@@ -302,16 +302,8 @@ impl SessionActor {
             Some(slug) => self.resolve_auto_classifier_sampler(slug).await,
             None => None,
         };
-        let models = self.models_manager.models();
-        let effective_supports_re = crate::agent::config::effective_classifier_supports_re(
-            aux_classifier_sampler
-                .as_ref()
-                .map(|(_, model)| model.as_str()),
-            &session_model,
-            &models,
-        );
         let (prompt_type, classifier_reasoning_effort) =
-            crate::util::config::auto_mode_classifier_defaults(&auto_cfg, effective_supports_re);
+            crate::util::config::auto_mode_classifier_defaults(&auto_cfg);
         let classify_timeout = crate::util::config::auto_mode_classify_timeout(&auto_cfg);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(
             Vec<workspace::permission::ClassifierMessage>,

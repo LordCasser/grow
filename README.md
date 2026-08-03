@@ -11,7 +11,7 @@ Grow 自己的边界。
 Grow 不是 xAI 官方产品，也不会内置 Grok 模型、推理端点或产品凭据。所有模型都由用户通过
 BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 
-当前源码版本为 `1.1.2`。完整配置参考 [config.example.toml](config.example.toml)，分主题文档见
+当前源码版本为 `1.1.3`。完整配置参考 [config.example.toml](config.example.toml)，分主题文档见
 [Grow User Guide](crates/codegen/pager/docs/user-guide/README.md)。
 
 ## Fork 之后改了什么
@@ -29,26 +29,18 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 | 数据与网络 | 删除遥测上传、计费订阅、远程会话同步、托管搜索、远程公告和媒体生成等产品服务链。模型请求只访问当前 Provider。 |
 | 分发 | GitHub Release 是唯一官方二进制渠道；覆盖 macOS、GNU/musl Linux 与 Windows 的 x86_64/arm64、Linux riscv64 和 OHOS arm64。除 OHOS 外，产物内嵌固定版本 `rg`。 |
 
-### 1.1.2 重点
+### 1.1.3 重点
 
-- Goal 执行中继续接受普通输入：Enter 进入 shell 权威 FIFO 队列，不再要求先点击 Stop。
-- Goal 执行中的 Send now 改为真正的 mid-turn interjection：shell 在同一个状态锁内将消息从
-  权威队列移入注入缓冲，在下一个安全边界交给当前 turn；它不会中断 Goal，也不会随后重复执行。
-- 斜杠输入与模型提示词彻底分流。Goal 命令始终通过独立控制面执行，只显示响应日志；`budget`、
-  `status`、`resume` 和 `set` 都不会取消当前 turn，只有显式 `/goal pause` 会中断执行。活跃 Goal
-  必须先 pause 才能 clear。
-- `/goal set` 原位修订当前非终态 Goal，保留 Goal 身份、执行状态和资源统计，并用单调 revision
-  隔离旧的异步规划与验证结果；输入 `/goal set` 后按 Tab 可补全当前目标以便编辑。命令会立即把
-  右下角 Behavior 同步为 Goal，但 planning 始终在隐藏 turn 中运行，不会阻塞 actor mailbox。
-- 通过 `Ctrl+X`、`B` 选择 Goal 后，首条普通文本按 `/goal set` 处理。pause、budget 限制、目标
-  修订和自动 back-off 都保留 Goal Behavior；只有 `/goal clear` 或 verifier 确认完成后自动回到
-  Normal。
-- 未知斜杠命令现在直接报错，不会降级成用户提示词发送给模型。
-- `read_file` 的图片和 PDF 页面拥有明确的模型路由：未配置 `[models].image_description` 时保留
-  主模型多模态内容；显式配置后由该辅助模型生成文字描述，失败会明确显示且不会静默换回主模型。
-- 官方 Release workflow 构建并验证 10 个目标，包括 OHOS arm64；完整资产齐全后才公开 Release。
+- `read_file` 读取图片或渲染后的扫描型 PDF 页面时，可以通过
+  `[models].image_description` 路由到独立视觉模型；未配置时仍由当前主模型直接读取。
+- 图片描述、会话标题、压缩、分类器、记忆重写和命令补全不再写死 `temperature` 或输出 token
+  上限。请求优先使用显式模型配置；配置未提供时省略参数，由 BYOK 上游服务决定。
+- 模型目录不再为 reasoning 模型猜测最低 effort，Auto 分类器也不再默认注入 `low`。显式配置、
+  模型声明的默认值和 session 已保存值仍然有效。
+- Auto 分类器支持独立配置 `classifier_model`、`reasoning_effort`、prompt 范围和超时；专用模型
+  无法解析时会回退到当前 session 模型。
 
-版本级变更见 [1.1.2 release notes](crates/codegen/shell/changelogs/1.1.2.md)。
+版本级变更见 [1.1.3 release notes](crates/codegen/shell/changelogs/1.1.3.md)。
 
 ## 安装
 
@@ -59,21 +51,21 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 
 | 平台 | Release 资产 |
 | --- | --- |
-| macOS Apple Silicon | `grow-1.1.2-macos-aarch64.tar.gz` |
-| macOS Intel | `grow-1.1.2-macos-x86_64.tar.gz` |
-| Linux x86_64 | `grow-1.1.2-linux-x86_64.tar.gz` |
-| Linux arm64 | `grow-1.1.2-linux-aarch64.tar.gz` |
-| Linux riscv64 | `grow-1.1.2-linux-riscv64.tar.gz` |
-| Linux x86_64（musl） | `grow-1.1.2-linux-x86_64-musl.tar.gz` |
-| Linux arm64（musl） | `grow-1.1.2-linux-aarch64-musl.tar.gz` |
-| Windows x86_64 | `grow-1.1.2-windows-x86_64.tar.gz` |
-| Windows arm64 | `grow-1.1.2-windows-aarch64.tar.gz` |
-| OpenHarmony arm64 | `grow-1.1.2-ohos-aarch64.tar.gz` |
+| macOS Apple Silicon | `grow-1.1.3-macos-aarch64.tar.gz` |
+| macOS Intel | `grow-1.1.3-macos-x86_64.tar.gz` |
+| Linux x86_64 | `grow-1.1.3-linux-x86_64.tar.gz` |
+| Linux arm64 | `grow-1.1.3-linux-aarch64.tar.gz` |
+| Linux riscv64 | `grow-1.1.3-linux-riscv64.tar.gz` |
+| Linux x86_64（musl） | `grow-1.1.3-linux-x86_64-musl.tar.gz` |
+| Linux arm64（musl） | `grow-1.1.3-linux-aarch64-musl.tar.gz` |
+| Windows x86_64 | `grow-1.1.3-windows-x86_64.tar.gz` |
+| Windows arm64 | `grow-1.1.3-windows-aarch64.tar.gz` |
+| OpenHarmony arm64 | `grow-1.1.3-ohos-aarch64.tar.gz` |
 
 选择对应资产后安装：
 
 ```sh
-GROW_VERSION=1.1.2
+GROW_VERSION=1.1.3
 GROW_ASSET="grow-${GROW_VERSION}-macos-aarch64.tar.gz" # 按上表替换
 
 curl -fLO "https://github.com/LordCasser/grow/releases/download/v${GROW_VERSION}/${GROW_ASSET}"
@@ -86,7 +78,7 @@ grow --version
 Windows PowerShell：
 
 ```powershell
-$GrowVersion = "1.1.2"
+$GrowVersion = "1.1.3"
 $GrowAsset = "grow-$GrowVersion-windows-x86_64.tar.gz" # arm64 时替换资产名
 
 Invoke-WebRequest `
@@ -113,7 +105,6 @@ Grow 不会猜测模型。第一次启动前，在 `~/.grow/config.toml` 中至�
 ```toml
 [models]
 default = "deepseek/deepseek-chat"
-output_limit = 65536
 
 [provider.deepseek]
 api_backend = "chat_completions"
@@ -125,7 +116,6 @@ env_key = "DEEPSEEK_API_KEY"
 [provider.deepseek.models.deepseek-chat]
 name = "DeepSeek Chat"
 context_window = 128000
-output_limit = 65536
 reasoning_efforts = ["high", "max"]
 ```
 
@@ -209,10 +199,12 @@ Permission 规则和 MCP 输出限制，避免项目文件覆盖个人模型、U
 ```toml
 [models]
 default = "provider/model"
-default_reasoning_effort = "high"
-output_limit = 65536
 inference_idle_timeout_secs = 300
 max_retries = 3
+
+# 可选采样覆盖；省略时由模型配置或上游服务决定。
+# default_reasoning_effort = "high"
+# output_limit = 65536
 ```
 
 - `context_window` 用于本地上下文预算和自动压缩。
@@ -365,7 +357,7 @@ cargo build --locked --release -p cli --bin grow --target <target>
 Release workflow 另外构建 `riscv64gc-unknown-linux-gnu`。GNU 资产以 glibc 2.28 为最低基线，
 musl 与 riscv64 通过 `cross` 构建；Windows 使用静态 CRT。
 
-## 1.1.2 发布准备
+## 1.1.3 发布准备
 
 Grow 的可发布应用 crate 继承根 workspace 版本；部分内部 leaf crate 仍保持自己的 `0.1.0`
 版本。tag 必须与 `cli` / workspace 版本一致。
@@ -383,18 +375,18 @@ cargo test --locked -p shell --lib -- --test-threads=4
 cargo test --locked -p pager --lib
 cargo test --locked -p shell --test test_mcp_permission_persistence
 
-GROW_VERSION=1.1.2 GROW_TOOLS_BUNDLE_RG_PATH="$(command -v rg)" \
+GROW_VERSION=1.1.3 GROW_TOOLS_BUNDLE_RG_PATH="$(command -v rg)" \
   cargo build --locked --profile release-dist -p cli --bin grow
 ./target/release-dist/grow --version
 ```
 
 release commit 完成且工作区干净后，可以用 `scripts/act-release.sh validate` 在本地校验 tag/version
-契约；脚本会在缺少 `v1.1.2` 时只创建本地 tag，不会推送。
+契约；脚本会在缺少 `v1.1.3` 时只创建本地 tag，不会推送。
 
 正式发布流程：
 
 1. 提交版本、lockfile、release notes 和文档。
-2. 创建并推送 annotated tag `v1.1.2`，不要提前创建公开 Release。
+2. 创建并推送 annotated tag `v1.1.3`，不要提前创建公开 Release。
 3. [release workflow](.github/workflows/release.yml) 通过 matrix 构建 10 个目标；除 OHOS 外均嵌入
    固定版本 `rg`。
 4. workflow 先创建隐藏 draft Release，验证 10 个 updater 约定资产均已上传后再一次性公开。

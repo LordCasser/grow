@@ -1,5 +1,23 @@
 # Changelog
 
+# 1.1.3 — 2026-08-03
+
+## Behavior Changes
+
+- 内部辅助模型请求遵循 BYOK 采样所有权：未显式配置时不再写死 `temperature`、`top_p`、
+  `max_output_tokens` 或 `reasoning_effort`，由模型配置或上游服务决定。
+- 模型目录不再自动选择最低 reasoning effort；Auto 分类器也不再默认注入 `low`。
+- `read_file` 图片与渲染后的 PDF 页面可由 `[models].image_description` 指定的视觉模型解释；
+  未配置时继续交给主模型直接读取。
+
+## Fixes
+
+- 修复只允许 `temperature = 1` 的模型在图片描述等内部调用中返回 HTTP 400。
+- 扫描型 PDF 的多页图片会在一次辅助视觉请求中完整传递并生成文字工具结果。
+- Auto 分类器可显式配置独立模型与 reasoning effort；省略 effort 时保持上游默认。
+
+完整发布说明见 [changelogs/1.1.3.md](changelogs/1.1.3.md)。
+
 # 1.1.2 — 2026-08-03
 
 ## Behavior Changes

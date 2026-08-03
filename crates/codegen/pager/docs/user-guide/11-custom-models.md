@@ -175,10 +175,10 @@ reasoning_efforts = ["none", "high", "max"]
 `reasoning_effort = "high"` sets a model default but does not by itself define a safe cycle menu.
 Prefer `reasoning_efforts` for BYOK models: it derives support, and `default = true` marks the
 model-specific default. That model default overrides `[models].default_reasoning_effort`. When no
-model default is marked, Grow uses the global default if the model lists it; otherwise it uses the
-lowest listed effort. `Ctrl+X E`, `/effort`, and `/model` all use the same model-declared list. The
-selected value is stored with the session, so reopening a session restores its last effort before
-any configured default is considered.
+model default is marked, Grow uses the global default only if the model lists it; otherwise it
+leaves reasoning effort unset for the upstream service. `Ctrl+X E`, `/effort`, and `/model` all use
+the same model-declared list. The selected value is stored with the session, so reopening a session
+restores its last effort before any configured default is considered.
 
 ## Auxiliary models
 
@@ -189,6 +189,11 @@ routes that content to the configured auxiliary model and stores its textual des
 context; resolution, transport, and empty-response failures are surfaced as text and never silently
 fall back to another model. User message attachments and PDF `format="text"` are independent of
 this setting.
+
+Auxiliary image-description requests do not hard-code `temperature`, `top_p`, or an output token
+limit. Values configured on the selected model still apply; otherwise Grow omits them so the BYOK
+service can select compatible defaults. This avoids provider errors from models that only accept a
+particular temperature or reject unsupported sampling fields.
 
 Prompt suggestions are disabled unless explicitly assigned a configured catalog model:
 

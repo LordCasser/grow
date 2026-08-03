@@ -101,6 +101,22 @@ Deny always wins over allow and over always-approve’s normal pass-through. See
 
 Reduces interactive prompts by checking many tool calls before they run. Routine local work often proceeds; other calls may be blocked or escalated. In non-interactive sessions, a blocked call fails and is reported to the model (for example `Auto mode blocked this action …`). Behavior is the same for `grow -p`, `agent stdio`, and `agent serve`.
 
+The classifier can use a dedicated BYOK model:
+
+```toml
+[auto_mode]
+enabled = true
+classifier_model = "provider/classifier-model" # omit to use the session model
+reasoning_effort = "low"                       # optional
+prompt_type = "full"
+classify_timeout_ms = 30000
+```
+
+The model must exist in the configured provider catalog. If resolution or credentials fail, Auto
+mode falls back to the current session model. Because an explicit `reasoning_effort` is also used on
+that fallback path, leave it unset unless both models accept the value. With no explicit effort,
+Grow uses model configuration when present and otherwise omits the field for the upstream service.
+
 For automation that must run tools without interactive approval, use always-approve (and deny rules if you need hard blocks) rather than auto alone.
 
 ### Disable always-approve (administrators)

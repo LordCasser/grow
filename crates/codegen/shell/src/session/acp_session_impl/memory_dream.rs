@@ -694,8 +694,6 @@ impl SessionActor {
             items,
             tools: vec![],
             model: Some("grow-build".to_owned()),
-            temperature: Some(0.3),
-            max_output_tokens: Some(1024),
             ..Default::default()
         };
 

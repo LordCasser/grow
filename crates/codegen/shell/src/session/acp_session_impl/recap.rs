@@ -517,7 +517,8 @@ impl SessionActor {
     /// Handle an AI-powered shell command suggestion request.
     /// Builds a minimal prompt from the prefix and CWD, calls the sampler
     ///
-    /// with low temperature and small max_tokens, and returns the suggestion.
+    /// and returns the suggestion. Sampling preferences come from the selected
+    /// model configuration or, when unset there, from the upstream service.
     pub(super) async fn handle_ai_suggest(
         &self,
         prefix: &str,
@@ -546,8 +547,6 @@ impl SessionActor {
             items,
             tools: vec![],
             model: Some(model),
-            temperature: Some(0.1),
-            max_output_tokens: Some(50),
             ..Default::default()
         };
 

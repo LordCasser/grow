@@ -110,8 +110,6 @@ Just generate the session_title and nothing else"#,
             "additionalProperties": false
         }),
     }])
-    .with_max_output_tokens(100)
-    .with_temperature(1.0)
     .with_tool_choice(ConversationToolChoice::Function("session_title".to_owned()));
 
     match client.conversation_collect(request).await {

@@ -16,6 +16,9 @@
 - An explicitly configured auxiliary model is never silently replaced by the
   active model. Resolution, transport, or empty-response failures become a
   visible text failure in the tool result and contain no inline image.
+- Image-description requests inherit sampling parameters from the configured
+  model; the image layer must not hard-code temperature or other provider-
+  constrained sampling values.
 - PDF `format="text"` remains ordinary `FileContent`; only rendered-page output
   enters the image route.
 - User message attachments are independent of this setting. They are persisted

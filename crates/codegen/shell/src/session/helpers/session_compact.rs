@@ -443,8 +443,7 @@ pub(crate) async fn generate_session_compact(
             let chat_messages: Vec<ChatRequestMessage> =
                 conversation_to_chat_messages(chat_history);
             let mut message =
-                ChatCompletionRequest::new(sampling_config.model.to_owned(), chat_messages)
-                    .with_temperature(1.0);
+                ChatCompletionRequest::new(sampling_config.model.to_owned(), chat_messages);
             if !tools.is_empty() {
                 message = message
                     .with_tools(
@@ -549,7 +548,6 @@ pub(crate) async fn generate_session_compact(
                 tool_choice: (!tools.is_empty()).then_some(conversation_tool_choice),
                 tools,
                 model: Some(sampling_config.model.to_owned()),
-                temperature: Some(1.0),
                 ..Default::default()
             };
             let stream_result =
@@ -673,7 +671,6 @@ pub(crate) async fn generate_session_compact(
                 items: chat_history,
                 tools,
                 model: Some(sampling_config.model.to_owned()),
-                temperature: Some(1.0),
                 ..Default::default()
             };
             let stream_result =

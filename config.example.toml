@@ -120,13 +120,13 @@ items = ["action-required", "spinner", "activity", "session-name", "grow"]
 
 [models]
 default = "deepseek/deepseek-chat"  # 必须使用 provider/model
-default_reasoning_effort = "high"  # 模型支持该档位时才生效
-output_limit = 65536                # 模型级 output_limit 优先
 max_retries = 3
 inference_idle_timeout_secs = 300   # 两个流式 chunk 之间的超时，不是整轮超时
 stream_tool_calls = true
 
-# 以下采样参数会应用到没有更精确配置的所有模型。
+# 以下采样参数均为可选覆盖；不配置时不会由 Grow 注入固定值。
+# default_reasoning_effort = "high"
+# output_limit = 65536
 # temperature = 0.7
 # top_p = 0.95
 # extra_headers = { "X-Request-Tags" = "team=example" }
@@ -165,7 +165,7 @@ env_http_headers = {}               # { "X-Tenant" = "TENANT_TOKEN_ENV" }
 name = "DeepSeek Chat"
 description = "Primary coding model"
 context_window = 128000             # 仅用于本地上下文管理与自动压缩
-output_limit = 65536
+# output_limit = 65536               # 可选：作为 max_tokens/max_output_tokens 发送
 auto_compact_threshold_percent = 85
 system_prompt_label = "Grow"
 use_concise = false
@@ -194,7 +194,6 @@ stream_tool_calls = true
 value = "high"                     # none|minimal|low|medium|high|xhigh|max
 label = "High"
 description = "Balanced reasoning"
-default = true
 
 [[provider.deepseek.models.deepseek-chat.reasoning_efforts]]
 value = "max"
@@ -211,7 +210,7 @@ base_url = "http://127.0.0.1:11434/v1"
 [provider.local.models.qwen3-coder]
 name = "Qwen3 Coder (local)"
 context_window = 131072
-output_limit = 16384
+# output_limit = 16384
 reasoning_efforts = ["none", "high"] # 简写形式
 
 # Anthropic Messages-compatible Provider 只需更换 backend；它不是厂商绑定。
@@ -592,7 +591,7 @@ enabled = false
 prompt_type = "just_command"         # full|no_user_tool_prefix|bare_instructions|just_command
 classifier_model = "deepseek/deepseek-chat" # 删除本行则继承 session 模型
 classify_timeout_ms = 30000
-reasoning_effort = "low"
+# reasoning_effort = "low"          # 可选；不配置则使用模型配置或上游默认
 
 # -----------------------------------------------------------------------------
 # Worktree 与本地存储维护

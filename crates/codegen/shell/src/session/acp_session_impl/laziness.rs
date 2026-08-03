@@ -546,8 +546,6 @@ impl SessionActor {
             tools: vec![],
             tool_choice: None,
             model: Some(model_id.clone()),
-            temperature: Some(0.0),
-            max_output_tokens: Some(LAZINESS_MAX_OUTPUT_TOKENS),
             // Don't pass `reasoning_effort` — `grow-4.5` (and
             // other tool-flavoured Grow variants) reject the field at
             // the proxy with `400 Bad Request: Model does not support

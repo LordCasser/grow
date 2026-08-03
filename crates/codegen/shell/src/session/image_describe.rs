@@ -363,10 +363,7 @@ pub async fn describe_images(
             });
         }
     }
-    let request = ConversationRequest::from_items(vec![user_item])
-        .with_model(model)
-        .with_temperature(0.2)
-        .with_max_output_tokens(4_096);
+    let request = ConversationRequest::from_items(vec![user_item]).with_model(model);
     const DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
     let response = tokio::time::timeout(DESCRIBE_TIMEOUT, client.conversation_collect(request))
         .await
@@ -601,6 +598,14 @@ mod tests {
 
         assert_eq!(description, "Pages contain scanned invoices.");
         let request = request_rx.await.unwrap();
+        assert!(
+            request.get("temperature").is_none(),
+            "image description must inherit the configured model temperature"
+        );
+        assert!(
+            request.get("max_tokens").is_none(),
+            "image description must inherit the configured model output limit"
+        );
         let content = request["messages"][0]["content"].as_array().unwrap();
         assert_eq!(
             content

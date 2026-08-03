@@ -28,14 +28,15 @@ auto_update = true                     # check for updates on launch
 
 [models]
 default = "example/model-a"           # provider/model used for new sessions
-default_reasoning_effort = "high"     # only used when the model declares this effort
 
-# Defaults applied to every model; a provider model value always wins.
+# Optional defaults applied to every model; a provider model value always wins.
+# Leave sampling fields unset to let the upstream LLM service choose.
 # See "Custom Models" for the per-model overrides and full details.
 extra_headers = { "X-Request-Tags" = "team=example,env=prod" }
-temperature = 0.7
-top_p = 0.95
-output_limit = 8192
+# default_reasoning_effort = "high"
+# temperature = 0.7
+# top_p = 0.95
+# output_limit = 8192
 max_retries = 8
 inference_idle_timeout_secs = 600
 stream_tool_calls = true
@@ -236,7 +237,6 @@ owns shared endpoint/credential options; each model owns its API identifier and 
 ```toml
 [models]
 default = "example/model-a"
-output_limit = 8192
 
 [provider.example]
 api_backend = "responses"             # chat_completions | responses | messages
@@ -250,13 +250,33 @@ env_http_headers = { "X-Tenant" = "TENANT_TOKEN" }
 [provider.example.models.model-a]
 name = "Model A"
 context_window = 128000                # local context management / auto-compact
-output_limit = 16384                   # overrides [models].output_limit
 reasoning_efforts = ["none", "high"]
 ```
 
 There is no built-in model to override. `output_limit` maps to `max_tokens` for Chat Completions and
-Messages, and `max_output_tokens` for Responses. See [Custom Models](11-custom-models.md) and the
+Messages, and `max_output_tokens` for Responses. `temperature`, `top_p`, `output_limit`, and
+`reasoning_effort` are optional: when neither the request nor model configuration supplies one,
+Grow omits it and lets the BYOK service choose. See [Custom Models](11-custom-models.md) and the
 repository's [`config.example.toml`](../../../../../config.example.toml) for complete examples.
+
+### Auto permission classifier
+
+Auto permission mode may use the current session model or a dedicated configured model:
+
+```toml
+[auto_mode]
+enabled = true
+classifier_model = "example/model-a"  # omit to inherit the session model
+reasoning_effort = "low"              # optional explicit override
+prompt_type = "full"                  # full | no_user_tool_prefix | bare_instructions | just_command
+classify_timeout_ms = 30000
+```
+
+`classifier_model` must resolve through the provider catalog. If it cannot be resolved or its
+credentials are unavailable, the classifier falls back to the session model. An explicit
+`reasoning_effort` applies to either route, so omit it unless both possible models accept that
+value. When omitted, Grow uses the selected model's configured default or leaves the field to the
+upstream service.
 
 ### MCP servers
 

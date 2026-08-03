@@ -651,8 +651,8 @@ pub enum SessionCommand {
     },
     /// Request an AI-generated shell command suggestion.
     ///
-    /// The session actor builds a minimal prompt from `prefix` + `cwd`,
-    /// calls the sampler with low temperature / max_tokens, and returns
+    /// The session actor builds a minimal prompt from `prefix` + `cwd`, calls
+    /// the sampler using configured or upstream sampling defaults, and returns
     /// the suggested completion via `respond_to`.
     AISuggest {
         prefix: String,
@@ -673,8 +673,8 @@ pub enum SessionCommand {
         respond_to: oneshot::Sender<Option<String>>,
     },
     /// Rewrite a raw memory note into well-structured markdown via a one-shot
-    /// LLM call. The session uses `prepare_chat_completion()` with
-    /// `grow-build` model, low temperature, and capped output tokens.
+    /// LLM call. The session uses `prepare_chat_completion()` with the
+    /// `grow-build` model and configured or upstream sampling defaults.
     RewriteMemoryNote {
         raw_text: String,
         context_summary: String,
