@@ -16,6 +16,13 @@ enum SpawnBehaviour {
     /// Parse `{PLAN_FILE}` out of the prompt, write `body` there,
     /// then respond `Done`.
     WritePlanThenDone { body: &'static [u8] },
+    /// Like `WritePlanThenDone` but block on `release` before writing —
+    /// keeps the planner spawn in flight until the test releases it (for
+    /// displacement tests).
+    HoldThenDone {
+        release: StdArc<tokio::sync::Notify>,
+        body: &'static [u8],
+    },
     /// Reply success but never write the file.
     NoWriteThenDone,
     /// Reply with subagent runtime failure.
@@ -101,6 +108,23 @@ fn spawn_planner_coordinator_capturing(
                         child_session_id: req.id.clone(),
                         ..Default::default()
                     },
+                    SpawnBehaviour::HoldThenDone { release, body } => {
+                        // Keep the planner spawn in flight until the test
+                        // releases it (displacement window).
+                        release.notified().await;
+                        if let Some(p) = plan_path.as_deref() {
+                            let _ =
+                                std::fs::create_dir_all(std::path::Path::new(p).parent().unwrap());
+                            let _ = std::fs::write(p, body);
+                        }
+                        SubagentResult {
+                            success: true,
+                            output: StdArc::from("Done"),
+                            subagent_id: req.id.clone(),
+                            child_session_id: req.id.clone(),
+                            ..Default::default()
+                        }
+                    }
                     SpawnBehaviour::Runtime { message, cancelled } => SubagentResult {
                         success: false,
                         error: Some(message.clone()),
@@ -1837,6 +1861,91 @@ async fn planner_mutual_exclusion_skips_spawn_while_in_flight() {
                     .plan_file
                     .is_some(),
                 "the second attempt must publish the plan"
+            );
+        })
+        .await;
+}
+
+/// Interruptibility (planning): user steering / send-now displaces the
+/// in-flight planner — the front returns promptly without pausing the goal,
+/// no second planner spawns (single-flight), and the background continuation
+/// publishes the plan once the coordinator finishes.
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn goal_planner_displaced_by_steering() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let release = StdArc::new(tokio::sync::Notify::new());
+            let (tx, spawn_count) = spawn_planner_coordinator(SpawnBehaviour::HoldThenDone {
+                release: StdArc::clone(&release),
+                body: b"# Plan\n- [ ] Do the work\n",
+            });
+            let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
+            create_test_goal(&actor);
+
+            // Start the planner; the coordinator holds the spawn open.
+            let planner = StdArc::clone(&actor);
+            let planner_handle = tokio::task::spawn_local(async move {
+                planner.maybe_run_goal_planner("do X").await;
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+            // Steering (send-now) arrives: the planner must be displaced —
+            // the front returns promptly, the goal stays Active, and no
+            // second planner spawns.
+            actor.pending_interjections.push(
+                crate::session::acp_session::interjection::PendingInterjection {
+                    text: "steer now".into(),
+                    attachments: vec![],
+                },
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(5), planner_handle)
+                .await
+                .expect("a displaced planner must return promptly")
+                .expect("planner task must not panic");
+            assert_eq!(
+                spawn_count.load(SeqOrd::SeqCst),
+                1,
+                "displacement must not spawn a second planner"
+            );
+            assert_eq!(
+                actor.goal_tracker.lock().status(),
+                Some(crate::session::goal_tracker::GoalStatus::Active),
+                "displacement must not pause the goal"
+            );
+            assert!(
+                actor
+                    .goal_planner_in_flight
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                "the background continuation still owns the planner"
+            );
+
+            // Release the coordinator: the background continuation finishes
+            // and publishes the plan.
+            release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if actor
+                        .goal_tracker
+                        .lock()
+                        .snapshot()
+                        .unwrap()
+                        .plan_file
+                        .is_some()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the displaced planner continuation must publish the plan");
+            assert!(
+                !actor
+                    .goal_planner_in_flight
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                "the in-flight flag must be released after the continuation finishes"
             );
         })
         .await;

@@ -1017,3 +1017,75 @@ async fn goal_pause_cancels_turn_and_emits_durable_terminal() {
         })
         .await;
 }
+
+/// Interruptibility (sampling): a user steering / send-now soft-preempts the
+/// Goal implementer's in-flight sampler request — the request is cancelled
+/// and `run_turn_via_sampler` returns `Steered` so the main agent can
+/// immediately process the user message (the turn loop rebuilds the request).
+#[test]
+fn goal_sampling_soft_preempted_by_steering() {
+    let handle = std::thread::Builder::new()
+        .name("goal_sampling_soft_preempted_by_steering".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let local = tokio::task::LocalSet::new();
+                    local
+                        .run_until(async {
+                            let server = test_support::MockInferenceServer::start()
+                                .await
+                                .expect("mock inference server");
+                            let actor = spawn_implementer_actor(&server).await;
+
+                            let request = sampling_types::ConversationRequest {
+                                items: vec![sampling_types::ConversationItem::user(
+                                    "implement this step",
+                                )],
+                                ..Default::default()
+                            };
+                            // Steering (send-now) is queued before the sampler
+                            // request submits: the sampler's `tokio::select!`
+                            // (biased) prefers the pending interjection over
+                            // continuing the request, so it cancels and
+                            // returns `Steered` — the main agent responds to
+                            // the user immediately instead of finishing the
+                            // in-flight sample. (Mid-flight cancel delivery is
+                            // exercised by the sampler-layer tests; this pins
+                            // the steering-preempts-sampling decision.)
+                            actor.pending_interjections.push(
+                                crate::session::acp_session::interjection::PendingInterjection {
+                                    text: "stop and answer me".into(),
+                                    attachments: vec![],
+                                },
+                            );
+                            let sampler = StdArc::clone(&actor);
+                            let sampler_handle = tokio::task::spawn_local(async move {
+                                sampler.run_turn_via_sampler(request).await
+                            });
+
+                            let outcome = tokio::time::timeout(
+                                std::time::Duration::from_secs(10),
+                                sampler_handle,
+                            )
+                            .await
+                            .expect("sampler must return promptly after steering")
+                            .expect("sampler task must not panic")
+                            .expect("run_turn_via_sampler must succeed");
+                            assert!(
+                                matches!(
+                                    outcome,
+                                    crate::session::acp_session::SamplerTurnOutcome::Steered
+                                ),
+                                "steering must soft-preempt the Goal sampler (expected Steered)"
+                            );
+                        })
+                        .await;
+                })
+        })
+        .expect("spawn test thread");
+    handle.join().expect("test thread panicked");
+}
