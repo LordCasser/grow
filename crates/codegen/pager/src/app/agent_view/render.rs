@@ -1913,6 +1913,9 @@ impl AgentView {
                 layout_cfg,
                 Some(layout.scrollback),
                 self.session.state.is_turn_running(),
+                self.goal_state
+                    .as_ref()
+                    .is_some_and(|g| g.verifying_completion),
             );
             let close_rect = agent::render_todo_chrome_with_close_label(
                 buf,

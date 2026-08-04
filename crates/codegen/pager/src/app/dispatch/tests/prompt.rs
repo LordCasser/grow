@@ -4064,3 +4064,70 @@ fn suggestion_debounce_routes_by_agent_id_not_active_view() {
         "expiry must fetch for the arming agent even off-screen: {effects:?}"
     );
 }
+
+/// Goal verification protection: while the verifier is judging completion,
+/// any immediate send (send-now) is rejected with a toast and NO effects —
+/// the message stays queued (editable/cancellable) instead of racing the
+/// verdict with the user's new input.
+#[test]
+fn goal_verifying_rejects_send_now_with_toast() {
+    use crate::app::actions::{Action, Effect};
+    use crate::app::agent::AgentId;
+    use crate::app::dispatch::dispatch;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.verifying_completion = true;
+        app.agents.get_mut(&id).unwrap().goal_state = Some(goal);
+    }
+
+    let effects = dispatch(
+        Action::SendPromptNow {
+            text: "hello".into(),
+            images: vec![],
+        },
+        &mut app,
+    );
+
+    assert!(
+        effects.is_empty(),
+        "send-now must be rejected while the Goal verifier runs: {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert_eq!(
+        agent.toast.as_ref().map(|(s, _)| s.as_str()),
+        Some("Goal is verifying; please wait before sending."),
+        "a toast must explain the rejection"
+    );
+    // The message was not sent: nothing left the local queue / no RPC effect.
+}
+
+/// The same send-now path is NOT blocked outside verification (active goal,
+/// implementing): steering reaches the goal as usual.
+#[test]
+fn goal_active_without_verifying_still_sends() {
+    use crate::app::actions::{Action, Effect};
+    use crate::app::agent::AgentId;
+    use crate::app::dispatch::dispatch;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let goal = crate::app::agent::GoalDisplayState::test_stub();
+        app.agents.get_mut(&id).unwrap().goal_state = Some(goal); // verifying_completion = false
+    }
+
+    let effects = dispatch(
+        Action::SendPromptNow {
+            text: "steer".into(),
+            images: vec![],
+        },
+        &mut app,
+    );
+    assert!(
+        !effects.is_empty(),
+        "an active goal that is NOT verifying must still accept send-now (steering)"
+    );
+}

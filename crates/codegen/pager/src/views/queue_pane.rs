@@ -123,7 +123,7 @@ impl QueuedPromptEntry {
         let line_count = prompt.text.lines().count();
 
         // Build initial styled line (will be rebuilt with proper width later).
-        let styled = Self::build_styled(&first_line, line_count, prompt.kind, None);
+        let styled = Self::build_styled(&first_line, line_count, prompt.kind, None, false);
 
         Self {
             id: prompt.id,
@@ -152,7 +152,7 @@ impl QueuedPromptEntry {
             .to_string();
         let line_count = wire.text.lines().count();
         let kind = kind_from_wire(&wire.kind);
-        let styled = Self::build_styled(&first_line, line_count, kind, None);
+        let styled = Self::build_styled(&first_line, line_count, kind, None, false);
         Self {
             id: synth_server_id(&wire.id),
             position,
@@ -171,12 +171,13 @@ impl QueuedPromptEntry {
     ///
     /// This ensures the `(+N lines)` suffix is always visible by truncating
     /// the first line content to make room.
-    pub fn rebuild_styled_for_width(&mut self, available_width: u16) {
+    pub fn rebuild_styled_for_width(&mut self, available_width: u16, verifying: bool) {
         self.styled = Self::build_styled(
             &self.first_line,
             self.line_count,
             self.kind,
             Some(available_width as usize),
+            verifying,
         );
     }
 
@@ -184,11 +185,15 @@ impl QueuedPromptEntry {
     ///
     /// If `max_width` is provided and the entry is multiline, truncates the
     /// first line content to ensure the `(+N lines)` suffix fits.
+    /// `verifying` appends a "waiting for Goal verification" cue to prompt
+    /// rows: while the verifier runs, send-now is rejected (the message stays
+    /// queued), so the row visibly explains why empty Enter does nothing.
     fn build_styled(
         first_line: &str,
         line_count: usize,
         kind: QueueEntryKind,
         max_width: Option<usize>,
+        verifying: bool,
     ) -> Line<'static> {
         let theme = Theme::current();
         let extra_lines = line_count.saturating_sub(1);
@@ -203,7 +208,12 @@ impl QueuedPromptEntry {
         } else {
             String::new()
         };
-        let suffix_width = suffix.width();
+        let verifying_suffix = if verifying && kind == QueueEntryKind::Prompt {
+            " ⏳ verifying"
+        } else {
+            ""
+        };
+        let suffix_width = suffix.width() + verifying_suffix.width();
 
         // Determine how much space we have for the first line content.
         // Reserve space for the suffix if multiline.
@@ -230,6 +240,12 @@ impl QueuedPromptEntry {
 
                 if extra_lines > 0 {
                     spans.push(Span::styled(suffix, Style::default().fg(theme.gray)));
+                }
+                if verifying {
+                    spans.push(Span::styled(
+                        verifying_suffix,
+                        Style::default().fg(theme.gray),
+                    ));
                 }
 
                 Line::from(spans)
@@ -877,6 +893,7 @@ impl QueuePane {
         layout_cfg: &LayoutConfig,
         overlay_area: Option<Rect>,
         is_turn_running: bool,
+        goal_verifying: bool,
     ) {
         // Detect a theme switch and refresh the list chrome style. Its
         // `selection_bg` (the focused-row highlight) is captured from the
@@ -902,7 +919,7 @@ impl QueuePane {
         let prefix_width = 2 + digit_count(max_pos); // "#" + digits + " "
         let content_width = (inner.width as usize).saturating_sub(prefix_width);
         for entry in &mut self.entries {
-            entry.rebuild_styled_for_width(content_width as u16);
+            entry.rebuild_styled_for_width(content_width as u16, goal_verifying);
         }
 
         // When the queue overflows, the ListPane reserves its scrollbar in the
@@ -1391,7 +1408,7 @@ mod tests {
     #[test]
     fn test_single_line_no_suffix() {
         let styled =
-            QueuedPromptEntry::build_styled("hello world", 1, QueueEntryKind::Prompt, None);
+            QueuedPromptEntry::build_styled("hello world", 1, QueueEntryKind::Prompt, None, false);
         let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "hello world");
         assert!(!text.contains("line"));
@@ -1399,7 +1416,8 @@ mod tests {
 
     #[test]
     fn test_multiline_suffix() {
-        let styled = QueuedPromptEntry::build_styled("first line", 5, QueueEntryKind::Prompt, None);
+        let styled =
+            QueuedPromptEntry::build_styled("first line", 5, QueueEntryKind::Prompt, None, false);
         let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("first line"));
         assert!(text.contains("(+4 lines)"));
@@ -1476,7 +1494,8 @@ mod tests {
 
     #[test]
     fn test_multiline_singular() {
-        let styled = QueuedPromptEntry::build_styled("first line", 2, QueueEntryKind::Prompt, None);
+        let styled =
+            QueuedPromptEntry::build_styled("first line", 2, QueueEntryKind::Prompt, None, false);
         let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("(+1 line)"));
         assert!(!text.contains("lines)")); // Should be singular
@@ -1485,15 +1504,25 @@ mod tests {
     #[test]
     fn test_truncation_preserves_suffix() {
         // Width of 25: "first line" (10) + " (+4 lines)" (11) = 21, fits
-        let styled =
-            QueuedPromptEntry::build_styled("first line", 5, QueueEntryKind::Prompt, Some(25));
+        let styled = QueuedPromptEntry::build_styled(
+            "first line",
+            5,
+            QueueEntryKind::Prompt,
+            Some(25),
+            false,
+        );
         let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("first line"));
         assert!(text.contains("(+4 lines)"));
 
         // Width of 20: Need to truncate "first line" to fit suffix
-        let styled =
-            QueuedPromptEntry::build_styled("first line here", 5, QueueEntryKind::Prompt, Some(20));
+        let styled = QueuedPromptEntry::build_styled(
+            "first line here",
+            5,
+            QueueEntryKind::Prompt,
+            Some(20),
+            false,
+        );
         let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
         // Should have truncated first line but kept suffix
         assert!(text.contains("(+4 lines)"));
@@ -1509,6 +1538,7 @@ mod tests {
             10,
             QueueEntryKind::Prompt,
             Some(15), // " (+9 lines)" is 11 chars, leaving 4 for content
+            false,
         );
         let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("(+9 lines)"));
@@ -1516,7 +1546,8 @@ mod tests {
 
     #[test]
     fn test_command_with_suffix() {
-        let styled = QueuedPromptEntry::build_styled("/help me", 3, QueueEntryKind::Command, None);
+        let styled =
+            QueuedPromptEntry::build_styled("/help me", 3, QueueEntryKind::Command, None, false);
         let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("/help"));
         assert!(text.contains("(+2 lines)"));
@@ -1527,7 +1558,7 @@ mod tests {
     #[test]
     fn test_bash_command_has_bang_prefix() {
         let styled =
-            QueuedPromptEntry::build_styled("ls -la", 1, QueueEntryKind::BashCommand, None);
+            QueuedPromptEntry::build_styled("ls -la", 1, QueueEntryKind::BashCommand, None, false);
         let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             text.starts_with("! "),
@@ -1538,8 +1569,13 @@ mod tests {
 
     #[test]
     fn test_bash_command_multiline_suffix() {
-        let styled =
-            QueuedPromptEntry::build_styled("echo hello", 3, QueueEntryKind::BashCommand, None);
+        let styled = QueuedPromptEntry::build_styled(
+            "echo hello",
+            3,
+            QueueEntryKind::BashCommand,
+            None,
+            false,
+        );
         let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("! "));
         assert!(text.contains("(+2 lines)"));
@@ -1549,7 +1585,8 @@ mod tests {
 
     #[test]
     fn test_cron_has_recycle_prefix() {
-        let styled = QueuedPromptEntry::build_styled("check status", 1, QueueEntryKind::Cron, None);
+        let styled =
+            QueuedPromptEntry::build_styled("check status", 1, QueueEntryKind::Cron, None, false);
         let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             text.starts_with("\u{21BB}  "),
@@ -1560,8 +1597,13 @@ mod tests {
 
     #[test]
     fn test_cron_multiline_suffix() {
-        let styled =
-            QueuedPromptEntry::build_styled("/pr-babysit check", 4, QueueEntryKind::Cron, None);
+        let styled = QueuedPromptEntry::build_styled(
+            "/pr-babysit check",
+            4,
+            QueueEntryKind::Cron,
+            None,
+            false,
+        );
         let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("\u{21BB}  "));
         assert!(text.contains("(+3 lines)"));
@@ -1574,6 +1616,7 @@ mod tests {
             1,
             QueueEntryKind::Cron,
             Some(15),
+            false,
         );
         let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("\u{21BB}  "));
@@ -1586,6 +1629,7 @@ mod tests {
             1,
             QueueEntryKind::BashCommand,
             Some(15),
+            false,
         );
         let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("! "));
@@ -1613,7 +1657,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let layout_cfg = crate::appearance::LayoutConfig::default();
         // Focused + turn running → all three buttons render for the selected row.
-        pane.render(area, &mut buf, true, &layout_cfg, None, true);
+        pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
 
         let edit = pane.edit_button.rect.expect("edit button renders");
         let interject = pane.send_now.rect.expect("interject button renders");
@@ -1646,7 +1690,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let layout_cfg = crate::appearance::LayoutConfig::default();
         // Focused + turn NOT running → [edit] and [cancel], no [Send now].
-        pane.render(area, &mut buf, true, &layout_cfg, None, false);
+        pane.render(area, &mut buf, true, &layout_cfg, None, false, false);
 
         assert!(
             pane.send_now.rect.is_none(),
@@ -1682,7 +1726,7 @@ mod tests {
             pane.sync_from_merged(&local, &[], None, None, &Default::default());
             let area = Rect::new(0, 0, 80, 1);
             let mut buf = Buffer::empty(area);
-            pane.render(area, &mut buf, true, &layout_cfg, None, true);
+            pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
             pane.last_inner.expect("inner recorded").x
         };
 
@@ -1697,7 +1741,7 @@ mod tests {
 
                 let area = Rect::new(0, 0, width, 1);
                 let mut buf = Buffer::empty(area);
-                pane.render(area, &mut buf, true, &layout_cfg, None, is_running);
+                pane.render(area, &mut buf, true, &layout_cfg, None, is_running, false);
 
                 let inner = pane.last_inner.expect("inner recorded");
                 let rects = [
@@ -1745,7 +1789,7 @@ mod tests {
         let layout_cfg = crate::appearance::LayoutConfig::default();
 
         // Unfocused with no hover → no action buttons at all.
-        pane.render(area, &mut buf, false, &layout_cfg, None, true);
+        pane.render(area, &mut buf, false, &layout_cfg, None, true, false);
         assert!(pane.delete_button.rect.is_none());
         assert!(pane.send_now.rect.is_none());
         assert!(pane.edit_button.rect.is_none());
@@ -1756,7 +1800,7 @@ mod tests {
             pane.update_row_hover(inner.x, inner.y + 1),
             "hovering a new row should report a change"
         );
-        pane.render(area, &mut buf, false, &layout_cfg, None, true);
+        pane.render(area, &mut buf, false, &layout_cfg, None, true, false);
 
         let ids = pane.entry_ids();
         assert_eq!(pane.delete_button.entry_id, Some(ids[1]));
@@ -1768,7 +1812,7 @@ mod tests {
 
         // Moving off the rows clears the hover and hides the buttons again.
         assert!(pane.clear_row_hover());
-        pane.render(area, &mut buf, false, &layout_cfg, None, true);
+        pane.render(area, &mut buf, false, &layout_cfg, None, true, false);
         assert!(pane.delete_button.rect.is_none());
         assert!(pane.send_now.rect.is_none());
         assert!(pane.edit_button.rect.is_none());
@@ -1789,10 +1833,10 @@ mod tests {
         let layout_cfg = crate::appearance::LayoutConfig::default();
 
         // First render records `last_inner`; then hover the second row.
-        pane.render(area, &mut buf, false, &layout_cfg, None, true);
+        pane.render(area, &mut buf, false, &layout_cfg, None, true, false);
         let inner = pane.last_inner.expect("inner area recorded during render");
         assert!(pane.update_row_hover(inner.x, inner.y + 1));
-        pane.render(area, &mut buf, false, &layout_cfg, None, true);
+        pane.render(area, &mut buf, false, &layout_cfg, None, true, false);
 
         let theme = Theme::current();
         let hover_bg = crate::render::color::blend_color(theme.bg_base, theme.bg_dark, 0.5)
@@ -1831,14 +1875,14 @@ mod tests {
         let theme = Theme::current();
 
         // Focused + turn running → [Interject] renders for the selected row.
-        pane.render(area, &mut buf, true, &layout_cfg, None, true);
+        pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
         let rect = pane.send_now.rect.expect("interject button renders");
         let non_hover_fg = buf[(rect.x, rect.y)].fg;
         assert_eq!(non_hover_fg, theme.gray, "plain button uses gray fg");
 
         // Hover the [Interject] button → fg becomes text_primary.
         assert!(pane.update_send_now_hover(rect.x, rect.y));
-        pane.render(area, &mut buf, true, &layout_cfg, None, true);
+        pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
         let rect = pane.send_now.rect.expect("interject button still renders");
         for x in rect.x..rect.x + rect.width {
             assert_eq!(buf[(x, rect.y)].fg, theme.text_primary, "col {x}");
@@ -1872,10 +1916,10 @@ mod tests {
 
         // Establish layout, then scroll so rows 0 and 1 sit above the top and
         // leave a stale hover on the now-off-screen first row.
-        pane.render(area, &mut buf, true, &layout_cfg, None, true);
+        pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
         pane.list_state.set_scroll_offset(2);
         pane.hovered_row_id = Some(ids[0]);
-        pane.render(area, &mut buf, true, &layout_cfg, None, true);
+        pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
 
         assert!(
             pane.delete_button.rect.is_none(),
@@ -1909,7 +1953,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
         let layout_cfg = crate::appearance::LayoutConfig::default();
-        pane.render(area, &mut buf, true, &layout_cfg, None, true);
+        pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
 
         let cancel = pane.delete_button.rect.expect("cancel button renders");
         assert_eq!(
@@ -1938,7 +1982,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 3);
         let mut buf = Buffer::empty(Rect::new(0, 0, 82, 3));
         let layout_cfg = crate::appearance::LayoutConfig::default();
-        pane.render(area, &mut buf, true, &layout_cfg, None, true);
+        pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
 
         let sb = pane
             .list_state
@@ -1972,7 +2016,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 3);
         let mut buf = Buffer::empty(Rect::new(0, 0, 82, 3));
         let layout_cfg = crate::appearance::LayoutConfig::default();
-        pane.render(area, &mut buf, false, &layout_cfg, None, true);
+        pane.render(area, &mut buf, false, &layout_cfg, None, true, false);
 
         let inner = pane.last_inner.expect("inner area recorded during render");
         // Hover the top visible row → the first entry.
@@ -1987,6 +2031,44 @@ mod tests {
             pane.hovered_row_id,
             Some(ids[1]),
             "scroll must refresh the hovered row to the entry now under the cursor"
+        );
+    }
+}
+
+#[cfg(test)]
+mod verifying_cue_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_row_appends_verifying_cue_when_goal_verifying() {
+        let styled =
+            QueuedPromptEntry::build_styled("hello", 1, QueueEntryKind::Prompt, None, true);
+        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("verifying"),
+            "a prompt row must show the verification-wait cue, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_row_omits_cue_when_not_verifying() {
+        let styled =
+            QueuedPromptEntry::build_styled("hello", 1, QueueEntryKind::Prompt, None, false);
+        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !text.contains("verifying"),
+            "no cue outside verification, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn command_row_never_shows_verifying_cue() {
+        let styled =
+            QueuedPromptEntry::build_styled("/compact", 1, QueueEntryKind::Command, None, true);
+        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !text.contains("verifying"),
+            "slash command rows are not user messages; no cue, got {text:?}"
         );
     }
 }

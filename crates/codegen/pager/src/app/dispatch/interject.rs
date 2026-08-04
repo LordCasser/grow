@@ -92,6 +92,22 @@ pub(super) fn dispatch_send_prompt_now(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    // Goal verification protection: while the verifier is judging whether the
+    // Goal is complete, any immediate send (empty-Enter send-now, Ctrl+Enter,
+    // queue-row send-now) would race the verdict with the user's new input —
+    // the verifier's decision is based on the pre-steering implementer
+    // output, so it would be stale. Reject with a toast and keep the message
+    // queued (editable/cancellable) instead of sending it.
+    let goal_verifying = app.agents.get(&id).is_some_and(|agent| {
+        agent
+            .goal_state
+            .as_ref()
+            .is_some_and(|goal| goal.verifying_completion)
+    });
+    if goal_verifying {
+        app.show_toast("Goal is verifying; please wait before sending.");
+        return vec![];
+    }
     let goal_active = app.agents.get(&id).is_some_and(|agent| {
         agent
             .goal_state

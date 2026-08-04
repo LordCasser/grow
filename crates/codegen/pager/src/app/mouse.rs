@@ -1205,7 +1205,7 @@ mod tests {
         let running = agent.session.state.is_turn_running();
         agent
             .queue
-            .render(area, &mut buf, true, &layout_cfg, None, running);
+            .render(area, &mut buf, true, &layout_cfg, None, running, false);
         agent.pane_areas.queue = area;
         let mut found = None;
         'find: for row in area.y..area.y + area.height {
