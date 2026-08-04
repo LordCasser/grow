@@ -472,15 +472,37 @@ pub(crate) fn present_child_completion(
         .parent_cmd_tx
         .as_ref()
         .is_some_and(|tx| !tx.is_closed());
+    let goal_loop_active = completion_data
+        .goal_loop_active
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if goal_loop_active && parent_channel_open {
+        // Goal's broad auto-wake gate must not discard a child that the main
+        // agent was explicitly waiting for before user steering displaced
+        // that wait. Do not gate this handoff on `should_surface`: completion
+        // can win the coordinator send just before steering drops the old
+        // receiver, making `waiter_delivered` true even though the model never
+        // observes that wait result. The actor tracker ignores unrelated ids
+        // and owns exactly-once delivery versus the racing foreground wait.
+        let summary =
+            tools::implementations::grow_build::task::completion_summary(&request, &result);
+        let body = tools::reminders::task_completion::format_subagent_completion(
+            &summary,
+            Some(&completion_data.task_output_tool_name),
+        );
+        if let Some(cmd_tx) = completion_data.parent_cmd_tx.as_ref() {
+            let _ = cmd_tx.send(SessionCommand::DeferredCompletionAvailable {
+                task_id: request.id.clone(),
+                body,
+            });
+        }
+    }
     let will_wake = should_auto_wake_subagent(
         disposition.backgrounded,
         result.cancelled,
         completion_data.auto_wake_enabled,
         disposition.waiter_delivered,
         disposition.explicitly_killed,
-        completion_data
-            .goal_loop_active
-            .load(std::sync::atomic::Ordering::Relaxed),
+        goal_loop_active,
         parent_channel_open,
     ) && disposition.should_surface;
     if completion_data.spawned_notification_emitted || request.run_in_background {

@@ -556,6 +556,14 @@ pub fn shared_startup_blocking_client() -> reqwest::blocking::Client {
 mod tests {
     use super::*;
 
+    /// reqwest is built with `rustls-no-provider` (see the vendoring notes on
+    /// the workspace's rustls setup): production installs the ring provider at
+    /// CLI startup, but tests bypass startup, so install it once here.
+    #[ctor::ctor]
+    fn install_rustls_provider() {
+        diagnostics::tls::install_ring_provider_once();
+    }
+
     /// The cause-chain formatter appends each `source()` joined with ": ", so a
     /// reqwest error whose `Display` hides the hyper cause still surfaces it.
     #[test]

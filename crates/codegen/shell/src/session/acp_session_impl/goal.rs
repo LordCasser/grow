@@ -237,7 +237,7 @@ impl SessionActor {
         tracker.append_history(entry);
     }
 
-    async fn verify_goal_candidate(&self) {
+    async fn verify_goal_candidate(self: &std::sync::Arc<Self>, foreground_generation: u64) {
         use crate::session::goal_classifier::GoalClassifierOutcome;
         let policy = self.resolve_goal_classifier_policy();
         if !policy.enabled {
@@ -248,11 +248,19 @@ impl SessionActor {
             .await;
             return;
         }
-        let attempts = self
-            .goal_tracker
-            .lock()
-            .snapshot()
-            .map_or(0, |snapshot| snapshot.classifier_runs_attempted);
+        let (attempts, already_verifying) =
+            self.goal_tracker
+                .lock()
+                .snapshot()
+                .map_or((0, false), |snapshot| {
+                    (
+                        snapshot.classifier_runs_attempted,
+                        snapshot.verifying_in_flight,
+                    )
+                });
+        if already_verifying {
+            return;
+        }
         if attempts >= policy.max_runs {
             self.auto_pause_for_classifier_cap(attempts, "", "").await;
             return;
@@ -265,23 +273,88 @@ impl SessionActor {
         };
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         self.emit_goal_verifying(current_tokens);
-        let outcome = {
-            let goal_id = definition_key.0.clone();
-            let revision = definition_key.1;
-            let _latch = TrackerDropGuard::new(&self.goal_tracker, move |tracker| {
-                if tracker.definition_is_current(&goal_id, revision)
+        let actor = std::sync::Arc::clone(self);
+        let latch_goal_id = definition_key.0.clone();
+        let latch_revision = definition_key.1;
+        let mut verification_task = tokio::task::spawn_local(async move {
+            let _latch = TrackerDropGuard::new(&actor.goal_tracker, move |tracker| {
+                if tracker.definition_is_current(&latch_goal_id, latch_revision)
                     && let Some(snapshot) = tracker.snapshot_mut()
                 {
                     snapshot.verifying_in_flight = false;
                 }
             });
-            self.run_verification_stage_for_drain(attempt).await
+            actor.run_verification_stage_for_drain(attempt).await
+        });
+        let background_definition = definition_key.clone();
+        enum VerificationWait {
+            Displaced(&'static str),
+            Finished(Result<GoalClassifierOutcome, tokio::task::JoinError>),
+        }
+        let wait = tokio::select! {
+            biased;
+            _ = super::tool_calls::wait_for_pending_interjection(
+                &self.pending_interjections,
+            ) => VerificationWait::Displaced("user steering"),
+            _ = self
+                .completion_delivery
+                .wait_generation_change(foreground_generation) => {
+                VerificationWait::Displaced("a foreground completion")
+            },
+            result = &mut verification_task => VerificationWait::Finished(result),
+        };
+        let outcome = match wait {
+            VerificationWait::Displaced(displaced_by) => {
+                let actor = std::sync::Arc::clone(self);
+                tokio::task::spawn_local(async move {
+                    let outcome = verification_task.await;
+                    if actor
+                        .goal_tracker
+                        .lock()
+                        .definition_is_current(&background_definition.0, background_definition.1)
+                    {
+                        actor.goal_tracker.lock().rollback_classifier_attempt();
+                        if actor.goal_tracker.lock().status()
+                            == Some(crate::session::goal_tracker::GoalStatus::Active)
+                        {
+                            let body = match outcome {
+                                Ok(outcome) => format!(
+                                    "A Goal verification stage displaced by {displaced_by} has finished. Its verdict was not committed because foreground context changed. Re-evaluate against the latest foreground information before pausing or completing the Goal. Diagnostic result: {outcome:?}"
+                                ),
+                                Err(error) => format!(
+                                    "A Goal verification stage displaced by {displaced_by} failed in its background continuation ({error}). Re-evaluate the Goal against the latest foreground information."
+                                ),
+                            };
+                            let body = tools::util::truncate_str(&body, 8 * 1024).to_owned();
+                            actor.completion_delivery.queue_ready(
+                                format!(
+                                    "goal-verifier:{}:{}:{attempt}",
+                                    background_definition.0, background_definition.1,
+                                ),
+                                body,
+                            );
+                            let _ = actor.event_tx.send(SessionEvent::ForegroundWake);
+                        }
+                    }
+                });
+                return;
+            }
+            VerificationWait::Finished(result) => match result {
+                Ok(outcome) => outcome,
+                Err(error) => GoalClassifierOutcome::VerificationUnavailable {
+                    reason: crate::session::events::GoalVerificationUnavailableReason::SamplerError,
+                    details_path: format!("verifier task failed: {error}"),
+                },
+            },
         };
         let tracker = self.goal_tracker.lock();
         let stale = !tracker.definition_is_current(&definition_key.0, definition_key.1);
         let inactive = tracker.status() != Some(crate::session::goal_tracker::GoalStatus::Active);
         drop(tracker);
         if stale || inactive {
+            return;
+        }
+        if self.goal_foreground_changed(foreground_generation) {
             return;
         }
         if let GoalClassifierOutcome::VerificationUnavailable { reason, .. } = outcome {
@@ -297,7 +370,7 @@ impl SessionActor {
             return;
         }
         let notify = self.goal_notify_sender();
-        self.apply_classifier_outcome(&policy, attempt, outcome, &notify)
+        self.apply_classifier_outcome(&policy, attempt, outcome, &notify, foreground_generation)
             .await;
     }
 
@@ -316,11 +389,15 @@ impl SessionActor {
         attempt: u32,
         outcome: crate::session::goal_classifier::GoalClassifierOutcome,
         notify: &crate::session::goal_orchestrator::GoalNotifySender,
+        foreground_generation: u64,
     ) {
         use crate::session::goal_classifier::GoalClassifierOutcome;
         use crate::session::goal_tracker::GoalClassifierVerdict;
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         let (tokens_used, finished) = self.goal_tokens(current_tokens);
+        if self.goal_foreground_changed(foreground_generation) {
+            return;
+        }
         match outcome {
             GoalClassifierOutcome::Achieved { details_path } => {
                 {
@@ -355,6 +432,9 @@ impl SessionActor {
                     tracker.record_not_achieved_streak();
                 }
                 if attempt >= policy.max_runs {
+                    if self.goal_foreground_changed(foreground_generation) {
+                        return;
+                    }
                     self.auto_pause_for_classifier_cap(attempt, &details_path, &pause_summary)
                         .await;
                     return;
@@ -365,6 +445,9 @@ impl SessionActor {
                         .lock()
                         .record_classifier_stall(&gap_fingerprint);
                 if stalled {
+                    if self.goal_foreground_changed(foreground_generation) {
+                        return;
+                    }
                     self.auto_pause_for_classifier_stall(&details_path, &pause_summary)
                         .await;
                     return;
@@ -383,12 +466,18 @@ impl SessionActor {
                 if let Some(consecutive) = claimed {
                     self.maybe_run_goal_strategist(attempt, consecutive).await;
                 }
+                if self.goal_foreground_changed(foreground_generation) {
+                    return;
+                }
                 notify.emit_goal_updated(&mut self.goal_tracker.lock(), tokens_used, finished);
             }
             GoalClassifierOutcome::Blocked {
                 details_path,
                 pause_summary,
             } => {
+                if self.goal_foreground_changed(foreground_generation) {
+                    return;
+                }
                 {
                     let mut tracker = self.goal_tracker.lock();
                     Self::record_verdict_on_orchestration(
@@ -864,7 +953,11 @@ impl SessionActor {
         )
     }
 
-    pub(super) async fn setup_goal(&self, objective: &str, token_budget: Option<i64>) -> String {
+    pub(super) async fn setup_goal(
+        self: &std::sync::Arc<Self>,
+        objective: &str,
+        token_budget: Option<i64>,
+    ) -> String {
         let goal_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().to_rfc3339();
         let token_baseline = self.chat_state_handle.get_total_tokens().await as i64;
@@ -960,7 +1053,7 @@ impl SessionActor {
         format!("<system-reminder>\n{body}\nStart now.\n</system-reminder>\n\n")
     }
 
-    pub(super) async fn resume_goal(&self) -> GoalResumeOutcome {
+    pub(super) async fn resume_goal(self: &std::sync::Arc<Self>) -> GoalResumeOutcome {
         use crate::session::goal_tracker::GoalStatus;
         enum ResumeTransition {
             Resumed {
@@ -1375,7 +1468,7 @@ impl SessionActor {
         }
     }
 
-    pub(super) async fn run_goal_round_end(&self) -> GoalRoundDecision {
+    pub(super) async fn run_goal_round_end(self: &std::sync::Arc<Self>) -> GoalRoundDecision {
         use crate::session::goal_evaluator::GoalEvaluatorDecision;
         if !laziness_injection_active(
             self.goal_harness_enabled(),
@@ -1386,7 +1479,20 @@ impl SessionActor {
         let Some(definition_key) = self.goal_tracker.lock().definition_key() else {
             return GoalRoundDecision::EndTurn;
         };
-        let verdict = match self.evaluate_goal_round().await {
+        let foreground_generation = self.completion_delivery.generation();
+        let evaluator = self.evaluate_goal_round();
+        tokio::pin!(evaluator);
+        let evaluated = tokio::select! {
+            biased;
+            _ = super::tool_calls::wait_for_pending_interjection(
+                &self.pending_interjections,
+            ) => return GoalRoundDecision::ResumeForeground,
+            _ = self.completion_delivery.wait_generation_change(foreground_generation) => {
+                return GoalRoundDecision::ResumeForeground;
+            },
+            verdict = &mut evaluator => verdict,
+        };
+        let verdict = match evaluated {
             Ok(verdict) => verdict,
             Err(error) => {
                 if !self
@@ -1403,6 +1509,9 @@ impl SessionActor {
                             GoalRoundDecision::Continue(plan.directive)
                         });
                 }
+                if self.goal_foreground_changed(foreground_generation) {
+                    return GoalRoundDecision::ResumeForeground;
+                }
                 self.record_goal_round_progress(&error, true);
                 self.auto_pause_goal_if_active_with_message(
                     crate::session::goal_tracker::GoalPauseReason::Infra,
@@ -1416,6 +1525,9 @@ impl SessionActor {
                 return GoalRoundDecision::EndTurn;
             }
         };
+        if self.goal_foreground_changed(foreground_generation) {
+            return GoalRoundDecision::ResumeForeground;
+        }
         if !self
             .goal_tracker
             .lock()
@@ -1448,7 +1560,10 @@ impl SessionActor {
                     self.goal_notify_sender().persist_goal_state(&tracker);
                 }
                 self.record_goal_round_progress(&verdict.evidence, false);
-                self.verify_goal_candidate().await;
+                self.verify_goal_candidate(foreground_generation).await;
+                if self.goal_foreground_changed(foreground_generation) {
+                    return GoalRoundDecision::ResumeForeground;
+                }
             }
             GoalEvaluatorDecision::Blocked => {
                 self.record_goal_round_progress(&verdict.evidence, false);
@@ -1459,6 +1574,7 @@ impl SessionActor {
                     streak
                 };
                 if streak >= 3
+                    && !self.goal_foreground_changed(foreground_generation)
                     && self
                         .auto_pause_goal_if_active_with_message(
                             crate::session::goal_tracker::GoalPauseReason::Verification,
@@ -1497,6 +1613,16 @@ impl SessionActor {
             self.record_and_emit_premature_stop(pattern);
         }
         GoalRoundDecision::Continue(plan.directive)
+    }
+
+    /// Autonomous Goal decisions are valid only against the exact foreground
+    /// event generation they started with. Steering is observable in its
+    /// inbox; deferred completions additionally carry a monotonic generation
+    /// so a ready-and-drained race cannot make an old verdict appear current.
+    fn goal_foreground_changed(&self, generation: u64) -> bool {
+        !self.pending_interjections.is_empty()
+            || self.completion_delivery.has_ready()
+            || self.completion_delivery.generation() != generation
     }
 
     pub(super) async fn inject_goal_continuation_message(&self, directive: String) {

@@ -216,6 +216,13 @@ mod tests {
 
         #[test]
         fn library_is_unsafe() {
+            // `dirs::home_dir()` reads $HOME; peer tests (e.g. the trust
+            // suite) mutate $HOME under the crate-shared env lock, so this
+            // test must hold the same lock or the exclusion check can see a
+            // foreign home (and misclassify real `~/Library` as a project).
+            let _lock = crate::ENV_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(home) = dirs::home_dir() {
                 assert!(!is_project_dir(&home.join("Library")));
                 assert!(!is_project_dir(&home.join("Library/Caches")));
@@ -225,6 +232,12 @@ mod tests {
 
         #[test]
         fn icloud_drive_projects_are_safe() {
+            // Same $HOME race protection as `library_is_unsafe` (the assertion
+            // depends on `is_project_dir` reading the same home this test
+            // does).
+            let _lock = crate::ENV_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(home) = dirs::home_dir() {
                 assert!(is_project_dir(&home.join(
                     "Library/Mobile Documents/com~apple~CloudDocs/Projects/my-app"

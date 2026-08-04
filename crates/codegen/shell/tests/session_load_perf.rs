@@ -412,7 +412,7 @@ fn parse_instrumentation_log(path: &Path) -> Vec<(String, f64)> {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "heavy: builds a full MvpAgent and replays a large session; run with --ignored"]
 async fn full_session_load_e2e() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    diagnostics::tls::install_ring_provider_once();
 
     let server = test_support::MockInferenceServer::start().await.unwrap();
 

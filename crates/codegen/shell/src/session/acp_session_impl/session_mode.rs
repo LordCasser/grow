@@ -125,7 +125,11 @@ impl SessionActor {
         };
         let current_behavior = self.behavior.lock().behavior();
         let target_behavior = mode.behavior();
-        if current_behavior == target_behavior {
+        let completed_goal_receipt = self.goal_tracker.lock().status()
+            == Some(crate::session::goal_tracker::GoalStatus::Complete);
+        if current_behavior == target_behavior
+            && !(mode != SessionMode::Default && completed_goal_receipt)
+        {
             let cleared = self.behavior.lock().clear_pending_switch();
             if cleared {
                 self.enqueue_current_mode_update(acp::SessionModeId::new(mode.as_id()));
@@ -315,6 +319,49 @@ impl SessionActor {
 
         if mode == SessionMode::Plan && self.state.lock().await.running_task.is_some() {
             self.cancel_running_task(true, false, false, Some("behavior_switch".to_string()))
+                .await;
+        }
+
+        // A completed Goal is a retained display receipt, not an active
+        // Behavior. Normal therefore leaves it visible. An explicit switch to
+        // any special Behavior starts a new control context and atomically
+        // retires that receipt so it cannot override the selected mode in the
+        // pager or reappear after session reload.
+        let clear_completed_goal = mode != SessionMode::Default
+            && self.goal_tracker.lock().status()
+                == Some(crate::session::goal_tracker::GoalStatus::Complete);
+        if clear_completed_goal {
+            let (respond_to, deleted) = tokio::sync::oneshot::channel();
+            if self
+                .notifications
+                .persistence_tx
+                .send(
+                    crate::session::persistence::PersistenceMsg::DeleteGoalModeState { respond_to },
+                )
+                .is_err()
+                || !matches!(deleted.await, Ok(Ok(())))
+            {
+                let message = format!(
+                    "Could not durably retire the completed Goal; {} Behavior was not changed.",
+                    mode.display_label()
+                );
+                self.enqueue_current_mode_update_with_behavior_change(
+                    acp::SessionModeId::new(
+                        session_mode_from_prompt_mode(previous_prompt_mode).as_id(),
+                    ),
+                    serde_json::json!({ "status": "rejected", "message": message }),
+                );
+                return BehaviorChangeOutcome::Rejected { message };
+            }
+            self.goal_tracker.lock().clear();
+            self.goal_continuation_streak
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.goal_blocked_streak
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.goal_turn_task_ids.lock().clear();
+            self.subagent_token_records.lock().clear();
+            self.clear_pending_classifier_completions();
+            self.send_grow_notification(crate::session::goal_orchestrator::build_goal_cleared())
                 .await;
         }
         *self.current_prompt_mode.lock() = prompt_mode;

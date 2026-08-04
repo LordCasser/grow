@@ -751,7 +751,9 @@ async fn interject_queued_prompt_during_active_goal_injects_without_cancel() {
             let (queued, queued_rx) = user_item_with_rx("p1", "A");
             {
                 let mut state = actor.state.lock().await;
-                state.pending_inputs.push_back(user_item("running", "A"));
+                // Initial Goal planning owns a root task before it has a
+                // current/running prompt-row association. Send-now must still
+                // inject instead of silently remaining queued.
                 state.pending_inputs.push_back(queued);
                 state.running_task = Some(running_task_stub("running"));
             }
@@ -1185,6 +1187,14 @@ async fn queue_input_stacked_send_now_prompts_insert_fifo_during_goal_turn() {
                 .tool_context
                 .goal_loop_active_gate
                 .store(true, std::sync::atomic::Ordering::Relaxed);
+            actor.goal_tracker.lock().create_goal(
+                "goal-send-now-fifo".into(),
+                "test send-now ordering".into(),
+                None,
+                0,
+                "2026-01-01T00:00:00Z".into(),
+                None,
+            );
 
             for id in ["sn-1", "sn-2"] {
                 let (respond_to, _prx) = oneshot::channel();
@@ -1519,6 +1529,14 @@ async fn queue_input_send_now_exempts_synthetic_and_goal_turns() {
                 .tool_context
                 .goal_loop_active_gate
                 .store(true, std::sync::atomic::Ordering::Relaxed);
+            actor.goal_tracker.lock().create_goal(
+                "goal-send-now".into(),
+                "test send-now admission".into(),
+                None,
+                0,
+                "2026-01-01T00:00:00Z".into(),
+                None,
+            );
             let (respond_to, _p2) = oneshot::channel();
             let cancel = actor
                 .queue_input(

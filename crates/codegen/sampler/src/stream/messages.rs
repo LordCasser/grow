@@ -393,7 +393,8 @@ pub fn stream_messages<'a>(
                                         Some(state.signature)
                                     };
                                     assistant_reasoning = Some(rs::ReasoningItem {
-                                        id: String::new(),
+                                        // async-openai >= 0.41: `id` is `Option<String>`.
+                                        id: Some(String::new()),
                                         summary,
                                         content: None,
                                         encrypted_content,

@@ -11,6 +11,10 @@ use cli::{Cli, Commands};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
+    // reqwest is built with `rustls-no-provider`; install the ring provider
+    // before any TLS client is built (see diagnostics::tls). ptyctl's
+    // registry/`wait` paths build clients directly.
+    diagnostics::tls::install_ring_provider_once();
 
     let cli = Cli::parse();
 

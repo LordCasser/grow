@@ -119,6 +119,14 @@ mod tests {
 
     use super::shared;
 
+    /// reqwest is built with `rustls-no-provider` (see the vendoring notes on
+    /// the workspace's rustls setup): production installs the ring provider at
+    /// CLI startup, but tests bypass startup, so install it once here.
+    #[ctor::ctor]
+    fn install_rustls_provider() {
+        diagnostics::tls::install_ring_provider_once();
+    }
+
     static BUILD_CALLS: AtomicUsize = AtomicUsize::new(0);
 
     /// Fails on the first call (a real `reqwest::Error`, no I/O), then builds.

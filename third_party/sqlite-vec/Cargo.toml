@@ -10,7 +10,10 @@
 # Local additions:
 #   sqlite-vec-diskann.c, sqlite-vec-ivf-kmeans.c, sqlite-vec-ivf.c, and
 #   sqlite-vec-rescore.c: byte-identical to the files at the upstream tag above.
-# No upstream C or Rust source is modified.
+# Local modifications:
+#   build.rs: pass -Wno-unused-parameter to the C compiler (upstream C emits
+#   unused-parameter warnings for p_vector/pApi). The C files above remain
+#   byte-identical.
 # Upgrade checklist: prefer returning to the exact crates.io dependency once a
 # release both contains the musl fix and packages every included C file. Until
 # then, re-copy the published crate and the missing files from the same tag.

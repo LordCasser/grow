@@ -6,14 +6,20 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug)]
+struct EventQueueInner<E> {
+    events: Mutex<Vec<E>>,
+    notify: tokio::sync::Notify,
+}
+
+#[derive(Debug)]
 pub struct EventQueue<E> {
-    events: Arc<Mutex<Vec<E>>>,
+    inner: Arc<EventQueueInner<E>>,
 }
 
 impl<E> Clone for EventQueue<E> {
     fn clone(&self) -> Self {
         Self {
-            events: Arc::clone(&self.events),
+            inner: Arc::clone(&self.inner),
         }
     }
 }
@@ -27,13 +33,19 @@ impl<E> Default for EventQueue<E> {
 impl<E> EventQueue<E> {
     pub fn new() -> Self {
         Self {
-            events: Arc::new(Mutex::new(Vec::new())),
+            inner: Arc::new(EventQueueInner {
+                events: Mutex::new(Vec::new()),
+                notify: tokio::sync::Notify::new(),
+            }),
         }
     }
 
     /// Producer hook: record an event for later draining.
     pub fn push(&self, event: E) {
         self.lock().push(event);
+        // Queue non-emptiness is level-triggered: every foreground phase
+        // currently observing the queue must get a chance to re-check it.
+        self.inner.notify.notify_waiters();
     }
 
     /// Push, then drop the oldest events so at most `max` remain.
@@ -44,6 +56,8 @@ impl<E> EventQueue<E> {
             let excess = q.len() - max;
             q.drain(..excess);
         }
+        drop(q);
+        self.inner.notify.notify_waiters();
     }
 
     pub fn len(&self) -> usize {
@@ -74,8 +88,23 @@ impl<E> EventQueue<E> {
         self.lock().clear();
     }
 
+    /// Wait until at least one event is available without polling. The
+    /// pre-registered notification plus the second queue check closes the
+    /// producer-between-check-and-await race.
+    pub async fn wait_nonempty(&self) {
+        loop {
+            let notified = self.inner.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.is_empty() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, Vec<E>> {
-        self.events.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.events.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -174,5 +203,35 @@ mod tests {
         q.push(9);
         assert_eq!(q.snapshot(), vec![9]);
         assert_eq!(q.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn wait_nonempty_wakes_on_push() {
+        let q: EventQueue<u32> = EventQueue::new();
+        let waiter = q.clone();
+        let task = tokio::spawn(async move { waiter.wait_nonempty().await });
+        tokio::task::yield_now().await;
+        q.push(1);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_nonempty_returns_for_existing_event() {
+        let q: EventQueue<u32> = EventQueue::new();
+        q.push(1);
+        q.wait_nonempty().await;
+    }
+
+    #[tokio::test]
+    async fn wait_nonempty_wakes_all_registered_waiters() {
+        let q: EventQueue<u32> = EventQueue::new();
+        let first = q.clone();
+        let second = q.clone();
+        let first = tokio::spawn(async move { first.wait_nonempty().await });
+        let second = tokio::spawn(async move { second.wait_nonempty().await });
+        tokio::task::yield_now().await;
+        q.push(1);
+        first.await.unwrap();
+        second.await.unwrap();
     }
 }

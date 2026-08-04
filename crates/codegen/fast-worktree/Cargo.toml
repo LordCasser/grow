@@ -30,7 +30,7 @@ crossbeam = { workspace = true }
 dashmap = { workspace = true }
 dunce = { workspace = true }
 gix = { workspace = true, features = ["status", "parallel"] }
-gix-status = { version = "0.30.0" }
+gix-status = { version = "0.33.0" }
 globset = { workspace = true }
 ignore = { workspace = true }
 num_cpus = { workspace = true }
@@ -60,10 +60,10 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 libc = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-nix = { version = "0.30", features = ["fs"] }
+nix = { version = "0.31", features = ["fs"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.30", features = ["fs"] }
+nix = { version = "0.31", features = ["fs"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 

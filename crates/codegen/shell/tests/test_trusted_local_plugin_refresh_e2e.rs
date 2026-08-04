@@ -161,7 +161,7 @@ fn trusted_local_refresh_surfaces_new_agent_via_discovery() {
     );
     let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
     assert!(
-        names.contains(&"demo-plugin:new-agent"),
+        names.contains(&"demo-plugin:new"),
         "new agent must surface in /agents after session-start refresh; got {names:?}"
     );
 

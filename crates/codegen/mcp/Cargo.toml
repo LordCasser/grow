@@ -18,6 +18,12 @@ version = { workspace = true }
 # - `blocking` is for build-script style use (not actually used here today, but
 #   kept for future MCP transports that may need it).
 # - `query`/`form` opt-in features stay off; rmcp transports don't use them.
+# - `rustls-no-provider` is REQUIRED: reqwest 0.13.4's `rustls` feature is
+#   hardcoded to `__rustls-aws-lc-rs` (verified in its Cargo.toml), and rmcp's
+#   `reqwest` feature enables `reqwest?/rustls` the same way. Dropping
+#   `rustls-no-provider` would re-introduce aws-lc-rs (cmake/nasm C build) that
+#   the workspace removed for OHOS cross-compilation. See
+#   docs/architecture/dependency-workarounds.md.
 reqwest = { version = "0.13", default-features = false, features = [
     "blocking",
     "json",
@@ -62,6 +68,12 @@ libc = { workspace = true }
 # `test-util` enables `tokio::time::pause` / `advance`, required by
 # the deterministic timing tests in `liveness.rs`.
 tokio = { workspace = true, features = ["test-util"] }
+# `ctor` installs the rustls ring provider once before tests run (via
+# `diagnostics::tls::install_ring_provider_once`): reqwest is built with
+# `rustls-no-provider` (see docs/architecture/dependency-workarounds.md), and
+# the provider is only installed by CLI startup in production — tests bypass
+# that startup path.
+ctor = { workspace = true }
 
 [lints]
 workspace = true

@@ -5,6 +5,14 @@
 //! server (axum) to talk to the `SamplingClient`. Happy-path SSE
 //! payloads come from `test_support::sse`.
 
+/// reqwest is built with `rustls-no-provider` (see the vendoring notes on the
+/// workspace's rustls setup): production installs the ring provider at CLI
+/// startup, but test binaries bypass startup, so install it once here.
+#[ctor::ctor]
+fn install_rustls_provider() {
+    diagnostics::tls::install_ring_provider_once();
+}
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};

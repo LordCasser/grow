@@ -68,7 +68,7 @@ fn assistant_with_reasoning_items(
     if !reasoning_text.is_empty() {
         out.push(ConversationItem::Reasoning(
             sampling_types::rs::ReasoningItem {
-                id: String::new(),
+                id: Some(String::new()),
                 summary: vec![sampling_types::rs::SummaryPart::SummaryText(
                     sampling_types::rs::SummaryTextContent {
                         text: reasoning_text.to_string(),
@@ -193,7 +193,7 @@ fn flatten_skips_reasoning_when_encrypted_only() {
     // rather than emit a meaningless line.
     let items = vec![
         ConversationItem::Reasoning(sampling_types::rs::ReasoningItem {
-            id: String::new(),
+            id: Some(String::new()),
             summary: vec![],
             content: None,
             encrypted_content: Some("opaque_base64".into()),
@@ -221,7 +221,7 @@ fn flatten_skips_reasoning_when_text_is_empty() {
     // zero-info line would just waste tokens.
     let items = vec![
         ConversationItem::Reasoning(sampling_types::rs::ReasoningItem {
-            id: String::new(),
+            id: Some(String::new()),
             summary: vec![sampling_types::rs::SummaryPart::SummaryText(
                 sampling_types::rs::SummaryTextContent {
                     text: String::new(),

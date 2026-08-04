@@ -728,11 +728,38 @@ impl SessionActor {
         };
         let request_id = sampler::RequestId::random();
         let request_id_str = request_id.as_str().to_string();
-        match self
+        let collect = self
             .sampler_handle
-            .submit_and_collect(request_id, request)
-            .await
-        {
+            .submit_and_collect(request_id.clone(), request);
+        tokio::pin!(collect);
+        let collected = if self.goal_loop_active() {
+            tokio::select! {
+                biased;
+                _ = super::tool_calls::wait_for_pending_interjection(
+                    &self.pending_interjections,
+                ) => {
+                    self.sampler_handle.cancel(request_id);
+                    // Let the sampler publish its terminal cancellation before
+                    // starting the replacement request. This keeps per-request
+                    // stream ordering deterministic without cancelling the
+                    // Goal root task.
+                    let _ = collect.await;
+                    self.turn_stream_drained.lock().take();
+                    tracing::info!(
+                        sampler_request_id = request_id_str,
+                        "soft-preempted Goal sampling for user steering"
+                    );
+                    None
+                },
+                result = &mut collect => Some(result),
+            }
+        } else {
+            Some(collect.await)
+        };
+        let Some(collected) = collected else {
+            return Ok(SamplerTurnOutcome::Steered);
+        };
+        match collected {
             Ok((response, metrics)) => {
                 let span = tracing::Span::current();
                 span.record("request_id", request_id_str.as_str());

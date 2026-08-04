@@ -367,13 +367,38 @@ async fn handle_notification(
                 .goal_loop_active
                 .load(std::sync::atomic::Ordering::Relaxed);
             let mut will_wake = false;
-            if task_snapshot.block_waited || task_snapshot.explicitly_killed {
-            } else if goal_loop_active {
+            if goal_loop_active {
+                // Goal suppresses unrelated background noise, but a task
+                // whose blocking wait was displaced by steering has an
+                // explicit delivery obligation. The actor-side tracker owns
+                // the race with the original wait result and ignores task ids
+                // that were never deferred.
+                let tool_name = resolved_tool_name(&config.task_output_tool_name);
+                let read_name = resolved_tool_name(&config.read_tool_name);
+                let body = if is_monitor {
+                    tools::reminders::task_completion::format_monitor_completion(
+                        &task_snapshot,
+                        tool_name,
+                    )
+                } else {
+                    tools::reminders::task_completion::format_bash_completion(
+                        &task_snapshot,
+                        tool_name,
+                        read_name,
+                    )
+                };
+                let _ = config
+                    .session_cmd_tx
+                    .send(SessionCommand::DeferredCompletionAvailable {
+                        task_id: task_id.clone(),
+                        body,
+                    });
                 tracing::info!(
                     task_id = %task_id,
                     is_monitor,
-                    "auto-wake: suppressed completion (goal loop active)"
+                    "auto-wake: routed Goal completion through deferred-delivery tracker"
                 );
+            } else if task_snapshot.block_waited || task_snapshot.explicitly_killed {
             } else if config.auto_wake_enabled {
                 config.task_completion_reservations.reserve(task_id.clone());
                 let tool_name = resolved_tool_name(&config.task_output_tool_name);
@@ -877,13 +902,11 @@ mod tests {
             _ => panic!("expected DispatchNotificationHook"),
         }
     }
-    /// Gap 1: while a goal loop is active, a completed background bash task
-    /// must NOT fire the synthetic auto-wake prompt — an async "task completed"
-    /// wake mid-goal derails a weak model. It must also NOT be marked
-    /// reserved (so surface 2's `TaskCompletionReminder` is free to
-    /// drain it). The pager's `grow/task_completed` notification still fires.
+    /// Goal completions enter the actor's deferred-delivery gate instead of
+    /// firing a synthetic prompt. The actor drops unrelated task ids and only
+    /// wakes for a wait that steering explicitly transferred to the background.
     #[tokio::test]
-    async fn bash_task_completed_suppresses_auto_wake_during_goal_loop() {
+    async fn bash_task_completed_routes_through_deferred_gate_during_goal_loop() {
         let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
         config
             .task_output_tool_name
@@ -900,6 +923,11 @@ mod tests {
             &mut offsets,
         )
         .await;
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(SessionCommand::DeferredCompletionAvailable { task_id, .. })
+                if task_id == "bg-goal"
+        ));
         match cmd_rx
             .try_recv()
             .expect("expected DispatchNotificationHook for task_complete")
@@ -911,10 +939,7 @@ mod tests {
             }
             _ => panic!("unexpected session command"),
         }
-        assert!(
-            cmd_rx.try_recv().is_err(),
-            "goal-loop-active bash completion must not inject auto-wake commands"
-        );
+        assert!(cmd_rx.try_recv().is_err());
         assert!(
             config.task_completion_reservations.snapshot().is_empty(),
             "goal-loop-active completion must not be marked reserved"
@@ -1173,13 +1198,11 @@ mod tests {
         config.task_completion_reservations.release("bg-dead");
         assert!(!config.task_completion_reservations.contains("bg-dead"));
     }
-    /// Gap 1 (adjacent branch): the goal-loop arm sits BEFORE the
-    /// `auto_wake_enabled == false` `InjectNotification` fallback, so an
-    /// auto-wake-DISABLED completion mid-goal must also be suppressed — it must
-    /// NOT fall through to the idle-gated `InjectNotification`. Guards against a
-    /// future reorder that would leak a mid-goal notification.
+    /// The Goal deferred-delivery gate is independent of the ordinary
+    /// auto-wake preference: disabling auto-wake must not lose a completion
+    /// whose wait may have been displaced by steering.
     #[tokio::test]
-    async fn bash_task_completed_auto_wake_disabled_still_suppressed_during_goal_loop() {
+    async fn bash_task_completed_auto_wake_disabled_still_routes_through_deferred_gate() {
         let (mut config, mut cmd_rx) = make_test_config();
         config.auto_wake_enabled = false;
         config
@@ -1193,6 +1216,11 @@ mod tests {
             &mut offsets,
         )
         .await;
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(SessionCommand::DeferredCompletionAvailable { task_id, .. })
+                if task_id == "bg-disabled-goal"
+        ));
         match cmd_rx
             .try_recv()
             .expect("expected DispatchNotificationHook for task_complete")
@@ -1204,10 +1232,7 @@ mod tests {
             }
             _ => panic!("unexpected session command"),
         }
-        assert!(
-            cmd_rx.try_recv().is_err(),
-            "goal-loop-active completion must not InjectNotification with auto-wake disabled"
-        );
+        assert!(cmd_rx.try_recv().is_err());
         assert!(config.task_completion_reservations.snapshot().is_empty());
     }
     /// Natural monitor exit (including exit code 0) must immediate-auto-wake
@@ -1381,9 +1406,9 @@ mod tests {
         );
         assert!(config.task_completion_reservations.snapshot().is_empty());
     }
-    /// Goal-loop suppression applies to monitor completions too.
+    /// Monitor completions use the same Goal deferred-delivery gate as bash.
     #[tokio::test]
-    async fn monitor_task_completed_suppressed_during_goal_loop() {
+    async fn monitor_task_completed_routes_through_deferred_gate_during_goal_loop() {
         let (config, mut cmd_rx) = make_test_config();
         config
             .goal_loop_active
@@ -1396,6 +1421,11 @@ mod tests {
             &mut offsets,
         )
         .await;
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(SessionCommand::DeferredCompletionAvailable { task_id, .. })
+                if task_id == "mon-goal"
+        ));
         match cmd_rx
             .try_recv()
             .expect("expected DispatchNotificationHook for task_complete")
@@ -1407,10 +1437,7 @@ mod tests {
             }
             _ => panic!("unexpected session command"),
         }
-        assert!(
-            cmd_rx.try_recv().is_err(),
-            "goal-loop-active monitor completion must not auto-wake"
-        );
+        assert!(cmd_rx.try_recv().is_err());
         assert!(config.task_completion_reservations.snapshot().is_empty());
     }
     #[tokio::test]

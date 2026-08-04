@@ -23,6 +23,13 @@ tools = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+# `ctor` installs the rustls ring provider once before tests run (via
+# `diagnostics::tls::install_ring_provider_once`): reqwest is built with
+# `rustls-no-provider` (see docs/architecture/dependency-workarounds.md), and
+# the provider is only installed by CLI startup in production — tests bypass
+# that startup path.
+ctor = { workspace = true }
+diagnostics = { workspace = true }
 
 [lints]
 workspace = true

@@ -641,7 +641,12 @@ impl<'a> IntoIterator for &'a SigSet {
 }
 
 /// A signal handler.
-#[allow(unknown_lints)]
+//
+// The Eq/Hash/PartialEq derives are upstream API: they intentionally compare
+// fn-pointer addresses (SIG_DFL/SIG_IGN sentinels vs. handlers). This trips
+// `unpredictable_function_pointer_comparisons` on rustc >= 1.83 — upstream
+// nix 0.26..0.31 warns identically — so the lint is allowed on this type only.
+#[allow(unknown_lints, unpredictable_function_pointer_comparisons)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SigHandler {
     /// Default signal handling.
@@ -649,12 +654,12 @@ pub enum SigHandler {
     /// Request that the signal be ignored.
     SigIgn,
     /// Use the given signal-catching function, which takes in the signal.
-    Handler(extern fn(libc::c_int)),
+    Handler(extern "C" fn(libc::c_int)),
     /// Use the given signal-catching function, which takes in the signal, information about how
     /// the signal was generated, and a pointer to the threads `ucontext_t`.
     #[cfg(not(target_os = "redox"))]
     #[cfg_attr(docsrs, doc(cfg(all())))]
-    SigAction(extern fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void))
+    SigAction(extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void))
 }
 
 /// Action to take on receipt of a signal. Corresponds to `sigaction`.
@@ -674,9 +679,9 @@ impl SigAction {
             (*p).sa_sigaction = match handler {
                 SigHandler::SigDfl => libc::SIG_DFL,
                 SigHandler::SigIgn => libc::SIG_IGN,
-                SigHandler::Handler(f) => f as *const extern fn(libc::c_int) as usize,
+                SigHandler::Handler(f) => f as *const extern "C" fn(libc::c_int) as usize,
                 #[cfg(not(target_os = "redox"))]
-                SigHandler::SigAction(f) => f as *const extern fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) as usize,
+                SigHandler::SigAction(f) => f as *const extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) as usize,
             };
         }
 
@@ -722,9 +727,9 @@ impl SigAction {
                 //   ensured that it is correctly initialized.
                 unsafe{
                     *(&p as *const usize
-                         as *const extern fn(_, _, _))
+                         as *const extern "C" fn(_, _, _))
                 }
-                as extern fn(_, _, _)),
+                as extern "C" fn(_, _, _)),
             p => SigHandler::Handler(
                 // Safe for one of two reasons:
                 // * The SigHandler was created by SigHandler::new, in which
@@ -734,9 +739,9 @@ impl SigAction {
                 //   ensured that it is correctly initialized.
                 unsafe{
                     *(&p as *const usize
-                         as *const extern fn(libc::c_int))
+                         as *const extern "C" fn(libc::c_int))
                 }
-                as extern fn(libc::c_int)),
+                as extern "C" fn(libc::c_int)),
         }
     }
 }
@@ -838,8 +843,8 @@ pub unsafe fn signal(signal: Signal, handler: SigHandler) -> Result<SigHandler> 
             libc::SIG_IGN => SigHandler::SigIgn,
             p => SigHandler::Handler(
                 *(&p as *const usize
-                     as *const extern fn(libc::c_int))
-                as extern fn(libc::c_int)),
+                     as *const extern "C" fn(libc::c_int))
+                as extern "C" fn(libc::c_int)),
         }
     })
 }

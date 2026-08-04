@@ -31,14 +31,14 @@ pdf_oxide = { workspace = true }
 # `workspace = true`: the workspace `zip` pin has default features on, which
 # drag aes/bzip2/lzma/zstd into the shipped pager binary. PPTX entries are
 # only ever stored or deflated.
-zip = { version = "3", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
 quick-xml = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 minijinja = { version = "2", features = ["custom_syntax"] }
 parking_lot = { workspace = true }
 htmd = { workspace = true }
 scraper = { workspace = true }
-reqwest = { workspace = true, features = ["rustls-tls", "json", "gzip", "brotli", "deflate"] }
+reqwest = { workspace = true, features = ["rustls-no-provider", "json", "gzip", "brotli", "deflate"] }
 pulldown-cmark = { workspace = true }
 regex = { workspace = true }
 schemars = { workspace = true }
@@ -98,9 +98,16 @@ tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 test-support = { workspace = true }
 test-utils = { workspace = true }
+# `ctor` installs the rustls ring provider once before tests run (via
+# `diagnostics::tls::install_ring_provider_once`): reqwest is built with
+# `rustls-no-provider` (see docs/architecture/dependency-workarounds.md), and
+# the provider is only installed by CLI startup in production — tests bypass
+# that startup path.
+ctor = { workspace = true }
+diagnostics = { workspace = true }
 
 [build-dependencies]
-reqwest = { workspace = true, features = ["blocking", "rustls-tls"] }
+reqwest = { workspace = true, features = ["blocking", "rustls-no-provider"] }
 flate2 = { workspace = true }
 sha2 = { workspace = true }
 tar = { workspace = true }

@@ -537,7 +537,7 @@ fn over_budget_recap_serializes_to_well_formed_messages_request() {
 
     let mk_reasoning = |id: &str| {
         ConversationItem::Reasoning(rs::ReasoningItem {
-            id: id.to_string(),
+            id: Some(id.to_string()),
             summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                 text: format!("secret thinking {id}"),
             })],

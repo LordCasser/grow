@@ -4,6 +4,14 @@
 //! (one process under cargo test, nextest, and Bazel alike) so the
 //! environment they pin cannot leak into, or be poisoned by, other tests.
 
+/// reqwest is built with `rustls-no-provider` (see the vendoring notes on the
+/// workspace's rustls setup): production installs the ring provider at CLI
+/// startup, but test binaries bypass startup, so install it once here.
+#[ctor::ctor]
+fn install_rustls_provider() {
+    diagnostics::tls::install_ring_provider_once();
+}
+
 mod support;
 
 use std::sync::Once;

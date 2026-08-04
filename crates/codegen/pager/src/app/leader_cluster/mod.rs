@@ -302,7 +302,9 @@ impl PagerLeaderCluster {
     /// Stand up the cluster. Callers MUST be `#[serial_test::serial(GROW_HOME)]`
     /// (env mutation) and run inside a current-thread `LocalSet`.
     async fn start() -> Self {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        // reqwest is built with `rustls-no-provider`; install the ring
+        // provider before any TLS client is built (see diagnostics::tls).
+        diagnostics::tls::install_ring_provider_once();
 
         let server = MockInferenceServer::start().await.expect("mock server");
         let grow_home = TempDir::new().unwrap();

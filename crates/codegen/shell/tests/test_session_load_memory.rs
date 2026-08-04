@@ -663,7 +663,7 @@ mod rss {
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "heavy: builds a full MvpAgent and loads a large session; run with --ignored --nocapture"]
     async fn session_load_e2e_peak_rss() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        diagnostics::tls::install_ring_provider_once();
 
         let server = test_support::MockInferenceServer::start().await.unwrap();
 

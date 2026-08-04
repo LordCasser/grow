@@ -15,6 +15,7 @@ ptyctl = { path = "../ptyctl" }
 axum = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 reqwest = { workspace = true, features = ["json"] }
+diagnostics = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

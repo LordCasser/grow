@@ -124,7 +124,8 @@ mod links {
     }
 
     impl Backend for RecordingBackend {
-        fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+        type Error = io::Error;
+        fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
         where
             I: Iterator<Item = (u16, u16, &'a Cell)>,
         {
@@ -133,38 +134,38 @@ mod links {
             }
             Ok(())
         }
-        fn hide_cursor(&mut self) -> io::Result<()> {
+        fn hide_cursor(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
-        fn show_cursor(&mut self) -> io::Result<()> {
+        fn show_cursor(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
-        fn get_cursor_position(&mut self) -> io::Result<Position> {
+        fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
             Ok(Position::ORIGIN)
         }
-        fn set_cursor_position<P: Into<Position>>(&mut self, _position: P) -> io::Result<()> {
+        fn set_cursor_position<P: Into<Position>>(&mut self, _position: P) -> Result<(), Self::Error> {
             Ok(())
         }
-        fn clear(&mut self) -> io::Result<()> {
+        fn clear(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
-        fn clear_region(&mut self, _clear_type: ratatui::backend::ClearType) -> io::Result<()> {
+        fn clear_region(&mut self, _clear_type: ratatui::backend::ClearType) -> Result<(), Self::Error> {
             Ok(())
         }
-        fn append_lines(&mut self, n: u16) -> io::Result<()> {
+        fn append_lines(&mut self, n: u16) -> Result<(), Self::Error> {
             self.appended_lines += n;
             Ok(())
         }
-        fn size(&self) -> io::Result<Size> {
+        fn size(&self) -> Result<Size, Self::Error> {
             Ok(Size::new(80, 24))
         }
-        fn window_size(&mut self) -> io::Result<WindowSize> {
+        fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
             Ok(WindowSize {
                 columns_rows: Size::new(80, 24),
                 pixels: Size::new(0, 0),
             })
         }
-        fn flush(&mut self) -> io::Result<()> {
+        fn flush(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
     }

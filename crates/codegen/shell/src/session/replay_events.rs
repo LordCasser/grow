@@ -105,6 +105,10 @@ impl SessionNotification {
 #[derive(Debug)]
 pub(crate) enum SessionEvent {
     Notification(SessionNotification),
+    /// A deferred task or Goal-stage completion became ready outside the
+    /// actor mailbox. Wakes the actor so an idle session can synthesize a
+    /// model turn; an active turn drains it at its next safe boundary.
+    ForegroundWake,
     FlushReplay {
         respond_to: Option<oneshot::Sender<()>>,
     },

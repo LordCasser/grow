@@ -1174,6 +1174,7 @@ mod configuration_shortcut_tests {
             .sync_acp_commands(&commands, None, &agent.session.models);
         agent.sync_command_selection_context();
         agent.prompt.set_text("/goal set");
+        agent.prompt.set_cursor("/goal set".len());
         agent.prompt.refresh_slash(&agent.session.models);
         assert!(agent.prompt.slash_open());
 

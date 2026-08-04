@@ -41,6 +41,9 @@ pub(crate) enum SamplerTurnOutcome {
     RefreshByokAndResubmit {
         credential: sampling_types::SentCredential,
     },
+    /// Goal-only soft preemption: the sampler request was stopped so the same
+    /// root turn can consume a newly arrived user steering event.
+    Steered,
 }
 
 /// Outcome of `process_conversation_turn`, distinguishing normal completion from cancellation.
@@ -233,6 +236,10 @@ pub(crate) enum NotAchievedSyntheticReason {
 /// (achieved / paused / blocked) or this isn't a goal turn.
 pub(crate) enum GoalRoundDecision {
     Continue(String),
+    /// A user steering event or deferred completion arrived while an
+    /// evaluator/verifier was running. Discard that autonomous decision and
+    /// return to the main-agent sampling loop.
+    ResumeForeground,
     EndTurn,
 }
 

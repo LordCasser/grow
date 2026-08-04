@@ -24,6 +24,14 @@ const DUPLEX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const CHURN_SESSIONS: usize = 15;
 const CONCURRENT_SESSIONS: usize = 4;
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
+fn test_model_config(base_url: &str) -> String {
+    format!(
+        "[models]\ndefault = \"test/test-model\"\n\n\
+         [provider.test]\napi_backend = \"chat_completions\"\n\n\
+         [provider.test.options]\nbase_url = \"{base_url}\"\n\n\
+         [provider.test.models.test-model]\nname = \"Test Model\"\ncontext_window = 128000\n"
+    )
+}
 /// Field names are the wire contract (`RegistrySnapshot` in
 /// `agent/mvp_agent/session_lifecycle.rs`); `deny_unknown_fields` forces a
 /// new server-side count to be mirrored and asserted here.
@@ -146,8 +154,14 @@ async fn churn_one(conn: &acp::ClientSideConnection, cwd: &std::path::Path, labe
 /// Builds the in-process agent from the environment and returns an
 /// initialized client connection over duplex pipes. IO
 /// tasks spawn on the current `LocalSet`.
-async fn connect_and_auth() -> acp::ClientSideConnection {
-    let agent_config = AgentConfig::default();
+async fn connect_and_auth(base_url: &str) -> acp::ClientSideConnection {
+    let raw: toml::Value =
+        toml::from_str(&test_model_config(base_url)).expect("valid explicit test model TOML");
+    let mut agent_config =
+        AgentConfig::new_from_toml_cfg(&raw).expect("valid explicit test config");
+    agent_config.models.default = Some("test/test-model".to_owned());
+    agent_config.default_model_override = None;
+    agent_config.remote_settings = Some(shell::util::config::RemoteSettings::default());
     let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(gw_tx);
     let agent = MvpAgent::new(gateway, &agent_config).expect("valid config");
@@ -219,7 +233,7 @@ async fn connect_and_auth() -> acp::ClientSideConnection {
 /// `git_contention_e2e`).
 #[test]
 fn session_churn_returns_registry_snapshot_to_baseline() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    diagnostics::tls::install_ring_provider_once();
     let mock_rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -236,13 +250,18 @@ fn session_churn_returns_registry_snapshot_to_baseline() {
         std::env::set_var("GROW_INFERENCE_BASE_URL", server.url());
         std::env::set_var("GROW_API_KEY", "test-key-for-ci");
     }
+    std::fs::write(
+        grow_home.path().join("config.toml"),
+        test_model_config(&server.url()),
+    )
+    .expect("write explicit test model config");
     let agent_rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("agent runtime");
     let local = tokio::task::LocalSet::new();
     agent_rt.block_on(local.run_until(async move {
-        let client_conn = connect_and_auth().await;
+        let client_conn = connect_and_auth(&server.url()).await;
         churn_one(&client_conn, workdir.path(), 0).await;
         let baseline = read_counts(&client_conn).await;
         assert_eq!(

@@ -165,16 +165,8 @@ pager-pty-harness = { path = "../pager-pty-harness" }
 # In-process leader-cluster harness (mock inference server; no cycle:
 # test-support depends on neither the pager nor the shell).
 test-support = { workspace = true, features = [] }
-# Ring CryptoProvider install for the in-process leader-cluster tests. Explicit
-# spec mirroring the shell's, NOT `workspace = true`: the workspace pin enables
-# aws-lc-rs, under which `rustls::crypto::ring` does not exist. Dev-only — the
-# production lib deliberately dropped rustls (moved to cli).
-rustls = { version = "0.23", default-features = false, features = [
-    "ring",
-    "logging",
-    "std",
-    "tls12",
-] }
+# Ring provider install for the in-process leader-cluster tests now lives in
+# `diagnostics::tls::install_ring_provider_once` (dev-only rustls removed here).
 
 [[bench]]
 name = "render"

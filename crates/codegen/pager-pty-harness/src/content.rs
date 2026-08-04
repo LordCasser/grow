@@ -153,6 +153,27 @@ impl ContentController {
         &self.sandbox
     }
 
+    /// Seed `$GROW_HOME/config.toml` with a mock LLM provider pointing at
+    /// this controller's server.
+    ///
+    /// Since the provider-neutral refactor (095ab55), the pager's BYOK gate
+    /// refuses to start without `[models].default` + a provider `base_url`;
+    /// a fresh sandbox home has neither. Spawn-based tests must call this
+    /// before spawning the pager.
+    pub fn seed_llm_config(&self) -> Result<()> {
+        let grow_home = self.home().join(".grow");
+        std::fs::create_dir_all(&grow_home).context("create .grow")?;
+        let config = format!(
+            "[models]\ndefault = \"mock/mock\"\n\n\
+             [provider.mock]\napi_backend = \"chat_completions\"\n\n\
+             [provider.mock.options]\nbase_url = \"{}\"\n\n\
+             [provider.mock.models.mock]\nname = \"Mock\"\ncontext_window = 128000\n",
+            self.url()
+        );
+        std::fs::write(grow_home.join("config.toml"), config).context("write config.toml")?;
+        Ok(())
+    }
+
     /// Replace the mocked assistant response. All subsequent chat completion
     /// requests will stream this text word-by-word.
     pub fn set_response(&self, text: impl Into<String>) {
@@ -302,6 +323,14 @@ fn default_response_text() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// reqwest is built with `rustls-no-provider` (see the vendoring notes on
+    /// the workspace's rustls setup): production installs the ring provider at
+    /// CLI startup, but tests bypass startup, so install it once here.
+    #[ctor::ctor]
+    fn install_rustls_provider() {
+        diagnostics::tls::install_ring_provider_once();
+    }
 
     const EXPECTATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 

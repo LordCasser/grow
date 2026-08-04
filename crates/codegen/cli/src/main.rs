@@ -1457,7 +1457,9 @@ fn main() {
     }
 }
 async fn async_main(args: PagerArgs) -> Result<()> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // reqwest is built with `rustls-no-provider`; install the ring provider
+    // before any TLS client is built (see diagnostics::tls).
+    diagnostics::tls::install_ring_provider_once();
     let mut args = args.apply_cwd()?;
     if let Some(ref mode) = args.compaction_mode {
         unsafe { std::env::set_var("GROW_COMPACTION_MODE", mode) };

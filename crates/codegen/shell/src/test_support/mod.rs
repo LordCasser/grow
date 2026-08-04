@@ -11,6 +11,14 @@ fn redirect_unified_log_for_tests() {
     ::diagnostics::unified_log::redirect_to_temp_for_tests();
 }
 
+/// reqwest is built with `rustls-no-provider` (see the vendoring notes on the
+/// workspace's rustls setup): production installs the ring provider at CLI
+/// startup, but tests bypass startup, so install it once here.
+#[ctor::ctor]
+fn install_rustls_provider() {
+    ::diagnostics::tls::install_ring_provider_once();
+}
+
 /// Prepend the hermetic git binary (via `GIT_BIN_PATH`) to `PATH` so that
 /// `Command::new("git")` in test helpers resolves to the Bazel-provided
 /// static binary instead of relying on system-installed git.

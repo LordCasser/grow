@@ -7,6 +7,14 @@
 //! Each test spawns a temporary mock server that returns SSE streams,
 //! allowing us to test the client without real API credentials.
 
+/// reqwest is built with `rustls-no-provider` (see the vendoring notes on the
+/// workspace's rustls setup): production installs the ring provider at CLI
+/// startup, but test binaries bypass startup, so install it once here.
+#[ctor::ctor]
+fn install_rustls_provider() {
+    diagnostics::tls::install_ring_provider_once();
+}
+
 use futures_util::stream::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{Value, json};

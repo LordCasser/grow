@@ -225,7 +225,9 @@ async fn tool_dyn_delegates_id_description_capabilities() {
     );
     assert_eq!(
         tool.capabilities().tool_scope,
-        tool_protocol::ToolScope::Read
+        // `BlockingEcho` declares no scope; the protocol default is `Write`
+        // (unknown tools fail closed as mutating until they declare `Read`).
+        tool_protocol::ToolScope::Write
     );
 }
 

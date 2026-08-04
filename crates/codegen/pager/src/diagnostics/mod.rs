@@ -1019,7 +1019,7 @@ mod tests {
         std::fs::create_dir_all(&agents).expect("agents dir");
         std::fs::write(
             agents.join("reader.md"),
-            "---\nname: reader\ndescription: read only\ntoolPreset: explore\n---\n\nRead only.\n",
+            "---\nname: reader\ndescription: read only\ntoolPreset: explore\ninjectDefaultTools: false\n---\n\nRead only.\n",
         )
         .expect("agent definition");
 

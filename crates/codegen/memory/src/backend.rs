@@ -1245,6 +1245,15 @@ mod tests {
     use config_types::MemoryIndexConfig;
     use tempfile::TempDir;
 
+    /// reqwest is built with `rustls-no-provider` (see the vendoring notes on
+    /// the workspace's rustls setup): production installs the ring provider at
+    /// CLI startup, but tests bypass startup, so install it once here. Covers
+    /// this binary's whole test suite, including `factory_tests`.
+    #[ctor::ctor]
+    fn install_rustls_provider() {
+        diagnostics::tls::install_ring_provider_once();
+    }
+
     /// An api-key provider that fails the test if its key is ever resolved,
     /// proving a scoped-away credential is never consulted.
     struct PanicKey;

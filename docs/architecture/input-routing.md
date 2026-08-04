@@ -11,7 +11,9 @@ Goal, plan, and future behaviors therefore share the same admission rules.
    row, the session actor atomically removes the authoritative queue item and
    moves its payload into the interjection buffer. It cannot both inject and
    later run as a standalone prompt. Outside Goal mode, Send now retains the
-   normal cancel-and-promote behavior.
+   normal cancel-and-promote behavior. `State::running_task` is the sole
+   lifecycle authority; `current_prompt_id` and queue-row association are
+   display metadata and may legitimately be absent during Goal planning.
 3. Leading-slash input is a Grow command. Goal commands always use the
    `grow/commands/execute` control plane, including while idle; other known host
    commands use it while a turn or Goal is active. The raw command is never a
@@ -52,6 +54,13 @@ return to Normal. User messages queued under Goal are retagged to the target
 Behavior when Goal is intentionally exited, so stale prompt metadata cannot
 silently re-enter a cleared or completed Goal.
 
+A verifier-confirmed Goal retains its completed Goal display as a receipt while
+the effective Behavior is Normal. Selecting Normal preserves that receipt.
+Selecting any special Behavior (including Goal for a new objective) first
+durably retires the completed Goal snapshot, emits the cleared display update,
+then applies the selected Behavior. A stale completed snapshot can therefore
+neither override the new status chip nor resurrect Goal routing after reload.
+
 Goal definition, lifecycle, and resource constraints are orthogonal:
 
 - `set` revises a non-terminal Goal definition in place. It preserves Goal
@@ -74,3 +83,52 @@ Goal definition, lifecycle, and resource constraints are orthogonal:
 Hidden Goal reminders and skill announcements share the session's buffered
 system-reminder channel and drain at model-safe boundaries. User corrections
 use the distinct interjection channel and remain real user messages.
+
+## Foreground interruption and completion delivery
+
+An active Goal is one root turn with interruptible foreground phases. User
+steering may soft-preempt model sampling, a blocking wait tool, or the initial
+planner wait, but it never cancels the Goal root task, terminal task, or child
+agent. Non-Goal Behaviors do not enter this path: their existing Send now
+cancel-and-promote semantics remain unchanged.
+
+When steering displaces `wait_tasks`, `get_task_output`, or a compatible wait,
+the original model tool call receives exactly one terminal result saying that
+the wait moved to the background. This legally closes
+`assistant(tool_call) -> tool_result`; the eventual task payload never reuses
+that call id. A session-local completion tracker atomically records the task as
+awaiting or deferred and resolves completion-vs-steering races:
+
+- completion before steering is retained and becomes ready when the wait is
+  deferred;
+- the original wait winning removes the tracker entry, so no reminder follows;
+- a deferred completion is injected once as a hidden system reminder;
+- a later output tool that explicitly returns the completion consumes any
+  queued reminder in the same commit path.
+
+Completion producers keep Goal's general background-noise suppression. Bash,
+monitor, and child-agent completions are offered to the tracker while Goal is
+active, but only task ids registered by a steering-displaced wait are surfaced.
+Thus Goal-specific delivery does not enable unrelated auto-wakes and does not
+alter Normal, Plan, Ask, Workflow, or Deep Research completion policy.
+
+Foreground events are delivered at model-safe boundaries. User steering wakes
+and may soft-preempt Goal sampling; task completion never interrupts a response
+already streaming. If completion arrives during that response, the turn drains
+it afterward and samples again before Goal evaluation. If it arrives during an
+evaluator or verifier, the monotonic completion generation invalidates that
+autonomous result before it can pause or complete the Goal. If no root turn is
+running, a synthetic completion wake starts a Normal turn with the payload kept
+in a hidden system reminder.
+
+User steering during evaluation discards that uncommitted evaluation request;
+it has no durable child identity or side effects and is recomputed from the new
+foreground context. A verifier panel does have durable child identities, so its
+wait transfers to a background continuation. Its late verdict is diagnostic
+only: it may wake the main Agent, but cannot mutate Goal lifecycle state.
+
+Initial planner ownership follows the same rule. Steering transfers the planner
+future and its child wait to a background continuation. The continuation commits
+only against the captured Goal id and definition revision, then queues a Goal
+stage completion for the next safe main-agent sample. A late planner can never
+overwrite a revised or cleared Goal.

@@ -41,7 +41,7 @@ mimalloc = "0.1"
 # Fast hash for better HashMap performance
 ahash = { version = "0.8", features = ["serde"] }
 # Additional hash utilities for StringInterner
-hashbrown = "0.15"
+hashbrown = { workspace = true }
 nohash-hasher = "0.2"
 rustc-hash = { workspace = true }
 smallvec = { workspace = true }

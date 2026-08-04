@@ -489,7 +489,10 @@ impl SessionActor {
             == Some(crate::session::goal_tracker::GoalStatus::Active);
         let mut state = self.state.lock().await;
         let running_front_id = state.running_prompt_id().map(str::to_string);
-        let turn_running = running_front_id.is_some();
+        // The root task exists before Goal planning assigns a prompt id.
+        // Lifecycle admission must therefore use the actor's authoritative
+        // running_task, not the queue/display association.
+        let turn_running = state.running_task.is_some();
         let row_matches = |item: &InputItem| {
             item.queue_meta.as_ref().is_some_and(|m| {
                 m.id == id

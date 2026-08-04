@@ -956,7 +956,8 @@ pub(crate) async fn run(
             resolve_announcements(effective_config.as_ref().unwrap_or(&empty_config));
         app.active_announcements = announcements::filter_expired(announcements);
         if !app.active_announcements.is_empty() {
-            use rand::Rng;
+            // rand >= 0.10 moved `random_range` to the `RngExt` trait.
+            use rand::RngExt;
             let idx = rand::rng().random_range(0..app.active_announcements.len());
             app.announcement = app.active_announcements.get(idx).cloned();
         }

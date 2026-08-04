@@ -48,6 +48,10 @@ async fn scroll_up_from_follow_bottom_then_back_down() -> Result<()> {
         .context("start mock inference server")?;
     content.set_response(long_markdown(LINES));
 
+    // BYOK gate: the pager refuses to start without a configured LLM
+    // ([models].default + a provider base_url). Point it at the mock server.
+    content.seed_llm_config().context("seed mock LLM config")?;
+
     let mut harness = PtyHarness::spawn_with_content(&binary, ROWS, COLS, &content, &[])
         .context("spawn pager in PTY")?;
 

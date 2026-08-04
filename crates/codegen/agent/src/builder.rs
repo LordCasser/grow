@@ -1121,6 +1121,15 @@ fn resolve_shell_for_prompt() -> String {
 mod tests {
     use super::*;
     use crate::config::AgentScope;
+
+    /// reqwest is built with `rustls-no-provider` (see the vendoring notes on
+    /// the workspace's rustls setup): production installs the ring provider at
+    /// CLI startup, but tests bypass startup, so install it once here.
+    #[ctor::ctor]
+    fn install_rustls_provider() {
+        diagnostics::tls::install_ring_provider_once();
+    }
+
     fn entry(name: &str, desc: &str, source: SubagentSource) -> SubagentEntry {
         SubagentEntry {
             name: name.to_string(),

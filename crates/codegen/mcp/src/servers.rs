@@ -3809,6 +3809,14 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// reqwest is built with `rustls-no-provider` (see the vendoring notes on
+    /// the workspace's rustls setup): production installs the ring provider at
+    /// CLI startup, but tests bypass startup, so install it once here.
+    #[ctor::ctor]
+    fn install_rustls_provider() {
+        diagnostics::tls::install_ring_provider_once();
+    }
+
     /// A single undecodable line on an MCP stdio server's stdout must NOT
     /// collapse the transport: if the decode error surfaced as `None`, the
     /// service would read it as EOF → "Transport closed" → `tools/list` fails

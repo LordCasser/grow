@@ -1053,7 +1053,7 @@ impl SessionActor {
     /// is disabled, when the coordinator is not plumbed (tests /
     /// compatible template), or when `plan_file` is already populated.
     /// On `FailClosed` the goal is paused with the canonical reason.
-    pub(super) async fn maybe_run_goal_planner(&self, objective: &str) {
+    pub(super) async fn maybe_run_goal_planner(self: &std::sync::Arc<Self>, objective: &str) {
         if !self.goal_planner_enabled {
             return;
         }
@@ -1132,69 +1132,152 @@ impl SessionActor {
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         self.emit_goal_planning(current_tokens);
 
-        let outcome = crate::session::goal_planner::run_goal_planner(
-            spawner,
-            crate::session::goal_planner::GoalPlannerInputs {
-                objective,
-                context: &context,
-                plan_file: &plan_file,
-                attempt,
-                // Planner is forced to the parent model (no role override), so the
-                // effective role model is always the parent.
-                model_id: crate::session::goal_planner::effective_role_model_id(None, &model_id),
-                tool_names: &tool_names,
-                inherit_tool_names: &inherit_tool_names,
+        let objective = objective.to_owned();
+        let effective_model_id =
+            crate::session::goal_planner::effective_role_model_id(None, &model_id).to_owned();
+        let foreground_generation = self.completion_delivery.generation();
+        let mut planner_task = tokio::task::spawn_local(async move {
+            crate::session::goal_planner::run_goal_planner(
+                spawner,
+                crate::session::goal_planner::GoalPlannerInputs {
+                    objective: &objective,
+                    context: &context,
+                    plan_file: &plan_file,
+                    attempt,
+                    model_id: &effective_model_id,
+                    tool_names: &tool_names,
+                    inherit_tool_names: &inherit_tool_names,
+                },
+            )
+            .await
+        });
+        let background_definition = definition_key.clone();
+        enum PlannerWait {
+            Displaced(&'static str),
+            Finished(
+                Result<crate::session::goal_planner::GoalPlannerOutcome, tokio::task::JoinError>,
+            ),
+        }
+        let wait = tokio::select! {
+            biased;
+            _ = super::tool_calls::wait_for_pending_interjection(
+                &self.pending_interjections,
+            ) => PlannerWait::Displaced("user steering"),
+            _ = self
+                .completion_delivery
+                .wait_generation_change(foreground_generation) => {
+                PlannerWait::Displaced("a foreground completion")
             },
-        )
-        .await;
+            result = &mut planner_task => PlannerWait::Finished(result),
+        };
+        let outcome = match wait {
+            PlannerWait::Displaced(displaced_by) => {
+                // Transfer the planner wait to a continuation. The child and
+                // its waiter remain alive; only the Goal's foreground setup
+                // stops blocking so the main agent can process the foreground.
+                self.push_system_reminder(&format!(
+                    "The Goal planner is still running in the background after {displaced_by}. Process the foreground information now, but do not begin plan-dependent execution until the planner completion reminder arrives."
+                ));
+                let actor = std::sync::Arc::clone(self);
+                tokio::task::spawn_local(async move {
+                    match planner_task.await {
+                        Ok(outcome) => {
+                            let applied = actor
+                                .apply_goal_planner_outcome(&background_definition, outcome)
+                                .await;
+                            if applied {
+                                actor.completion_delivery.queue_ready(
+                                    format!(
+                                        "goal-planner:{}:{}",
+                                        background_definition.0, background_definition.1
+                                    ),
+                                    "The Goal planner finished in the background. Its plan is now available; incorporate it before continuing execution."
+                                        .to_string(),
+                                );
+                                let _ = actor.event_tx.send(SessionEvent::ForegroundWake);
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            error = %error,
+                            "goal planner continuation task failed"
+                        ),
+                    }
+                });
+                return;
+            }
+            PlannerWait::Finished(result) => match result {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    tracing::warn!(error = %error, "goal planner task failed");
+                    crate::session::goal_planner::GoalPlannerOutcome::FailClosed {
+                        reason: crate::session::events::GoalPlannerFailClosedReason::Aborted,
+                        latency_ms: 0,
+                    }
+                }
+            },
+        };
 
+        self.apply_goal_planner_outcome(&definition_key, outcome)
+            .await;
+    }
+
+    async fn apply_goal_planner_outcome(
+        &self,
+        definition_key: &(String, u64),
+        outcome: crate::session::goal_planner::GoalPlannerOutcome,
+    ) -> bool {
         if !self
             .goal_tracker
             .lock()
             .definition_is_current(&definition_key.0, definition_key.1)
         {
             tracing::info!("goal planner: discarded stale result after goal revision");
-            return;
+            return false;
         }
 
-        match outcome {
+        let plan_available = match outcome {
             crate::session::goal_planner::GoalPlannerOutcome::Planned { plan_file, .. } => {
-                // Record `plan_file`, then snapshot the planner's ORIGINAL plan
-                // as the immutable baseline the verifier diffs later edits
-                // against. Capture once: `maybe_run_goal_planner` only runs when
-                // no plan exists yet, and the `is_none()` guard keeps a restart /
-                // re-entry from overwriting it.
+                // Stage the immutable baseline before publishing either path.
+                // The file copy is an await boundary, so committing plan_file
+                // earlier could let `/goal set` retain an old planner result
+                // after its definition revision changed.
                 let baseline_target = {
-                    let mut tracker = self.goal_tracker.lock();
+                    let tracker = self.goal_tracker.lock();
                     let src = tracker.plan_path();
                     let dst = tracker.plan_baseline_path();
                     let need_baseline = tracker
                         .snapshot()
                         .is_some_and(|o| o.plan_baseline_file.is_none());
-                    if let Some(o) = tracker.snapshot_mut() {
-                        o.plan_file = Some(plan_file);
-                    }
                     need_baseline.then_some((src, dst))
                 };
-                if let Some((src, dst)) = baseline_target {
+                let baseline_file = if let Some((src, dst)) = baseline_target {
                     match tokio::fs::copy(&src, &dst).await {
-                        Ok(_) => {
-                            let mut tracker = self.goal_tracker.lock();
-                            // `None` here means the goal ended concurrently during
-                            // the copy; the orphaned baseline file is harmless
-                            // (never referenced without a recorded path).
-                            if let Some(o) = tracker.snapshot_mut() {
-                                o.plan_baseline_file = Some(dst);
-                            }
+                        Ok(_) => Some(dst),
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                src = %src.display(),
+                                "goal planner: failed to snapshot plan baseline; \
+                                 PLAN_CHANGES will render (none)",
+                            );
+                            None
                         }
-                        Err(err) => tracing::warn!(
-                            error = %err,
-                            src = %src.display(),
-                            "goal planner: failed to snapshot plan baseline; \
-                             PLAN_CHANGES will render (none)",
-                        ),
+                    }
+                } else {
+                    None
+                };
+                let mut tracker = self.goal_tracker.lock();
+                if !tracker.definition_is_current(&definition_key.0, definition_key.1) {
+                    tracing::info!("goal planner: discarded staged result after goal revision");
+                    return false;
+                }
+                if let Some(o) = tracker.snapshot_mut() {
+                    o.plan_file = Some(plan_file);
+                    if let Some(path) = baseline_file {
+                        o.plan_baseline_file = Some(path);
                     }
                 }
+                true
             }
             crate::session::goal_planner::GoalPlannerOutcome::FailClosed { .. } => {
                 let _ = self
@@ -1203,8 +1286,9 @@ impl SessionActor {
                         planner_failure_pause_message(),
                     )
                     .await;
+                false
             }
-        }
+        };
 
         // Reset the latch on every exit path (success, fail-closed,
         // mid-run status change) and emit so the "planning…" badge turns
@@ -1213,11 +1297,16 @@ impl SessionActor {
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
         let mut tracker = self.goal_tracker.lock();
+        if !tracker.definition_is_current(&definition_key.0, definition_key.1) {
+            tracing::info!("goal planner: discarded result after goal changed during commit");
+            return false;
+        }
         if let Some(o) = tracker.snapshot_mut() {
             o.planning_in_flight = false;
         }
         self.goal_notify_sender()
             .emit_goal_updated(&mut tracker, tokens_used, finished_marginal);
+        plan_available
     }
 
     /// Run the stall-triggered strategist subagent (best-effort, fail-OPEN).

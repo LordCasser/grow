@@ -50,6 +50,14 @@ mod tests {
     use crate::{CredentialSnapshot, HttpAuth};
     use reqwest_middleware::ClientBuilder;
 
+    /// reqwest is built with `rustls-no-provider` (see the vendoring notes on
+    /// the workspace's rustls setup): production installs the ring provider at
+    /// CLI startup, but tests bypass startup, so install it once here.
+    #[ctor::ctor]
+    fn install_rustls_provider() {
+        diagnostics::tls::install_ring_provider_once();
+    }
+
     struct Provider(Option<String>);
 
     impl HttpAuth for Provider {

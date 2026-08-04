@@ -387,10 +387,28 @@ mod tests {
         assert!(is_grow_process(std::process::id()));
         assert!(!is_grow_process(u32::MAX));
     }
+    #[cfg(unix)]
     #[test]
-    fn is_grow_process_strict_self_true_impossible_pid_false() {
-        assert!(is_grow_process_strict(std::process::id()));
+    fn is_grow_process_strict_matches_grow_named_process() {
+        // Strict detection matches the process name (`ps -o comm=` on
+        // macOS/BSD); the test binary itself is `shell_base-*`, so probe with
+        // a helper whose argv[0] is grow-named instead of asserting on self.
+        let dir = std::env::temp_dir().join(format!("grow-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create probe dir");
+        let link = dir.join("grow-sleep");
+        std::os::unix::fs::symlink("/bin/sleep", &link).expect("symlink grow-sleep");
+        let mut child = std::process::Command::new(&link)
+            .arg("60")
+            .spawn()
+            .expect("spawn grow-named sleep");
+        assert!(
+            is_grow_process_strict(child.id()),
+            "grow-named process should be detected strictly"
+        );
         assert!(!is_grow_process_strict(u32::MAX));
+        child.kill().expect("kill probe");
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
     }
     #[cfg(unix)]
     #[test]

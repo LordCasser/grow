@@ -3,6 +3,14 @@
 //! Each `MockServer` binds to its own random port and these tests do not touch
 //! global state, so no serial execution is required.
 
+/// reqwest is built with `rustls-no-provider` (see the vendoring notes on the
+/// workspace's rustls setup): production installs the ring provider at CLI
+/// startup, but test binaries bypass startup, so install it once here.
+#[ctor::ctor]
+fn install_rustls_provider() {
+    diagnostics::tls::install_ring_provider_once();
+}
+
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 

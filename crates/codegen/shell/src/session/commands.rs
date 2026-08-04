@@ -190,6 +190,13 @@ pub enum SessionCommand {
         command: String,
         respond_to: oneshot::Sender<Result<(), String>>,
     },
+    /// A background task completed after its Goal wait was displaced by user
+    /// steering. The actor decides whether this task is registered for
+    /// deferred delivery; unrelated Goal background noise remains suppressed.
+    DeferredCompletionAvailable {
+        task_id: String,
+        body: String,
+    },
     SessionMode {
         session_mode: acp::SessionModeId,
         responds_to: oneshot::Sender<crate::session::behavior::BehaviorChangeOutcome>,

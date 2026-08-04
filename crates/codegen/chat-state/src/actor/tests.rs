@@ -3785,7 +3785,7 @@ fn assert_prefix_stable_pair(
 fn reasoning_sibling(id: &str, encrypted: Option<&str>) -> ConversationItem {
     use sampling_types::rs;
     ConversationItem::Reasoning(rs::ReasoningItem {
-        id: id.to_string(),
+        id: Some(id.to_string()),
         summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
             text: format!("thinking for {id}"),
         })],

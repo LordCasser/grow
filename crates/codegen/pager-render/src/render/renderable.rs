@@ -102,7 +102,8 @@ impl<'a> Renderable for Span<'a> {
 /// Lines render as a single line (no wrapping).
 impl<'a> Renderable for Line<'a> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        WidgetRef::render_ref(self, area, buf);
+        // ratatui 0.30 implements `WidgetRef` for references, not values.
+        WidgetRef::render_ref(&self, area, buf);
     }
     fn desired_height(&self, _width: u16) -> u16 {
         1

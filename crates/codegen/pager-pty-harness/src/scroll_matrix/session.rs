@@ -162,6 +162,11 @@ fn spawn_pager(
     content: &ContentController,
     extra_env: &[(&str, &str)],
 ) -> PtyHarness {
+    // BYOK gate: the pager refuses to start without a configured LLM
+    // ([models].default + a provider base_url). Point it at the mock server.
+    content
+        .seed_llm_config()
+        .expect("seed mock LLM config before pager spawn");
     let mut harness = PtyHarness::new_in_sandbox(
         binary,
         SESSION_ROWS,

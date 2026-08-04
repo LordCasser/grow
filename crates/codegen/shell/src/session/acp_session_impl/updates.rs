@@ -1138,6 +1138,64 @@ mod grow_event_id_stamping_tests {
             })
             .await;
     }
+
+    #[tokio::test]
+    async fn completed_goal_receipt_survives_normal_but_special_behavior_retires_it() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, mut persistence_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                actor.goal_tracker.lock().create_goal(
+                    "completed-goal".into(),
+                    "done".into(),
+                    None,
+                    0,
+                    "now".into(),
+                    None,
+                );
+                actor.goal_tracker.lock().complete_verified();
+
+                let normal = actor
+                    .request_behavior_change(acp::SessionModeId::new("normal"))
+                    .await;
+                assert!(matches!(
+                    normal,
+                    crate::session::behavior::BehaviorChangeOutcome::Applied
+                ));
+                assert_eq!(
+                    actor.goal_tracker.lock().status(),
+                    Some(crate::session::goal_tracker::GoalStatus::Complete),
+                    "Normal keeps the completed Goal receipt visible"
+                );
+
+                let persistence = tokio::task::spawn_local(async move {
+                    while let Some(message) = persistence_rx.recv().await {
+                        if let PersistenceMsg::DeleteGoalModeState { respond_to } = message {
+                            let _ = respond_to.send(Ok(()));
+                            return;
+                        }
+                    }
+                });
+                let ask = actor
+                    .request_behavior_change(acp::SessionModeId::new("ask"))
+                    .await;
+                persistence.await.unwrap();
+                assert!(matches!(
+                    ask,
+                    crate::session::behavior::BehaviorChangeOutcome::Applied
+                ));
+                assert!(actor.goal_tracker.lock().snapshot().is_none());
+                assert_eq!(
+                    *actor.current_prompt_mode.lock(),
+                    crate::session::behavior::PromptMode::Ask
+                );
+            })
+            .await;
+    }
 }
 
 /// Synthetic auto-wake prompts (background subagent / bash / monitor /

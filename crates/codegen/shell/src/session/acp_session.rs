@@ -88,6 +88,8 @@ pub use types::{TodoGateDecision, TodoGateReason};
 #[path = "acp_session_impl/auth_retry.rs"]
 mod auth_retry;
 use auth_retry::{AuthRetryDecision, AuthRetrySchedule};
+#[path = "acp_session_impl/completion_delivery.rs"]
+mod completion_delivery;
 #[path = "acp_session_impl/goal.rs"]
 mod goal;
 #[path = "acp_session_impl/interjection.rs"]
@@ -490,6 +492,10 @@ pub(crate) struct SessionActor {
     /// Pushed by `SessionCommand::Interject` handler, drained at safe
     /// points in `process_conversation_turn`. Internally synchronized.
     pub(crate) pending_interjections: InterjectionBuffer<acp::ImageContent>,
+    /// Results of waits that user steering moved to the background. Keeps the
+    /// original tool result paired while routing eventual completion through
+    /// a hidden system reminder.
+    pub(crate) completion_delivery: completion_delivery::CompletionDeliveryTracker,
     /// Hidden system reminders that arrived while a turn was running (skill
     /// announcements and Goal control-plane revisions). Flushed at the same
     /// safe points as `pending_interjections` plus on cancel/idle.

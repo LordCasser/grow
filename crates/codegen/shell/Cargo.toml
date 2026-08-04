@@ -53,7 +53,7 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 similar = { workspace = true }
 thiserror = { workspace = true }
 clap = { workspace = true }
-dirs = "6"
+dirs = { workspace = true }
 tokio-stream = { workspace = true }
 toml = { workspace = true, features = ["preserve_order"] }
 toml_edit = { workspace = true }
@@ -94,7 +94,7 @@ notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 nucleo = { workspace = true }
 arc-swap = { workspace = true }
-infer = "0.15"
+infer = { workspace = true }
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 moka = { workspace = true, features = ["future"] }
 dhat = { workspace = true, optional = true }

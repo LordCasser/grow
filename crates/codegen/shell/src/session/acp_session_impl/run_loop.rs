@@ -2,6 +2,43 @@
 //! arms, and the free helpers only the loop consumes.
 #![allow(clippy::items_after_test_module)]
 use super::*;
+
+async fn maybe_wake_for_deferred_completion(
+    session: std::sync::Arc<SessionActor>,
+    completion_tx: tokio::sync::mpsc::UnboundedSender<(String, PromptTurnResult)>,
+) {
+    if !session.completion_delivery.has_ready() || session.state.lock().await.running_task.is_some()
+    {
+        return;
+    }
+    if !session.drain_deferred_completions().await {
+        return;
+    }
+    // `handle_prompt` reconstructs origin from this id rather than trusting
+    // the queued field. Use the existing hidden notification namespace so the
+    // wake cannot be mistaken for user input or request a Behavior change.
+    let wake_id = format!("notifications-deferred-{}", uuid::Uuid::now_v7());
+    let (respond_to, _) = tokio::sync::oneshot::channel();
+    session.state.lock().await.pending_inputs.push_back(InputItem {
+        prompt_id: wake_id.clone(),
+        prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+            "A deferred background result is now available. Process the system reminder and respond or continue as appropriate.",
+        ))],
+        prompt_mode: crate::session::behavior::PromptMode::Agent,
+        client_identifier: None,
+        screen_mode: None,
+        verbatim: true,
+        json_schema: None,
+        origin: super::PromptOrigin::NotificationDrain,
+        task_wake_fallback: None,
+        respond_to,
+        persist_ack: None,
+        parsed_prompt_tx: None,
+        queue_meta: None,
+        send_now: false,
+    });
+    SessionActor::maybe_start_running_task(session, completion_tx).await;
+}
 /// The `YoloToggled` event to emit after `set_yolo_mode(requested)`, given the
 /// previous state and the post-call ACTUAL state (read back via
 /// `is_yolo_mode()`). Returns `Some(actual)` only on a real change.
@@ -379,6 +416,13 @@ pub(super) async fn run_session(
                                     }
                                 }
                             }
+                            SessionEvent::ForegroundWake => {
+                                maybe_wake_for_deferred_completion(
+                                    session.clone(),
+                                    completion_tx.clone(),
+                                )
+                                .await;
+                            }
                             SessionEvent::FlushReplay { respond_to } => {
                                 if let Some(notification) = replay_buffer.flush() {
                                     session.emit_buffered(notification).await;
@@ -667,6 +711,19 @@ pub(super) async fn run_session(
                             )
                             .await;
                             let _ = respond_to.send(result.map(|_| ()));
+                        }
+                        SessionCommand::DeferredCompletionAvailable { task_id, body } => {
+                            if session.completion_delivery.complete(task_id.clone(), body) {
+                                tracing::info!(
+                                    task_id,
+                                    "steering-deferred completion is ready for foreground delivery"
+                                );
+                                maybe_wake_for_deferred_completion(
+                                    session.clone(),
+                                    completion_tx.clone(),
+                                )
+                                .await;
+                            }
                         }
                         SessionCommand::SessionMode { session_mode, responds_to } => {
                             let outcome = session.request_behavior_change(session_mode).await;
@@ -1818,12 +1875,12 @@ pub(super) async fn run_session(
                             // running-state check races turn end) would strand
                             // forever and silently drop the user's message. Run
                             // it as its own prompt turn instead.
-                            let turn_running = session
-                                .current_prompt_id
-                                .lock()
-                                .ok()
-                                .and_then(|g| g.clone())
-                                .is_some();
+                            // State::running_task is the actor's lifecycle
+                            // authority. current_prompt_id is deliberately
+                            // absent during Goal planning and other setup
+                            // phases, so using it here misclassified a live
+                            // turn as idle and queued steering behind it.
+                            let turn_running = session.state.lock().await.running_task.is_some();
                             if turn_running {
                                 session.pending_interjections.push(PendingInterjection {
                                     text,

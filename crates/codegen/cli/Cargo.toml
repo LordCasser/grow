@@ -50,12 +50,6 @@ semver = { workspace = true }
 tty-utils = { workspace = true }
 config = { workspace = true }
 sandbox = { path = "../sandbox", default-features = false }
-rustls = { version = "0.23", default-features = false, features = [
-    "ring",
-    "logging",
-    "std",
-    "tls12",
-] }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

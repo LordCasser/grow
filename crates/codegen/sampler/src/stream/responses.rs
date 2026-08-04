@@ -818,6 +818,7 @@ mod tests {
             item: rs_types::OutputItem::FunctionCall(rs_types::FunctionToolCall {
                 arguments: String::new(),
                 call_id: call_id.into(),
+                namespace: None,
                 name: name.into(),
                 id: None,
                 status: None,

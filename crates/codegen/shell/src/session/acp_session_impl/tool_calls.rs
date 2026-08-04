@@ -75,18 +75,16 @@ fn is_interruptible_wait_tool(tool_name: &str, args: &serde_json::Value) -> bool
         _ => false,
     }
 }
-async fn wait_for_pending_interjection(buf: &InterjectionBuffer<acp::ImageContent>) {
-    loop {
-        if !buf.is_empty() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+pub(super) async fn wait_for_pending_interjection(buf: &InterjectionBuffer<acp::ImageContent>) {
+    buf.wait_nonempty().await;
 }
 use crate::tools::tool_context::BlockingWaitGuard;
 /// Model-facing result when a wait is aborted for a pending interjection.
 fn interrupted_wait_tool_result(args: &serde_json::Value) -> ToolRunResult {
-    interrupted_wait_tool_result_with_msg(args, "Wait interrupted: the user sent a message.")
+    interrupted_wait_tool_result_with_msg(
+        args,
+        "Wait moved to background because the user sent a message. The task is still running and its completion will be delivered automatically.",
+    )
 }
 /// [`interrupted_wait_tool_result`] with a caller-chosen model-facing message.
 fn interrupted_wait_tool_result_with_msg(args: &serde_json::Value, msg: &str) -> ToolRunResult {
@@ -99,10 +97,15 @@ fn interrupted_wait_tool_result_with_msg(args: &serde_json::Value, msg: &str) ->
         .or_else(|| args.get("task_id").and_then(|v| v.as_str()))
         .unwrap_or("")
         .to_string();
+    let status = if task_id.is_empty() {
+        "cancelled"
+    } else {
+        "running"
+    };
     let result = TaskOutputResult {
         task_id,
         command: String::new(),
-        status: "cancelled".to_string(),
+        status: status.to_string(),
         exit_code: None,
         started: String::new(),
         ended: None,
@@ -401,6 +404,7 @@ impl SessionActor {
             }
         }
         self.drain_pending_interjections().await;
+        self.drain_deferred_completions().await;
         self.flush_pending_system_reminders().await;
         if let Some(final_result) = final_result {
             return Ok(final_result);
@@ -505,6 +509,8 @@ impl SessionActor {
         };
         let workspace_ops = self.workspace_ops.clone();
         let pending_interjections = self.pending_interjections.clone();
+        let completion_delivery = self.completion_delivery.clone();
+        let goal_active = self.goal_loop_active();
         let session_id: Arc<str> = Arc::from(&*self.session_info.id.0);
         let dispatch_futures: Vec<_> = approved
             .iter()
@@ -514,9 +520,13 @@ impl SessionActor {
                 let workspace_ops = workspace_ops.clone();
                 let session_id = session_id.clone();
                 let pending_interjections = pending_interjections.clone();
+                let completion_delivery = completion_delivery.clone();
                 let blocking_wait_depth = self.tool_context.blocking_wait_depth.clone();
                 let interruptible =
                     is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args);
+                let tracked_task_ids = goal_active
+                    .then(|| super::completion_delivery::wait_task_ids(&prepared.parsed_args))
+                    .unwrap_or_default();
                 let lock = lock_path_for_args(&prepared.parsed_args)
                     .and_then(|fp| file_locks.get(fp).cloned());
                 let tools_execute_span = tracing::Span::current();
@@ -546,16 +556,33 @@ impl SessionActor {
                     };
                     let result = if interruptible {
                         let _wait_guard = BlockingWaitGuard::enter(blocking_wait_depth.clone());
+                        completion_delivery.begin_wait(&tracked_task_ids);
                         async {
                             tokio::select! {
                                 biased;
-                                result = run_tool() => result,
+                                result = run_tool() => {
+                                    completion_delivery.finish_wait(&tracked_task_ids);
+                                    result
+                                },
                                 _ = wait_for_pending_interjection(&pending_interjections) => {
+                                    // Transfer ownership before dropping the
+                                    // wait future. Completion sources can now
+                                    // race safely with waiter teardown.
+                                    completion_delivery.defer_wait(&tracked_task_ids);
                                     tracing::info!(
                                         tool = %prepared.tool_name,
+                                        task_ids = ?tracked_task_ids,
                                         "abort wait tool: interjection pending"
                                     );
-                                    Ok(interrupted_wait_tool_result(&prepared.parsed_args))
+                                    let result = if tracked_task_ids.is_empty() {
+                                        interrupted_wait_tool_result_with_msg(
+                                            &prepared.parsed_args,
+                                            "Wait ended early because the user sent a message.",
+                                        )
+                                    } else {
+                                        interrupted_wait_tool_result(&prepared.parsed_args)
+                                    };
+                                    Ok(result)
                                 }
                             }
                         }
@@ -2268,6 +2295,7 @@ impl SessionActor {
         let consumed_ids =
             tools::reminders::task_completion::consumed_completion_ids(&result.output);
         if !consumed_ids.is_empty() {
+            self.completion_delivery.consume(&consumed_ids);
             self.drop_pending_items_for_consumed_completions(&consumed_ids)
                 .await;
         }
@@ -2776,6 +2804,16 @@ impl SessionActor {
                 .await;
             }
             SamplingEvent::Failed { request_id, error } => {
+                if error.message == "request cancelled"
+                    && self.goal_loop_active()
+                    && !self.pending_interjections.is_empty()
+                {
+                    tracing::info!(
+                        sampler_request_id = request_id.as_str(),
+                        "ignored expected sampler cancellation from Goal soft preemption"
+                    );
+                    return;
+                }
                 ::diagnostics::unified_log::error(
                     "shell.turn.inference_failed",
                     Some(self.session_info.id.0.as_ref()),
@@ -3216,8 +3254,8 @@ mod plan_approval_helper_tests {
 #[cfg(test)]
 mod wait_interrupt_tests {
     use super::{
-        BlockingWaitGuard, interrupted_wait_tool_result, is_interruptible_wait_tool,
-        wait_for_pending_interjection,
+        BlockingWaitGuard, interrupted_wait_tool_result, interrupted_wait_tool_result_with_msg,
+        is_interruptible_wait_tool, wait_for_pending_interjection,
     };
     use tool_types::TaskOutputOutput;
     use tools::types::output::ToolOutput;
@@ -3280,23 +3318,33 @@ mod wait_interrupt_tests {
         ));
     }
     #[test]
-    fn interrupted_wait_result_is_cancelled_not_error() {
+    fn interrupted_task_wait_result_keeps_task_running() {
         let r = interrupted_wait_tool_result(&serde_json::json!({
             "task_ids": ["bg-9"],
             "timeout_ms": 60_000
         }));
         assert!(
             r.prompt_text
-                .contains("Wait interrupted: the user sent a message.")
+                .contains("Wait moved to background because the user sent a message.")
         );
         match &r.output {
             ToolOutput::TaskOutput(TaskOutputOutput::Result(res)) => {
                 assert_eq!(res.task_id, "bg-9");
-                assert_eq!(res.status, "cancelled");
+                assert_eq!(res.status, "running");
             }
             other => panic!("expected TaskOutput Result, got {other:?}"),
         }
         assert!(!r.output.is_error());
+    }
+    #[test]
+    fn pure_timing_wait_does_not_claim_a_background_completion() {
+        let r = interrupted_wait_tool_result_with_msg(
+            &serde_json::json!({"duration_ms": 60_000}),
+            "Wait ended early because the user sent a message.",
+        );
+        assert!(r.prompt_text.contains("Wait ended early"));
+        assert!(!r.prompt_text.contains("still running"));
+        assert!(!r.prompt_text.contains("delivered automatically"));
     }
     /// `BlockingWaitGuard` counts nested waits; drop always decrements.
     #[test]

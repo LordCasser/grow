@@ -44,16 +44,7 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
 
     // BYOK gate: the pager refuses to start without a configured LLM
     // ([models].default + a provider base_url). Point it at the mock server.
-    let grow_home = content.home().join(".grow");
-    std::fs::create_dir_all(&grow_home).context("create .grow")?;
-    let config = format!(
-        "[models]\ndefault = \"mock/mock\"\n\n\
-         [provider.mock]\napi_backend = \"chat_completions\"\n\n\
-         [provider.mock.options]\nbase_url = \"{}\"\n\n\
-         [provider.mock.models.mock]\nname = \"Mock\"\ncontext_window = 128000\n",
-        content.url()
-    );
-    std::fs::write(grow_home.join("config.toml"), config).context("write config.toml")?;
+    content.seed_llm_config().context("seed mock LLM config")?;
 
     let mut setup_turn = content.expect_agent_turn(
         "initial plan-drafting turn",

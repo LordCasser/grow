@@ -2378,6 +2378,7 @@ mod inline_auto_compact_flow_tests {
             max_retries: 3,
             max_turns: None,
             pending_interjections: InterjectionBuffer::new(),
+            completion_delivery: Default::default(),
             pending_system_reminders: Mutex::new(Vec::new()),
             idle_flush_timeout: None,
             dream_check_timeout: None,

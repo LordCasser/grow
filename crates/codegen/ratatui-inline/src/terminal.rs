@@ -157,6 +157,7 @@ impl<'a> From<Frame<'a>> for OurFrame<'a> {
 pub struct Terminal<B>
 where
     B: Backend,
+    io::Error: From<B::Error>,
 {
     /// The backend used to interface with the terminal
     backend: B,
@@ -190,6 +191,7 @@ where
 impl<B> Drop for Terminal<B>
 where
     B: Backend,
+    io::Error: From<B::Error>,
 {
     fn drop(&mut self) {
         // Attempt to restore the cursor state
@@ -202,6 +204,7 @@ where
 impl<B> Terminal<B>
 where
     B: Backend,
+    io::Error: From<B::Error>,
 {
     /// Creates a new [`Terminal`] with the given [`Backend`] with a full screen viewport.
     ///
@@ -498,23 +501,24 @@ where
     ///
     /// ```
     /// # let backend = ratatui::backend::TestBackend::new(10, 10);
-    /// # let mut terminal = ratatui::Terminal::new(backend)?;
+    /// # let mut terminal = ratatui::Terminal::new(backend).unwrap();
     /// use ratatui::{layout::Position, widgets::Paragraph};
     ///
     /// // with a closure
-    /// terminal.draw(|frame| {
-    ///     let area = frame.area();
-    ///     frame.render_widget(Paragraph::new("Hello World!"), area);
-    ///     frame.set_cursor_position(Position { x: 0, y: 0 });
-    /// })?;
+    /// terminal
+    ///     .draw(|frame| {
+    ///         let area = frame.area();
+    ///         frame.render_widget(Paragraph::new("Hello World!"), area);
+    ///         frame.set_cursor_position(Position { x: 0, y: 0 });
+    ///     })
+    ///     .unwrap();
     ///
     /// // or with a function
-    /// terminal.draw(render)?;
+    /// terminal.draw(render).unwrap();
     ///
     /// fn render(frame: &mut ratatui::Frame) {
     ///     frame.render_widget(Paragraph::new("Hello World!"), frame.area());
     /// }
-    /// # std::io::Result::Ok(())
     /// ```
     pub fn draw<F>(&mut self, render_callback: F) -> io::Result<CompletedFrame<'_>>
     where
@@ -565,31 +569,67 @@ where
     /// # Examples
     ///
     /// ```should_panic
-    /// # use ratatui::layout::Position;;
-    /// # let backend = ratatui::backend::TestBackend::new(10, 10);
-    /// # let mut terminal = ratatui::Terminal::new(backend)?;
     /// use std::io;
     ///
-    /// use ratatui::widgets::Paragraph;
+    /// use ratatui_inline::Terminal;
     ///
-    /// // with a closure
-    /// terminal.try_draw(|frame| {
-    ///     let value: u8 = "not a number".parse().map_err(io::Error::other)?;
-    ///     let area = frame.area();
-    ///     frame.render_widget(Paragraph::new("Hello World!"), area);
-    ///     frame.set_cursor_position(Position { x: 0, y: 0 });
-    ///     io::Result::Ok(())
-    /// })?;
-    ///
-    /// // or with a function
-    /// terminal.try_draw(render)?;
-    ///
-    /// fn render(frame: &mut ratatui::Frame) -> io::Result<()> {
-    ///     let value: u8 = "not a number".parse().map_err(io::Error::other)?;
-    ///     frame.render_widget(Paragraph::new("Hello World!"), frame.area());
-    ///     Ok(())
+    /// // A minimal io::Error-backed backend (TestBackend's `Infallible` error
+    /// // cannot satisfy the `io::Error` conversions this Terminal requires).
+    /// struct BoomBackend;
+    /// impl ratatui::backend::Backend for BoomBackend {
+    ///     type Error = io::Error;
+    ///     fn draw<'a, I>(&mut self, _c: I) -> Result<(), Self::Error>
+    ///     where
+    ///         I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+    ///     {
+    ///         Ok(())
+    ///     }
+    ///     fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+    ///         Ok(())
+    ///     }
+    ///     fn show_cursor(&mut self) -> Result<(), Self::Error> {
+    ///         Ok(())
+    ///     }
+    ///     fn get_cursor_position(&mut self) -> Result<ratatui::layout::Position, Self::Error> {
+    ///         Ok(ratatui::layout::Position::ORIGIN)
+    ///     }
+    ///     fn set_cursor_position<P: Into<ratatui::layout::Position>>(
+    ///         &mut self,
+    ///         _p: P,
+    ///     ) -> Result<(), Self::Error> {
+    ///         Ok(())
+    ///     }
+    ///     fn clear(&mut self) -> Result<(), Self::Error> {
+    ///         Ok(())
+    ///     }
+    ///     fn clear_region(&mut self, _c: ratatui::backend::ClearType) -> Result<(), Self::Error> {
+    ///         Ok(())
+    ///     }
+    ///     fn append_lines(&mut self, _n: u16) -> Result<(), Self::Error> {
+    ///         Ok(())
+    ///     }
+    ///     fn size(&self) -> Result<ratatui::layout::Size, Self::Error> {
+    ///         Ok(ratatui::layout::Size::new(80, 24))
+    ///     }
+    ///     fn window_size(&mut self) -> Result<ratatui::backend::WindowSize, Self::Error> {
+    ///         Ok(ratatui::backend::WindowSize {
+    ///             columns_rows: ratatui::layout::Size::new(80, 24),
+    ///             pixels: ratatui::layout::Size::new(0, 0),
+    ///         })
+    ///     }
+    ///     fn flush(&mut self) -> Result<(), Self::Error> {
+    ///         Ok(())
+    ///     }
     /// }
-    /// # io::Result::Ok(())
+    ///
+    /// let mut terminal = Terminal::new(BoomBackend).unwrap();
+    /// // The render callback's `io::Error` propagates through `try_draw`.
+    /// terminal
+    ///     .try_draw(|_frame| -> io::Result<()> {
+    ///         let _value: u8 = "not a number".parse().map_err(io::Error::other)?;
+    ///         Ok(())
+    ///     })
+    ///     .unwrap();
     /// ```
     pub fn try_draw<F, E>(&mut self, render_callback: F) -> io::Result<CompletedFrame<'_>>
     where
@@ -671,7 +711,7 @@ where
     ///
     /// This is the position of the cursor after the last draw call.
     pub fn get_cursor_position(&mut self) -> io::Result<Position> {
-        self.backend.get_cursor_position()
+        Ok(self.backend.get_cursor_position()?)
     }
 
     /// Sets the cursor position.
@@ -730,7 +770,7 @@ where
 
     /// Queries the real size of the backend.
     pub fn size(&self) -> io::Result<Size> {
-        self.backend.size()
+        Ok(self.backend.size()?)
     }
 
     /// Insert some content before the current inline viewport. This has no effect when the
@@ -1222,7 +1262,10 @@ fn emit_frame_with_links<B: Backend + Write>(
     cur_ids: &[u32],
     cur_table: &[LinkRef],
     area: Rect,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    io::Error: From<B::Error>,
+{
     let width = area.width as usize;
     let resolve = |x: u16, y: u16| -> Option<&LinkRef> {
         let idx = (y - area.y) as usize * width + (x - area.x) as usize;
@@ -1270,7 +1313,10 @@ fn compute_inline_size<B: Backend>(
     height: u16,
     size: Size,
     offset_in_previous_viewport: u16,
-) -> io::Result<(Rect, Position)> {
+) -> io::Result<(Rect, Position)>
+where
+    io::Error: From<B::Error>,
+{
     let pos = backend.get_cursor_position()?;
     let mut row = pos.y;
 
@@ -1300,7 +1346,11 @@ fn compute_inline_size<B: Backend>(
     ))
 }
 
-impl<B: Backend> Terminal<B> {
+impl<B> Terminal<B>
+where
+    B: Backend,
+    io::Error: From<B::Error>,
+{
     /// HACK: this is added
     pub fn viewport_area(&self) -> Rect {
         self.viewport_area
@@ -1332,14 +1382,78 @@ impl<B: Backend> Terminal<B> {
 
 #[cfg(test)]
 mod inline_resize_tests {
-    use ratatui::backend::TestBackend;
+    use std::io;
+
     use ratatui::{TerminalOptions, Viewport, layout::Rect};
 
-    use super::Terminal;
+    use super::{Backend, Cell, Position, Size, Terminal};
+    use ratatui::backend::WindowSize;
 
-    fn full_height_inline(width: u16, height: u16) -> Terminal<TestBackend> {
+    /// Minimal io::Error-backed test backend. `ratatui::backend::TestBackend`
+    /// uses `Infallible` as its `Backend::Error`, which cannot satisfy the
+    /// `io::Error` conversions this fork's `Terminal` API requires.
+    #[derive(Default)]
+    struct ResizeBackend {
+        size: Size,
+    }
+
+    impl ResizeBackend {
+        fn new(width: u16, height: u16) -> Self {
+            Self {
+                size: Size::new(width, height),
+            }
+        }
+        fn resize(&mut self, width: u16, height: u16) {
+            self.size = Size::new(width, height);
+        }
+    }
+
+    impl Backend for ResizeBackend {
+        type Error = io::Error;
+        fn draw<'a, I>(&mut self, _content: I) -> Result<(), Self::Error>
+        where
+            I: Iterator<Item = (u16, u16, &'a Cell)>,
+        {
+            Ok(())
+        }
+        fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn show_cursor(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
+            Ok(Position::ORIGIN)
+        }
+        fn set_cursor_position<P: Into<Position>>(&mut self, _position: P) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn clear(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn clear_region(&mut self, _clear_type: ratatui::backend::ClearType) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn append_lines(&mut self, _n: u16) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn size(&self) -> Result<Size, Self::Error> {
+            Ok(self.size)
+        }
+        fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+            Ok(WindowSize {
+                columns_rows: self.size,
+                pixels: Size::new(0, 0),
+            })
+        }
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    fn full_height_inline(width: u16, height: u16) -> Terminal<ResizeBackend> {
         Terminal::with_options(
-            TestBackend::new(width, height),
+            ResizeBackend::new(width, height),
             TerminalOptions {
                 viewport: Viewport::Inline(height),
             },
@@ -1411,7 +1525,7 @@ mod inline_resize_tests {
     /// over-apply.
     #[test]
     fn small_inline_viewport_is_not_forced_full() {
-        let backend = TestBackend::new(80, 24);
+        let backend = ResizeBackend::new(80, 24);
         let mut terminal = Terminal::with_options(
             backend,
             TerminalOptions {
@@ -1436,7 +1550,7 @@ mod inline_resize_tests {
     /// Fullscreen viewports already track the full size; behavior is unchanged.
     #[test]
     fn fullscreen_tracks_terminal() {
-        let backend = TestBackend::new(80, 24);
+        let backend = ResizeBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         assert_eq!(terminal.viewport_area(), Rect::new(0, 0, 80, 24));
 

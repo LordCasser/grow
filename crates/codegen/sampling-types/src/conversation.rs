@@ -406,7 +406,8 @@ impl ReasoningContent {
         Some(Self {
             text,
             encrypted: r.encrypted_content.as_deref().map(Arc::<str>::from),
-            id: Some(Arc::<str>::from(r.id.as_str())),
+            // async-openai >= 0.41 made `ReasoningItem.id` an `Option<String>`.
+            id: r.id.as_deref().map(Arc::<str>::from),
         })
     }
 
@@ -415,11 +416,13 @@ impl ReasoningContent {
         self.text.is_none() && self.encrypted.is_none()
     }
 
-    fn join_content(content: &Option<Vec<rs::ReasoningTextContent>>) -> Option<Arc<str>> {
+    fn join_content(content: &Option<Vec<rs::ReasoningItemContent>>) -> Option<Arc<str>> {
         let parts = content.as_ref()?;
         let joined: String = parts
             .iter()
-            .map(|p| p.text.as_str())
+            .map(|item| match item {
+                rs::ReasoningItemContent::ReasoningText(rt) => rt.text.as_str(),
+            })
             .collect::<Vec<_>>()
             .join("\n");
         (!joined.is_empty()).then_some(Arc::<str>::from(joined))
@@ -1310,7 +1313,9 @@ pub fn reasoning_item_text(r: &rs::ReasoningItem) -> String {
     }
     if let Some(ref content) = r.content {
         for c in content {
-            parts.push(c.text.clone());
+            if let rs::ReasoningItemContent::ReasoningText(rt) = c {
+                parts.push(rt.text.clone());
+            }
         }
     }
     parts.join("\n")
@@ -1328,7 +1333,7 @@ pub fn reasoning_item_text(r: &rs::ReasoningItem) -> String {
 /// hits the typed-`OutputItem::Reasoning` path, not this helper).
 pub fn synthesized_reasoning_item(text: impl Into<String>) -> rs::ReasoningItem {
     rs::ReasoningItem {
-        id: String::new(),
+        id: None,
         summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
             text: text.into(),
         })],
@@ -1523,7 +1528,9 @@ fn build_synthetic_reasoning(
         None => Vec::new(),
     };
     Some(rs::ReasoningItem {
-        id,
+        // async-openai >= 0.41: `id` is `Option<String>`; keep the previous
+        // always-present-empty wire format.
+        id: Some(id),
         summary,
         content: None,
         encrypted_content: encrypted.map(String::from),
@@ -2096,7 +2103,8 @@ impl From<ConversationRequest> for ChatCompletionRequest {
                 json_schema: rs::ResponseFormatJsonSchema {
                     description: None,
                     name: STRUCTURED_OUTPUT_SCHEMA_NAME.to_string(),
-                    schema: Some(schema),
+                    // async-openai >= 0.41: `schema` is a plain `Value`.
+                    schema,
                     strict: Some(true),
                 },
             });
@@ -2146,7 +2154,8 @@ impl From<&ConversationRequest> for rs::CreateResponse {
                     rs::ResponseFormatJsonSchema {
                         description: None,
                         name: STRUCTURED_OUTPUT_SCHEMA_NAME.to_string(),
-                        schema: Some(schema.clone()),
+                        // async-openai >= 0.41: `schema` is a plain `Value`.
+                        schema: schema.clone(),
                         strict: Some(true),
                     },
                 ),
@@ -2247,6 +2256,7 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
                 r#type: rs::MessageType::Message,
                 role: rs::Role::System,
                 content: rs::EasyInputContent::Text(s.content.as_ref().to_owned()),
+                phase: None,
             })]
         }
         ConversationItem::User(u) => {
@@ -2255,6 +2265,7 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
                 r#type: rs::MessageType::Message,
                 role: rs::Role::User,
                 content,
+                phase: None,
             })]
         }
         ConversationItem::Reasoning(r) => {
@@ -2279,6 +2290,7 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
                     r#type: rs::MessageType::Message,
                     role: rs::Role::Assistant,
                     content: rs::EasyInputContent::Text(a.content.as_ref().to_owned()),
+                    phase: None,
                 }));
             }
 
@@ -2292,6 +2304,7 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
                         arguments: arguments.as_ref().to_owned(),
                         id: None,
                         status: None,
+                        namespace: None,
                     },
                 )));
             }
@@ -2377,6 +2390,7 @@ fn build_responses_tools(req: &ConversationRequest) -> Vec<rs::Tool> {
                 description: t.description.clone(),
                 parameters: Some(t.parameters.clone()),
                 strict: None,
+                defer_loading: None,
             })
         })
         .collect()
@@ -2657,8 +2671,10 @@ pub fn transform_conversation_cwd(
                 }
                 if let Some(ref mut content) = r.content {
                     for c in content.iter_mut() {
-                        if c.text.contains(source_cwd) {
-                            c.text = c.text.replace(source_cwd, target_cwd);
+                        if let rs::ReasoningItemContent::ReasoningText(rt) = c {
+                            if rt.text.contains(source_cwd) {
+                                rt.text = rt.text.replace(source_cwd, target_cwd);
+                            }
                         }
                     }
                 }
@@ -3606,7 +3622,7 @@ mod tests {
         };
         assert_eq!(f.name, STRUCTURED_OUTPUT_SCHEMA_NAME);
         assert_eq!(f.strict, Some(true));
-        assert_eq!(f.schema, Some(schema.clone()));
+        assert_eq!(f.schema, schema.clone());
 
         // Messages API: json_schema → output_config.format
         let msgs_req = build_messages_request(&req);
@@ -3757,6 +3773,7 @@ mod tests {
                 id: "msg_123".to_string(),
                 role: rs::AssistantRole::Assistant,
                 status: rs::OutputStatus::Completed,
+            phase: None,
             })],
             parallel_tool_calls: None,
             previous_response_id: None,
@@ -3810,6 +3827,7 @@ mod tests {
             output: vec![rs::OutputItem::FunctionCall(rs::FunctionToolCall {
                 arguments: r#"{"path": "/bar.txt"}"#.to_string(),
                 call_id: "call_789".to_string(),
+                namespace: None,
                 name: "read_file".to_string(),
                 id: None,
                 status: None,
@@ -4197,7 +4215,7 @@ mod tests {
             object: "response".to_string(),
             output: vec![
                 rs::OutputItem::Reasoning(rs::ReasoningItem {
-                    id: "reasoning_1".to_string(),
+                    id: Some("reasoning_1".to_string()),
                     summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                         text: "I need to analyze this carefully.".to_string(),
                     })],
@@ -4215,6 +4233,7 @@ mod tests {
                     )],
                     id: "msg_123".to_string(),
                     role: rs::AssistantRole::Assistant,
+                    phase: None,
                     status: rs::OutputStatus::Completed,
                 }),
             ],
@@ -4270,7 +4289,7 @@ mod tests {
             object: "response".to_string(),
             output: vec![
                 rs::OutputItem::Reasoning(rs::ReasoningItem {
-                    id: "reasoning_enc".to_string(),
+                    id: Some("reasoning_enc".to_string()),
                     summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                         text: "Visible thinking summary".to_string(),
                     })],
@@ -4288,6 +4307,7 @@ mod tests {
                     )],
                     id: "msg_456".to_string(),
                     role: rs::AssistantRole::Assistant,
+                    phase: None,
                     status: rs::OutputStatus::Completed,
                 }),
             ],
@@ -4360,7 +4380,7 @@ mod tests {
             object: "response".to_string(),
             output: vec![
                 rs::OutputItem::Reasoning(rs::ReasoningItem {
-                    id: "reasoning_only_enc".to_string(),
+                    id: Some("reasoning_only_enc".to_string()),
                     summary: vec![], // Empty summary
                     content: None,
                     encrypted_content: Some("enc_only_encrypted_no_visible_summary".to_string()),
@@ -4376,6 +4396,7 @@ mod tests {
                     )],
                     id: "msg_789".to_string(),
                     role: rs::AssistantRole::Assistant,
+                    phase: None,
                     status: rs::OutputStatus::Completed,
                 }),
             ],
@@ -4438,7 +4459,7 @@ mod tests {
         // Reasoning is now a sibling variant — round-trip both items
         // through serde and confirm they survive.
         let reasoning_item = ConversationItem::Reasoning(rs::ReasoningItem {
-            id: "reasoning_1".to_string(),
+            id: Some("reasoning_1".to_string()),
             summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                 text: "Computing the answer...".to_string(),
             })],
@@ -4470,7 +4491,7 @@ mod tests {
             ConversationItem::user("What is 2+2?"),
             // Previous reasoning + assistant: reasoning is now a sibling.
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: "r1".to_string(),
+                id: Some("r1".to_string()),
                 summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                     text: "Let me calculate 2+2...".to_string(),
                 })],
@@ -4532,7 +4553,7 @@ mod tests {
         let req = ConversationRequest::from_items(vec![
             ConversationItem::user("Hello"),
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: String::new(),
+                id: Some(String::new()),
                 summary: vec![],
                 content: None,
                 encrypted_content: Some("enc_hidden_thoughts".to_string()),
@@ -6370,7 +6391,7 @@ mod tests {
 
         let mut items = vec![
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: "rs_1".to_string(),
+                id: Some("rs_1".to_string()),
                 summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                     text: format!("thinking about {worktree}"),
                 })],
@@ -8262,6 +8283,7 @@ mod tests {
                 id: "msg_test".into(),
                 role: rs::AssistantRole::Assistant,
                 status: rs::OutputStatus::Completed,
+            phase: None,
             })],
             parallel_tool_calls: None,
             previous_response_id: None,
@@ -8334,7 +8356,7 @@ mod tests {
         let response = ConversationResponse {
             items: vec![
                 ConversationItem::Reasoning(rs::ReasoningItem {
-                    id: "r1".to_string(),
+                    id: Some("r1".to_string()),
                     summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                         text: "thinking but no text output".to_string(),
                     })],
@@ -8451,7 +8473,7 @@ mod tests {
         // which would shift the cache prefix every turn.
         fn r(text: &str) -> ConversationItem {
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: text.to_string(),
+                id: Some(text.to_string()),
                 summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                     text: text.to_string(),
                 })],
@@ -8513,7 +8535,7 @@ mod tests {
         let items = vec![
             ConversationItem::user("hi"),
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: "r1".to_string(),
+                id: Some("r1".to_string()),
                 summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                     text: "thinking step 1".to_string(),
                 })],
@@ -8522,7 +8544,7 @@ mod tests {
                 status: None,
             }),
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: "r2".to_string(),
+                id: Some("r2".to_string()),
                 summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                     text: "thinking step 2".to_string(),
                 })],
@@ -8550,7 +8572,7 @@ mod tests {
         let items = vec![
             ConversationItem::user("hi"),
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: "r1".to_string(),
+                id: Some("r1".to_string()),
                 summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                     text: "abandoned thinking".to_string(),
                 })],
@@ -8636,7 +8658,7 @@ mod tests {
         let ConversationItem::Reasoning(r) = &siblings[0] else {
             panic!("expected Reasoning sibling, got {:?}", siblings[0]);
         };
-        assert_eq!(r.id, "rs_00000000-0000-4000-8000-000000000001");
+        assert_eq!(r.id.as_deref(), Some("rs_00000000-0000-4000-8000-000000000001"));
         assert_eq!(r.summary.len(), 1);
         let rs::SummaryPart::SummaryText(s) = &r.summary[0];
         assert_eq!(
@@ -8669,7 +8691,7 @@ mod tests {
         let ConversationItem::Reasoning(r) = &siblings[0] else {
             panic!("expected Reasoning sibling");
         };
-        assert_eq!(r.id, "");
+        assert_eq!(r.id.as_deref(), Some(""));
         assert_eq!(
             r.encrypted_content.as_deref(),
             Some("anthropic-signature-bytes-here")
@@ -8690,7 +8712,7 @@ mod tests {
         let ConversationItem::Reasoning(r) = &siblings[0] else {
             panic!("expected Reasoning sibling");
         };
-        assert_eq!(r.id, "");
+        assert_eq!(r.id.as_deref(), Some(""));
         assert!(r.encrypted_content.is_none());
         let rs::SummaryPart::SummaryText(s) = &r.summary[0];
         assert_eq!(s.text, "step-by-step plain reasoning");
@@ -8909,7 +8931,7 @@ mod tests {
         encrypted: Option<&str>,
     ) -> ConversationItem {
         ConversationItem::Reasoning(rs::ReasoningItem {
-            id: id.to_string(),
+            id: Some(id.to_string()),
             summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                 text: summary_text.to_string(),
             })],

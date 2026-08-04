@@ -14,6 +14,7 @@ pub mod prompt_timing;
 pub mod sampling_log;
 pub mod session_ctx;
 pub mod session_metrics;
+pub mod tls;
 pub mod unified_log;
 
 pub use events::DiagnosticEvent;

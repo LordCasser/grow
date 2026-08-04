@@ -85,7 +85,7 @@ impl SlashCommand for AcpSlashCommand {
             {
                 return Some(vec![ArgItem {
                     display: objective.to_string(),
-                    match_text: objective.to_string(),
+                    match_text: format!("set {objective}"),
                     insert_text: format!("set {objective}"),
                     description: "Edit the current goal objective".into(),
                 }]);
@@ -689,6 +689,7 @@ mod tests {
                 .expect("current objective should be offered");
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].display, "修复登录流程");
+            assert_eq!(items[0].match_text, "set 修复登录流程");
             assert_eq!(items[0].insert_text, "set 修复登录流程");
         }
         assert!(

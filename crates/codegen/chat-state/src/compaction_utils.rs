@@ -3093,7 +3093,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
         let result = strip_tool_messages_for_conversation_item(vec![
             ConversationItem::system("system"),
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: "r_123".to_string(),
+                id: Some("r_123".to_string()),
                 summary: vec![],
                 content: None,
                 encrypted_content: Some("encrypted_sig".to_string()),
@@ -3115,7 +3115,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
         use sampling_types::{AssistantItem, rs};
         let result = strip_reasoning_blocks(vec![
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: "r_123".to_string(),
+                id: Some("r_123".to_string()),
                 summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                     text: "thinking".to_string(),
                 })],
@@ -3156,7 +3156,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
         use sampling_types::{AssistantItem, ToolCall, rs};
         let mk_reasoning = || {
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: "r_123".to_string(),
+                id: Some("r_123".to_string()),
                 summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                     text: "plan".to_string(),
                 })],
@@ -3208,7 +3208,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
         use sampling_types::{AssistantItem, rs};
         let result = prepare_conversation_for_summarization(vec![
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: "r_123".to_string(),
+                id: Some("r_123".to_string()),
                 summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                     text: "thinking".to_string(),
                 })],
@@ -3236,7 +3236,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
         use sampling_types::{AssistantItem, ToolCall, rs};
         let mk_reasoning = || {
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: "r".to_string(),
+                id: Some("r".to_string()),
                 summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                     text: "thinking".to_string(),
                 })],
@@ -3328,7 +3328,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             ConversationItem::system("system prompt"),
             ConversationItem::user("hello"),
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: "r1".to_string(),
+                id: Some("r1".to_string()),
                 summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                     text: "thought".to_string(),
                 })],
@@ -3499,7 +3499,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             vec![
                 ConversationItem::system("sys"),
                 ConversationItem::Reasoning(rs::ReasoningItem {
-                    id: "r1".to_string(),
+                    id: Some("r1".to_string()),
                     summary: vec![],
                     content: None,
                     encrypted_content: Some("sig".to_string()),
@@ -3734,7 +3734,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
         use sampling_types::rs;
         let big_enc = "Z".repeat(40_000);
         let reasoning = ConversationItem::Reasoning(rs::ReasoningItem {
-            id: "r1".to_string(),
+            id: Some("r1".to_string()),
             summary: vec![],
             content: None,
             encrypted_content: Some(big_enc),

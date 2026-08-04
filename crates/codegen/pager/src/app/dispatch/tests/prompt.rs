@@ -2989,7 +2989,10 @@ fn unknown_slash_in_non_project_dir_does_not_create_session() {
         dispatch_send_prompt_inner(&mut app, "/notarealcommandxyz".into(), true, false, false);
 
     assert!(effects.is_empty());
-    assert!(app.project_picker_shown);
+    assert!(
+        !app.project_picker_shown,
+        "slash commands are handled locally and must bypass the project picker"
+    );
     assert_eq!(app.agents[&id].session.queue_len(), 0);
 }
 

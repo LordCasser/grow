@@ -268,6 +268,11 @@ impl SessionActor {
         );
         let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
         if let Some(completion_id) = origin.completion_id() {
+            // A deferred Goal task may finish after Goal already returned to
+            // Normal, in which case the existing auto-wake path owns delivery.
+            // Atomically retire any stale deferred entry before this prompt is
+            // exposed so a later Goal-stage wake cannot duplicate it.
+            self.completion_delivery.consume(&[completion_id]);
             self.mark_completions_reported(&[completion_id]).await;
             if let Some(reservations) = &self.tool_context.task_completion_reservations {
                 reservations.release(completion_id);
@@ -1052,9 +1057,13 @@ impl SessionActor {
                     } else {
                         self.run_goal_round_end_foreground().await
                     };
-                    if let GoalRoundDecision::Continue(directive) = decision {
-                        self.inject_goal_continuation_message(directive).await;
-                        continue;
+                    match decision {
+                        GoalRoundDecision::Continue(directive) => {
+                            self.inject_goal_continuation_message(directive).await;
+                            continue;
+                        }
+                        GoalRoundDecision::ResumeForeground => continue,
+                        GoalRoundDecision::EndTurn => {}
                     }
                 }
                 match self
@@ -2139,6 +2148,7 @@ impl SessionActor {
                 self.push_system_reminder(&reminder);
             }
             self.drain_pending_interjections().await;
+            self.drain_deferred_completions().await;
             self.flush_pending_system_reminders().await;
             self.inject_pending_monitor_events().await;
             let memory_reminder = self.first_turn_memory_reminder().await;
@@ -2289,6 +2299,10 @@ impl SessionActor {
                             ));
                         }
                     }
+                }
+                Ok(SamplerTurnOutcome::Steered) => {
+                    auth_retry_schedule.reset();
+                    continue;
                 }
             };
             auth_retry_schedule.reset();
@@ -2612,8 +2626,12 @@ impl SessionActor {
                         ));
                     }
                 }
-                if self.drain_pending_interjections().await {
-                    tracing::info!("Drained interjection(s) before turn completion — continuing");
+                if self.drain_pending_interjections().await
+                    || self.drain_deferred_completions().await
+                {
+                    tracing::info!(
+                        "Drained foreground event(s) before turn completion — continuing"
+                    );
                     continue;
                 }
                 let snapshot = self
@@ -2624,9 +2642,11 @@ impl SessionActor {
                         model_fingerprint.clone(),
                     )
                     .await;
-                if self.drain_pending_interjections().await {
+                if self.drain_pending_interjections().await
+                    || self.drain_deferred_completions().await
+                {
                     tracing::info!(
-                        "Drained late interjection(s) during turn-end bookkeeping — continuing"
+                        "Drained late foreground event(s) during turn-end bookkeeping — continuing"
                     );
                     continue;
                 }
