@@ -535,6 +535,14 @@ pub(crate) struct SessionActor {
     /// Goal sampler; ordinary completion reminders deliberately do not.
     pub(crate) goal_control_generation: std::sync::atomic::AtomicU64,
     pub(crate) goal_control_notify: Arc<tokio::sync::Notify>,
+    /// Planner mutual exclusion: at most ONE planner task may run per
+    /// session (unlike verifier stages, the planner is spawned from the
+    /// turn task and can be displaced into a background continuation — a
+    /// new GoalSummary cycle must not spawn a second planner while the
+    /// first is still alive, or writers stack). Held by the planner task
+    /// itself for its whole lifetime and released on every exit path
+    /// (incl. session teardown dropping the task).
+    pub(crate) goal_planner_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// Session-plan snapshot parked while Goal owns the Todo resource. Goal
     /// retirement restores it atomically so Goal-scoped writes never leak into
     /// Normal or another Behavior.

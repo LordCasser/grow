@@ -199,6 +199,7 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                         completion_delivery: Default::default(),
                         pending_system_reminders: Mutex::new(Vec::new()),
                         goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+        goal_planner_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                         goal_control_notify: Arc::new(tokio::sync::Notify::new()),
                         goal_plan_scope: parking_lot::Mutex::new(None),
                         idle_flush_timeout: None,
@@ -648,6 +649,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 completion_delivery: Default::default(),
                 pending_system_reminders: Mutex::new(Vec::new()),
                 goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+                goal_planner_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                    false,
+                )),
                 goal_control_notify: Arc::new(tokio::sync::Notify::new()),
                 goal_plan_scope: parking_lot::Mutex::new(None),
                 idle_flush_timeout: None,
@@ -904,6 +908,9 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 completion_delivery: Default::default(),
                 pending_system_reminders: Mutex::new(Vec::new()),
                 goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+                goal_planner_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                    false,
+                )),
                 goal_control_notify: Arc::new(tokio::sync::Notify::new()),
                 goal_plan_scope: parking_lot::Mutex::new(None),
                 idle_flush_timeout: None,
@@ -2100,6 +2107,9 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 completion_delivery: Default::default(),
                 pending_system_reminders: Mutex::new(Vec::new()),
                 goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+                goal_planner_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                    false,
+                )),
                 goal_control_notify: Arc::new(tokio::sync::Notify::new()),
                 goal_plan_scope: parking_lot::Mutex::new(None),
                 idle_flush_timeout: None,

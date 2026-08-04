@@ -2409,6 +2409,7 @@ mod inline_auto_compact_flow_tests {
             completion_delivery: Default::default(),
             pending_system_reminders: Mutex::new(Vec::new()),
             goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+            goal_planner_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             goal_control_notify: Arc::new(tokio::sync::Notify::new()),
             goal_plan_scope: parking_lot::Mutex::new(None),
             idle_flush_timeout: None,

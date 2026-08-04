@@ -1781,3 +1781,63 @@ async fn planner_empty_artifact_pauses_goal() {
         })
         .await;
 }
+
+/// Planner mutual exclusion: while one planner task is in flight (e.g. a
+/// displaced planner still running in its background continuation), a fresh
+/// GoalSummary cycle must NOT spawn a second writer — they would stack and
+/// double-charge. The flag is owned by the live task and released on every
+/// exit path.
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn planner_mutual_exclusion_skips_spawn_while_in_flight() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (tx, spawn_count) = spawn_planner_coordinator(SpawnBehaviour::WritePlanThenDone {
+                body: b"# Plan\n- [ ] Do the work\n",
+            });
+            let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
+            create_test_goal(&actor);
+
+            // Simulate a planner still alive (displaced → background
+            // continuation): a second cycle must not spawn another writer.
+            actor
+                .goal_planner_in_flight
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            actor.maybe_run_goal_planner("do X").await;
+            assert_eq!(
+                spawn_count.load(SeqOrd::SeqCst),
+                0,
+                "no second planner may spawn while one is in flight"
+            );
+            assert!(
+                actor
+                    .goal_planner_in_flight
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                "the in-flight flag must stay held (owned by the live task)"
+            );
+
+            // After the live task exits the flag is released and a new
+            // cycle may plan normally.
+            actor
+                .goal_planner_in_flight
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            actor.maybe_run_goal_planner("do X").await;
+            assert_eq!(
+                spawn_count.load(SeqOrd::SeqCst),
+                1,
+                "after release the planner may spawn again"
+            );
+            assert!(
+                actor
+                    .goal_tracker
+                    .lock()
+                    .snapshot()
+                    .unwrap()
+                    .plan_file
+                    .is_some(),
+                "the second attempt must publish the plan"
+            );
+        })
+        .await;
+}

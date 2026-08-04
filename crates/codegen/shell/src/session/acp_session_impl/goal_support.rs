@@ -12,6 +12,18 @@ const GOAL_PAUSED_INTERACTION_REMINDER: &str = "The current Goal is paused. Resp
 
 const GOAL_PLAN_MAX_BYTES: u64 = 1024 * 1024;
 
+/// Releases [`SessionActor::goal_planner_in_flight`] when the planner task
+/// exits on ANY path (normal completion, displaced background continuation,
+/// fail-closed, or session teardown dropping the task). Guarantees at most
+/// one planner per session so GoalSummary cycles cannot stack writers.
+struct PlannerInFlightGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for PlannerInFlightGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 async fn validate_goal_plan_staging(
     actual: &std::path::Path,
     expected: &std::path::Path,
@@ -1462,12 +1474,34 @@ impl SessionActor {
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         self.emit_goal_planning(current_tokens);
 
+        // Mutual exclusion: at most ONE planner per session. A displaced
+        // planner keeps running in its background continuation, so a fresh
+        // GoalSummary cycle must not spawn a second writer (they would
+        // stack and double-charge). The guard lives inside the planner task
+        // itself and is released on every exit path, including the
+        // background continuation and session teardown dropping the task.
+        if self
+            .goal_planner_in_flight
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            tracing::debug!("goal planner: a planner is already in flight; skipping");
+            return;
+        }
+        let planner_in_flight = std::sync::Arc::clone(&self.goal_planner_in_flight);
+
         let objective = objective.to_owned();
         let effective_model_id =
             crate::session::goal_planner::effective_role_model_id(None, &model_id).to_owned();
         let foreground_generation = self.completion_delivery.generation();
         let control_generation = self.goal_control_generation();
         let mut planner_task = tokio::task::spawn_local(async move {
+            let _in_flight = PlannerInFlightGuard(planner_in_flight);
             crate::session::goal_planner::run_goal_planner(
                 spawner,
                 crate::session::goal_planner::GoalPlannerInputs {
@@ -1570,7 +1604,19 @@ impl SessionActor {
                 && tracker.autonomy_generation() == Some(autonomy_generation)
                 && tracker.status() == Some(crate::session::goal_tracker::GoalStatus::Active)
         };
-        if !lease_is_current(&self.goal_tracker.lock()) {
+        // The latch must be cleared on EVERY exit, including stale-lease
+        // discards (e.g. a displaced planner whose background continuation
+        // commits after a steering / control-change bumped the generation):
+        // a stuck `planning_in_flight` would wedge the Planning badge and
+        // (with the planner mutual-exclusion gate) block future planning.
+        let lease_ok = {
+            let mut tracker = self.goal_tracker.lock();
+            if let Some(o) = tracker.snapshot_mut() {
+                o.planning_in_flight = false;
+            }
+            lease_is_current(&tracker)
+        };
+        if !lease_ok {
             tracing::info!("goal planner: discarded stale result after goal revision");
             return false;
         }
