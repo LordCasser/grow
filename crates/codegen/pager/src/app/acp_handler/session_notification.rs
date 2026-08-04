@@ -178,7 +178,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         return false;
     }
     let mut plugins_changed_needs_skills_refetch = false;
-    let mut terminal_outcome: Option<super::super::turn_completion::TerminalApply> = None;
+    let mut terminal_outcome: Option<super::super::turn_completion::TerminalOutcome> = None;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
     let changed = match session_notif.update {
         ref update @ (GrowSessionUpdate::AutoCompactStarted { .. }
@@ -265,15 +265,16 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     .as_ref()
                     .and_then(|v| v.get("cancelTrigger"))
                     .and_then(|v| v.as_str());
-                terminal_outcome =
-                    Some(super::super::turn_completion::finalize_turn_from_terminal(
+                terminal_outcome = Some(
+                    super::super::turn_completion::finalize_turn_from_durable_terminal(
                         agent,
                         root_session_id,
-                        Some(&prompt_id),
+                        &prompt_id,
                         Some(&stop_reason),
                         agent_result.as_deref(),
                         cancel_trigger,
-                    ));
+                    ),
+                );
                 false
             }
         }

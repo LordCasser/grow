@@ -1,6 +1,6 @@
 //! ThinkingBlock - displays agent thinking/reasoning content with markdown support.
 
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use unicode_width::UnicodeWidthStr;
 

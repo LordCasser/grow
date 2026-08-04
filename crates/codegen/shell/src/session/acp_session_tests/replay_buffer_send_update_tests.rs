@@ -70,6 +70,9 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         notifications_suppressed: false,
         rewindable: false,
         nudges_used_this_session: 0,
+        recent_terminals: VecDeque::new(),
+        foreground_compact: false,
+        pending_manual_compact: None,
     });
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let actor = SessionActor {
@@ -105,6 +108,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         startup_hints: StartupHints::default(),
         forked_tool_override: None,
         compaction: crate::session::compaction_config::CompactionConfig {
+            lease: Default::default(),
             threshold_percent: std::cell::Cell::new(85),
             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             context_window_override: None,
@@ -147,6 +151,9 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         pending_interjections: InterjectionBuffer::new(),
         completion_delivery: Default::default(),
         pending_system_reminders: Mutex::new(Vec::new()),
+        goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+        goal_control_notify: Arc::new(tokio::sync::Notify::new()),
+        goal_plan_scope: parking_lot::Mutex::new(None),
         idle_flush_timeout: None,
         dream_check_timeout: None,
         last_idle_flush_conversation_len: std::sync::atomic::AtomicUsize::new(0),
@@ -202,6 +209,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         goal_plan_reconciled: std::sync::atomic::AtomicBool::new(false),
         pending_classifier_completions: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
+        goal_stage_seq: std::sync::atomic::AtomicU64::new(0),
         managed_mcp_handle: Default::default(),
         initial_client_mcp_servers: vec![],
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),

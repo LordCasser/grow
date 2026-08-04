@@ -91,6 +91,9 @@ async fn create_test_actor_with_memory(
         notifications_suppressed: false,
         rewindable: false,
         nudges_used_this_session: 0,
+        recent_terminals: VecDeque::new(),
+        foreground_compact: false,
+        pending_manual_compact: None,
     });
     let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
@@ -153,6 +156,7 @@ async fn create_test_actor_with_memory(
         startup_hints: StartupHints::default(),
         forked_tool_override: None,
         compaction: crate::session::compaction_config::CompactionConfig {
+            lease: Default::default(),
             threshold_percent: std::cell::Cell::new(threshold_percent),
             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             context_window_override: None,
@@ -197,6 +201,9 @@ async fn create_test_actor_with_memory(
         pending_interjections: InterjectionBuffer::new(),
         completion_delivery: Default::default(),
         pending_system_reminders: Mutex::new(Vec::new()),
+        goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+        goal_control_notify: Arc::new(tokio::sync::Notify::new()),
+        goal_plan_scope: parking_lot::Mutex::new(None),
         idle_flush_timeout: memory_config
             .as_ref()
             .and_then(|mc| mc.flush.idle_timeout_secs)
@@ -256,6 +263,7 @@ async fn create_test_actor_with_memory(
         goal_plan_reconciled: std::sync::atomic::AtomicBool::new(false),
         pending_classifier_completions: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
+        goal_stage_seq: std::sync::atomic::AtomicU64::new(0),
         managed_mcp_handle: Default::default(),
         initial_client_mcp_servers: vec![],
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),

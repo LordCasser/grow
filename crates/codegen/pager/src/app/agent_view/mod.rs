@@ -482,24 +482,6 @@ pub(super) fn app_should_open_link_on_click_with(
 pub(super) fn is_text_selection_on_double_click() -> bool {
     crate::appearance::cache::load_keep_text_selection().selects_word()
 }
-/// A driver-side turn-end broadcast awaiting its `session/prompt` RPC
-/// response. See [`AgentView::pending_turn_end_reconcile`].
-#[derive(Debug, Clone)]
-pub(crate) struct PendingTurnEnd {
-    /// The prompt whose turn the broadcast declared ended.
-    pub prompt_id: String,
-    /// `stopReason` from the broadcast (`"cancelled"`, `"end_turn"`, …).
-    pub stop_reason: Option<String>,
-    /// `agentResult` detail from the broadcast (error text, when present).
-    pub agent_result: Option<String>,
-    /// `_meta.cancelTrigger` from the broadcast (`"send_now"` marks a
-    /// cancel-and-send whose "Turn cancelled" marker is suppressed). `None`
-    /// on older shells / non-cancel ends.
-    pub cancel_trigger: Option<String>,
-    /// When the broadcast arrived; the reconcile fires after
-    /// [`super::dispatch::TURN_END_RECONCILE_GRACE`].
-    pub received_at: std::time::Instant,
-}
 /// Stop/stop_failure hook runs held for the live turn's terminal marker.
 /// See [`AgentView::pending_stop_hooks`].
 #[derive(Debug, Clone, Default)]
@@ -684,6 +666,20 @@ pub(crate) struct BehaviorSwitchConfirm {
     pub(crate) target: tools::types::SessionMode,
     pub(crate) prompt: Option<BehaviorSwitchStashedPrompt>,
 }
+/// Extra metadata a late `PromptResponse` contributed for an
+/// already-finalized turn (see [`AgentView::finalized_pr_meta`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FinalizedPrMeta {
+    /// Typed token usage from the late response (`PromptResponse.usage`).
+    pub(crate) usage: Option<agent_client_protocol::Usage>,
+    /// `_meta.structuredOutput` / `_meta.structuredOutputError` from the late
+    /// response: `Ok(value)` when the model produced schema-validated output,
+    /// `Err(message)` when the shell reported a structured-output failure.
+    pub(crate) structured_output: Option<Result<serde_json::Value, String>>,
+    /// `Err` text when the late RPC resolved as an error (the durable rail's
+    /// `agent_result` may be coarser or absent).
+    pub(crate) error: Option<String>,
+}
 pub struct AgentView {
     pub session: AgentSession,
     pub(crate) session_binding_epoch: u32,
@@ -766,6 +762,24 @@ pub struct AgentView {
     /// turn that already ended (otherwise the viewer re-strands on "Waiting…").
     /// Reset at the start of every load so it never leaks across loads.
     pub(crate) replayed_terminal_prompts: HashSet<String>,
+    /// Prompt id of the turn THIS client's terminal finalizer already
+    /// committed (the first-wins winner). A late `PromptResponse` whose pid
+    /// matches only merges its extra metadata ([`Self::finalized_pr_meta`]) —
+    /// it must not finish the turn, push a second marker, drain the queue,
+    /// or re-run the adoption handoff (all of that ran exactly once when the
+    /// finalizer won). Cleared at the next real turn start
+    /// ([`start_turn_boundary`](crate::app::agent_view::session::AgentView::start_turn_boundary))
+    /// and at every replay-window entry, so a stale pid can never merge into
+    /// a newer turn.
+    pub(crate) finalized_prompt: Option<String>,
+    /// Extra metadata a late `PromptResponse` contributed for an
+    /// already-finalized turn ([`Self::finalized_prompt`] matched): the
+    /// durable rail's terminal cannot carry token usage, structured output,
+    /// or the RPC's own error text, so the late response merges them here.
+    /// There is no live consumer yet — this is the retention point that
+    /// makes the late-PR merge observable and keeps the data from being
+    /// dropped by the race.
+    pub(crate) finalized_pr_meta: Option<FinalizedPrMeta>,
     /// Wake prompt id whose failure marker already rendered — a re-delivered
     /// errored wake terminal must not stack a second "Turn failed" row (the
     /// output-epoch dedupe only covers chatty closes; failures bypass it).
@@ -1392,16 +1406,9 @@ pub struct AgentView {
     /// complete. Kind-only: the payload is re-derived from the widget on
     /// reissue so the freshly attached image chip travels with it.
     pub(crate) deferred_send: Option<AgentDeferredSend>,
-    /// Armed when an `grow/session/prompt_complete` broadcast arrives for the
-    /// turn THIS client drives while it is still awaiting that turn's
-    /// `session/prompt` RPC response. The RPC normally lands milliseconds
-    /// later and disarms this; if it never does (lost in leader response
-    /// routing / reconnect races), the event loop reconciles turn state from
-    /// the broadcast after [`super::dispatch::TURN_END_RECONCILE_GRACE`] so
-    /// the pane cannot stay latched in `TurnRunning`/`TurnCancelling` forever
-    /// (a lost response would otherwise leave the TUI on "Cancelling…" with
-    /// Esc and the input dead until a restart).
-    pub(crate) pending_turn_end_reconcile: Option<PendingTurnEnd>,
+    /// Prompt-id currently being reconciled by the submission watchdog. This
+    /// prevents the animation tick from issuing duplicate status RPCs.
+    pub(crate) prompt_status_query_for: Option<String>,
     /// Send-now cancel expectation: the client-minted id of a cancel-and-send
     /// prompt this client dispatched into a running turn (send-now chord /
     /// queue-row "Send now" / a plain prompt sent into a held blocking wait,
@@ -1409,7 +1416,7 @@ pub struct AgentView {
     /// cancel is the silent half of cancel-and-send, so the turn-end rails
     /// suppress the "Turn cancelled by user …" marker.
     ///
-    /// Compat fallback only: a wire `_meta.cancelTrigger` on the turn end is
+    /// A wire `_meta.cancelTrigger` on the turn end is
     /// trusted over this flag (`"send_now"` suppresses, anything else
     /// renders). Consumed at every driver turn end. Kept across the matching
     /// send-now prompt's turn start (so the outgoing turn's cancel
@@ -2084,6 +2091,14 @@ pub(crate) mod test_fixtures {
     use crate::scrollback::state::ScrollbackState;
     use agent_client_protocol as acp;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    /// Simulate the authoritative QueueChanged(running) acknowledgement for a
+    /// locally submitted prompt before driving tracker activity in tests.
+    pub fn confirm_submitted_turn(agent: &mut AgentView) {
+        if agent.session.state.is_turn_submitting() {
+            let prompt_id = agent.session.current_prompt_id.clone();
+            agent.start_turn_boundary(prompt_id.as_deref());
+        }
+    }
     /// Drive the agent's tracker into a task-output wait via the real update
     /// path. `timeout_ms > 0` advertises a blocking (sendable/parked) wait;
     /// `0` is an instant poll that must NOT advertise one.
@@ -2097,6 +2112,7 @@ pub(crate) mod test_fixtures {
         task_id: &str,
         timeout_ms: u64,
     ) {
+        confirm_submitted_turn(agent);
         use crate::acp::meta::NotificationMeta;
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         use std::sync::Arc;
@@ -2171,6 +2187,7 @@ pub(crate) mod test_fixtures {
     /// (`WaitingReason::TasksComplete`) blocking wait via the real update
     /// path; the tracker classifies on the title alone.
     pub fn simulate_wait_all(agent: &mut AgentView) {
+        confirm_submitted_turn(agent);
         use crate::acp::meta::NotificationMeta;
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         use std::sync::Arc;
@@ -2204,6 +2221,7 @@ pub(crate) mod test_fixtures {
     /// (`crate::acp::tracker`). The shell aborts that await the moment the
     /// user sends (send-now), so it must read as a sendable/parked wait.
     pub fn simulate_subagent_wait(agent: &mut AgentView) {
+        confirm_submitted_turn(agent);
         use crate::acp::meta::NotificationMeta;
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         use std::sync::Arc;

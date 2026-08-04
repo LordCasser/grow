@@ -99,6 +99,8 @@ impl AgentView {
             session_reload: None,
             unexpected_replay_drops: 0,
             replayed_terminal_prompts: HashSet::new(),
+            finalized_prompt: None,
+            finalized_pr_meta: None,
             failed_wake_marker_for: None,
             active_pane: ActivePane::Prompt,
             prompt_mode: PromptMode::Normal,
@@ -304,7 +306,7 @@ impl AgentView {
             pending_effects: Vec::new(),
             paste_probe_in_flight: 0,
             deferred_send: None,
-            pending_turn_end_reconcile: None,
+            prompt_status_query_for: None,
             expect_send_now_cancel: None,
             optimistic_queue_ids: std::collections::HashSet::new(),
             send_now_awaiting_confirm: None,
@@ -352,6 +354,7 @@ impl AgentView {
     /// wall-max against a previous attempt's anchor in
     /// [`honest_turn_elapsed`].
     pub fn mark_turn_finished(&mut self) {
+        self.prompt_status_query_for = None;
         self.turn_started_at = None;
         self.turn_paused_duration = std::time::Duration::ZERO;
         self.turn_paused_wall = std::time::Duration::ZERO;
@@ -374,6 +377,16 @@ impl AgentView {
         self.replayed_terminal_prompts.clear();
         self.unexpected_replay_drops = 0;
         self.pending_stop_hooks = None;
+        // A reconnect restarts live state: the pre-window finalized marker
+        // must not merge a late PromptResponse into the reloaded turn.
+        self.finalized_prompt = None;
+        self.finalized_pr_meta = None;
+        // Re-arm the prompt-status watchdog (same invariant as
+        // `start_turn_boundary` / `mark_turn_finished`): a status RPC issued
+        // before the reload is in flight for a prompt that may not survive
+        // the reload, and its in-flight guard would otherwise block
+        // re-querying the prompt's authoritative status forever.
+        self.prompt_status_query_for = None;
         self.clear_send_now_expectation();
         self.optimistic_queue_ids.clear();
         self.send_now_awaiting_confirm = None;
@@ -456,6 +469,12 @@ impl AgentView {
     /// it. Deliberately NOT used by server-initiated synthetic turns
     /// (auto-wake / actor runs): they never call `start_turn`.
     pub(crate) fn start_turn_boundary(&mut self, starting_prompt_id: Option<&str>) {
+        self.prompt_status_query_for = None;
+        // A new turn invalidates the previous turn's finalized marker: a
+        // late PromptResponse for the OLD pid must be discarded (not merged)
+        // once a newer turn owns the slot.
+        self.finalized_prompt = None;
+        self.finalized_pr_meta = None;
         if self
             .expect_send_now_cancel
             .as_deref()
@@ -1532,6 +1551,20 @@ mod status_window_tests {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
         agent.start_turn_boundary(None);
         assert!(agent.session.state.is_turn_running());
+    }
+    #[test]
+    fn begin_replay_window_rearms_prompt_status_watchdog() {
+        // W6: a status RPC issued before a replay/reload window is in flight
+        // for a prompt that may not survive the reload. If its in-flight
+        // guard survives, the watchdog can never re-query the prompt's
+        // authoritative status after the reload. The window must clear it —
+        // the same invariant `start_turn_boundary` / `mark_turn_finished`
+        // enforce. `begin_session_reload` ends in `begin_replay_window`, so
+        // this single site covers both entry points.
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent.prompt_status_query_for = Some("pid-lost".into());
+        agent.begin_replay_window();
+        assert!(agent.prompt_status_query_for.is_none());
     }
     #[test]
     fn session_rebind_and_replay_invalidate_minimal_btw() {

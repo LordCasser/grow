@@ -115,6 +115,9 @@ fn pending_notification_cap_keeps_newest_entries() {
         notifications_suppressed: true,
         rewindable: false,
         nudges_used_this_session: 0,
+        recent_terminals: VecDeque::new(),
+        foreground_compact: false,
+        pending_manual_compact: None,
     };
     for index in 0..(MAX_PENDING_NOTIFICATIONS + 3) {
         SessionActor::push_pending_notification(

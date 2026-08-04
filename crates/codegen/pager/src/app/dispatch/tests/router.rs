@@ -830,7 +830,7 @@ fn acp_bootstrap_command_appears_in_autocomplete() {
     );
 }
 #[test]
-fn non_goal_acp_bootstrap_command_uses_turn_path_while_idle() {
+fn non_goal_acp_bootstrap_command_uses_command_plane_while_idle() {
     let mut app = test_app();
     app.bootstrap_acp_commands = vec![acp::AvailableCommand::new(
         "flush".to_string(),
@@ -849,10 +849,10 @@ fn non_goal_acp_bootstrap_command_uses_turn_path_while_idle() {
     }
     let effects = dispatch(Action::SendPrompt("/flush".into()), &mut app);
     assert_eq!(effects.len(), 1);
-    assert!(
-        matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "/flush"),
-        "idle ACP command should use the established turn path, got: {effects:?}"
-    );
+    assert!(matches!(
+        &effects[0],
+        Effect::ExecuteSlashCommand { command, .. } if command == "/flush"
+    ));
 }
 
 #[test]
@@ -1092,10 +1092,10 @@ fn acp_command_with_args_preserves_args_on_idle_turn_path() {
     }
     let effects = dispatch(Action::SendPrompt("/search find bugs".into()), &mut app);
     assert_eq!(effects.len(), 1);
-    assert!(
-        matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "/search find bugs"),
-        "idle ACP command should preserve args, got: {effects:?}"
-    );
+    assert!(matches!(
+        &effects[0],
+        Effect::ExecuteSlashCommand { command, .. } if command == "/search find bugs"
+    ));
 }
 #[test]
 fn generation_lifecycle_bootstrap_through_runtime_update() {

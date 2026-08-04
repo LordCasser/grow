@@ -10,7 +10,7 @@ use std::sync::Arc;
 use ratatui::{
     CompletedFrame, Frame, TerminalOptions, Viewport,
     backend::{Backend, ClearType},
-    buffer::{Buffer, Cell},
+    buffer::{Buffer, Cell, CellDiffOption},
     layout::{Position, Rect, Size},
 };
 use unicode_width::UnicodeWidthStr as _;
@@ -1190,7 +1190,10 @@ fn diff_large<'a>(prev: &Buffer, next: &'a Buffer) -> Vec<(u16, u16, &'a Cell)> 
     let mut to_skip: usize = 0;
 
     for (i, (current, previous)) in next_buffer.iter().zip(previous_buffer.iter()).enumerate() {
-        if !current.skip && (current != previous || invalidated > 0) && to_skip == 0 {
+        if current.diff_option != CellDiffOption::Skip
+            && (current != previous || invalidated > 0)
+            && to_skip == 0
+        {
             // Safe coordinate conversion: divide in usize, then narrow to u16.
             let x = area.x + (i % width) as u16;
             let y = area.y + (i / width) as u16;
@@ -1233,7 +1236,9 @@ fn diff_large_with_links<'a>(
     for (i, (current, previous)) in next_buffer.iter().zip(previous_buffer.iter()).enumerate() {
         let link_changed =
             resolve_link(next_ids, next_table, i) != resolve_link(prev_ids, prev_table, i);
-        if !current.skip && (current != previous || link_changed || invalidated > 0) && to_skip == 0
+        if current.diff_option != CellDiffOption::Skip
+            && (current != previous || link_changed || invalidated > 0)
+            && to_skip == 0
         {
             let x = area.x + (i % width) as u16;
             let y = area.y + (i / width) as u16;

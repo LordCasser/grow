@@ -414,18 +414,6 @@ fn extract_interaction_resolved_tool_call_id(json: &serde_json::Value) -> Option
         .and_then(|v| v.as_str())
         .map(String::from)
 }
-/// Extract session_id from a prompt-complete notification.
-fn extract_session_id_from_prompt_complete(json: &serde_json::Value) -> Option<String> {
-    let method = json.get("method")?.as_str()?;
-    if method != "grow/session/prompt_complete" {
-        return None;
-    }
-    json.get("params")?
-        .get("sessionId")
-        .or_else(|| json.get("params")?.get("session_id"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
 /// Extract session_id from a response's result (for session/new and session/load responses).
 /// This is used to track session ownership when the session is first created.
 fn extract_session_id_from_result(json: &serde_json::Value) -> Option<String> {
@@ -1765,10 +1753,7 @@ pub async fn run_leader_server(
                     }
                     continue;
                 }
-                let session_id = json.as_ref().and_then(extract_session_id).or_else(|| {
-                    json.as_ref()
-                        .and_then(extract_session_id_from_prompt_complete)
-                });
+                let session_id = json.as_ref().and_then(extract_session_id);
                 if let Some(ref sid) = session_id
                     && let Some(tcid) = json
                         .as_ref()
@@ -3638,19 +3623,6 @@ mod tests {
             extract_session_id(&pv(payload)),
             Some("top-level".to_string())
         );
-    }
-    #[test]
-    fn extract_session_id_from_prompt_complete_works() {
-        let payload = r#"{"jsonrpc":"2.0","method":"grow/session/prompt_complete","params":{"sessionId":"sess-prompt"}}"#;
-        assert_eq!(
-            extract_session_id_from_prompt_complete(&pv(payload)),
-            Some("sess-prompt".to_string())
-        );
-    }
-    #[test]
-    fn extract_session_id_from_prompt_complete_ignores_other_methods() {
-        let payload = r#"{"jsonrpc":"2.0","method":"grow/session_notification","params":{"sessionId":"sess-prompt"}}"#;
-        assert_eq!(extract_session_id_from_prompt_complete(&pv(payload)), None);
     }
     #[test]
     fn extract_child_session_event_spawned() {

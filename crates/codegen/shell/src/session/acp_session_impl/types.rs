@@ -194,13 +194,15 @@ pub(crate) enum NoNudgeReason {
 }
 
 /// Distinguishes turn-end drains from mid-turn drains. Turn-end is the
-/// safe boundary to fire the verification stage (no model
+/// safe boundary to SCHEDULE the verification stage (no model
 /// inference in flight); mid-turn `update_goal(completed: true)` calls
 /// are deferred so the verifier-skeptic subagents never race the
-/// parent's sampler.
+/// parent's sampler. The stage itself runs as a background task and
+/// commits via `SessionEvent::GoalStageCompleted` — the drain never
+/// awaits it (B1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DrainPurpose {
-    /// End-of-turn drain. Verification-eligible completions fire the
+    /// End-of-turn drain. Verification-eligible completions schedule the
     /// verification stage (if enabled, Active, and not already in flight).
     /// Deferred completions from prior mid-turn drains are processed
     /// FIFO ahead of the regular channel.

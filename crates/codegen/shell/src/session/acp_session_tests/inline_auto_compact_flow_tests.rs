@@ -42,6 +42,9 @@ async fn create_test_actor(
         notifications_suppressed: false,
         rewindable: false,
         nudges_used_this_session: 0,
+        recent_terminals: VecDeque::new(),
+        foreground_compact: false,
+        pending_manual_compact: None,
     });
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let chat_state_handle = chat_state::ChatStateActor::spawn(
@@ -103,6 +106,7 @@ async fn create_test_actor(
         startup_hints: StartupHints::default(),
         forked_tool_override: None,
         compaction: crate::session::compaction_config::CompactionConfig {
+            lease: Default::default(),
             threshold_percent: std::cell::Cell::new(threshold_percent),
             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             context_window_override: None,
@@ -145,6 +149,9 @@ async fn create_test_actor(
         pending_interjections: InterjectionBuffer::new(),
         completion_delivery: Default::default(),
         pending_system_reminders: Mutex::new(Vec::new()),
+        goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+        goal_control_notify: Arc::new(tokio::sync::Notify::new()),
+        goal_plan_scope: parking_lot::Mutex::new(None),
         idle_flush_timeout: None,
         dream_check_timeout: None,
         last_idle_flush_conversation_len: std::sync::atomic::AtomicUsize::new(0),
@@ -196,6 +203,7 @@ async fn create_test_actor(
         goal_plan_reconciled: std::sync::atomic::AtomicBool::new(false),
         pending_classifier_completions: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
+        goal_stage_seq: std::sync::atomic::AtomicU64::new(0),
         managed_mcp_handle: Default::default(),
         initial_client_mcp_servers: vec![],
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -507,6 +515,9 @@ async fn create_test_actor_with_memory(
         notifications_suppressed: false,
         rewindable: false,
         nudges_used_this_session: 0,
+        recent_terminals: VecDeque::new(),
+        foreground_compact: false,
+        pending_manual_compact: None,
     });
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let chat_state_handle = chat_state::ChatStateActor::spawn(
@@ -569,6 +580,7 @@ async fn create_test_actor_with_memory(
         startup_hints: StartupHints::default(),
         forked_tool_override: None,
         compaction: crate::session::compaction_config::CompactionConfig {
+            lease: Default::default(),
             threshold_percent: std::cell::Cell::new(threshold_percent),
             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             context_window_override: None,
@@ -613,6 +625,9 @@ async fn create_test_actor_with_memory(
         pending_interjections: InterjectionBuffer::new(),
         completion_delivery: Default::default(),
         pending_system_reminders: Mutex::new(Vec::new()),
+        goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+        goal_control_notify: Arc::new(tokio::sync::Notify::new()),
+        goal_plan_scope: parking_lot::Mutex::new(None),
         idle_flush_timeout: memory_config
             .as_ref()
             .and_then(|mc| mc.flush.idle_timeout_secs)
@@ -675,6 +690,7 @@ async fn create_test_actor_with_memory(
         goal_plan_reconciled: std::sync::atomic::AtomicBool::new(false),
         pending_classifier_completions: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
+        goal_stage_seq: std::sync::atomic::AtomicU64::new(0),
         managed_mcp_handle: Default::default(),
         initial_client_mcp_servers: vec![],
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),

@@ -3,9 +3,59 @@
 #![allow(clippy::items_after_test_module)]
 use super::*;
 
+fn spawn_manual_compaction(
+    session: std::sync::Arc<SessionActor>,
+    completion_tx: tokio::sync::mpsc::UnboundedSender<(String, PromptTurnResult)>,
+    user_context: Option<String>,
+    respond_to: Option<
+        tokio::sync::oneshot::Sender<acp::Result<crate::session::CompactConversationStatus>>,
+    >,
+) {
+    tokio::task::spawn_local(async move {
+        let result = session.run_compact(user_context).await;
+        if let Some(respond_to) = respond_to {
+            let response = result
+                .as_ref()
+                .map(|_| crate::session::CompactConversationStatus::Completed)
+                .map_err(Clone::clone);
+            let _ = respond_to.send(response);
+        } else if let Err(error) = &result {
+            session
+                .send_host_turn_slash_command_output(&format!(
+                    "Scheduled compaction failed: {error}"
+                ))
+                .await;
+        }
+        session.state.lock().await.foreground_compact = false;
+        SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
+        SessionActor::maybe_drain_notifications(session.clone(), completion_tx).await;
+        session.emit_session_idle_if_idle().await;
+    });
+}
+
+async fn maybe_start_pending_manual_compaction(
+    session: std::sync::Arc<SessionActor>,
+    completion_tx: tokio::sync::mpsc::UnboundedSender<(String, PromptTurnResult)>,
+) -> bool {
+    let user_context = {
+        let mut state = session.state.lock().await;
+        if state.running_task.is_some() || state.foreground_compact {
+            return false;
+        }
+        let Some(user_context) = state.pending_manual_compact.take() else {
+            return false;
+        };
+        state.foreground_compact = true;
+        user_context
+    };
+    spawn_manual_compaction(session, completion_tx, user_context, None);
+    true
+}
+
 async fn maybe_wake_for_deferred_completion(
     session: std::sync::Arc<SessionActor>,
     completion_tx: tokio::sync::mpsc::UnboundedSender<(String, PromptTurnResult)>,
+    promote: bool,
 ) {
     if !session.completion_delivery.has_ready() || session.state.lock().await.running_task.is_some()
     {
@@ -19,7 +69,7 @@ async fn maybe_wake_for_deferred_completion(
     // wake cannot be mistaken for user input or request a Behavior change.
     let wake_id = format!("notifications-deferred-{}", uuid::Uuid::now_v7());
     let (respond_to, _) = tokio::sync::oneshot::channel();
-    session.state.lock().await.pending_inputs.push_back(InputItem {
+    let item = InputItem {
         prompt_id: wake_id.clone(),
         prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
             "A deferred background result is now available. Process the system reminder and respond or continue as appropriate.",
@@ -36,8 +86,25 @@ async fn maybe_wake_for_deferred_completion(
         parsed_prompt_tx: None,
         queue_meta: None,
         send_now: false,
-    });
-    SessionActor::maybe_start_running_task(session, completion_tx).await;
+    };
+    let mut state = session.state.lock().await;
+    let insert_at = state
+        .pending_inputs
+        .iter()
+        .position(|queued| {
+            matches!(
+                queued.origin,
+                super::PromptOrigin::GoalSummary
+                    | super::PromptOrigin::GoalClassifierNudge
+                    | super::PromptOrigin::NotificationDrain
+            )
+        })
+        .unwrap_or(state.pending_inputs.len());
+    state.pending_inputs.insert(insert_at, item);
+    drop(state);
+    if promote {
+        SessionActor::maybe_start_running_task(session, completion_tx).await;
+    }
 }
 /// The `YoloToggled` event to emit after `set_yolo_mode(requested)`, given the
 /// previous state and the post-call ACTUAL state (read back via
@@ -121,6 +188,50 @@ impl SessionActor {
             })),
         );
         Some(fallback)
+    }
+
+    /// `CompactSession` admission on the mailbox: decide the immediate
+    /// status and either queue a pending compact behind the running turn or
+    /// spawn the foreground compaction. Extracted from the command arm so
+    /// the mailbox-not-blocked property is directly testable (the command
+    /// must be accepted while a background Goal verification stage runs).
+    pub(super) async fn admit_manual_compaction(
+        self: &std::sync::Arc<Self>,
+        user_context: Option<String>,
+        completion_tx: tokio::sync::mpsc::UnboundedSender<(String, PromptTurnResult)>,
+        respond_to: Option<
+            tokio::sync::oneshot::Sender<acp::Result<crate::session::CompactConversationStatus>>,
+        >,
+    ) {
+        let mut state = self.state.lock().await;
+        if state.running_task.is_some() {
+            let status = if state.pending_manual_compact.is_some() {
+                crate::session::CompactConversationStatus::AlreadyRunning
+            } else {
+                state.pending_manual_compact = Some(user_context);
+                crate::session::CompactConversationStatus::Scheduled
+            };
+            drop(state);
+            if let Some(respond_to) = respond_to {
+                let _ = respond_to.send(Ok(status));
+            }
+        } else if state.foreground_compact || self.compaction.lease.is_in_flight() {
+            drop(state);
+            if let Some(respond_to) = respond_to {
+                let _ = respond_to.send(Ok(
+                    crate::session::CompactConversationStatus::AlreadyRunning,
+                ));
+            }
+        } else {
+            state.foreground_compact = true;
+            drop(state);
+            spawn_manual_compaction(
+                std::sync::Arc::clone(self),
+                completion_tx,
+                user_context,
+                respond_to,
+            );
+        }
     }
 }
 async fn shutdown_workflows(session: &SessionActor) {
@@ -420,8 +531,18 @@ pub(super) async fn run_session(
                                 maybe_wake_for_deferred_completion(
                                     session.clone(),
                                     completion_tx.clone(),
+                                    true,
                                 )
                                 .await;
+                            }
+                            // A background Goal stage (verifier / strategist /
+                            // summarizer) finished its model work. Commit the
+                            // pure state part under the captured lease; stale
+                            // completions are dropped with diagnostics. The
+                            // stage never awaited the mailbox, so the mailbox
+                            // stays responsive to user commands throughout.
+                            SessionEvent::GoalStageCompleted(completion) => {
+                                session.handle_goal_stage_completed(completion).await;
                             }
                             SessionEvent::FlushReplay { respond_to } => {
                                 if let Some(notification) = replay_buffer.flush() {
@@ -481,7 +602,24 @@ pub(super) async fn run_session(
                     if session.flush_stranded_interjections().await {
                         tracing::info!("Flushed stranded interjection(s) into prompt turns");
                     }
-                    SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
+                    maybe_wake_for_deferred_completion(
+                        session.clone(),
+                        completion_tx.clone(),
+                        false,
+                    )
+                    .await;
+                    if !maybe_start_pending_manual_compaction(
+                        session.clone(),
+                        completion_tx.clone(),
+                    )
+                    .await
+                    {
+                        SessionActor::maybe_start_running_task(
+                            session.clone(),
+                            completion_tx.clone(),
+                        )
+                        .await;
+                    }
                     // If no user prompt started, check for pending notifications
                     SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;
                     session.emit_session_idle_if_idle().await;
@@ -693,7 +831,18 @@ pub(super) async fn run_session(
                             if cancel_for_send_now {
                                 session.cancel_turn_for_send_now(&mut replay_buffer).await;
                             }
-                            SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
+                            if !maybe_start_pending_manual_compaction(
+                                session.clone(),
+                                completion_tx.clone(),
+                            )
+                            .await
+                            {
+                                SessionActor::maybe_start_running_task(
+                                    session.clone(),
+                                    completion_tx.clone(),
+                                )
+                                .await;
+                            }
                         }
                         SessionCommand::ExecuteSlashCommand { command, respond_to } => {
                             let result = session
@@ -703,14 +852,60 @@ pub(super) async fn run_session(
                                 // Preserve user steering that reached the
                                 // interjection buffer before `/goal pause`.
                                 session.flush_stranded_interjections().await;
-                                session.cancel_turn_for_send_now(&mut replay_buffer).await;
+                                session
+                                    .cancel_turn_for_goal_pause(&mut replay_buffer)
+                                    .await;
                             }
-                            SessionActor::maybe_start_running_task(
+                            if !maybe_start_pending_manual_compaction(
                                 session.clone(),
                                 completion_tx.clone(),
                             )
-                            .await;
+                            .await
+                            {
+                                SessionActor::maybe_start_running_task(
+                                    session.clone(),
+                                    completion_tx.clone(),
+                                )
+                                .await;
+                            }
                             let _ = respond_to.send(result.map(|_| ()));
+                        }
+                        SessionCommand::QueryPromptStatus { prompt_id, respond_to } => {
+                            use crate::session::prompt_queue::PromptStatus;
+                            let state = session.state.lock().await;
+                            let status = if let Some(task) = state.running_task.as_ref()
+                                && task.prompt_id == prompt_id
+                            {
+                                PromptStatus::Running {
+                                    turn_start_ms: task.turn_start_ms,
+                                }
+                            } else if let Some((position, item)) = state
+                                .pending_inputs
+                                .iter()
+                                .enumerate()
+                                .find(|(_, item)| item.prompt_id == prompt_id)
+                            {
+                                PromptStatus::Queued {
+                                    position,
+                                    queue_version: item
+                                        .queue_meta
+                                        .as_ref()
+                                        .map_or(0, |meta| meta.version),
+                                }
+                            } else if let Some(terminal) = state
+                                .recent_terminals
+                                .iter()
+                                .rev()
+                                .find(|terminal| terminal.prompt_id == prompt_id)
+                            {
+                                PromptStatus::Terminal {
+                                    stop_reason: terminal.stop_reason.clone(),
+                                    agent_result: terminal.agent_result.clone(),
+                                }
+                            } else {
+                                PromptStatus::Unknown
+                            };
+                            let _ = respond_to.send(status);
                         }
                         SessionCommand::DeferredCompletionAvailable { task_id, body } => {
                             if session.completion_delivery.complete(task_id.clone(), body) {
@@ -721,6 +916,7 @@ pub(super) async fn run_session(
                                 maybe_wake_for_deferred_completion(
                                     session.clone(),
                                     completion_tx.clone(),
+                                    true,
                                 )
                                 .await;
                             }
@@ -1011,7 +1207,18 @@ pub(super) async fn run_session(
                             if cancel_for_send_now {
                                 session.cancel_turn_for_send_now(&mut replay_buffer).await;
                             }
-                            SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
+                            if !maybe_start_pending_manual_compaction(
+                                session.clone(),
+                                completion_tx.clone(),
+                            )
+                            .await
+                            {
+                                SessionActor::maybe_start_running_task(
+                                    session.clone(),
+                                    completion_tx.clone(),
+                                )
+                                .await;
+                            }
                         }
                         SessionCommand::Cancel {
                             cancel_subagents,
@@ -1061,10 +1268,21 @@ pub(super) async fn run_session(
                                 )
                                 .await;
 
-                            // Kick any already-queued prompt so it doesn't sit
-                            // waiting for a completion message that will never
-                            // arrive (the aborted task can't send one).
-                            SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
+                            // Manual compaction admitted during the cancelled
+                            // turn owns the next foreground slot; otherwise
+                            // promote the queued prompt normally.
+                            if !maybe_start_pending_manual_compaction(
+                                session.clone(),
+                                completion_tx.clone(),
+                            )
+                            .await
+                            {
+                                SessionActor::maybe_start_running_task(
+                                    session.clone(),
+                                    completion_tx.clone(),
+                                )
+                                .await;
+                            }
                             // Ctrl+C leaves pending notifications suppressed. Other
                             // cancel triggers leave the actor eligible for its normal idle drain.
                             if !suppress_task_wakes {
@@ -1076,11 +1294,13 @@ pub(super) async fn run_session(
                             }
                         }
                         SessionCommand::CompactSession { user_context, respond_to } => {
-                            let s = session.clone();
-                            tokio::task::spawn_local(async move {
-                                let compact_session = s.run_compact(user_context).await;
-                                let _ = respond_to.send(compact_session);
-                            });
+                            session
+                                .admit_manual_compaction(
+                                    user_context,
+                                    completion_tx.clone(),
+                                    Some(respond_to),
+                                )
+                                .await;
                         }
                         SessionCommand::ReloadPlugins { registry } => {
                             // Eager fan-out: a plugin was added/removed/reloaded
@@ -1882,6 +2102,11 @@ pub(super) async fn run_session(
                             // turn as idle and queued steering behind it.
                             let turn_running = session.state.lock().await.running_task.is_some();
                             if turn_running {
+                                if session.goal_tracker.lock().status()
+                                    == Some(crate::session::goal_tracker::GoalStatus::Active)
+                                {
+                                    session.goal_tracker.lock().bump_autonomy_generation();
+                                }
                                 session.pending_interjections.push(PendingInterjection {
                                     text,
                                     attachments: images,

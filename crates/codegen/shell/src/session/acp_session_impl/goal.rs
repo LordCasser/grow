@@ -4,6 +4,7 @@ use super::*;
 
 impl SessionActor {
     async fn finish_goal_behavior_after_verified_achievement(&self) {
+        self.retire_goal_plan_scope().await;
         if self.behavior.lock().behavior() != Some(tool_types::BehaviorId::Goal) {
             return;
         }
@@ -97,6 +98,24 @@ pub(crate) enum GapsUpdate<'a> {
     Preserve,
 }
 
+/// Lease + attempt payload for one scheduled verification stage. The drain
+/// (mailbox) builds it and hands it to
+/// [`SessionActor::schedule_goal_verifier_stage`], which runs the model
+/// work off the mailbox.
+struct GoalVerifierStageSpec {
+    attempt: u32,
+    policy: GoalClassifierPolicy,
+    ack_tx: Option<
+        tokio::sync::oneshot::Sender<
+            tools::implementations::grow_build::update_goal::UpdateGoalAck,
+        >,
+    >,
+    goal_id: String,
+    definition_revision: u64,
+    autonomy_generation: u64,
+    foreground_generation: u64,
+}
+
 impl SessionActor {
     async fn evaluate_goal_round(
         &self,
@@ -112,7 +131,9 @@ impl SessionActor {
                 .ok_or_else(|| "goal state disappeared before evaluation".to_string())?;
             (snapshot.objective.clone(), snapshot.plan_file.clone())
         };
-        let transcript = bounded_goal_transcript(&self.chat_state_handle.get_conversation().await);
+        let transcript = bounded_goal_transcript(
+            &self.project_goal_conversation(self.chat_state_handle.get_conversation().await, true),
+        );
         let plan = match plan_file {
             Some(path) => tokio::fs::read_to_string(path)
                 .await
@@ -237,6 +258,13 @@ impl SessionActor {
         tracker.append_history(entry);
     }
 
+    /// Workflow-path verification: spawn_local verification task + select
+    /// over user steering / foreground completion / goal-control change,
+    /// with a displaced-result background continuation. This shape is the
+    /// model the mailbox turn-end drain mirrors for non-workflow sessions —
+    /// except that drain's stage completion commits via
+    /// `SessionEvent::GoalStageCompleted` under a captured lease instead of
+    /// this function's in-task `goal_foreground_changed` checks.
     async fn verify_goal_candidate(self: &std::sync::Arc<Self>, foreground_generation: u64) {
         use crate::session::goal_classifier::GoalClassifierOutcome;
         let policy = self.resolve_goal_classifier_policy();
@@ -268,6 +296,11 @@ impl SessionActor {
         let Some(definition_key) = self.goal_tracker.lock().definition_key() else {
             return;
         };
+        let autonomy_generation = self
+            .goal_tracker
+            .lock()
+            .autonomy_generation()
+            .unwrap_or_default();
         let Some(attempt) = self.reserve_classifier_attempt_slot(&policy) else {
             return;
         };
@@ -312,6 +345,8 @@ impl SessionActor {
                         .goal_tracker
                         .lock()
                         .definition_is_current(&background_definition.0, background_definition.1)
+                        && actor.goal_tracker.lock().autonomy_generation()
+                            == Some(autonomy_generation)
                     {
                         actor.goal_tracker.lock().rollback_classifier_attempt();
                         if actor.goal_tracker.lock().status()
@@ -349,9 +384,10 @@ impl SessionActor {
         };
         let tracker = self.goal_tracker.lock();
         let stale = !tracker.definition_is_current(&definition_key.0, definition_key.1);
+        let autonomy_stale = tracker.autonomy_generation() != Some(autonomy_generation);
         let inactive = tracker.status() != Some(crate::session::goal_tracker::GoalStatus::Active);
         drop(tracker);
-        if stale || inactive {
+        if stale || autonomy_stale || inactive {
             return;
         }
         if self.goal_foreground_changed(foreground_generation) {
@@ -384,7 +420,7 @@ impl SessionActor {
     }
 
     async fn apply_classifier_outcome(
-        &self,
+        self: &std::sync::Arc<Self>,
         policy: &GoalClassifierPolicy,
         attempt: u32,
         outcome: crate::session::goal_classifier::GoalClassifierOutcome,
@@ -413,7 +449,7 @@ impl SessionActor {
                     notify.emit_goal_updated(&mut tracker, tokens_used, finished);
                 }
                 self.finish_goal_behavior_after_verified_achievement().await;
-                self.maybe_run_goal_summarizer(attempt).await;
+                self.maybe_run_goal_summarizer(attempt);
             }
             GoalClassifierOutcome::NotAchieved {
                 details_path,
@@ -464,7 +500,7 @@ impl SessionActor {
                             )
                         });
                 if let Some(consecutive) = claimed {
-                    self.maybe_run_goal_strategist(attempt, consecutive).await;
+                    self.maybe_run_goal_strategist(attempt, consecutive);
                 }
                 if self.goal_foreground_changed(foreground_generation) {
                     return;
@@ -658,7 +694,10 @@ impl SessionActor {
 
         let (final_response, anchor_to_persist) = {
             let current = {
-                let items = self.chat_state_handle.get_conversation().await;
+                let items = self.project_goal_conversation(
+                    self.chat_state_handle.get_conversation().await,
+                    true,
+                );
                 crate::session::goal_classifier::evidence::extract_final_response(&items)
                     .unwrap_or_default()
             };
@@ -953,11 +992,11 @@ impl SessionActor {
         )
     }
 
-    pub(super) async fn setup_goal(
-        self: &std::sync::Arc<Self>,
-        objective: &str,
-        token_budget: Option<i64>,
-    ) -> String {
+    /// Commit Goal control state without starting planner or implementer model
+    /// work. Slash commands may call this on the actor mailbox safely; the
+    /// finite Goal cycle is scheduled separately.
+    pub(super) async fn initialize_goal_runtime(&self, objective: &str, token_budget: Option<i64>) {
+        self.enter_goal_plan_scope().await;
         let goal_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().to_rfc3339();
         let token_baseline = self.chat_state_handle.get_total_tokens().await as i64;
@@ -972,6 +1011,7 @@ impl SessionActor {
             created_at,
             baseline_commit,
         );
+        self.push_current_goal_context();
         self.goal_turn_task_ids.lock().clear();
         self.clear_pending_classifier_completions();
         self.goal_continuation_streak
@@ -979,15 +1019,56 @@ impl SessionActor {
         self.goal_blocked_streak
             .store(0, std::sync::atomic::Ordering::Relaxed);
 
-        {
-            let (tokens_used, finished_marginal) = self.goal_tokens(token_baseline);
-            let notify = self.goal_notify_sender();
-            notify.emit_goal_updated(
-                &mut self.goal_tracker.lock(),
-                tokens_used,
-                finished_marginal,
-            );
-        }
+        let (tokens_used, finished_marginal) = self.goal_tokens(token_baseline);
+        self.goal_notify_sender().emit_goal_updated(
+            &mut self.goal_tracker.lock(),
+            tokens_used,
+            finished_marginal,
+        );
+    }
+
+    pub(super) async fn render_goal_start_reminder(&self) -> String {
+        let names = self.resolve_goal_tool_names().await;
+        let planner_enabled = self.goal_planner_enabled;
+        let body = {
+            let tracker = self.goal_tracker.lock();
+            let o = tracker
+                .snapshot()
+                .expect("an initialized Goal must have an orchestration snapshot");
+            let plan_path = goal_reminder_plan_path(planner_enabled, o);
+            let scratch_dir = crate::session::goal_tracker::implementer_scratch_dir(&o.verifier_id);
+            let scratch = scratch_dir.to_string_lossy();
+            if self.goal_runs_on_workflow_engine() {
+                render_goal_rules(
+                    &o.objective,
+                    &names,
+                    "",
+                    "",
+                    plan_path,
+                    &scratch,
+                    o.scratch_dir_ready,
+                )
+            } else {
+                render_goal_rules_foreground(
+                    &o.objective,
+                    &names,
+                    "",
+                    "",
+                    plan_path,
+                    &scratch,
+                    o.scratch_dir_ready,
+                )
+            }
+        };
+        format!("<system-reminder>\n{body}\nStart now.\n</system-reminder>\n\n")
+    }
+
+    pub(super) async fn setup_goal(
+        self: &std::sync::Arc<Self>,
+        objective: &str,
+        token_budget: Option<i64>,
+    ) -> String {
+        self.initialize_goal_runtime(objective, token_budget).await;
 
         // Planning is model work and this method runs inside a prompt task,
         // never inline in the actor mailbox. If `/goal set` revises the
@@ -1018,39 +1099,7 @@ impl SessionActor {
             planning_objective = latest_objective;
         }
 
-        let names = self.resolve_goal_tool_names().await;
-        let planner_enabled = self.goal_planner_enabled;
-        let body = {
-            let tracker = self.goal_tracker.lock();
-            let o = tracker
-                .snapshot()
-                .expect("create_goal must populate the orchestration snapshot");
-            let plan_path = goal_reminder_plan_path(planner_enabled, o);
-            let scratch_dir = crate::session::goal_tracker::implementer_scratch_dir(&o.verifier_id);
-            let scratch = scratch_dir.to_string_lossy();
-            if self.goal_runs_on_workflow_engine() {
-                render_goal_rules(
-                    &o.objective,
-                    &names,
-                    "",
-                    "",
-                    plan_path,
-                    &scratch,
-                    o.scratch_dir_ready,
-                )
-            } else {
-                render_goal_rules_foreground(
-                    &o.objective,
-                    &names,
-                    "",
-                    "",
-                    plan_path,
-                    &scratch,
-                    o.scratch_dir_ready,
-                )
-            }
-        };
-        format!("<system-reminder>\n{body}\nStart now.\n</system-reminder>\n\n")
+        self.render_goal_start_reminder().await
     }
 
     pub(super) async fn resume_goal(self: &std::sync::Arc<Self>) -> GoalResumeOutcome {
@@ -1132,31 +1181,6 @@ impl SessionActor {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.goal_blocked_streak
             .store(0, std::sync::atomic::Ordering::Relaxed);
-
-        if was_resumed {
-            let needs_retry = {
-                let tracker = self.goal_tracker.lock();
-                tracker
-                    .snapshot()
-                    .map(|o| o.status == GoalStatus::Active && o.plan_file.is_none())
-                    .unwrap_or(false)
-            };
-            if needs_retry {
-                let objective = self
-                    .goal_tracker
-                    .lock()
-                    .snapshot()
-                    .map(|o| o.objective.clone());
-                if let Some(objective) = objective {
-                    self.maybe_run_goal_planner(&objective).await;
-                    if self.goal_tracker.lock().status() != Some(GoalStatus::Active) {
-                        return GoalResumeOutcome::Message(
-                            "Planning failed again; goal paused.".to_string(),
-                        );
-                    }
-                }
-            }
-        }
 
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
@@ -1288,12 +1312,18 @@ impl SessionActor {
         true
     }
 
-    async fn prepare_goal_continuation(&self, current_tokens: i64) -> Option<GoalContinuationPlan> {
+    /// Pure continuation computation for an Active goal: stop-detector,
+    /// token budget, directive rendering, and strategy-rec / stop-pattern
+    /// consumption. Safe to call on the mailbox — it reads chat/tool state
+    /// and emits updates, but NEVER drains goal updates and never runs model
+    /// work. The turn-end drain is the caller's job (`handle_turn_end`),
+    /// and verification itself runs in background Goal stages whose
+    /// completions commit via the mailbox.
+    pub(super) async fn render_goal_continuation(
+        &self,
+        current_tokens: i64,
+    ) -> Option<GoalContinuationPlan> {
         let foreground = !self.goal_runs_on_workflow_engine();
-        if foreground {
-            self.drain_goal_updates(current_tokens, DrainPurpose::TurnEnd)
-                .await;
-        }
 
         let goal_active = laziness_injection_active(
             self.goal_harness_enabled(),
@@ -1449,7 +1479,20 @@ impl SessionActor {
         })
     }
 
-    fn record_and_emit_premature_stop(&self, pattern: &'static str) {
+    /// Thin wrapper over [`Self::render_goal_continuation`] kept for the
+    /// workflow-engine path (`run_goal_round_end` runs inside the turn task
+    /// and never drains — the workflow engine owns its own round
+    /// evaluation, so this wrapper's behavior there is unchanged) and for
+    /// tests. The mailbox turn-end path drains explicitly in
+    /// `handle_turn_end` and renders via [`Self::render_goal_continuation`].
+    pub(super) async fn prepare_goal_continuation(
+        &self,
+        current_tokens: i64,
+    ) -> Option<GoalContinuationPlan> {
+        self.render_goal_continuation(current_tokens).await
+    }
+
+    pub(super) fn record_and_emit_premature_stop(&self, pattern: &'static str) {
         self.goal_tracker.lock().append_history(
             crate::session::goal_tracker::GoalHistoryEntry::now(
                 crate::session::goal_tracker::GoalEvent::PrematureStopDetected,
@@ -1468,6 +1511,12 @@ impl SessionActor {
         }
     }
 
+    /// Workflow-engine round evaluation. Runs inside the turn task (never
+    /// the mailbox), so it may await evaluator/verifier model work inline —
+    /// unlike the non-workflow turn-end path (`handle_turn_end`), which
+    /// drains mailbox-fast and schedules verification as background Goal
+    /// stages. This function's behavior is intentionally unchanged by the
+    /// B1 stage refactor; it stays the workflow engine's own loop.
     pub(super) async fn run_goal_round_end(self: &std::sync::Arc<Self>) -> GoalRoundDecision {
         use crate::session::goal_evaluator::GoalEvaluatorDecision;
         if !laziness_injection_active(
@@ -1628,12 +1677,18 @@ impl SessionActor {
     pub(super) async fn inject_goal_continuation_message(&self, directive: String) {
         self.prune_prior_goal_continuation_directives().await;
         self.chat_state_handle
-            .push_user_message(ConversationItem::goal_summary(directive));
+            .push_user_message(self.goal_directive_item(
+                directive,
+                sampling_types::SyntheticReason::GoalSummary,
+                sampling_types::GoalDirectiveKind::Continuation,
+            ));
     }
 
     pub(super) async fn maybe_queue_goal_continuation(&self) {
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-        let Some(plan) = self.prepare_goal_continuation(current_tokens).await else {
+        // Renders only — the caller (`handle_turn_end`) has already run the
+        // mailbox-fast turn-end drain and scheduled any verification stages.
+        let Some(plan) = self.render_goal_continuation(current_tokens).await else {
             return;
         };
         {
@@ -1762,13 +1817,23 @@ impl SessionActor {
 }
 
 impl SessionActor {
-    pub(super) async fn drain_goal_updates(&self, current_tokens: i64, purpose: DrainPurpose) {
+    /// Turn-end / mid-turn drain of `update_goal` envelopes. Must stay
+    /// mailbox-fast: the non-model parts (progress, blocked_reason counting,
+    /// cap/NonActive/BlockSeen rejections, MidTurn deferral) run inline;
+    /// a `completed: true` proposal with a valid lease and a free in-flight
+    /// slot is scheduled as a background Goal stage instead of awaiting the
+    /// verification model work (B1).
+    pub(super) async fn drain_goal_updates(
+        self: &std::sync::Arc<Self>,
+        current_tokens: i64,
+        purpose: DrainPurpose,
+    ) {
         self.drain_goal_updates_with_extra(current_tokens, purpose, Vec::new())
             .await;
     }
 
     pub(super) async fn drain_goal_updates_with_extra(
-        &self,
+        self: &std::sync::Arc<Self>,
         current_tokens: i64,
         purpose: DrainPurpose,
         extra: Vec<tools::implementations::grow_build::update_goal::UpdateGoalEnvelope>,
@@ -2064,11 +2129,15 @@ impl SessionActor {
                 }
                 continue;
             }
-            let _in_flight_guard = InFlightGuard {
-                flag: &self.goal_classifier_in_flight,
-            };
+            // The in-flight CAS stays SET until the mailbox commits this
+            // stage's completion (`handle_goal_stage_completed`): it
+            // serializes verification stages exactly like the old inline
+            // run did — a concurrent `completed: true` proposal is routed
+            // through the synthetic ConcurrentInFlight accounting above.
             let fire_started = std::time::Instant::now();
             let Some(definition_key) = self.goal_tracker.lock().definition_key() else {
+                self.goal_classifier_in_flight
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
                 try_send_ack(
                     ack_tx,
                     UpdateGoalAck::Rejected {
@@ -2081,6 +2150,8 @@ impl SessionActor {
             };
 
             let Some(attempt) = self.reserve_classifier_attempt_slot(&policy) else {
+                self.goal_classifier_in_flight
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
                 self.events
                     .emit(crate::session::events::Event::GoalVerificationUnavailable {
                     reason:
@@ -2102,74 +2173,27 @@ impl SessionActor {
 
             self.emit_goal_verifying(current_tokens);
 
-            let slot_goal_id = definition_key.0.clone();
-            let slot_revision = definition_key.1;
-            let mut slot_guard = TrackerDropGuard::new(&self.goal_tracker, move |t| {
-                use crate::session::goal_tracker::GoalStatus;
-                if t.definition_is_current(&slot_goal_id, slot_revision)
-                    && !matches!(
-                        t.status(),
-                        Some(
-                            GoalStatus::BackOffPaused
-                                | GoalStatus::NoProgressPaused
-                                | GoalStatus::Blocked
-                        ),
-                    )
-                {
-                    t.rollback_classifier_attempt();
-                }
+            // Schedule the verification stage as a background task. The
+            // drain (mailbox) NEVER awaits model work: the stage reports its
+            // outcome via `SessionEvent::GoalStageCompleted` and the mailbox
+            // commits (or lease-drops) it there. The ack travels with the
+            // stage and is resolved at commit time — the `update_goal` tool
+            // contract is unchanged, only the resolution point moved.
+            let autonomy_generation = self
+                .goal_tracker
+                .lock()
+                .autonomy_generation()
+                .unwrap_or_default();
+            let foreground_generation = self.completion_delivery.generation();
+            self.schedule_goal_verifier_stage(GoalVerifierStageSpec {
+                attempt,
+                policy,
+                ack_tx,
+                goal_id: definition_key.0,
+                definition_revision: definition_key.1,
+                autonomy_generation,
+                foreground_generation,
             });
-
-            let outcome = {
-                let latch_goal_id = definition_key.0.clone();
-                let latch_revision = definition_key.1;
-                let _verifying_latch = TrackerDropGuard::new(&self.goal_tracker, move |t| {
-                    if t.definition_is_current(&latch_goal_id, latch_revision)
-                        && let Some(o) = t.snapshot_mut()
-                    {
-                        o.verifying_in_flight = false;
-                    }
-                });
-                self.run_verification_stage_for_drain(attempt).await
-            };
-
-            let tracker = self.goal_tracker.lock();
-            let definition_changed =
-                !tracker.definition_is_current(&definition_key.0, definition_key.1);
-            let status_changed =
-                tracker.status() != Some(crate::session::goal_tracker::GoalStatus::Active);
-            drop(tracker);
-            if definition_changed || status_changed {
-                self.events
-                    .emit(crate::session::events::Event::GoalVerificationUnavailable {
-                    reason:
-                        crate::session::events::GoalVerificationUnavailableReason::GoalNotActiveAtResolve
-                            .as_const_str(),
-                    attempt,
-                    latency_ms: fire_started.elapsed().as_millis() as u64,
-                });
-                try_send_ack(
-                    ack_tx,
-                    UpdateGoalAck::Rejected {
-                        reason: RejectReason::StatusChangedDuringClassifier,
-                        detail: if definition_changed {
-                            "Goal definition changed during classifier run".to_string()
-                        } else {
-                            "Goal transitioned to non-Active during classifier run".to_string()
-                        },
-                    },
-                );
-                continue;
-            }
-            slot_guard.disarm();
-
-            let ack = self
-                .apply_classifier_outcome_foreground(&policy, attempt, outcome, &notify)
-                .await;
-            if !auto_paused_mid_drain && self.goal_is_paused() {
-                auto_paused_mid_drain = true;
-            }
-            try_send_ack(ack_tx, ack);
         }
         if cap_dropped > 0 {
             self.events.emit(
@@ -2189,35 +2213,405 @@ impl SessionActor {
         })
     }
 
-    fn goal_is_paused(&self) -> bool {
-        self.goal_tracker
-            .lock()
-            .status()
-            .is_some_and(|s| s.is_paused())
-    }
-
     pub(crate) fn clear_pending_classifier_completions(&self) {
         self.pending_classifier_completions.lock().clear();
     }
 
-    /// In-turn goal loop step: run verification for the round just completed
-    /// and decide whether to continue the loop in-turn (with the continuation
-    /// directive) or end the turn. The premature-stop signal, if any, is
-    /// emitted here — once per continued round.
-    pub(super) async fn run_goal_round_end_foreground(&self) -> GoalRoundDecision {
-        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-        let Some(plan) = self.prepare_goal_continuation(current_tokens).await else {
-            return GoalRoundDecision::EndTurn;
+    /// Spawn the verification stage for a `completed: true` proposal.
+    /// Runs entirely off the mailbox; completion arrives via
+    /// `SessionEvent::GoalStageCompleted`. The TrackerDropGuards live inside
+    /// the task so a dropped stage (session teardown) refunds the reserved
+    /// attempt and clears `verifying_in_flight` exactly like the old inline
+    /// run did. The rollback decision for a stale completion is the mailbox
+    /// commit's job, so the guard is disarmed before the event is sent.
+    fn schedule_goal_verifier_stage(self: &std::sync::Arc<Self>, spec: GoalVerifierStageSpec) {
+        use crate::session::goal_tracker::GoalStatus;
+        let GoalVerifierStageSpec {
+            attempt,
+            policy,
+            ack_tx,
+            goal_id,
+            definition_revision,
+            autonomy_generation,
+            foreground_generation,
+        } = spec;
+        let stage_id = self
+            .goal_stage_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let actor = std::sync::Arc::clone(self);
+        tokio::task::spawn_local(async move {
+            let started = std::time::Instant::now();
+            let slot_goal_id = goal_id.clone();
+            let slot_revision = definition_revision;
+            let mut slot_guard = TrackerDropGuard::new(&actor.goal_tracker, move |t| {
+                if t.definition_is_current(&slot_goal_id, slot_revision)
+                    && !matches!(
+                        t.status(),
+                        Some(
+                            GoalStatus::BackOffPaused
+                                | GoalStatus::NoProgressPaused
+                                | GoalStatus::Blocked
+                        ),
+                    )
+                {
+                    t.rollback_classifier_attempt();
+                }
+            });
+            let outcome = {
+                let latch_goal_id = goal_id.clone();
+                let latch_revision = definition_revision;
+                let _verifying_latch = TrackerDropGuard::new(&actor.goal_tracker, move |t| {
+                    if t.definition_is_current(&latch_goal_id, latch_revision)
+                        && let Some(o) = t.snapshot_mut()
+                    {
+                        o.verifying_in_flight = false;
+                    }
+                });
+                // Poll INSIDE `catch_unwind` (a bare `catch_unwind(async …)`
+                // would only guard the closure body, not the future's polls)
+                // so a panicking stage still surfaces a fail-closed outcome
+                // (and its ack) instead of silently wedging the in-flight
+                // CAS for the rest of the session.
+                let mut stage = std::pin::pin!(actor.run_verification_stage_for_drain(attempt));
+                std::future::poll_fn(|cx| {
+                    let poll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        stage.as_mut().poll(cx)
+                    }));
+                    match poll {
+                        Ok(std::task::Poll::Ready(outcome)) => {
+                            std::task::Poll::Ready(Ok::<_, ()>(outcome))
+                        }
+                        Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+                        Err(_) => std::task::Poll::Ready(Err(())),
+                    }
+                })
+                .await
+                .unwrap_or_else(|()| {
+                    crate::session::goal_classifier::GoalClassifierOutcome::VerificationUnavailable {
+                        reason: crate::session::events::GoalVerificationUnavailableReason::SamplerError,
+                        details_path: format!("verifier stage task panicked (stage {stage_id})"),
+                    }
+                })
+            };
+            slot_guard.disarm();
+            let latency_ms = started.elapsed().as_millis() as u64;
+            let completion = SessionEvent::GoalStageCompleted(
+                crate::session::replay_events::GoalStageCompletion {
+                    stage_id,
+                    goal_id: goal_id.clone(),
+                    definition_revision,
+                    autonomy_generation,
+                    foreground_generation,
+                    kind: crate::session::replay_events::GoalStageKind::Verifier {
+                        attempt,
+                        max_runs: policy.max_runs,
+                        latency_ms,
+                        outcome: Ok(outcome),
+                        ack: ack_tx,
+                    },
+                },
+            );
+            if actor.event_tx.send(completion).is_err() {
+                // The actor's event channel closed (session teardown): the
+                // mailbox will never commit this stage, so release the
+                // in-flight CAS and refund the reserved attempt locally —
+                // purely defensive, the actor is terminating anyway, but it
+                // keeps the tracker consistent for any surviving observers.
+                actor
+                    .goal_classifier_in_flight
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                actor.rollback_stage_attempt_if_owed(&goal_id, definition_revision);
+            }
+        });
+    }
+
+    /// Mailbox-side commit for a finished background Goal stage. Validates
+    /// the lease captured at schedule time; a stale completion (goal paused /
+    /// cleared / revised, or foreground context changed) is dropped with
+    /// diagnostics and its model work is simply discarded.
+    pub(super) async fn handle_goal_stage_completed(
+        self: &std::sync::Arc<Self>,
+        completion: crate::session::replay_events::GoalStageCompletion,
+    ) {
+        use crate::session::replay_events::GoalStageKind;
+        let crate::session::replay_events::GoalStageCompletion {
+            stage_id,
+            goal_id,
+            definition_revision,
+            autonomy_generation,
+            foreground_generation,
+            kind,
+        } = completion;
+        match kind {
+            GoalStageKind::Verifier {
+                attempt,
+                max_runs,
+                latency_ms,
+                outcome,
+                ack,
+            } => {
+                self.commit_verifier_stage(
+                    stage_id,
+                    &goal_id,
+                    definition_revision,
+                    autonomy_generation,
+                    foreground_generation,
+                    attempt,
+                    max_runs,
+                    latency_ms,
+                    outcome,
+                    ack,
+                )
+                .await;
+            }
+            GoalStageKind::Strategist {
+                attempt,
+                consecutive_failures,
+                outcome,
+            } => {
+                self.commit_strategist_stage(
+                    stage_id,
+                    &goal_id,
+                    definition_revision,
+                    autonomy_generation,
+                    attempt,
+                    consecutive_failures,
+                    outcome,
+                );
+            }
+            GoalStageKind::Summarizer { attempt, outcome } => {
+                self.commit_summarizer_stage(
+                    stage_id,
+                    &goal_id,
+                    definition_revision,
+                    autonomy_generation,
+                    attempt,
+                    outcome,
+                )
+                .await;
+            }
+        }
+    }
+
+    /// Commit a finished verification stage. Lease (definition revision +
+    /// autonomy generation + Active status + unchanged foreground) must
+    /// still hold; otherwise the outcome is dropped, the reserved attempt is
+    /// refunded per the old slot-guard rule, and the tool ack is resolved as
+    /// `Rejected(StatusChangedDuringClassifier)` — preserving the
+    /// `update_goal` ack contract.
+    async fn commit_verifier_stage(
+        self: &std::sync::Arc<Self>,
+        stage_id: u64,
+        goal_id: &str,
+        definition_revision: u64,
+        autonomy_generation: u64,
+        foreground_generation: u64,
+        attempt: u32,
+        max_runs: u32,
+        latency_ms: u64,
+        outcome: Result<crate::session::goal_classifier::GoalClassifierOutcome, String>,
+        ack_tx: Option<
+            tokio::sync::oneshot::Sender<
+                tools::implementations::grow_build::update_goal::UpdateGoalAck,
+            >,
+        >,
+    ) {
+        use crate::session::events::GoalVerificationUnavailableReason;
+        use crate::session::goal_classifier::GoalClassifierOutcome;
+        use crate::session::goal_tracker::GoalStatus;
+        use tools::implementations::grow_build::update_goal::{RejectReason, UpdateGoalAck};
+
+        // The stage's model work is done: release the in-flight CAS so the
+        // next `completed: true` proposal may start its own stage.
+        self.goal_classifier_in_flight
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => GoalClassifierOutcome::VerificationUnavailable {
+                reason: GoalVerificationUnavailableReason::SamplerError,
+                details_path: format!("verifier stage failed: {error}"),
+            },
         };
-        // A Continue directive is unconditionally injected — returning it
-        // commits the embedded strategist note for delivery.
-        if let Some(rec) = plan.strategy_rec.as_deref() {
-            self.consume_strategist_note(rec);
+
+        let (definition_stale, status_stale, generation_stale) = {
+            let tracker = self.goal_tracker.lock();
+            (
+                !tracker.definition_is_current(goal_id, definition_revision),
+                tracker.status() != Some(GoalStatus::Active),
+                tracker.autonomy_generation() != Some(autonomy_generation),
+            )
+        };
+        let foreground_stale = self.goal_foreground_changed(foreground_generation);
+        if definition_stale || status_stale || generation_stale || foreground_stale {
+            tracing::info!(
+                stage_id,
+                goal_id,
+                definition_revision,
+                autonomy_generation,
+                definition_stale,
+                status_stale,
+                generation_stale,
+                foreground_stale,
+                "goal verifier stage completion dropped: lease no longer current",
+            );
+            // Mirrors the old inline drain's slot guard: refund the reserved
+            // classifier attempt when the goal still owns the same definition
+            // and is not in a paused family (a revised goal keeps the
+            // attempt; a paused one gets it back).
+            self.rollback_stage_attempt_if_owed(goal_id, definition_revision);
+            self.events
+                .emit(crate::session::events::Event::GoalVerificationUnavailable {
+                    reason: GoalVerificationUnavailableReason::GoalNotActiveAtResolve
+                        .as_const_str(),
+                    attempt,
+                    latency_ms,
+                });
+            let detail = if definition_stale {
+                "Goal definition changed during classifier run".to_string()
+            } else if status_stale {
+                "Goal transitioned to non-Active during classifier run".to_string()
+            } else {
+                "Goal context changed during classifier run (steering or a deferred completion)"
+                    .to_string()
+            };
+            try_send_ack(
+                ack_tx,
+                UpdateGoalAck::Rejected {
+                    reason: RejectReason::StatusChangedDuringClassifier,
+                    detail,
+                },
+            );
+            return;
         }
-        if let Some(pattern) = plan.stop_pattern {
-            self.record_and_emit_premature_stop(pattern);
+
+        let policy = GoalClassifierPolicy {
+            enabled: true,
+            max_runs,
+        };
+        let notify = self.goal_notify_sender();
+        let ack = self
+            .apply_classifier_outcome_foreground(&policy, attempt, outcome, &notify)
+            .await;
+        let requeue_cycle = matches!(&ack, UpdateGoalAck::ClassifierNotAchieved { .. })
+            && self.goal_tracker.lock().status() == Some(GoalStatus::Active);
+        try_send_ack(ack_tx, ack);
+        if requeue_cycle {
+            // Cycle-boundary contract (verifier gate): the stage rejected the
+            // completion but the Goal is still Active — schedule the next
+            // finite implementer cycle with the fresh gaps/next-step rendered
+            // from the post-verification state. Achieved, paused, blocked and
+            // lease-dropped outcomes never reach here: they either completed
+            // the Goal or left it non-Active, and `handle_turn_end` suppresses
+            // the continuation while the stage is in flight, so exactly one
+            // requeue happens per resolved verification.
+            self.maybe_queue_goal_continuation().await;
         }
-        GoalRoundDecision::Continue(plan.directive)
+    }
+
+    /// Refund the classifier attempt a stage reserved when its completion
+    /// is discarded. Mirrors the old inline drain's slot-guard condition.
+    fn rollback_stage_attempt_if_owed(&self, goal_id: &str, definition_revision: u64) {
+        use crate::session::goal_tracker::GoalStatus;
+        let mut tracker = self.goal_tracker.lock();
+        if tracker.definition_is_current(goal_id, definition_revision)
+            && !matches!(
+                tracker.status(),
+                Some(
+                    GoalStatus::BackOffPaused | GoalStatus::NoProgressPaused | GoalStatus::Blocked
+                ),
+            )
+        {
+            tracker.rollback_classifier_attempt();
+        }
+    }
+
+    /// Commit a finished strategist stage (fail-OPEN). The recommendation is
+    /// recorded only while the lease (definition revision + autonomy
+    /// generation) still holds; a stale completion keeps the claimed cap
+    /// bonus (mirroring the old disarm-on-stale), while a current-lease
+    /// completion that delivered no restructure revokes it (mirroring the
+    /// old guard drop).
+    fn commit_strategist_stage(
+        self: &std::sync::Arc<Self>,
+        stage_id: u64,
+        goal_id: &str,
+        definition_revision: u64,
+        autonomy_generation: u64,
+        _attempt: u32,
+        _consecutive_failures: u32,
+        outcome: Result<crate::session::goal_strategist::GoalStrategistOutcome, String>,
+    ) {
+        let lease_ok = {
+            let tracker = self.goal_tracker.lock();
+            tracker.definition_is_current(goal_id, definition_revision)
+                && tracker.autonomy_generation() == Some(autonomy_generation)
+        };
+        if !lease_ok {
+            tracing::info!(
+                stage_id,
+                goal_id,
+                definition_revision,
+                "goal strategist: discarded stale result after goal change",
+            );
+            return;
+        }
+        if let Ok(crate::session::goal_strategist::GoalStrategistOutcome::Advised {
+            strategy_file,
+            recommendation,
+            ..
+        }) = outcome
+        {
+            self.goal_tracker.lock().record_strategy_recommendation(
+                strategy_file.to_string_lossy().into_owned(),
+                recommendation,
+            );
+            return;
+        }
+        // Fail-OPEN: no restructure delivered (FailOpen / task failure) —
+        // give the cap bonus claimed at schedule time back.
+        self.goal_tracker.lock().revoke_strategist_cap_bonus();
+    }
+
+    /// Commit a finished summarizer stage (fail-OPEN). The closing summary
+    /// is surfaced only while the lease (definition revision + autonomy
+    /// generation) still holds.
+    async fn commit_summarizer_stage(
+        self: &std::sync::Arc<Self>,
+        stage_id: u64,
+        goal_id: &str,
+        definition_revision: u64,
+        autonomy_generation: u64,
+        _attempt: u32,
+        outcome: Result<crate::session::goal_summarizer::GoalSummarizerOutcome, String>,
+    ) {
+        let lease_ok = {
+            let tracker = self.goal_tracker.lock();
+            tracker.definition_is_current(goal_id, definition_revision)
+                && tracker.autonomy_generation() == Some(autonomy_generation)
+        };
+        if !lease_ok {
+            tracing::info!(
+                stage_id,
+                goal_id,
+                definition_revision,
+                "goal summarizer: discarded stale result after goal change",
+            );
+            return;
+        }
+        if let Ok(crate::session::goal_summarizer::GoalSummarizerOutcome::Summarized {
+            summary,
+            ..
+        }) = outcome
+        {
+            // Bump the stream start so the summary chunk carries a fresh
+            // `streamStartMs`; without it the client appends this closing
+            // message to the model's last turn message instead of a new
+            // block.
+            self.chat_state_handle
+                .record_stream_start(chrono::Utc::now().timestamp_millis());
+            self.send_slash_command_output(&summary).await;
+        }
     }
 
     async fn account_not_achieved_without_sampler(
@@ -2278,8 +2672,12 @@ impl SessionActor {
         Some((attempt, details_ptr.unwrap_or("").to_owned(), cap_reached))
     }
 
+    /// Pure-state commit of a classifier outcome, producing the tool ack.
+    /// The model work it used to inline (summarizer / strategist subagents)
+    /// now runs as background Goal stages scheduled by this function — the
+    /// mailbox never awaits model work here.
     async fn apply_classifier_outcome_foreground(
-        &self,
+        self: &std::sync::Arc<Self>,
         policy: &GoalClassifierPolicy,
         attempt: u32,
         outcome: crate::session::goal_classifier::GoalClassifierOutcome,
@@ -2313,7 +2711,7 @@ impl SessionActor {
                     details_path
                 };
                 self.finish_goal_behavior_after_verified_achievement().await;
-                self.maybe_run_goal_summarizer(attempt).await;
+                self.maybe_run_goal_summarizer(attempt);
                 UpdateGoalAck::ClassifierAchieved { details_path }
             }
             GoalClassifierOutcome::NotAchieved {
@@ -2365,8 +2763,7 @@ impl SessionActor {
                             )
                         });
                 if let Some(consecutive_not_achieved) = claimed {
-                    self.maybe_run_goal_strategist(attempt, consecutive_not_achieved)
-                        .await;
+                    self.maybe_run_goal_strategist(attempt, consecutive_not_achieved);
                 }
                 notify.emit_goal_updated(
                     &mut self.goal_tracker.lock(),

@@ -728,6 +728,7 @@ impl SessionActor {
         };
         let request_id = sampler::RequestId::random();
         let request_id_str = request_id.as_str().to_string();
+        let goal_control_generation = self.goal_control_generation();
         let collect = self
             .sampler_handle
             .submit_and_collect(request_id.clone(), request);
@@ -738,7 +739,7 @@ impl SessionActor {
                 _ = super::tool_calls::wait_for_pending_interjection(
                     &self.pending_interjections,
                 ) => {
-                    self.sampler_handle.cancel(request_id);
+                    self.sampler_handle.cancel(request_id.clone());
                     // Let the sampler publish its terminal cancellation before
                     // starting the replacement request. This keeps per-request
                     // stream ordering deterministic without cancelling the
@@ -748,6 +749,16 @@ impl SessionActor {
                     tracing::info!(
                         sampler_request_id = request_id_str,
                         "soft-preempted Goal sampling for user steering"
+                    );
+                    None
+                },
+                _ = self.wait_goal_control_change(goal_control_generation) => {
+                    self.sampler_handle.cancel(request_id.clone());
+                    let _ = collect.await;
+                    self.turn_stream_drained.lock().take();
+                    tracing::info!(
+                        sampler_request_id = request_id_str,
+                        "soft-preempted Goal sampling for a Goal definition change"
                     );
                     None
                 },

@@ -788,6 +788,89 @@ fn kill_nothing_live_with_status_stamps_real_terminal_status() {
     );
 }
 
+/// W4: a `Running` status response adopts the turn (turn-start shim) only
+/// while the prompt is still `TurnSubmitting` — the queue/changed path
+/// gates its own shim with the same `is_turn_submitting()` guard. From
+/// `TurnSubmitting` the shim renders the prompt block and enters
+/// `TurnRunning`.
+#[test]
+fn running_status_shims_only_while_submitting() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnSubmitting;
+        agent.session.current_prompt_id = Some("pid-run".into());
+        agent.prompt_status_query_for = Some("pid-run".into());
+        agent.apply_follow_ups("pid-run".into(), vec!["follow up".into()]);
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: id,
+            prompt_id: "pid-run".into(),
+            status: Ok(crate::app::actions::PromptStatusWire::Running {
+                turn_start_ms: chrono::Utc::now().timestamp_millis() as u64,
+            }),
+        }),
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    let agent = &app.agents[&id];
+    assert!(
+        agent.session.state.is_turn_running(),
+        "a Running response must adopt the turn from Submitting"
+    );
+    assert!(
+        agent.follow_ups.is_none(),
+        "the turn-start shim clears the previous response's follow-up chips"
+    );
+    assert!(agent.turn_start_ms.is_some());
+    assert!(agent.turn_started_at.is_some());
+    assert!(agent.prompt_status_query_for.is_none());
+}
+
+/// W4: once the turn is already `TurnRunning`, a further `Running` status
+/// response (the C1 watchdog's bounded re-poll, or a duplicate
+/// queue/changed + status delivery) must only refresh the anchors — never
+/// re-run the shim. Re-running it would start a second turn boundary and
+/// drop the current turn's follow-up chips.
+#[test]
+fn running_status_skips_shim_when_turn_already_running() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("pid-run".into());
+        agent.prompt_status_query_for = Some("pid-run".into());
+        agent.apply_follow_ups("pid-run".into(), vec!["follow up".into()]);
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: id,
+            prompt_id: "pid-run".into(),
+            status: Ok(crate::app::actions::PromptStatusWire::Running {
+                turn_start_ms: chrono::Utc::now().timestamp_millis() as u64,
+            }),
+        }),
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    let agent = &app.agents[&id];
+    assert!(agent.session.state.is_turn_running());
+    assert!(
+        agent.follow_ups.is_some(),
+        "an already-Running turn must not re-run the shim (it would drop the chips)"
+    );
+    assert!(agent.turn_start_ms.is_some());
+    assert!(agent.turn_started_at.is_some());
+    assert!(agent.prompt_status_query_for.is_none());
+}
+
 #[test]
 fn cancel_complete_does_nothing() {
     let mut app = test_app_with_agent();

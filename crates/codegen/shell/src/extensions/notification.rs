@@ -1004,10 +1004,9 @@ pub enum SessionUpdate {
     /// pending ⏳ for this `tool_call_id`.
     InteractionResolved { tool_call_id: String },
     /// The durable, replayable signal that a turn reached its terminal
-    /// outcome. Rides the persisted `_grow/session/update` rail (unlike the
-    /// fire-and-forget `grow/session/prompt_complete` notification), so a
-    /// viewer that re-attaches mid-turn can finalize the turn from replay
-    /// instead of staying stuck on "Waiting…".
+    /// outcome. Rides the persisted `_grow/session/update` rail so a viewer
+    /// that reattaches mid-turn can finalize the turn from replay instead of
+    /// staying stuck on "Waiting…".
     TurnCompleted {
         /// Correlation key the re-attaching viewer finalizes the turn on:
         /// the prompt/turn whose terminal outcome this carries.

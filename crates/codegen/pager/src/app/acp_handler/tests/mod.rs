@@ -822,59 +822,9 @@ pub(super) fn make_token_notification_with_event(
         response_tx: tx,
     })
 }
-/// Build an `grow/session/prompt_complete` ext-notification for `session_id`.
-pub(super) fn prompt_complete_ext(session_id: &str) -> acp::ExtNotification {
-    let raw = serde_json::value::to_raw_value(
-            &serde_json::json!({
-            "sessionId": session_id,
-            "stopReason": "end_turn",
-        }),
-        )
-        .unwrap();
-    acp::ExtNotification::new("grow/session/prompt_complete", std::sync::Arc::from(raw))
-}
 /// Insert a fresh agent at `id` with an optional pre-assigned session id.
 pub(super) fn insert_agent(app: &mut AppView, id: AgentId, session_id: Option<&str>) {
     app.agents.insert(id, make_agent(session_id));
-}
-/// Build an `grow/session/prompt_complete` ext-notification with an explicit
-/// `stopReason` and optional `agentResult`.
-pub(super) fn prompt_complete_ext_with_reason(
-    session_id: &str,
-    stop_reason: &str,
-    agent_result: Option<&str>,
-) -> acp::ExtNotification {
-    let mut payload = serde_json::json!({
-            "sessionId": session_id,
-            "stopReason": stop_reason,
-        });
-    if let Some(r) = agent_result {
-        payload["agentResult"] = serde_json::json!(r);
-    }
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("grow/session/prompt_complete", std::sync::Arc::from(raw))
-}
-/// Build an `grow/session/prompt_complete` ext-notification carrying a
-/// `promptId` (shells with the lost-response fix). Built through the
-/// typed [`PromptCompletePayload`] so the test wire shape can never
-/// drift from what `handle_prompt_complete` parses.
-pub(super) fn prompt_complete_ext_with_prompt_id(
-    session_id: &str,
-    prompt_id: &str,
-    stop_reason: &str,
-) -> acp::ExtNotification {
-    let raw = serde_json::value::to_raw_value(
-            &PromptCompletePayload {
-                session_id: session_id.to_string(),
-                stop_reason: Some(stop_reason.to_string()),
-                prompt_id: Some(prompt_id.to_string()),
-                agent_result: None,
-                cancel_trigger: None,
-                meta: None,
-            },
-        )
-        .unwrap();
-    acp::ExtNotification::new("grow/session/prompt_complete", std::sync::Arc::from(raw))
 }
 /// Build a live `AgentMessageChunk` whose meta carries `promptId` plus a
 /// `turnStartMs` `start_ms_ago` milliseconds in the past — drives the viewer
@@ -926,6 +876,27 @@ pub(super) fn grow_turn_completed_notif(
             usage: None,
         },
         meta: Some(serde_json::json!({ "isReplay": is_replay })),
+    };
+    acp::ExtNotification::new(
+        "grow/session/update",
+        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+    )
+}
+pub(super) fn grow_turn_completed_notif_with_result(
+    session_id: &str,
+    prompt_id: &str,
+    stop_reason: &str,
+    agent_result: &str,
+) -> acp::ExtNotification {
+    let payload = SessionNotification {
+        session_id: acp::SessionId::new(session_id),
+        update: GrowSessionUpdate::TurnCompleted {
+            prompt_id: prompt_id.into(),
+            stop_reason: stop_reason.into(),
+            agent_result: Some(agent_result.into()),
+            usage: None,
+        },
+        meta: Some(serde_json::json!({ "isReplay": false })),
     };
     acp::ExtNotification::new(
         "grow/session/update",

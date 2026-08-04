@@ -511,6 +511,11 @@ impl SessionActor {
         let pending_interjections = self.pending_interjections.clone();
         let completion_delivery = self.completion_delivery.clone();
         let goal_active = self.goal_loop_active();
+        let wait_owner_turn = self
+            .current_prompt_id
+            .lock()
+            .expect("current_prompt_id mutex poisoned")
+            .clone();
         let session_id: Arc<str> = Arc::from(&*self.session_info.id.0);
         let dispatch_futures: Vec<_> = approved
             .iter()
@@ -521,6 +526,7 @@ impl SessionActor {
                 let session_id = session_id.clone();
                 let pending_interjections = pending_interjections.clone();
                 let completion_delivery = completion_delivery.clone();
+                let wait_owner_turn = wait_owner_turn.clone();
                 let blocking_wait_depth = self.tool_context.blocking_wait_depth.clone();
                 let interruptible =
                     is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args);
@@ -556,7 +562,8 @@ impl SessionActor {
                     };
                     let result = if interruptible {
                         let _wait_guard = BlockingWaitGuard::enter(blocking_wait_depth.clone());
-                        completion_delivery.begin_wait(&tracked_task_ids);
+                        completion_delivery
+                            .begin_wait(wait_owner_turn.as_deref(), &tracked_task_ids);
                         async {
                             tokio::select! {
                                 biased;

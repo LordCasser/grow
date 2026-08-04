@@ -181,9 +181,9 @@ fn format_cron_prompt(prompt: &str, task_id: &str, human_schedule: &str) -> Stri
 /// - **Command**: starts command, returns the appropriate `Effect` (e.g., `Effect::Compact`)
 /// - **BashCommand**: starts turn (no user block), returns `Effect::SendBashCommand`
 /// - **Cron**: pushes cron prompt block to scrollback, starts turn, returns `Effect::SendPrompt`
-pub(super) struct QueueDrain {
-    pub(super) effects: Vec<Effect>,
-    pub(super) page_flip_entry: Option<EntryId>,
+pub(in crate::app) struct QueueDrain {
+    pub(in crate::app) effects: Vec<Effect>,
+    pub(in crate::app) page_flip_entry: Option<EntryId>,
 }
 
 impl QueueDrain {
@@ -195,7 +195,7 @@ impl QueueDrain {
     }
 }
 
-pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
+pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
     use crate::app::agent::QueueEntryKind;
     use crate::unified_log as ulog;
 
@@ -214,6 +214,13 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
 
     if !agent.session.state.is_idle() {
         log_blocked("turn_running", sid);
+        return QueueDrain::blocked();
+    }
+    if agent.session.current_prompt_id.is_some() {
+        // A Prompt RPC has been submitted but the shell has not yet confirmed
+        // queue admission or foreground ownership. Keep it separate from the
+        // visual Running state and do not optimistically drain another row.
+        log_blocked("prompt_submitting", sid);
         return QueueDrain::blocked();
     }
     // Hold the drain during an in-flight model switch. See the
@@ -338,8 +345,13 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
 
     match queued.kind {
         QueueEntryKind::Prompt => {
-            agent.start_turn_boundary(Some(&prompt_id));
+            // Submission is not a turn boundary. QueueChanged carrying this id
+            // as `running_prompt_id` is the authority that starts the visual
+            // foreground turn; a terminal response may instead resolve it as
+            // queued/removed without ever showing a fake LLM response.
             agent.session.current_prompt_id = Some(prompt_id.clone());
+            agent.session.state = crate::app::agent::AgentState::TurnSubmitting;
+            agent.turn_started_at = Some(Instant::now());
             // Scrollback shows display text (never raw skill XML). Combined
             // drains paint one bubble per original follow-up.
             let is_skill = queued.display_as_skill;
@@ -472,6 +484,13 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                 effects: vec![Effect::Compact {
                     agent_id,
                     session_id,
+                    user_context: queued
+                        .text
+                        .strip_prefix("/compact")
+                        .map(str::trim)
+                        .filter(|context| !context.is_empty())
+                        .map(str::to_string),
+                    track_foreground: true,
                 }],
                 page_flip_entry: None,
             }
@@ -2307,6 +2326,7 @@ mod tests {
         let id = AgentId(0);
         dispatch(Action::SendPrompt("first".into()), &mut app);
         let agent = app.agents.get_mut(&id).unwrap();
+        crate::app::agent_view::test_fixtures::confirm_submitted_turn(agent);
 
         // Blocking get_task_output registers first; anchor still running.
         simulate_task_output_wait_call(agent, "wait-1", "bg-anchor", 120_000);
@@ -2801,6 +2821,7 @@ mod tests {
         let id = AgentId(0);
         dispatch(Action::SendPrompt("first".into()), &mut app);
         let agent = app.agents.get_mut(&id).unwrap();
+        crate::app::agent_view::test_fixtures::confirm_submitted_turn(agent);
 
         let meta = crate::acp::meta::NotificationMeta::default();
         // Meta-less task ToolCall (old shell): provisional Subagent wait.

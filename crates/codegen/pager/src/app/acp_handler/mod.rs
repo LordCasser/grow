@@ -39,6 +39,7 @@ mod interactions;
 mod mcp;
 mod permissions;
 mod prompt_origin;
+pub(crate) use prompt_origin::viewer_turn_anchor;
 mod queue;
 mod routing;
 mod session_notification;
@@ -56,7 +57,7 @@ use routing::{
     mcp_target_agent, resolve_notif_agent, resolve_target_view,
 };
 
-use prompt_origin::{finish_wake_turn, viewer_turn_anchor};
+use prompt_origin::finish_wake_turn;
 pub(crate) use prompt_origin::{
     is_scheduler_fired_prompt, is_server_initiated_prompt, is_wake_prompt,
     should_adopt_running_prompt,
@@ -73,7 +74,7 @@ use session_notification::{
 };
 
 pub(crate) use queue::PendingRunningAdoption;
-use queue::{handle_prompt_complete, handle_queue_changed};
+use queue::handle_queue_changed;
 
 use background::{
     derive_child_cwd, handle_git_head_changed, handle_monitor_event, handle_scheduled_task_created,
@@ -668,8 +669,6 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         "grow/settings/update" => handle_settings_update(notif, app),
         "grow/sessions/changed" => handle_sessions_changed(notif, app),
         "grow/queue/changed" => handle_queue_changed(notif, app),
-        // TODO(prompt_complete-deprecation): Legacy removal (gated): durable turn_completed is already consumed via finalize_turn_from_terminal; keep & re-point the lost-RPC reconcile to the durable rail before deleting.
-        "grow/session/prompt_complete" => handle_prompt_complete(notif, app),
         "grow/session/interjection" => handle_interjection(notif, app),
         "grow/monitor_event" => handle_monitor_event(notif, app),
         "grow/scheduled_task_created" => handle_scheduled_task_created(notif, app),

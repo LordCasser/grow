@@ -2,7 +2,6 @@
 //! split out via `#[path]` to keep the module itself small.
 
 use super::*;
-use crate::app::agent::AgentState;
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEventBlock;
 use crate::scrollback::state::ScrollbackState;
@@ -39,11 +38,36 @@ fn running_driver(prompt_id: &str) -> AgentView {
 }
 
 #[test]
+fn durable_terminal_immediately_finalizes_driver() {
+    let mut agent = running_driver("p1");
+    let outcome =
+        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
+    assert!(matches!(outcome.apply, TerminalApply::ViewerFinalized));
+    assert!(agent.session.state.is_idle());
+    assert!(agent.session.current_prompt_id.is_none());
+    assert!(matches!(
+        last_session_event(&agent.scrollback),
+        Some(SessionEvent::TurnCompleted { .. })
+    ));
+}
+
+#[test]
+fn stale_durable_terminal_cannot_finish_new_driver_turn() {
+    let mut agent = running_driver("new");
+    let outcome =
+        finalize_turn_from_durable_terminal(&mut agent, "s1", "old", Some("end_turn"), None, None);
+    assert!(matches!(outcome.apply, TerminalApply::Ignored));
+    assert!(agent.session.state.is_turn_running());
+    assert_eq!(agent.session.current_prompt_id.as_deref(), Some("new"));
+    assert!(last_session_event(&agent.scrollback).is_none());
+}
+
+#[test]
 fn viewer_finalize_idles_and_pushes_completed_marker() {
     let mut agent = running_viewer("p1");
     let outcome =
-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("end_turn"), None, None);
-    assert!(matches!(outcome, TerminalApply::ViewerFinalized));
+        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
+    assert!(matches!(outcome.apply, TerminalApply::ViewerFinalized));
     assert!(agent.session.state.is_idle());
     assert!(agent.session.current_prompt_id.is_none());
     assert!(agent.turn_started_at.is_none());
@@ -195,7 +219,8 @@ fn viewer_finalize_consumes_stop_hook_stash() {
         groups: one_stop_group(),
     });
 
-    let _ = finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("end_turn"), None, None);
+    let _ =
+        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
 
     assert_eq!(last_marker_groups(&agent.scrollback), Some(1));
     assert!(agent.pending_stop_hooks.is_none());
@@ -204,13 +229,14 @@ fn viewer_finalize_consumes_stop_hook_stash() {
 #[test]
 fn viewer_finalize_duplicate_terminal_is_noop() {
     let mut agent = running_viewer("p1");
-    let _ = finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("end_turn"), None, None);
+    let _ =
+        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
     let len_after_first = agent.scrollback.len();
 
     // A duplicate/stale terminal for the now-finished turn does nothing.
     let outcome =
-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("end_turn"), None, None);
-    assert!(matches!(outcome, TerminalApply::Ignored));
+        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
+    assert!(matches!(outcome.apply, TerminalApply::Ignored));
     assert!(agent.session.state.is_idle());
     assert_eq!(
         agent.scrollback.len(),
@@ -224,7 +250,7 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
     // cancelled → Turn cancelled.
     let mut agent = running_viewer("p1");
     let _ =
-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("cancelled"), None, None);
+        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("cancelled"), None, None);
     assert!(matches!(
         last_session_event(&agent.scrollback),
         Some(SessionEvent::TurnCancelled { .. })
@@ -232,10 +258,10 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
 
     // error (+agentResult) → Turn failed carrying the error text.
     let mut agent = running_viewer("p1");
-    let _ = finalize_turn_from_terminal(
+    let _ = finalize_turn_from_durable_terminal(
         &mut agent,
         "s1",
-        Some("p1"),
+        "p1",
         Some("error"),
         Some("boom"),
         None,
@@ -248,7 +274,7 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
     // rate_limit → finished, but no marker (not actionable from a viewer).
     let mut agent = running_viewer("p1");
     let _ =
-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("rate_limit"), None, None);
+        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("rate_limit"), None, None);
     assert!(agent.session.state.is_idle());
     assert!(
         last_session_event(&agent.scrollback).is_none(),
@@ -258,122 +284,11 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
     // unknown/other reason → Turn completed (the catch-all).
     let mut agent = running_viewer("p1");
     let _ =
-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("max_tokens"), None, None);
+        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("max_tokens"), None, None);
     assert!(matches!(
         last_session_event(&agent.scrollback),
         Some(SessionEvent::TurnCompleted { .. })
     ));
-}
-
-#[test]
-fn driver_arms_reconcile_and_does_not_finish() {
-    let mut agent = running_driver("p1");
-    let outcome =
-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("cancelled"), None, None);
-    assert!(matches!(outcome, TerminalApply::ReconcileArmed));
-    assert!(
-        matches!(agent.session.state, AgentState::TurnRunning),
-        "the driver's turn must NOT be finished — the PromptResponse RPC owns it"
-    );
-    let pending = agent
-        .pending_turn_end_reconcile
-        .as_ref()
-        .expect("the driver's awaited turn must arm a reconcile");
-    assert_eq!(pending.prompt_id, "p1");
-    assert_eq!(pending.stop_reason.as_deref(), Some("cancelled"));
-}
-
-#[test]
-fn driver_mismatched_prompt_id_does_not_arm() {
-    // Stale/peer terminal must not arm reconcile on a different live turn.
-    let mut agent = running_driver("p1");
-    let outcome = finalize_turn_from_terminal(
-        &mut agent,
-        "s1",
-        Some("p-other"),
-        Some("end_turn"),
-        None,
-        None,
-    );
-    assert!(matches!(outcome, TerminalApply::Ignored));
-    assert!(agent.pending_turn_end_reconcile.is_none());
-    assert!(matches!(agent.session.state, AgentState::TurnRunning));
-}
-
-#[test]
-fn driver_missing_prompt_id_arms_against_current_when_idle_in_turn() {
-    let mut agent = running_driver("p1");
-    let outcome = finalize_turn_from_terminal(&mut agent, "s1", None, Some("end_turn"), None, None);
-    assert!(matches!(outcome, TerminalApply::ReconcileArmed));
-    assert_eq!(
-        agent.pending_turn_end_reconcile.as_ref().unwrap().prompt_id,
-        "p1"
-    );
-}
-
-fn stream_agent_text(agent: &mut AgentView, text: &str) {
-    use crate::acp::meta::NotificationMeta;
-    use agent_client_protocol as acp;
-    let meta = NotificationMeta::default();
-    let _ = agent.session.tracker.handle_update(
-        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
-            acp::TextContent::new(text),
-        ))),
-        &meta,
-        &mut agent.scrollback,
-    );
-}
-
-/// Missing wire pid still arms lost-PR reconcile (full teardown
-/// lives in `reconcile_overdue_turn_ends` / PromptResponse).
-#[test]
-fn repro_terminal_without_prompt_id_arms_reconcile_for_lost_pr() {
-    let mut agent = running_driver("p1");
-    stream_agent_text(&mut agent, "done");
-    let outcome = finalize_turn_from_terminal(&mut agent, "s1", None, Some("end_turn"), None, None);
-    assert!(matches!(outcome, TerminalApply::ReconcileArmed));
-    assert!(agent.pending_turn_end_reconcile.is_some());
-    assert!(
-        matches!(agent.session.state, AgentState::TurnRunning),
-        "driver stays TurnRunning until PR or overdue reconcile"
-    );
-    assert_eq!(
-        agent.session.tracker.activity(),
-        Some(crate::acp::tracker::TurnActivity::Responding)
-    );
-}
-
-/// Exact pid still arms (control).
-#[test]
-fn recovery_mode_matching_turn_completed_arms_reconcile_for_lost_pr() {
-    let mut agent = running_driver("p1");
-    stream_agent_text(&mut agent, "done");
-
-    let outcome =
-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("end_turn"), None, None);
-    assert!(matches!(outcome, TerminalApply::ReconcileArmed));
-    assert!(matches!(agent.session.state, AgentState::TurnRunning));
-    assert!(agent.pending_turn_end_reconcile.is_some());
-}
-
-/// Re-arm same pid keeps earliest received_at (does not extend grace forever).
-#[test]
-fn driver_rearm_same_pid_preserves_received_at() {
-    let mut agent = running_driver("p1");
-    let _ = finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("end_turn"), None, None);
-    let first = agent
-        .pending_turn_end_reconcile
-        .as_ref()
-        .unwrap()
-        .received_at;
-    std::thread::sleep(std::time::Duration::from_millis(5));
-    let _ = finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("end_turn"), None, None);
-    let second = agent
-        .pending_turn_end_reconcile
-        .as_ref()
-        .unwrap()
-        .received_at;
-    assert_eq!(first, second);
 }
 
 // ── End markers: always the plain event text (work lives in the status row) ──
@@ -461,15 +376,15 @@ fn workless_marker_renders_legacy_text() {
 #[test]
 fn viewer_finalize_suppresses_send_now_cancel_marker() {
     let mut agent = running_viewer("p1");
-    let outcome = finalize_turn_from_terminal(
+    let outcome = finalize_turn_from_durable_terminal(
         &mut agent,
         "s1",
-        Some("p1"),
+        "p1",
         Some("cancelled"),
         None,
         Some("send_now"),
     );
-    assert!(matches!(outcome, TerminalApply::ViewerFinalized));
+    assert!(matches!(outcome.apply, TerminalApply::ViewerFinalized));
     assert!(agent.session.state.is_idle(), "the turn still finishes");
     assert!(
         last_session_event(&agent.scrollback).is_none(),
@@ -479,10 +394,10 @@ fn viewer_finalize_suppresses_send_now_cancel_marker() {
     // A non-send-now trigger keeps the marker even with a local expectation armed (wire is authoritative).
     let mut agent = running_viewer("p1");
     agent.expect_send_now_cancel = Some("p-mine".into());
-    let _ = finalize_turn_from_terminal(
+    let _ = finalize_turn_from_durable_terminal(
         &mut agent,
         "s1",
-        Some("p1"),
+        "p1",
         Some("cancelled"),
         None,
         Some("ctrl_c"),
@@ -496,7 +411,7 @@ fn viewer_finalize_suppresses_send_now_cancel_marker() {
     let mut agent = running_viewer("p1");
     agent.expect_send_now_cancel = Some("p-mine".into());
     let _ =
-        finalize_turn_from_terminal(&mut agent, "s1", Some("p1"), Some("cancelled"), None, None);
+        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("cancelled"), None, None);
     assert!(
         last_session_event(&agent.scrollback).is_none(),
         "the armed expectation suppresses the marker without wire meta"
@@ -504,28 +419,6 @@ fn viewer_finalize_suppresses_send_now_cancel_marker() {
     assert!(
         agent.expect_send_now_cancel.is_none(),
         "the expectation is consumed on the viewer finalize"
-    );
-}
-
-/// The driver arm records the broadcast's `cancelTrigger` for a lost-RPC reconcile.
-#[test]
-fn driver_arm_records_cancel_trigger_for_reconcile() {
-    let mut agent = running_driver("p1");
-    let outcome = finalize_turn_from_terminal(
-        &mut agent,
-        "s1",
-        Some("p1"),
-        Some("cancelled"),
-        None,
-        Some("send_now"),
-    );
-    assert!(matches!(outcome, TerminalApply::ReconcileArmed));
-    assert_eq!(
-        agent
-            .pending_turn_end_reconcile
-            .as_ref()
-            .and_then(|p| p.cancel_trigger.as_deref()),
-        Some("send_now")
     );
 }
 
@@ -553,4 +446,209 @@ fn turn_end_after_park_pushes_single_marker() {
         "the real turn end pushes exactly one marker"
     );
     assert_eq!(last_marker_block(&agent).event.message(), "Worked for 5.0s");
+}
+
+// ── Shared finalizer: full teardown, exactly once ──────────────────
+
+/// Push one synthetic permission request; returns the response receiver so
+/// the test can assert the drain actually answered.
+fn push_synthetic_permission(
+    agent: &mut AgentView,
+    id: usize,
+) -> tokio::sync::oneshot::Receiver<Result<acp::RequestPermissionResponse, acp::Error>> {
+    use crate::views::permission_view::{PermissionFocus, PermissionViewState};
+    let (tx, rx) =
+        tokio::sync::oneshot::channel::<Result<acp::RequestPermissionResponse, acp::Error>>();
+    let request = acp_transport::AcpArgs {
+        request: acp::RequestPermissionRequest::new(
+            acp::SessionId::new(std::sync::Arc::from("sess-1")),
+            acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(std::sync::Arc::from("tc-1")),
+                acp::ToolCallUpdateFields::default(),
+            ),
+            vec![acp::PermissionOption::new(
+                acp::PermissionOptionId::new(std::sync::Arc::from("allow")),
+                "Allow",
+                acp::PermissionOptionKind::AllowOnce,
+            )],
+        ),
+        response_tx: tx,
+    };
+    let options = request.request.options.clone();
+    let state = PermissionViewState {
+        request,
+        id,
+        focus: PermissionFocus::Options,
+        options,
+        active_idx: 0,
+        bash_highlights: None,
+        bash_selection_count: 0,
+        bash_command_raw: None,
+        mcp_scope: None,
+        title: "test permission".to_string(),
+        description: Vec::new(),
+        args_expanded: false,
+        desc_scroll: 0,
+        subagent_label: None,
+        options_area_height: 0,
+        options_scroll_offset: 0,
+    };
+    agent.permission_queue.push_back(state);
+    rx
+}
+
+/// The winner of the first-wins gate runs the FULL turn-end teardown that
+/// the PromptResponse rail used to own — permission queue drain, plan
+/// approval dismissal, cancel-panel cleanup, bash wrap-up, cron id,
+/// prompt-suggestion wipe — plus the finalized marker. A duplicate terminal
+/// must not repeat any of it.
+#[test]
+fn viewer_finalize_runs_full_teardown_once() {
+    use crate::views::modal::CancelTurnViewState;
+    use crate::views::plan_approval_view::PlanApprovalViewState;
+    use tools::implementations::grow_build::plan_control::PlanApprovalExtRequest;
+
+    let mut agent = running_viewer("p1");
+    let mut perm_rx = push_synthetic_permission(&mut agent, 1);
+    let (plan_tx, mut plan_rx) = tokio::sync::oneshot::channel();
+    agent.plan_approval_view = Some(PlanApprovalViewState::new(
+        PlanApprovalExtRequest {
+            session_id: "s1".into(),
+            tool_call_id: "plan-1".into(),
+            plan_content: "plan text".into(),
+        },
+        Default::default(),
+        plan_tx,
+    ));
+    agent.cancel_turn_view = Some(CancelTurnViewState {
+        active_idx: 0,
+        running_count: 2,
+    });
+    agent
+        .cancel_turn_buttons
+        .push(ratatui::layout::Rect::default());
+    agent.bash_turn = true;
+    agent.cron_task_id = Some("task-1".into());
+    agent.activity_started_at = Some(Instant::now());
+    agent.last_activity = Some(crate::acp::tracker::TurnActivity::Thinking);
+    let generation = agent.prompt.prompt_suggestion.begin_fetch();
+    assert!(
+        agent
+            .prompt
+            .prompt_suggestion
+            .on_loaded(Some("next prompt".into()), generation),
+        "suggestion must be installed before the finalize"
+    );
+
+    let outcome =
+        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
+    assert!(matches!(outcome.apply, TerminalApply::ViewerFinalized));
+
+    assert!(agent.permission_queue.is_empty(), "permissions drained");
+    assert!(
+        matches!(
+            perm_rx.try_recv(),
+            Ok(Ok(acp::RequestPermissionResponse { .. }))
+        ),
+        "drained permissions answered Cancelled"
+    );
+    assert!(
+        plan_rx.try_recv().is_ok(),
+        "the dismissed plan approval answered stale-cancel"
+    );
+    assert!(
+        agent.plan_approval_view.is_none(),
+        "plan approval dismissed"
+    );
+    assert!(agent.cancel_turn_view.is_none(), "cancel panel cleared");
+    assert!(
+        agent.cancel_turn_buttons.is_empty(),
+        "cancel buttons cleared"
+    );
+    assert!(!agent.bash_turn, "bash turn flag reset");
+    assert!(agent.cron_task_id.is_none(), "cron id cleared");
+    assert!(agent.activity_started_at.is_none());
+    assert!(agent.last_activity.is_none());
+    assert!(
+        !agent.prompt.prompt_suggestion.has_suggestion(),
+        "stale prompt suggestion wiped"
+    );
+    assert_eq!(agent.finalized_prompt.as_deref(), Some("p1"));
+
+    // The duplicate/stale terminal must not repeat any of the teardown.
+    let duplicate =
+        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
+    assert!(matches!(duplicate.apply, TerminalApply::Ignored));
+    assert_eq!(agent.finalized_prompt.as_deref(), Some("p1"));
+    assert!(agent.permission_queue.is_empty());
+    assert!(agent.plan_approval_view.is_none());
+    assert!(!agent.bash_turn);
+}
+
+// ── Late PromptResponse merge (durable rail won first) ─────────────
+
+/// A durable win records the winner; a late PromptResponse for the same pid
+/// merges usage / structured output / error details and nothing else.
+#[test]
+fn late_prompt_response_merges_usage_and_structured_output_only() {
+    let mut agent = running_viewer("p1");
+    let _ =
+        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("end_turn"), None, None);
+    assert_eq!(agent.finalized_prompt.as_deref(), Some("p1"));
+
+    let mut meta = serde_json::Map::new();
+    meta.insert("promptId".into(), serde_json::json!("p1"));
+    meta.insert("structuredOutput".into(), serde_json::json!({"ok": true}));
+    let pr = acp::PromptResponse::new(acp::StopReason::EndTurn)
+        .usage(acp::Usage::new(42, 10, 32))
+        .meta(meta);
+    merge_finalized_pr_meta(&mut agent, &Ok(pr));
+
+    let merged = agent.finalized_pr_meta.as_ref().expect("meta merged");
+    assert_eq!(
+        merged.usage.as_ref().map(|u| u.total_tokens),
+        Some(42),
+        "late usage merged"
+    );
+    assert!(
+        matches!(merged.structured_output.as_ref(), Some(Ok(v)) if v == &serde_json::json!({"ok": true})),
+        "late structured output merged"
+    );
+    assert!(merged.error.is_none());
+
+    // A second late response fills only the missing fields (no clobber).
+    merge_finalized_pr_meta(&mut agent, &Err("late boom".to_string()));
+    let merged = agent.finalized_pr_meta.as_ref().unwrap();
+    assert_eq!(merged.error.as_deref(), Some("late boom"));
+    assert_eq!(
+        merged.usage.as_ref().map(|u| u.total_tokens),
+        Some(42),
+        "usage must survive a later error response"
+    );
+    assert!(
+        matches!(merged.structured_output.as_ref(), Some(Ok(v)) if v == &serde_json::json!({"ok": true})),
+        "structured output must survive a later error response"
+    );
+
+    // The structured-output-error form maps to Err.
+    let mut agent2 = running_viewer("p1");
+    let _ =
+        finalize_turn_from_durable_terminal(&mut agent2, "s1", "p1", Some("end_turn"), None, None);
+    let mut meta = serde_json::Map::new();
+    meta.insert("promptId".into(), serde_json::json!("p1"));
+    meta.insert(
+        "structuredOutputError".into(),
+        serde_json::json!("schema mismatch"),
+    );
+    merge_finalized_pr_meta(
+        &mut agent2,
+        &Ok(acp::PromptResponse::new(acp::StopReason::EndTurn).meta(meta)),
+    );
+    assert!(
+        matches!(
+            agent2.finalized_pr_meta.as_ref().unwrap().structured_output.as_ref(),
+            Some(Err(e)) if e == "schema mismatch"
+        ),
+        "structuredOutputError maps to the Err form"
+    );
 }

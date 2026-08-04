@@ -505,6 +505,9 @@ pub(crate) async fn spawn_session_actor(
         notifications_suppressed: false,
         rewindable: false,
         nudges_used_this_session: 0,
+        recent_terminals: VecDeque::new(),
+        foreground_compact: false,
+        pending_manual_compact: None,
     });
     let mcp_strategy = match std::env::var("MCP_INIT_STRATEGY") {
         Ok(v) if !v.trim().is_empty() => McpInitStrategy::from(v),
@@ -529,7 +532,33 @@ pub(crate) async fn spawn_session_actor(
     let hunk_tracker_handle_for_bridge = tool_context.hunk_tracker_handle.clone();
     let hunk_tracker_handle = tool_context.hunk_tracker_handle.clone();
     let prompt_index_for_bridge = tool_context.prompt_index.clone();
-    let (behavior, restored_prompt_mode) = {
+    let persisted_goal_mode = match persisted_goal_mode {
+        Some(goal)
+            if goal.architecture_version == 1
+                || goal.status == crate::session::goal_tracker::GoalStatus::Complete =>
+        {
+            Some(goal)
+        }
+        Some(goal) => {
+            // A pre-v1 Goal cannot be resumed under the current orchestration
+            // (leases, staging, and stage scheduling assume v1 invariants); a
+            // completed receipt is display-only and survives. Surface the
+            // drop as a user-visible unified log entry (same rail as the
+            // task_wake notices) so an upgrade restart explains why the Goal
+            // vanished.
+            ::diagnostics::unified_log::info(
+                "shell.goal.legacy_architecture_version_dropped",
+                Some(session_info.id.0.as_ref()),
+                Some(serde_json::json!({
+                    "architecture_version": goal.architecture_version,
+                    "status": goal.status,
+                })),
+            );
+            None
+        }
+        None => None,
+    };
+    let (behavior, mut restored_prompt_mode) = {
         let session_dir = crate::session::persistence::session_dir(&session_info);
         let mut tracker = if let Some(snapshot) = persisted_behavior {
             crate::session::behavior::BehaviorController::from_snapshot(session_dir, snapshot)
@@ -547,6 +576,10 @@ pub(crate) async fn spawn_session_actor(
         (Arc::new(parking_lot::Mutex::new(tracker)), prompt_mode)
     };
     let goal_was_restored = persisted_goal_mode.is_some();
+    if !goal_was_restored && restored_prompt_mode == PromptMode::Goal {
+        behavior.lock().select_behavior(None);
+        restored_prompt_mode = PromptMode::Agent;
+    }
     let goal_tracker = {
         let session_dir = crate::session::persistence::session_dir(&session_info);
         let tracker = if let Some(snapshot) = persisted_goal_mode {
@@ -1428,6 +1461,7 @@ pub(crate) async fn spawn_session_actor(
         startup_hints,
         forked_tool_override,
         compaction: super::compaction_config::CompactionConfig {
+            lease: Default::default(),
             threshold_percent: std::cell::Cell::new(auto_compact_threshold_percent),
             force_compact: force_compact.clone(),
             context_window_override,
@@ -1480,6 +1514,9 @@ pub(crate) async fn spawn_session_actor(
         pending_interjections: InterjectionBuffer::new(),
         completion_delivery: Default::default(),
         pending_system_reminders: Mutex::new(Vec::new()),
+        goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+        goal_control_notify: Arc::new(tokio::sync::Notify::new()),
+        goal_plan_scope: parking_lot::Mutex::new(None),
         idle_flush_timeout: memory_config
             .as_ref()
             .and_then(|mc| mc.flush.idle_timeout_secs)
@@ -1547,6 +1584,7 @@ pub(crate) async fn spawn_session_actor(
         goal_plan_reconciled: std::sync::atomic::AtomicBool::new(false),
         pending_classifier_completions: parking_lot::Mutex::new(VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
+        goal_stage_seq: std::sync::atomic::AtomicU64::new(0),
         managed_mcp_handle,
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announced_servers: Mutex::new(

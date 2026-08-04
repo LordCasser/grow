@@ -537,6 +537,7 @@ impl SessionActor {
                     .collect::<Vec<_>>();
                 let image_count = attachments.len() as u32;
                 Self::respond_removed_prompt(item.respond_to);
+                self.goal_tracker.lock().bump_autonomy_generation();
                 self.pending_interjections.push(PendingInterjection {
                     text: text.clone(),
                     attachments,

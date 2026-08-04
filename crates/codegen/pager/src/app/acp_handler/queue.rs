@@ -21,45 +21,6 @@ pub(crate) struct PendingRunningAdoption {
     pub turn_ended: bool,
 }
 
-/// Wire payload of `grow/session/prompt_complete`, emitted by
-/// `MvpAgent::prompt()` on the shell after every turn.
-///
-/// `Serialize` is derived so tests construct payloads through the same type
-/// they are parsed into (shape drift fails at compile time, not at runtime).
-/// Unknown fields (e.g. `turnId`, future additions) are ignored; every field
-/// except `sessionId` is optional for wire compatibility with older shells —
-/// in particular `promptId` only exists on shells with the lost-response fix.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PromptCompletePayload {
-    pub(super) session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) stop_reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) prompt_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) agent_result: Option<String>,
-    /// What triggered a cancelled turn's cancel (`"send_now"` suppresses the
-    /// "Turn cancelled" marker); stamped top-level, absent on older shells.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) cancel_trigger: Option<String>,
-    /// `_meta` extension point — parsed defensively as a trigger fallback.
-    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub(super) meta: Option<serde_json::Value>,
-}
-
-impl PromptCompletePayload {
-    /// The cancel trigger, wherever it was stamped: the top-level
-    /// `cancelTrigger` field (the shell's emission), falling back to
-    /// `_meta.cancelTrigger` (the envelope shape of the durable rail).
-    /// `None` (older shells) means a normal cancel.
-    pub(super) fn cancel_trigger(&self) -> Option<&str> {
-        self.cancel_trigger
-            .as_deref()
-            .or_else(|| self.meta.as_ref()?.get("cancelTrigger")?.as_str())
-    }
-}
-
 pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(changed) =
         serde_json::from_str::<crate::app::prompt_queue::QueueChanged>(notif.params.get())
@@ -283,7 +244,26 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                 .and_then(|a| a.session.current_prompt_id.clone());
             match current {
                 // Already tracking this running prompt — inert.
-                Some(c) if c == pid => {}
+                Some(c) if c == pid => {
+                    // Locally submitted but not optimistically promoted: the
+                    // server has now confirmed foreground ownership.
+                    if app
+                        .agents
+                        .get(&aid)
+                        .is_some_and(|agent| agent.session.state.is_turn_submitting())
+                    {
+                        let page_flip_entry = app.agents.get_mut(&aid).and_then(|agent| {
+                            super::super::dispatch::apply_turn_start_shim(
+                                agent,
+                                pid,
+                                running_text,
+                                &running_kind,
+                                running_combined,
+                            )
+                        });
+                        super::super::dispatch::note_peek_page_flip(app, aid, page_flip_entry);
+                    }
+                }
                 // Nothing running locally: adopt now + run the turn-start shim
                 // (render the queued prompt's user block, set `TurnRunning`).
                 None => {
@@ -379,46 +359,4 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
         _ => {}
     }
     true
-}
-
-/// `prompt_complete` carries `sessionId`, `stopReason`, `agentResult`,
-/// `turnId`, and (shells ≥ the lost-response fix) `promptId`; for viewers,
-/// turns are serialized per session, so "finish the running viewer turn for
-/// this session" is unambiguous even without the prompt id.
-///
-/// This is the one-release compat rail (kept until every leader emits the
-/// durable [`GrowSessionUpdate::TurnCompleted`]): it parses the payload and
-/// delegates the turn-finalize to
-/// [`finalize_turn_from_terminal`](super::super::turn_completion::finalize_turn_from_terminal),
-/// which carries the driver-arm / viewer-finish behavior verbatim.
-///
-/// TODO(prompt_complete-deprecation): Legacy removal (gated): durable turn_completed is already consumed via finalize_turn_from_terminal; keep & re-point the lost-RPC reconcile to the durable rail before deleting.
-pub(super) fn handle_prompt_complete(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
-    let Ok(payload) = serde_json::from_str::<PromptCompletePayload>(notif.params.get()) else {
-        tracing::warn!("Failed to parse grow/session/prompt_complete");
-        return false;
-    };
-    let session_id = payload.session_id.as_str();
-
-    let sid = acp::SessionId::new(session_id.to_string());
-    let Some(SessionMatch::Root(id)) = find_session_match(app, &sid) else {
-        return false;
-    };
-    let is_active = is_matched_agent_active(app, id);
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return false;
-    };
-
-    // Finalize on the agent, then map the outcome to the return bool in the one
-    // shared place both terminal rails use (returns it directly — arming reports
-    // a change unconditionally so a background tab still wakes the reconcile tick).
-    let outcome = super::super::turn_completion::finalize_turn_from_terminal(
-        agent,
-        session_id,
-        payload.prompt_id.as_deref(),
-        payload.stop_reason.as_deref(),
-        payload.agent_result.as_deref(),
-        payload.cancel_trigger(),
-    );
-    super::super::turn_completion::apply_terminal_outcome(outcome, app, id, is_active)
 }

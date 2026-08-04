@@ -43,8 +43,18 @@ pub struct CompactConversationRequest {
     pub user_context: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactConversationStatus {
+    Completed,
+    Scheduled,
+    AlreadyRunning,
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct CompactConversationResponse {}
+pub struct CompactConversationResponse {
+    pub status: CompactConversationStatus,
+}
 
 // ── Citations / comments ────────────────────────────────────────────────
 

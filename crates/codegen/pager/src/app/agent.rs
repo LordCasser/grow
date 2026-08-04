@@ -560,6 +560,10 @@ pub enum AgentState {
     /// Nothing happening. Queue can drain.
     #[default]
     Idle,
+    /// Prompt RPC was sent, but the server has not yet confirmed whether it is
+    /// queued or owns the foreground. This is busy/cancellable, but it is not
+    /// an inference turn and must not render as an LLM response.
+    TurnSubmitting,
     /// A prompt turn is in progress.
     TurnRunning,
     /// A turn cancel has been sent; waiting for PromptResponse.
@@ -579,7 +583,23 @@ impl AgentState {
     }
     /// A prompt turn is actively running (not cancelling).
     pub fn is_turn_running(&self) -> bool {
-        matches!(self, Self::TurnRunning)
+        matches!(self, Self::TurnSubmitting | Self::TurnRunning)
+    }
+    pub fn is_turn_submitting(&self) -> bool {
+        matches!(self, Self::TurnSubmitting)
+    }
+    /// Whether a durable terminal signal may finalize the current turn.
+    ///
+    /// Contract (single finalizer, see `turn_completion`): `TurnRunning` and
+    /// `TurnCancelling` are terminal; `TurnSubmitting` is NOT — while the
+    /// prompt RPC is still in flight the server has not confirmed the
+    /// foreground, so a durable `TurnCompleted` cannot be trusted to end the
+    /// right turn and is Ignored. Recovery from a lost submission is the
+    /// prompt-status watchdog's job (Phase C). The driver's own
+    /// `PromptResponse` rail is exempt: it is the RPC's terminal and may
+    /// finalize from `TurnSubmitting`.
+    pub fn is_terminal_turn(&self) -> bool {
+        matches!(self, Self::TurnRunning | Self::TurnCancelling)
     }
     /// Manual `/compact` is in flight (stoppable via session/cancel).
     pub fn is_compact_running(&self) -> bool {
@@ -854,10 +874,17 @@ impl AgentSession {
             .values()
             .any(|t| t.status == BgTaskStatus::Running)
     }
-    /// Cancel the current turn: cleanup tracker, set state to Cancelling.
-    pub fn cancel_turn(&mut self, scrollback: &mut ScrollbackState) {
-        self.tracker.finish_turn(scrollback);
-        self.state = AgentState::TurnCancelling;
+    /// Begin cancellation without committing a terminal transition.
+    ///
+    /// Streaming content and tool activity remain owned by the prompt until an
+    /// exact-id PromptResponse or durable TurnCompleted wins finalization. This
+    /// prevents cancellation intent from closing the tracker before the
+    /// authoritative terminal (and from closing it a second time when that
+    /// terminal arrives).
+    pub fn cancel_turn(&mut self, _scrollback: &mut ScrollbackState) {
+        if self.state.is_turn_running() {
+            self.state = AgentState::TurnCancelling;
+        }
     }
     /// Current activity within a running turn (for turn status line display).
     ///

@@ -384,12 +384,22 @@ pub(crate) fn skeptic_scratch_dir(verifier_id: &str, idx: u32) -> PathBuf {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GoalOrchestration {
+    /// Lifecycle architecture version. Version 1 introduced scoped plans,
+    /// finite cycles and lease-owned async stages; older active/paused state is
+    /// intentionally not resumed into the new state machine.
+    #[serde(default)]
+    pub architecture_version: u8,
     pub goal_id: String,
     pub objective: String,
     /// Monotonic definition generation. Async Goal work captures this before
     /// awaiting and may commit only while it still matches.
     #[serde(default)]
     pub definition_revision: u64,
+    /// Monotonic ownership generation for autonomous work. Steering and every
+    /// lifecycle transition invalidate stages captured under an older value
+    /// without pretending the user's objective changed.
+    #[serde(default)]
+    pub autonomy_generation: u64,
     pub status: GoalStatus,
     pub phase: GoalPhase,
     pub token_budget: Option<i64>,
@@ -579,6 +589,12 @@ pub struct GoalOrchestration {
     /// and the load-time reconciler. Persisted across restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_file: Option<PathBuf>,
+
+    /// Blake3 of the exact bytes atomically published to `plan_file` and its
+    /// immutable baseline. It binds both verifier inputs to one actor-owned
+    /// planner commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_content_hash: Option<String>,
 
     /// Path to the immutable snapshot of the planner's ORIGINAL plan
     /// (`<session_dir>/goal/plan.baseline.md`, via
@@ -793,6 +809,23 @@ impl GoalTracker {
         self.goal_dir().join("plan.md")
     }
 
+    /// Directory holding definition-owned staging artifacts
+    /// (`<session_dir>/goal/staging/`). Transient: removed on terminal Goal
+    /// transitions (clear, verified completion, behavior exit); the canonical
+    /// `plan.md` / `plan.baseline.md` siblings are retained as the audit
+    /// record.
+    pub fn plan_staging_dir(&self) -> PathBuf {
+        self.goal_dir().join("staging")
+    }
+
+    /// Definition-owned staging path. A planner may write only here; the actor
+    /// validates the artifact and atomically publishes `plan.md` while the
+    /// captured Goal lease remains current.
+    pub fn plan_staging_path(&self, goal_id: &str, revision: u64) -> PathBuf {
+        self.plan_staging_dir()
+            .join(format!("{goal_id}-{revision}.md"))
+    }
+
     /// Path to the immutable baseline snapshot of the planner's original
     /// plan (`<session_dir>/goal/plan.baseline.md`); written once after
     /// the planner first produces `plan.md`. Sibling of [`Self::plan_path`].
@@ -907,9 +940,11 @@ impl GoalTracker {
             }
         };
         self.orchestration = Some(GoalOrchestration {
+            architecture_version: 1,
             goal_id,
             objective,
             definition_revision: 0,
+            autonomy_generation: 0,
             status: GoalStatus::Active,
             phase: GoalPhase::Executing,
             token_budget,
@@ -948,6 +983,7 @@ impl GoalTracker {
             last_strategy_recommendation: None,
             changes_baseline_commit: baseline_commit,
             plan_file: None,
+            plan_content_hash: None,
             plan_baseline_file: None,
             scratch_dir_ready,
             live_subagent_tokens: 0,
@@ -985,6 +1021,7 @@ impl GoalTracker {
 
         o.objective = objective;
         o.definition_revision = o.definition_revision.saturating_add(1);
+        o.autonomy_generation = o.autonomy_generation.saturating_add(1);
         if let Some(budget) = token_budget {
             o.token_budget = Some(budget);
             o.budget_limit_reported = false;
@@ -1002,6 +1039,9 @@ impl GoalTracker {
         o.first_final_response = None;
         o.skeptic0_session_id = None;
         o.skeptic_model_assignment.clear();
+        o.plan_file = None;
+        o.plan_content_hash = None;
+        o.plan_baseline_file = None;
         o.verifying_in_flight = false;
         o.planning_in_flight = false;
         o.reset_classifier_stall_fields();
@@ -1021,6 +1061,20 @@ impl GoalTracker {
         self.orchestration
             .as_ref()
             .is_some_and(|o| o.goal_id == goal_id && o.definition_revision == revision)
+    }
+
+    pub fn autonomy_generation(&self) -> Option<u64> {
+        self.orchestration
+            .as_ref()
+            .map(|goal| goal.autonomy_generation)
+    }
+
+    pub fn bump_autonomy_generation(&mut self) -> bool {
+        let Some(goal) = self.orchestration.as_mut() else {
+            return false;
+        };
+        goal.autonomy_generation = goal.autonomy_generation.saturating_add(1);
+        true
     }
 
     pub fn set_phase(&mut self, phase: GoalPhase) {
@@ -1065,6 +1119,7 @@ impl GoalTracker {
                     .saturating_add(since.elapsed().as_millis() as u64);
             }
             o.status = reason.to_status();
+            o.autonomy_generation = o.autonomy_generation.saturating_add(1);
             // A paused Goal owns no live planner/verifier stage. Explicit
             // pause cancels the turn that owns those futures; clearing the
             // transient latches as part of the lifecycle transition prevents
@@ -1100,6 +1155,7 @@ impl GoalTracker {
             && o.status != GoalStatus::BudgetLimited
         {
             o.status = GoalStatus::Active;
+            o.autonomy_generation = o.autonomy_generation.saturating_add(1);
             o.pause_message = None;
             o.classifier_runs_attempted = 0;
             o.rounds_since_verify = 0;
@@ -1416,9 +1472,11 @@ impl GoalTracker {
 #[cfg(test)]
 pub(crate) fn make_base_orchestration() -> GoalOrchestration {
     GoalOrchestration {
+        architecture_version: 1,
         goal_id: "g-test".into(),
         objective: "test objective".into(),
         definition_revision: 0,
+        autonomy_generation: 0,
         status: GoalStatus::Active,
         phase: GoalPhase::Idle,
         token_budget: None,
@@ -1457,6 +1515,7 @@ pub(crate) fn make_base_orchestration() -> GoalOrchestration {
         last_strategy_recommendation: None,
         changes_baseline_commit: None,
         plan_file: None,
+        plan_content_hash: None,
         plan_baseline_file: None,
         scratch_dir_ready: false,
         live_subagent_tokens: 0,

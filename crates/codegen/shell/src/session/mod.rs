@@ -75,10 +75,18 @@ pub enum PromptOrigin {
     /// system reminder into context and then triggers a model turn so the
     /// model can print a visible progress update.
     GoalSummary,
-    /// Hidden prompt turn created by the Goal command control plane when a
-    /// set/resume command needs to start model work from idle. The command is
-    /// surfaced separately as an agent response log, never as user input.
+    /// Legacy Goal command-plane turn. No longer produced — the shell
+    /// GoalStage refactor removed `queue_goal_control_prompt`, and Goal work
+    /// now runs as `GoalSummary` cycles. Retained for wire/parse
+    /// compatibility: replayed or reattached `goal-control-*` prompt ids must
+    /// keep classifying as durable control turns (hidden user echo, no
+    /// UserPromptSubmit hook, control-plane mode, autonomy projection)
+    /// instead of collapsing into `User`.
     GoalControl,
+    /// Shell-owned slash command scheduled through the command plane. It may
+    /// execute a finite prompt task for lifecycle consistency, but is never a
+    /// user/model prompt and is hidden from conversation UI.
+    HostCommand,
     /// Verification-stage nudge injected after the verification stage
     /// achieved — keep working" system-reminder body alongside the
     /// path to the persisted details file. The variant name retains
@@ -113,6 +121,8 @@ impl PromptOrigin {
             Self::GoalSummary
         } else if prompt_id.starts_with("goal-control-") {
             Self::GoalControl
+        } else if prompt_id.starts_with("host-command-") {
+            Self::HostCommand
         } else if prompt_id.starts_with("goal-classifier-nudge-") {
             Self::GoalClassifierNudge
         } else if prompt_id.starts_with("scheduler-fired-") {
@@ -157,6 +167,7 @@ impl PromptOrigin {
             | Self::NotificationDrain
             | Self::GoalSummary
             | Self::GoalControl
+            | Self::HostCommand
             | Self::GoalClassifierNudge => true,
         }
     }
@@ -169,6 +180,7 @@ impl PromptOrigin {
             | Self::NotificationDrain
             | Self::GoalSummary
             | Self::GoalControl
+            | Self::HostCommand
             | Self::GoalClassifierNudge
             | Self::SchedulerFired
             | Self::PlanResume => None,

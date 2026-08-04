@@ -123,6 +123,9 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                             notifications_suppressed: false,
                             rewindable: false,
                             nudges_used_this_session: 0,
+                            recent_terminals: VecDeque::new(),
+                            foreground_compact: false,
+                            pending_manual_compact: None,
                         }),
                         notifications: NotificationSender {
                             gateway: GatewaySender::new(gateway_tx),
@@ -152,6 +155,7 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                         startup_hints: StartupHints::default(),
                         forked_tool_override: None,
                         compaction: crate::session::compaction_config::CompactionConfig {
+                            lease: Default::default(),
                             threshold_percent: std::cell::Cell::new(85),
                             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                             context_window_override: None,
@@ -194,6 +198,9 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                         pending_interjections: InterjectionBuffer::new(),
                         completion_delivery: Default::default(),
                         pending_system_reminders: Mutex::new(Vec::new()),
+                        goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+                        goal_control_notify: Arc::new(tokio::sync::Notify::new()),
+                        goal_plan_scope: parking_lot::Mutex::new(None),
                         idle_flush_timeout: None,
                         dream_check_timeout: None,
                         last_idle_flush_conversation_len: std::sync::atomic::AtomicUsize::new(0),
@@ -246,6 +253,7 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                             std::collections::VecDeque::new(),
                         ),
                         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
+                        goal_stage_seq: std::sync::atomic::AtomicU64::new(0),
                         managed_mcp_handle: Default::default(),
                         initial_client_mcp_servers: vec![],
                         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -561,6 +569,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     notifications_suppressed: false,
                     rewindable: false,
                     nudges_used_this_session: 0,
+                    recent_terminals: VecDeque::new(),
+                    foreground_compact: false,
+                    pending_manual_compact: None,
                 }),
                 notifications: NotificationSender {
                     gateway: GatewaySender::new(gateway_tx),
@@ -590,6 +601,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 startup_hints: StartupHints::default(),
                 forked_tool_override: None,
                 compaction: crate::session::compaction_config::CompactionConfig {
+                    lease: Default::default(),
                     threshold_percent: std::cell::Cell::new(85),
                     force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     context_window_override: None,
@@ -635,6 +647,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 pending_interjections: InterjectionBuffer::new(),
                 completion_delivery: Default::default(),
                 pending_system_reminders: Mutex::new(Vec::new()),
+                goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+                goal_control_notify: Arc::new(tokio::sync::Notify::new()),
+                goal_plan_scope: parking_lot::Mutex::new(None),
                 idle_flush_timeout: None,
                 dream_check_timeout: None,
                 last_idle_flush_conversation_len: std::sync::atomic::AtomicUsize::new(0),
@@ -687,6 +702,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     std::collections::VecDeque::new(),
                 ),
                 goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
+                goal_stage_seq: std::sync::atomic::AtomicU64::new(0),
                 managed_mcp_handle: Default::default(),
                 initial_client_mcp_servers: vec![],
                 tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -792,6 +808,9 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 notifications_suppressed: false,
                 rewindable: false,
                 nudges_used_this_session: 0,
+                recent_terminals: VecDeque::new(),
+                foreground_compact: false,
+                pending_manual_compact: None,
             });
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
             let agent = test_agent_default().await;
@@ -841,6 +860,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 startup_hints: StartupHints::default(),
                 forked_tool_override: None,
                 compaction: crate::session::compaction_config::CompactionConfig {
+                    lease: Default::default(),
                     threshold_percent: std::cell::Cell::new(85),
                     force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     context_window_override: None,
@@ -883,6 +903,9 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 pending_interjections: InterjectionBuffer::new(),
                 completion_delivery: Default::default(),
                 pending_system_reminders: Mutex::new(Vec::new()),
+                goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+                goal_control_notify: Arc::new(tokio::sync::Notify::new()),
+                goal_plan_scope: parking_lot::Mutex::new(None),
                 idle_flush_timeout: None,
                 dream_check_timeout: None,
                 last_idle_flush_conversation_len: std::sync::atomic::AtomicUsize::new(0),
@@ -935,6 +958,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     std::collections::VecDeque::new(),
                 ),
                 goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
+                goal_stage_seq: std::sync::atomic::AtomicU64::new(0),
                 managed_mcp_handle: Default::default(),
                 initial_client_mcp_servers: vec![],
                 tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -980,6 +1004,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 let mut state = actor.state.lock().await;
                 state.running_task = Some(AgentTask {
                     prompt_id: "running".into(),
+                    turn_start_ms: 0,
                     handle: tokio::task::spawn_local(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
@@ -1068,6 +1093,7 @@ async fn cancel_records_mid_turn_abort_interrupt_marker() {
                 let mut state = actor.state.lock().await;
                 state.running_task = Some(AgentTask {
                     prompt_id: "running".into(),
+                    turn_start_ms: 0,
                     handle: tokio::task::spawn_local(async {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
@@ -1110,6 +1136,7 @@ async fn cancel_without_active_tool_arms_interrupt_reminder() {
                 let mut state = actor.state.lock().await;
                 state.running_task = Some(AgentTask {
                     prompt_id: "running".into(),
+                    turn_start_ms: 0,
                     handle: tokio::task::spawn_local(async {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
@@ -1151,6 +1178,7 @@ async fn send_now_cancel_arms_no_interrupt_signals_and_resets_wait_depth() {
                 let mut state = actor.state.lock().await;
                 state.running_task = Some(AgentTask {
                     prompt_id: "running".into(),
+                    turn_start_ms: 0,
                     handle: tokio::task::spawn_local(async {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
@@ -1215,6 +1243,7 @@ async fn cancel_with_dangling_tool_call_skips_interrupt_reminder() {
                 let mut state = actor.state.lock().await;
                 state.running_task = Some(AgentTask {
                     prompt_id: "running".into(),
+                    turn_start_ms: 0,
                     handle: tokio::task::spawn_local(async {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
@@ -1456,6 +1485,7 @@ async fn cancel_running_task_interactive_preserves_queued_work() {
                 let mut state = actor.state.lock().await;
                 state.running_task = Some(AgentTask {
                     prompt_id: "running".into(),
+                    turn_start_ms: 0,
                     handle: tokio::task::spawn_local(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
@@ -1974,6 +2004,9 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 notifications_suppressed: false,
                 rewindable: false,
                 nudges_used_this_session: 0,
+                recent_terminals: VecDeque::new(),
+                foreground_compact: false,
+                pending_manual_compact: None,
             });
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
             let agent = test_agent_default().await;
@@ -2023,6 +2056,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 startup_hints: StartupHints::default(),
                 forked_tool_override: None,
                 compaction: crate::session::compaction_config::CompactionConfig {
+                    lease: Default::default(),
                     threshold_percent: std::cell::Cell::new(85),
                     force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     context_window_override: None,
@@ -2065,6 +2099,9 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 pending_interjections: InterjectionBuffer::new(),
                 completion_delivery: Default::default(),
                 pending_system_reminders: Mutex::new(Vec::new()),
+                goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+                goal_control_notify: Arc::new(tokio::sync::Notify::new()),
+                goal_plan_scope: parking_lot::Mutex::new(None),
                 idle_flush_timeout: None,
                 dream_check_timeout: None,
                 last_idle_flush_conversation_len: std::sync::atomic::AtomicUsize::new(0),
@@ -2117,6 +2154,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     std::collections::VecDeque::new(),
                 ),
                 goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
+                goal_stage_seq: std::sync::atomic::AtomicU64::new(0),
                 managed_mcp_handle: Default::default(),
                 initial_client_mcp_servers: vec![],
                 tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -2183,6 +2221,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 let mut state = actor.state.lock().await;
                 state.running_task = Some(AgentTask {
                     prompt_id: "running".into(),
+                    turn_start_ms: 0,
                     handle: task.abort_handle(),
                 });
             }
@@ -2323,6 +2362,7 @@ async fn cancel_keeps_remaining_queued_prompts_visible_to_clients() {
                 let mut state = actor.state.lock().await;
                 state.running_task = Some(AgentTask {
                     prompt_id: "running".into(),
+                    turn_start_ms: 0,
                     handle: tokio::task::spawn_local(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })

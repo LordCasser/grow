@@ -438,7 +438,7 @@ impl SessionActor {
     /// These are client-side events (like diff reviews) that should be part of session history.
     /// Exception: `SubagentProgress` ticks are transient and return before the store.
     pub(super) async fn handle_grow_session_notification(
-        &self,
+        self: &std::sync::Arc<Self>,
         mut notification: GrowSessionNotification,
     ) {
         if !matches!(
@@ -819,7 +819,9 @@ mod grow_event_id_stamping_tests {
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, mut prx) =
                     tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                let actor = std::sync::Arc::new(
+                    create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
+                );
                 actor
                     .send_grow_notification(GrowSessionUpdate::HookAnnotation {
                         message: "own emission".into(),

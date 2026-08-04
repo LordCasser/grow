@@ -1846,17 +1846,7 @@ pub(crate) async fn run(
 
             _ = animation_tick => {
                 animation_tick_at = None;
-                // Lost-response recovery: finish any turn whose
-                // `prompt_complete` broadcast outlived the grace window
-                // without its `session/prompt` RPC response arriving
-                // (see `dispatch::reconcile_overdue_turn_ends`).
-                // `needs_animation()` keeps ticks alive while a reconcile
-                // is armed, so this check cannot be starved.
-                // Lost-response recovery: finish turns whose terminal armed
-                // reconcile and grace expired without PromptResponse
-                // (`dispatch::reconcile_overdue_turn_ends`). `needs_animation()`
-                // keeps ticks alive while reconcile is armed.
-                let reconciled = dispatch::reconcile_overdue_turn_ends(&mut app);
+                let reconciled = dispatch::poll_stalled_prompt_submissions(&mut app);
                 if let Some(effs) = reconciled {
                     if process_effects(effs, &mut tasks, &mut app) {
                         break;

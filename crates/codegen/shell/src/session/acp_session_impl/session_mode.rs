@@ -354,6 +354,7 @@ impl SessionActor {
                 return BehaviorChangeOutcome::Rejected { message };
             }
             self.goal_tracker.lock().clear();
+            self.retire_goal_plan_scope().await;
             self.goal_continuation_streak
                 .store(0, std::sync::atomic::Ordering::Relaxed);
             self.goal_blocked_streak
@@ -363,6 +364,16 @@ impl SessionActor {
             self.clear_pending_classifier_completions();
             self.send_grow_notification(crate::session::goal_orchestrator::build_goal_cleared())
                 .await;
+        }
+        if target_behavior == Some(tool_types::BehaviorId::Goal)
+            && self.goal_tracker.lock().snapshot().is_some()
+        {
+            self.enter_goal_plan_scope().await;
+        } else if current_behavior == Some(tool_types::BehaviorId::Goal)
+            && target_behavior != Some(tool_types::BehaviorId::Goal)
+            && self.goal_tracker.lock().snapshot().is_some()
+        {
+            self.deactivate_goal_plan_scope().await;
         }
         *self.current_prompt_mode.lock() = prompt_mode;
         self.behavior.lock().select_behavior(prompt_mode.behavior());

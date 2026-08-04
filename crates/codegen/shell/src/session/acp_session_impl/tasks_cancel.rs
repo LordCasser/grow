@@ -55,6 +55,7 @@ impl Drop for TurnActiveGuard {
 
 pub(crate) struct AgentTask {
     pub(crate) prompt_id: String,
+    pub(crate) turn_start_ms: u64,
     pub(crate) handle: tokio::task::AbortHandle,
 }
 
@@ -75,6 +76,10 @@ impl AgentTask {
         let pid = prompt_id.clone();
         Self {
             prompt_id,
+            turn_start_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
             handle: tokio::task::spawn_local(async move {
                 run_task(
                     session.clone(),
@@ -230,6 +235,21 @@ impl SessionActor {
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({ "reason": "send_now" })),
         );
+    }
+
+    /// End only the foreground Goal turn after `/goal pause`. Background
+    /// tasks/subagents and their deferred completions survive; the distinct
+    /// trigger keeps this lifecycle transition separate from Normal send-now
+    /// marker and queue semantics.
+    pub(super) async fn cancel_turn_for_goal_pause(
+        &self,
+        replay_buffer: &mut crate::agent::update_chunk_merge::ReplayBuffer,
+    ) {
+        if let Some(notification) = replay_buffer.flush() {
+            self.emit_buffered(notification).await;
+        }
+        self.cancel_running_task(false, false, false, Some("goal_pause".to_string()))
+            .await;
     }
 
     pub(super) async fn cancel_running_task(
@@ -495,6 +515,18 @@ impl SessionActor {
             .as_ref()
             .map(|t| t.prompt_id.clone())
             .or(pinned_prompt_id);
+
+        // Abort drops the wait tool's select future, so transfer or retire its
+        // reservations while the authoritative prompt identity is still
+        // available. This closes cancel-vs-completion without synthesizing a
+        // second result for the original tool call.
+        if let Some(prompt_id) = cancelled_prompt_id.as_deref() {
+            if kill_background_tasks {
+                self.completion_delivery.consume_turn_waits(prompt_id);
+            } else {
+                self.completion_delivery.defer_turn_waits(prompt_id);
+            }
+        }
 
         self.agent
             .borrow()

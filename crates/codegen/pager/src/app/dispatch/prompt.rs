@@ -2,7 +2,6 @@
 
 use super::ctx::with_active_agent;
 use super::interject;
-use super::permissions::drain_permission_queue;
 use super::queue::{
     apply_turn_start_shim, drain_prompt_state_to_last_queued, immediate_server_send_eligible,
     maybe_drain_queue, note_peek_page_flip, push_server_queue_echo, retire_optimistic_echo,
@@ -14,7 +13,6 @@ use crate::app::actions::{Action, DoctorFixTarget, Effect};
 use crate::app::agent::{AgentCommand, AgentId, AgentState};
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
-use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
 use crate::slash::command::DoctorRequest;
@@ -652,7 +650,34 @@ pub(super) fn dispatch_send_prompt_inner(
                 return dispatch(action, app);
             }
             CommandResult::QueueCommand(cmd_text) => {
-                agent.session.enqueue_command(cmd_text);
+                let Some(session_id) = agent.session.session_id.clone() else {
+                    if consume_input {
+                        agent.prompt.set_text("");
+                    }
+                    agent.scrollback.push_block(RenderBlock::system(
+                        "/compact requires an active session.".to_string(),
+                    ));
+                    return vec![];
+                };
+                let track_foreground = agent.session.state.is_idle();
+                if track_foreground {
+                    agent.session.start_command(AgentCommand::Compact);
+                    agent.turn_started_at = Some(std::time::Instant::now());
+                }
+                let user_context = cmd_text
+                    .strip_prefix("/compact")
+                    .map(str::trim)
+                    .filter(|context| !context.is_empty())
+                    .map(str::to_string);
+                if consume_input {
+                    agent.prompt.set_text("");
+                }
+                return vec![Effect::Compact {
+                    agent_id: id,
+                    session_id,
+                    user_context,
+                    track_foreground,
+                }];
             }
             CommandResult::InjectSkill {
                 display_text,
@@ -700,14 +725,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 }
             }
             CommandResult::HostCommand(command_text) => {
-                let is_goal_control = crate::slash::parse_invocation(&command_text)
-                    .is_some_and(|invocation| invocation.token.eq_ignore_ascii_case("goal"));
-                let execute_out_of_band = is_goal_control
-                    || agent.session.state.is_turn_running()
-                    || agent.goal_state.as_ref().is_some_and(|goal| {
-                        matches!(goal.status, crate::app::agent::GoalDisplayStatus::Active)
-                    });
-                if execute_out_of_band && let Some(session_id) = agent.session.session_id.clone() {
+                if let Some(session_id) = agent.session.session_id.clone() {
                     if consume_input {
                         agent.prompt.set_text("");
                     }
@@ -717,17 +735,10 @@ pub(super) fn dispatch_send_prompt_inner(
                         command: command_text,
                     }];
                 }
-                // Non-Goal idle commands retain the established turn path.
-                // Goal set/resume start any required inference from the
-                // shell-owned control plane, keeping the command itself out of
-                // the user-message stream.
-                let skill_token_ranges = agent
-                    .prompt
-                    .slash_controller
-                    .recognized_token_ranges(&command_text, &agent.session.models);
-                agent
-                    .session
-                    .enqueue_prompt_with_skill_tokens(command_text, skill_token_ranges);
+                agent.scrollback.push_block(RenderBlock::system(
+                    "This command requires an active session.".to_string(),
+                ));
+                return vec![];
             }
         }
         if consume_input {
@@ -1130,386 +1141,331 @@ pub(super) fn handle_prompt_response(
     // `PromptResponse`). Take any stashed adoption now; it is applied
     // after `finish_turn` clears `current_prompt_id` below.
     let pending_adoption = app.pending_running_adoptions.remove(&agent_id);
-    if let Some(agent) = app.agents.get_mut(&agent_id) {
-        // Discard PromptResponses that don't belong to the currently
-        // active prompt -- they belong to a turn the user rewound, or to
-        // a queued prompt that never became the running turn.
-        //
-        // The prompt id comes from two places depending on the arm:
-        //   - `Ok`:  the agent echoes `promptId` in PR meta.
-        //   - `Err`: an `acp::Error` carries NO meta, so we fall back to
-        //            the `prompt_id` the pager minted when it sent this
-        //            RPC (threaded through `TaskResult::PromptResponse`).
-        //
-        // Without the `Err` fallback, a queued prompt's RPC error has no
-        // id to gate on and is misattributed to the running turn — e.g.
-        // when a queued prompt is removed in leader mode and its
-        // `respond_to` is dropped on the leader, the resulting
-        // "session failed to respond" error would detonate an unrelated
-        // in-flight turn with a spurious "Turn failed" (on the
-        // submitter's screen, even when another client did the edit).
-        let response_pid = match &result {
-            Ok(pr) => pr
-                .meta
-                .as_ref()
-                .and_then(|m| m.get("promptId"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            Err(_) => prompt_id.clone(),
-        };
-        // The turn-end RPC for this prompt arrived — disarm the
-        // lost-response reconcile that `handle_prompt_complete` armed
-        // for it (the broadcast is emitted before the RPC response, so
-        // in the healthy path the marker lives only a few ms).
-        if let Some(pending) = agent.pending_turn_end_reconcile.as_ref()
-            && response_pid.as_deref() == Some(pending.prompt_id.as_str())
+    // The `agent` borrow lasts only through the pid gate and the shared
+    // finalizer; the app-level tail (notifications, adoption handoff, queue
+    // drain, suggestion fetch) re-borrows per step.
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    // Discard PromptResponses that don't belong to the currently
+    // active prompt -- they belong to a turn the user rewound, or to
+    // a queued prompt that never became the running turn.
+    //
+    // The prompt id comes from two places depending on the arm:
+    //   - `Ok`:  the agent echoes `promptId` in PR meta.
+    //   - `Err`: an `acp::Error` carries NO meta, so we fall back to
+    //            the `prompt_id` the pager minted when it sent this
+    //            RPC (threaded through `TaskResult::PromptResponse`).
+    //
+    // Without the `Err` fallback, a queued prompt's RPC error has no
+    // id to gate on and is misattributed to the running turn — e.g.
+    // when a queued prompt is removed in leader mode and its
+    // `respond_to` is dropped on the leader, the resulting
+    // "session failed to respond" error would detonate an unrelated
+    // in-flight turn with a spurious "Turn failed" (on the
+    // submitter's screen, even when another client did the edit).
+    let response_pid = match &result {
+        Ok(pr) => pr
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("promptId"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        Err(_) => prompt_id.clone(),
+    };
+    if let Some(response_pid) = response_pid.as_deref()
+        && agent.session.current_prompt_id.as_deref() != Some(response_pid)
+    {
+        // A late PromptResponse for a turn the durable rail already
+        // finalized (the first-wins winner is recorded on the agent):
+        // merge the RPC's extra metadata only. No finish, no marker, no
+        // drain, no adoption handoff — all of that ran exactly once
+        // when the durable terminal won. The merge window is bounded to
+        // "the finalized turn is still the current foreground, or the
+        // session is idle": once a NEWER turn owns the slot (even as a
+        // server-unconfirmed submission), the late response is discarded
+        // like any other stale terminal.
+        if agent.finalized_prompt.as_deref() == Some(response_pid)
+            && (agent.session.current_prompt_id.is_none()
+                || agent.session.current_prompt_id.as_deref() == Some(response_pid))
         {
-            agent.pending_turn_end_reconcile = None;
-        }
-        if let Some(response_pid) = response_pid.as_deref()
-            && agent.session.current_prompt_id.as_deref() != Some(response_pid)
-        {
-            if (agent.session.current_prompt_id.is_none()
-                || agent
-                    .session
-                    .current_prompt_id
-                    .as_deref()
-                    .is_some_and(crate::app::acp_handler::is_server_initiated_prompt))
-                && crate::app::acp_handler::is_server_initiated_prompt(response_pid)
-            {
-                // Server-initiated turn (auto-wake) — adopt.
-                agent.session.current_prompt_id = Some(response_pid.to_string());
-            } else {
-                // Not the running turn: this response (Ok rewound/stale,
-                // or Err from a queued/removed prompt) must not touch the
-                // active turn. Restore the adoption we popped above so a
-                // genuinely-draining next prompt can still be adopted by
-                // the real running turn's PromptResponse — unless it is the
-                // stashed turn's own response: that spent the turn's only
-                // exit, so consume (discard), never restore.
-                if let Some(p) = pending_adoption {
-                    if p.prompt_id == response_pid {
-                        agent.discard_pending_adoption_updates(&p.prompt_id);
-                    } else {
-                        app.pending_running_adoptions.insert(agent_id, p);
-                    }
-                }
-                // Server-authoritative queue lifecycle: this prompt's RPC
-                // resolved without becoming the running turn (removed,
-                // cancelled, rewound). Retire its optimistic echo so a
-                // later `grow/queue/changed` broadcast can't re-pin a
-                // stale placeholder and reorder the queue.
-                if let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.to_string()) {
-                    retire_optimistic_echo(
-                        &mut app.optimistic_prompt_echoes,
-                        &mut app.shared_prompt_queues,
-                        &sid,
-                        response_pid,
-                    );
-                    agent.shared_queue.retain(|e| e.id != response_pid);
-                    agent.note_queue_echo_retired(response_pid);
-                }
-                // Resolved-without-running never adopts; explicit for the
-                // session-less arm (no note_queue_echo_retired above).
-                agent.retire_send_now_painted_block(response_pid);
-                return vec![];
-            }
-        }
-        let was_cancelling = agent.session.state.is_cancelling()
-            || matches!(
-                &result,
-                Ok(pr) if pr.stop_reason == acp::StopReason::Cancelled
-            );
-        // Send-now cancel: suppress the "Turn cancelled by user" marker (the new
-        // prompt follows right under the partial). Wire `cancelTrigger` wins, else
-        // the client-side expectation; consumed at every turn end (no stale flag).
-        let expected_send_now = agent.expect_send_now_cancel.take();
-        let wire_cancel_trigger = result.as_ref().ok().and_then(|pr| {
-            pr.meta
-                .as_ref()?
-                .get("cancelTrigger")?
-                .as_str()
-                .map(str::to_string)
-        });
-        let send_now_cancel = was_cancelling
-            && match wire_cancel_trigger.as_deref() {
-                Some(trigger) => trigger == "send_now",
-                None => expected_send_now.is_some(),
-            };
-        let rate_limited = agent.session.rate_limited;
-        let model_incompatible = agent.session.model_incompatible;
-        // The RetryState handler already pushed the actionable context-overflow
-        // block, so the generic TurnFailed + error toast are redundant.
-        let context_overflow = scrollback_has_recent_context_too_large(&agent.scrollback);
-        let elapsed = agent.turn_elapsed();
-
-        {
-            let sid = agent.session.session_id.as_ref().map(|s| s.0.as_ref());
-            let elapsed_ms = elapsed.map(|d| d.as_millis() as u64).unwrap_or(0);
-            let ok = result.is_ok();
-            crate::unified_log::info(
-                "turn.complete",
-                sid,
-                Some(serde_json::json!({
-                    "elapsed_ms": elapsed_ms,
-                    "ok": ok,
-                    "was_cancelling": was_cancelling,
-                    "send_now_cancel": send_now_cancel,
-                })),
-            );
-        }
-
-        // qtrace: turn end on this client. This clears current_prompt_id
-        // and (briefly) returns the client to Idle — the start of the
-        // leader-mode turn-end window where a freshly-sent prompt can be
-        // wrongly local-drained before the next running-prompt broadcast
-        // is adopted.
-        tracing::debug!(
-            target: "qtrace",
-            pid = std::process::id(),
-            event = "turn_end",
-            prompt_id = prompt_id.as_deref().unwrap_or(""),
-            was_cancelling,
-            shared_queue_len = agent.shared_queue.len(),
-            pending_len = agent.session.pending_prompts.len(),
-            has_pending_adoption = pending_adoption.is_some(),
-            session = agent.session.session_id.as_ref().map(|s| s.0.as_ref()).unwrap_or(""),
-            "turn ended; client returning to idle",
-        );
-
-        // Read before `finish_turn()` clears it; keys the pending stop-hook stash.
-        let ending_prompt_id = agent
-            .session
-            .current_prompt_id
-            .clone()
-            .or_else(|| response_pid.clone());
-
-        agent.session.finish_turn(&mut agent.scrollback);
-
-        // Insert session event message (skip TurnCompleted for bash-mode — no agent turn).
-        let event = match (&result, was_cancelling) {
-            // Send-now cancel: no marker (the new prompt is the next turn); the
-            // `None` still flushes any held stop hooks standalone.
-            (Ok(_), true) if send_now_cancel => None,
-            (Ok(_), true) => Some(SessionEvent::TurnCancelled {
-                elapsed: elapsed.unwrap_or_default(),
-            }),
-            (Ok(_), false) if agent.bash_turn => None,
-            (Ok(_), false) => Some(SessionEvent::TurnCompleted {
-                // Legacy copy on purpose: unknown elapsed keeps the "in 0.0s"
-                // form here — only wake markers use the honest `None` form.
-                elapsed: Some(elapsed.unwrap_or_default()),
-            }),
-            (Err(_), _) if rate_limited || model_incompatible || context_overflow => {
-                // Skip TurnFailed when a dedicated prompt already shows the
-                // error (rate limit, model incompatibility, or a terminal
-                // context-window overflow).
-                None
-            }
-            (Err(err), _) => Some(SessionEvent::TurnFailed {
-                error: err.clone(),
-                elapsed,
-            }),
-        };
-        crate::app::turn_completion::push_turn_terminal_marker(
-            agent,
-            event,
-            ending_prompt_id.as_deref(),
-        );
-
-        let notification = match (&result, was_cancelling) {
-            (Ok(_), false) if !agent.bash_turn => {
-                let body = match elapsed {
-                    Some(d) => {
-                        format!("Turn complete in {}.", crate::util::format_duration(d))
-                    }
-                    None => String::from("Turn complete."),
-                };
-                Some((NotificationEventKind::TurnComplete, body))
-            }
-            (Err(err), _) if !rate_limited && !model_incompatible && !context_overflow => {
-                Some((NotificationEventKind::AgentError, format!("Error: {err}")))
-            }
-            _ => None,
-        };
-
-        agent.mark_turn_finished();
-        agent.activity_started_at = None;
-        agent.last_activity = None;
-
-        // Drain all queued permission requests — the turn is over,
-        // so any pending permissions are stale. Send Cancelled to each.
-        drain_permission_queue(agent);
-
-        // Dismiss any active plan approval or review — the turn
-        // that produced it has completed, so the state is stale.
-        if let Some(mut pav) = agent.plan_approval_view.take() {
-            pav.send_stale_cancel();
-            agent.plan_next_comment_id = pav.next_comment_id;
-            agent.prompt.restore(pav.stashed_prompt);
-            agent.line_viewer = None;
-        }
-
-        agent.cancel_turn_view = None;
-        agent.cancel_turn_buttons.clear();
-
-        // After a bash-mode turn, scroll to bottom so the user sees
-        // the command output, but keep focus on the prompt for
-        // consistency with normal prompt behavior.
-        let was_bash_turn = agent.bash_turn;
-        if agent.bash_turn {
-            agent.bash_turn = false;
-            agent.scrollback.goto_bottom();
-        }
-        agent.cron_task_id = None;
-
-        // TurnComplete suppressed when queue is non-empty (badge
-        // fires only after the final queued turn); AgentError always fires.
-        if let Some((kind, body)) = notification {
-            // A stashed server-authoritative adoption means the next
-            // turn is about to start, so treat the queue as non-empty
-            // (suppress the TurnComplete notification / idle escapes),
-            // mirroring the local non-empty-queue behavior.
-            let queue_empty =
-                agent.session.pending_prompts.is_empty() && pending_adoption.is_none();
-            let session_name = agent
-                .display_name
-                .as_deref()
-                .or(agent.generated_session_title.as_deref());
-
-            // Skip idle escapes when queue is non-empty — the next
-            // turn starts immediately and would overwrite them (title flicker).
-            if queue_empty {
-                let cwd_str = app.cwd.to_string_lossy();
-                let model = agent.session.models.current_model_name();
-                let idle_title = crate::notifications::TitleState {
-                    session_name,
-                    model: model.as_deref(),
-                    activity: None,
-                    has_pending_permissions: false,
-                    cwd: Some(&cwd_str),
-                    turn_elapsed: None,
-                    is_busy: false,
-                    focused: true,
-                };
-                app.pending_notification_escapes =
-                    app.notification_service.build_idle_escapes(&idle_title);
-            }
-
-            if kind != NotificationEventKind::TurnComplete || queue_empty {
-                // Defer the notification so the terminal has time
-                // to apply the idle title.  Ghostty debounces
-                // setTitle() by 75 ms (SurfaceView_AppKit.swift:576),
-                // so we need >75 ms before the notification reads
-                // self.title for the subtitle.  3 ticks × 33 ms ≈ 99 ms.
-                let session_id = agent.session.session_id.as_ref().map(|s| s.0.to_string());
-
-                // Use the session name as the notification title so
-                // terminals that show it (Ghostty/OSC 777) display
-                // which session completed.  For body-only protocols
-                // (Warp, iTerm2/OSC 9), emit_notification folds the
-                // title into the body automatically.
-                let notif_title = session_name
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "Grow".into());
-
-                app.deferred_notification = Some((
-                    NotificationEvent {
-                        kind,
-                        title: notif_title,
-                        body,
-                        session_id,
-                    },
-                    3,
-                ));
-            }
-        }
-
-        if let Err(ref err) = result {
-            tracing::error!(agent = ?agent_id, error = %err, "Prompt failed");
-        }
-
-        // Predicted-next-prompt (tab autocomplete): wipe any stale suggestion
-        // at every turn boundary. This must run before the reconnect /
-        // reconnect and other early-return paths below, which skip the fetch gate
-        // entirely — a prior ghost would otherwise survive those paths.
-        agent.prompt.prompt_suggestion.clear();
-
-        // Cancelled turns resume queue processing one item at a time
-        // through the same drain path as normal completions.
-        // `maybe_drain_queue` keeps the idle-only and editing-front
-        // guards so we do not send from under the user.
-        if app.reconnect_pending {
+            crate::app::turn_completion::merge_finalized_pr_meta(agent, &result);
             if let Some(p) = pending_adoption {
-                agent.discard_pending_adoption_updates(&p.prompt_id);
+                // The finalized turn's own response spent the turn's only
+                // exit: consume (discard), never restore. A newer turn's
+                // stash stays for its own terminal.
+                if p.prompt_id == response_pid {
+                    agent.discard_pending_adoption_updates(&p.prompt_id);
+                } else {
+                    app.pending_running_adoptions.insert(agent_id, p);
+                }
             }
             return vec![];
         }
-
-        // FIFO handoff: if a server-authoritative prompt drained
-        // into the running slot during this turn's teardown, adopt it
-        // now (finish_turn cleared current_prompt_id) and run the
-        // turn-start shim. This sets `TurnRunning`, so the
-        // `maybe_drain_queue` below no-ops rather than draining a local
-        // prompt — the leader owns the drain order.
-        let adopted_page_flip = if let Some(p) = pending_adoption
-            && agent.session.current_prompt_id.is_none()
+        if (agent.session.current_prompt_id.is_none()
+            || agent
+                .session
+                .current_prompt_id
+                .as_deref()
+                .is_some_and(crate::app::acp_handler::is_server_initiated_prompt))
+            && crate::app::acp_handler::is_server_initiated_prompt(response_pid)
         {
-            if response_pid.as_deref() != Some(p.prompt_id.as_str())
-                && agent.should_adopt_running_prompt(&p.prompt_id)
-            {
-                apply_turn_start_shim(agent, p.prompt_id, p.text, &p.kind, p.combined_texts)
-            } else {
-                agent.discard_pending_adoption_updates(&p.prompt_id);
-                None
-            }
+            // Server-initiated turn (auto-wake) — adopt.
+            agent.session.current_prompt_id = Some(response_pid.to_string());
         } else {
-            None
-        };
-
-        let drain = maybe_drain_queue(agent);
-        let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);
-        let mut effects = drain.effects;
-
-        // Predicted-next-prompt (tab autocomplete): fetch a fresh suggestion
-        // (the stale one was wiped above) — but only after a clean, non-bash
-        // agent turn that leaves the session idle with an empty prompt and no
-        // queued work, local or server-side (a draft in progress or a draining
-        // queue means the user is already mid-thought). Placed after
-        // `maybe_drain_queue` so `is_idle` reflects a locally-drained next
-        // turn.
-        if crate::views::prompt_suggestion::resolve_enabled()
-            && result.is_ok()
-            && !was_cancelling
-            && !was_bash_turn
-            && agent.prompt.text().is_empty()
-            && agent.session.pending_prompts.is_empty()
-            && agent.shared_queue.is_empty()
-            && agent.session.state.is_idle()
-            && let Some(session_id) = agent.session.session_id.as_ref().map(|s| s.0.to_string())
-        {
-            let generation = agent.prompt.prompt_suggestion.begin_fetch();
-            let model = crate::views::prompt_suggestion::resolve_model(&agent.session.models);
-            effects.push(Effect::FetchPromptSuggestion {
-                agent_id,
-                generation,
-                model,
-                session_id: Some(session_id),
-            });
+            // Not the running turn: this response (Ok rewound/stale,
+            // or Err from a queued/removed prompt) must not touch the
+            // active turn. Restore the adoption we popped above so a
+            // genuinely-draining next prompt can still be adopted by
+            // the real running turn's PromptResponse — unless it is the
+            // stashed turn's own response: that spent the turn's only
+            // exit, so consume (discard), never restore.
+            if let Some(p) = pending_adoption {
+                if p.prompt_id == response_pid {
+                    agent.discard_pending_adoption_updates(&p.prompt_id);
+                } else {
+                    app.pending_running_adoptions.insert(agent_id, p);
+                }
+            }
+            // Server-authoritative queue lifecycle: this prompt's RPC
+            // resolved without becoming the running turn (removed,
+            // cancelled, rewound). Retire its optimistic echo so a
+            // later `grow/queue/changed` broadcast can't re-pin a
+            // stale placeholder and reorder the queue.
+            if let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.to_string()) {
+                retire_optimistic_echo(
+                    &mut app.optimistic_prompt_echoes,
+                    &mut app.shared_prompt_queues,
+                    &sid,
+                    response_pid,
+                );
+                agent.shared_queue.retain(|e| e.id != response_pid);
+                agent.note_queue_echo_retired(response_pid);
+            }
+            // Resolved-without-running never adopts; explicit for the
+            // session-less arm (no note_queue_echo_retired above).
+            agent.retire_send_now_painted_block(response_pid);
+            return vec![];
         }
-
-        note_peek_page_flip(app, agent_id, page_flip_entry);
-        return effects;
     }
-    vec![]
+    let was_cancelling = agent.session.state.is_cancelling()
+        || matches!(
+            &result,
+            Ok(pr) if pr.stop_reason == acp::StopReason::Cancelled
+        );
+    // Send-now cancel: suppress the "Turn cancelled by user" marker (the new
+    // prompt follows right under the partial). Wire `cancelTrigger` wins, else
+    // the client-side expectation; the expectation itself is consumed by the
+    // shared finalizer at every turn end (no stale flag).
+    let wire_cancel_trigger = result.as_ref().ok().and_then(|pr| {
+        pr.meta
+            .as_ref()?
+            .get("cancelTrigger")?
+            .as_str()
+            .map(str::to_string)
+    });
+    let rate_limited = agent.session.rate_limited;
+    let model_incompatible = agent.session.model_incompatible;
+    // The RetryState handler already pushed the actionable context-overflow
+    // block, so the generic TurnFailed + error toast are redundant.
+    let context_overflow = scrollback_has_recent_context_too_large(&agent.scrollback);
+    let elapsed = agent.turn_elapsed();
+
+    {
+        let sid = agent.session.session_id.as_ref().map(|s| s.0.as_ref());
+        let elapsed_ms = elapsed.map(|d| d.as_millis() as u64).unwrap_or(0);
+        let ok = result.is_ok();
+        // Read-only mirror of the finalizer's decision (the finalizer
+        // consumes `expect_send_now_cancel`).
+        let send_now_cancel = was_cancelling
+            && match wire_cancel_trigger.as_deref() {
+                Some(trigger) => trigger == "send_now",
+                None => agent.expect_send_now_cancel.is_some(),
+            };
+        crate::unified_log::info(
+            "turn.complete",
+            sid,
+            Some(serde_json::json!({
+                "elapsed_ms": elapsed_ms,
+                "ok": ok,
+                "was_cancelling": was_cancelling,
+                "send_now_cancel": send_now_cancel,
+            })),
+        );
+    }
+
+    // qtrace: turn end on this client. This clears current_prompt_id
+    // and (briefly) returns the client to Idle — the start of the
+    // leader-mode turn-end window where a freshly-sent prompt can be
+    // wrongly local-drained before the next running-prompt broadcast
+    // is adopted.
+    tracing::debug!(
+        target: "qtrace",
+        pid = std::process::id(),
+        event = "turn_end",
+        prompt_id = prompt_id.as_deref().unwrap_or(""),
+        was_cancelling,
+        shared_queue_len = agent.shared_queue.len(),
+        pending_len = agent.session.pending_prompts.len(),
+        has_pending_adoption = pending_adoption.is_some(),
+        session = agent.session.session_id.as_ref().map(|s| s.0.as_ref()).unwrap_or(""),
+        "turn ended; client returning to idle",
+    );
+
+    // The terminal part converges on the shared first-wins finalizer
+    // (turn_completion): it finishes the turn, pushes the marker, runs the
+    // full teardown, records the winner, and consumes
+    // `expect_send_now_cancel`. `response_pid == None` (older shells without
+    // promptId meta) attributes the response to the running turn, matching
+    // the legacy behavior.
+    let was_bash_turn = agent.bash_turn;
+    let outcome = crate::app::turn_completion::finalize_prompt_terminal(
+        agent,
+        response_pid.as_deref(),
+        crate::app::turn_completion::TerminalMeta {
+            pr_ok: result.is_ok(),
+            failed_error: result.as_ref().err().cloned(),
+            was_cancelling,
+            bash_turn: was_bash_turn,
+            skip_error_marker: rate_limited || model_incompatible || context_overflow,
+            cancel_trigger: wire_cancel_trigger,
+            accepts_submitting: true,
+        },
+    );
+    let crate::app::turn_completion::TerminalOutcome {
+        apply,
+        notification,
+    } = outcome;
+    // The pid gate above guarantees the finalizer wins on this rail; an
+    // Ignored outcome is defensive and must not fall through to the handoff.
+    if !matches!(
+        apply,
+        crate::app::turn_completion::TerminalApply::ViewerFinalized
+    ) {
+        return vec![];
+    }
+
+    if let Err(ref err) = result {
+        tracing::error!(agent = ?agent_id, error = %err, "Prompt failed");
+    }
+
+    // TurnComplete suppressed when queue is non-empty (badge fires only
+    // after the final queued turn); AgentError always fires. A stashed
+    // server-authoritative adoption means the next turn is about to start,
+    // so treat the queue as non-empty too (suppress the TurnComplete
+    // notification / idle escapes), mirroring the local non-empty-queue
+    // behavior.
+    let queue_empty = pending_adoption.is_none()
+        && app
+            .agents
+            .get(&agent_id)
+            .is_some_and(|agent| agent.session.pending_prompts.is_empty());
+    crate::app::turn_completion::apply_terminal_notifications(
+        app,
+        agent_id,
+        notification,
+        queue_empty,
+    );
+
+    // Cancelled turns resume queue processing one item at a time
+    // through the same drain path as normal completions.
+    // `maybe_drain_queue` keeps the idle-only and editing-front
+    // guards so we do not send from under the user.
+    if app.reconnect_pending {
+        if let Some(p) = pending_adoption
+            && let Some(agent) = app.agents.get_mut(&agent_id)
+        {
+            agent.discard_pending_adoption_updates(&p.prompt_id);
+        }
+        return vec![];
+    }
+
+    // FIFO handoff: if a server-authoritative prompt drained
+    // into the running slot during this turn's teardown, adopt it
+    // now (finish_turn cleared current_prompt_id) and run the
+    // turn-start shim. This sets `TurnRunning`, so the
+    // `maybe_drain_queue` below no-ops rather than draining a local
+    // prompt — the leader owns the drain order.
+    let adopted_page_flip = if let Some(p) = pending_adoption
+        && let Some(agent) = app.agents.get_mut(&agent_id)
+        && agent.session.current_prompt_id.is_none()
+    {
+        if response_pid.as_deref() != Some(p.prompt_id.as_str())
+            && agent.should_adopt_running_prompt(&p.prompt_id)
+        {
+            apply_turn_start_shim(agent, p.prompt_id, p.text, &p.kind, p.combined_texts)
+        } else {
+            agent.discard_pending_adoption_updates(&p.prompt_id);
+            None
+        }
+    } else {
+        None
+    };
+
+    let drain = {
+        let Some(agent) = app.agents.get_mut(&agent_id) else {
+            return vec![];
+        };
+        maybe_drain_queue(agent)
+    };
+    let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);
+    let mut effects = drain.effects;
+
+    // Predicted-next-prompt (tab autocomplete): fetch a fresh suggestion
+    // (the stale one was wiped by the finalizer) — but only after a clean,
+    // non-bash agent turn that leaves the session idle with an empty prompt
+    // and no queued work, local or server-side (a draft in progress or a
+    // draining queue means the user is already mid-thought). Placed after
+    // `maybe_drain_queue` so `is_idle` reflects a locally-drained next
+    // turn.
+    if crate::views::prompt_suggestion::resolve_enabled()
+        && result.is_ok()
+        && !was_cancelling
+        && !was_bash_turn
+        && let Some(agent) = app.agents.get_mut(&agent_id)
+        && agent.prompt.text().is_empty()
+        && agent.session.pending_prompts.is_empty()
+        && agent.shared_queue.is_empty()
+        && agent.session.state.is_idle()
+        && let Some(session_id) = agent.session.session_id.as_ref().map(|s| s.0.to_string())
+    {
+        let generation = agent.prompt.prompt_suggestion.begin_fetch();
+        let model = crate::views::prompt_suggestion::resolve_model(&agent.session.models);
+        effects.push(Effect::FetchPromptSuggestion {
+            agent_id,
+            generation,
+            model,
+            session_id: Some(session_id),
+        });
+    }
+
+    note_peek_page_flip(app, agent_id, page_flip_entry);
+    effects
 }
 
 pub(super) fn handle_compact_complete(
     app: &mut AppView,
     agent_id: AgentId,
-    result: Result<(), String>,
+    track_foreground: bool,
+    result: Result<crate::app::actions::CompactRequestStatus, String>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
+        if !track_foreground {
+            let message = match result {
+                Ok(crate::app::actions::CompactRequestStatus::Scheduled) => {
+                    "Compaction scheduled after the current turn.".to_string()
+                }
+                Ok(crate::app::actions::CompactRequestStatus::AlreadyRunning) => {
+                    "Compaction is already pending or running.".to_string()
+                }
+                Ok(crate::app::actions::CompactRequestStatus::Completed) => {
+                    "Conversation compacted.".to_string()
+                }
+                Err(error) => format!("Compaction request failed: {error}"),
+            };
+            agent.scrollback.push_block(RenderBlock::system(message));
+            return vec![];
+        }
         // Defensive: only process if we're still in a compact command state.
         let was_cancelling = matches!(
             agent.session.state,
@@ -1534,11 +1490,21 @@ pub(super) fn handle_compact_complete(
         agent.session.finish_command();
 
         match &result {
-            Ok(()) => {
+            Ok(crate::app::actions::CompactRequestStatus::Completed) => {
                 agent.scrollback.push_block(RenderBlock::session_event(
                     SessionEvent::CompactCompleted {
                         elapsed: elapsed.unwrap_or_default(),
                     },
+                ));
+            }
+            Ok(crate::app::actions::CompactRequestStatus::Scheduled) => {
+                agent.scrollback.push_block(RenderBlock::system(
+                    "Compaction scheduled after the current turn.".to_string(),
+                ));
+            }
+            Ok(crate::app::actions::CompactRequestStatus::AlreadyRunning) => {
+                agent.scrollback.push_block(RenderBlock::system(
+                    "Compaction is already pending or running.".to_string(),
                 ));
             }
             Err(err) if was_cancelling || err.contains("compact cancelled") => {

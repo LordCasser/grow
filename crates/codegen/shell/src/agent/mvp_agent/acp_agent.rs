@@ -1467,41 +1467,6 @@ impl acp::Agent for MvpAgent {
                 _ => None,
             });
         {
-            let mapped = stop_result
-                .as_ref()
-                .map(|ok| ok.stop_reason)
-                .map_err(Clone::clone);
-            let (stop_reason_value, agent_result_value) = crate::sampling::error::prompt_complete_fields(
-                &mapped,
-            );
-            let turn_id = arguments
-                .meta
-                .as_ref()
-                .and_then(|m| m.get("turnId"))
-                .and_then(|v| v.as_u64());
-            let mut payload = serde_json::json!({
-                "sessionId": arguments.session_id.to_string(),
-                "promptId": prompt_id.as_str(),
-                "stopReason": stop_reason_value,
-                "agentResult": agent_result_value,
-            });
-            if let Some(tid) = turn_id {
-                payload["turnId"] = serde_json::json!(tid);
-            }
-            if let Some(ref t) = cancel_trigger {
-                payload["cancelTrigger"] = serde_json::json!(t);
-            }
-            let params = serde_json::value::to_raw_value(&payload)
-                .expect("prompt_complete params serialization");
-            self.gateway
-                .forward_fire_and_forget(
-                    acp::ExtNotification::new(
-                        "grow/session/prompt_complete",
-                        params.into(),
-                    ),
-                );
-        }
-        {
             let end_activity = if handle
                 .pending_interactions
                 .lock()
@@ -1743,7 +1708,8 @@ impl acp::Agent for MvpAgent {
             | "grow/internal/reload_project_mcp_servers" | "grow/internal/reload_skills"
             | "grow/internal/reload_workflows" | "grow/internal/reload_models"
             | "grow/internal/reload_announcements"
-            | "grow/plugins/reload" | "grow/commands/list" | "grow/commands/execute" => {
+            | "grow/plugins/reload" | "grow/commands/list" | "grow/commands/execute"
+            | "grow/queue/prompt_status" => {
                 crate::extensions::session_admin::handle(self, &args).await
             }
             "grow/session/repair" => crate::extensions::repair::handle(self, &args).await,

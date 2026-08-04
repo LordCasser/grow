@@ -10,6 +10,14 @@ use super::agent::AgentId;
 use crate::scrollback::entry::EntryId;
 use agent_client_protocol as acp;
 use shell::sampling::types::ReasoningEffort;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactRequestStatus {
+    Completed,
+    Scheduled,
+    AlreadyRunning,
+}
 /// Synchronous, side-effect-free user intent.
 ///
 /// Produced by [`super::input`] from key/mouse events.
@@ -1381,6 +1389,8 @@ pub enum Effect {
     Compact {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        user_context: Option<String>,
+        track_foreground: bool,
     },
     /// Kill a background task.
     KillBgTask {
@@ -1788,6 +1798,11 @@ pub enum Effect {
         session_id: acp::SessionId,
         command: String,
     },
+    QueryPromptStatus {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        prompt_id: String,
+    },
     /// Register the current session in the active-sessions crash-recovery
     /// registry (`~/.grow/active_sessions.json`).
     RegisterActiveSession {
@@ -1940,6 +1955,23 @@ pub enum DoctorPlanningOutcome {
     Plan(Box<crate::diagnostics::FixPlan>),
     RunLocally(String),
 }
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PromptStatusWire {
+    Unknown,
+    Queued {
+        position: usize,
+        queue_version: u64,
+    },
+    Running {
+        turn_start_ms: u64,
+    },
+    Terminal {
+        stop_reason: String,
+        agent_result: Option<String>,
+    },
+}
+
 /// Result from a completed async [`Effect`].
 ///
 /// Wrapped in `Action::TaskComplete` and dispatched synchronously.
@@ -1962,6 +1994,11 @@ pub enum TaskResult {
     SessionFailed {
         agent_id: AgentId,
         error: String,
+    },
+    PromptStatusResolved {
+        agent_id: AgentId,
+        prompt_id: String,
+        status: Result<PromptStatusWire, String>,
     },
     /// Worktree session was created successfully (worktree + ACP session).
     WorktreeSessionCreated {
@@ -2129,7 +2166,8 @@ pub enum TaskResult {
     /// Manual `/compact` command completed.
     CompactComplete {
         agent_id: AgentId,
-        result: Result<(), String>,
+        track_foreground: bool,
+        result: Result<CompactRequestStatus, String>,
     },
     /// Background task kill result. `outcome` is `None` when the agent
     /// returned an error envelope or an unparseable payload (treated as

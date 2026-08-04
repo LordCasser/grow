@@ -8,6 +8,330 @@ use super::*;
 /// Compile-time constant for v1; remote tunability is a deferred follow-up.
 pub(super) const GOAL_CONTINUATION_BACKOFF_THRESHOLD: u32 = 3;
 
+const GOAL_PAUSED_INTERACTION_REMINDER: &str = "The current Goal is paused. Respond to the user's immediate message using the Goal objective and existing context, but do not resume autonomous Goal execution, schedule another Goal cycle, or claim the Goal is complete. The Goal remains paused until the user explicitly resumes it.";
+
+const GOAL_PLAN_MAX_BYTES: u64 = 1024 * 1024;
+
+async fn validate_goal_plan_staging(
+    actual: &std::path::Path,
+    expected: &std::path::Path,
+) -> Result<(Vec<u8>, String), String> {
+    if actual != expected {
+        return Err(format!(
+            "planner returned unexpected staging path: {}",
+            actual.display()
+        ));
+    }
+    let metadata = tokio::fs::symlink_metadata(actual)
+        .await
+        .map_err(|error| format!("cannot stat staged plan: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("staged plan must be a regular non-symlink file".into());
+    }
+    if metadata.len() == 0 || metadata.len() > GOAL_PLAN_MAX_BYTES {
+        return Err(format!(
+            "staged plan size {} is outside 1..={GOAL_PLAN_MAX_BYTES}",
+            metadata.len()
+        ));
+    }
+    let bytes = tokio::fs::read(actual)
+        .await
+        .map_err(|error| format!("cannot read staged plan: {error}"))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|error| format!("staged plan is not UTF-8: {error}"))?;
+    let has_markdown_task = text.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("- [ ] ")
+            || line.starts_with("- [x] ")
+            || line.starts_with("- [X] ")
+            || line.starts_with("* [ ] ")
+            || line.starts_with("* [x] ")
+            || line.starts_with("* [X] ")
+    });
+    if !has_markdown_task {
+        return Err("staged plan contains no parseable Markdown task".into());
+    }
+    let content_hash = blake3::hash(&bytes).to_hex().to_string();
+    Ok((bytes, content_hash))
+}
+
+impl SessionActor {
+    /// Move the single live Todo resource into Goal scope while parking the
+    /// session plan. The ACP wire remains an ordinary full Plan replacement;
+    /// scope is an internal ownership rule.
+    pub(super) async fn enter_goal_plan_scope(&self) {
+        use crate::tools::todo::TodoState;
+        use tools::types::resources::State;
+
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let live_plan = bridge
+            .read_resource::<State<TodoState>>()
+            .await
+            .map(|state| state.0)
+            .unwrap_or_default();
+        let goal_plan = {
+            let mut scope = self.goal_plan_scope.lock();
+            match scope.as_mut() {
+                Some(scope) if scope.goal_active => return,
+                Some(scope) => {
+                    scope.session = live_plan;
+                    scope.goal_active = true;
+                    scope.goal.clone()
+                }
+                None => {
+                    let goal = TodoState::default();
+                    *scope = Some(super::super::GoalPlanScope {
+                        session: live_plan,
+                        goal: goal.clone(),
+                        goal_active: true,
+                    });
+                    goal
+                }
+            }
+        };
+        self.replace_live_plan(goal_plan).await;
+    }
+
+    /// Switch the live resource back to Session scope without retiring the
+    /// paused Goal. A later switch to Goal restores its private Todo state.
+    pub(super) async fn deactivate_goal_plan_scope(&self) {
+        use crate::tools::todo::TodoState;
+        use tools::types::resources::State;
+
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let live_goal = bridge
+            .read_resource::<State<TodoState>>()
+            .await
+            .map(|state| state.0)
+            .unwrap_or_default();
+        let session_plan = {
+            let mut scope = self.goal_plan_scope.lock();
+            let Some(scope) = scope.as_mut() else {
+                return;
+            };
+            if !scope.goal_active {
+                return;
+            }
+            scope.goal = live_goal;
+            scope.goal_active = false;
+            scope.session.clone()
+        };
+        self.replace_live_plan(session_plan).await;
+    }
+
+    async fn replace_live_plan(&self, plan: crate::tools::todo::TodoState) {
+        use crate::tools::todo::plan_entry_from_todo_item;
+        use tools::types::resources::State;
+
+        self.agent
+            .borrow()
+            .tool_bridge()
+            .update_resource(State(plan.clone()))
+            .await;
+        let _ = self.notifications.persistence_tx.send(
+            crate::session::persistence::PersistenceMsg::PlanState(plan.clone()),
+        );
+        let entries = plan
+            .todo_items()
+            .cloned()
+            .map(plan_entry_from_todo_item)
+            .collect();
+        self.send_update(acp::SessionUpdate::Plan(acp::Plan::new(entries)), None)
+            .await;
+    }
+
+    /// Retire Goal plan ownership and restore the pre-Goal session Todo state.
+    /// This is shared by clear and verified completion, so a later Normal turn
+    /// cannot persist or rebroadcast Goal leftovers. Only ever called on
+    /// terminal Goal transitions, so it also performs the staging GC.
+    pub(super) async fn retire_goal_plan_scope(&self) {
+        // Terminal Goal transitions remove the transient definition-owned
+        // staging drafts; the canonical plan.md / plan.baseline.md audit
+        // record is retained (see docs/architecture/input-routing.md). The
+        // planner recreates the staging dir on demand, and any still-running
+        // planner continuation's result is lease-dropped at commit.
+        let staging = self.goal_tracker.lock().plan_staging_dir();
+        if let Err(error) = std::fs::remove_dir_all(&staging) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %staging.display(),
+                    error = %error,
+                    "goal plan staging cleanup failed",
+                );
+            }
+        }
+        let Some(scope) = self.goal_plan_scope.lock().take() else {
+            return;
+        };
+        if scope.goal_active {
+            self.replace_live_plan(scope.session).await;
+        }
+    }
+
+    pub(super) fn goal_control_generation(&self) -> u64 {
+        self.goal_control_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(super) fn push_goal_control_notice(&self, content: String) {
+        self.pending_system_reminders
+            .lock()
+            .push(self.goal_directive_item(
+                content,
+                sampling_types::SyntheticReason::SystemReminder,
+                sampling_types::GoalDirectiveKind::ControlNotice,
+            ));
+        self.goal_control_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.goal_control_notify.notify_waiters();
+    }
+
+    pub(super) async fn wait_goal_control_change(&self, generation: u64) {
+        loop {
+            let notified = self.goal_control_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.goal_control_generation() != generation {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub(super) fn current_goal_directive_tag(
+        &self,
+        kind: sampling_types::GoalDirectiveKind,
+    ) -> Option<sampling_types::GoalDirectiveTag> {
+        let tracker = self.goal_tracker.lock();
+        let goal = tracker.snapshot()?;
+        Some(sampling_types::GoalDirectiveTag {
+            goal_id: goal.goal_id.clone(),
+            definition_revision: goal.definition_revision,
+            kind,
+        })
+    }
+
+    pub(super) fn goal_directive_item(
+        &self,
+        content: impl Into<String>,
+        reason: sampling_types::SyntheticReason,
+        kind: sampling_types::GoalDirectiveKind,
+    ) -> ConversationItem {
+        match self.current_goal_directive_tag(kind) {
+            Some(tag) => ConversationItem::goal_directive(content, reason, tag),
+            None => ConversationItem::system_reminder(content),
+        }
+    }
+
+    pub(super) fn push_current_goal_context(&self) {
+        let objective = self
+            .goal_tracker
+            .lock()
+            .snapshot()
+            .map(|goal| goal.objective.clone());
+        let Some(objective) = objective else {
+            return;
+        };
+        self.chat_state_handle
+            .push_user_message(self.goal_directive_item(
+                format!("<goal-context>\nObjective: {objective}\n</goal-context>"),
+                sampling_types::SyntheticReason::SystemReminder,
+                sampling_types::GoalDirectiveKind::Context,
+            ));
+    }
+
+    pub(super) async fn inject_paused_goal_interaction_directive(&self) {
+        if self.behavior.lock().behavior() != Some(tool_types::BehaviorId::Goal)
+            || !self
+                .goal_tracker
+                .lock()
+                .status()
+                .is_some_and(|status| status.is_paused())
+        {
+            return;
+        }
+        // One PausedInteraction directive per (goal_id, definition_revision):
+        // if the conversation already carries this exact tag, the model has
+        // seen it and later paused user turns skip the duplicate. A revised
+        // Goal bumps the revision, so its next paused turn re-injects with the
+        // fresh tag; after compaction removed the directive from context,
+        // re-injecting once is correct again.
+        let Some(tag) =
+            self.current_goal_directive_tag(sampling_types::GoalDirectiveKind::PausedInteraction)
+        else {
+            return;
+        };
+        if self
+            .chat_state_handle
+            .get_conversation()
+            .await
+            .iter()
+            .any(|item| {
+                matches!(
+                    item,
+                    ConversationItem::User(user) if user.goal_directive.as_ref() == Some(&tag)
+                )
+            })
+        {
+            return;
+        }
+        self.chat_state_handle
+            .push_user_message(self.goal_directive_item(
+                format!(
+                    "<{}>\n{}\n</{}>",
+                    self.reminder_wrapper_tag(),
+                    GOAL_PAUSED_INTERACTION_REMINDER,
+                    self.reminder_wrapper_tag()
+                ),
+                sampling_types::SyntheticReason::SystemReminder,
+                sampling_types::GoalDirectiveKind::PausedInteraction,
+            ));
+    }
+
+    pub(super) fn project_goal_conversation(
+        &self,
+        items: Vec<ConversationItem>,
+        include_autonomy: bool,
+    ) -> Vec<ConversationItem> {
+        if self.behavior.lock().behavior() != Some(tool_types::BehaviorId::Goal) {
+            return sampling_types::project_conversation_for_goal_scope(
+                items,
+                sampling_types::GoalConversationProjection::Exclude,
+            );
+        }
+        let definition = self
+            .goal_tracker
+            .lock()
+            .snapshot()
+            .map(|goal| (goal.goal_id.clone(), goal.definition_revision, goal.status));
+        match definition.as_ref() {
+            Some((goal_id, revision, crate::session::goal_tracker::GoalStatus::Active)) => {
+                sampling_types::project_conversation_for_goal_scope(
+                    items,
+                    sampling_types::GoalConversationProjection::Active {
+                        goal_id,
+                        definition_revision: *revision,
+                        include_autonomy,
+                    },
+                )
+            }
+            Some((goal_id, revision, status)) if status.is_paused() => {
+                sampling_types::project_conversation_for_goal_scope(
+                    items,
+                    sampling_types::GoalConversationProjection::Paused {
+                        goal_id,
+                        definition_revision: *revision,
+                    },
+                )
+            }
+            _ => sampling_types::project_conversation_for_goal_scope(
+                items,
+                sampling_types::GoalConversationProjection::Exclude,
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GoalClassifierPolicy {
     pub enabled: bool,
@@ -1061,7 +1385,7 @@ impl SessionActor {
             tracing::debug!("goal planner: no subagent coordinator channel; skipping");
             return;
         };
-        let (plan_file, definition_key) = {
+        let (plan_file, definition_key, autonomy_generation) = {
             let tracker = self.goal_tracker.lock();
             match tracker.snapshot() {
                 Some(o) if o.plan_file.is_some() => {
@@ -1069,8 +1393,9 @@ impl SessionActor {
                     return;
                 }
                 Some(o) => (
-                    tracker.plan_path(),
+                    tracker.plan_staging_path(&o.goal_id, o.definition_revision),
                     (o.goal_id.clone(), o.definition_revision),
+                    o.autonomy_generation,
                 ),
                 None => return,
             }
@@ -1136,6 +1461,7 @@ impl SessionActor {
         let effective_model_id =
             crate::session::goal_planner::effective_role_model_id(None, &model_id).to_owned();
         let foreground_generation = self.completion_delivery.generation();
+        let control_generation = self.goal_control_generation();
         let mut planner_task = tokio::task::spawn_local(async move {
             crate::session::goal_planner::run_goal_planner(
                 spawner,
@@ -1168,6 +1494,9 @@ impl SessionActor {
                 .wait_generation_change(foreground_generation) => {
                 PlannerWait::Displaced("a foreground completion")
             },
+            _ = self.wait_goal_control_change(control_generation) => {
+                PlannerWait::Displaced("a Goal control change")
+            },
             result = &mut planner_task => PlannerWait::Finished(result),
         };
         let outcome = match wait {
@@ -1183,7 +1512,11 @@ impl SessionActor {
                     match planner_task.await {
                         Ok(outcome) => {
                             let applied = actor
-                                .apply_goal_planner_outcome(&background_definition, outcome)
+                                .apply_goal_planner_outcome(
+                                    &background_definition,
+                                    autonomy_generation,
+                                    outcome,
+                                )
                                 .await;
                             if applied {
                                 actor.completion_delivery.queue_ready(
@@ -1217,65 +1550,70 @@ impl SessionActor {
             },
         };
 
-        self.apply_goal_planner_outcome(&definition_key, outcome)
+        self.apply_goal_planner_outcome(&definition_key, autonomy_generation, outcome)
             .await;
     }
 
     async fn apply_goal_planner_outcome(
         &self,
         definition_key: &(String, u64),
+        autonomy_generation: u64,
         outcome: crate::session::goal_planner::GoalPlannerOutcome,
     ) -> bool {
-        if !self
-            .goal_tracker
-            .lock()
-            .definition_is_current(&definition_key.0, definition_key.1)
-        {
+        let lease_is_current = |tracker: &crate::session::goal_tracker::GoalTracker| {
+            tracker.definition_is_current(&definition_key.0, definition_key.1)
+                && tracker.autonomy_generation() == Some(autonomy_generation)
+                && tracker.status() == Some(crate::session::goal_tracker::GoalStatus::Active)
+        };
+        if !lease_is_current(&self.goal_tracker.lock()) {
             tracing::info!("goal planner: discarded stale result after goal revision");
             return false;
         }
 
         let plan_available = match outcome {
             crate::session::goal_planner::GoalPlannerOutcome::Planned { plan_file, .. } => {
-                // Stage the immutable baseline before publishing either path.
-                // The file copy is an await boundary, so committing plan_file
-                // earlier could let `/goal set` retain an old planner result
-                // after its definition revision changed.
-                let baseline_target = {
+                let (expected_staging, canonical_plan, baseline_plan) = {
                     let tracker = self.goal_tracker.lock();
-                    let src = tracker.plan_path();
-                    let dst = tracker.plan_baseline_path();
-                    let need_baseline = tracker
-                        .snapshot()
-                        .is_some_and(|o| o.plan_baseline_file.is_none());
-                    need_baseline.then_some((src, dst))
+                    (
+                        tracker.plan_staging_path(&definition_key.0, definition_key.1),
+                        tracker.plan_path(),
+                        tracker.plan_baseline_path(),
+                    )
                 };
-                let baseline_file = if let Some((src, dst)) = baseline_target {
-                    match tokio::fs::copy(&src, &dst).await {
-                        Ok(_) => Some(dst),
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err,
-                                src = %src.display(),
-                                "goal planner: failed to snapshot plan baseline; \
-                                 PLAN_CHANGES will render (none)",
-                            );
-                            None
+                let (plan_bytes, content_hash) =
+                    match validate_goal_plan_staging(&plan_file, &expected_staging).await {
+                        Ok(validated) => validated,
+                        Err(error) => {
+                            tracing::warn!(%error, "goal planner: rejected staging artifact");
+                            let _ = tokio::fs::remove_file(&plan_file).await;
+                            return false;
                         }
-                    }
-                } else {
-                    None
-                };
+                    };
+                // Publication and lease validation are one actor-owned commit.
+                // The artifact is capped at 1 MiB, so the small synchronous
+                // rename/write while holding the tracker lock is preferable to
+                // releasing the lease between filesystem awaits: otherwise a
+                // concurrent `/goal set`, pause, or steering event could make a
+                // stale planner overwrite the canonical plan after validation.
                 let mut tracker = self.goal_tracker.lock();
-                if !tracker.definition_is_current(&definition_key.0, definition_key.1) {
-                    tracing::info!("goal planner: discarded staged result after goal revision");
+                if !lease_is_current(&tracker) {
+                    drop(tracker);
+                    let _ = tokio::fs::remove_file(&plan_file).await;
+                    return false;
+                }
+                if let Err(error) = std::fs::rename(&plan_file, &canonical_plan) {
+                    tracing::warn!(%error, "goal planner: failed to publish canonical plan");
+                    return false;
+                }
+                if let Err(error) = std::fs::write(&baseline_plan, &plan_bytes) {
+                    tracing::warn!(%error, "goal planner: failed to publish plan baseline");
+                    let _ = std::fs::remove_file(&canonical_plan);
                     return false;
                 }
                 if let Some(o) = tracker.snapshot_mut() {
-                    o.plan_file = Some(plan_file);
-                    if let Some(path) = baseline_file {
-                        o.plan_baseline_file = Some(path);
-                    }
+                    o.plan_file = Some(canonical_plan);
+                    o.plan_content_hash = Some(content_hash);
+                    o.plan_baseline_file = Some(baseline_plan);
                 }
                 true
             }
@@ -1297,7 +1635,7 @@ impl SessionActor {
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
         let mut tracker = self.goal_tracker.lock();
-        if !tracker.definition_is_current(&definition_key.0, definition_key.1) {
+        if !lease_is_current(&tracker) {
             tracing::info!("goal planner: discarded result after goal changed during commit");
             return false;
         }
@@ -1309,41 +1647,82 @@ impl SessionActor {
         plan_available
     }
 
-    /// Run the stall-triggered strategist subagent (best-effort, fail-OPEN).
-    /// Called from `apply_classifier_outcome`'s `NotAchieved` branch once the
-    /// consecutive-failure streak hits a multiple of `goal_strategist_every`
-    /// and neither the cap nor the stall paused the round. On success the
-    /// recommendation + strategy-note path are persisted on the orchestration
-    /// so the continuation directive can inline them. Any failure (no
-    /// coordinator, spawn error, missing note) is logged and ignored — the
-    /// goal keeps running, never pauses. No `goal_tracker` lock is held across
-    /// the strategist `.await`.
-    pub(super) async fn maybe_run_goal_strategist(&self, attempt: u32, consecutive_failures: u32) {
-        // The claim granted the cap bonus up front; every exit that delivers
-        // no restructure (early return, FailOpen, future dropped by a turn
-        // cancel) must give it back.
+    /// Schedule the stall-triggered strategist subagent as a background Goal
+    /// stage (best-effort, fail-OPEN). The fire claim (cap bonus + marker)
+    /// is made by the caller in the mailbox; the model work runs in the
+    /// spawned stage task and its outcome is committed by the mailbox via
+    /// `SessionEvent::GoalStageCompleted`. `apply_classifier_outcome` never
+    /// awaits model work, so the mailbox can call this directly.
+    pub(super) fn maybe_run_goal_strategist(
+        self: &std::sync::Arc<Self>,
+        attempt: u32,
+        consecutive_failures: u32,
+    ) {
         let Some(definition_key) = self.goal_tracker.lock().definition_key() else {
             return;
         };
-        let guard_goal_id = definition_key.0.clone();
-        let guard_revision = definition_key.1;
-        let mut bonus_guard = TrackerDropGuard::new(&self.goal_tracker, move |t| {
-            if t.definition_is_current(&guard_goal_id, guard_revision) {
-                t.revoke_strategist_cap_bonus();
+        let autonomy_generation = self
+            .goal_tracker
+            .lock()
+            .autonomy_generation()
+            .unwrap_or_default();
+        if self.tool_context.subagent_event_tx.is_none() {
+            // Mirror the old no-coordinator exit (guard dropped without a
+            // run): the strategist delivered nothing, so the cap bonus the
+            // caller claimed is revoked — only while the same definition
+            // still owns the orchestration.
+            let mut tracker = self.goal_tracker.lock();
+            if tracker.definition_is_current(&definition_key.0, definition_key.1) {
+                tracker.revoke_strategist_cap_bonus();
             }
-        });
-        let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {
-            tracing::debug!("goal strategist: no subagent coordinator channel; skipping");
             return;
+        }
+        let stage_id = self
+            .goal_stage_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let foreground_generation = self.completion_delivery.generation();
+        let actor = std::sync::Arc::clone(self);
+        tokio::task::spawn_local(async move {
+            let outcome = actor
+                .run_goal_strategist_stage(attempt, consecutive_failures)
+                .await;
+            let _ = actor.event_tx.send(SessionEvent::GoalStageCompleted(
+                crate::session::replay_events::GoalStageCompletion {
+                    stage_id,
+                    goal_id: definition_key.0.clone(),
+                    definition_revision: definition_key.1,
+                    autonomy_generation,
+                    foreground_generation,
+                    kind: crate::session::replay_events::GoalStageKind::Strategist {
+                        attempt,
+                        consecutive_failures,
+                        outcome,
+                    },
+                },
+            ));
+        });
+    }
+
+    /// Stage-task body for the strategist: assemble inputs and run the
+    /// subagent off the mailbox. Returns the raw outcome; the mailbox
+    /// commit (`commit_strategist_stage`) decides apply vs. discard and owns
+    /// the cap-bonus bookkeeping.
+    async fn run_goal_strategist_stage(
+        &self,
+        attempt: u32,
+        consecutive_failures: u32,
+    ) -> Result<crate::session::goal_strategist::GoalStrategistOutcome, String> {
+        let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {
+            return Err("goal strategist: no subagent coordinator channel".to_string());
         };
 
-        // Assemble inputs under one scoped lock, then drop it before the spawn
-        // await. `plan_path` / `strategy_path` are derived from the tracker
-        // while we hold the lock (cheap path joins).
+        // Assemble inputs under one scoped lock, then drop it before the
+        // spawn await. `plan_path` / `strategy_path` are derived from the
+        // tracker while we hold the lock (cheap path joins).
         let (objective, plan_file, strategy_file, verifier_id) = {
             let tracker = self.goal_tracker.lock();
             let Some(o) = tracker.snapshot() else {
-                return;
+                return Err("goal strategist: orchestration vanished before stage ran".to_string());
             };
             (
                 o.objective.clone(),
@@ -1415,62 +1794,74 @@ impl SessionActor {
             },
         )
         .await;
-
-        if !self
-            .goal_tracker
-            .lock()
-            .definition_is_current(&definition_key.0, definition_key.1)
-        {
-            tracing::info!("goal strategist: discarded stale result after goal revision");
-            bonus_guard.disarm();
-            return;
-        }
-
-        // Fail-OPEN: persist on success; any other exit leaves `bonus_guard`
-        // armed (the runner already emitted diagnostics + warning).
-        if let crate::session::goal_strategist::GoalStrategistOutcome::Advised {
-            strategy_file,
-            recommendation,
-            ..
-        } = outcome
-        {
-            self.goal_tracker.lock().record_strategy_recommendation(
-                strategy_file.to_string_lossy().into_owned(),
-                recommendation,
-            );
-            bonus_guard.disarm();
-        }
+        Ok(outcome)
     }
 
-    /// Generate the ONE closing user-facing summary after a goal is
-    /// verified-achieved and surface it as the goal turn's final message.
-    ///
-    /// Best-effort / fail-OPEN: gated by `goal_summary_enabled`; any failure
-    /// (disabled, no coordinator, spawn error, empty output) is logged /
-    /// diagnostics'd and skipped — goal completion is NEVER blocked, paused, or
-    /// un-achieved (the goal is already Complete when this runs). Read-only:
-    /// the spawn pins a read-only toolset and the prompt forbids edits. No
-    /// `goal_tracker` lock is held across the summarizer `.await`.
-    pub(super) async fn maybe_run_goal_summarizer(&self, attempt: u32) {
+    /// Schedule the ONE closing user-facing summarizer after a goal is
+    /// verified-achieved, as a background Goal stage (fail-OPEN). The
+    /// closing summary is surfaced by the mailbox commit
+    /// (`commit_summarizer_stage`) — goal completion is never blocked,
+    /// paused, or un-achieved (the goal is already Complete when this runs).
+    pub(super) fn maybe_run_goal_summarizer(self: &std::sync::Arc<Self>, attempt: u32) {
         if !self.goal_summary_enabled {
             return;
         }
-        let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {
+        let Some(definition_key) = self.goal_tracker.lock().definition_key() else {
+            return;
+        };
+        let autonomy_generation = self
+            .goal_tracker
+            .lock()
+            .autonomy_generation()
+            .unwrap_or_default();
+        if self.tool_context.subagent_event_tx.is_none() {
             tracing::debug!("goal summarizer: no subagent coordinator channel; skipping");
             return;
+        }
+        let stage_id = self
+            .goal_stage_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let foreground_generation = self.completion_delivery.generation();
+        let actor = std::sync::Arc::clone(self);
+        tokio::task::spawn_local(async move {
+            let outcome = actor.run_goal_summarizer_stage(attempt).await;
+            let _ = actor.event_tx.send(SessionEvent::GoalStageCompleted(
+                crate::session::replay_events::GoalStageCompletion {
+                    stage_id,
+                    goal_id: definition_key.0.clone(),
+                    definition_revision: definition_key.1,
+                    autonomy_generation,
+                    foreground_generation,
+                    kind: crate::session::replay_events::GoalStageKind::Summarizer {
+                        attempt,
+                        outcome,
+                    },
+                },
+            ));
+        });
+    }
+
+    /// Stage-task body for the summarizer: assemble inputs and run the
+    /// subagent off the mailbox. Returns the raw outcome; the mailbox
+    /// commit (`commit_summarizer_stage`) surfaces the summary.
+    async fn run_goal_summarizer_stage(
+        &self,
+        attempt: u32,
+    ) -> Result<crate::session::goal_summarizer::GoalSummarizerOutcome, String> {
+        let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {
+            return Err("goal summarizer: no subagent coordinator channel".to_string());
         };
 
         // Snapshot inputs under one scoped lock, dropped before the awaits.
-        let (objective, plan_file, details_file, definition_key) = {
+        let (objective, plan_file, details_file) = {
             let tracker = self.goal_tracker.lock();
             let Some(o) = tracker.snapshot() else {
-                return;
+                return Err("goal summarizer: orchestration vanished before stage ran".to_string());
             };
             (
                 o.objective.clone(),
                 tracker.plan_path(),
                 o.last_classifier_details_path.clone(),
-                (o.goal_id.clone(), o.definition_revision),
             )
         };
 
@@ -1514,30 +1905,7 @@ impl SessionActor {
             },
         )
         .await;
-
-        if !self
-            .goal_tracker
-            .lock()
-            .definition_is_current(&definition_key.0, definition_key.1)
-        {
-            tracing::info!("goal summarizer: discarded stale result after goal revision");
-            return;
-        }
-
-        // Fail-OPEN: surface the summary on success; any other outcome already
-        // emitted diagnostics and is skipped. The chunk persists via
-        // `updates.jsonl`, so resume/rewind keep it.
-        if let crate::session::goal_summarizer::GoalSummarizerOutcome::Summarized {
-            summary, ..
-        } = outcome
-        {
-            // Bump the stream start so the summary chunk carries a fresh
-            // `streamStartMs`; without it the client appends this closing
-            // message to the model's last turn message instead of a new block.
-            self.chat_state_handle
-                .record_stream_start(chrono::Utc::now().timestamp_millis());
-            self.send_slash_command_output(&summary).await;
-        }
+        Ok(outcome)
     }
 
     /// Build a [`GoalNotifySender`] for the goal orchestrator.

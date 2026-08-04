@@ -363,33 +363,6 @@ fn cta_mcp_server(
         is_managed_gateway: false,
     }
 }
-fn arm_reconcile(
-    app: &mut AppView,
-    id: AgentId,
-    prompt_id: &str,
-    stop_reason: &str,
-    age: std::time::Duration,
-) {
-    arm_reconcile_with_trigger(app, id, prompt_id, stop_reason, None, age);
-}
-/// [`arm_reconcile`] with an explicit `_meta.cancelTrigger`.
-fn arm_reconcile_with_trigger(
-    app: &mut AppView,
-    id: AgentId,
-    prompt_id: &str,
-    stop_reason: &str,
-    cancel_trigger: Option<&str>,
-    age: std::time::Duration,
-) {
-    app.agents.get_mut(&id).unwrap().pending_turn_end_reconcile =
-        Some(crate::app::agent_view::PendingTurnEnd {
-            prompt_id: prompt_id.into(),
-            stop_reason: Some(stop_reason.into()),
-            agent_result: None,
-            cancel_trigger: cancel_trigger.map(str::to_string),
-            received_at: std::time::Instant::now() - age,
-        });
-}
 pub(super) fn end_turn() -> Action {
     Action::TaskComplete(TaskResult::PromptResponse {
         agent_id: AgentId(0),

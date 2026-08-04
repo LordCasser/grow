@@ -2,161 +2,9 @@
     use super::*;
 
     #[test]
-    fn driver_prompt_complete_without_prompt_id_arms_reconcile_not_finish() {
-        // Driver still owns the turn via PromptResponse — prompt_complete must
-        // NOT finish immediately. Missing wire promptId (legacy shells) arms
-        // lost-PR reconcile on current_prompt_id so grace teardown
-        // can run if the RPC never arrives; turn state stays TurnRunning.
-        let mut app = make_app_with_agent("sess-drive");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-local".into());
-            agent.turn_started_at = Some(std::time::Instant::now());
-            assert!(!agent.attached_as_viewer);
-        }
-
-        let affected = handle_ext_notification(&prompt_complete_ext("sess-drive"), &mut app);
-        assert!(
-            affected,
-            "arming reconcile must schedule ticks for background-tab recovery"
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            matches!(agent.session.state, AgentState::TurnRunning),
-            "driver's running turn must NOT be finished by prompt_complete"
-        );
-        assert_eq!(
-            agent.session.current_prompt_id.as_deref(),
-            Some("pid-local"),
-            "driver's current_prompt_id must be untouched at arm time"
-        );
-        assert!(agent.turn_started_at.is_some());
-        assert_eq!(
-            agent
-                .pending_turn_end_reconcile
-                .as_ref()
-                .map(|p| p.prompt_id.as_str()),
-            Some("pid-local"),
-        );
-    }
-
-    #[test]
-    fn driver_prompt_complete_with_matching_prompt_id_arms_reconcile() {
-        // Lost-response recovery: when the driver
-        // receives the turn-end broadcast for the exact turn it is awaiting,
-        // it must ARM the deferred reconcile — without finishing the turn
-        // immediately (the RPC response normally lands ms later and carries
-        // richer context; finishing here would double-finish every turn).
-        let mut app = make_app_with_agent("sess-drive");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-stuck".into());
-            agent.session.cancel_turn(&mut agent.scrollback); // CancelTurn → TurnCancelling
-            assert!(!agent.attached_as_viewer);
-        }
-
-        let affected = handle_ext_notification(
-            &prompt_complete_ext_with_prompt_id("sess-drive", "pid-stuck", "cancelled"),
-            &mut app,
-        );
-        assert!(
-            affected,
-            "arming must report a state change — the event loop only calls \
-             schedule_tick on changed ACP batches, and the reconcile sweep \
-             runs on the animation tick (a dormant background tab would \
-             otherwise never get swept)"
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            agent.session.state.is_cancelling(),
-            "turn state must be untouched at arm time (RPC may still arrive)"
-        );
-        let pending = agent
-            .pending_turn_end_reconcile
-            .as_ref()
-            .expect("reconcile must be armed for the driver's awaited turn");
-        assert_eq!(pending.prompt_id, "pid-stuck");
-        assert_eq!(pending.stop_reason.as_deref(), Some("cancelled"));
-    }
-
-    #[test]
-    fn driver_prompt_complete_with_mismatched_prompt_id_does_not_arm() {
-        // A broadcast for some OTHER prompt (stale, or a queued prompt that
-        // resolved server-side) must not arm a reconcile against the turn
-        // this client is actually driving.
-        let mut app = make_app_with_agent("sess-drive");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-current".into());
-        }
-
-        let _ = handle_ext_notification(
-            &prompt_complete_ext_with_prompt_id("sess-drive", "pid-other", "end_turn"),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(agent.pending_turn_end_reconcile.is_none());
-        assert!(matches!(agent.session.state, AgentState::TurnRunning));
-    }
-
-    #[test]
-    fn driver_prompt_complete_without_prompt_id_arms_on_current() {
-        // Older shells omit `promptId`; arm reconcile on current_prompt_id when
-        // not mid-tool (see arm_driver_turn_end_reconcile). Does not finish.
-        let mut app = make_app_with_agent("sess-drive");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-current".into());
-        }
-
-        let _ = handle_ext_notification(&prompt_complete_ext("sess-drive"), &mut app);
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            agent
-                .pending_turn_end_reconcile
-                .as_ref()
-                .map(|p| p.prompt_id.as_str()),
-            Some("pid-current"),
-        );
-        assert!(matches!(agent.session.state, AgentState::TurnRunning));
-    }
-
-    #[test]
-    fn driver_prompt_complete_pushes_no_marker() {
-        // The driver emits its own marker via PromptResponse; prompt_complete
-        // must not double-push one for it (or push any block at all).
-        let mut app = make_app_with_agent("sess-drive");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-local".into());
-            agent.turn_started_at = Some(std::time::Instant::now());
-            assert!(!agent.attached_as_viewer);
-        }
-
-        let len_before = app.agents.get(&AgentId(0)).unwrap().scrollback.len();
-        let _ = handle_ext_notification(&prompt_complete_ext("sess-drive"), &mut app);
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            agent.scrollback.len(),
-            len_before,
-            "the driver must not get any new block from prompt_complete"
-        );
-    }
-
-    #[test]
     fn live_turn_completed_finalizes_viewer_turn_and_duplicate_is_noop() {
         // The durable `TurnCompleted` is the viewer's non-interactive exit from
-        // TurnRunning on the replayed rail (parallel to the fire-and-forget
-        // `prompt_complete`). A viewer adopting the driver's live turn must drop
+        // TurnRunning on the replayed rail. A viewer adopting the driver's live turn must drop
         // back to Idle with a marker when it arrives.
         let mut app = make_app_with_agent("sess-view");
         app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
@@ -200,10 +48,10 @@
     }
 
     #[test]
-    fn live_turn_completed_driver_arms_reconcile() {
-        // For the driver the `PromptResponse` RPC owns the lifecycle, so a live
-        // TurnCompleted for the turn it is driving arms the lost-RPC reconcile
-        // WITHOUT finishing the turn (mirrors the `prompt_complete` driver path).
+    fn live_turn_completed_driver_finalizes_immediately() {
+        // Durable TurnCompleted is prompt-id lifecycle authority for drivers
+        // and viewers alike. PromptResponse may arrive later with metadata but
+        // cannot finish or mark the prompt twice.
         let mut app = make_app_with_agent("sess-drive");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -219,15 +67,9 @@
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(
-            matches!(agent.session.state, AgentState::TurnRunning),
-            "the driver's turn must NOT be finished by a live TurnCompleted"
+            matches!(agent.session.state, AgentState::Idle),
+            "the durable terminal must finish the matching driver turn"
         );
-        let pending = agent
-            .pending_turn_end_reconcile
-            .as_ref()
-            .expect("the driver's awaited turn must arm a reconcile");
-        assert_eq!(pending.prompt_id, "pid-local");
-        assert_eq!(pending.stop_reason.as_deref(), Some("cancelled"));
     }
 
     #[test]
@@ -1384,14 +1226,10 @@
         );
     }
 
-    /// BUG 1 pin: a BACKGROUND-tab driver (`is_active == false`) that arms the
-    /// lost-RPC reconcile from a live `TurnCompleted` must STILL report a change.
-    /// Otherwise `event_loop` skips `schedule_tick` and `reconcile_overdue_turn_ends`
-    /// never fires, stranding the turn on "Waiting…". The reconcile-arm return must
-    /// NOT be gated on `is_active`. (This test fails if the live arm routes the arm
-    /// through `changed && is_active`.)
+    /// A background-tab driver must still apply a durable terminal and report
+    /// the state change even though its pane is not active.
     #[test]
-    fn background_driver_live_turn_completed_arms_reconcile_and_reports_change() {
+    fn background_driver_live_turn_completed_finalizes_and_reports_change() {
         let mut app = make_app_with_agent("sess-bg");
         let id = AgentId(0);
         {
@@ -1410,17 +1248,10 @@
         );
         assert!(
             affected,
-            "a background driver's reconcile-arm must report a change so the tick is scheduled"
+            "a background driver's durable terminal must report its state change"
         );
         let agent = app.agents.get(&id).unwrap();
-        assert!(
-            agent.pending_turn_end_reconcile.is_some(),
-            "the lost-RPC reconcile must be armed"
-        );
-        assert!(
-            matches!(agent.session.state, AgentState::TurnRunning),
-            "arming must NOT finish the driver's turn"
-        );
+        assert!(matches!(agent.session.state, AgentState::Idle));
     }
 
     /// The replay set never leaks across loads: a second load enters a fresh
@@ -1533,4 +1364,3 @@
             "it must not stash onto the running local turn"
         );
     }
-

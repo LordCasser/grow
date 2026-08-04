@@ -9,6 +9,49 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
+const COMPACTION_IDLE: u8 = 0;
+const COMPACTION_MANUAL: u8 = 1;
+const COMPACTION_AUTO: u8 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionOwner {
+    Manual,
+    Auto,
+}
+
+/// Single publication lease for conversation replacement. Prefire may still
+/// prepare a read-only summary in parallel, but manual and auto compaction can
+/// never both enter the mutating pipeline.
+#[derive(Default)]
+pub struct CompactionLease {
+    owner: AtomicU8,
+}
+
+pub struct CompactionLeaseGuard<'a>(&'a CompactionLease);
+
+impl Drop for CompactionLeaseGuard<'_> {
+    fn drop(&mut self) {
+        self.0.owner.store(COMPACTION_IDLE, Ordering::Release);
+    }
+}
+
+impl CompactionLease {
+    pub fn try_enter(&self, owner: CompactionOwner) -> Option<CompactionLeaseGuard<'_>> {
+        let value = match owner {
+            CompactionOwner::Manual => COMPACTION_MANUAL,
+            CompactionOwner::Auto => COMPACTION_AUTO,
+        };
+        self.owner
+            .compare_exchange(COMPACTION_IDLE, value, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| CompactionLeaseGuard(self))
+    }
+
+    pub fn is_in_flight(&self) -> bool {
+        self.owner.load(Ordering::Acquire) != COMPACTION_IDLE
+    }
+}
+
 /// Auto-compaction is gated whenever `auto_compact_suppressed` is not [`SUPPRESS_NONE`].
 pub(crate) const SUPPRESS_NONE: u8 = 0;
 /// Resolvable failure (`other`): suppressed for the current turn, then
@@ -179,6 +222,7 @@ impl PrefireState {
 }
 
 pub struct CompactionConfig {
+    pub lease: CompactionLease,
     /// Context window usage percentage (0-100) at which auto-compact triggers.
     ///
     /// `Cell` so the value can be re-resolved at model-switch time without
@@ -263,6 +307,26 @@ mod prefire_state_tests {
         let state = PrefireState::default();
         assert!(state.take_handle().is_none());
         assert!(state.take().is_none());
+    }
+}
+
+#[cfg(test)]
+mod compaction_lease_tests {
+    use super::*;
+
+    #[test]
+    fn manual_and_auto_compaction_are_mutually_exclusive() {
+        let lease = CompactionLease::default();
+        let manual = lease
+            .try_enter(CompactionOwner::Manual)
+            .expect("manual lease");
+        assert!(lease.is_in_flight());
+        assert!(lease.try_enter(CompactionOwner::Auto).is_none());
+        drop(manual);
+        let auto = lease.try_enter(CompactionOwner::Auto).expect("auto lease");
+        assert!(lease.try_enter(CompactionOwner::Manual).is_none());
+        drop(auto);
+        assert!(!lease.is_in_flight());
     }
 }
 

@@ -239,7 +239,7 @@ impl SessionActor {
     pub(super) async fn handle_prompt(
         self: &Arc<Self>,
         prompt_id: &str,
-        prompt_blocks: Vec<acp::ContentBlock>,
+        mut prompt_blocks: Vec<acp::ContentBlock>,
         prompt_mode: PromptMode,
         prompt_client_identifier: Option<String>,
         prompt_screen_mode: Option<String>,
@@ -335,6 +335,64 @@ impl SessionActor {
                 self.signals_handle().record_edit_and_retry();
             }
         }
+        // Goal planning is a finite Goal stage owned by the synthetic cycle,
+        // never by the slash-command actor handler. A missing plan is resolved
+        // before the implementer request is built. Steering may transfer the
+        // planner to the background; in that case this cycle ends cleanly and
+        // the foreground user prompt is promoted by the actor.
+        if matches!(origin, super::super::PromptOrigin::GoalSummary) {
+            let planning_objective = {
+                let tracker = self.goal_tracker.lock();
+                tracker.snapshot().and_then(|goal| {
+                    (goal.status == crate::session::goal_tracker::GoalStatus::Active
+                        && goal.plan_file.is_none())
+                    .then(|| goal.objective.clone())
+                })
+            };
+            if let Some(objective) = planning_objective {
+                self.maybe_run_goal_planner(&objective).await;
+                let ready = {
+                    let tracker = self.goal_tracker.lock();
+                    tracker.snapshot().is_some_and(|goal| {
+                        goal.status == crate::session::goal_tracker::GoalStatus::Active
+                            && (!self.goal_planner_enabled || goal.plan_file.is_some())
+                    })
+                };
+                if !ready {
+                    return ok_end_turn(0, None);
+                }
+                prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+                    self.render_goal_start_reminder().await,
+                ))];
+            } else if matches!(
+                prompt_blocks.as_slice(),
+                [acp::ContentBlock::Text(text)]
+                    if text.text == super::slash_exec::GOAL_CYCLE_PLACEHOLDER
+            ) {
+                // Command-plane cycle (`queue_goal_cycle`): the queued blocks
+                // are a placeholder. Render the real continuation directive
+                // here, in the turn task, from the same pure source as the
+                // turn-end continuation (`render_goal_continuation`). A Goal
+                // that is no longer active renders nothing — end the cycle
+                // without model work so the placeholder never reaches the
+                // model. Renders only; the turn-end drain stays the caller's
+                // job (`handle_turn_end`).
+                let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+                let Some(plan) = self.render_goal_continuation(current_tokens).await else {
+                    return ok_end_turn(0, None);
+                };
+                if let Some(rec) = plan.strategy_rec.as_deref() {
+                    self.consume_strategist_note(rec);
+                }
+                if let Some(pattern) = plan.stop_pattern {
+                    self.record_and_emit_premature_stop(pattern);
+                }
+                prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+                    plan.directive,
+                ))];
+            }
+        }
+
         let original_prompt_text = prompt_blocks.iter().fold(String::new(), |mut acc, b| {
             if let acp::ContentBlock::Text(t) = b {
                 acc.push_str(&t.text);
@@ -465,6 +523,7 @@ impl SessionActor {
                                 .lock()
                                 .revise_goal(objective, token_budget);
                             debug_assert!(revised);
+                            self.push_current_goal_context();
                             let current_tokens =
                                 self.chat_state_handle.get_total_tokens().await as i64;
                             let (tokens_used, finished) = self.goal_tokens(current_tokens);
@@ -878,6 +937,9 @@ impl SessionActor {
         self.maybe_inject_mcp_connecting_reminder().await;
         self.maybe_inject_date_rollover_reminder().await;
         self.inject_behavior_reminders().await;
+        if matches!(&origin, super::super::PromptOrigin::User) {
+            self.inject_paused_goal_interaction_directive().await;
+        }
         self.inject_resumed_tasks_reminder();
         if matches!(&origin, super::super::PromptOrigin::User) {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
@@ -917,7 +979,11 @@ impl SessionActor {
                 self.maybe_inject_interrupt_reminder().await;
             }
             let mut user_chat = if implicit_goal_set {
-                ConversationItem::system_reminder(user_message)
+                self.goal_directive_item(
+                    user_message,
+                    sampling_types::SyntheticReason::SystemReminder,
+                    sampling_types::GoalDirectiveKind::Autonomy,
+                )
             } else {
                 match &origin {
                     super::super::PromptOrigin::TaskCompleted { .. } => {
@@ -932,10 +998,17 @@ impl SessionActor {
                     super::super::PromptOrigin::NotificationDrain => {
                         ConversationItem::notification_drain(user_message)
                     }
-                    super::super::PromptOrigin::GoalSummary => {
-                        ConversationItem::goal_summary(user_message)
-                    }
-                    super::super::PromptOrigin::GoalControl => {
+                    super::super::PromptOrigin::GoalSummary => self.goal_directive_item(
+                        user_message,
+                        sampling_types::SyntheticReason::GoalSummary,
+                        sampling_types::GoalDirectiveKind::Continuation,
+                    ),
+                    super::super::PromptOrigin::GoalControl => self.goal_directive_item(
+                        user_message,
+                        sampling_types::SyntheticReason::SystemReminder,
+                        sampling_types::GoalDirectiveKind::ControlNotice,
+                    ),
+                    super::super::PromptOrigin::HostCommand => {
                         ConversationItem::system_reminder(user_message)
                     }
                     super::super::PromptOrigin::GoalClassifierNudge => {
@@ -1001,7 +1074,12 @@ impl SessionActor {
                 self.chat_state_handle.push_user_message(user_chat);
             }
         }
-        if !implicit_goal_set && !matches!(origin, super::super::PromptOrigin::GoalControl) {
+        if !implicit_goal_set
+            && !matches!(
+                origin,
+                super::super::PromptOrigin::GoalControl | super::super::PromptOrigin::HostCommand
+            )
+        {
             self.dispatch_hook(
                 ::hooks::event::HookEventName::UserPromptSubmit,
                 ::hooks::event::HookPayload::UserPromptSubmit {
@@ -1052,10 +1130,16 @@ impl SessionActor {
                     self.goal_tracker.lock().status(),
                 );
                 if goal_active {
+                    // A foreground Goal prompt owns exactly one implementer
+                    // cycle. The actor-level turn-end hook schedules the next
+                    // continuation after this prompt reaches its durable
+                    // terminal; keeping the sampler inside a long-lived
+                    // `handle_prompt` loop makes pause, compact and queued user
+                    // work wait behind an artificial turn boundary.
                     let decision = if self.goal_runs_on_workflow_engine() {
                         self.run_goal_round_end().await
                     } else {
-                        self.run_goal_round_end_foreground().await
+                        GoalRoundDecision::EndTurn
                     };
                     match decision {
                         GoalRoundDecision::Continue(directive) => {
@@ -1063,7 +1147,7 @@ impl SessionActor {
                             continue;
                         }
                         GoalRoundDecision::ResumeForeground => continue,
-                        GoalRoundDecision::EndTurn => {}
+                        GoalRoundDecision::EndTurn => break round,
                     }
                 }
                 match self
@@ -1580,13 +1664,17 @@ impl SessionActor {
     /// after every turn finishes. Two terminal branches when the
     /// goal is `Active` (`goal_active_now == true`):
     ///
-    /// 1. **Success.** Reset `goal_continuation_streak` to 0, then call
+    /// 1. **Success.** Reset `goal_continuation_streak` to 0, then run the
+    ///    mailbox-fast turn-end drain (B1: `completed: true` proposals are
+    ///    scheduled as background Goal stages — the drain never awaits
+    ///    verification model work) and queue the continuation reminder via
     ///    `maybe_queue_goal_continuation` unless `suppress_goal_continuation`
-    ///    (stationarity silent EndTurn). That helper verifies any pending
-    ///    completion via its turn-end drain, queues the continuation reminder
-    ///    if the goal is still `Active`, and runs the stop-detector to select
-    ///    the nudge flavor (generic vs. bail-specific) and emit
-    ///    `Event::GoalPrematureStopDetected`.
+    ///    (stationarity silent EndTurn). The reminder is rendered against the
+    ///    pre-verification state; a stage that pauses/rejects the goal
+    ///    commits (or is lease-dropped) via the mailbox before the next
+    ///    turn's drain. `render_goal_continuation` also runs the
+    ///    stop-detector to select the nudge flavor (generic vs. bail-specific)
+    ///    and emit `Event::GoalPrematureStopDetected`.
     /// 2. **Non-success.** Increment `goal_continuation_streak`. At
     ///    [`GOAL_CONTINUATION_BACKOFF_THRESHOLD`] consecutive hits,
     ///    reset the streak and auto-pause with
@@ -1601,7 +1689,7 @@ impl SessionActor {
     /// Active), both branches are skipped: neither streak moves and the
     /// existing pause cause is preserved.
     pub(crate) async fn handle_turn_end(
-        &self,
+        self: &std::sync::Arc<Self>,
         turn_succeeded: bool,
         suppress_goal_continuation: bool,
     ) {
@@ -1613,7 +1701,33 @@ impl SessionActor {
             self.goal_continuation_streak
                 .store(0, std::sync::atomic::Ordering::Relaxed);
             if !suppress_goal_continuation {
-                self.maybe_queue_goal_continuation().await;
+                // B1: the turn-end drain must stay mailbox-fast. A
+                // `completed: true` proposal schedules a background Goal
+                // stage instead of awaiting the verification model work
+                // inline, so `/goal pause`, `/compact`, user prompts and
+                // cancels are never queued behind minutes of verification.
+                //
+                // Cycle-boundary contract (verifier gate): while a
+                // verification stage is in flight the next implementer
+                // cycle must NOT be queued — the stage's mailbox commit
+                // decides the next cycle. `commit_verifier_stage` requeues
+                // on `NotAchieved` (still Active) and stays silent on
+                // Achieved / paused / blocked / lease-dropped, so a
+                // `completed: true` proposal never races the verdict that
+                // resolves it. The in-flight CAS is the authoritative
+                // signal: it covers both "this drain just scheduled the
+                // stage" and "a stage from an earlier turn is still
+                // running" (e.g. a user message started a turn while the
+                // stage ran — its turn-end must also stay silent).
+                let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+                self.drain_goal_updates(current_tokens, DrainPurpose::TurnEnd)
+                    .await;
+                if !self
+                    .goal_classifier_in_flight
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    self.maybe_queue_goal_continuation().await;
+                }
             }
             return;
         }
@@ -2218,6 +2332,24 @@ impl SessionActor {
                 })),
             );
             let mut request = request;
+            let origin = super::super::PromptOrigin::from_prompt_id(req_id);
+            let current_item_is_autonomy = request.items.last().is_some_and(|item| {
+                matches!(
+                    item,
+                    ConversationItem::User(user)
+                        if user.goal_directive.as_ref().is_some_and(|tag| {
+                            tag.kind == sampling_types::GoalDirectiveKind::Autonomy
+                        })
+                )
+            });
+            let include_goal_autonomy = current_item_is_autonomy
+                || matches!(
+                    origin,
+                    super::super::PromptOrigin::GoalSummary
+                        | super::super::PromptOrigin::GoalClassifierNudge
+                        | super::super::PromptOrigin::GoalControl
+                );
+            request.items = self.project_goal_conversation(request.items, include_goal_autonomy);
             if structured_output_native {
                 request.json_schema = json_schema.clone();
             }

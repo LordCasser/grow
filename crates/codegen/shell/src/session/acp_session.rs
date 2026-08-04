@@ -226,6 +226,15 @@ struct GoalToolNames {
     task: String,
     todo: String,
 }
+
+/// Internal Plan scope storage. ACP still sees full `Plan` replacements; this
+/// owns the two independent Todo states while Goal and other Behaviors share a
+/// session.
+pub(crate) struct GoalPlanScope {
+    session: tools::implementations::grow_build::todo::TodoState,
+    goal: tools::implementations::grow_build::todo::TodoState,
+    goal_active: bool,
+}
 /// Shared body of the goal-mode system reminder.
 ///
 /// Loaded once at compile time. Used by both `setup_goal` (initial
@@ -259,7 +268,7 @@ pub(super) const GOAL_CONTINUATION_DIRECTIVE_TEMPLATE_FOREGROUND: &str =
     include_str!("templates/goal_continuation_directive_foreground.md");
 /// Built continuation directive plus the optional premature-stop pattern that
 /// the caller emits when it actually continues. Produced by
-/// [`SessionActor::prepare_goal_continuation`].
+/// [`SessionActor::render_goal_continuation`].
 struct GoalContinuationPlan {
     directive: String,
     stop_pattern: Option<&'static str>,
@@ -277,6 +286,11 @@ struct GoalContinuationPlan {
 /// the `credentials` sync mutex on `SessionActor`.
 pub(crate) struct State {
     pub(crate) running_task: Option<AgentTask>,
+    /// Manual compaction is the other foreground owner. While set, prompt
+    /// promotion is forbidden even though there is no `AgentTask`.
+    pub(crate) foreground_compact: bool,
+    /// One coalescing manual-compaction request admitted during a running turn.
+    pub(crate) pending_manual_compact: Option<Option<String>>,
     pub(crate) pending_inputs: VecDeque<InputItem>,
     pub(crate) pending_notifications: Vec<PendingNotification>,
     /// Prompt ids held out of combine-on-promote (composer edit in progress).
@@ -295,6 +309,7 @@ pub(crate) struct State {
     /// switching models is a deliberate user action that resets
     /// expectations.
     pub(crate) nudges_used_this_session: u32,
+    pub(crate) recent_terminals: VecDeque<crate::session::prompt_queue::RecentPromptTerminal>,
 }
 impl State {
     pub(crate) fn clear_pending_notifications(&mut self) {
@@ -307,6 +322,18 @@ impl State {
     /// before taking this lock, so only `running_task` is race-free here.
     pub(crate) fn running_prompt_id(&self) -> Option<&str> {
         self.running_task.as_ref().map(|t| t.prompt_id.as_str())
+    }
+
+    pub(crate) fn record_recent_terminal(
+        &mut self,
+        terminal: crate::session::prompt_queue::RecentPromptTerminal,
+    ) {
+        self.recent_terminals
+            .retain(|entry| entry.prompt_id != terminal.prompt_id);
+        self.recent_terminals.push_back(terminal);
+        while self.recent_terminals.len() > 128 {
+            self.recent_terminals.pop_front();
+        }
     }
     /// Sweep `pending_inputs`, removing entries matching `drop_if` EXCEPT the
     /// running turn's own slot, and return the removed items (callers harvest
@@ -352,11 +379,12 @@ impl State {
 /// and `arm_idle_notification` (idle-notification debounce) — all consult this
 /// so they share one definition of idleness, with no drift between them.
 ///
-/// Returns `true` exactly when: no turn is running, no user prompt is
-/// queued, and interactive Ctrl+C has not suppressed notifications pending
-/// genuine user re-engagement.
+/// Returns `true` exactly when: no turn or manual compaction is running, no
+/// user prompt is queued, and interactive Ctrl+C has not suppressed
+/// notifications pending genuine user re-engagement.
 pub(crate) fn is_session_idle_for_injection(state: &State) -> bool {
     state.running_task.is_none()
+        && !state.foreground_compact
         && state.pending_inputs.is_empty()
         && !state.notifications_suppressed
 }
@@ -366,7 +394,10 @@ pub(crate) fn is_session_idle_for_injection(state: &State) -> bool {
 /// it can be unit-tested directly against a `State` without spawning a full
 /// actor + leader.
 pub(crate) fn state_is_busy(state: &State) -> bool {
-    state.running_task.is_some() || !state.pending_inputs.is_empty()
+    state.running_task.is_some()
+        || state.foreground_compact
+        || state.pending_manual_compact.is_some()
+        || !state.pending_inputs.is_empty()
 }
 /// Data carried from prepare_tool_call → dispatch_tool → finalize.
 #[derive(Debug, Clone)]
@@ -500,6 +531,14 @@ pub(crate) struct SessionActor {
     /// announcements and Goal control-plane revisions). Flushed at the same
     /// safe points as `pending_interjections` plus on cancel/idle.
     pub(crate) pending_system_reminders: Mutex<Vec<ConversationItem>>,
+    /// Preemptive Goal-control generation. Definition changes wake an active
+    /// Goal sampler; ordinary completion reminders deliberately do not.
+    pub(crate) goal_control_generation: std::sync::atomic::AtomicU64,
+    pub(crate) goal_control_notify: Arc<tokio::sync::Notify>,
+    /// Session-plan snapshot parked while Goal owns the Todo resource. Goal
+    /// retirement restores it atomically so Goal-scoped writes never leak into
+    /// Normal or another Behavior.
+    pub(crate) goal_plan_scope: Mutex<Option<GoalPlanScope>>,
     /// Idle flush timeout: `None` = disabled, `Some(duration)` = flush after inactivity.
     pub(crate) idle_flush_timeout: Option<std::time::Duration>,
     /// Periodic dream check interval: `None` = disabled.
@@ -648,7 +687,7 @@ pub(crate) struct SessionActor {
     pub(crate) goal_strategist_every: u32,
     /// Resolved refuted-goal round count before the continuation directive
     /// escalates to a forceful "re-verify now" block; cached at actor
-    /// construction. Read by [`Self::prepare_goal_continuation`].
+    /// construction. Read by [`Self::render_goal_continuation`].
     pub(crate) goal_reverify_after: u32,
     /// Set on session load once `maybe_reconcile_active_goal_without_plan`
     /// has run so subsequent prompt-flow ticks don't repeat the
@@ -659,6 +698,10 @@ pub(crate) struct SessionActor {
     >,
     /// [`Self::account_not_achieved_without_sampler`].
     pub(crate) goal_classifier_in_flight: std::sync::atomic::AtomicBool,
+    /// Monotonic ordinal for background Goal stages (verifier / strategist /
+    /// summarizer). Assigned at schedule time and carried on the stage's
+    /// completion event for correlation + diagnostics. In-memory only.
+    pub(crate) goal_stage_seq: std::sync::atomic::AtomicU64,
     /// Agent-level managed MCP config cache (refreshed in background).
     pub(crate) managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
     /// Original client-provided MCP servers from session creation.
@@ -952,8 +995,9 @@ impl SessionActor {
     /// Send visible text output to the TUI from a slash command.
     ///
     /// Uses `AgentMessageChunk` so the text appears in the conversation
-    /// scrollback, then flushes the replay buffer to ensure delivery
-    /// before the turn ends.
+    /// scrollback. The session actor owns replay flushing; callers running in
+    /// that actor must never enqueue a flush event and wait for the same actor
+    /// to acknowledge it.
     async fn send_slash_command_output(&self, text: &str) {
         self.send_slash_command_output_with_meta(text, None).await;
     }
@@ -981,9 +1025,6 @@ impl SessionActor {
             None,
         )
         .await;
-        if let Err(e) = crate::session::replay_events::flush_replay_actor(&self.event_tx).await {
-            tracing::warn!(?e, "flush_replay_actor failed");
-        }
     }
 }
 impl SessionActor {
@@ -1783,6 +1824,9 @@ mod managed_gateway_tool_tests {
 #[cfg(test)]
 #[path = "acp_session_tests/goal/goal_planner_e2e_tests.rs"]
 mod goal_planner_e2e_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/goal/goal_stage_actor_tests.rs"]
+mod goal_stage_actor_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/interjection_tests.rs"]
 mod interjection_tests;

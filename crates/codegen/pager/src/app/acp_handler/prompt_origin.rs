@@ -10,8 +10,8 @@ pub(crate) fn is_server_initiated_prompt(prompt_id: &str) -> bool {
 ///
 /// Cron turns are synthetic (so [`is_server_initiated_prompt`] is also true for
 /// them), but UNLIKE auto-wake / subagent-completion turns they are
-/// CLIENT-driven via `MvpAgent::prompt()` and therefore DO emit a matching
-/// `grow/session/prompt_complete` turn-end signal. A viewer can thus safely
+/// CLIENT-driven via `MvpAgent::prompt()` and therefore emit a matching durable
+/// `TurnCompleted` terminal. A viewer can thus safely
 /// enter `TurnRunning` for them (the exit exists, so it won't strand) — which is
 /// what lets the dashboard show a running `/loop` session as Working.
 pub(crate) fn is_scheduler_fired_prompt(prompt_id: &str) -> bool {
@@ -41,7 +41,7 @@ pub(crate) fn is_wake_prompt(prompt_id: &str) -> bool {
 
 /// Whether a running `prompt_id` is adoptable — i.e. safe to bind as the
 /// viewer's `current_prompt_id` and show as a live `TurnRunning`. The invariant:
-/// adoptable iff the turn emits a terminal `grow/session/prompt_complete`, the
+/// adoptable iff the turn emits a durable `TurnCompleted` terminal, the
 /// only non-interactive way a viewer leaves `TurnRunning`. That holds for
 /// user-driven turns and `/loop` (`scheduler-fired-…`) fires — both run via
 /// `MvpAgent::prompt()` — and is false for actor-run synthetic turns
@@ -72,7 +72,7 @@ pub(crate) fn should_adopt_running_prompt(prompt_id: &str) -> bool {
 /// elapsed then matches the driver's, both live and on completion. Falls back
 /// to `now` when `turnStartMs` is absent (older shell) or the wall clock is
 /// skewed forward.
-pub(super) fn viewer_turn_anchor(turn_start_ms: Option<i64>) -> std::time::Instant {
+pub(crate) fn viewer_turn_anchor(turn_start_ms: Option<i64>) -> std::time::Instant {
     let now = std::time::Instant::now();
     let Some(start_ms) = turn_start_ms else {
         return now;

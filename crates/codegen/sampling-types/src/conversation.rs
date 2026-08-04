@@ -130,6 +130,43 @@ pub enum SyntheticReason {
     Unknown,
 }
 
+/// Semantic role of a Goal-scoped synthetic directive.
+///
+/// The role is structural metadata: request and compaction projection must not
+/// infer Goal lifecycle policy by parsing reminder text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalDirectiveKind {
+    Context,
+    Autonomy,
+    PausedInteraction,
+    ControlNotice,
+    Continuation,
+}
+
+/// Identity carried by a synthetic Goal directive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalDirectiveTag {
+    pub goal_id: String,
+    pub definition_revision: u64,
+    pub kind: GoalDirectiveKind,
+}
+
+/// Goal directive projection applied to a model or compaction request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalConversationProjection<'a> {
+    Exclude,
+    Active {
+        goal_id: &'a str,
+        definition_revision: u64,
+        include_autonomy: bool,
+    },
+    Paused {
+        goal_id: &'a str,
+        definition_revision: u64,
+    },
+}
+
 impl SyntheticReason {
     /// Whether a user item with this reason **starts a prompt turn** — i.e.
     /// the turn pipeline pushed it while consuming a `prompt_index` slot
@@ -208,6 +245,10 @@ pub struct UserItem {
     /// deserialize correctly (`serde(default)` fills in `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synthetic_reason: Option<SyntheticReason>,
+    /// Goal ownership and lifecycle role for Goal-generated synthetic input.
+    /// `None` for real user input and non-Goal runtime reminders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_directive: Option<GoalDirectiveTag>,
     /// Relocation generation for a working-directory switch reminder.
     /// Structural metadata keeps recovery dedup independent of reminder text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -235,6 +276,56 @@ pub struct UserItem {
     /// prompts), so markers stamped before and after a restart may disagree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_index: Option<usize>,
+}
+
+/// Project Goal-owned synthetic directives for one request without mutating
+/// the persisted conversation.
+pub fn project_conversation_for_goal_scope(
+    items: Vec<ConversationItem>,
+    projection: GoalConversationProjection<'_>,
+) -> Vec<ConversationItem> {
+    items
+        .into_iter()
+        .filter(|item| {
+            let ConversationItem::User(user) = item else {
+                return true;
+            };
+            let Some(tag) = user.goal_directive.as_ref() else {
+                return true;
+            };
+            match &projection {
+                GoalConversationProjection::Exclude => false,
+                GoalConversationProjection::Active {
+                    goal_id,
+                    definition_revision,
+                    include_autonomy,
+                } => {
+                    tag.goal_id == *goal_id
+                        && tag.definition_revision == *definition_revision
+                        && match tag.kind {
+                            GoalDirectiveKind::Context
+                            | GoalDirectiveKind::ControlNotice
+                            | GoalDirectiveKind::Continuation => true,
+                            GoalDirectiveKind::Autonomy => *include_autonomy,
+                            GoalDirectiveKind::PausedInteraction => false,
+                        }
+                }
+                GoalConversationProjection::Paused {
+                    goal_id,
+                    definition_revision,
+                } => {
+                    tag.goal_id == *goal_id
+                        && tag.definition_revision == *definition_revision
+                        && matches!(
+                            tag.kind,
+                            GoalDirectiveKind::Context
+                                | GoalDirectiveKind::ControlNotice
+                                | GoalDirectiveKind::PausedInteraction
+                        )
+                }
+            }
+        })
+        .collect()
 }
 
 /// Assistant response with tool calls.
@@ -848,6 +939,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: None,
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -861,6 +953,7 @@ impl ConversationItem {
         Self::User(UserItem {
             content: parts,
             synthetic_reason: None,
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -878,6 +971,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::CompactionMeta),
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -896,6 +990,25 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::SystemReminder),
+            goal_directive: None,
+            cwd_generation: None,
+            prior_turn_interrupt: None,
+            prompt_index: None,
+        })
+    }
+
+    /// Create a structurally tagged Goal directive.
+    pub fn goal_directive(
+        content: impl Into<String>,
+        synthetic_reason: SyntheticReason,
+        tag: GoalDirectiveTag,
+    ) -> Self {
+        Self::User(UserItem {
+            content: vec![ContentPart::Text {
+                text: Arc::<str>::from(content.into()),
+            }],
+            synthetic_reason: Some(synthetic_reason),
+            goal_directive: Some(tag),
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -925,6 +1038,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::ProjectInstructions),
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -938,6 +1052,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::WorkingDirectorySwitch),
+            goal_directive: None,
             cwd_generation: Some(cwd_generation),
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -955,6 +1070,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::AutoContinue),
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -974,6 +1090,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::TruncationContinue),
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -991,6 +1108,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::AutoRecovery),
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1009,6 +1127,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::Interjection),
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1022,6 +1141,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::TaskCompleted),
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1035,6 +1155,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::SubagentCompleted),
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1048,6 +1169,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::NotificationDrain),
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1061,6 +1183,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::GoalSummary),
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1078,6 +1201,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::GoalClassifierNudge),
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1091,6 +1215,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::SchedulerFired),
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1104,6 +1229,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::StopHookFeedback),
+            goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1313,9 +1439,8 @@ pub fn reasoning_item_text(r: &rs::ReasoningItem) -> String {
     }
     if let Some(ref content) = r.content {
         for c in content {
-            if let rs::ReasoningItemContent::ReasoningText(rt) = c {
-                parts.push(rt.text.clone());
-            }
+            let rs::ReasoningItemContent::ReasoningText(rt) = c;
+            parts.push(rt.text.clone());
         }
     }
     parts.join("\n")
@@ -2671,10 +2796,9 @@ pub fn transform_conversation_cwd(
                 }
                 if let Some(ref mut content) = r.content {
                     for c in content.iter_mut() {
-                        if let rs::ReasoningItemContent::ReasoningText(rt) = c {
-                            if rt.text.contains(source_cwd) {
-                                rt.text = rt.text.replace(source_cwd, target_cwd);
-                            }
+                        let rs::ReasoningItemContent::ReasoningText(rt) = c;
+                        if rt.text.contains(source_cwd) {
+                            rt.text = rt.text.replace(source_cwd, target_cwd);
                         }
                     }
                 }
@@ -3474,6 +3598,69 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
 
+    fn goal_directive(goal_id: &str, revision: u64, kind: GoalDirectiveKind) -> ConversationItem {
+        let mut item = ConversationItem::user(format!("{goal_id}:{revision}:{kind:?}"));
+        let ConversationItem::User(user) = &mut item else {
+            unreachable!();
+        };
+        user.goal_directive = Some(GoalDirectiveTag {
+            goal_id: goal_id.to_string(),
+            definition_revision: revision,
+            kind,
+        });
+        item
+    }
+
+    #[test]
+    fn goal_scope_projection_filters_revision_and_autonomy_by_turn_kind() {
+        let items = vec![
+            ConversationItem::user("ordinary"),
+            goal_directive("g", 1, GoalDirectiveKind::Context),
+            goal_directive("g", 1, GoalDirectiveKind::Autonomy),
+            goal_directive("g", 1, GoalDirectiveKind::PausedInteraction),
+            goal_directive("g", 1, GoalDirectiveKind::ControlNotice),
+            goal_directive("g", 1, GoalDirectiveKind::Continuation),
+            goal_directive("g", 0, GoalDirectiveKind::Context),
+            goal_directive("other", 1, GoalDirectiveKind::Context),
+        ];
+
+        let active = project_conversation_for_goal_scope(
+            items.clone(),
+            GoalConversationProjection::Active {
+                goal_id: "g",
+                definition_revision: 1,
+                include_autonomy: true,
+            },
+        );
+        assert_eq!(active.len(), 5); // ordinary + context/autonomy/control/continuation
+
+        let active_user_turn = project_conversation_for_goal_scope(
+            items.clone(),
+            GoalConversationProjection::Active {
+                goal_id: "g",
+                definition_revision: 1,
+                include_autonomy: false,
+            },
+        );
+        assert_eq!(active_user_turn.len(), 4); // ordinary + context/control/continuation
+
+        let paused = project_conversation_for_goal_scope(
+            items.clone(),
+            GoalConversationProjection::Paused {
+                goal_id: "g",
+                definition_revision: 1,
+            },
+        );
+        assert_eq!(paused.len(), 4); // ordinary + context/control/paused
+
+        let excluded =
+            project_conversation_for_goal_scope(items, GoalConversationProjection::Exclude);
+        assert_eq!(excluded.len(), 1);
+        assert!(
+            matches!(&excluded[0], ConversationItem::User(user) if user.goal_directive.is_none())
+        );
+    }
+
     #[test]
     fn prior_turn_interrupt_serde_round_trip_and_unknown_fallback() {
         for (variant, wire) in [
@@ -3773,7 +3960,7 @@ mod tests {
                 id: "msg_123".to_string(),
                 role: rs::AssistantRole::Assistant,
                 status: rs::OutputStatus::Completed,
-            phase: None,
+                phase: None,
             })],
             parallel_tool_calls: None,
             previous_response_id: None,
@@ -8283,7 +8470,7 @@ mod tests {
                 id: "msg_test".into(),
                 role: rs::AssistantRole::Assistant,
                 status: rs::OutputStatus::Completed,
-            phase: None,
+                phase: None,
             })],
             parallel_tool_calls: None,
             previous_response_id: None,
@@ -8658,7 +8845,10 @@ mod tests {
         let ConversationItem::Reasoning(r) = &siblings[0] else {
             panic!("expected Reasoning sibling, got {:?}", siblings[0]);
         };
-        assert_eq!(r.id.as_deref(), Some("rs_00000000-0000-4000-8000-000000000001"));
+        assert_eq!(
+            r.id.as_deref(),
+            Some("rs_00000000-0000-4000-8000-000000000001")
+        );
         assert_eq!(r.summary.len(), 1);
         let rs::SummaryPart::SummaryText(s) = &r.summary[0];
         assert_eq!(

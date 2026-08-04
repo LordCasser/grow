@@ -1,13 +1,11 @@
-//! Turn cancellation, task and subagent kills, and overdue turn reconciliation.
+//! Turn cancellation, task/subagent kills, and prompt-admission recovery.
 
 use super::ctx::find_agent_by_session_id;
 use super::permissions::drain_permission_queue;
-use super::queue::{apply_turn_start_shim, maybe_drain_queue, note_peek_page_flip};
 use crate::app::actions::Effect;
-use crate::app::agent::AgentId;
 use crate::app::agent_view::ActivePane;
+use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
-use crate::scrollback::blocks::SessionEvent;
 use std::time::Instant;
 
 /// Map `[ui].cancel_subagents_on_turn_cancel` / in-memory agent preference to
@@ -307,156 +305,93 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
     }]
 }
 
-/// Grace window between a driver-side `grow/session/prompt_complete`
-/// broadcast and that turn's `session/prompt` RPC response, after which
-/// [`reconcile_overdue_turn_ends`] finishes the turn from the broadcast. The
-/// healthy-path gap is milliseconds (the shell emits the broadcast just
-/// before writing the RPC response), so an expiry means the response is
-/// genuinely lost, not merely slow.
-pub(crate) const TURN_END_RECONCILE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+/// A submitting prompt that receives no queue or terminal signal asks the
+/// shell for authoritative status. Time never fabricates a terminal.
+pub(crate) const PROMPT_STATUS_WATCHDOG_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(2);
 
-/// Finish turns whose end was announced by `grow/session/prompt_complete`
-/// but whose `session/prompt` RPC response never arrived.
-///
-/// The RPC response is the driver's only turn-state exit, and it can be lost
-/// in leader response routing / reconnect races (the loss left the TUI
-/// latched in `TurnCancelling` — Esc dead, prompts piling into a queue
-/// that never drains — until a restart). The
-/// broadcast is armed in `handle_prompt_complete` and disarmed by a matching
-/// `TaskResult::PromptResponse`; whatever is still armed past
-/// [`TURN_END_RECONCILE_GRACE`] is reconciled here with the essential subset
-/// of the PromptResponse teardown (state, marker, adoption hand-off, queue
-/// drain).
-///
-/// Returns `None` when nothing fired; `Some(effects)` (possibly empty) when
-/// at least one agent was reconciled, so the caller forces a redraw.
-pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effect>> {
-    let overdue: Vec<AgentId> = app
+/// A prompt that is already `Running` (admitted) but whose lifecycle
+/// signals (TurnCompleted / PromptResponse) went missing asks for
+/// authoritative status once this much time passes with no NEW activity.
+/// Bounded: one query in flight per prompt, and every non-terminal
+/// response simply re-arms the observation window — time never fabricates
+/// a terminal; only a status response that reports one ends the turn.
+pub(crate) const PROMPT_STATUS_RUNNING_WATCHDOG_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
+pub(crate) fn poll_stalled_prompt_submissions(app: &mut AppView) -> Option<Vec<Effect>> {
+    let stalled_submissions = app
         .agents
         .iter()
-        .filter(|(_, a)| {
-            a.pending_turn_end_reconcile
-                .as_ref()
-                .is_some_and(|p| p.received_at.elapsed() >= TURN_END_RECONCILE_GRACE)
+        .filter_map(|(id, agent)| {
+            let prompt_id = agent.session.current_prompt_id.as_ref()?;
+            // One status query in flight per prompt: the response handler
+            // clears the marker, re-arming the watchdog for the next window.
+            if agent.prompt_status_query_for.as_deref() == Some(prompt_id.as_str()) {
+                return None;
+            }
+            let stalled = if agent.session.state.is_turn_submitting() {
+                // Submission is silent client-side (no activity can exist),
+                // so the elapsed window alone decides.
+                agent
+                    .turn_started_at
+                    .is_some_and(|started| started.elapsed() >= PROMPT_STATUS_WATCHDOG_DELAY)
+            } else if agent.session.state.is_turn_running() {
+                running_turn_stalled(agent)
+            } else {
+                false
+            };
+            if stalled {
+                Some((*id, prompt_id.clone(), agent.session.session_id.clone()?))
+            } else {
+                None
+            }
         })
-        .map(|(id, _)| *id)
-        .collect();
-    if overdue.is_empty() {
+        .collect::<Vec<_>>();
+    if stalled_submissions.is_empty() {
         return None;
     }
 
-    let mut fired = false;
     let mut effects = Vec::new();
-    let mut drained_ids = Vec::new();
-    for id in overdue {
-        // Take the stashed adoption before borrowing the agent (disjoint
-        // `app` fields; same pattern as the PromptResponse arm).
-        let pending_adoption = app.pending_running_adoptions.remove(&id);
-        let Some(agent) = app.agents.get_mut(&id) else {
-            continue;
-        };
-        let Some(pending) = agent.pending_turn_end_reconcile.take() else {
-            continue;
-        };
-
-        let still_ours =
-            agent.session.current_prompt_id.as_deref() == Some(pending.prompt_id.as_str());
-        let busy = agent.session.state.is_turn_running() || agent.session.state.is_cancelling();
-        if !still_ours || !busy {
-            // The turn already resolved through the normal path (or a new
-            // turn was adopted); the marker is stale. Restore the adoption
-            // for the path that owns it.
-            if let Some(p) = pending_adoption {
-                app.pending_running_adoptions.insert(id, p);
-            }
-            continue;
+    for (agent_id, prompt_id, session_id) in stalled_submissions {
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            agent.prompt_status_query_for = Some(prompt_id.clone());
         }
-
-        fired = true;
-        let was_cancelling = agent.session.state.is_cancelling()
-            || pending.stop_reason.as_deref() == Some("cancelled");
-        // Send-now cancel: suppress the marker (wire `cancelTrigger` wins, else
-        // the armed expectation). Consumed every reconcile (no stale flag).
-        let expected_send_now = agent.expect_send_now_cancel.take();
-        let send_now_cancel = was_cancelling
-            && match pending.cancel_trigger.as_deref() {
-                Some(trigger) => trigger == "send_now",
-                None => expected_send_now.is_some(),
-            };
-        let elapsed = agent.turn_elapsed().unwrap_or_default();
-        crate::unified_log::warn(
-            "turn.end_reconciled_from_broadcast",
-            agent.session.session_id.as_ref().map(|s| s.0.as_ref()),
-            Some(serde_json::json!({
-                "prompt_id": pending.prompt_id,
-                "stop_reason": pending.stop_reason,
-                "was_cancelling": was_cancelling,
-                "send_now_cancel": send_now_cancel,
-                "grace_ms": TURN_END_RECONCILE_GRACE.as_millis() as u64,
-            })),
-        );
-
-        agent.session.finish_turn(&mut agent.scrollback);
-        let event = if was_cancelling {
-            // Send-now cancel renders no marker (the new prompt is the next turn).
-            (!send_now_cancel).then_some(SessionEvent::TurnCancelled { elapsed })
-        } else {
-            match pending.stop_reason.as_deref() {
-                // Rate limits drive a dedicated driver UX via the retry
-                // notifications (already delivered); no extra marker.
-                Some("rate_limit") => None,
-                Some("error") => Some(SessionEvent::TurnFailed {
-                    error: pending
-                        .agent_result
-                        .clone()
-                        .unwrap_or_else(|| "unknown error".into()),
-                    elapsed: Some(elapsed),
-                }),
-                _ => Some(SessionEvent::TurnCompleted {
-                    elapsed: Some(elapsed),
-                }),
-            }
-        };
-        crate::app::turn_completion::push_turn_terminal_marker(
-            agent,
-            event,
-            Some(pending.prompt_id.as_str()),
-        );
-
-        agent.mark_turn_finished();
-        agent.activity_started_at = None;
-        agent.last_activity = None;
-        drain_permission_queue(agent);
-        agent.cancel_turn_view = None;
-        agent.cancel_turn_buttons.clear();
-        if agent.bash_turn {
-            agent.bash_turn = false;
-            agent.scrollback.goto_bottom();
-        }
-        agent.cron_task_id = None;
-
-        // FIFO handoff (mirrors the PromptResponse arm): adopt the next
-        // server-authoritative running prompt now that the slot is free.
-        let adopted_page_flip = if let Some(p) = pending_adoption
-            && agent.session.current_prompt_id.is_none()
-        {
-            if p.prompt_id != pending.prompt_id && agent.should_adopt_running_prompt(&p.prompt_id) {
-                apply_turn_start_shim(agent, p.prompt_id, p.text, &p.kind, p.combined_texts)
-            } else {
-                agent.discard_pending_adoption_updates(&p.prompt_id);
-                None
-            }
-        } else {
-            None
-        };
-        let drain = maybe_drain_queue(agent);
-        effects.extend(drain.effects);
-        drained_ids.push((id, adopted_page_flip.or(drain.page_flip_entry)));
+        effects.push(Effect::QueryPromptStatus {
+            agent_id,
+            session_id,
+            prompt_id,
+        });
     }
-    for (id, page_flip_entry) in drained_ids {
-        note_peek_page_flip(app, id, page_flip_entry);
+    Some(effects)
+}
+
+/// Whether a `TurnRunning` turn looks stalled: the running window elapsed
+/// since the turn started, and no NEW activity arrived for the full window.
+///
+/// "New activity" is the render-maintained phase anchor (`activity_started_at`),
+/// refreshed on every activity transition — thinking → responding → tool →
+/// wait — exactly the pair `views::turn_status` consumes. A turn that never
+/// rendered (background pane, nothing streamed) has no anchor and counts as
+/// stalled once the turn window elapsed.
+///
+/// The tracker cannot gate this on its own: its in-flight state only clears
+/// via `finish_turn`, which never runs when TurnCompleted AND PromptResponse
+/// are both lost, so `tracker.activity()` would keep reporting "activity"
+/// forever. A stale anchor on a genuinely busy turn costs only one bounded
+/// status query per window whose `Running` response refreshes the anchors
+/// without re-running the turn-start shim (see the `PromptStatusResolved`
+/// `Running` arm), so it is safe by construction.
+fn running_turn_stalled(agent: &AgentView) -> bool {
+    let Some(started) = agent.turn_started_at else {
+        return false;
+    };
+    if started.elapsed() < PROMPT_STATUS_RUNNING_WATCHDOG_DELAY {
+        return false;
     }
-    fired.then_some(effects)
+    agent
+        .activity_started_at
+        .is_none_or(|at| at.elapsed() >= PROMPT_STATUS_RUNNING_WATCHDOG_DELAY)
 }
 
 pub(super) fn dispatch_cancel_scheduled_task(app: &mut AppView, task_id: String) -> Vec<Effect> {

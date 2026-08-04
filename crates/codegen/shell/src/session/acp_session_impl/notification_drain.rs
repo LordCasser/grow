@@ -120,14 +120,14 @@ impl SessionActor {
         let may_combine;
         {
             let state = self.state.lock().await;
-            if state.running_task.is_some() {
+            if state.running_task.is_some() || state.foreground_compact {
                 let queue_depth = state.pending_inputs.len();
                 if queue_depth > 0 {
                     ::diagnostics::unified_log::debug(
                         "shell.prompt.start_blocked",
                         Some(self.session_info.id.0.as_ref()),
                         Some(serde_json::json!({
-                            "reason": "task_already_running",
+                            "reason": if state.foreground_compact { "compaction_running" } else { "task_already_running" },
                             "queue_depth": queue_depth,
                         })),
                     );
@@ -166,25 +166,9 @@ impl SessionActor {
 
         let mut state = self.state.lock().await;
         // Re-check after the await gap.
-        if state.running_task.is_some() || state.pending_inputs.is_empty() {
-            return;
-        }
-
-        // A paused Goal is a lifecycle barrier, not an input rejection. Keep
-        // user prompts and ordinary wakes queued until an explicit Goal
-        // control resumes or clears the Goal. GoalControl is inserted at the
-        // front and is the sole synthetic turn allowed through this barrier.
-        let goal_paused = self.behavior.lock().behavior() == Some(tool_types::BehaviorId::Goal)
-            && self
-                .goal_tracker
-                .lock()
-                .status()
-                .is_some_and(|status| status.is_paused());
-        if goal_paused
-            && !matches!(
-                state.pending_inputs.front().map(|item| &item.origin),
-                Some(super::PromptOrigin::GoalControl)
-            )
+        if state.running_task.is_some()
+            || state.foreground_compact
+            || state.pending_inputs.is_empty()
         {
             return;
         }

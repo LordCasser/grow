@@ -190,6 +190,10 @@ pub enum SessionCommand {
         command: String,
         respond_to: oneshot::Sender<Result<(), String>>,
     },
+    QueryPromptStatus {
+        prompt_id: String,
+        respond_to: oneshot::Sender<crate::session::prompt_queue::PromptStatus>,
+    },
     /// A background task completed after its Goal wait was displaced by user
     /// steering. The actor decides whether this task is registered for
     /// deferred delivery; unrelated Goal background noise remains suppressed.
@@ -281,7 +285,7 @@ pub enum SessionCommand {
     CompactSession {
         /// Optional user-provided context to guide the compaction
         user_context: Option<String>,
-        respond_to: oneshot::Sender<acp::Result<()>>,
+        respond_to: oneshot::Sender<acp::Result<CompactConversationStatus>>,
     },
     /// Reload plugin hooks and registry mid-session.
     ReloadPlugins {

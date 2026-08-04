@@ -12,6 +12,30 @@ pub use ::prompt_queue::{
 // Outbound method for broadcast_queue_changed. An ACP routing concern, not a queue concern.
 pub const QUEUE_CHANGED_METHOD: &str = "grow/queue/changed";
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PromptStatus {
+    Unknown,
+    Queued {
+        position: usize,
+        queue_version: u64,
+    },
+    Running {
+        turn_start_ms: u64,
+    },
+    Terminal {
+        stop_reason: String,
+        agent_result: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RecentPromptTerminal {
+    pub(crate) prompt_id: String,
+    pub(crate) stop_reason: String,
+    pub(crate) agent_result: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

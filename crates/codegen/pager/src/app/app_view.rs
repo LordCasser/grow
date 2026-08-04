@@ -3833,17 +3833,23 @@ impl AppView {
         if self.minimal_state.transcript.is_some() {
             return TickDemand::Fast;
         }
-        if self
-            .agents
-            .values()
-            .any(|a| a.pending_turn_end_reconcile.is_some())
-        {
-            return TickDemand::Fast;
-        }
         if self.deferred_notification.is_some() {
             return TickDemand::Fast;
         }
         if self.session_picker_content_loading {
+            return TickDemand::Fast;
+        }
+        // A background agent stuck in TurnSubmitting keeps the animation
+        // loop alive so the submission watchdog
+        // (`poll_stalled_prompt_submissions`, driven by the animation tick)
+        // can re-query the shell for the prompt's authoritative status. The
+        // focused-agent `!is_idle()` check below cannot see background
+        // agents, so without this the stall would never be re-queried.
+        if self
+            .agents
+            .values()
+            .any(|a| a.session.state.is_turn_submitting())
+        {
             return TickDemand::Fast;
         }
         if self.agents.values().any(|agent| {
@@ -4183,44 +4189,53 @@ pub(crate) mod tests {
             keyboard_normalizer: KeyboardNormalizer::from_terminal_context(),
         }
     }
+    /// Build a test `AgentSession` bound to `app`'s ACP channel. Centralises
+    /// the fixture so multi-agent tests don't duplicate the large literal.
+    fn make_test_session(
+        app: &AppView,
+        id: super::super::agent::AgentId,
+        sid: &str,
+    ) -> AgentSession {
+        AgentSession {
+            id,
+            acp_tx: app.acp_tx.clone(),
+            session_id: Some(sid.to_string().into()),
+            models: ModelState::default(),
+            state: AgentState::Idle,
+            tracker: AcpUpdateTracker::new(),
+            cwd: std::path::PathBuf::from("/tmp"),
+            is_worktree: false,
+            forked_from: None,
+            pending_prompts: std::collections::VecDeque::new(),
+            next_queue_id: 0,
+            yolo_mode: false,
+            auto_mode: false,
+            prompt_history: Vec::new(),
+            prompt_history_loading: false,
+            loading_replay: false,
+            restore_degree: None,
+            rate_limited: false,
+            model_incompatible: false,
+            available_commands: Vec::new(),
+            available_commands_generation: 0,
+            available_tools: None,
+            model_switch_pending: false,
+            user_model_preference: None,
+            deferred_model_switch: None,
+            bg_tasks: std::collections::BTreeMap::new(),
+            bg_tool_call_to_task: std::collections::HashMap::new(),
+            scheduled_tasks: std::collections::HashMap::new(),
+            in_flight_prompt: None,
+            compact_held_prompt: None,
+            current_prompt_id: None,
+            created_via_new: false,
+        }
+    }
     pub(crate) fn test_app_with_agent() -> AppView {
         let mut app = test_app();
         let id = super::super::agent::AgentId(0);
         let mut agent = AgentView::new(
-            AgentSession {
-                id,
-                acp_tx: app.acp_tx.clone(),
-                session_id: Some("test-session".into()),
-                models: ModelState::default(),
-                state: AgentState::Idle,
-                tracker: AcpUpdateTracker::new(),
-                cwd: std::path::PathBuf::from("/tmp"),
-                is_worktree: false,
-                forked_from: None,
-                pending_prompts: std::collections::VecDeque::new(),
-                next_queue_id: 0,
-                yolo_mode: false,
-                auto_mode: false,
-                prompt_history: Vec::new(),
-                prompt_history_loading: false,
-                loading_replay: false,
-                restore_degree: None,
-                rate_limited: false,
-                model_incompatible: false,
-                available_commands: Vec::new(),
-                available_commands_generation: 0,
-                available_tools: None,
-                model_switch_pending: false,
-                user_model_preference: None,
-                deferred_model_switch: None,
-                bg_tasks: std::collections::BTreeMap::new(),
-                bg_tool_call_to_task: std::collections::HashMap::new(),
-                scheduled_tasks: std::collections::HashMap::new(),
-                in_flight_prompt: None,
-                compact_held_prompt: None,
-                current_prompt_id: None,
-                created_via_new: false,
-            },
+            make_test_session(&app, id, "test-session"),
             ScrollbackState::new(),
         );
         agent.active_pane = crate::views::agent::ActivePane::Scrollback;
@@ -4241,6 +4256,39 @@ pub(crate) mod tests {
             .unwrap()
             .scrollback
             .push_block(crate::scrollback::RenderBlock::system("boot"));
+    }
+    #[test]
+    fn background_agent_turn_submitting_demands_fast_ticks() {
+        // W2: the stalled-submission watchdog (`poll_stalled_prompt_submissions`)
+        // runs on the animation tick, so a BACKGROUND agent stuck in
+        // TurnSubmitting must keep the tick loop alive even while the focused
+        // agent is idle — otherwise the prompt is never re-queried and stays
+        // "Submitting…" forever. Replaces the deleted
+        // `needs_animation_gates_pending_turn_end_reconcile` equivalent.
+        let mut app = test_app_with_agent();
+        let background = super::super::agent::AgentId(1);
+        let agent = AgentView::new(
+            make_test_session(&app, background, "bg-session"),
+            ScrollbackState::new(),
+        );
+        app.agents.insert(background, agent);
+        // Focused agent idle with content (no empty-state Slow shimmer).
+        idle_agent_with_content(&mut app, super::super::agent::AgentId(0));
+
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::None,
+            "idle focused + idle background must not tick"
+        );
+        app.agents.get_mut(&background).unwrap().session.state = AgentState::TurnSubmitting;
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Fast,
+            "a background TurnSubmitting agent must keep the watchdog ticking"
+        );
+        // Back to idle: the tick demand must drop again (no 30fps leak).
+        app.agents.get_mut(&background).unwrap().session.state = AgentState::Idle;
+        assert_eq!(app.tick_demand(), TickDemand::None);
     }
     #[test]
     fn dashboard_x11_primary_provenance_bypasses_unrelated_clipboard_image() {
@@ -5233,40 +5281,6 @@ pub(crate) mod tests {
         assert!(
             !app.needs_animation(),
             "a reconciled command catalog must stop requesting ticks"
-        );
-    }
-    #[test]
-    fn needs_animation_gates_pending_turn_end_reconcile() {
-        use super::super::dispatch::{TURN_END_RECONCILE_GRACE, reconcile_overdue_turn_ends};
-        let mut app = test_app_with_agent();
-        let id = super::super::agent::AgentId(0);
-        app.active_view = ActiveView::AgentDashboard;
-        assert!(app.agents[&id].session.state.is_idle());
-        assert!(
-            !app.needs_animation(),
-            "idle background agent on the dashboard must not request ticks"
-        );
-        app.agents.get_mut(&id).unwrap().pending_turn_end_reconcile =
-            Some(super::super::agent_view::PendingTurnEnd {
-                prompt_id: "pid-stuck".into(),
-                stop_reason: Some("end_turn".into()),
-                agent_result: None,
-                cancel_trigger: None,
-                received_at: std::time::Instant::now()
-                    - (TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1)),
-            });
-        assert!(
-            app.needs_animation(),
-            "an armed turn-end reconcile must request ticks even for a background agent"
-        );
-        let _ = reconcile_overdue_turn_ends(&mut app);
-        assert!(
-            app.agents[&id].pending_turn_end_reconcile.is_none(),
-            "reconcile must clear the overdue marker"
-        );
-        assert!(
-            !app.needs_animation(),
-            "a cleared reconcile marker must stop requesting ticks"
         );
     }
     #[test]

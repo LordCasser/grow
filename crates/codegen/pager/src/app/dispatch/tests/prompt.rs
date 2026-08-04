@@ -2062,50 +2062,6 @@ fn rekeyed_broadcast_reconciles_optimistic_echo_by_text() {
 }
 
 #[test]
-fn prompt_response_disarms_pending_reconcile() {
-    // Healthy path: the RPC response arrives within the grace window —
-    // the marker must be disarmed so the reconcile can never double-fire.
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    {
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.session.state = AgentState::TurnCancelling;
-        agent.session.current_prompt_id = Some("pid-stuck".into());
-    }
-    arm_reconcile(
-        &mut app,
-        id,
-        "pid-stuck",
-        "cancelled",
-        std::time::Duration::ZERO,
-    );
-
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::PromptResponse {
-            agent_id: id,
-            result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled).meta(
-                serde_json::json!({ "promptId": "pid-stuck" })
-                    .as_object()
-                    .cloned(),
-            )),
-            http_status: None,
-            prompt_id: Some("pid-stuck".into()),
-        }),
-        &mut app,
-    );
-
-    let agent = &app.agents[&id];
-    assert!(
-        agent.pending_turn_end_reconcile.is_none(),
-        "PromptResponse for the armed prompt must disarm the reconcile"
-    );
-    assert!(
-        agent.session.state.is_idle(),
-        "the normal PromptResponse teardown still runs"
-    );
-}
-
-#[test]
 fn prompt_response_resets_cancelling_to_idle() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -2419,16 +2375,48 @@ fn switch_model_holds_prompt_until_complete() {
 }
 
 #[test]
-fn slash_compact_enqueues_command() {
+fn slash_compact_starts_immediately_when_idle() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
 
     let effects = dispatch(Action::SendPrompt("/compact".into()), &mut app);
-    // /compact enqueues as Command and drains immediately (agent was idle).
     assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::Compact { .. }));
+    assert!(matches!(
+        &effects[0],
+        Effect::Compact {
+            track_foreground: true,
+            user_context: None,
+            ..
+        }
+    ));
     // Prompt should be cleared.
     assert!(app.agents[&id].prompt.text().is_empty());
+}
+
+#[test]
+fn slash_compact_is_sent_for_actor_scheduling_while_turn_runs() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(
+        Action::SendPrompt("/compact preserve auth context".into()),
+        &mut app,
+    );
+
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Compact {
+            track_foreground: false,
+            user_context: Some(context),
+            ..
+        }] if context == "preserve auth context"
+    ));
+    assert!(matches!(
+        app.agents[&id].session.state,
+        AgentState::TurnRunning
+    ));
+    assert!(app.agents[&id].session.pending_prompts.is_empty());
 }
 
 #[test]
@@ -3626,10 +3614,9 @@ fn local_drain_holds_while_server_row_queued() {
         "the local row must stay queued"
     );
 
-    // The running server row does NOT hold the drain (it is the in-flight
-    // turn, not a queued one) — once it's marked running and the turn ends,
-    // the local row drains normally.
-    agent.session.current_prompt_id = Some("srv-1".into());
+    // Once the authoritative turn ends, its row disappears from the shared
+    // queue and the local row drains normally.
+    agent.shared_queue.clear();
     let effects = maybe_drain_queue(agent).effects;
     assert!(
         matches!(effects.as_slice(), [Effect::SendPrompt { .. }]),
@@ -3645,6 +3632,7 @@ fn stale_expectation_cleared_on_next_turn_start() {
     app.agents.get_mut(&id).unwrap().expect_send_now_cancel = Some("p-stale".into());
 
     dispatch(Action::SendPrompt("fresh turn".into()), &mut app);
+    crate::app::agent_view::test_fixtures::confirm_submitted_turn(app.agents.get_mut(&id).unwrap());
     assert!(
         app.agents[&id].expect_send_now_cancel.is_none(),
         "turn start must clear a stale expectation"

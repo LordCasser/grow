@@ -660,6 +660,17 @@
             Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
             other => panic!("expected SendPrompt, got {other:?}"),
         };
+        assert!(handle_queue_changed(
+            &queue_changed_running_ex(
+                "sess-1",
+                &[],
+                Some(&pid_first),
+                Some("first"),
+                Some("prompt"),
+                None,
+            ),
+            &mut app
+        ));
         assert_eq!(
             app.agents[&id].session.current_prompt_id.as_deref(),
             Some(pid_first.as_str())
@@ -768,7 +779,22 @@
 
         // p1 from idle; its echo consumes the armed skip, so the 2nd handoff
         // starts with skip == false (the condition that triggered the dup).
-        let _ = dispatch(Action::SendPrompt("first".into()), &mut app);
+        let first_effects = dispatch(Action::SendPrompt("first".into()), &mut app);
+        let pid_first = match &first_effects[0] {
+            Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
+            other => panic!("expected SendPrompt, got {other:?}"),
+        };
+        assert!(handle_queue_changed(
+            &queue_changed_running_ex(
+                "sess-1",
+                &[],
+                Some(&pid_first),
+                Some("first"),
+                Some("prompt"),
+                None,
+            ),
+            &mut app
+        ));
         user_echo(&mut app, "first");
         assert_eq!(user_block_count(&app, id, "first"), 1);
 
@@ -1788,7 +1814,7 @@
         );
     }
 
-    /// A viewer's `prompt_complete` finalize discards stash + buffer.
+    /// A viewer's durable terminal finalize discards stash + buffer.
     #[test]
     fn viewer_finalize_discards_adoption_buffer() {
         let mut app = app_with_running_p1_and_stashed_b1();
@@ -1796,16 +1822,10 @@
         send_tool_call_update(&mut app, "b1", "bash-mode-1", None);
         app.agents.get_mut(&id).unwrap().attached_as_viewer = true;
 
-        let params = serde_json::json!({
-            "sessionId": "sess-1",
-            "stopReason": "end_turn",
-            "promptId": "p1",
-        });
-        let notif = acp::ExtNotification::new(
-            "grow/session/prompt_complete",
-            serde_json::value::to_raw_value(&params).unwrap().into(),
-        );
-        handle_prompt_complete(&notif, &mut app);
+        assert!(handle_ext_notification(
+            &grow_turn_completed_notif("sess-1", "p1", "end_turn", false),
+            &mut app
+        ));
 
         let agent = app.agents.get(&id).unwrap();
         assert!(agent.session.state.is_idle(), "viewer turn finalized");
@@ -2173,7 +2193,7 @@
     fn viewer_does_not_enter_turn_running_for_server_initiated_turn() {
         // A server-initiated / auto-wake turn (synthetic prompt id, e.g. a
         // background subagent or task completion: `task-completed-…`) runs inside
-        // the actor and emits NO `grow/session/prompt_complete`. If a viewer
+        // the actor and is not adopted as a client-driven turn. If a viewer
         // entered TurnRunning for it, nothing would ever finish the turn and the
         // viewer would be stuck "Responding…" forever — exactly the bug where one
         // dashboard showed "Worked for" while the other was stuck responding.
@@ -2211,7 +2231,7 @@
     fn viewer_enters_turn_running_for_scheduler_fired_cron_turn() {
         // A `/loop` (scheduled-task) turn has a synthetic `scheduler-fired-…`
         // prompt id, but UNLIKE auto-wake turns it is client-driven via
-        // `MvpAgent::prompt()` and DOES emit `grow/session/prompt_complete`. So a
+        // `MvpAgent::prompt()` and receives a durable terminal. So a
         // viewer MUST enter TurnRunning for it — otherwise the dashboard's
         // locally-tracked row for a running `/loop` session never shows Working.
         let mut app = make_app_with_agent("sess-view");
@@ -2241,20 +2261,25 @@
             assert!(agent.turn_started_at.is_some());
         }
 
-        // The cron's prompt_complete must still finish it — no permanent spinner.
-        let _ = handle_ext_notification(&prompt_complete_ext("sess-view"), &mut app);
+        let _ = handle_ext_notification(
+            &grow_turn_completed_notif(
+                "sess-view",
+                "scheduler-fired-task-1",
+                "end_turn",
+                false,
+            ),
+            &mut app,
+        );
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(
             matches!(agent.session.state, AgentState::Idle),
-            "cron prompt_complete must finish the viewer turn (no strand)"
+            "the durable terminal must finish the viewer turn (no strand)"
         );
         assert!(agent.session.current_prompt_id.is_none());
     }
 
     #[test]
-    fn viewer_prompt_complete_finishes_turn() {
-        // A viewer in TurnRunning receives grow/session/prompt_complete for its
-        // session -> finish_turn: state Idle, current_prompt_id cleared.
+    fn viewer_durable_terminal_finishes_turn() {
         let mut app = make_app_with_agent("sess-view");
         app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
         let _ = handle(
@@ -2266,29 +2291,32 @@
             AgentState::TurnRunning
         ));
 
-        let affected = handle_ext_notification(&prompt_complete_ext("sess-view"), &mut app);
+        let affected = handle_ext_notification(
+            &grow_turn_completed_notif("sess-view", "pid-driver", "end_turn", false),
+            &mut app,
+        );
         assert!(affected, "finishing the active viewer turn should redraw");
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(
             matches!(agent.session.state, AgentState::Idle),
-            "prompt_complete must drop a viewer back to Idle"
+            "TurnCompleted must drop a viewer back to Idle"
         );
         assert!(
             agent.session.current_prompt_id.is_none(),
-            "prompt_complete must clear current_prompt_id"
+            "TurnCompleted must clear current_prompt_id"
         );
         assert!(agent.turn_started_at.is_none());
     }
 
     #[test]
-    fn viewer_prompt_complete_pushes_turn_completed_marker() {
+    fn viewer_durable_terminal_pushes_turn_completed_marker() {
         // Regression (leader/dashboard mode): the "Worked for X" marker
         // is generated from the driver's PromptResponse RPC, which a viewer
         // never receives. Before this fix the driver pane showed
         // "Worked for …" while the viewer pane (same session) showed
         // nothing. The viewer must surface the equivalent marker on the
-        // broadcast prompt_complete.
+        // durable terminal.
         let mut app = make_app_with_agent("sess-view");
         app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
         let _ = handle(
@@ -2300,7 +2328,10 @@
             AgentState::TurnRunning
         ));
 
-        let affected = handle_ext_notification(&prompt_complete_ext("sess-view"), &mut app);
+        let affected = handle_ext_notification(
+            &grow_turn_completed_notif("sess-view", "pid-driver", "end_turn", false),
+            &mut app,
+        );
         assert!(affected, "finishing the active viewer turn should redraw");
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -2309,7 +2340,7 @@
                 last_session_event(&agent.scrollback),
                 Some(SessionEvent::TurnCompleted { .. })
             ),
-            "a viewer must push a 'Worked for' marker on prompt_complete"
+            "a viewer must push a 'Worked for' marker on TurnCompleted"
         );
     }
 
@@ -2337,7 +2368,10 @@
             "viewer elapsed must reflect the back-dated turn start (~5s), got {elapsed:?}"
         );
 
-        let _ = handle_ext_notification(&prompt_complete_ext("sess-view"), &mut app);
+        let _ = handle_ext_notification(
+            &grow_turn_completed_notif("sess-view", "pid-driver", "end_turn", false),
+            &mut app,
+        );
         let agent = app.agents.get(&AgentId(0)).unwrap();
         match last_session_event(&agent.scrollback) {
             Some(SessionEvent::TurnCompleted {
@@ -2351,7 +2385,7 @@
     }
 
     #[test]
-    fn viewer_prompt_complete_cancelled_pushes_turn_cancelled_marker() {
+    fn viewer_durable_cancelled_pushes_turn_cancelled_marker() {
         let mut app = make_app_with_agent("sess-view");
         app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
         let _ = handle(
@@ -2360,7 +2394,7 @@
         );
 
         let _ = handle_ext_notification(
-            &prompt_complete_ext_with_reason("sess-view", "cancelled", None),
+            &grow_turn_completed_notif("sess-view", "pid-driver", "cancelled", false),
             &mut app,
         );
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -2374,7 +2408,7 @@
     }
 
     #[test]
-    fn viewer_prompt_complete_error_pushes_turn_failed_marker() {
+    fn viewer_durable_error_pushes_turn_failed_marker() {
         let mut app = make_app_with_agent("sess-view");
         app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
         let _ = handle(
@@ -2383,7 +2417,7 @@
         );
 
         let _ = handle_ext_notification(
-            &prompt_complete_ext_with_reason("sess-view", "error", Some("boom")),
+            &grow_turn_completed_notif_with_result("sess-view", "pid-driver", "error", "boom"),
             &mut app,
         );
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -2396,7 +2430,7 @@
     }
 
     #[test]
-    fn viewer_prompt_complete_rate_limit_pushes_no_marker() {
+    fn viewer_durable_rate_limit_pushes_no_marker() {
         // Rate limits surface a dedicated UX on the driver and aren't actionable
         // from a viewer — the viewer still finishes its turn but pushes no
         // "Turn failed" line.
@@ -2408,7 +2442,7 @@
         );
 
         let _ = handle_ext_notification(
-            &prompt_complete_ext_with_reason("sess-view", "rate_limit", None),
+            &grow_turn_completed_notif("sess-view", "pid-driver", "rate_limit", false),
             &mut app,
         );
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -2602,5 +2636,413 @@
                 .send_now_painted_blocks
                 .contains_key("p1"),
             "a row draining to running keeps its painted block for the adoption"
+        );
+    }
+
+    // ── Single-finalizer permutations (PR rail vs durable rail) ─────
+
+    /// Count turn-terminal markers (TurnCompleted/Cancelled/Failed) in the
+    /// agent's scrollback.
+    fn count_terminal_markers(app: &AppView, id: AgentId) -> usize {
+        let agent = &app.agents[&id];
+        (0..agent.scrollback.len())
+            .filter(|&i| {
+                matches!(
+                    agent.scrollback.entry(i).map(|e| &e.block),
+                    Some(RenderBlock::SessionEvent(ev)) if ev.event.is_turn_terminal()
+                )
+            })
+            .count()
+    }
+
+    /// Full-permutation rail test (PR first): the PromptResponse finalizes
+    /// once — one marker, one queue drain — and the later durable
+    /// TurnCompleted for the same pid is Ignored: no second marker, no
+    /// second drain, no adoption handoff.
+    #[test]
+    fn prompt_response_first_then_durable_terminal_single_finalize() {
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::dispatch::dispatch;
+
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+
+        // p1 drains from idle; the leader confirms it as running.
+        let effects = dispatch(Action::SendPrompt("first".into()), &mut app);
+        let pid_first = match &effects[0] {
+            Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
+            other => panic!("expected SendPrompt, got {other:?}"),
+        };
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some(&pid_first)),
+            &mut app
+        ));
+        // A follow-up queued locally mid-turn drains exactly once, at finalize.
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .session
+            .enqueue_prompt("second".to_string());
+
+        // PR for p1 arrives first → the PR rail finalizes + drains once.
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::PromptResponse {
+                agent_id: id,
+                result: Ok(
+                    acp::PromptResponse::new(acp::StopReason::EndTurn).meta(
+                        serde_json::json!({ "promptId": pid_first.as_str() })
+                            .as_object()
+                            .cloned(),
+                    ),
+                ),
+                http_status: None,
+                prompt_id: None,
+            }),
+            &mut app,
+        );
+        let sends: Vec<_> = effects
+            .iter()
+            .filter(|e| matches!(e, Effect::SendPrompt { .. }))
+            .collect();
+        assert_eq!(sends.len(), 1, "the queued follow-up drains exactly once");
+        let agent = &app.agents[&id];
+        assert!(agent.session.state.is_turn_running(), "follow-up is running");
+        assert_ne!(
+            agent.session.current_prompt_id.as_deref(),
+            Some(pid_first.as_str()),
+            "the follow-up owns the slot now"
+        );
+        assert_eq!(count_terminal_markers(&app, id), 1, "exactly one marker");
+
+        // The late durable terminal for p1 is Ignored: no second marker, no
+        // drain, no state change.
+        assert!(!handle_ext_notification(
+            &grow_turn_completed_notif("sess-1", &pid_first, "end_turn", false),
+            &mut app,
+        ));
+        let agent = &app.agents[&id];
+        assert!(agent.session.state.is_turn_running());
+        assert_eq!(count_terminal_markers(&app, id), 1, "no second marker");
+        assert!(
+            app.pending_effects.is_empty(),
+            "the losing rail drains nothing"
+        );
+        assert!(app.pending_running_adoptions.is_empty());
+    }
+
+    /// Full-permutation rail test (durable first, local queue): the durable
+    /// TurnCompleted finalizes once and the teardown drains the local queue
+    /// exactly once; the late PromptResponse for the same pid is discarded
+    /// (a new turn owns the slot) — no merge, no re-drain, no re-adopt.
+    #[test]
+    fn durable_terminal_first_drains_local_queue_once() {
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::dispatch::dispatch;
+
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+
+        let effects = dispatch(Action::SendPrompt("first".into()), &mut app);
+        let pid_first = match &effects[0] {
+            Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
+            other => panic!("expected SendPrompt, got {other:?}"),
+        };
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some(&pid_first)),
+            &mut app
+        ));
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .session
+            .enqueue_prompt("second".to_string());
+
+        // Durable wins; the teardown drains "second" exactly once.
+        assert!(handle_ext_notification(
+            &grow_turn_completed_notif("sess-1", &pid_first, "end_turn", false),
+            &mut app,
+        ));
+        let agent = &app.agents[&id];
+        assert!(
+            agent.session.state.is_turn_running(),
+            "the queued follow-up ran once"
+        );
+        assert_ne!(
+            agent.session.current_prompt_id.as_deref(),
+            Some(pid_first.as_str())
+        );
+        assert_eq!(count_terminal_markers(&app, id), 1);
+        // The teardown's queue drain queued the "second" send (harness does
+        // not process effects); capture it so the late-PR assertions below
+        // measure only what the discarded response adds.
+        let _drain_effects = std::mem::take(&mut app.pending_effects);
+
+        // Late PR for p1: discarded (new turn), nothing merges or re-runs.
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::PromptResponse {
+                agent_id: id,
+                result: Ok(
+                    acp::PromptResponse::new(acp::StopReason::EndTurn).meta(
+                        serde_json::json!({ "promptId": pid_first.as_str() })
+                            .as_object()
+                            .cloned(),
+                    ),
+                ),
+                http_status: None,
+                prompt_id: None,
+            }),
+            &mut app,
+        );
+        assert!(effects.is_empty(), "the late PR must be discarded");
+        let agent = &app.agents[&id];
+        assert!(
+            agent.session.state.is_turn_running(),
+            "the next turn survives the late PR"
+        );
+        assert!(
+            agent.finalized_pr_meta.is_none(),
+            "no merge after a new turn started"
+        );
+        assert_eq!(count_terminal_markers(&app, id), 1);
+        assert!(
+            app.pending_effects.is_empty(),
+            "the late PR adds no effects"
+        );
+        assert!(app.pending_running_adoptions.is_empty());
+    }
+
+    /// Full-permutation rail test (PR first, FIFO handoff): the
+    /// PromptResponse finalizes and applies the stashed adoption exactly
+    /// once; the later durable TurnCompleted for the finished pid is Ignored
+    /// (pid mismatch — the adopted next turn owns the slot).
+    #[test]
+    fn prompt_response_first_handoff_then_durable_ignored() {
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::dispatch::dispatch;
+
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+
+        // p1 running; p2 broadcast running before p1's terminal → stash.
+        let effects = dispatch(Action::SendPrompt("first".into()), &mut app);
+        let pid_first = match &effects[0] {
+            Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
+            other => panic!("expected SendPrompt, got {other:?}"),
+        };
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some(&pid_first)),
+            &mut app
+        ));
+        let effects = dispatch(Action::SendPrompt("second".into()), &mut app);
+        let pid_second = match &effects[0] {
+            Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
+            other => panic!("expected immediate SendPrompt, got {other:?}"),
+        };
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some(&pid_second)),
+            &mut app
+        ));
+        assert!(app.pending_running_adoptions.contains_key(&id));
+
+        // PR for p1 wins; the stashed adoption applies exactly once.
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::PromptResponse {
+                agent_id: id,
+                result: Ok(
+                    acp::PromptResponse::new(acp::StopReason::EndTurn).meta(
+                        serde_json::json!({ "promptId": pid_first.as_str() })
+                            .as_object()
+                            .cloned(),
+                    ),
+                ),
+                http_status: None,
+                prompt_id: None,
+            }),
+            &mut app,
+        );
+        let agent = &app.agents[&id];
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some(pid_second.as_str()),
+            "the stashed adoption applied exactly once"
+        );
+        assert!(agent.session.state.is_turn_running());
+        assert!(
+            app.pending_running_adoptions.is_empty(),
+            "stash consumed once"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { .. })),
+            "no re-send of the already-adopted prompt"
+        );
+        assert_eq!(count_terminal_markers(&app, id), 1);
+
+        // The late durable terminal for p1 is Ignored.
+        assert!(!handle_ext_notification(
+            &grow_turn_completed_notif("sess-1", &pid_first, "end_turn", false),
+            &mut app,
+        ));
+        let agent = &app.agents[&id];
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some(pid_second.as_str()),
+            "the adopted turn must survive the late durable terminal"
+        );
+        assert!(agent.session.state.is_turn_running());
+        assert_eq!(count_terminal_markers(&app, id), 1);
+        assert!(app.pending_effects.is_empty());
+        assert!(app.pending_running_adoptions.is_empty());
+    }
+
+    /// Full-permutation rail test (durable first, FIFO handoff): the
+    /// durable TurnCompleted wins and applies the stashed adoption exactly
+    /// once; the late PromptResponse for the finished pid is discarded (the
+    /// adopted next turn owns the slot).
+    #[test]
+    fn durable_terminal_first_handoff_then_late_pr_discarded() {
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::dispatch::dispatch;
+
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+
+        // p1 running; p2 broadcast running before p1's terminal → stash.
+        let effects = dispatch(Action::SendPrompt("first".into()), &mut app);
+        let pid_first = match &effects[0] {
+            Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
+            other => panic!("expected SendPrompt, got {other:?}"),
+        };
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some(&pid_first)),
+            &mut app
+        ));
+        let effects = dispatch(Action::SendPrompt("second".into()), &mut app);
+        let pid_second = match &effects[0] {
+            Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
+            other => panic!("expected immediate SendPrompt, got {other:?}"),
+        };
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some(&pid_second)),
+            &mut app
+        ));
+        assert!(app.pending_running_adoptions.contains_key(&id));
+
+        // Durable wins; the stashed adoption applies exactly once.
+        assert!(handle_ext_notification(
+            &grow_turn_completed_notif("sess-1", &pid_first, "end_turn", false),
+            &mut app,
+        ));
+        let agent = &app.agents[&id];
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some(pid_second.as_str()),
+            "the stashed adoption applied exactly once"
+        );
+        assert!(agent.session.state.is_turn_running());
+        assert!(app.pending_running_adoptions.is_empty());
+        assert_eq!(count_terminal_markers(&app, id), 1);
+
+        // The late PR for p1 must not re-adopt or re-finalize.
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::PromptResponse {
+                agent_id: id,
+                result: Ok(
+                    acp::PromptResponse::new(acp::StopReason::EndTurn).meta(
+                        serde_json::json!({ "promptId": pid_first.as_str() })
+                            .as_object()
+                            .cloned(),
+                    ),
+                ),
+                http_status: None,
+                prompt_id: None,
+            }),
+            &mut app,
+        );
+        assert!(effects.is_empty());
+        let agent = &app.agents[&id];
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some(pid_second.as_str()),
+            "the adopted turn must survive the late PR"
+        );
+        assert!(agent.session.state.is_turn_running());
+        assert!(app.pending_running_adoptions.is_empty());
+        assert_eq!(count_terminal_markers(&app, id), 1);
+    }
+
+    /// Late-PR merge: the durable terminal finalizes first (nothing queued,
+    /// nothing stashed → Idle), then the driver's PromptResponse arrives.
+    /// It must apply usage + structured output into the finalized record and
+    /// must NOT finish the turn, push a second marker, drain, or adopt.
+    #[test]
+    fn late_prompt_response_merges_metadata_after_durable_finalize() {
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::dispatch::dispatch;
+
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+
+        let effects = dispatch(Action::SendPrompt("first".into()), &mut app);
+        let pid_first = match &effects[0] {
+            Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
+            other => panic!("expected SendPrompt, got {other:?}"),
+        };
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some(&pid_first)),
+            &mut app
+        ));
+
+        // Durable terminal finalizes first (nothing queued → Idle).
+        assert!(handle_ext_notification(
+            &grow_turn_completed_notif("sess-1", &pid_first, "end_turn", false),
+            &mut app,
+        ));
+        {
+            let agent = &app.agents[&id];
+            assert!(agent.session.state.is_idle());
+            assert_eq!(
+                agent.finalized_prompt.as_deref(),
+                Some(pid_first.as_str())
+            );
+            assert_eq!(count_terminal_markers(&app, id), 1);
+        }
+
+        // Late PR with rich metadata: merge only.
+        let mut meta = serde_json::Map::new();
+        meta.insert("promptId".into(), serde_json::json!(pid_first.as_str()));
+        meta.insert("structuredOutput".into(), serde_json::json!({ "ok": true }));
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::PromptResponse {
+                agent_id: id,
+                result: Ok(
+                    acp::PromptResponse::new(acp::StopReason::EndTurn)
+                        .usage(acp::Usage::new(7, 3, 4))
+                        .meta(meta),
+                ),
+                http_status: None,
+                prompt_id: None,
+            }),
+            &mut app,
+        );
+        assert!(effects.is_empty(), "the merge path produces no effects");
+        let agent = &app.agents[&id];
+        assert!(agent.session.state.is_idle(), "no second finish");
+        assert!(agent.session.current_prompt_id.is_none());
+        assert_eq!(count_terminal_markers(&app, id), 1, "no second marker");
+        let merged = agent.finalized_pr_meta.as_ref().expect("meta merged");
+        assert_eq!(merged.usage.as_ref().map(|u| u.total_tokens), Some(7));
+        assert!(
+            matches!(merged.structured_output.as_ref(), Some(Ok(v)) if v == &serde_json::json!({ "ok": true })),
+            "structured output merged"
+        );
+        assert!(
+            app.pending_effects.is_empty(),
+            "no drain on the merge path"
+        );
+        assert!(
+            app.pending_running_adoptions.is_empty(),
+            "no adoption on the merge path"
         );
     }

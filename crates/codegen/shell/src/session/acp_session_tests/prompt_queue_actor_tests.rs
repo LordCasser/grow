@@ -807,6 +807,7 @@ async fn interject_after_cancel_does_nothing_and_keeps_prompt_queued() {
                 state.pending_inputs.push_back(user_item("p1", "A"));
                 state.running_task = Some(AgentTask {
                     prompt_id: "running".into(),
+                    turn_start_ms: 0,
                     handle: tokio::task::spawn_local(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })

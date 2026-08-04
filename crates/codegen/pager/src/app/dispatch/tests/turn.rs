@@ -546,230 +546,330 @@ fn cancel_turn_retry_honors_subagent_preference() {
     ));
 }
 
-/// The latched-cancel deadlock: cancel sent → state
-/// `TurnCancelling` → the turn's PromptResponse RPC is lost → nothing can
-/// ever exit the state. The armed broadcast marker must finish the turn
-/// after the grace window.
 #[test]
-fn reconcile_finishes_cancelling_turn_after_grace() {
+fn stalled_unacknowledged_submission_queries_exact_prompt_status() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.session.state = AgentState::TurnCancelling;
-        agent.session.current_prompt_id = Some("pid-stuck".into());
+        agent.session.state = AgentState::TurnSubmitting;
+        agent.session.current_prompt_id = Some("pid-submitting".into());
+        agent.turn_started_at = Some(
+            std::time::Instant::now()
+                - PROMPT_STATUS_WATCHDOG_DELAY
+                - std::time::Duration::from_millis(1),
+        );
     }
-    arm_reconcile(
-        &mut app,
-        id,
-        "pid-stuck",
-        "cancelled",
-        TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1),
-    );
 
-    let fired = reconcile_overdue_turn_ends(&mut app);
-
-    assert!(fired.is_some(), "an overdue marker must fire the reconcile");
-    let agent = &app.agents[&id];
-    assert!(
-        agent.session.state.is_idle(),
-        "reconcile must exit TurnCancelling"
-    );
-    assert!(agent.session.current_prompt_id.is_none());
-    assert!(agent.pending_turn_end_reconcile.is_none());
-    let has_cancelled_marker = (0..agent.scrollback.len()).any(|i| {
-        matches!(
-            agent.scrollback.entry(i).map(|e| &e.block),
-            Some(RenderBlock::SessionEvent(ev))
-                if matches!(ev.event, SessionEvent::TurnCancelled { .. })
-        )
-    });
-    assert!(
-        has_cancelled_marker,
-        "reconcile must surface the 'Turn cancelled' marker"
+    let effects = poll_stalled_prompt_submissions(&mut app).expect("watchdog must fire");
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::QueryPromptStatus {
+            agent_id,
+            prompt_id,
+            ..
+        }] if *agent_id == id && prompt_id == "pid-submitting"
+    ));
+    assert_eq!(
+        app.agents[&id].prompt_status_query_for.as_deref(),
+        Some("pid-submitting")
     );
 }
 
-/// A lost-RPC reconcile for a send-now cancel (`_meta.cancelTrigger: "send_now"`) pushes no marker.
 #[test]
-fn reconcile_suppresses_send_now_cancel_marker() {
+fn running_turn_stalled_without_activity_queries_prompt_status() {
+    // C1: a turn that is already Running (admitted) but whose lifecycle
+    // signals went missing must be re-queried once the running watchdog
+    // window elapsed with no activity. The query alone must not fabricate a
+    // terminal: state stays TurnRunning until the response says otherwise.
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
-        agent.session.current_prompt_id = Some("pid-stuck".into());
+        agent.session.current_prompt_id = Some("pid-running".into());
+        agent.turn_started_at = Some(
+            std::time::Instant::now()
+                - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
+                - std::time::Duration::from_secs(1),
+        );
+        // No activity_started_at: nothing ever rendered/streamed for this
+        // turn (background pane), so the turn counts as stalled.
     }
-    arm_reconcile_with_trigger(
-        &mut app,
-        id,
-        "pid-stuck",
-        "cancelled",
-        Some("send_now"),
-        TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1),
+
+    let effects = poll_stalled_prompt_submissions(&mut app).expect("watchdog must fire");
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::QueryPromptStatus {
+            agent_id,
+            prompt_id,
+            ..
+        }] if *agent_id == id && prompt_id == "pid-running"
+    ));
+    assert_eq!(
+        app.agents[&id].prompt_status_query_for.as_deref(),
+        Some("pid-running")
     );
-
-    let fired = reconcile_overdue_turn_ends(&mut app);
-
-    assert!(fired.is_some(), "the overdue reconcile must still fire");
-    let agent = &app.agents[&id];
-    assert!(agent.session.state.is_idle(), "the turn still finishes");
-    let has_marker = (0..agent.scrollback.len()).any(|i| {
-        matches!(
-            agent.scrollback.entry(i).map(|e| &e.block),
-            Some(RenderBlock::SessionEvent(ev))
-                if matches!(
-                    ev.event,
-                    SessionEvent::TurnCancelled { .. } | SessionEvent::TurnCompleted { .. }
-                )
-        )
-    });
     assert!(
-        !has_marker,
-        "a send-now cancel reconcile must not push a cancelled (or substitute \
-         completed) marker"
+        app.agents[&id].session.state.is_turn_running(),
+        "the watchdog must query, never fabricate a terminal locally"
+    );
+    assert!(
+        app.agents[&id].session.current_prompt_id.as_deref() == Some("pid-running"),
+        "the watchdog must not clear the prompt locally"
     );
 }
 
-/// Older-shell fallback on the reconcile rail: no wire trigger, armed expectation.
 #[test]
-fn reconcile_suppresses_expected_send_now_cancel_without_wire_trigger() {
+fn running_turn_with_recent_activity_skips_query() {
+    // C1: a busy turn keeps its phase anchor fresh (render refreshes
+    // activity_started_at on every activity transition), so a genuinely
+    // running turn is never re-queried while activity is flowing.
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
-        agent.session.current_prompt_id = Some("pid-stuck".into());
-        agent.expect_send_now_cancel = Some("p-next".into());
+        agent.session.current_prompt_id = Some("pid-busy".into());
+        agent.turn_started_at = Some(
+            std::time::Instant::now()
+                - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
+                - std::time::Duration::from_secs(60),
+        );
+        agent.activity_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
     }
-    arm_reconcile(
-        &mut app,
-        id,
-        "pid-stuck",
-        "cancelled",
-        TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1),
-    );
 
-    let fired = reconcile_overdue_turn_ends(&mut app);
-
-    assert!(fired.is_some());
-    let agent = &app.agents[&id];
-    let has_cancelled = (0..agent.scrollback.len()).any(|i| {
-        matches!(
-            agent.scrollback.entry(i).map(|e| &e.block),
-            Some(RenderBlock::SessionEvent(ev))
-                if matches!(ev.event, SessionEvent::TurnCancelled { .. })
-        )
-    });
-    assert!(!has_cancelled, "expected send-now cancel renders no marker");
     assert!(
-        agent.expect_send_now_cancel.is_none(),
-        "the expectation is consumed by the reconcile"
+        poll_stalled_prompt_submissions(&mut app).is_none(),
+        "recent activity must suppress the running watchdog"
     );
+    assert!(app.agents[&id].prompt_status_query_for.is_none());
 }
 
 #[test]
-fn reconcile_waits_for_grace_window() {
-    // A freshly-armed marker means the RPC response may still be in
-    // flight (healthy path: it lands milliseconds after the broadcast) —
-    // do not touch the turn yet.
+fn running_turn_with_stale_activity_queries_prompt_status() {
+    // C1: an observed-but-unchanged phase anchor for the full window means
+    // the activity stream went quiet (e.g. TurnCompleted lost after the last
+    // chunk) — re-query. A stale anchor on a genuinely busy turn only costs
+    // one bounded query whose Running response refreshes the anchors.
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.session.state = AgentState::TurnCancelling;
-        agent.session.current_prompt_id = Some("pid-stuck".into());
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("pid-stale".into());
+        agent.turn_started_at = Some(
+            std::time::Instant::now()
+                - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
+                - std::time::Duration::from_secs(1),
+        );
+        agent.activity_started_at = Some(
+            std::time::Instant::now()
+                - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
+                - std::time::Duration::from_secs(1),
+        );
+        agent.last_activity = Some(crate::acp::tracker::TurnActivity::Responding);
     }
-    arm_reconcile(
-        &mut app,
-        id,
-        "pid-stuck",
-        "cancelled",
-        std::time::Duration::ZERO,
-    );
 
-    let fired = reconcile_overdue_turn_ends(&mut app);
+    let effects = poll_stalled_prompt_submissions(&mut app).expect("watchdog must fire");
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::QueryPromptStatus {
+            agent_id,
+            prompt_id,
+            ..
+        }] if *agent_id == id && prompt_id == "pid-stale"
+    ));
+}
 
-    assert!(fired.is_none());
-    let agent = &app.agents[&id];
-    assert!(agent.session.state.is_cancelling());
+#[test]
+fn running_turn_below_threshold_skips_query() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("pid-young".into());
+        agent.turn_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
+    }
+
     assert!(
-        agent.pending_turn_end_reconcile.is_some(),
-        "marker must stay armed until grace expires"
+        poll_stalled_prompt_submissions(&mut app).is_none(),
+        "a running window below the threshold must not query"
+    );
+    assert!(app.agents[&id].prompt_status_query_for.is_none());
+}
+
+#[test]
+fn running_turn_query_in_flight_skips_duplicate() {
+    // The single-in-flight guard applies to the running watchdog too: a
+    // prompt with a pending status RPC must not be re-queried on the next
+    // tick; the response handler clears the marker, re-arming the window.
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("pid-inflight".into());
+        agent.prompt_status_query_for = Some("pid-inflight".into());
+        agent.turn_started_at = Some(
+            std::time::Instant::now()
+                - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
+                - std::time::Duration::from_secs(1),
+        );
+    }
+
+    assert!(
+        poll_stalled_prompt_submissions(&mut app).is_none(),
+        "an in-flight status query must suppress a duplicate"
     );
 }
 
 #[test]
-fn reconcile_drops_stale_marker_when_turn_already_resolved() {
-    // The normal path won the race (PromptResponse finished the turn, or
-    // a new turn was adopted): the marker is stale and must be dropped
-    // without touching state or pushing a marker.
+fn running_watchdog_terminal_response_finalizes_via_first_wins_finalizer() {
+    // C1 end-to-end loop: the running watchdog re-queries a stalled turn,
+    // and a Terminal status response ends it through the same first-wins
+    // durable finalizer as a live TurnCompleted — exactly once, without any
+    // locally fabricated terminal.
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let scrollback_before = app.agents[&id].scrollback.len();
-    arm_reconcile(
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("pid-terminal".into());
+        agent.turn_started_at = Some(
+            std::time::Instant::now()
+                - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
+                - std::time::Duration::from_secs(1),
+        );
+    }
+
+    let effects = poll_stalled_prompt_submissions(&mut app).expect("watchdog must fire");
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::QueryPromptStatus { prompt_id, .. }] if prompt_id == "pid-terminal"
+    ));
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: id,
+            prompt_id: "pid-terminal".into(),
+            status: Ok(crate::app::actions::PromptStatusWire::Terminal {
+                stop_reason: "end_turn".into(),
+                agent_result: None,
+            }),
+        }),
         &mut app,
-        id,
-        "pid-old",
-        "end_turn",
-        TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1),
     );
 
-    let fired = reconcile_overdue_turn_ends(&mut app);
-
-    assert!(fired.is_none(), "stale marker must not fire");
+    assert!(effects.is_empty());
     let agent = &app.agents[&id];
     assert!(agent.session.state.is_idle());
-    assert!(agent.pending_turn_end_reconcile.is_none());
-    assert_eq!(agent.scrollback.len(), scrollback_before);
+    assert!(agent.session.current_prompt_id.is_none());
+    assert!(
+        agent.prompt_status_query_for.is_none(),
+        "the in-flight guard must clear so a later prompt can be re-queried"
+    );
+    let markers = (0..agent.scrollback.len())
+        .filter(|&index| {
+            matches!(
+                agent.scrollback.entry(index).map(|entry| &entry.block),
+                Some(RenderBlock::SessionEvent(event))
+                    if matches!(event.event, SessionEvent::TurnCompleted { .. })
+            )
+        })
+        .count();
+    assert_eq!(
+        markers, 1,
+        "status reconciliation must finalize exactly once"
+    );
 }
 
 #[test]
-fn reconcile_applies_stashed_running_adoption() {
-    // The failing sequence: queued prompt promoted server-side while the
-    // cancelled turn's response was lost. The reconcile must hand the pane
-    // to the promoted prompt (turn-start shim), not strand it Idle.
+fn queued_prompt_status_rearms_bounded_watchdog_without_claiming_running() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.session.state = AgentState::TurnCancelling;
-        agent.session.current_prompt_id = Some("pid-stuck".into());
+        agent.session.current_prompt_id = Some("pid-queued".into());
+        agent.prompt_status_query_for = Some("pid-queued".into());
+        agent.turn_started_at = Some(
+            std::time::Instant::now()
+                - PROMPT_STATUS_WATCHDOG_DELAY
+                - std::time::Duration::from_secs(1),
+        );
     }
-    // The leader's running_prompt_id broadcast arrived mid-teardown and
-    // was stashed (same as the PromptResponse path).
-    app.pending_running_adoptions.insert(
-        id,
-        crate::app::acp_handler::PendingRunningAdoption {
-            prompt_id: "pid-next".into(),
-            text: Some("queued prompt".into()),
-            combined_texts: None,
-            kind: "prompt".into(),
-            turn_ended: false,
-        },
-    );
-    arm_reconcile(
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: id,
+            prompt_id: "pid-queued".into(),
+            status: Ok(crate::app::actions::PromptStatusWire::Queued {
+                position: 2,
+                queue_version: 7,
+            }),
+        }),
         &mut app,
-        id,
-        "pid-stuck",
-        "cancelled",
-        TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1),
     );
 
-    let fired = reconcile_overdue_turn_ends(&mut app);
-
-    assert!(fired.is_some());
+    assert!(effects.is_empty());
     let agent = &app.agents[&id];
+    assert!(agent.session.state.is_idle());
     assert_eq!(
         agent.session.current_prompt_id.as_deref(),
-        Some("pid-next"),
-        "the stashed adoption must be applied after the reconcile"
+        Some("pid-queued")
     );
+    assert!(agent.prompt_status_query_for.is_none());
     assert!(
-        matches!(agent.session.state, AgentState::TurnRunning),
-        "the promoted prompt is the new running turn"
+        agent
+            .turn_started_at
+            .is_some_and(|started| started.elapsed() < PROMPT_STATUS_WATCHDOG_DELAY),
+        "a confirmed queue admission must start a fresh bounded watch window"
     );
-    assert!(!app.pending_running_adoptions.contains_key(&id));
+}
+
+#[test]
+fn terminal_prompt_status_uses_same_first_wins_finalizer() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.current_prompt_id = Some("pid-terminal".into());
+        agent.prompt_status_query_for = Some("pid-terminal".into());
+        agent.turn_started_at = Some(std::time::Instant::now());
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: id,
+            prompt_id: "pid-terminal".into(),
+            status: Ok(crate::app::actions::PromptStatusWire::Terminal {
+                stop_reason: "end_turn".into(),
+                agent_result: None,
+            }),
+        }),
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    let agent = &app.agents[&id];
+    assert!(agent.session.state.is_idle());
+    assert!(agent.session.current_prompt_id.is_none());
+    let markers = (0..agent.scrollback.len())
+        .filter(|&index| {
+            matches!(
+                agent.scrollback.entry(index).map(|entry| &entry.block),
+                Some(RenderBlock::SessionEvent(event))
+                    if matches!(event.event, SessionEvent::TurnCompleted { .. })
+            )
+        })
+        .count();
+    assert_eq!(
+        markers, 1,
+        "status reconciliation must finalize exactly once"
+    );
 }
 
 #[test]

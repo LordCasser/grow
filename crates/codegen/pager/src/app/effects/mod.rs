@@ -1201,25 +1201,44 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::Compact { agent_id, session_id } => {
+        Effect::Compact {
+            agent_id,
+            session_id,
+            user_context,
+            track_foreground,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
                     let params = serde_json::json!({
-                    "sessionId": session_id.0.to_string(),
-                });
+                        "sessionId": session_id.0.to_string(),
+                        "userContext": user_context,
+                    });
                     let req = acp::ExtRequest::new(
                         "grow/compact_conversation",
                         serde_json::value::to_raw_value(&params)
                             .expect("serialize compact params")
                             .into(),
                     );
-                    let result = acp_send(req, &tx).await;
+                    let result = match acp_send(req, &tx).await {
+                        Ok(response) => serde_json::from_str::<serde_json::Value>(response.0.get())
+                            .map_err(|error| sanitize_user_error(&format!(
+                                "invalid compact response: {error}"
+                            )))
+                            .and_then(|value| {
+                                serde_json::from_value(
+                                    value.get("status").cloned().unwrap_or_default(),
+                                )
+                                .map_err(|error| sanitize_user_error(&format!(
+                                    "invalid compact status: {error}"
+                                )))
+                            }),
+                        Err(error) => Err(sanitize_user_error(&error.to_string())),
+                    };
                     TaskResult::CompactComplete {
                         agent_id,
-                        result: result
-                            .map(|_| ())
-                            .map_err(|e| sanitize_user_error(&e.to_string())),
+                        track_foreground,
+                        result,
                     }
                 });
         }
@@ -3050,6 +3069,38 @@ pub(crate) fn execute(
                     sanitize_user_error(&format!("couldn't execute command: {error}"))
                 });
                 TaskResult::SlashCommandExecuted { agent_id, error }
+            });
+        }
+        Effect::QueryPromptStatus {
+            agent_id,
+            session_id,
+            prompt_id,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "sessionId": session_id.0.to_string(),
+                    "promptId": prompt_id,
+                });
+                let request = acp::ExtRequest::new(
+                    "grow/queue/prompt_status",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize prompt status params")
+                        .into(),
+                );
+                let status = match acp_send(request, &tx).await {
+                    Ok(response) => serde_json::from_str(response.0.get()).map_err(|error| {
+                        sanitize_user_error(&format!("invalid prompt status response: {error}"))
+                    }),
+                    Err(error) => Err(sanitize_user_error(&format!(
+                        "couldn't reconcile prompt status: {error}"
+                    ))),
+                };
+                TaskResult::PromptStatusResolved {
+                    agent_id,
+                    prompt_id,
+                    status,
+                }
             });
         }
         Effect::FetchCatalogEntry { kind, name } => {

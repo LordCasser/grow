@@ -1,12 +1,9 @@
 //! Pure construction of the durable, replayable turn-completion terminal.
 //!
-//! `TurnCompleted` is the persisted + replayed twin of the fire-and-forget
-//! `grow/session/prompt_complete` notification: it rides the
-//! `_grow/session/update` rail so a viewer that re-attaches mid-turn finalizes
-//! the turn from replay instead of stranding on "Waiting…". The
-//! `(stop_reason, agent_result)` pair is the SAME pair `prompt_complete`
-//! carries (from [`crate::sampling::error::prompt_complete_fields`]), so the
-//! two signals never disagree.
+//! `TurnCompleted` rides the persisted `_grow/session/update` rail so a viewer
+//! that reattaches mid-turn finalizes from replay instead of stranding on
+//! "Waiting…". It is the sole terminal lifecycle notification; PromptResponse
+//! carries only the RPC result and additional metadata.
 
 use crate::extensions::notification::SessionUpdate;
 

@@ -3,9 +3,8 @@
 //! These drive the SHIPPED handlers (`handle_completion` for normal + error
 //! completions, `cancel_running_task` for cancellation) and assert on the
 //! notification the real `send_grow_notification` persists — not a
-//! re-implementation. The terminal is the persisted + replayed twin of the
-//! fire-and-forget `prompt_complete`, so a re-attaching viewer can finalize
-//! from replay.
+//! re-implementation. The terminal is persisted and replayed, so a reattaching
+//! viewer can finalize from replay.
 
 use super::support::*;
 use super::*;
@@ -250,6 +249,7 @@ async fn cancellation_persists_turn_completed_cancelled() {
                 let mut state = actor.state.lock().await;
                 state.running_task = Some(AgentTask {
                     prompt_id: "running".into(),
+                    turn_start_ms: 0,
                     handle: tokio::task::spawn_local(async {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
@@ -319,6 +319,7 @@ async fn send_now_cancel_in_completion_race_window_still_persists_turn_completed
                 let mut state = actor.state.lock().await;
                 state.running_task = Some(AgentTask {
                     prompt_id: "running".into(),
+                    turn_start_ms: 0,
                     handle: tokio::task::spawn_local(async {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
@@ -365,6 +366,7 @@ async fn send_now_cancel_stamps_cancel_trigger_on_turn_end() {
                 let mut state = actor.state.lock().await;
                 state.running_task = Some(AgentTask {
                     prompt_id: "running".into(),
+                    turn_start_ms: 0,
                     handle: tokio::task::spawn_local(async {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
@@ -446,6 +448,7 @@ async fn pristine_rewind_cancel_emits_no_turn_completed() {
                 state.rewindable = true;
                 state.running_task = Some(AgentTask {
                     prompt_id: "rw".into(),
+                    turn_start_ms: 0,
                     handle: tokio::task::spawn_local(async {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })

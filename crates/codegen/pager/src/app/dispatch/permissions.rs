@@ -247,7 +247,7 @@ pub(super) fn dispatch_permission_cancel(app: &mut AppView) -> Vec<Effect> {
 ///
 /// Called on turn-end and turn-cancel. After draining, restores stashed
 /// prompt/pane. Distinct from `dispatch_permission_cancel` (front only).
-pub(super) fn drain_permission_queue(agent: &mut AgentView) {
+pub(crate) fn drain_permission_queue(agent: &mut AgentView) {
     agent.last_permission_click = None;
     if agent.permission_queue.is_empty() {
         return;

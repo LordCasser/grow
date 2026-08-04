@@ -275,7 +275,8 @@ impl SessionActor {
             );
             return PrefireOutcome::DebugFailPass1.into();
         }
-        let conversation = self.chat_state_handle.get_conversation().await;
+        let conversation =
+            self.project_goal_conversation(self.chat_state_handle.get_conversation().await, true);
         if conversation.len() < 4 {
             return PrefireOutcome::TooSmall.into();
         }
@@ -601,6 +602,13 @@ impl SessionActor {
         self: &Arc<Self>,
         user_context: Option<String>,
     ) -> Result<(), acp::Error> {
+        let Some(_exclusive) = self
+            .compaction
+            .lease
+            .try_enter(crate::session::compaction_config::CompactionOwner::Manual)
+        else {
+            return Err(acp::Error::internal_error().data("compaction already in progress"));
+        };
         let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
         self.record_compaction_variant();
         let total_tokens = self.chat_state_handle.get_total_tokens().await;
@@ -970,6 +978,7 @@ impl SessionActor {
             self.chat_state_handle.get_system_message(),
             self.chat_state_handle.get_conversation(),
         );
+        let full_conversation = self.project_goal_conversation(full_conversation, true);
         let segment_messages = if self.compaction.compaction_mode.writes_segments() {
             chat_state::compaction_utils::prepare_conversation_for_segment(
                 full_conversation.clone(),
@@ -2035,6 +2044,21 @@ impl SessionActor {
         trigger_info: AutoCompactTriggerInfo,
     ) -> Result<(), acp::Error> {
         use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
+        {
+            let state = self.state.lock().await;
+            if state.pending_manual_compact.is_some() || state.foreground_compact {
+                tracing::debug!("auto compact skipped: manual compaction has priority");
+                return Ok(());
+            }
+        }
+        let Some(_exclusive) = self
+            .compaction
+            .lease
+            .try_enter(crate::session::compaction_config::CompactionOwner::Auto)
+        else {
+            tracing::debug!("auto compact skipped: another compaction owns the lease");
+            return Ok(());
+        };
         let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
         self.record_compaction_variant();
         let tokens_before = self.chat_state_handle.get_total_tokens().await;
@@ -2279,6 +2303,9 @@ mod inline_auto_compact_flow_tests {
             notifications_suppressed: false,
             rewindable: false,
             nudges_used_this_session: 0,
+            recent_terminals: VecDeque::new(),
+            foreground_compact: false,
+            pending_manual_compact: None,
         });
         let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (event_tx, _event_rx) =
@@ -2338,6 +2365,7 @@ mod inline_auto_compact_flow_tests {
             startup_hints: StartupHints::default(),
             forked_tool_override: None,
             compaction: crate::session::compaction_config::CompactionConfig {
+                lease: Default::default(),
                 threshold_percent: std::cell::Cell::new(threshold_percent),
                 force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 context_window_override: None,
@@ -2380,6 +2408,9 @@ mod inline_auto_compact_flow_tests {
             pending_interjections: InterjectionBuffer::new(),
             completion_delivery: Default::default(),
             pending_system_reminders: Mutex::new(Vec::new()),
+            goal_control_generation: std::sync::atomic::AtomicU64::new(0),
+            goal_control_notify: Arc::new(tokio::sync::Notify::new()),
+            goal_plan_scope: parking_lot::Mutex::new(None),
             idle_flush_timeout: None,
             dream_check_timeout: None,
             last_idle_flush_conversation_len: std::sync::atomic::AtomicUsize::new(0),
@@ -2434,6 +2465,7 @@ mod inline_auto_compact_flow_tests {
                 std::collections::VecDeque::new(),
             ),
             goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
+            goal_stage_seq: std::sync::atomic::AtomicU64::new(0),
             managed_mcp_handle: Default::default(),
             initial_client_mcp_servers: vec![],
             tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),

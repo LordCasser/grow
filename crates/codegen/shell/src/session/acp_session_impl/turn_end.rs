@@ -240,9 +240,8 @@ impl SessionActor {
         // fork doesn't run under the state lock.
         drop(state);
 
-        // Durable twin of the fire-and-forget `prompt_complete` (emitted from
-        // `MvpAgent::prompt`): publish the turn's terminal on the persisted +
-        // replayed `_grow/session/update` rail so a viewer that re-attaches
+        // Publish the lifecycle-authoritative terminal on the persisted +
+        // replayed `_grow/session/update` rail so a viewer that reattaches
         // mid-turn finalizes from replay instead of stranding on "Waiting…".
         // The caller flushed the replay buffer first, so this lands strictly
         // after the turn's last `session/update` delta. Emit ONLY for a
@@ -292,10 +291,8 @@ impl SessionActor {
     /// Emit the durable, replayable `TurnCompleted` terminal — the single
     /// chokepoint shared by the completion (`handle_completion`) and cancel
     /// (`cancel_running_task`) sites. Derives `(stop_reason, agent_result)`
-    /// from the SAME source as the fire-and-forget `prompt_complete`
-    /// (`prompt_complete_fields`), so the two signals never disagree, then
-    /// persists + forwards via `send_grow_notification`. Retiring
-    /// `prompt_complete` later is then a one-line change at the call sites.
+    /// from the same source as PromptResponse (`prompt_complete_fields`), then
+    /// persists + forwards via `send_grow_notification`.
     ///
     /// `cancel_trigger` (when `Some`) rides the `_meta` as `cancelTrigger`;
     /// `"send_now"` marks a cancel-and-send end (marker suppressed).
@@ -307,6 +304,13 @@ impl SessionActor {
         cancel_trigger: Option<&str>,
     ) {
         let (stop_reason, agent_result) = crate::sampling::error::prompt_complete_fields(mapped);
+        self.state.lock().await.record_recent_terminal(
+            crate::session::prompt_queue::RecentPromptTerminal {
+                prompt_id: prompt_id.clone(),
+                stop_reason: stop_reason.as_str().unwrap_or("error").to_string(),
+                agent_result: agent_result.as_str().map(str::to_string),
+            },
+        );
         let extra_meta = cancel_trigger.map(|t| {
             [("cancelTrigger".to_string(), serde_json::json!(t))]
                 .into_iter()

@@ -38,8 +38,8 @@ use super::transcript::{
 use super::turn::handle_bg_task_killed;
 use crate::app::actions::{
     ClipboardPasteCompletion, ClipboardPasteContext, ClipboardPasteFailure, ClipboardPasteTarget,
-    DoctorFixTarget, DoctorPlanningOutcome, Effect, ProbedAttachment, SubagentKillOutcome,
-    TaskResult,
+    DoctorFixTarget, DoctorPlanningOutcome, Effect, ProbedAttachment, PromptStatusWire,
+    SubagentKillOutcome, TaskResult,
 };
 use crate::app::agent::AgentId;
 use crate::app::app_view::{ActiveView, AppView};
@@ -390,6 +390,113 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             http_status,
             prompt_id,
         } => handle_prompt_response(app, agent_id, result, http_status, prompt_id),
+        TaskResult::PromptStatusResolved {
+            agent_id,
+            prompt_id,
+            status,
+        } => {
+            let is_active = app.active_view == ActiveView::Agent(agent_id);
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            if agent.session.current_prompt_id.as_deref() != Some(prompt_id.as_str()) {
+                return vec![];
+            }
+            agent.prompt_status_query_for = None;
+            match status {
+                Ok(PromptStatusWire::Running { turn_start_ms }) => {
+                    // The turn-start shim adopts a server-confirmed running
+                    // turn and belongs to the still-Submitting window only
+                    // (queue/changed's own shim is gated the same way). When
+                    // the turn is already Running the shim already ran — via
+                    // queue/changed or a first Running response — and running
+                    // it again would start a second turn boundary, dropping
+                    // the current turn's follow-up chips (W4). The anchors
+                    // below are shared by both arms.
+                    let page_flip = if agent.session.state.is_turn_submitting() {
+                        super::queue::apply_turn_start_shim(
+                            agent,
+                            prompt_id.clone(),
+                            None,
+                            "prompt",
+                            None,
+                        )
+                    } else {
+                        None
+                    };
+                    let turn_start_ms = i64::try_from(turn_start_ms).unwrap_or(i64::MAX);
+                    agent.turn_start_ms = Some(turn_start_ms);
+                    agent.turn_start_ms_prompt = Some(prompt_id);
+                    agent.turn_started_at = Some(crate::app::acp_handler::viewer_turn_anchor(
+                        Some(turn_start_ms),
+                    ));
+                    super::queue::note_peek_page_flip(app, agent_id, page_flip);
+                    vec![]
+                }
+                Ok(PromptStatusWire::Queued { .. }) => {
+                    // The server confirmed admission but lifecycle broadcasts
+                    // are still quiet. Start a fresh observation window so the
+                    // watchdog remains bounded instead of issuing one status
+                    // RPC on every UI tick.
+                    agent.turn_started_at = Some(std::time::Instant::now());
+                    vec![]
+                }
+                Ok(PromptStatusWire::Terminal {
+                    stop_reason,
+                    agent_result,
+                }) => {
+                    // The turn ran while lifecycle signals were lost. Establish
+                    // the exact prompt boundary unless the turn already owns
+                    // the foreground: an already-Running/Cancelling turn's pid
+                    // matches the first-wins finalizer directly, so the
+                    // boundary reset (tracker re-seed, follow-up chips) must
+                    // not run a second time. Submitting and idle-with-stale-pid
+                    // recoveries still need the boundary to seed the finalize.
+                    if !agent.session.state.is_terminal_turn() {
+                        agent.start_turn_boundary(Some(&prompt_id));
+                    }
+                    agent.session.current_prompt_id = Some(prompt_id.clone());
+                    let session_id = agent
+                        .session
+                        .session_id
+                        .as_ref()
+                        .map(|id| id.0.to_string())
+                        .unwrap_or_default();
+                    let outcome = crate::app::turn_completion::finalize_turn_from_durable_terminal(
+                        agent,
+                        &session_id,
+                        &prompt_id,
+                        Some(&stop_reason),
+                        agent_result.as_deref(),
+                        None,
+                    );
+                    crate::app::turn_completion::apply_terminal_outcome(
+                        outcome, app, agent_id, is_active,
+                    );
+                    vec![]
+                }
+                Ok(PromptStatusWire::Unknown) => {
+                    agent.session.state = crate::app::agent::AgentState::Idle;
+                    agent.session.current_prompt_id = None;
+                    agent.session.in_flight_prompt = None;
+                    agent.mark_turn_finished();
+                    agent.show_toast("Prompt was not admitted by the session.");
+                    let drain = super::queue::maybe_drain_queue(agent);
+                    super::queue::note_peek_page_flip(app, agent_id, drain.page_flip_entry);
+                    drain.effects
+                }
+                Err(error) => {
+                    agent.session.state = crate::app::agent::AgentState::Idle;
+                    agent.session.current_prompt_id = None;
+                    agent.session.in_flight_prompt = None;
+                    agent.mark_turn_finished();
+                    agent.show_toast(&error);
+                    let drain = super::queue::maybe_drain_queue(agent);
+                    super::queue::note_peek_page_flip(app, agent_id, drain.page_flip_entry);
+                    drain.effects
+                }
+            }
+        }
         TaskResult::PromptRequiresBehaviorConfirmation {
             agent_id,
             session_id,
@@ -502,9 +609,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::CompactComplete { agent_id, result } => {
-            handle_compact_complete(app, agent_id, result)
-        }
+        TaskResult::CompactComplete {
+            agent_id,
+            track_foreground,
+            result,
+        } => handle_compact_complete(app, agent_id, track_foreground, result),
         TaskResult::SwitchModelComplete {
             agent_id,
             model_id,

@@ -49,8 +49,37 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "grow/plugins/reload" => handle_plugins_reload(agent).await,
         "grow/commands/list" => handle_commands_list(agent, args).await,
         "grow/commands/execute" => handle_command_execute(agent, args).await,
+        "grow/queue/prompt_status" => handle_prompt_status(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
+}
+
+async fn handle_prompt_status(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PromptStatusRequest {
+        session_id: String,
+        prompt_id: String,
+    }
+
+    let request: PromptStatusRequest = parse_params(args)?;
+    let session_id = acp::SessionId::new(Arc::from(request.session_id.as_str()));
+    let Some(handle) = agent.session_handle_waiting_for_load(&session_id).await else {
+        return Err(acp::Error::invalid_request()
+            .data(format!("unknown session id: {}", request.session_id)));
+    };
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    handle
+        .cmd_tx
+        .send(SessionCommand::QueryPromptStatus {
+            prompt_id: request.prompt_id,
+            respond_to,
+        })
+        .map_err(|_| acp::Error::internal_error().data("session actor unavailable"))?;
+    let status = response
+        .await
+        .map_err(|_| acp::Error::internal_error().data("session actor dropped prompt status"))?;
+    to_raw_response(&status)
 }
 
 fn handle_reload_announcements(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {

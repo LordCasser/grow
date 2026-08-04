@@ -22,6 +22,7 @@ enum DeliveryState {
 
 #[derive(Debug)]
 struct DeliveryEntry {
+    owner_turn: Option<String>,
     state: DeliveryState,
     ready: Option<(u64, String)>,
 }
@@ -45,10 +46,11 @@ pub(crate) struct CompletionDeliveryTracker {
 }
 
 impl CompletionDeliveryTracker {
-    pub(crate) fn begin_wait(&self, ids: &[String]) {
+    pub(crate) fn begin_wait(&self, owner_turn: Option<&str>, ids: &[String]) {
         let mut inner = self.inner.lock();
         for id in ids.iter().filter(|id| !id.trim().is_empty()) {
             inner.entries.entry(id.clone()).or_insert(DeliveryEntry {
+                owner_turn: owner_turn.map(str::to_owned),
                 state: DeliveryState::Awaiting,
                 ready: None,
             });
@@ -82,6 +84,7 @@ impl CompletionDeliveryTracker {
         let mut newly_ready = false;
         for id in ids.iter().filter(|id| !id.trim().is_empty()) {
             let entry = inner.entries.entry(id.clone()).or_insert(DeliveryEntry {
+                owner_turn: None,
                 state: DeliveryState::Awaiting,
                 ready: None,
             });
@@ -95,6 +98,38 @@ impl CompletionDeliveryTracker {
         if newly_ready {
             self.changed.notify_waiters();
         }
+    }
+
+    /// Transfer every still-blocking wait owned by an aborted turn to the
+    /// asynchronous completion rail. This must run before the turn future is
+    /// dropped; otherwise its select branch cannot perform `defer_wait` and an
+    /// `Awaiting` reservation would suppress the eventual completion forever.
+    pub(crate) fn defer_turn_waits(&self, owner_turn: &str) {
+        let mut inner = self.inner.lock();
+        let mut newly_ready = false;
+        for entry in inner.entries.values_mut().filter(|entry| {
+            entry.owner_turn.as_deref() == Some(owner_turn)
+                && entry.state == DeliveryState::Awaiting
+        }) {
+            entry.state = DeliveryState::DeferredBySteering;
+            newly_ready |= entry.ready.is_some();
+        }
+        if newly_ready {
+            inner.generation = inner.generation.wrapping_add(1);
+        }
+        drop(inner);
+        if newly_ready {
+            self.changed.notify_waiters();
+        }
+    }
+
+    /// Retire every reservation owned by a turn whose background work is being
+    /// killed. There can be no later result to deliver for these tasks.
+    pub(crate) fn consume_turn_waits(&self, owner_turn: &str) {
+        self.inner
+            .lock()
+            .entries
+            .retain(|_, entry| entry.owner_turn.as_deref() != Some(owner_turn));
     }
 
     /// Record a completion. Returns true only when it belongs to a wait that
@@ -135,6 +170,7 @@ impl CompletionDeliveryTracker {
         inner.entries.insert(
             task_id,
             DeliveryEntry {
+                owner_turn: None,
                 state: DeliveryState::DeferredBySteering,
                 ready: Some((sequence, body)),
             },
@@ -251,7 +287,7 @@ mod tests {
     #[test]
     fn ready_before_defer_is_not_lost() {
         let tracker = CompletionDeliveryTracker::default();
-        tracker.begin_wait(&["a".into()]);
+        tracker.begin_wait(Some("turn-a"), &["a".into()]);
         assert!(!tracker.complete("a".into(), "done".into()));
         tracker.defer_wait(&["a".into()]);
         assert!(tracker.has_ready());
@@ -262,7 +298,7 @@ mod tests {
     #[test]
     fn normal_wait_completion_is_not_delivered_twice() {
         let tracker = CompletionDeliveryTracker::default();
-        tracker.begin_wait(&["a".into()]);
+        tracker.begin_wait(Some("turn-a"), &["a".into()]);
         assert!(!tracker.complete("a".into(), "done".into()));
         tracker.finish_wait(&["a".into()]);
         assert!(tracker.drain_ready().is_empty());
@@ -271,7 +307,7 @@ mod tests {
     #[test]
     fn deferred_completions_keep_completion_order() {
         let tracker = CompletionDeliveryTracker::default();
-        tracker.begin_wait(&["a".into(), "b".into()]);
+        tracker.begin_wait(Some("turn-a"), &["a".into(), "b".into()]);
         tracker.defer_wait(&["a".into(), "b".into()]);
         assert!(tracker.complete("b".into(), "second task first".into()));
         assert!(tracker.complete("a".into(), "first task second".into()));
@@ -283,7 +319,7 @@ mod tests {
     #[test]
     fn explicit_output_consumes_queued_completion() {
         let tracker = CompletionDeliveryTracker::default();
-        tracker.begin_wait(&["a".into()]);
+        tracker.begin_wait(Some("turn-a"), &["a".into()]);
         tracker.defer_wait(&["a".into()]);
         assert!(tracker.complete("a".into(), "done".into()));
         tracker.consume(&["a"]);
@@ -293,7 +329,7 @@ mod tests {
     #[test]
     fn duplicate_completion_does_not_reorder_or_wake_twice() {
         let tracker = CompletionDeliveryTracker::default();
-        tracker.begin_wait(&["a".into()]);
+        tracker.begin_wait(Some("turn-a"), &["a".into()]);
         tracker.defer_wait(&["a".into()]);
         assert!(tracker.complete("a".into(), "first".into()));
         let generation = tracker.generation();
@@ -313,5 +349,30 @@ mod tests {
         tokio::task::yield_now().await;
         tracker.queue_ready("goal-stage".into(), "done".into());
         waiter.await.unwrap();
+    }
+
+    #[test]
+    fn aborting_a_turn_defers_only_its_waits() {
+        let tracker = CompletionDeliveryTracker::default();
+        tracker.begin_wait(Some("turn-a"), &["a".into()]);
+        tracker.begin_wait(Some("turn-b"), &["b".into()]);
+
+        assert!(!tracker.complete("a".into(), "done-a".into()));
+        assert!(!tracker.complete("b".into(), "done-b".into()));
+        tracker.defer_turn_waits("turn-a");
+
+        let drained = tracker.drain_ready();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].task_id, "a");
+        assert!(tracker.contains("b"));
+    }
+
+    #[test]
+    fn killing_a_turn_consumes_its_waits() {
+        let tracker = CompletionDeliveryTracker::default();
+        tracker.begin_wait(Some("turn-a"), &["a".into()]);
+        tracker.consume_turn_waits("turn-a");
+        assert!(!tracker.complete("a".into(), "late".into()));
+        assert!(!tracker.contains("a"));
     }
 }

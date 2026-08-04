@@ -655,6 +655,11 @@ fn compute_activity(
     goal_verifying: bool,
 ) -> (Style, String, bool) {
     match (state, activity) {
+        (AgentState::TurnSubmitting, _) => (
+            Style::default().fg(theme.text_secondary),
+            "Sending…".to_string(),
+            false,
+        ),
         (AgentState::TurnCancelling | AgentState::CommandCancelling { .. }, _) => (
             Style::default().fg(theme.accent_error),
             "Cancelling…".to_string(),
