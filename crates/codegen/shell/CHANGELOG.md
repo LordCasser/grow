@@ -1,5 +1,26 @@
 # Changelog
 
+# 1.1.4 — 2026-08-05
+
+## Behavior Changes
+
+- Goal 验证、规划与总结改为后台 stage 执行：验证期间界面与输入完全可用，不再需要 clear 恢复；
+  turn 终结收敛为单一权威，恢复链 watchdog 自动探测并恢复卡死的终结状态。
+- verifier 判断完成期间，所有发送入口（普通消息、send-now、队列行发送、编辑保存、队列 drain）
+  统一拦截并提示 `Goal is verifying; please wait before sending.`；消息保持排队，验证结束后
+  自然发送。
+- Goal Active 时 send-now 统一作为 mid-turn steering 注入（提升 autonomy generation），
+  系统事件明确标记为非用户输入。
+
+## Fixes
+
+- 修复 Goal 执行中回复卡死、界面阻塞、/compact 等命令被卡住的问题。
+- 修复 Goal 启动后反复生成 plan writer 的无限循环（校验宽容化、spawn 准入时机、planner
+  单飞互斥、latch 泄漏清理）。
+- 修复计划产物为空或发布失败时的静默重试；此时暂停 Goal 并说明原因。
+
+完整发布说明见 [changelogs/1.1.4.md](changelogs/1.1.4.md)。
+
 # 1.1.3 — 2026-08-03
 
 ## Behavior Changes
