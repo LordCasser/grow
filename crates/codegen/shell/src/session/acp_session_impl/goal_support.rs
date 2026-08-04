@@ -1586,6 +1586,21 @@ impl SessionActor {
                         Err(error) => {
                             tracing::warn!(%error, "goal planner: rejected staging artifact");
                             let _ = tokio::fs::remove_file(&plan_file).await;
+                            // The planner produced an unusable artifact (e.g.
+                            // a model that only wrote a title). Pause like the
+                            // FailClosed path instead of leaving the goal
+                            // Active without a plan: otherwise every Goal
+                            // cycle re-spawns the planner forever (the
+                            // turn-end continuation queues the next cycle on
+                            // Active alone). `pause` also clears the
+                            // `planning_in_flight` latch and emits the
+                            // GoalUpdated that turns the Planning badge off.
+                            let _ = self
+                                .auto_pause_goal_if_active_with_message(
+                                    crate::session::goal_tracker::GoalPauseReason::User,
+                                    planner_failure_pause_message(),
+                                )
+                                .await;
                             return false;
                         }
                     };
@@ -1603,11 +1618,25 @@ impl SessionActor {
                 }
                 if let Err(error) = std::fs::rename(&plan_file, &canonical_plan) {
                     tracing::warn!(%error, "goal planner: failed to publish canonical plan");
+                    drop(tracker);
+                    let _ = self
+                        .auto_pause_goal_if_active_with_message(
+                            crate::session::goal_tracker::GoalPauseReason::User,
+                            planner_failure_pause_message(),
+                        )
+                        .await;
                     return false;
                 }
                 if let Err(error) = std::fs::write(&baseline_plan, &plan_bytes) {
                     tracing::warn!(%error, "goal planner: failed to publish plan baseline");
                     let _ = std::fs::remove_file(&canonical_plan);
+                    drop(tracker);
+                    let _ = self
+                        .auto_pause_goal_if_active_with_message(
+                            crate::session::goal_tracker::GoalPauseReason::User,
+                            planner_failure_pause_message(),
+                        )
+                        .await;
                     return false;
                 }
                 if let Some(o) = tracker.snapshot_mut() {

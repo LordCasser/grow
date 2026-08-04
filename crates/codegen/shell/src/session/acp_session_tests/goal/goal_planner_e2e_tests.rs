@@ -1699,3 +1699,45 @@ async fn clear_restores_session_plan_and_leaves_compact_admissible() {
         })
         .await;
 }
+
+/// Regression: a planner artifact that fails the staging validation (no
+/// parseable markdown task — e.g. a model that only wrote a title) must
+/// PAUSE the goal instead of leaving it Active-without-a-plan. The old
+/// behaviour re-spawned the planner on every Goal cycle forever (turn-end
+/// continuation queues the next cycle on Active alone).
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn planner_invalid_artifact_pauses_goal_instead_of_retrying() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (tx, spawn_count) = spawn_planner_coordinator(SpawnBehaviour::WritePlanThenDone {
+                body: b"# Title only\nNo checkbox items here.\n",
+            });
+            let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
+            create_test_goal(&actor);
+
+            actor.maybe_run_goal_planner("do X").await;
+
+            assert_eq!(
+                spawn_count.load(SeqOrd::SeqCst),
+                1,
+                "a rejected artifact must not re-spawn the planner in the same call"
+            );
+            let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(
+                snap.plan_file, None,
+                "a rejected artifact must not be published"
+            );
+            assert!(
+                snap.status.is_paused(),
+                "an invalid plan artifact must pause the goal so the planner \
+                 is not re-spawned on every Goal cycle"
+            );
+            assert!(
+                !snap.planning_in_flight,
+                "the planning latch must be cleared by the pause"
+            );
+        })
+        .await;
+}
