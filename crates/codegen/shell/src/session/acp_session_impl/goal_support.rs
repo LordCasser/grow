@@ -39,17 +39,22 @@ async fn validate_goal_plan_staging(
         .map_err(|error| format!("cannot read staged plan: {error}"))?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|error| format!("staged plan is not UTF-8: {error}"))?;
-    let has_markdown_task = text.lines().any(|line| {
-        let line = line.trim_start();
-        line.starts_with("- [ ] ")
-            || line.starts_with("- [x] ")
-            || line.starts_with("- [X] ")
-            || line.starts_with("* [ ] ")
-            || line.starts_with("* [x] ")
-            || line.starts_with("* [X] ")
-    });
-    if !has_markdown_task {
-        return Err("staged plan contains no parseable Markdown task".into());
+    // The planner prompt only requires a `- [ ]` task checklist for
+    // `code-change` goals ("Task checklist (`code-change` only)"); analysis
+    // and other kinds legitimately produce acceptance-criteria prose with no
+    // checkboxes. `goal_next_step` treats a missing checklist as
+    // best-effort (`None`), so a checkbox is NOT a structural requirement —
+    // reject only genuinely unusable artifacts (empty / oversized /
+    // non-UTF-8 / wrong path / symlink). A missing checklist is logged for
+    // diagnostics but never blocks publication.
+    if !text
+        .lines()
+        .any(|line| line.trim_start().starts_with("- [") || line.trim_start().starts_with("* ["))
+    {
+        tracing::debug!(
+            "goal planner: staged plan has no `- [ ]` checklist; \
+             next-step extraction will be best-effort"
+        );
     }
     let content_hash = blake3::hash(&bytes).to_hex().to_string();
     Ok((bytes, content_hash))

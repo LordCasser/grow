@@ -1700,20 +1700,60 @@ async fn clear_restores_session_plan_and_leaves_compact_admissible() {
         .await;
 }
 
-/// Regression: a planner artifact that fails the staging validation (no
-/// parseable markdown task — e.g. a model that only wrote a title) must
-/// PAUSE the goal instead of leaving it Active-without-a-plan. The old
-/// behaviour re-spawned the planner on every Goal cycle forever (turn-end
-/// continuation queues the next cycle on Active alone).
+/// Analysis-style goals legitimately produce acceptance-criteria prose with
+/// no `- [ ]` checklist (the planner prompt only requires checkboxes for
+/// `code-change` goals). Such a plan must PUBLISH and keep the goal Active —
+/// rejecting it is what caused the infinite planner re-spawn loop.
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn planner_invalid_artifact_pauses_goal_instead_of_retrying() {
+async fn planner_analysis_plan_without_checklist_publishes() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let (tx, spawn_count) = spawn_planner_coordinator(SpawnBehaviour::WritePlanThenDone {
-                body: b"# Title only\nNo checkbox items here.\n",
+                body: b"# Plan: analyze the stack\n\n## Acceptance criteria\n1. Identify the pipeline.\n2. Map each technology to evidence.\n\n## Non-goals\n- No code changes.\n",
             });
+            let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
+            create_test_goal(&actor);
+            let plan_path = actor.goal_tracker.lock().plan_path();
+
+            actor.maybe_run_goal_planner("do X").await;
+
+            assert_eq!(
+                spawn_count.load(SeqOrd::SeqCst),
+                1,
+                "a valid analysis plan must be published on the first spawn"
+            );
+            let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(
+                snap.plan_file.as_deref(),
+                Some(plan_path.as_path()),
+                "an analysis plan without a checklist must still publish"
+            );
+            assert_eq!(
+                snap.status,
+                crate::session::goal_tracker::GoalStatus::Active,
+                "a valid plan must not pause the goal"
+            );
+            assert!(
+                !snap.planning_in_flight,
+                "the planning latch must be cleared after publication"
+            );
+        })
+        .await;
+}
+
+/// A genuinely unusable artifact (empty file) still pauses the goal — the
+/// fail-closed safety net for real planner failures, distinct from the
+/// checklist leniency above.
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn planner_empty_artifact_pauses_goal() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (tx, spawn_count) =
+                spawn_planner_coordinator(SpawnBehaviour::WritePlanThenDone { body: b"" });
             let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
             create_test_goal(&actor);
 
@@ -1727,11 +1767,11 @@ async fn planner_invalid_artifact_pauses_goal_instead_of_retrying() {
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(
                 snap.plan_file, None,
-                "a rejected artifact must not be published"
+                "an empty artifact must not be published"
             );
             assert!(
                 snap.status.is_paused(),
-                "an invalid plan artifact must pause the goal so the planner \
+                "an empty plan artifact must pause the goal so the planner \
                  is not re-spawned on every Goal cycle"
             );
             assert!(

@@ -340,6 +340,15 @@ impl SessionActor {
         // before the implementer request is built. Steering may transfer the
         // planner to the background; in that case this cycle ends cleanly and
         // the foreground user prompt is promoted by the actor.
+        //
+        // Spawn admission must be open BEFORE the planner spawns: an earlier
+        // interactive cancel (`behavior_switch` / Ctrl+C with
+        // `cancel_subagents`) closes admission until the next turn opens it,
+        // and the generic `open_subagent_spawn_admission()` below runs after
+        // this planning branch. Without this, a freshly-set goal's first
+        // cycle fails the planner spawn (FailClosed → pause) instead of
+        // planning. Opening here is idempotent with the later call.
+        self.open_subagent_spawn_admission();
         if matches!(origin, super::super::PromptOrigin::GoalSummary) {
             let planning_objective = {
                 let tracker = self.goal_tracker.lock();
