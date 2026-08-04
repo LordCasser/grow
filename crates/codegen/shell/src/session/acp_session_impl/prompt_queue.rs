@@ -537,11 +537,7 @@ impl SessionActor {
                     .collect::<Vec<_>>();
                 let image_count = attachments.len() as u32;
                 Self::respond_removed_prompt(item.respond_to);
-                self.goal_tracker.lock().bump_autonomy_generation();
-                self.pending_interjections.push(PendingInterjection {
-                    text: text.clone(),
-                    attachments,
-                });
+                self.queue_mid_turn_interjection(text.clone(), attachments);
                 self.broadcast_interjection(&text, Some(id));
                 self.events
                     .emit(crate::session::events::Event::Interjected {

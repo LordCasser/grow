@@ -24,6 +24,27 @@ pub(crate) type PendingInterjection = tools::interjection::PendingInterjection<a
 pub(crate) const INTERJECT_FALLBACK_PROMPT_PREFIX: &str = "interject-fallback-";
 
 impl SessionActor {
+    /// Common mid-turn steering path shared by the direct `Interject`
+    /// command and the queue send-now (`InterjectQueuedPrompt`) path: bump
+    /// the Goal autonomy generation while the Goal is Active (invalidating
+    /// any in-flight verifier stage or planner result captured under the old
+    /// generation) and buffer the text for the turn loop's next safe
+    /// boundary. Callers own the broadcast / event / idle-fallback
+    /// differences (source `Direct` vs `Queue`, echo id, prompt fallback).
+    pub(super) fn queue_mid_turn_interjection(
+        &self,
+        text: String,
+        attachments: Vec<acp::ImageContent>,
+    ) {
+        if self.goal_tracker.lock().status()
+            == Some(crate::session::goal_tracker::GoalStatus::Active)
+        {
+            self.goal_tracker.lock().bump_autonomy_generation();
+        }
+        self.pending_interjections
+            .push(PendingInterjection { text, attachments });
+    }
+
     /// Convert a stranded interjection into a queued prompt turn.
     ///
     /// An interjection is only merged into a *running* turn

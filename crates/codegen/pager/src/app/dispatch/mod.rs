@@ -50,6 +50,20 @@ pub(crate) use settings::ui::refresh_open_settings_modals;
 pub(crate) use status::commit_minimal_update_notice;
 pub(crate) use turn::poll_stalled_prompt_submissions;
 
+/// Toast shown when an immediate send is rejected because the Goal verifier
+/// is judging completion (send-now and plain-message paths share it).
+pub(super) const GOAL_VERIFYING_TOAST: &str = "Goal is verifying; please wait before sending.";
+
+/// Whether the session's Goal is currently running its verifier stage. While
+/// true, immediate sends are rejected so the user's new input never races
+/// the verdict (which is based on the pre-steering implementer output).
+pub(super) fn goal_is_verifying(agent: &crate::app::agent_view::AgentView) -> bool {
+    agent
+        .goal_state
+        .as_ref()
+        .is_some_and(|goal| goal.verifying_completion)
+}
+
 // Test-only consumers (cfg(test) mods elsewhere in the crate); a plain
 // re-export trips -D unused-imports in the lib build.
 #[cfg(test)]

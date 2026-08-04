@@ -98,14 +98,12 @@ pub(super) fn dispatch_send_prompt_now(
     // the verifier's decision is based on the pre-steering implementer
     // output, so it would be stale. Reject with a toast and keep the message
     // queued (editable/cancellable) instead of sending it.
-    let goal_verifying = app.agents.get(&id).is_some_and(|agent| {
-        agent
-            .goal_state
-            .as_ref()
-            .is_some_and(|goal| goal.verifying_completion)
-    });
+    let goal_verifying = app
+        .agents
+        .get(&id)
+        .is_some_and(crate::app::dispatch::goal_is_verifying);
     if goal_verifying {
-        app.show_toast("Goal is verifying; please wait before sending.");
+        app.show_toast(crate::app::dispatch::GOAL_VERIFYING_TOAST);
         return vec![];
     }
     let goal_active = app.agents.get(&id).is_some_and(|agent| {

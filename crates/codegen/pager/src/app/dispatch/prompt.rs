@@ -791,6 +791,17 @@ pub(super) fn dispatch_send_prompt_inner(
         // `grow/queue/changed`. We render an optimistic echo into the shared
         // queue keyed by `prompt_id`; the broadcast reconciles it by id.
         //
+        // Goal verification protection for plain user messages: while the
+        // verifier judges completion, a plain prompt must NOT be sent (it
+        // would race the verdict with the user's new input). Reject with a
+        // toast and keep the composer text intact — bash commands, slash
+        // commands (incl. `/goal pause`) and skill invocations above are not
+        // affected.
+        if crate::app::dispatch::goal_is_verifying(agent) {
+            app.show_toast(crate::app::dispatch::GOAL_VERIFYING_TOAST);
+            return vec![];
+        }
+        //
         // The IDLE case is unchanged (falls through to the local path below,
         // which drains instantly and renders the user block) — preserving the
         // byte-for-byte idle experience. Image/skill/editing/non-running cases

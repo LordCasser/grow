@@ -4131,3 +4131,78 @@ fn goal_active_without_verifying_still_sends() {
         "an active goal that is NOT verifying must still accept send-now (steering)"
     );
 }
+
+/// Verification protection also covers plain user messages (idle path sends
+/// immediately): while the verifier runs, a plain prompt is rejected with a
+/// toast and the composer text is KEPT (not sent, not cleared) — the user
+/// can edit or resend after verification.
+#[test]
+fn goal_verifying_rejects_plain_prompt_keeping_composer() {
+    use crate::app::actions::{Action, Effect};
+    use crate::app::agent::AgentId;
+    use crate::app::dispatch::dispatch;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.verifying_completion = true;
+        app.agents.get_mut(&id).unwrap().goal_state = Some(goal);
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .prompt
+            .set_text("hello draft");
+    }
+
+    let effects = dispatch(Action::SendPrompt("hello draft".into()), &mut app);
+
+    assert!(
+        effects.is_empty(),
+        "a plain prompt must be rejected while the Goal verifier runs: {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert_eq!(
+        agent.toast.as_ref().map(|(s, _)| s.as_str()),
+        Some("Goal is verifying; please wait before sending."),
+        "a toast must explain the rejection"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "hello draft",
+        "the composer draft must be preserved (not sent, not cleared)"
+    );
+}
+
+/// Slash commands (incl. Goal controls like /goal pause) are NOT blocked by
+/// verification — they take the command plane / local registry, not the
+/// plain-message path. A local builtin (`/compact`) must not produce the
+/// verification toast nor be sent as a plain prompt.
+#[test]
+fn goal_verifying_does_not_block_slash_commands() {
+    use crate::app::actions::{Action, Effect};
+    use crate::app::agent::AgentId;
+    use crate::app::dispatch::dispatch;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.verifying_completion = true;
+        app.agents.get_mut(&id).unwrap().goal_state = Some(goal);
+    }
+
+    let effects = dispatch(Action::SendPrompt("/compact".into()), &mut app);
+
+    let agent = &app.agents[&id];
+    assert!(
+        agent.toast.is_none(),
+        "slash commands must not hit the verification rejection"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. })),
+        "the slash text must not be sent as a plain prompt"
+    );
+}

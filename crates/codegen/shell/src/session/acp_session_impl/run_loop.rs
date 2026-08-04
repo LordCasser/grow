@@ -2102,15 +2102,7 @@ pub(super) async fn run_session(
                             // turn as idle and queued steering behind it.
                             let turn_running = session.state.lock().await.running_task.is_some();
                             if turn_running {
-                                if session.goal_tracker.lock().status()
-                                    == Some(crate::session::goal_tracker::GoalStatus::Active)
-                                {
-                                    session.goal_tracker.lock().bump_autonomy_generation();
-                                }
-                                session.pending_interjections.push(PendingInterjection {
-                                    text,
-                                    attachments: images,
-                                });
+                                session.queue_mid_turn_interjection(text, images);
                                 tracing::info!("Queued mid-turn interjection");
                             } else {
                                 session

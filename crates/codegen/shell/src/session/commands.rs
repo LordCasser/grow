@@ -194,9 +194,10 @@ pub enum SessionCommand {
         prompt_id: String,
         respond_to: oneshot::Sender<crate::session::prompt_queue::PromptStatus>,
     },
-    /// A background task completed after its Goal wait was displaced by user
-    /// steering. The actor decides whether this task is registered for
-    /// deferred delivery; unrelated Goal background noise remains suppressed.
+    /// System event (NOT a user input): a background task completed after its
+    /// Goal wait was displaced by user steering. The actor decides whether
+    /// this task is registered for deferred delivery; unrelated Goal
+    /// background noise remains suppressed.
     DeferredCompletionAvailable {
         task_id: String,
         body: String,
@@ -507,9 +508,10 @@ pub enum SessionCommand {
     PluginsList {
         respond_to: oneshot::Sender<Option<std::sync::Arc<agent::plugins::PluginRegistry>>>,
     },
-    /// Inject a notification (monitor event or bash task completion) into
-    /// the session's notification queue. Notifications are idle-gated and
-    /// batched by `maybe_drain_notifications`.
+    /// System event (NOT a user input): inject a notification (monitor
+    /// event or bash task completion) into the session's notification queue.
+    /// Notifications are idle-gated and batched by
+    /// `maybe_drain_notifications`.
     InjectNotification {
         prompt_id: String,
         prompt_blocks: Vec<acp::ContentBlock>,
@@ -705,15 +707,18 @@ pub enum SessionCommand {
         /// text-only / older clients.
         images: Vec<acp::ImageContent>,
     },
-    /// Trigger a model turn so the model can print a visible goal progress
-    /// summary.  The goal orchestrator injects a system reminder into context
-    /// (via `push_parent_reminder`) *before* sending this command.  The session
-    /// actor queues a short synthetic prompt instructing the model to summarize
-    /// the reminder, then calls `maybe_start_running_task`.  Fire-and-forget.
+    /// System event (NOT a user input): trigger a model turn so the model
+    /// can print a visible goal progress summary.  The goal orchestrator
+    /// injects a system reminder into context (via `push_parent_reminder`)
+    /// *before* sending this command.  The session actor queues a short
+    /// synthetic prompt instructing the model to summarize the reminder, then
+    /// calls `maybe_start_running_task`.  Fire-and-forget.
     GoalSummaryTurn {
         /// Short instruction appended as a verbatim user message.
         prompt_text: String,
     },
+    /// System event (NOT a user input): a workflow run completed and the
+    /// actor queues a synthetic completion turn for the model.
     WorkflowCompletionTurn {
         run_id: String,
         revision: u64,
