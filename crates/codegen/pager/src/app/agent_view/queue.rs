@@ -290,6 +290,13 @@ impl AgentView {
     /// Send one merged-queue row now (cancel-and-send), by selection id. The
     /// shell cancels the running turn and runs this row as the next turn.
     pub(in crate::app) fn force_interject_queue_row(&mut self, id: u64) -> InputOutcome {
+        // Verification protection: the row is NOT lost — it stays queued and
+        // drains once the Goal accepts new input, so the specific toast beats
+        // the generic "No turn running" (which is what non-goal idle shows).
+        if crate::app::dispatch::goal_is_verifying(self) {
+            self.show_toast(crate::app::dispatch::GOAL_VERIFYING_TOAST);
+            return InputOutcome::Changed;
+        }
         if !self.session.state.is_turn_running() {
             self.show_toast("No turn running — prompt will send when ready");
             return InputOutcome::Changed;
@@ -894,8 +901,8 @@ mod queue_edit_routing_tests {
 
     /// Interjecting a Server-origin row routes to `Action::QueueInterjectShared`
     /// (the agent atomically removes it + merges it into the running turn); a
-    /// Local-origin row interjects its text directly via `Action::Interject`
-    /// after removing it from the client-owned queue.
+    /// Local-origin row is removed from the client-owned queue and re-sent via
+    /// `Action::SendPromptNow` (asserted below).
     #[test]
     fn force_interject_routes_server_to_action_and_local_to_interject() {
         let mut agent = make_running_agent();

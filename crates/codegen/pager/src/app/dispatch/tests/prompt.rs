@@ -4071,7 +4071,7 @@ fn suggestion_debounce_routes_by_agent_id_not_active_view() {
 /// verdict with the user's new input.
 #[test]
 fn goal_verifying_rejects_send_now_with_toast() {
-    use crate::app::actions::{Action, Effect};
+    use crate::app::actions::Action;
     use crate::app::agent::AgentId;
     use crate::app::dispatch::dispatch;
 
@@ -4108,7 +4108,7 @@ fn goal_verifying_rejects_send_now_with_toast() {
 /// implementing): steering reaches the goal as usual.
 #[test]
 fn goal_active_without_verifying_still_sends() {
-    use crate::app::actions::{Action, Effect};
+    use crate::app::actions::Action;
     use crate::app::agent::AgentId;
     use crate::app::dispatch::dispatch;
 
@@ -4138,7 +4138,7 @@ fn goal_active_without_verifying_still_sends() {
 /// can edit or resend after verification.
 #[test]
 fn goal_verifying_rejects_plain_prompt_keeping_composer() {
-    use crate::app::actions::{Action, Effect};
+    use crate::app::actions::Action;
     use crate::app::agent::AgentId;
     use crate::app::dispatch::dispatch;
 
@@ -4204,5 +4204,145 @@ fn goal_verifying_does_not_block_slash_commands() {
             .iter()
             .any(|e| matches!(e, Effect::SendPrompt { .. })),
         "the slash text must not be sent as a plain prompt"
+    );
+}
+
+/// Entry-level UX: during verification, bare Enter on the empty composer
+/// (the send-now top-row path) shows the verification toast instead of a
+/// silent no-op — the queued row stays put and sends once verification ends.
+#[test]
+fn goal_verifying_empty_enter_send_now_shows_toast() {
+    use crate::app::agent::AgentId;
+    use crate::app::dispatch::tests::enqueue_local;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.verifying_completion = true;
+        app.agents.get_mut(&id).unwrap().goal_state = Some(goal);
+    }
+    enqueue_local(&mut app, id, "queued row");
+
+    let agent = app.agents.get_mut(&id).unwrap();
+    let outcome =
+        agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        matches!(outcome, crate::app::app_view::InputOutcome::Changed),
+        "verifying empty Enter must not send: {outcome:?}"
+    );
+    assert_eq!(
+        agent.toast.as_ref().map(|(s, _)| s.as_str()),
+        Some("Goal is verifying; please wait before sending."),
+        "the send-now attempt must explain the rejection"
+    );
+    assert_eq!(
+        agent.session.pending_prompts.len(),
+        1,
+        "the queued row must stay queued"
+    );
+}
+
+/// Entry-level UX: during verification, Ctrl+Enter with a non-empty composer
+/// shows the verification toast and KEEPS the draft (not silent, not sent).
+#[test]
+fn goal_verifying_ctrl_enter_keeps_draft_with_toast() {
+    use crate::app::agent::AgentId;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.verifying_completion = true;
+        app.agents.get_mut(&id).unwrap().goal_state = Some(goal);
+    }
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.prompt.set_text("hello draft");
+    let outcome =
+        agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+    assert!(
+        matches!(outcome, crate::app::app_view::InputOutcome::Changed),
+        "verifying Ctrl+Enter must not send: {outcome:?}"
+    );
+    assert_eq!(
+        agent.toast.as_ref().map(|(s, _)| s.as_str()),
+        Some("Goal is verifying; please wait before sending."),
+        "a toast must explain the rejection"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "hello draft",
+        "the draft must be preserved (not sent, not cleared)"
+    );
+}
+
+/// Entry-level UX: during verification, the queue-pane send-now chord shows
+/// the verification toast instead of the generic "No turn running" toast —
+/// the row stays queued and will send once verification ends.
+#[test]
+fn goal_verifying_queue_row_force_interject_shows_toast() {
+    use crate::app::agent::AgentState;
+    use crate::app::agent_view::test_fixtures::{
+        force_interject_key, make_running_agent, non_vscode_registry,
+    };
+
+    let mut agent = make_running_agent();
+    agent.session.state = AgentState::Idle; // verification: no running turn
+    let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+    goal.verifying_completion = true;
+    agent.goal_state = Some(goal);
+
+    let ids = agent.queue.entry_ids();
+    assert!(!ids.is_empty());
+    agent.queue.list_state.select_by_id(ids[0]);
+    let outcome = agent.handle_queue_key(&force_interject_key(), &non_vscode_registry());
+    assert!(
+        matches!(outcome, crate::app::app_view::InputOutcome::Changed),
+        "verifying queue send-now must not send: {outcome:?}"
+    );
+    assert_eq!(
+        agent.toast.as_ref().map(|(s, _)| s.as_str()),
+        Some("Goal is verifying; please wait before sending."),
+        "the queue send-now attempt must explain the rejection"
+    );
+    assert_eq!(
+        agent.session.pending_prompts.len(),
+        1,
+        "the row must stay queued"
+    );
+}
+
+/// Verification protection covers the queue-DRAIN path: while the verifier
+/// runs, `DrainQueue` (the edit-save / Esc / delete funnel) is blocked —
+/// rows stay queued and send once verification ends. The send-intent call
+/// sites (edit save) show the toast; this dispatch-level gate is the
+/// silent backstop for every drain producer.
+#[test]
+fn goal_verifying_blocks_drain_queue() {
+    use crate::app::actions::Action;
+    use crate::app::agent::AgentId;
+    use crate::app::dispatch::dispatch;
+    use crate::app::dispatch::tests::enqueue_local;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.verifying_completion = true;
+        app.agents.get_mut(&id).unwrap().goal_state = Some(goal);
+    }
+    enqueue_local(&mut app, id, "queued row");
+
+    let effects = dispatch(Action::DrainQueue, &mut app);
+    assert!(
+        effects.is_empty(),
+        "drain must be blocked while the Goal verifier runs: {effects:?}"
+    );
+    assert_eq!(
+        app.agents[&id].session.pending_prompts.len(),
+        1,
+        "the queued row must stay queued"
     );
 }

@@ -443,11 +443,21 @@ impl AgentView {
                             }
                             return InputOutcome::Changed;
                         }
-                        if let Some(id) = self.queue.send_now_click(mouse.column, mouse.row)
-                            && self.session.state.is_turn_running()
-                            && let InputOutcome::Action(action) = self.force_interject_queue_row(id)
-                        {
-                            return InputOutcome::Action(action);
+                        if let Some(id) = self.queue.send_now_click(mouse.column, mouse.row) {
+                            // Verification protection: same toast as every
+                            // other send-now entry (the mouse gate runs
+                            // BEFORE `force_interject_queue_row`, so the
+                            // function-level check can't catch this path).
+                            if crate::app::dispatch::goal_is_verifying(self) {
+                                self.show_toast(crate::app::dispatch::GOAL_VERIFYING_TOAST);
+                                return InputOutcome::Changed;
+                            }
+                            if self.session.state.is_turn_running()
+                                && let InputOutcome::Action(action) =
+                                    self.force_interject_queue_row(id)
+                            {
+                                return InputOutcome::Action(action);
+                            }
                         }
                         if let Some(id) = self.queue.edit_click(mouse.column, mouse.row)
                             && (!matches!(self.prompt_mode, PromptMode::EditingQueued { .. })
@@ -1203,9 +1213,22 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let layout_cfg = crate::appearance::LayoutConfig::default();
         let running = agent.session.state.is_turn_running();
-        agent
-            .queue
-            .render(area, &mut buf, true, &layout_cfg, None, running, false);
+        // Hit-test buffer must render the SAME verifying flag as the real
+        // view: the "⏳ verifying" cue changes row text width, and the
+        // hit-test text must stay consistent with what the user sees.
+        let goal_verifying = agent
+            .goal_state
+            .as_ref()
+            .is_some_and(|g| g.verifying_completion);
+        agent.queue.render(
+            area,
+            &mut buf,
+            true,
+            &layout_cfg,
+            None,
+            running,
+            goal_verifying,
+        );
         agent.pane_areas.queue = area;
         let mut found = None;
         'find: for row in area.y..area.y + area.height {
@@ -1236,6 +1259,11 @@ mod tests {
     fn click_edit(agent: &mut AgentView, selected_id: u64) -> InputOutcome {
         click_queue_button(agent, selected_id, |a, c, r| a.queue.edit_click(c, r))
     }
+    /// Verification protection applies at the mouse send-now click too
+    /// (backstop): while the verifier runs the `[Send now]` button is not
+    /// rendered (`queue_pane` gates it on `is_turn_running`), so this is
+    /// defense-in-depth — if the button ever renders during verification,
+    /// the click gets the shared toast instead of a silent no-op.
     /// Mouse "Send now" (interject) on the last local row keeps the pane open
     /// when a server row remains — the third sibling site of the same fix.
     #[test]

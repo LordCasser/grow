@@ -1,5 +1,5 @@
 // rand >= 0.10 moved `random_range`/`random` to the `RngExt` trait.
-use rand::{Rng as _, RngExt as _, SeedableRng as _};
+use rand::{RngExt as _, SeedableRng as _};
 use unicode_width::UnicodeWidthStr as _;
 
 use super::super::*;

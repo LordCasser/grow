@@ -27,6 +27,20 @@ pub(super) fn dispatch_interject(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    // Goal verification protection (dispatch-boundary backstop, mirrors
+    // `dispatch_send_prompt_now`): while the verifier is judging whether the
+    // Goal is complete, no send family may cross dispatch — a steering
+    // interject would race the verdict with the user's new input. All
+    // current `Action::Interject` producers are turn-gated, so this is
+    // defense-in-depth for the invariant "no send during verification".
+    let goal_verifying = app
+        .agents
+        .get(&id)
+        .is_some_and(crate::app::dispatch::goal_is_verifying);
+    if goal_verifying {
+        app.show_toast(crate::app::dispatch::GOAL_VERIFYING_TOAST);
+        return vec![];
+    }
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -266,6 +280,45 @@ mod tests {
             &mut app,
         );
         assert_eq!(app.agents.get(&id).unwrap().prompt.text(), "send me");
+    }
+
+    /// Verification protection covers the Interject family at the dispatch
+    /// boundary (backstop): while the Goal verifier runs, `Action::Interject`
+    /// is rejected with the shared toast and NO effects. All current
+    /// producers are turn-gated, so this enforces the invariant "no send
+    /// family crosses dispatch during verification" rather than fixing a
+    /// reachable leak.
+    #[test]
+    fn goal_verifying_rejects_interject_with_toast() {
+        use crate::app::actions::Action;
+        use crate::app::agent::AgentId;
+        use crate::app::dispatch::dispatch;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+            goal.verifying_completion = true;
+            app.agents.get_mut(&id).unwrap().goal_state = Some(goal);
+        }
+
+        let effects = dispatch(
+            Action::Interject {
+                text: "steer".into(),
+                images: vec![],
+            },
+            &mut app,
+        );
+        assert!(
+            effects.is_empty(),
+            "interject must be rejected while the Goal verifier runs: {effects:?}"
+        );
+        let agent = &app.agents[&id];
+        assert_eq!(
+            agent.toast.as_ref().map(|(s, _)| s.as_str()),
+            Some("Goal is verifying; please wait before sending."),
+            "a toast must explain the rejection"
+        );
     }
 
     /// Interjecting is a submit: it retires the active ephemeral tip.

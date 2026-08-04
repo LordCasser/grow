@@ -216,6 +216,16 @@ pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         log_blocked("turn_running", sid);
         return QueueDrain::blocked();
     }
+    // Goal verification protection (silent backstop): while the verifier
+    // judges completion, no queue drain may start a send — the edit-save /
+    // Esc / delete paths funnel through DrainQueue and would otherwise race
+    // the verdict. Rows stay queued and send once verification ends (the
+    // send-intent call sites show the toast; this keeps internal drains
+    // silent).
+    if crate::app::dispatch::goal_is_verifying(agent) {
+        log_blocked("goal_verifying", sid);
+        return QueueDrain::blocked();
+    }
     if agent.session.current_prompt_id.is_some() {
         // A Prompt RPC has been submitted but the shell has not yet confirmed
         // queue admission or foreground ownership. Keep it separate from the

@@ -328,6 +328,13 @@ impl AgentView {
         server_id: Option<String>,
         drain: bool,
     ) -> InputOutcome {
+        // Verification protection (send-intent paths only — `drain` means
+        // "save & send"): the edit is STILL SAVED (never lose user text),
+        // the toast explains why it is not sent yet, and `maybe_drain_queue`
+        // blocks the drain as a backstop. Esc/delete cancels stay silent.
+        if drain && crate::app::dispatch::goal_is_verifying(self) {
+            self.show_toast(crate::app::dispatch::GOAL_VERIFYING_TOAST);
+        }
         match server_id {
             Some(server_id) => {
                 let new_text = self.prompt.text().to_string();
@@ -1073,6 +1080,51 @@ mod tests {
         assert!(agent.session.pending_prompts.is_empty());
         assert!(matches!(agent.prompt_mode, PromptMode::Normal));
         assert_eq!(agent.prompt.text(), "draft");
+    }
+
+    /// Verification protection on the edit-save path: while the verifier
+    /// runs (no running turn), bare Enter in edit mode ("save & send")
+    /// shows the verification toast, the edit IS saved in place, and the
+    /// resulting DrainQueue is intercepted downstream — the row stays
+    /// queued and sends once verification ends.
+    #[test]
+    fn edit_save_during_verification_toasts_and_keeps_row() {
+        let mut agent = make_running_agent();
+        let registry = non_vscode_registry();
+        agent.session.state = AgentState::Idle; // verification: turn ended
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.verifying_completion = true;
+        agent.goal_state = Some(goal);
+
+        let ids = agent.queue.entry_ids();
+        agent.queue.list_state.select_by_id(ids[1]); // local row
+        let _ = agent.handle_queue_key(&edit_key(), &registry);
+        assert!(matches!(
+            agent.prompt_mode,
+            PromptMode::EditingQueued { .. }
+        ));
+        agent.prompt.set_text("edited row");
+
+        let outcome =
+            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::DrainQueue)),
+            "the edit save must still request a drain, got {outcome:?}"
+        );
+        assert_eq!(
+            agent.toast.as_ref().map(|(s, _)| s.as_str()),
+            Some("Goal is verifying; please wait before sending."),
+            "the save-and-send attempt must explain the rejection"
+        );
+        assert_eq!(
+            agent.session.pending_prompts.len(),
+            1,
+            "the row must stay queued (drain is blocked during verification)"
+        );
+        assert_eq!(
+            agent.session.pending_prompts[0].text, "edited row",
+            "the edit is saved in place — user text is never lost"
+        );
     }
 
     #[test]

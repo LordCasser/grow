@@ -1430,13 +1430,19 @@ mod inline_resize_tests {
         fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
             Ok(Position::ORIGIN)
         }
-        fn set_cursor_position<P: Into<Position>>(&mut self, _position: P) -> Result<(), Self::Error> {
+        fn set_cursor_position<P: Into<Position>>(
+            &mut self,
+            _position: P,
+        ) -> Result<(), Self::Error> {
             Ok(())
         }
         fn clear(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
-        fn clear_region(&mut self, _clear_type: ratatui::backend::ClearType) -> Result<(), Self::Error> {
+        fn clear_region(
+            &mut self,
+            _clear_type: ratatui::backend::ClearType,
+        ) -> Result<(), Self::Error> {
             Ok(())
         }
         fn append_lines(&mut self, _n: u16) -> Result<(), Self::Error> {
