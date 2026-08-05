@@ -152,6 +152,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # OpenHarmony (aarch64-unknown-linux-ohos): built natively inside
+          # the Harmonybrew ci-runner container (OHOS userland) on an arm64
+          # runner. OHOS releases do NOT bundle ripgrep (no GitHub prebuilt
+          # exists for this target); the binary resolves `rg` from PATH at
+          # runtime and search tools error with an install hint when it is
+          # missing. Smoke runs inside the container (the binary cannot run
+          # on the ubuntu runner), so `smoke: false` keeps the shared
+          # runner smoke off.
           cat <<'JSONEOF' > "${RUNNER_TEMP}/release-platforms.json"
           [
             {
@@ -280,14 +288,6 @@ jobs:
               "rg_strip_components": 1,
               "rg_runnable": true
             },
-            # OpenHarmony (aarch64-unknown-linux-ohos): built natively inside
-            # the Harmonybrew ci-runner container (OHOS userland) on an arm64
-            # runner. OHOS releases do NOT bundle ripgrep (no GitHub prebuilt
-            # exists for this target); the binary resolves `rg` from PATH at
-            # runtime and search tools error with an install hint when it is
-            # missing. Smoke runs inside the container (the binary cannot run
-            # on the ubuntu runner), so `smoke: false` keeps the shared
-            # runner smoke off.
             {
               "group": "ohos",
               "asset_platform": "ohos-aarch64",
