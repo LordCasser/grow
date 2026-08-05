@@ -183,12 +183,13 @@ restores its last effort before any configured default is considered.
 ## Auxiliary models
 
 Session summaries inherit the active session model when their setting is absent. Image reading is
-different: when `image_description` is absent, images returned by `read_file` and rendered PDF
-pages remain multimodal tool-result content for the active model. Setting `image_description`
+different: when `image_description` is absent, images returned by `read_file` and rendered pages of
+scanned or mixed PDFs remain multimodal tool-result content for the active model (text-layer PDFs
+default to Markdown text extraction and never enter the image route). Setting `image_description`
 routes that content to the configured auxiliary model and stores its textual description in model
 context; resolution, transport, and empty-response failures are surfaced as text and never silently
-fall back to another model. User message attachments and PDF `format="text"` are independent of
-this setting.
+fall back to another model. User message attachments and PDF `format="text"` / `format="markdown"`
+are independent of this setting.
 
 Auxiliary image-description requests do not hard-code `temperature`, `top_p`, or an output token
 limit. Values configured on the selected model still apply; otherwise Grow omits them so the BYOK

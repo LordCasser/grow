@@ -142,7 +142,7 @@ pub struct ReadFileInput {
     pub pages: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
-        description = "Output format for PDF files. 'image' (default) renders pages as images. 'text' extracts text content. Ignored for non-PDF files."
+        description = "Output format for PDF files. When omitted, the format is chosen automatically: PDFs with a native text layer on every requested page are extracted as Markdown text, scanned or image-based PDFs are rendered as page images. 'image' forces page-image rendering (the historical default). 'text' extracts plain text in reading order. 'markdown' extracts Markdown-style text. Ignored for non-PDF files."
     )]
     pub format: Option<String>,
 }
@@ -2156,8 +2156,10 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             "PDF format=text yields FileContent, got {terminal:?}"
         );
     }
-    /// PDF read with the default (image) format renders to `PdfPageImages` — a
-    /// single non-incremental result, so it must not stream.
+    /// PDF read with `format="image"` renders to `PdfPageImages` — a
+    /// single non-incremental result, so it must not stream. (The default
+    /// no-format route now extracts text-layer PDFs to `FileContent`; this
+    /// test pins the explicit image path.)
     #[tokio::test]
     async fn read_file_pdf_image_path_is_terminal_only() {
         let tmp = TempDir::new().unwrap();
@@ -2168,7 +2170,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             offset: None,
             limit: None,
             pages: None,
-            format: None,
+            format: Some("image".to_string()),
         };
         let resources = test_resources(tmp.path());
         let (deltas, terminal) = execute_collect(test_ctx(resources.into_shared()), input).await;
@@ -2179,7 +2181,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         );
         assert!(
             matches!(terminal, ReadFileOutput::PdfPageImages(_)),
-            "PDF default format renders images, got {terminal:?}"
+            "PDF format=image renders images, got {terminal:?}"
         );
     }
     /// Regression: a concurrent text read must not make a PDF-text read on

@@ -6,9 +6,10 @@
 ## Invariants
 
 - `image_description = None` means no auxiliary image route. Image files and
-  rendered PDF pages remain multimodal `tool_result` content for the active
-  model. Any active-model vision failure follows the normal sampling failure
-  path.
+  rendered PDF pages — i.e. pages of scanned or mixed PDFs, which the default
+  route sends to rendering — remain multimodal `tool_result` content for the
+  active model. Any active-model vision failure follows the normal sampling
+  failure path.
 - `image_description = Some(model)` means that configured model owns image
   interpretation. The session describes `ReadFileOutput::ImageContent` and
   `ReadFileOutput::PdfPageImages` before adding the tool result to model
@@ -19,10 +20,27 @@
 - Image-description requests inherit sampling parameters from the configured
   model; the image layer must not hard-code temperature or other provider-
   constrained sampling values.
-- PDF `format="text"` remains ordinary `FileContent`; only rendered-page output
-  enters the image route.
+- PDF `format="text"` and `format="markdown"` remain ordinary `FileContent`;
+  only rendered-page output enters the image route.
 - User message attachments are independent of this setting. They are persisted
   for workspace reuse and remain structural image content for the active model.
+
+## Default smart routing
+
+With no `format` parameter, `read_file` classifies each requested page
+(`pdf_oxide::PdfDocument::classify_page`):
+
+- every requested page has a usable native text layer (or is blank) → the PDF
+  is extracted to `FileContent` (Markdown via the markdown converter);
+- the first page classified `Scanned`/`ImageText`/`Mixed` stops the scan and
+  the whole PDF is rendered to `PdfPageImages` (the historical default);
+- any classification error (including encrypted/unauthenticated documents)
+  conservatively falls back to rendering, preserving the previous default
+  behaviour and error semantics.
+
+Routing is binary: no per-page mixing. Explicit `format="image"` always
+renders; `format="text"` extracts reading-ordered plain text;
+`format="markdown"` forces the markdown path.
 
 ## Ownership
 
