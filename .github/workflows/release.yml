@@ -1,6 +1,17 @@
-# Official Grow release targets. Updater-visible assets use
-# grow-{version}-{asset_platform}.tar.gz and contain exactly one executable:
-# `grow` on Unix, `grow.exe` on Windows.
+# Official Grow release entry workflow.
+#
+# Splits the release pipeline into:
+#   release.yml    — entry: validate tag, select platform matrix, publish
+#   build-one.yml  — reusable workflow: build + package ONE asset platform
+#
+# Triggers:
+#   - Tag push (v*): builds and publishes all 10 updater assets.
+#   - workflow_dispatch: pick platform groups via boolean inputs. `publish`
+#     is only allowed when every group is selected (the updater contract
+#     requires the full asset set on the GitHub Release).
+#
+# Updater-visible assets use grow-{version}-{asset_platform}.tar.gz and
+# contain exactly one executable: `grow` on Unix, `grow.exe` on Windows.
 name: Build release assets
 
 on:
@@ -13,6 +24,26 @@ on:
         description: Existing release tag to build (for example v1.1.0)
         required: true
         type: string
+      build_linux:
+        description: Build linux-* assets (x86_64, aarch64, riscv64, x86_64-musl, aarch64-musl)
+        type: boolean
+        default: true
+      build_macos:
+        description: Build macos-* assets (aarch64, x86_64)
+        type: boolean
+        default: true
+      build_windows:
+        description: Build windows-* assets (x86_64, aarch64)
+        type: boolean
+        default: true
+      build_ohos:
+        description: Build ohos-aarch64 asset
+        type: boolean
+        default: true
+      publish:
+        description: Publish to the GitHub Release (requires all platform groups)
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -22,8 +53,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CARGO_INCREMENTAL: "0"
-  CARGO_PROFILE_RELEASE_DIST_INCREMENTAL: "false"
   RELEASE_REPO: LordCasser/grow
   RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
 
@@ -102,412 +131,260 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+  # Platform catalog: single source of truth for every release asset.
+  # On tag push all platforms are selected; on workflow_dispatch the
+  # boolean inputs filter by group. The resulting JSON array drives the
+  # build job's matrix (matrix.include = fromJson(...)), so an empty
+  # selection expands to zero build combinations.
+  select:
+    name: Select platform matrix
+    runs-on: ubuntu-24.04
+    outputs:
+      platforms: ${{ steps.filter.outputs.platforms }}
+    env:
+      BUILD_LINUX: ${{ github.event_name == 'workflow_dispatch' && inputs.build_linux }}
+      BUILD_MACOS: ${{ github.event_name == 'workflow_dispatch' && inputs.build_macos }}
+      BUILD_WINDOWS: ${{ github.event_name == 'workflow_dispatch' && inputs.build_windows }}
+      BUILD_OHOS: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ohos }}
+    steps:
+      - id: filter
+        name: Filter platforms by selected groups
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat <<'JSONEOF' > "${RUNNER_TEMP}/release-platforms.json"
+          [
+            {
+              "group": "linux",
+              "asset_platform": "linux-x86_64",
+              "target": "x86_64-unknown-linux-gnu",
+              "runner": "ubuntu-24.04",
+              "builder": "alma",
+              "smoke": true,
+              "rg_repository": "BurntSushi/ripgrep",
+              "rg_tag": "15.0.0",
+              "rg_archive": "ripgrep-15.0.0-x86_64-unknown-linux-musl.tar.gz",
+              "rg_sha256": "253ad0fd5fef0d64cba56c70dccdacc1916d4ed70ad057cc525fcdb0c3bbd2a7",
+              "rg_strip_components": 1,
+              "rg_runnable": true
+            },
+            {
+              "group": "linux",
+              "asset_platform": "linux-aarch64",
+              "target": "aarch64-unknown-linux-gnu",
+              "runner": "ubuntu-24.04-arm",
+              "builder": "alma",
+              "smoke": true,
+              "rg_repository": "microsoft/ripgrep-prebuilt",
+              "rg_tag": "v15.0.0",
+              "rg_archive": "ripgrep-v15.0.0-aarch64-unknown-linux-musl.tar.gz",
+              "rg_sha256": "47c6ea56f4d18bc26778eaca9b9c3f6e201b7c7d78d5ebc528dfda47e0e8f1ba",
+              "rg_strip_components": 0,
+              "rg_runnable": true
+            },
+            {
+              "group": "linux",
+              "asset_platform": "linux-riscv64",
+              "target": "riscv64gc-unknown-linux-gnu",
+              "runner": "ubuntu-24.04",
+              "builder": "cross",
+              "smoke": false,
+              "rg_repository": "microsoft/ripgrep-prebuilt",
+              "rg_tag": "v15.0.0",
+              "rg_archive": "ripgrep-v15.0.0-riscv64gc-unknown-linux-gnu.tar.gz",
+              "rg_sha256": "49d7a681e4d22ffc523185682719332763ae182256e7360b9f621dc3268e7d08",
+              "rg_strip_components": 0,
+              "rg_runnable": false
+            },
+            {
+              "group": "linux",
+              "asset_platform": "linux-x86_64-musl",
+              "target": "x86_64-unknown-linux-musl",
+              "runner": "ubuntu-24.04",
+              "builder": "cross",
+              "smoke": false,
+              "rg_repository": "BurntSushi/ripgrep",
+              "rg_tag": "15.0.0",
+              "rg_archive": "ripgrep-15.0.0-x86_64-unknown-linux-musl.tar.gz",
+              "rg_sha256": "253ad0fd5fef0d64cba56c70dccdacc1916d4ed70ad057cc525fcdb0c3bbd2a7",
+              "rg_strip_components": 1,
+              "rg_runnable": true
+            },
+            {
+              "group": "linux",
+              "asset_platform": "linux-aarch64-musl",
+              "target": "aarch64-unknown-linux-musl",
+              "runner": "ubuntu-24.04",
+              "builder": "cross",
+              "smoke": false,
+              "rg_repository": "microsoft/ripgrep-prebuilt",
+              "rg_tag": "v15.0.0",
+              "rg_archive": "ripgrep-v15.0.0-aarch64-unknown-linux-musl.tar.gz",
+              "rg_sha256": "47c6ea56f4d18bc26778eaca9b9c3f6e201b7c7d78d5ebc528dfda47e0e8f1ba",
+              "rg_strip_components": 0,
+              "rg_runnable": false
+            },
+            {
+              "group": "macos",
+              "asset_platform": "macos-aarch64",
+              "target": "aarch64-apple-darwin",
+              "runner": "macos-15",
+              "builder": "macos",
+              "smoke": true,
+              "rg_repository": "BurntSushi/ripgrep",
+              "rg_tag": "15.0.0",
+              "rg_archive": "ripgrep-15.0.0-aarch64-apple-darwin.tar.gz",
+              "rg_sha256": "98bb2e61e7277ba0ea72d2ae2592497fd8d2940934a16b122448d302a6637e3b",
+              "rg_strip_components": 1,
+              "rg_runnable": true
+            },
+            {
+              "group": "macos",
+              "asset_platform": "macos-x86_64",
+              "target": "x86_64-apple-darwin",
+              "runner": "macos-15-intel",
+              "builder": "macos",
+              "smoke": true,
+              "rg_repository": "BurntSushi/ripgrep",
+              "rg_tag": "15.0.0",
+              "rg_archive": "ripgrep-15.0.0-x86_64-apple-darwin.tar.gz",
+              "rg_sha256": "44128c733d127ddbda461e01225a68b5f9997cfe7635242a797f645ca674a71a",
+              "rg_strip_components": 1,
+              "rg_runnable": true
+            },
+            {
+              "group": "windows",
+              "asset_platform": "windows-x86_64",
+              "target": "x86_64-pc-windows-msvc",
+              "runner": "windows-2025",
+              "builder": "windows",
+              "smoke": true,
+              "rg_repository": "BurntSushi/ripgrep",
+              "rg_tag": "15.0.0",
+              "rg_archive": "ripgrep-15.0.0-x86_64-pc-windows-msvc.zip",
+              "rg_sha256": "21a98bf42c4da97ca543c010e764cc6dec8b9b7538d05f8d21874016385e0860",
+              "rg_strip_components": 1,
+              "rg_runnable": true
+            },
+            {
+              "group": "windows",
+              "asset_platform": "windows-aarch64",
+              "target": "aarch64-pc-windows-msvc",
+              "runner": "windows-11-arm",
+              "builder": "windows",
+              "smoke": true,
+              "rg_repository": "BurntSushi/ripgrep",
+              "rg_tag": "15.0.0",
+              "rg_archive": "ripgrep-15.0.0-aarch64-pc-windows-msvc.zip",
+              "rg_sha256": "572709c8770cb7f9385d725cb06d2bcd9537ec24d4dd17b1be1d65a876f8b591",
+              "rg_strip_components": 1,
+              "rg_runnable": true
+            },
+            # OpenHarmony (aarch64-unknown-linux-ohos): built natively inside
+            # the Harmonybrew ci-runner container (OHOS userland) on an arm64
+            # runner. OHOS releases do NOT bundle ripgrep (no GitHub prebuilt
+            # exists for this target); the binary resolves `rg` from PATH at
+            # runtime and search tools error with an install hint when it is
+            # missing. Smoke runs inside the container (the binary cannot run
+            # on the ubuntu runner), so `smoke: false` keeps the shared
+            # runner smoke off.
+            {
+              "group": "ohos",
+              "asset_platform": "ohos-aarch64",
+              "target": "aarch64-unknown-linux-ohos",
+              "runner": "ubuntu-24.04-arm",
+              "builder": "ohos",
+              "smoke": false,
+              "rg_repository": "BurntSushi/ripgrep",
+              "rg_tag": "15.0.0",
+              "rg_archive": "(not bundled; no GitHub asset for this target)",
+              "rg_sha256": "(not bundled; no GitHub asset for this target)",
+              "rg_strip_components": 0,
+              "rg_runnable": false
+            }
+          ]
+          JSONEOF
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            jq -c \
+              --argjson linux "${BUILD_LINUX}" \
+              --argjson macos "${BUILD_MACOS}" \
+              --argjson windows "${BUILD_WINDOWS}" \
+              --argjson ohos "${BUILD_OHOS}" \
+              '[.[] | select((.group == "linux" and $linux) or (.group == "macos" and $macos) or (.group == "windows" and $windows) or (.group == "ohos" and $ohos))]' \
+              "${RUNNER_TEMP}/release-platforms.json" > "${RUNNER_TEMP}/selected.json"
+          else
+            cp "${RUNNER_TEMP}/release-platforms.json" "${RUNNER_TEMP}/selected.json"
+          fi
+          selected="$(jq -c . "${RUNNER_TEMP}/selected.json")"
+          echo "selected $(jq 'length' <<<"$selected") platform(s)"
+          echo "platforms=${selected}" >> "$GITHUB_OUTPUT"
+
+  # Manual dispatch sanity checks. Must stay a plain (never skipped) job so
+  # publish can depend on it on every trigger: the check itself is gated to
+  # workflow_dispatch, and on tag push this job is a trivial no-op success.
+  dispatch-guard:
+    name: Validate dispatch inputs
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require at least one platform group; publish requires all four
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          linux="${{ inputs.build_linux }}"
+          macos="${{ inputs.build_macos }}"
+          windows="${{ inputs.build_windows }}"
+          ohos="${{ inputs.build_ohos }}"
+          publish="${{ inputs.publish }}"
+          selected=0
+          for v in "$linux" "$macos" "$windows" "$ohos"; do
+            [[ "$v" == "true" ]] && selected=$((selected + 1))
+          done
+          if [[ "$selected" -eq 0 ]]; then
+            echo "::error::No platform group selected: check at least one of build_linux / build_macos / build_windows / build_ohos." >&2
+            exit 1
+          fi
+          if [[ "$publish" == "true" && "$selected" -lt 4 ]]; then
+            echo "::error::publish=true requires all 4 platform groups (selected ${selected}/4). Uncheck publish for partial builds." >&2
+            exit 1
+          fi
+
+  # One call of build-one.yml per selected platform. The matrix comes from
+  # the select job output; an empty selection expands to zero combinations
+  # and this job is skipped.
   build:
     name: Build ${{ matrix.asset_platform }}
-    needs: validate
-    timeout-minutes: 180
-    runs-on: ${{ matrix.runner }}
-    env:
-      ASSET_PLATFORM: ${{ matrix.asset_platform }}
-      TARGET_TRIPLE: ${{ matrix.target }}
-      GROW_VERSION: ${{ needs.validate.outputs.version }}
+    needs:
+      - validate
+      - select
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - asset_platform: linux-x86_64
-            target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
-            builder: alma
-            smoke: true
-            rg_repository: BurntSushi/ripgrep
-            rg_tag: 15.0.0
-            rg_archive: ripgrep-15.0.0-x86_64-unknown-linux-musl.tar.gz
-            rg_sha256: 253ad0fd5fef0d64cba56c70dccdacc1916d4ed70ad057cc525fcdb0c3bbd2a7
-            rg_strip_components: 1
-            rg_runnable: true
-          - asset_platform: linux-aarch64
-            target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-            builder: alma
-            smoke: true
-            rg_repository: microsoft/ripgrep-prebuilt
-            rg_tag: v15.0.0
-            rg_archive: ripgrep-v15.0.0-aarch64-unknown-linux-musl.tar.gz
-            rg_sha256: 47c6ea56f4d18bc26778eaca9b9c3f6e201b7c7d78d5ebc528dfda47e0e8f1ba
-            rg_strip_components: 0
-            rg_runnable: true
-          - asset_platform: linux-riscv64
-            target: riscv64gc-unknown-linux-gnu
-            runner: ubuntu-24.04
-            builder: cross
-            smoke: false
-            rg_repository: microsoft/ripgrep-prebuilt
-            rg_tag: v15.0.0
-            rg_archive: ripgrep-v15.0.0-riscv64gc-unknown-linux-gnu.tar.gz
-            rg_sha256: 49d7a681e4d22ffc523185682719332763ae182256e7360b9f621dc3268e7d08
-            rg_strip_components: 0
-            rg_runnable: false
-          - asset_platform: linux-x86_64-musl
-            target: x86_64-unknown-linux-musl
-            runner: ubuntu-24.04
-            builder: cross
-            smoke: false
-            rg_repository: BurntSushi/ripgrep
-            rg_tag: 15.0.0
-            rg_archive: ripgrep-15.0.0-x86_64-unknown-linux-musl.tar.gz
-            rg_sha256: 253ad0fd5fef0d64cba56c70dccdacc1916d4ed70ad057cc525fcdb0c3bbd2a7
-            rg_strip_components: 1
-            rg_runnable: true
-          - asset_platform: linux-aarch64-musl
-            target: aarch64-unknown-linux-musl
-            runner: ubuntu-24.04
-            builder: cross
-            smoke: false
-            rg_repository: microsoft/ripgrep-prebuilt
-            rg_tag: v15.0.0
-            rg_archive: ripgrep-v15.0.0-aarch64-unknown-linux-musl.tar.gz
-            rg_sha256: 47c6ea56f4d18bc26778eaca9b9c3f6e201b7c7d78d5ebc528dfda47e0e8f1ba
-            rg_strip_components: 0
-            rg_runnable: false
-          - asset_platform: macos-aarch64
-            target: aarch64-apple-darwin
-            runner: macos-15
-            builder: macos
-            smoke: true
-            rg_repository: BurntSushi/ripgrep
-            rg_tag: 15.0.0
-            rg_archive: ripgrep-15.0.0-aarch64-apple-darwin.tar.gz
-            rg_sha256: 98bb2e61e7277ba0ea72d2ae2592497fd8d2940934a16b122448d302a6637e3b
-            rg_strip_components: 1
-            rg_runnable: true
-          - asset_platform: macos-x86_64
-            target: x86_64-apple-darwin
-            runner: macos-15-intel
-            builder: macos
-            smoke: true
-            rg_repository: BurntSushi/ripgrep
-            rg_tag: 15.0.0
-            rg_archive: ripgrep-15.0.0-x86_64-apple-darwin.tar.gz
-            rg_sha256: 44128c733d127ddbda461e01225a68b5f9997cfe7635242a797f645ca674a71a
-            rg_strip_components: 1
-            rg_runnable: true
-          - asset_platform: windows-x86_64
-            target: x86_64-pc-windows-msvc
-            runner: windows-2025
-            builder: windows
-            smoke: true
-            rg_repository: BurntSushi/ripgrep
-            rg_tag: 15.0.0
-            rg_archive: ripgrep-15.0.0-x86_64-pc-windows-msvc.zip
-            rg_sha256: 21a98bf42c4da97ca543c010e764cc6dec8b9b7538d05f8d21874016385e0860
-            rg_strip_components: 1
-            rg_runnable: true
-          - asset_platform: windows-aarch64
-            target: aarch64-pc-windows-msvc
-            runner: windows-11-arm
-            builder: windows
-            smoke: true
-            rg_repository: BurntSushi/ripgrep
-            rg_tag: 15.0.0
-            rg_archive: ripgrep-15.0.0-aarch64-pc-windows-msvc.zip
-            rg_sha256: 572709c8770cb7f9385d725cb06d2bcd9537ec24d4dd17b1be1d65a876f8b591
-            rg_strip_components: 1
-            rg_runnable: true
-          # OpenHarmony (aarch64-unknown-linux-ohos): built natively inside the
-          # Harmonybrew ci-runner container (OHOS userland) on an arm64 runner.
-          # OHOS releases do NOT bundle ripgrep (no GitHub prebuilt exists for
-          # this target); the binary resolves `rg` from PATH at runtime and
-          # search tools error with an install hint when it is missing. The
-          # shared "Prepare bundled ripgrep" download step is skipped for this
-          # builder. Smoke runs inside the container (the binary cannot run on
-          # the ubuntu runner), so `smoke: false` keeps the shared runner
-          # smoke off.
-          - asset_platform: ohos-aarch64
-            target: aarch64-unknown-linux-ohos
-            runner: ubuntu-24.04-arm
-            builder: ohos
-            smoke: false
-            rg_repository: BurntSushi/ripgrep
-            rg_tag: 15.0.0
-            rg_archive: (not bundled; no GitHub asset for this target)
-            rg_sha256: (not bundled; no GitHub asset for this target)
-            rg_strip_components: 0
-            rg_runnable: false
-    steps:
-      - uses: actions/checkout@v6
-        if: ${{ !env.ACT }}
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-
-      - name: Act — checkout tagged tree on bind mount
-        if: ${{ env.ACT && runner.os == 'Linux' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null
-          if [[ -n "$(git status --porcelain)" ]]; then
-            echo "act build requires a clean worktree" >&2
-            git status --short >&2
-            exit 1
-          fi
-          if branch="$(git symbolic-ref -q --short HEAD 2>/dev/null)"; then
-            echo "ACT_RESTORE_REF=$branch" >> "$GITHUB_ENV"
-          else
-            echo "ACT_RESTORE_REF=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          fi
-          git checkout --detach "${RELEASE_TAG}"
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.92.0"
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-${{ matrix.asset_platform }}
-
-      - name: Install cross
-        if: ${{ matrix.builder == 'cross' }}
-        shell: bash
-        run: cargo install cross --locked --version 0.2.5
-
-      - name: Prepare bundled ripgrep
-        if: ${{ matrix.builder != 'windows' && matrix.builder != 'ohos' }}
-        shell: bash
-        env:
-          RG_REPOSITORY: ${{ matrix.rg_repository }}
-          RG_TAG: ${{ matrix.rg_tag }}
-          RG_ARCHIVE: ${{ matrix.rg_archive }}
-          RG_SHA256: ${{ matrix.rg_sha256 }}
-          RG_STRIP_COMPONENTS: ${{ matrix.rg_strip_components }}
-          RG_RUNNABLE: ${{ matrix.rg_runnable }}
-        run: |
-          set -euo pipefail
-          archive="${RUNNER_TEMP}/${RG_ARCHIVE}"
-          bundle_dir="${GITHUB_WORKSPACE}/.build-tools/rg/${ASSET_PLATFORM}"
-          url="https://github.com/${RG_REPOSITORY}/releases/download/${RG_TAG}/${RG_ARCHIVE}"
-
-          curl --fail --location --retry 5 --retry-all-errors \
-            --connect-timeout 30 --max-time 300 --output "$archive" "$url"
-          actual_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
-          test "$actual_sha256" = "$RG_SHA256"
-
-          mkdir -p "$bundle_dir"
-          if [[ "$RG_STRIP_COMPONENTS" == "1" ]]; then
-            tar -xzf "$archive" --strip-components=1 -C "$bundle_dir"
-          else
-            tar -xzf "$archive" -C "$bundle_dir"
-          fi
-          test -x "$bundle_dir/rg"
-          if [[ "$RG_RUNNABLE" == "true" ]]; then
-            "$bundle_dir/rg" --version >/dev/null
-          fi
-          echo "GROW_TOOLS_BUNDLE_RG_PATH=$bundle_dir/rg" >> "$GITHUB_ENV"
-
-      - name: Prepare bundled ripgrep
-        if: ${{ matrix.builder == 'windows' }}
-        shell: pwsh
-        env:
-          RG_REPOSITORY: ${{ matrix.rg_repository }}
-          RG_TAG: ${{ matrix.rg_tag }}
-          RG_ARCHIVE: ${{ matrix.rg_archive }}
-          RG_SHA256: ${{ matrix.rg_sha256 }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $archive = Join-Path $env:RUNNER_TEMP $env:RG_ARCHIVE
-          $expanded = Join-Path $env:RUNNER_TEMP "ripgrep-expanded"
-          $bundleDir = Join-Path $env:GITHUB_WORKSPACE ".build-tools/rg/$env:ASSET_PLATFORM"
-          $url = "https://github.com/$env:RG_REPOSITORY/releases/download/$env:RG_TAG/$env:RG_ARCHIVE"
-
-          Invoke-WebRequest -Uri $url -OutFile $archive
-          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          if ($actual -ne $env:RG_SHA256) {
-            throw "ripgrep SHA-256 mismatch: expected $env:RG_SHA256, got $actual"
-          }
-          Expand-Archive -Path $archive -DestinationPath $expanded
-          $rg = Get-ChildItem -Path $expanded -Recurse -Filter rg.exe | Select-Object -First 1
-          if (-not $rg) { throw "rg.exe not found in $archive" }
-          New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
-          $bundledRg = Join-Path $bundleDir "rg.exe"
-          Copy-Item $rg.FullName $bundledRg
-          & $bundledRg --version | Out-Null
-          "GROW_TOOLS_BUNDLE_RG_PATH=$bundledRg" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Build Grow (AlmaLinux 8, glibc 2.28 baseline)
-        if: ${{ matrix.builder == 'alma' }}
-        shell: bash
-        env:
-          GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK: "1"
-        run: |
-          set -euo pipefail
-          CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
-          RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
-          HOST_UID="$(id -u)"
-          HOST_GID="$(id -g)"
-          docker run --rm \
-            -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
-            -v "${CARGO_HOME}:${CARGO_HOME}" -v "${RUSTUP_HOME}:${RUSTUP_HOME}" \
-            -e "PATH=${CARGO_HOME}/bin:${PATH}" \
-            -e "HOME=${HOME}" -e "HOST_UID=${HOST_UID}" -e "HOST_GID=${HOST_GID}" \
-            -e "CARGO_HOME=${CARGO_HOME}" -e "RUSTUP_HOME=${RUSTUP_HOME}" \
-            -e "GROW_VERSION=${GROW_VERSION}" \
-            -e "GROW_TOOLS_BUNDLE_RG_PATH=${GROW_TOOLS_BUNDLE_RG_PATH}" \
-            -e "GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1" \
-            -e "TARGET_TRIPLE=${TARGET_TRIPLE}" -e "CARGO_INCREMENTAL=0" \
-            almalinux:8 bash -euo pipefail -c '
-              dnf install -y gcc gcc-c++ make cmake git perl pkgconf util-linux >/dev/null
-              setpriv --reuid="${HOST_UID}" --regid="${HOST_GID}" --clear-groups \
-                cargo build --locked --profile release-dist \
-                -p cli --bin grow --target "${TARGET_TRIPLE}"
-            '
-
-      - name: Build Grow (cross)
-        if: ${{ matrix.builder == 'cross' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          export CROSS_CONTAINER_OPTS="-v ${GITHUB_WORKSPACE}/.build-tools:/opt/tools:ro -e GROW_VERSION=${GROW_VERSION} -e GROW_TOOLS_BUNDLE_RG_PATH=/opt/tools/rg/${ASSET_PLATFORM}/rg -e GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1"
-          cross build --locked --profile release-dist \
-            -p cli --bin grow --target "${TARGET_TRIPLE}"
-
-      - name: Build Grow (macOS)
-        if: ${{ matrix.builder == 'macos' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo build --locked --profile release-dist \
-            -p cli --bin grow --target "${TARGET_TRIPLE}"
-
-      - name: Build Grow (Windows)
-        if: ${{ matrix.builder == 'windows' }}
-        shell: pwsh
-        run: cargo build --locked --profile release-dist -p cli --bin grow --target $env:TARGET_TRIPLE
-
-      # OpenHarmony build: runs scripts/build-ohos.sh inside the Harmonybrew
-      # ci-runner container (arm64 OHOS userland with ohos-sdk + brew rust).
-      # The script bootstraps the toolchain and installs the rsproxy cargo
-      # mirror (crates.io/USTC TLS is flaky), then builds with jemalloc off
-      # (its configure does not know the ohos triplet) and WITHOUT a bundled
-      # ripgrep (runtime resolves `rg` from PATH; search tools error with an
-      # install hint when missing). CARGO_TARGET_DIR lives under the mounted
-      # workspace so the runner can package the artifact. The binary is
-      # stripped with the SDK's llvm-strip and smoke-tested inside the
-      # container (it cannot run on the ubuntu runner).
-      - name: Build Grow (OHOS container)
-        if: ${{ matrix.builder == 'ohos' }}
-        shell: bash
-        env:
-          GROW_VERSION: ${{ needs.validate.outputs.version }}
-          CI_RUNNER: swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner@sha256:0ef61139a01b93f7ca08c31ab1da030e9137f956a68505d284a4e37b70e5c691
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            -v "${GITHUB_WORKSPACE}:/workspace/grow" -w /workspace/grow \
-            -e "GROW_VERSION=${GROW_VERSION}" \
-            -e "CARGO_PROFILE=release-dist" \
-            -e "CARGO_TARGET_DIR=/workspace/grow/target-ohos" \
-            "${CI_RUNNER}" sh -euo pipefail -c '
-              scripts/build-ohos.sh
-              BIN="${CARGO_TARGET_DIR}/${CARGO_PROFILE}/grow"
-              test -x "$BIN"
-              /opt/ohos-sdk/ohos/native/llvm/bin/llvm-strip --strip-all "$BIN"
-              scripts/build-ohos.sh --smoke
-            '
-      - name: Smoke-test native binary
-        if: ${{ matrix.smoke && matrix.builder != 'windows' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          bin="target/${TARGET_TRIPLE}/release-dist/grow"
-          test -x "$bin"
-          test -s "$bin"
-          "$bin" --version | tee /dev/stderr | grep -F "${GROW_VERSION}"
-
-      - name: Smoke-test native binary
-        if: ${{ matrix.smoke && matrix.builder == 'windows' }}
-        shell: pwsh
-        run: |
-          $bin = "target/$env:TARGET_TRIPLE/release-dist/grow.exe"
-          if (-not (Test-Path $bin)) { throw "missing $bin" }
-          $version = & $bin --version
-          if ($version -notlike "*$env:GROW_VERSION*") { throw "unexpected version: $version" }
-
-      - name: Package Unix release asset
-        if: ${{ matrix.builder != 'windows' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          stage_dir="$(mktemp -d "${RUNNER_TEMP}/grow-release.XXXXXX")"
-          trap 'rm -rf "$stage_dir"' EXIT
-          # OHOS builds into target-ohos (container CARGO_TARGET_DIR under the
-          # workspace); all other builders use target/${TARGET_TRIPLE}.
-          if [[ "${{ matrix.builder }}" == "ohos" ]]; then
-            bin_path="target-ohos/release-dist/grow"
-          else
-            bin_path="target/${TARGET_TRIPLE}/release-dist/grow"
-          fi
-          cp "$bin_path" "$stage_dir/grow"
-
-          case "${{ matrix.builder }}" in
-            alma)
-              strip --strip-all "$stage_dir/grow"
-              ;;
-            cross)
-              strip_bin="$(command -v llvm-strip || command -v llvm-strip-18 || true)"
-              test -n "$strip_bin" || { echo "llvm-strip not found" >&2; exit 1; }
-              "$strip_bin" --strip-all "$stage_dir/grow"
-              ;;
-            macos)
-              strip "$stage_dir/grow"
-              ;;
-            ohos)
-              : # already stripped in-container by the build step
-              ;;
-          esac
-
-          asset="dist/grow-${GROW_VERSION}-${ASSET_PLATFORM}.tar.gz"
-          COPYFILE_DISABLE=1 tar -C "$stage_dir" -czf "$asset" grow
-          test "$(tar -tzf "$asset")" = "grow"
-          ls -la "$asset"
-
-      - name: Package Windows release asset
-        if: ${{ matrix.builder == 'windows' }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $stageDir = Join-Path $env:RUNNER_TEMP "grow-release"
-          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
-          Copy-Item "target/$env:TARGET_TRIPLE/release-dist/grow.exe" (Join-Path $stageDir "grow.exe")
-          $asset = "dist/grow-$env:GROW_VERSION-$env:ASSET_PLATFORM.tar.gz"
-          tar -C $stageDir -czf $asset grow.exe
-          $entries = (tar -tzf $asset).Trim()
-          if ($entries -ne "grow.exe") { throw "invalid archive entry: $entries" }
-          Get-Item $asset
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: grow-${{ matrix.asset_platform }}
-          path: dist/grow-*
-          if-no-files-found: error
-          retention-days: 3
-
-      - name: Act — restore bind-mounted branch
-        if: ${{ always() && env.ACT && runner.os == 'Linux' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -n "${ACT_RESTORE_REF:-}" ]]; then
-            git checkout -f "${ACT_RESTORE_REF}"
-          fi
+        include: ${{ fromJson(needs.select.outputs.platforms) }}
+    uses: ./.github/workflows/build-one.yml
+    with:
+      runner: ${{ matrix.runner }}
+      asset_platform: ${{ matrix.asset_platform }}
+      target: ${{ matrix.target }}
+      builder: ${{ matrix.builder }}
+      smoke: ${{ matrix.smoke }}
+      rg_repository: ${{ matrix.rg_repository }}
+      rg_tag: ${{ matrix.rg_tag }}
+      rg_archive: ${{ matrix.rg_archive }}
+      rg_sha256: ${{ matrix.rg_sha256 }}
+      rg_strip_components: ${{ matrix.rg_strip_components }}
+      rg_runnable: ${{ matrix.rg_runnable }}
+      release_tag: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      grow_version: ${{ needs.validate.outputs.version }}
 
   publish:
     name: Publish release assets
     needs:
       - validate
       - build
+      - dispatch-guard
+    if: ${{ github.event_name == 'push' || inputs.publish }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v8

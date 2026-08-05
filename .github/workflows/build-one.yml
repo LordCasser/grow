@@ -1,0 +1,351 @@
+# Reusable single-platform build for Grow release assets.
+#
+# Called by release.yml (the entry workflow) once per matrix combination;
+# builds exactly one asset_platform for a given release tag, smoke-tests it,
+# packages it, and uploads it as a workflow artifact. Publishing to the
+# GitHub Release stays in release.yml.
+#
+# Updater-visible assets use grow-{version}-{asset_platform}.tar.gz and
+# contain exactly one executable: `grow` on Unix, `grow.exe` on Windows.
+name: Build one release asset
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Runner label for this platform
+        required: true
+        type: string
+      asset_platform:
+        description: Asset platform id (e.g. linux-x86_64)
+        required: true
+        type: string
+      target:
+        description: Cargo target triple
+        required: true
+        type: string
+      builder:
+        description: Build backend (alma | cross | macos | windows | ohos)
+        required: true
+        type: string
+      smoke:
+        description: Whether the native binary is smoke-tested
+        required: true
+        type: boolean
+      rg_repository:
+        description: Repository hosting the bundled ripgrep release
+        required: true
+        type: string
+      rg_tag:
+        description: Ripgrep release tag to bundle
+        required: true
+        type: string
+      rg_archive:
+        description: Ripgrep release archive filename
+        required: true
+        type: string
+      rg_sha256:
+        description: Expected SHA-256 of the ripgrep archive
+        required: true
+        type: string
+      rg_strip_components:
+        description: tar strip-components for the ripgrep archive
+        required: true
+        type: number
+      rg_runnable:
+        description: Whether the bundled rg can be executed on this runner
+        required: true
+        type: boolean
+      release_tag:
+        description: Release tag being built (checkout ref)
+        required: true
+        type: string
+      grow_version:
+        description: Version validated against the release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ inputs.asset_platform }}
+    timeout-minutes: 180
+    runs-on: ${{ inputs.runner }}
+    env:
+      ASSET_PLATFORM: ${{ inputs.asset_platform }}
+      TARGET_TRIPLE: ${{ inputs.target }}
+      GROW_VERSION: ${{ inputs.grow_version }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DIST_INCREMENTAL: "false"
+    steps:
+      - uses: actions/checkout@v6
+        if: ${{ !env.ACT }}
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Act — checkout tagged tree on bind mount
+        if: ${{ env.ACT && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "act build requires a clean worktree" >&2
+            git status --short >&2
+            exit 1
+          fi
+          if branch="$(git symbolic-ref -q --short HEAD 2>/dev/null)"; then
+            echo "ACT_RESTORE_REF=$branch" >> "$GITHUB_ENV"
+          else
+            echo "ACT_RESTORE_REF=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          fi
+          git checkout --detach "${RELEASE_TAG}"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92.0"
+          targets: ${{ inputs.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ inputs.asset_platform }}
+
+      - name: Install cross
+        if: ${{ inputs.builder == 'cross' }}
+        shell: bash
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Prepare bundled ripgrep
+        if: ${{ inputs.builder != 'windows' && inputs.builder != 'ohos' }}
+        shell: bash
+        env:
+          RG_REPOSITORY: ${{ inputs.rg_repository }}
+          RG_TAG: ${{ inputs.rg_tag }}
+          RG_ARCHIVE: ${{ inputs.rg_archive }}
+          RG_SHA256: ${{ inputs.rg_sha256 }}
+          RG_STRIP_COMPONENTS: ${{ inputs.rg_strip_components }}
+          RG_RUNNABLE: ${{ inputs.rg_runnable }}
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/${RG_ARCHIVE}"
+          bundle_dir="${GITHUB_WORKSPACE}/.build-tools/rg/${ASSET_PLATFORM}"
+          url="https://github.com/${RG_REPOSITORY}/releases/download/${RG_TAG}/${RG_ARCHIVE}"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            --connect-timeout 30 --max-time 300 --output "$archive" "$url"
+          actual_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          test "$actual_sha256" = "$RG_SHA256"
+
+          mkdir -p "$bundle_dir"
+          if [[ "$RG_STRIP_COMPONENTS" == "1" ]]; then
+            tar -xzf "$archive" --strip-components=1 -C "$bundle_dir"
+          else
+            tar -xzf "$archive" -C "$bundle_dir"
+          fi
+          test -x "$bundle_dir/rg"
+          if [[ "$RG_RUNNABLE" == "true" ]]; then
+            "$bundle_dir/rg" --version >/dev/null
+          fi
+          echo "GROW_TOOLS_BUNDLE_RG_PATH=$bundle_dir/rg" >> "$GITHUB_ENV"
+
+      - name: Prepare bundled ripgrep
+        if: ${{ inputs.builder == 'windows' }}
+        shell: pwsh
+        env:
+          RG_REPOSITORY: ${{ inputs.rg_repository }}
+          RG_TAG: ${{ inputs.rg_tag }}
+          RG_ARCHIVE: ${{ inputs.rg_archive }}
+          RG_SHA256: ${{ inputs.rg_sha256 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path $env:RUNNER_TEMP $env:RG_ARCHIVE
+          $expanded = Join-Path $env:RUNNER_TEMP "ripgrep-expanded"
+          $bundleDir = Join-Path $env:GITHUB_WORKSPACE ".build-tools/rg/$env:ASSET_PLATFORM"
+          $url = "https://github.com/$env:RG_REPOSITORY/releases/download/$env:RG_TAG/$env:RG_ARCHIVE"
+
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne $env:RG_SHA256) {
+            throw "ripgrep SHA-256 mismatch: expected $env:RG_SHA256, got $actual"
+          }
+          Expand-Archive -Path $archive -DestinationPath $expanded
+          $rg = Get-ChildItem -Path $expanded -Recurse -Filter rg.exe | Select-Object -First 1
+          if (-not $rg) { throw "rg.exe not found in $archive" }
+          New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
+          $bundledRg = Join-Path $bundleDir "rg.exe"
+          Copy-Item $rg.FullName $bundledRg
+          & $bundledRg --version | Out-Null
+          "GROW_TOOLS_BUNDLE_RG_PATH=$bundledRg" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build Grow (AlmaLinux 8, glibc 2.28 baseline)
+        if: ${{ inputs.builder == 'alma' }}
+        shell: bash
+        env:
+          GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK: "1"
+        run: |
+          set -euo pipefail
+          CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
+          RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
+          HOST_UID="$(id -u)"
+          HOST_GID="$(id -g)"
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
+            -v "${CARGO_HOME}:${CARGO_HOME}" -v "${RUSTUP_HOME}:${RUSTUP_HOME}" \
+            -e "PATH=${CARGO_HOME}/bin:${PATH}" \
+            -e "HOME=${HOME}" -e "HOST_UID=${HOST_UID}" -e "HOST_GID=${HOST_GID}" \
+            -e "CARGO_HOME=${CARGO_HOME}" -e "RUSTUP_HOME=${RUSTUP_HOME}" \
+            -e "GROW_VERSION=${GROW_VERSION}" \
+            -e "GROW_TOOLS_BUNDLE_RG_PATH=${GROW_TOOLS_BUNDLE_RG_PATH}" \
+            -e "GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1" \
+            -e "TARGET_TRIPLE=${TARGET_TRIPLE}" -e "CARGO_INCREMENTAL=0" \
+            almalinux:8 bash -euo pipefail -c '
+              dnf install -y gcc gcc-c++ make cmake git perl pkgconf util-linux >/dev/null
+              setpriv --reuid="${HOST_UID}" --regid="${HOST_GID}" --clear-groups \
+                cargo build --locked --profile release-dist \
+                -p cli --bin grow --target "${TARGET_TRIPLE}"
+            '
+
+      - name: Build Grow (cross)
+        if: ${{ inputs.builder == 'cross' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CROSS_CONTAINER_OPTS="-v ${GITHUB_WORKSPACE}/.build-tools:/opt/tools:ro -e GROW_VERSION=${GROW_VERSION} -e GROW_TOOLS_BUNDLE_RG_PATH=/opt/tools/rg/${ASSET_PLATFORM}/rg -e GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1"
+          cross build --locked --profile release-dist \
+            -p cli --bin grow --target "${TARGET_TRIPLE}"
+
+      - name: Build Grow (macOS)
+        if: ${{ inputs.builder == 'macos' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --profile release-dist \
+            -p cli --bin grow --target "${TARGET_TRIPLE}"
+
+      - name: Build Grow (Windows)
+        if: ${{ inputs.builder == 'windows' }}
+        shell: pwsh
+        run: cargo build --locked --profile release-dist -p cli --bin grow --target $env:TARGET_TRIPLE
+
+      # OpenHarmony build: runs scripts/build-ohos.sh inside the Harmonybrew
+      # ci-runner container (arm64 OHOS userland with ohos-sdk + brew rust).
+      # The script bootstraps the toolchain and installs the rsproxy cargo
+      # mirror (crates.io/USTC TLS is flaky), then builds with jemalloc off
+      # (its configure does not know the ohos triplet) and WITHOUT a bundled
+      # ripgrep (runtime resolves `rg` from PATH; search tools error with an
+      # install hint when missing). CARGO_TARGET_DIR lives under the mounted
+      # workspace so the runner can package the artifact. The binary is
+      # stripped with the SDK's llvm-strip and smoke-tested inside the
+      # container (it cannot run on the ubuntu runner).
+      - name: Build Grow (OHOS container)
+        if: ${{ inputs.builder == 'ohos' }}
+        shell: bash
+        env:
+          GROW_VERSION: ${{ inputs.grow_version }}
+          CI_RUNNER: swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner@sha256:0ef61139a01b93f7ca08c31ab1da030e9137f956a68505d284a4e37b70e5c691
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/workspace/grow" -w /workspace/grow \
+            -e "GROW_VERSION=${GROW_VERSION}" \
+            -e "CARGO_PROFILE=release-dist" \
+            -e "CARGO_TARGET_DIR=/workspace/grow/target-ohos" \
+            "${CI_RUNNER}" sh -euo pipefail -c '
+              scripts/build-ohos.sh
+              BIN="${CARGO_TARGET_DIR}/${CARGO_PROFILE}/grow"
+              test -x "$BIN"
+              /opt/ohos-sdk/ohos/native/llvm/bin/llvm-strip --strip-all "$BIN"
+              scripts/build-ohos.sh --smoke
+            '
+
+      - name: Smoke-test native binary
+        if: ${{ inputs.smoke && inputs.builder != 'windows' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${TARGET_TRIPLE}/release-dist/grow"
+          test -x "$bin"
+          test -s "$bin"
+          "$bin" --version | tee /dev/stderr | grep -F "${GROW_VERSION}"
+
+      - name: Smoke-test native binary
+        if: ${{ inputs.smoke && inputs.builder == 'windows' }}
+        shell: pwsh
+        run: |
+          $bin = "target/$env:TARGET_TRIPLE/release-dist/grow.exe"
+          if (-not (Test-Path $bin)) { throw "missing $bin" }
+          $version = & $bin --version
+          if ($version -notlike "*$env:GROW_VERSION*") { throw "unexpected version: $version" }
+
+      - name: Package Unix release asset
+        if: ${{ inputs.builder != 'windows' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          stage_dir="$(mktemp -d "${RUNNER_TEMP}/grow-release.XXXXXX")"
+          trap 'rm -rf "$stage_dir"' EXIT
+          # OHOS builds into target-ohos (container CARGO_TARGET_DIR under the
+          # workspace); all other builders use target/${TARGET_TRIPLE}.
+          if [[ "${{ inputs.builder }}" == "ohos" ]]; then
+            bin_path="target-ohos/release-dist/grow"
+          else
+            bin_path="target/${TARGET_TRIPLE}/release-dist/grow"
+          fi
+          cp "$bin_path" "$stage_dir/grow"
+
+          case "${{ inputs.builder }}" in
+            alma)
+              strip --strip-all "$stage_dir/grow"
+              ;;
+            cross)
+              strip_bin="$(command -v llvm-strip || command -v llvm-strip-18 || true)"
+              test -n "$strip_bin" || { echo "llvm-strip not found" >&2; exit 1; }
+              "$strip_bin" --strip-all "$stage_dir/grow"
+              ;;
+            macos)
+              strip "$stage_dir/grow"
+              ;;
+            ohos)
+              : # already stripped in-container by the build step
+              ;;
+          esac
+
+          asset="dist/grow-${GROW_VERSION}-${ASSET_PLATFORM}.tar.gz"
+          COPYFILE_DISABLE=1 tar -C "$stage_dir" -czf "$asset" grow
+          test "$(tar -tzf "$asset")" = "grow"
+          ls -la "$asset"
+
+      - name: Package Windows release asset
+        if: ${{ inputs.builder == 'windows' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $stageDir = Join-Path $env:RUNNER_TEMP "grow-release"
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          Copy-Item "target/$env:TARGET_TRIPLE/release-dist/grow.exe" (Join-Path $stageDir "grow.exe")
+          $asset = "dist/grow-$env:GROW_VERSION-$env:ASSET_PLATFORM.tar.gz"
+          tar -C $stageDir -czf $asset grow.exe
+          $entries = (tar -tzf $asset).Trim()
+          if ($entries -ne "grow.exe") { throw "invalid archive entry: $entries" }
+          Get-Item $asset
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: grow-${{ inputs.asset_platform }}
+          path: dist/grow-*
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Act — restore bind-mounted branch
+        if: ${{ always() && env.ACT && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ACT_RESTORE_REF:-}" ]]; then
+            git checkout -f "${ACT_RESTORE_REF}"
+          fi
