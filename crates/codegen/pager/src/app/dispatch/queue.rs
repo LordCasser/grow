@@ -60,7 +60,13 @@ fn combine_queued_prompts_enabled() -> bool {
 /// later prompts behind the older ones (they join the local queue and drain in
 /// order), preserving FIFO.
 pub(super) fn immediate_server_send_eligible(agent: &AgentView) -> bool {
-    let server_busy = agent.session.state.is_turn_running() || !agent.shared_queue.is_empty();
+    // `synthetic_running_prompt`: the shell runs a non-adoptable turn (Goal
+    // round) the pager deliberately does not adopt — `is_turn_running()` is
+    // false but the server IS busy, so a plain prompt must go to the server
+    // queue, never the local drain (which would stick on "Sending…").
+    let server_busy = agent.session.state.is_turn_running()
+        || agent.session.synthetic_running_prompt.is_some()
+        || !agent.shared_queue.is_empty();
     server_busy
         && agent.session.session_id.is_some()
         && agent.session.pending_prompts.is_empty()
@@ -214,6 +220,16 @@ pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
 
     if !agent.session.state.is_idle() {
         log_blocked("turn_running", sid);
+        return QueueDrain::blocked();
+    }
+    // The shell is running a non-adoptable turn (Goal round) the pager
+    // deliberately did not adopt: draining locally would send the prompt
+    // into the shell's queue behind the running round and leave the pager
+    // stuck on "Sending…" (no promoting broadcast ever arrives). Park the
+    // rows; the `running_prompt_id == None` broadcast at round end clears
+    // the gate and drips them.
+    if agent.synthetic_turn_in_flight() {
+        log_blocked("synthetic_turn_running", sid);
         return QueueDrain::blocked();
     }
     // Goal verification protection (silent backstop): while the verifier
@@ -1074,6 +1090,55 @@ mod tests {
             is_monitor: false,
             restored_from_replay: false,
         }
+    }
+
+    /// While the shell runs a non-adoptable turn (Goal round), the local
+    /// drain is blocked and the immediate server-send path opens: a plain
+    /// prompt goes to the server queue instead of sticking on "Sending…".
+    #[test]
+    fn synthetic_turn_in_flight_gates_drain_and_opens_immediate_send() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+
+        // Baseline: idle + empty shared queue → not immediate-eligible.
+        let agent = app.agents.get(&id).unwrap();
+        assert!(!immediate_server_send_eligible(agent));
+
+        // Shell reports a non-adoptable running prompt (Goal round).
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.note_synthetic_running_prompt("goal-summary-abc");
+        }
+        let agent = app.agents.get(&id).unwrap();
+        assert!(agent.synthetic_turn_in_flight());
+        assert!(
+            immediate_server_send_eligible(agent),
+            "server-busy (synthetic turn) must open the immediate-send path"
+        );
+
+        // The local drain is blocked while the flag is set.
+        enqueue_local(&mut app, id, "queued row");
+        let drain = maybe_drain_queue(app.agents.get_mut(&id).unwrap());
+        assert!(
+            drain.effects.is_empty(),
+            "drain must not fire while the shell runs a non-adoptable turn"
+        );
+        assert_eq!(
+            app.agents[&id].session.pending_prompts.len(),
+            1,
+            "the row stays parked for the round end"
+        );
+
+        // Shell reports no running prompt → flag clears → drain drips.
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .clear_synthetic_running_prompt();
+        let drain = maybe_drain_queue(app.agents.get_mut(&id).unwrap());
+        assert!(
+            !drain.effects.is_empty(),
+            "drain must resume once the synthetic turn is over"
+        );
     }
 
     #[test]

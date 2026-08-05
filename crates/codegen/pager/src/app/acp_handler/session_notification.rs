@@ -369,6 +369,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 cwd: effective_child_cwd,
                 is_worktree: effective_is_worktree,
                 forked_from: None,
+                synthetic_running_prompt: None,
                 pending_prompts: std::collections::VecDeque::new(),
                 next_queue_id: 0,
                 yolo_mode: true,

@@ -505,6 +505,51 @@
         );
     }
 
+    /// The shell's non-adoptable running prompt (Goal round) must mark the
+    /// session as server-busy (`synthetic_running_prompt`) so send routing
+    /// and the local drain never stick a prompt on "Sending…" behind the
+    /// round; a `running_prompt_id == None` broadcast (or an adoptable
+    /// running prompt taking over) clears it.
+    #[test]
+    fn queue_changed_tracks_synthetic_turn_in_flight() {
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some("goal-summary-abc")),
+            &mut app
+        ));
+        assert!(
+            app.agents[&id].synthetic_turn_in_flight(),
+            "a non-adoptable running prompt must classify the session as server-busy"
+        );
+
+        // An adoptable running prompt takes over → flag clears.
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some("p-user-1")),
+            &mut app
+        ));
+        assert!(
+            !app.agents[&id].synthetic_turn_in_flight(),
+            "an adoptable running prompt must clear the synthetic flag"
+        );
+
+        // Non-adoptable again, then no running prompt → flag clears.
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some("goal-summary-def")),
+            &mut app
+        ));
+        assert!(app.agents[&id].synthetic_turn_in_flight());
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], None),
+            &mut app
+        ));
+        assert!(
+            !app.agents[&id].synthetic_turn_in_flight(),
+            "running_prompt_id == None must clear the flag"
+        );
+    }
+
     /// Cron (`scheduler-fired-…`) is a synthetic id but is client-driven via
     /// `MvpAgent::prompt()` and DOES emit `prompt_complete`, so the queue-changed
     /// adoption must STILL fire for it (the exit exists, so it won't strand).

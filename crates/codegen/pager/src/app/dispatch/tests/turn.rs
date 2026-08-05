@@ -830,6 +830,66 @@ fn queued_prompt_status_rearms_bounded_watchdog_without_claiming_running() {
     );
 }
 
+/// A LOCALLY-DRAINED prompt (TurnSubmitting) that the shell admits but does
+/// NOT promote — another turn (typically a non-adoptable Goal round the
+/// pager chose not to adopt) is running — must resolve out of "Sending…" on
+/// the first Queued status answer: the queue/changed re-merged row
+/// represents the message and the future promoting broadcast starts the
+/// turn via the shim. The old behaviour re-armed the 2s watchdog forever,
+/// which made Goal rounds look hung until the user hit Ctrl+C.
+#[test]
+fn queued_prompt_status_resolves_submitting_state() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnSubmitting;
+        agent.session.current_prompt_id = Some("pid-queued".into());
+        agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
+            text: "hello".into(),
+            images: vec![],
+            scrollback_entry: crate::scrollback::EntryId::new(1),
+            combined_scrollback_entries: vec![],
+            chip_elements: vec![],
+        });
+        agent.prompt_status_query_for = Some("pid-queued".into());
+        agent.turn_started_at = Some(
+            std::time::Instant::now()
+                - PROMPT_STATUS_WATCHDOG_DELAY
+                - std::time::Duration::from_secs(1),
+        );
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: id,
+            prompt_id: "pid-queued".into(),
+            status: Ok(crate::app::actions::PromptStatusWire::Queued {
+                position: 2,
+                queue_version: 7,
+            }),
+        }),
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    let agent = &app.agents[&id];
+    assert!(
+        agent.session.state.is_idle(),
+        "\"Sending…\" must resolve to Idle when the shell queued the prompt"
+    );
+    assert!(
+        agent.session.current_prompt_id.is_none(),
+        "the queued row (re-merged via queue/changed) represents the message"
+    );
+    assert!(agent.session.in_flight_prompt.is_none());
+    assert!(agent.prompt_status_query_for.is_none());
+    assert!(
+        agent.turn_started_at.is_none(),
+        "the submitting watchdog must NOT re-arm (mark_turn_finished cleared the window)"
+    );
+}
+
 #[test]
 fn terminal_prompt_status_uses_same_first_wins_finalizer() {
     let mut app = test_app_with_agent();

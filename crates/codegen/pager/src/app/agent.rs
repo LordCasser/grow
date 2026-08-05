@@ -648,6 +648,19 @@ pub struct AgentSession {
     /// navigation does not consult it -- the session picker is the
     /// source of truth for navigation history.
     pub forked_from: Option<AgentId>,
+    /// The shell is running a NON-adoptable (server-initiated, no terminal
+    /// exit) turn — e.g. a Goal round. The pager deliberately does NOT
+    /// adopt such turns (no `PromptResponse` would ever finish them), so
+    /// `state` stays `Idle` while the shell works. This field re-classifies
+    /// the session as "server busy" for send routing and local-drain
+    /// gating: without it, a plain prompt would be drained locally, enter
+    /// `TurnSubmitting`, and stick on "Sending…" because the shell queues
+    /// the prompt behind the Goal round instead of promoting it.
+    ///
+    /// Set from `grow/queue/changed` broadcasts (and `SessionLoaded`) when
+    /// `running_prompt_id` is present but non-adoptable; cleared when the
+    /// broadcast reports no running prompt or an adoptable one takes over.
+    pub(crate) synthetic_running_prompt: Option<String>,
     /// Prompts waiting to be sent. Drained front-to-back when
     /// `state` becomes [`AgentState::Idle`].
     pub pending_prompts: VecDeque<QueuedPrompt>,
@@ -1132,6 +1145,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             is_worktree: false,
             forked_from: None,
+            synthetic_running_prompt: None,
             pending_prompts: VecDeque::new(),
             next_queue_id: 0,
             yolo_mode: false,

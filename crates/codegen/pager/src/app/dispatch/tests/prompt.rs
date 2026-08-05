@@ -4346,3 +4346,40 @@ fn goal_verifying_blocks_drain_queue() {
         "the queued row must stay queued"
     );
 }
+
+/// Regression (Goal round "Sending…" hang): while the shell runs a
+/// non-adoptable Goal turn (the pager stays Idle by design), a plain
+/// prompt must take the server queue (immediate-send echo) — NOT the local
+/// drain — so the pager never enters TurnSubmitting stuck behind the Goal
+/// round until the user hits Ctrl+C.
+#[test]
+fn plain_prompt_during_synthetic_turn_goes_to_server_queue() {
+    use crate::app::actions::{Action, Effect};
+    use crate::app::agent::AgentId;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.note_synthetic_running_prompt("goal-summary-abc");
+    }
+
+    let effects = dispatch(Action::SendPrompt("hello".into()), &mut app);
+
+    let agent = &app.agents[&id];
+    assert!(
+        agent.session.state.is_idle(),
+        "immediate-send must not enter TurnSubmitting: {:?}",
+        agent.session.state
+    );
+    assert!(
+        agent.session.pending_prompts.is_empty(),
+        "the prompt must not sit in the local drip-feed queue"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. })),
+        "the prompt must be sent to the server queue: {effects:?}"
+    );
+}

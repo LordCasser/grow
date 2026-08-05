@@ -16,6 +16,7 @@ pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent
         cwd: std::path::PathBuf::from(cwd),
         is_worktree: false,
         forked_from: None,
+        synthetic_running_prompt: None,
         pending_prompts: std::collections::VecDeque::new(),
         next_queue_id: 0,
         yolo_mode: false,

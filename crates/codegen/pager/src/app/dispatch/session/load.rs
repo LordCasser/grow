@@ -131,6 +131,7 @@ fn dispatch_load_session_ungated(
             cwd: session_cwd.clone().unwrap_or_else(|| app.cwd.clone()),
             is_worktree: false,
             forked_from: None,
+            synthetic_running_prompt: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
             yolo_mode: app.default_yolo,
@@ -578,6 +579,13 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         if adopting && let Some(running_pid) = running_prompt_id {
             agent.adopt_running_prompt(running_pid);
         } else {
+            // A live non-adoptable running prompt (Goal round) is not
+            // adopted on load either — record it so send routing stays
+            // server-busy from the first user message (otherwise the pager
+            // drains locally and sticks on "Sending…").
+            if let Some(running_pid) = running_prompt_id.as_deref() {
+                agent.note_synthetic_running_prompt(running_pid);
+            }
             agent.scrollback.finish_all_running();
             for child in agent.subagent_views.values_mut() {
                 child.scrollback.finish_all_running();

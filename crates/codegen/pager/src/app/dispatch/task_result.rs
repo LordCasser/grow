@@ -434,11 +434,28 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     vec![]
                 }
                 Ok(PromptStatusWire::Queued { .. }) => {
-                    // The server confirmed admission but lifecycle broadcasts
-                    // are still quiet. Start a fresh observation window so the
-                    // watchdog remains bounded instead of issuing one status
-                    // RPC on every UI tick.
-                    agent.turn_started_at = Some(std::time::Instant::now());
+                    // The server admitted the prompt but has NOT promoted it
+                    // — another turn (typically a non-adoptable Goal round
+                    // the pager chose not to adopt) is running, so the
+                    // promoting broadcast will not come until that turn
+                    // ends. A LOCALLY-DRAINED prompt must not stay on
+                    // "Sending…" for the round's whole duration: resolve the
+                    // submitting state and let the queue/changed re-merged
+                    // row represent the message; the future promoting
+                    // broadcast starts the turn via the turn-start shim
+                    // (which reuses the painted user block by text). The
+                    // pre-existing behaviour re-armed the 2s watchdog
+                    // forever, which is what made Goal rounds look hung.
+                    if agent.session.state.is_turn_submitting() {
+                        agent.session.state = crate::app::agent::AgentState::Idle;
+                        agent.session.current_prompt_id = None;
+                        agent.session.in_flight_prompt = None;
+                        agent.mark_turn_finished();
+                    } else {
+                        // Running-prompt watchdog: keep a fresh observation
+                        // window so the query stays bounded.
+                        agent.turn_started_at = Some(std::time::Instant::now());
+                    }
                     vec![]
                 }
                 Ok(PromptStatusWire::Terminal {
