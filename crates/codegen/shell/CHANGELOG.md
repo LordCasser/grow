@@ -11,8 +11,16 @@
   自然发送。
 - Goal Active 时 send-now 统一作为 mid-turn steering 注入（提升 autonomy generation），
   系统事件明确标记为非用户输入。
+- Goal Active 时 Ctrl+C / Esc 打开 Goal 中断面板：Pause goal / Stop turn only /
+  Stop turn + subagents 显式三选，无静默默认值；只有显式 "Pause goal" 才暂停
+  Goal，其余取消保持 Goal Active 可继续；Esc 仅关闭面板。
+- Goal round 作为普通 Running turn 展示与操作：round 期间 Enter 排队、send-now
+  即 foreground steering。
 
 ## Fixes
+
+- 修复 Goal 中断面板二次 Esc 取消父 turn 的问题；修复 goal stage 运行期间
+  （session Idle）goal chip spinner / 已用时钟 / dashboard 行动画停摆的问题。
 
 - 修复 Goal 执行中回复卡死、界面阻塞、/compact 等命令被卡住的问题。
 - 修复 Goal 启动后反复生成 plan writer 的无限循环（校验宽容化、spawn 准入时机、planner
