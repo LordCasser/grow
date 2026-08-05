@@ -455,7 +455,6 @@ pub(super) mod paste_key_tests {
                 cwd: std::path::PathBuf::from("/tmp"),
                 is_worktree: false,
                 forked_from: None,
-                synthetic_running_prompt: None,
                 pending_prompts: std::collections::VecDeque::new(),
                 next_queue_id: 0,
                 yolo_mode: false,

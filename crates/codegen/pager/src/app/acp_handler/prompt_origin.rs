@@ -27,8 +27,8 @@ pub(crate) fn is_scheduler_fired_prompt(prompt_id: &str) -> bool {
 /// the only signal marking the back-to-idle point (see [`finish_wake_turn`];
 /// a chatty wake closes with a marker, a silent one stays markerless).
 /// Deliberately narrower than "non-adopted
-/// synthetic": goal turns render through the goal chip/loop chrome and
-/// `plan-resume-…` keeps its own markerless shape.
+/// synthetic": goal turns are adopted as normal Running turns (Goal chip plus
+/// turn status chrome) and `plan-resume-…` keeps its own markerless shape.
 pub(crate) fn is_wake_prompt(prompt_id: &str) -> bool {
     matches!(
         shell::session::PromptOrigin::from_prompt_id(prompt_id),
@@ -43,10 +43,12 @@ pub(crate) fn is_wake_prompt(prompt_id: &str) -> bool {
 /// viewer's `current_prompt_id` and show as a live `TurnRunning`. The invariant:
 /// adoptable iff the turn emits a durable `TurnCompleted` terminal, the
 /// only non-interactive way a viewer leaves `TurnRunning`. That holds for
-/// user-driven turns and `/loop` (`scheduler-fired-…`) fires — both run via
-/// `MvpAgent::prompt()` — and is false for actor-run synthetic turns
-/// (task-completed / subagent-completion / notification-drain / goal-*), which
-/// have no such exit, so adopting one strands the viewer in `TurnRunning`.
+/// user-driven turns, `/loop` (`scheduler-fired-…`) fires, and **Goal rounds**
+/// (`goal-summary-…`): all three run through the prompt-turn machinery and
+/// their durable `TurnCompleted` is emitted by `handle_completion`. It is
+/// false for actor-run synthetic turns (task-completed / subagent-completion /
+/// notification-drain), which have no such exit, so adopting one strands the
+/// viewer in `TurnRunning`.
 ///
 /// This is the pure pid-only synthetic-turn guard. It serves the live-delta
 /// viewer gate and the `queue/changed` turn-start shim (the latter negated, as a
@@ -58,7 +60,21 @@ pub(crate) fn is_wake_prompt(prompt_id: &str) -> bool {
 ///
 /// [`AgentView::should_adopt_running_prompt`]: crate::app::agent_view::AgentView::should_adopt_running_prompt
 pub(crate) fn should_adopt_running_prompt(prompt_id: &str) -> bool {
-    !is_server_initiated_prompt(prompt_id) || is_scheduler_fired_prompt(prompt_id)
+    !is_server_initiated_prompt(prompt_id)
+        || is_scheduler_fired_prompt(prompt_id)
+        || is_goal_summary_prompt(prompt_id)
+}
+
+/// Whether the prompt_id is a Goal round (`goal-summary-…`). Goal rounds are
+/// server-initiated, but they run through the full prompt-turn machinery
+/// (`maybe_queue_goal_continuation` queues a complete InputItem; the turn is
+/// promoted and emits a durable `TurnCompleted`) — so the pager CAN adopt
+/// them and show the round as a normal Running turn, exactly like user turns.
+pub(crate) fn is_goal_summary_prompt(prompt_id: &str) -> bool {
+    matches!(
+        shell::session::PromptOrigin::from_prompt_id(prompt_id),
+        shell::session::PromptOrigin::GoalSummary
+    )
 }
 
 /// Compute the monotonic anchor a VIEWER should use as its turn-start time.

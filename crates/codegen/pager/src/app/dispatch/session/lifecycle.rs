@@ -239,7 +239,6 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             cwd: effective_cwd.clone(),
             is_worktree: inherit_worktree,
             forked_from: None,
-            synthetic_running_prompt: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
             yolo_mode: app.default_yolo,
@@ -402,6 +401,7 @@ pub(in crate::app::dispatch) fn dispatch_delete_current_session_answered(
     let mut effects = vec![Effect::CancelTurn {
         session_id: session_id.clone(),
         cancel_subagents: true,
+        pause_goal: false,
         trigger: None,
         rewind_if_pristine: false,
     }];
@@ -611,7 +611,6 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             cwd: app.cwd.clone(),
             is_worktree: false,
             forked_from: None,
-            synthetic_running_prompt: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
             yolo_mode: app.default_yolo,

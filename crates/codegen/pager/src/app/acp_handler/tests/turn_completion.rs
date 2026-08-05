@@ -273,11 +273,19 @@
     }
 
     #[test]
-    fn goal_terminal_snapshots_epoch_so_next_silent_wake_stays_markerless() {
-        // A dirty output epoch made the NEXT silent wake inherit the goal turn's output.
+    fn goal_round_terminal_finalizes_normally_and_keeps_silent_wake_markerless() {
+        // A Goal round is adopted as a normal Running turn: its durable
+        // TurnCompleted runs the ordinary first-wins finalizer (back to Idle,
+        // one marker, output epoch snapshot) — and a subsequent silent wake
+        // stays markerless without inheriting the Goal round's output.
         use crate::app::agent_view::test_fixtures::count_turn_markers;
 
         let mut app = make_app_with_agent("sess-wake");
+        // Adopt the Goal round via its promoting broadcast (normal path).
+        let _ = handle_ext_notification(
+            &queue_changed_running("sess-wake", &[], Some("goal-summary-g1")),
+            &mut app,
+        );
         let _ = handle(
             make_viewer_chunk_with_turn_start("sess-wake", "goal-summary-g1", 5_000),
             &mut app,
@@ -286,20 +294,25 @@
             &grow_turn_completed_notif("sess-wake", "goal-summary-g1", "end_turn", false),
             &mut app,
         );
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.session.state.is_idle(),
+            "the Goal round terminal must finalize the adopted turn back to Idle"
+        );
+        assert_eq!(count_turn_markers(agent), 1, "one normal round marker");
 
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
         let _ = handle_ext_notification(
             &grow_turn_completed_notif("sess-wake", "task-completed-bg1", "end_turn", false),
             &mut app,
         );
-
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert_eq!(
             agent.scrollback.len(),
             len_before,
-            "a silent wake after a goal turn must not inherit its output"
+            "a silent wake after a Goal round must not inherit its output"
         );
-        assert_eq!(count_turn_markers(agent), 0);
+        assert_eq!(count_turn_markers(agent), 1);
     }
 
     #[test]
@@ -388,8 +401,15 @@
     }
 
     #[test]
-    fn silent_errored_wake_after_goal_turn_has_no_elapsed() {
+    fn silent_errored_wake_after_adopted_goal_round_has_no_elapsed() {
+        // A Goal round is adopted and finalized normally (clearing the turn
+        // anchor); a later silent errored wake must stay failure-visible with
+        // no elapsed — it must not inherit the round's anchor or output.
         let mut app = make_app_with_agent("sess-wake");
+        let _ = handle_ext_notification(
+            &queue_changed_running("sess-wake", &[], Some("goal-summary-g1")),
+            &mut app,
+        );
         let _ = handle(
             make_viewer_chunk_with_turn_start("sess-wake", "goal-summary-g1", 5_000),
             &mut app,

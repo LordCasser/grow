@@ -3,9 +3,11 @@
 use super::ctx::find_agent_by_session_id;
 use super::permissions::drain_permission_queue;
 use crate::app::actions::Effect;
+use crate::app::agent::InterruptIntent;
 use crate::app::agent_view::ActivePane;
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
+use crate::views::modal::GoalInterruptChoice;
 use std::time::Instant;
 
 /// Map `[ui].cancel_subagents_on_turn_cancel` / in-memory agent preference to
@@ -81,13 +83,56 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
             agent.clear_send_now_expectation();
             return vec![Effect::CancelTurn {
                 session_id,
-                cancel_subagents: resolved_pref.unwrap_or(true),
+                // Replay the exact original intent (pause_goal AND
+                // cancel_subagents); without a stashed intent fall back to the
+                // resolved preference (Legacy semantics).
+                cancel_subagents: agent
+                    .last_interrupt
+                    .map_or(resolved_pref.unwrap_or(true), |i| i.cancel_subagents),
+                pause_goal: agent.last_interrupt.as_ref().is_some_and(|i| i.pause_goal),
                 // A fresh gesture (e.g. a second Ctrl+C on a stuck spinner) re-set
                 // the hint; consume it so the re-sent cancel still carries the trigger.
                 trigger: agent.cancel_trigger_hint.take(),
                 // Retry cancel of a stuck turn — no local prompt rewind here.
                 rewind_if_pristine: false,
             }];
+        }
+        // Goal interrupt: while the Goal is Active, an interrupt gesture ALWAYS
+        // opens the Goal panel — never a silent default, and the legacy
+        // `cancel_subagents_on_turn_cancel` preference is ignored (product
+        // decision: Goal interrupts always ask). The panel covers both "a turn
+        // is running" (Full: pause / stop turn / stop turn+subagents) and "no
+        // turn" (gap / verifying / planning: pause only) — never pretends to
+        // cancel a turn that is not running.
+        if agent
+            .goal_state
+            .as_ref()
+            .is_some_and(|g| matches!(g.status, crate::app::agent::GoalDisplayStatus::Active))
+        {
+            if agent.goal_interrupt_view.is_some() {
+                return vec![];
+            }
+            let has_turn =
+                agent.session.state.is_turn_running() || agent.session.state.is_compact_running();
+            let running_subagents = agent
+                .subagent_sessions
+                .values()
+                .filter(|s| s.is_running() && s.workflow_run_id.is_none())
+                .count()
+                > 0;
+            agent.goal_interrupt_view = Some(crate::views::modal::GoalInterruptViewState {
+                active_idx: 0,
+                choices: if has_turn {
+                    crate::views::modal::GoalInterruptChoice::for_active_turn(running_subagents)
+                } else {
+                    crate::views::modal::GoalInterruptChoice::pause_only()
+                },
+            });
+            // Default focus to the picker (mirrors the Legacy panel).
+            if agent.active_pane == ActivePane::Scrollback {
+                agent.active_pane = ActivePane::Prompt;
+            }
+            return vec![];
         }
         if !agent.session.state.is_turn_running() && !agent.session.state.is_compact_running() {
             return vec![];
@@ -175,7 +220,83 @@ pub(super) fn dispatch_cancel_turn_choice(
     effects
 }
 
+/// Submit an explicit Goal-interrupt choice. Maps the three axes
+/// {pause goal, cancel turn, stop subagents} onto the cancel pipeline; with
+/// no active turn the "Pause goal" choice routes through the `/goal pause`
+/// command plane instead of a fake turn-cancel.
+pub(super) fn dispatch_goal_interrupt_choice(
+    app: &mut AppView,
+    choice: GoalInterruptChoice,
+) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let mut effects = Vec::new();
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.goal_interrupt_view = None;
+        agent.goal_interrupt_buttons.clear();
+    }
+    let has_turn = app
+        .agents
+        .get(&id)
+        .is_some_and(|a| a.session.state.is_turn_running() || a.session.state.is_compact_running());
+    match choice {
+        GoalInterruptChoice::PauseGoal => {
+            if has_turn {
+                if let Some(agent) = app.agents.get_mut(&id) {
+                    agent.last_interrupt = Some(InterruptIntent {
+                        pause_goal: true,
+                        cancel_subagents: false,
+                    });
+                }
+                effects.extend(do_cancel_turn_with_pause(app, false, true));
+            } else if let Some(agent) = app.agents.get_mut(&id)
+                && let Some(session_id) = agent.session.session_id.clone()
+            {
+                // No turn to cancel: `/goal pause` handles the no-turn case
+                // (pause the Goal, keep subagents). Same G/T/S semantics as
+                // the with-turn path.
+                effects.push(Effect::ExecuteSlashCommand {
+                    agent_id: id,
+                    session_id,
+                    command: "/goal pause".into(),
+                });
+            }
+        }
+        GoalInterruptChoice::StopTurnOnly => {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.last_interrupt = Some(InterruptIntent {
+                    pause_goal: false,
+                    cancel_subagents: false,
+                });
+            }
+            effects.extend(do_cancel_turn_with_pause(app, false, false));
+        }
+        GoalInterruptChoice::StopTurnAndSubagents => {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.last_interrupt = Some(InterruptIntent {
+                    pause_goal: false,
+                    cancel_subagents: true,
+                });
+            }
+            effects.extend(do_cancel_turn_with_pause(app, true, false));
+        }
+    }
+    effects
+}
+
 pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<Effect> {
+    do_cancel_turn_with_pause(app, cancel_subagents, false)
+}
+
+/// [`do_cancel_turn`] plus the explicit "pause the Goal" intent. Only the
+/// Goal panel's "Pause goal" choice passes `pause_goal: true`; every other
+/// caller keeps the Goal untouched.
+pub(super) fn do_cancel_turn_with_pause(
+    app: &mut AppView,
+    cancel_subagents: bool,
+    pause_goal: bool,
+) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -194,6 +315,7 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
         return vec![Effect::CancelTurn {
             session_id,
             cancel_subagents,
+            pause_goal,
             trigger: agent.cancel_trigger_hint.take(),
             rewind_if_pristine: false,
         }];
@@ -294,6 +416,7 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
     vec![Effect::CancelTurn {
         session_id,
         cancel_subagents,
+        pause_goal,
         // Consume the gesture hint set by the key/mouse handler (persists
         // through the subagent picker until this final build). `None` for
         // non-gesture callers.

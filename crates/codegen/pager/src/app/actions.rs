@@ -375,6 +375,8 @@ pub enum Action {
     CancelTurn,
     /// User confirmed a cancel-turn choice from the panel.
     CancelTurnChoice(crate::views::modal::CancelTurnChoice),
+    /// User confirmed a Goal-interrupt choice from the Goal panel.
+    GoalInterruptChoice(crate::views::modal::GoalInterruptChoice),
     /// Kill a background task by task_id.
     KillBgTask(String),
     /// Kill (cancel) a subagent by subagent_id.
@@ -1371,6 +1373,10 @@ pub enum Effect {
     CancelTurn {
         session_id: acp::SessionId,
         cancel_subagents: bool,
+        /// Explicit user "Pause goal" intent (the Goal interrupt panel's
+        /// "Pause goal" choice). The shell pauses an active Goal ONLY when
+        /// this is true; every other cancel leaves the Goal untouched.
+        pause_goal: bool,
         /// What user gesture triggered the cancel (ESC / Ctrl+C / mouse), sent
         /// on `session/cancel` as `_meta.cancelTrigger` so the agent's
         /// `mid_turn_abort` diagnostics can distinguish them. `None` for

@@ -4347,46 +4347,9 @@ fn goal_verifying_blocks_drain_queue() {
     );
 }
 
-/// Regression (Goal round "Sending…" hang): while the shell runs a
-/// non-adoptable Goal turn (the pager stays Idle by design), a plain
-/// prompt must take the server queue (immediate-send echo) — NOT the local
-/// drain — so the pager never enters TurnSubmitting stuck behind the Goal
-/// round until the user hits Ctrl+C.
-#[test]
-fn plain_prompt_during_synthetic_turn_goes_to_server_queue() {
-    use crate::app::actions::{Action, Effect};
-    use crate::app::agent::AgentId;
-
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    {
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.note_synthetic_running_prompt("goal-summary-abc");
-    }
-
-    let effects = dispatch(Action::SendPrompt("hello".into()), &mut app);
-
-    let agent = &app.agents[&id];
-    assert!(
-        agent.session.state.is_idle(),
-        "immediate-send must not enter TurnSubmitting: {:?}",
-        agent.session.state
-    );
-    assert!(
-        agent.session.pending_prompts.is_empty(),
-        "the prompt must not sit in the local drip-feed queue"
-    );
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::SendPrompt { .. })),
-        "the prompt must be sent to the server queue: {effects:?}"
-    );
-}
-
-/// Key-press level of the same scenario: Goal Executing (synthetic round in
-/// flight) + pressing Enter on "hello" — the full input → dispatch path must
-/// queue the message server-side without entering "Sending…".
+/// Key-press level: after the Goal round is adopted (Running), pressing
+/// Enter queues the message with normal running-turn semantics — the full
+/// input → dispatch path never enters "Sending…".
 #[test]
 fn goal_executing_enter_queues_without_sending_state() {
     use crate::app::agent::AgentId;
@@ -4398,7 +4361,9 @@ fn goal_executing_enter_queues_without_sending_state() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
-        agent.note_synthetic_running_prompt("goal-summary-round-1");
+        // Adopted Goal round: the pager tracks it as a normal Running turn.
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("goal-summary-round-1".into());
         agent.prompt.set_text("hello");
     }
 
@@ -4414,17 +4379,17 @@ fn goal_executing_enter_queues_without_sending_state() {
 
     let agent = &app.agents[&id];
     assert!(
-        agent.session.state.is_idle(),
-        "no 'Sending…' on the key path: {:?}",
+        agent.session.state.is_turn_running(),
+        "the round keeps running; the message is queued: {:?}",
         agent.session.state
     );
     assert!(agent.prompt.text().is_empty(), "composer consumed");
 }
 
 /// Send-now (Ctrl+Enter) during a Goal round must still reach the Goal as
-/// steering — the synthetic round is treated as running for send-now
-/// purposes, not a silent no-op (the pager never adopts the round, so
-/// `is_turn_running()` alone would wrongly short-circuit it).
+/// steering — the round is an adopted Running turn, so the normal send-now
+/// path applies and `dispatch_send_prompt_now` routes it into the Goal as
+/// an interjection (never a cancel-and-send that would pause the Goal).
 #[test]
 fn goal_executing_ctrl_enter_interjects_as_steering() {
     use crate::app::actions::Effect;
@@ -4437,7 +4402,9 @@ fn goal_executing_ctrl_enter_interjects_as_steering() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
-        agent.note_synthetic_running_prompt("goal-summary-round-1");
+        // Adopted Goal round: the pager tracks it as a normal Running turn.
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("goal-summary-round-1".into());
         agent.prompt.set_text("steer now");
     }
 

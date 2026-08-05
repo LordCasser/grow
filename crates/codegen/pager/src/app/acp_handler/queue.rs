@@ -196,14 +196,6 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
         // regardless of buffer occupancy — this ext broadcast can overtake the
         // turn's `session/update`s (separate, reorderable channels).
         (None, Some(aid)) => {
-            // No running prompt on the server: the shell's non-adoptable
-            // turn (if any) is over — resume local drains, and drip any rows
-            // that were parked by the synthetic-turn gate.
-            let had_synthetic = app.agents.get_mut(&aid).is_some_and(|agent| {
-                let had = agent.synthetic_turn_in_flight();
-                agent.clear_synthetic_running_prompt();
-                had
-            });
             let retain = app
                 .pending_running_adoptions
                 .get(&aid)
@@ -216,14 +208,6 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                 && let Some(agent) = app.agents.get_mut(&aid)
             {
                 agent.discard_pending_adoption_updates(&p.prompt_id);
-            }
-            // The synthetic-turn drain gate may have parked local rows:
-            // drip them now that the shell is idle again.
-            if had_synthetic {
-                let effects = super::super::dispatch::maybe_drain_queue_and_note_peek(app, aid);
-                if !effects.is_empty() {
-                    app.pending_effects.extend(effects);
-                }
             }
         }
         // Non-adoptable running prompt (see `AgentView::should_adopt_running_prompt`):
@@ -245,13 +229,6 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                 .get(&aid)
                 .is_some_and(|a| !a.should_adopt_running_prompt(&pid)) =>
         {
-            // The pager stays Idle during this turn BY DESIGN (no terminal
-            // exit would ever finish it) — but the shell is busy, so record
-            // it: send routing must not drain locally and stick on
-            // "Sending…" behind the running Goal round.
-            if let Some(agent) = app.agents.get_mut(&aid) {
-                agent.note_synthetic_running_prompt(&pid);
-            }
             tracing::debug!(
                 target: "qtrace",
                 pid = std::process::id(),
@@ -261,12 +238,6 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
             );
         }
         (Some(pid), Some(aid)) => {
-            // An adoptable running prompt: the pager adopts it below (or
-            // already tracks it) — the shell's non-adoptable turn, if any,
-            // is over.
-            if let Some(agent) = app.agents.get_mut(&aid) {
-                agent.clear_synthetic_running_prompt();
-            }
             let current = app
                 .agents
                 .get(&aid)
@@ -313,13 +284,6 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                 // handler adopts it after `finish_turn` clears
                 // `current_prompt_id`. Never corrupt the in-flight turn.
                 Some(_) => {
-                    // If the stashed running prompt is itself non-adoptable
-                    // (a Goal round starting behind our finishing turn),
-                    // record it so send routing stays server-busy once our
-                    // turn finishes (the deferred adoption skips it).
-                    if let Some(agent) = app.agents.get_mut(&aid) {
-                        agent.note_synthetic_running_prompt(&pid);
-                    }
                     // The leader emits this prompt's user-echo (no `promptId`,
                     // so the gate can't drop it) right after this broadcast but
                     // before the previous turn's `PromptResponse` runs the
@@ -351,6 +315,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                         && super::super::dispatch::shim_renders_own_user_block(
                             &running_kind,
                             running_text.as_deref(),
+                            Some(&pid),
                         );
                     if will_render_own_block && let Some(agent) = app.agents.get_mut(&aid) {
                         agent.session.tracker.expect_user_echo();

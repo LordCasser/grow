@@ -248,8 +248,13 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     true
                 }
             } else if is_server_initiated_prompt(&prompt_id)
-                && !is_scheduler_fired_prompt(&prompt_id)
+                && !should_adopt_running_prompt(&prompt_id)
             {
+                // Genuinely non-adoptable server-initiated turns (goal-control
+                // legacy / host-command / classifier-nudge / plan-resume —
+                // task-completed & co. took the wake arm above): a busy pager
+                // must not finalize a turn it never adopted, so the durable
+                // terminal is acknowledged without state surgery.
                 if agent.session.state.is_busy() {
                     if agent.session.state.command_in_flight().is_some() {
                         agent.session.tracker.snapshot_output_epoch();
@@ -369,7 +374,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 cwd: effective_child_cwd,
                 is_worktree: effective_is_worktree,
                 forked_from: None,
-                synthetic_running_prompt: None,
                 pending_prompts: std::collections::VecDeque::new(),
                 next_queue_id: 0,
                 yolo_mode: true,

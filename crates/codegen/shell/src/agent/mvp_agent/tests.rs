@@ -1800,6 +1800,48 @@ fn cancel_does_not_forward_to_bridge_in_local_mode() {
         );
     });
 }
+/// The Goal interrupt panel's "Pause goal" choice travels as `_meta.pauseGoal`;
+/// the cancel handler must forward it onto `SessionCommand::Cancel` (the
+/// Cancel arm pauses the Goal only when it is true). Absent meta → false.
+#[test]
+fn cancel_forwards_pause_goal_meta() {
+    use crate::session::SessionCommand;
+    use acp::Agent as _;
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let sid = acp::SessionId::new("sess-cancel-pause");
+
+        // Explicit pause intent.
+        let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
+        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        let mut meta = serde_json::Map::new();
+        meta.insert("pauseGoal".to_string(), serde_json::json!(true));
+        let notif = acp::CancelNotification::new(sid.clone()).meta(meta);
+        agent.cancel(notif).await.expect("cancel must succeed");
+        let mut saw_pause = false;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            if let SessionCommand::Cancel { pause_goal: true, .. } = cmd {
+                saw_pause = true;
+            }
+        }
+        assert!(saw_pause, "pauseGoal meta must reach SessionCommand::Cancel");
+
+        // Absent meta → false (older clients / programmatic cancels).
+        let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
+        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent
+            .cancel(acp::CancelNotification::new(sid.clone()))
+            .await
+            .expect("cancel must succeed");
+        let mut saw_no_pause = false;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            if let SessionCommand::Cancel { pause_goal: false, .. } = cmd {
+                saw_no_pause = true;
+            }
+        }
+        assert!(saw_no_pause, "absent pauseGoal must default to false");
+    });
+}
 /// Regression (post-cancel slot hang, first bad release 0.2.101; see
 /// `dispatch_lock`). SDK e2e shape:
 /// `test_cancel_ends_in_flight_turn_and_frees_slot` (agent-sdk).

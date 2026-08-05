@@ -379,7 +379,6 @@ fn build_fork_placeholder(
             cwd: parent_cwd.to_path_buf(),
             is_worktree: false,
             forked_from: Some(parent_id),
-            synthetic_running_prompt: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
             yolo_mode: app.default_yolo,

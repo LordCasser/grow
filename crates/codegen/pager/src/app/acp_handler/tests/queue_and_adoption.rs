@@ -505,131 +505,6 @@
         );
     }
 
-    /// The shell's non-adoptable running prompt (Goal round) must mark the
-    /// session as server-busy (`synthetic_running_prompt`) so send routing
-    /// and the local drain never stick a prompt on "Sending…" behind the
-    /// round; a `running_prompt_id == None` broadcast (or an adoptable
-    /// running prompt taking over) clears it.
-    #[test]
-    fn queue_changed_tracks_synthetic_turn_in_flight() {
-        let mut app = make_app_with_agent("sess-1");
-        let id = AgentId(0);
-
-        assert!(handle_queue_changed(
-            &queue_changed_running("sess-1", &[], Some("goal-summary-abc")),
-            &mut app
-        ));
-        assert!(
-            app.agents[&id].synthetic_turn_in_flight(),
-            "a non-adoptable running prompt must classify the session as server-busy"
-        );
-
-        // An adoptable running prompt takes over → flag clears.
-        assert!(handle_queue_changed(
-            &queue_changed_running("sess-1", &[], Some("p-user-1")),
-            &mut app
-        ));
-        assert!(
-            !app.agents[&id].synthetic_turn_in_flight(),
-            "an adoptable running prompt must clear the synthetic flag"
-        );
-
-        // Non-adoptable again, then no running prompt → flag clears.
-        assert!(handle_queue_changed(
-            &queue_changed_running("sess-1", &[], Some("goal-summary-def")),
-            &mut app
-        ));
-        assert!(app.agents[&id].synthetic_turn_in_flight());
-        assert!(handle_queue_changed(
-            &queue_changed_running("sess-1", &[], None),
-            &mut app
-        ));
-        assert!(
-            !app.agents[&id].synthetic_turn_in_flight(),
-            "running_prompt_id == None must clear the flag"
-        );
-    }
-
-    /// Full user-scenario simulation of the Goal-round "Sending…" hang:
-    /// Goal Executing (Active goal + the shell running a non-adoptable Goal
-    /// round) → the user presses Enter on a plain prompt → the message must
-    /// go to the SERVER queue (no TurnSubmitting / "Sending…", the Goal
-    /// keeps executing) → the round ends (running == None) → the shell
-    /// promotes the queued message → the pager adopts it as a normal
-    /// Running turn via the turn-start shim.
-    #[test]
-    fn goal_round_plain_prompt_queues_then_promotes_at_round_end() {
-        use crate::app::actions::{Action, Effect};
-        use crate::app::dispatch::dispatch;
-
-        let mut app = make_app_with_agent("sess-1");
-        let id = AgentId(0);
-        // Goal Executing display state (Active + Executing, NOT verifying).
-        app.agents.get_mut(&id).unwrap().goal_state =
-            Some(crate::app::agent::GoalDisplayState::test_stub());
-
-        // The shell broadcasts the Goal round as running (non-adoptable).
-        assert!(handle_queue_changed(
-            &queue_changed_running("sess-1", &[], Some("goal-summary-round-1")),
-            &mut app
-        ));
-        assert!(app.agents[&id].synthetic_turn_in_flight());
-
-        // The user presses Enter on "hello" while the Goal round runs.
-        let effects = dispatch(Action::SendPrompt("hello".into()), &mut app);
-        let hello_pid = effects
-            .iter()
-            .find_map(|e| match e {
-                Effect::SendPrompt { prompt_id, .. } => Some(prompt_id.clone()),
-                _ => None,
-            })
-            .expect("the prompt must be sent to the server queue");
-
-        let agent = &app.agents[&id];
-        assert!(
-            agent.session.state.is_idle(),
-            "no 'Sending…': the message must take the server queue, got {:?}",
-            agent.session.state
-        );
-        assert!(
-            agent.session.pending_prompts.is_empty(),
-            "no local drip-feed row"
-        );
-        assert_eq!(
-            agent.goal_state.as_ref().map(|g| g.status),
-            Some(crate::app::agent::GoalDisplayStatus::Active),
-            "the Goal must keep executing — nothing pauses or cancels it"
-        );
-        assert!(
-            app.shared_prompt_queue("sess-1")
-                .is_some_and(|q| q.iter().any(|e| e.id == hello_pid)),
-            "the queued row must be visible in the queue pane"
-        );
-
-        // The Goal round ends: the shell broadcasts running == None.
-        assert!(handle_queue_changed(
-            &queue_changed_running("sess-1", &[], None),
-            &mut app
-        ));
-        assert!(!app.agents[&id].synthetic_turn_in_flight());
-
-        // The shell promotes the queued message → the pager adopts it as a
-        // normal Running turn (turn-start shim).
-        assert!(handle_queue_changed(
-            &queue_changed_running("sess-1", &[&hello_pid], Some(&hello_pid)),
-            &mut app
-        ));
-        let agent = &app.agents[&id];
-        assert!(
-            agent.session.state.is_turn_running(),
-            "the promoted message must become a Running turn"
-        );
-        assert_eq!(
-            agent.session.current_prompt_id.as_deref(),
-            Some(hello_pid.as_str())
-        );
-    }
-
     /// Cron (`scheduler-fired-…`) is a synthetic id but is client-driven via
     /// `MvpAgent::prompt()` and DOES emit `prompt_complete`, so the queue-changed
     /// adoption must STILL fire for it (the exit exists, so it won't strand).
@@ -654,6 +529,176 @@
         assert!(
             agent.session.state.is_turn_running(),
             "cron turn must enter TurnRunning so its running chrome shows"
+        );
+    }
+
+    /// A Goal round (`goal-summary-…`) is adopted as a normal Running turn:
+    /// the pager enters TurnRunning and binds current_prompt_id. Unlike a
+    /// user turn it must NOT paint the goal directive as a user bubble — the
+    /// Goal chip/loop chrome carries the context — even when the broadcast
+    /// carries directive text.
+    #[test]
+    fn goal_round_adopts_as_running_turn_without_directive_bubble() {
+        use crate::scrollback::block::RenderBlock;
+
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+
+        assert!(handle_queue_changed(
+            &queue_changed_running_ex(
+                "sess-1",
+                &[],
+                Some("goal-summary-round-1"),
+                Some("analysis directive"),
+                Some("prompt"),
+                None,
+            ),
+            &mut app
+        ));
+        let agent = app.agents.get(&id).unwrap();
+        assert!(
+            agent.session.state.is_turn_running(),
+            "a Goal round must show as a normal Running turn"
+        );
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some("goal-summary-round-1")
+        );
+        assert!(
+            (0..agent.scrollback.len()).all(|i| !matches!(
+                agent.scrollback.entry(i).map(|e| &e.block),
+                Some(RenderBlock::UserPrompt(_))
+            )),
+            "the goal directive must never render as a user bubble"
+        );
+    }
+
+    /// A Goal round has no client `PromptResponse` rail, so its handoff to
+    /// the next round runs entirely on the durable TurnCompleted path
+    /// (`apply_terminal_outcome` consumes the stashed next round). That
+    /// requires driver semantics: an `attached_as_viewer` flag would discard
+    /// the stash. Adopting a Goal round must therefore force
+    /// `attached_as_viewer = false` even when the pane was a viewer before.
+    #[test]
+    fn goal_round_adoption_forces_driver_semantics() {
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().attached_as_viewer = true;
+
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some("goal-summary-g1")),
+            &mut app
+        ));
+        assert!(
+            !app.agents[&id].attached_as_viewer,
+            "a Goal round must be adopted with driver semantics (durable-only handoff)"
+        );
+    }
+
+    /// Multi-round sequence: round 1 adopt → durable TurnCompleted → Idle →
+    /// round 2 (fresh goal-summary pid) promoted → Running again. The Goal
+    /// loop reads exactly like consecutive normal turns.
+    #[test]
+    fn goal_rounds_sequence_adopt_idle_readopt() {
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some("goal-summary-round-1")),
+            &mut app
+        ));
+        assert!(app.agents[&id].session.state.is_turn_running());
+
+        assert!(handle_ext_notification(
+            &grow_turn_completed_notif("sess-1", "goal-summary-round-1", "end_turn", false),
+            &mut app
+        ));
+        assert!(
+            app.agents[&id].session.state.is_idle(),
+            "round terminal must return the pager to Idle"
+        );
+
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some("goal-summary-round-2")),
+            &mut app
+        ));
+        let agent = app.agents.get(&id).unwrap();
+        assert!(agent.session.state.is_turn_running(), "round 2 adopts");
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some("goal-summary-round-2")
+        );
+    }
+
+    /// Handoff race: a Goal round g2 is promoted while g1 is still Running
+    /// (stashed as a pending adoption); g1's durable TurnCompleted must
+    /// consume the stash and adopt g2 — Goal rounds have no client
+    /// `PromptResponse` rail, so the durable-terminal path owns the handoff.
+    #[test]
+    fn goal_round_handoff_stashes_next_and_adopts_on_terminal() {
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some("goal-summary-g1")),
+            &mut app
+        ));
+        assert!(app.agents[&id].session.state.is_turn_running());
+
+        // g2 promoted while g1 still runs → stashed (FIFO handoff).
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some("goal-summary-g2")),
+            &mut app
+        ));
+        assert!(
+            app.pending_running_adoptions.contains_key(&id),
+            "the next round must be stashed for handoff"
+        );
+
+        // g1's durable terminal finalizes the current turn and adopts g2.
+        assert!(handle_ext_notification(
+            &grow_turn_completed_notif("sess-1", "goal-summary-g1", "end_turn", false),
+            &mut app
+        ));
+        let agent = app.agents.get(&id).unwrap();
+        assert!(
+            agent.session.state.is_turn_running(),
+            "the handoff must adopt g2 without dropping back to Idle"
+        );
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some("goal-summary-g2")
+        );
+        assert!(!app.pending_running_adoptions.contains_key(&id));
+    }
+
+    /// Enter during an adopted Goal round queues the message with normal
+    /// running-turn semantics: the prompt goes to the server queue and the
+    /// round keeps running (no local drain, no "Sending…").
+    #[test]
+    fn enter_during_goal_round_queues_like_normal_running() {
+        use crate::app::actions::{Action, Effect};
+        use crate::app::dispatch::dispatch;
+
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some("goal-summary-round-1")),
+            &mut app
+        ));
+        assert!(app.agents[&id].session.state.is_turn_running());
+
+        let effects = dispatch(Action::SendPrompt("hello".into()), &mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { .. })),
+            "Enter must send the prompt to the server queue: {effects:?}"
+        );
+        let agent = app.agents.get(&id).unwrap();
+        assert!(
+            agent.session.state.is_turn_running(),
+            "the round keeps running; the message is queued behind it"
         );
     }
 
@@ -1256,11 +1301,12 @@
     }
 
     /// The adoption predicate: synthetic non-scheduler turns (auto-wake /
-    /// subagent-completion / notification-drain / goal turns) emit no
-    /// `prompt_complete`, so a re-attach must NOT adopt them (adoption would
+    /// subagent-completion / notification-drain) emit no durable
+    /// `TurnCompleted`, so a re-attach must NOT adopt them (adoption would
     /// strand the viewer in `TurnRunning`). Scheduler-fired (`/loop`) turns are
-    /// synthetic but client-driven with a real `prompt_complete`, and plain user
-    /// turns are always adoptable.
+    /// synthetic but client-driven with a real terminal, and Goal rounds
+    /// (`goal-summary-…`) run the full prompt-turn machinery and emit a
+    /// durable `TurnCompleted` — both are adoptable, as are plain user turns.
     #[test]
     fn should_adopt_running_prompt_skips_synthetic_non_scheduler() {
         assert!(should_adopt_running_prompt("p-user"));
@@ -1272,7 +1318,7 @@
         assert!(!should_adopt_running_prompt(
             "notifications-019e0000-0000-7000-8000-0000000000aa"
         ));
-        assert!(!should_adopt_running_prompt("goal-summary-019e2d3e"));
+        assert!(should_adopt_running_prompt("goal-summary-019e2d3e"));
         assert!(!should_adopt_running_prompt(
             "goal-classifier-nudge-019e2d3e"
         ));

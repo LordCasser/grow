@@ -611,6 +611,12 @@ pub enum SessionCommand {
         cancel_subagents: bool,
         kill_background_tasks: bool,
         rewind_if_pristine: bool,
+        /// Whether this cancel carries an explicit user intent to PAUSE an
+        /// active Goal (the Goal interrupt panel's "Pause goal" choice).
+        /// When true the Cancel arm runs `auto_pause_goal_if_active`; every
+        /// other cancel (plain Ctrl+C/Esc outside Goal, subagent teardown,
+        /// lifecycle shutdown) leaves an active Goal untouched.
+        pause_goal: bool,
         /// Free-form discriminator for *what* triggered the cancel, taken from
         /// the `session/cancel` request `_meta.cancelTrigger` (e.g. `"esc"`,
         /// `"ctrl_c"`). `None` for older clients and programmatic teardowns

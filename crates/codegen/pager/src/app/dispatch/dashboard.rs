@@ -1923,6 +1923,7 @@ fn stop_top_level_activity(agent: &mut crate::app::agent_view::AgentView) -> Opt
             effects.push(Effect::CancelTurn {
                 session_id: session_id.clone(),
                 cancel_subagents: true,
+                pause_goal: false,
                 trigger: None,
                 rewind_if_pristine: false,
             });

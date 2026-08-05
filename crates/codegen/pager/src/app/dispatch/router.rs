@@ -99,7 +99,8 @@ use super::transcript::{
 };
 use super::turn::{
     dispatch_cancel_scheduled_task, dispatch_cancel_turn, dispatch_cancel_turn_choice,
-    dispatch_demote_to_background, dispatch_kill_bg_task, dispatch_kill_subagent,
+    dispatch_demote_to_background, dispatch_goal_interrupt_choice, dispatch_kill_bg_task,
+    dispatch_kill_subagent,
 };
 use crate::app::actions::{Action, Effect};
 use crate::app::agent_view::ActivePane;
@@ -849,6 +850,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::CancelTurn => dispatch_cancel_turn(app),
         Action::CancelTurnChoice(choice) => dispatch_cancel_turn_choice(app, choice),
+        Action::GoalInterruptChoice(choice) => dispatch_goal_interrupt_choice(app, choice),
         Action::KillBgTask(task_id) => dispatch_kill_bg_task(app, task_id),
         Action::KillSubagent(subagent_id) => dispatch_kill_subagent(app, subagent_id),
         Action::CancelScheduledTask(task_id) => dispatch_cancel_scheduled_task(app, task_id),

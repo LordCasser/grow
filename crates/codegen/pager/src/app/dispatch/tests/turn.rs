@@ -424,6 +424,229 @@ fn cancel_turn_choice_after_turn_finished_is_noop() {
     assert!(app.agents[&id].session.state.is_idle());
 }
 
+// ── Goal interrupt panel ────────────────────────────────────────────────
+
+/// Goal Active + running turn: an interrupt gesture ALWAYS opens the Goal
+/// panel — even when a legacy "always stop" preference is set — and sends no
+/// effect. This is the core product decision (Goal interrupts always ask).
+#[test]
+fn goal_active_cancel_opens_panel_ignoring_pref() {
+    use crate::app::agent::GoalDisplayState;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.goal_state = Some(GoalDisplayState::test_stub());
+        agent.session.state = AgentState::TurnRunning;
+        agent.cancel_subagents_preference = Some(true); // must be ignored
+    }
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(effects.is_empty(), "no silent cancel: {effects:?}");
+    let agent = app.agents.get(&id).unwrap();
+    assert!(
+        agent.goal_interrupt_view.is_some(),
+        "the Goal panel must open"
+    );
+    assert!(
+        agent.session.state.is_turn_running(),
+        "the turn is untouched until an explicit choice"
+    );
+}
+
+/// Panel choice count follows running subagents: 2 entries without, 3 with.
+#[test]
+fn goal_panel_choice_count_follows_subagents() {
+    use crate::app::agent::GoalDisplayState;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.goal_state = Some(GoalDisplayState::test_stub());
+        agent.session.state = AgentState::TurnRunning;
+    }
+    let _ = dispatch(Action::CancelTurn, &mut app);
+    assert_eq!(
+        app.agents[&id]
+            .goal_interrupt_view
+            .as_ref()
+            .unwrap()
+            .choices
+            .len(),
+        2,
+        "no subagents → Pause goal + Stop this turn only"
+    );
+
+    // Re-open with a running subagent → third entry appears.
+    app.agents.get_mut(&id).unwrap().goal_interrupt_view = None;
+    app.agents.get_mut(&id).unwrap().subagent_sessions.insert(
+        "sa-1".into(),
+        crate::app::agent_view::test_fixtures::running_subagent_info("child-1"),
+    );
+    let _ = dispatch(Action::CancelTurn, &mut app);
+    assert_eq!(
+        app.agents[&id]
+            .goal_interrupt_view
+            .as_ref()
+            .unwrap()
+            .choices
+            .len(),
+        3,
+        "running subagent → Stop turn + subagents appears"
+    );
+}
+
+/// "Pause goal" (with an active turn) maps to a cancel that carries the
+/// explicit pause intent: `{ pause_goal: true, cancel_subagents: false }`.
+#[test]
+fn goal_pause_choice_maps_to_cancel_with_pause() {
+    use crate::views::modal::GoalInterruptChoice;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(
+        Action::GoalInterruptChoice(GoalInterruptChoice::PauseGoal),
+        &mut app,
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CancelTurn {
+            cancel_subagents: false,
+            pause_goal: true,
+            ..
+        }]
+    ));
+    assert!(app.agents[&id].session.state.is_cancelling());
+}
+
+/// "Stop this turn only" keeps the Goal Active: no pause intent.
+#[test]
+fn goal_stop_turn_only_maps_to_cancel_without_pause() {
+    use crate::views::modal::GoalInterruptChoice;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(
+        Action::GoalInterruptChoice(GoalInterruptChoice::StopTurnOnly),
+        &mut app,
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CancelTurn {
+            cancel_subagents: false,
+            pause_goal: false,
+            ..
+        }]
+    ));
+    assert!(app.agents[&id].session.state.is_cancelling());
+}
+
+/// "Stop turn + subagents": cancel with subagents, no pause intent.
+#[test]
+fn goal_stop_turn_and_subagents_maps_to_cancel_subagents() {
+    use crate::views::modal::GoalInterruptChoice;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(
+        Action::GoalInterruptChoice(GoalInterruptChoice::StopTurnAndSubagents),
+        &mut app,
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CancelTurn {
+            cancel_subagents: true,
+            pause_goal: false,
+            ..
+        }]
+    ));
+    assert!(app.agents[&id].session.state.is_cancelling());
+}
+
+/// Goal Active with NO running turn (gap / verifying / planning): the panel
+/// offers pause only, and choosing it routes through the `/goal pause`
+/// command plane — never a fake turn-cancel, no Cancelling state.
+#[test]
+fn goal_active_without_turn_pause_routes_command_plane() {
+    use crate::app::agent::GoalDisplayState;
+    use crate::views::modal::GoalInterruptChoice;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.goal_state = Some(GoalDisplayState::test_stub());
+        // Idle: no turn running.
+    }
+    let _ = dispatch(Action::CancelTurn, &mut app);
+    let agent = app.agents.get(&id).unwrap();
+    let view = agent.goal_interrupt_view.as_ref().expect("panel opens");
+    assert_eq!(view.choices.len(), 1, "pause-only panel");
+    assert!(agent.session.state.is_idle());
+
+    let effects = dispatch(
+        Action::GoalInterruptChoice(GoalInterruptChoice::PauseGoal),
+        &mut app,
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::ExecuteSlashCommand { command, .. } if command == "/goal pause"
+        )),
+        "no-turn pause must route through the /goal pause command plane: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::CancelTurn { .. })),
+        "no fake turn-cancel"
+    );
+    assert!(
+        app.agents[&id].session.state.is_idle(),
+        "no Cancelling without a turn"
+    );
+}
+
+/// A stuck-turn retry replays the last explicit Goal-interrupt intent: after
+/// "Stop this turn only", a second gesture while `TurnCancelling` re-sends
+/// with `pause_goal: false` (never a new default).
+#[test]
+fn goal_retry_replays_last_interrupt_without_pause() {
+    use crate::views::modal::GoalInterruptChoice;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+    }
+    // First gesture: StopTurnOnly (stashes the intent).
+    let _ = dispatch(
+        Action::GoalInterruptChoice(GoalInterruptChoice::StopTurnOnly),
+        &mut app,
+    );
+    assert!(app.agents[&id].session.state.is_cancelling());
+
+    // Retry while Cancelling: replays pause_goal=false + cancel_subagents=false.
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CancelTurn {
+            cancel_subagents: false,
+            pause_goal: false,
+            ..
+        }]
+    ));
+}
 #[test]
 fn cancel_turn_choice_after_subagents_finished_still_cancels() {
     use crate::views::modal::CancelTurnChoice;

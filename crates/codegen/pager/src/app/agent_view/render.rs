@@ -940,6 +940,22 @@ impl AgentView {
             } else {
                 0
             };
+        // The Goal interrupt panel shares the same overlay slot family.
+        let goal_interrupt_view_h =
+            if permission_view_h == 0 && question_view_h == 0 && rewind_view_h == 0 {
+                if self.goal_interrupt_view.is_some() {
+                    modal::goal_interrupt_panel_height(
+                        self.goal_interrupt_view
+                            .as_ref()
+                            .map_or(0, |v| v.choices.len()),
+                        area.height,
+                    )
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
         let jump_view_h = if !self.jump_slot_taken() {
             if let Some(ref js) = self.jump_state {
                 crate::views::jump::jump_overlay_height(js, area.height)
@@ -1032,6 +1048,8 @@ impl AgentView {
             jump_view_h
         } else if cancel_turn_view_h > 0 {
             cancel_turn_view_h
+        } else if goal_interrupt_view_h > 0 {
+            goal_interrupt_view_h
         } else {
             base_prompt_height
         };
@@ -2734,6 +2752,19 @@ impl AgentView {
             let buttons = &mut self.cancel_turn_buttons;
             if let Some(ctv) = self.cancel_turn_view.as_ref() {
                 modal::render_cancel_turn_panel(buf, layout.prompt, ctv, prompt_focused, buttons);
+            } else {
+                buttons.clear();
+            }
+        } else if goal_interrupt_view_h > 0 {
+            let buttons = &mut self.goal_interrupt_buttons;
+            if let Some(view) = self.goal_interrupt_view.as_ref() {
+                modal::render_goal_interrupt_panel(
+                    buf,
+                    layout.prompt,
+                    view,
+                    prompt_focused,
+                    buttons,
+                );
             } else {
                 buttons.clear();
             }

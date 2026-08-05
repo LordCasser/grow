@@ -1089,3 +1089,66 @@ fn goal_sampling_soft_preempted_by_steering() {
         .expect("spawn test thread");
     handle.join().expect("test thread panicked");
 }
+
+/// Cancel-arm pause decision is conditional on the explicit "Pause goal"
+/// intent: `pause_goal: false` (StopTurnOnly / StopTurnAndSubagents / plain
+/// cancels) leaves an active Goal Active; `pause_goal: true` pauses it.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn cancel_pause_goal_intent_is_conditional() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _tmp, _rx) = make_stage_actor(None).await;
+            create_test_goal(&actor);
+            assert_eq!(
+                actor.goal_tracker.lock().status(),
+                Some(crate::session::goal_tracker::GoalStatus::Active)
+            );
+
+            actor.maybe_auto_pause_goal_on_cancel(false).await;
+            assert_eq!(
+                actor.goal_tracker.lock().status(),
+                Some(crate::session::goal_tracker::GoalStatus::Active),
+                "a cancel without the pause intent must NOT pause the Goal"
+            );
+
+            actor.maybe_auto_pause_goal_on_cancel(true).await;
+            assert_eq!(
+                actor.goal_tracker.lock().status(),
+                Some(crate::session::goal_tracker::GoalStatus::UserPaused),
+                "the explicit Pause goal intent must pause the Goal (User)"
+            );
+        })
+        .await;
+}
+
+/// Continuation contract after a user-cancelled turn: the Goal stays Active
+/// but does NOT auto-queue the next round (a cancelled turn must not spin a
+/// fresh implementer cycle); the next user input resumes the loop.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn cancelled_turn_stays_active_without_auto_continuation() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _tmp, _rx) = make_stage_actor(None).await;
+            create_test_goal(&actor);
+
+            // Simulate the cancelled turn's turn-end (non-success).
+            actor.handle_turn_end(false, false).await;
+
+            let state = actor.state.lock().await;
+            assert!(
+                state.pending_inputs.is_empty(),
+                "a cancelled turn must not auto-queue the next Goal round"
+            );
+            drop(state);
+            assert_eq!(
+                actor.goal_tracker.lock().status(),
+                Some(crate::session::goal_tracker::GoalStatus::Active),
+                "the Goal stays Active (not paused, not auto-continued)"
+            );
+        })
+        .await;
+}

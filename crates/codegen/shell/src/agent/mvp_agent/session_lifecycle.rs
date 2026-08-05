@@ -17,6 +17,7 @@ impl MvpAgent {
             cancel_subagents: true,
             kill_background_tasks: true,
             rewind_if_pristine: false,
+            pause_goal: false,
             trigger: Some("session_delete".into()),
         });
         let _ = handle.cmd_tx.send(SessionCommand::Shutdown);

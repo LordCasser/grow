@@ -59,8 +59,7 @@ use routing::{
 
 use prompt_origin::finish_wake_turn;
 pub(crate) use prompt_origin::{
-    is_scheduler_fired_prompt, is_server_initiated_prompt, is_wake_prompt,
-    should_adopt_running_prompt,
+    is_goal_summary_prompt, is_server_initiated_prompt, is_wake_prompt, should_adopt_running_prompt,
 };
 
 pub(crate) use subagent_activity::finalize_killed_subagent;

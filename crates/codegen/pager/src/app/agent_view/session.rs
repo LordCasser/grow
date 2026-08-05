@@ -275,6 +275,9 @@ impl AgentView {
             casual_stashed_prompt: None,
             cancel_turn_view: None,
             cancel_turn_buttons: Vec::new(),
+            goal_interrupt_view: None,
+            goal_interrupt_buttons: Vec::new(),
+            last_interrupt: None,
             cancel_subagents_preference: None,
             cancel_trigger_hint: None,
             rewind_state: None,
@@ -549,33 +552,6 @@ impl AgentView {
             && !self.is_rewound_prompt(prompt_id)
     }
 
-    /// Record that the shell is running a NON-adoptable turn (see
-    /// [`Self::should_adopt_running_prompt`]) — e.g. a Goal round. Send
-    /// routing and the local drain treat the session as server-busy while
-    /// set; otherwise a plain prompt would be drained locally and stick on
-    /// "Sending…" because the shell queues it behind the running Goal round.
-    /// No-op when the pid is adoptable, terminal-in-replay or rewound (such
-    /// turns have already ended — the pager must not treat them as busy).
-    pub(crate) fn note_synthetic_running_prompt(&mut self, prompt_id: &str) {
-        let live_synthetic = !crate::app::acp_handler::should_adopt_running_prompt(prompt_id)
-            && !self.replayed_terminal_prompts.contains(prompt_id)
-            && !self.is_rewound_prompt(prompt_id);
-        if live_synthetic {
-            self.session.synthetic_running_prompt = Some(prompt_id.to_string());
-        }
-    }
-
-    /// Forget the shell's non-adoptable running turn (broadcast reported no
-    /// running prompt, or an adoptable one took over). Local drains resume.
-    pub(crate) fn clear_synthetic_running_prompt(&mut self) {
-        self.session.synthetic_running_prompt = None;
-    }
-
-    /// Whether the shell is currently running a non-adoptable turn the
-    /// pager chose not to adopt (Goal round etc.).
-    pub(crate) fn synthetic_turn_in_flight(&self) -> bool {
-        self.session.synthetic_running_prompt.is_some()
-    }
     /// Finalize a reconnect-reload window and, iff the running prompt is
     /// adoptable, adopt it. Returns whether the window finalized.
     ///
@@ -596,10 +572,6 @@ impl AgentView {
             && self.should_adopt_running_prompt(pid)
         {
             self.adopt_running_prompt(pid.to_string());
-        } else if finalized && let Some(pid) = running_prompt_id.as_deref() {
-            // Non-adoptable running prompt (Goal round): keep the session
-            // classified as server-busy for send routing.
-            self.note_synthetic_running_prompt(pid);
         }
         finalized
     }

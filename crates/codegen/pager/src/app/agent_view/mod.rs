@@ -1273,6 +1273,20 @@ pub struct AgentView {
     /// Clickable rects for cancel-turn option rows, populated by
     /// `render_cancel_turn_panel`.
     pub(crate) cancel_turn_buttons: Vec<Rect>,
+    /// Goal interrupt panel — shown whenever an interrupt gesture (Esc /
+    /// Ctrl+C) arrives while the Goal is Active. Always asks, never a silent
+    /// default; its choices cover {pause goal, cancel turn, stop subagents}
+    /// explicitly. Distinct from `cancel_turn_view` (Legacy panel): different
+    /// choices, labels, and Esc semantics (dismiss-only).
+    pub(crate) goal_interrupt_view: Option<modal::GoalInterruptViewState>,
+    /// Clickable rects for Goal interrupt option rows, populated by the Goal
+    /// panel renderer.
+    pub(crate) goal_interrupt_buttons: Vec<Rect>,
+    /// The last explicit Goal-interrupt intent the user submitted (used to
+    /// replay the same decision on a stuck-turn retry — a second Esc/Ctrl+C
+    /// while `TurnCancelling` re-sends the cancel with the original
+    /// pause_goal / cancel_subagents, never a new default).
+    pub(crate) last_interrupt: Option<crate::app::agent::InterruptIntent>,
     /// Per-agent mirror of cancel-subagents preference (`Some(true)` = always
     /// stop, `Some(false)` = always continue). Always choices set this on every
     /// agent and persist to `[ui].cancel_subagents_on_turn_cancel`; when unset,
@@ -2371,7 +2385,6 @@ pub(crate) mod test_fixtures {
             cwd: std::path::PathBuf::from("/tmp"),
             is_worktree: false,
             forked_from: None,
-            synthetic_running_prompt: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
             yolo_mode: false,
@@ -2433,7 +2446,6 @@ pub(crate) mod test_fixtures {
                 cwd: std::path::PathBuf::from("/tmp"),
                 is_worktree: false,
                 forked_from: None,
-                synthetic_running_prompt: None,
                 pending_prompts: std::collections::VecDeque::new(),
                 next_queue_id: 0,
                 yolo_mode: false,
@@ -3253,7 +3265,6 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             cwd,
             is_worktree: false,
             forked_from: None,
-            synthetic_running_prompt: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
             yolo_mode: false,

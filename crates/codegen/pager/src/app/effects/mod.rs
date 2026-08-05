@@ -892,6 +892,7 @@ pub(crate) fn execute(
         Effect::CancelTurn {
             session_id,
             cancel_subagents,
+            pause_goal,
             trigger,
             rewind_if_pristine,
         } => {
@@ -905,6 +906,7 @@ pub(crate) fn execute(
                         Some(
                             serde_json::json!({
                         "cancel_subagents": cancel_subagents,
+                        "pause_goal": pause_goal,
                         "trigger": trigger_str,
                         "rewind_if_pristine": rewind_if_pristine,
                     }),
@@ -912,6 +914,9 @@ pub(crate) fn execute(
                     );
                     let send_start = std::time::Instant::now();
                     let mut meta = serde_json::json!({ "cancelSubagents": cancel_subagents });
+                    if pause_goal {
+                        meta["pauseGoal"] = true.into();
+                    }
                     if let Some(t) = trigger_str {
                         meta["cancelTrigger"] = t.into();
                     }

@@ -177,6 +177,45 @@ impl AgentView {
             _ => InputOutcome::Unchanged,
         }
     }
+
+    /// Goal interrupt panel keys. Esc is DISMISS-ONLY: it closes the panel
+    /// and leaves the turn, subagents, and the Goal untouched (no
+    /// CancelTurnChoice, no Effect). Choices are submitted explicitly via
+    /// Enter / 1-N (never a silent default).
+    pub(super) fn handle_goal_interrupt_key(&mut self, key: &KeyEvent) -> InputOutcome {
+        let Some(view) = self.goal_interrupt_view.as_mut() else {
+            return InputOutcome::Unchanged;
+        };
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                view.active_idx = (view.active_idx + 1).min(view.choices.len() - 1);
+                InputOutcome::Changed
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                view.active_idx = view.active_idx.saturating_sub(1);
+                InputOutcome::Changed
+            }
+            KeyCode::Enter => {
+                let choice = view.choices[view.active_idx];
+                InputOutcome::Action(Action::GoalInterruptChoice(choice))
+            }
+            KeyCode::Char(c @ '1'..='9') => {
+                let idx = (c as usize) - ('1' as usize);
+                if let Some(choice) = view.choices.get(idx) {
+                    InputOutcome::Action(Action::GoalInterruptChoice(*choice))
+                } else {
+                    InputOutcome::Changed
+                }
+            }
+            KeyCode::Esc => {
+                self.suppress_rewind_arm(std::time::Instant::now());
+                self.goal_interrupt_view = None;
+                self.goal_interrupt_buttons.clear();
+                InputOutcome::Changed
+            }
+            _ => InputOutcome::Unchanged,
+        }
+    }
     /// Mouse handler for the cancel-turn panel. `Moved` moves the
     /// cursor onto the pointed row; `Down(Left)` dispatches the row's
     /// `CancelTurnChoice`. All other events are consumed.
@@ -212,6 +251,47 @@ impl AgentView {
                     }
                     let choice = CancelTurnChoice::ALL[idx];
                     return InputOutcome::Action(Action::CancelTurnChoice(choice));
+                }
+                InputOutcome::Unchanged
+            }
+            _ => InputOutcome::Unchanged,
+        }
+    }
+    /// Mouse handler for the Goal interrupt panel. `Down(Left)` on an option
+    /// row submits that choice; all other events are consumed.
+    pub(super) fn handle_goal_interrupt_mouse(&mut self, mouse: &MouseEvent) -> InputOutcome {
+        if self.goal_interrupt_view.is_none() {
+            return InputOutcome::Unchanged;
+        }
+        let hit_idx = self
+            .goal_interrupt_buttons
+            .iter()
+            .enumerate()
+            .find(|(_, rect)| rect.contains((mouse.column, mouse.row).into()))
+            .map(|(idx, _)| idx);
+        match mouse.kind {
+            MouseEventKind::Moved => {
+                let Some(idx) = hit_idx else {
+                    return InputOutcome::Unchanged;
+                };
+                if let Some(view) = self.goal_interrupt_view.as_mut()
+                    && view.active_idx != idx
+                {
+                    view.active_idx = idx;
+                    return InputOutcome::Changed;
+                }
+                InputOutcome::Unchanged
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(idx) = hit_idx
+                    && let Some(view) = self.goal_interrupt_view.as_ref()
+                    && let Some(choice) = view.choices.get(idx)
+                {
+                    let choice = *choice;
+                    if let Some(view) = self.goal_interrupt_view.as_mut() {
+                        view.active_idx = idx;
+                    }
+                    return InputOutcome::Action(Action::GoalInterruptChoice(choice));
                 }
                 InputOutcome::Unchanged
             }
@@ -1289,7 +1369,6 @@ mod cancel_turn_mouse_tests {
                 cwd: std::path::PathBuf::from("/tmp"),
                 is_worktree: false,
                 forked_from: None,
-                synthetic_running_prompt: None,
                 pending_prompts: std::collections::VecDeque::new(),
                 next_queue_id: 0,
                 yolo_mode: false,
@@ -1428,6 +1507,113 @@ mod cancel_turn_mouse_tests {
             agent.rewind_arm_suppressed(Instant::now()),
             "the Esc-confirmed cancel must refresh the post-cancel grace"
         );
+    }
+
+    /// Panel with one synthetic Rect per Goal choice, stacked at y=10.
+    fn setup_goal_panel(agent: &mut AgentView) {
+        agent.goal_interrupt_view = Some(crate::views::modal::GoalInterruptViewState {
+            active_idx: 0,
+            choices: crate::views::modal::GoalInterruptChoice::for_active_turn(true),
+        });
+        agent.goal_interrupt_buttons.clear();
+        for (i, _) in agent
+            .goal_interrupt_view
+            .as_ref()
+            .unwrap()
+            .choices
+            .iter()
+            .enumerate()
+        {
+            agent.goal_interrupt_buttons.push(Rect {
+                x: 5,
+                y: 10 + i as u16,
+                width: 40,
+                height: 1,
+            });
+        }
+    }
+
+    /// The Goal panel's Esc is DISMISS-ONLY: it closes the panel and leaves
+    /// the turn, subagents, and the Goal untouched — no CancelTurnChoice, no
+    /// Effect (this is the bug fix: a second Esc used to map to ContinueToRun
+    /// and cancel the parent turn).
+    #[test]
+    fn goal_panel_esc_dismisses_without_any_action() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::time::Instant;
+        let mut agent = make_agent();
+        agent.session.state = AgentState::TurnRunning;
+        setup_goal_panel(&mut agent);
+        agent.rewind_suppress_deadline = Some(Instant::now());
+        let outcome =
+            agent.handle_goal_interrupt_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "panel Esc must dismiss only, got {outcome:?}"
+        );
+        assert!(
+            agent.goal_interrupt_view.is_none(),
+            "the panel must close with NO effect"
+        );
+        assert!(
+            agent.session.state.is_turn_running(),
+            "the turn keeps running"
+        );
+        assert!(
+            agent.rewind_arm_suppressed(Instant::now()),
+            "the dismissed panel must still refresh the post-cancel grace"
+        );
+    }
+
+    #[test]
+    fn goal_panel_enter_submits_selected_choice() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut agent = make_agent();
+        agent.session.state = AgentState::TurnRunning;
+        setup_goal_panel(&mut agent);
+        let outcome =
+            agent.handle_goal_interrupt_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::GoalInterruptChoice(
+                crate::views::modal::GoalInterruptChoice::PauseGoal
+            ))
+        ));
+    }
+
+    #[test]
+    fn goal_panel_number_keys_submit_choice() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut agent = make_agent();
+        agent.session.state = AgentState::TurnRunning;
+        setup_goal_panel(&mut agent);
+        let outcome =
+            agent.handle_goal_interrupt_key(&KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::GoalInterruptChoice(
+                crate::views::modal::GoalInterruptChoice::StopTurnOnly
+            ))
+        ));
+        // Out-of-range number is consumed without action.
+        let outcome =
+            agent.handle_goal_interrupt_key(&KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Changed));
+    }
+
+    #[test]
+    fn goal_panel_mouse_click_submits_choice() {
+        let mut agent = make_agent();
+        agent.session.state = AgentState::TurnRunning;
+        setup_goal_panel(&mut agent);
+        // Row 1 = second choice (StopTurnOnly).
+        let outcome = agent.handle_goal_interrupt_mouse(&down(10, 11));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::GoalInterruptChoice(
+                crate::views::modal::GoalInterruptChoice::StopTurnOnly
+            ))
+        ));
     }
 }
 #[cfg(test)]

@@ -149,6 +149,58 @@ impl CancelTurnChoice {
         }
     }
 }
+
+/// Goal-interrupt choices (Goal Active, always ask — never a silent default,
+/// never an "always" preference). Each choice is an explicit user decision
+/// over the three axes: pause the Goal, cancel the current turn, and whether
+/// running subagents are stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalInterruptChoice {
+    /// Pause the Goal (User reason) and end the current turn; subagents keep
+    /// running. Semantically identical to `/goal pause`'s G/T/S when a turn
+    /// is active; with no active turn it routes to the `/goal pause` command
+    /// plane directly.
+    PauseGoal,
+    /// Stop this turn only: the Goal stays Active (it may be continued by
+    /// the next user input); subagents keep running.
+    StopTurnOnly,
+    /// Stop the turn AND its subagents; the Goal stays Active.
+    StopTurnAndSubagents,
+}
+impl GoalInterruptChoice {
+    /// Choices for an ACTIVE Goal turn. `running_subagents` decides whether
+    /// the third entry (stop subagents too) is offered.
+    pub fn for_active_turn(running_subagents: bool) -> Vec<GoalInterruptChoice> {
+        let mut choices = vec![
+            GoalInterruptChoice::PauseGoal,
+            GoalInterruptChoice::StopTurnOnly,
+        ];
+        if running_subagents {
+            choices.push(GoalInterruptChoice::StopTurnAndSubagents);
+        }
+        choices
+    }
+    /// Choices when the Goal is Active but NO turn is running (gap between
+    /// rounds, verifying, planning): only pausing is meaningful.
+    pub fn pause_only() -> Vec<GoalInterruptChoice> {
+        vec![GoalInterruptChoice::PauseGoal]
+    }
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::PauseGoal => "Pause goal",
+            Self::StopTurnOnly => "Stop this turn only",
+            Self::StopTurnAndSubagents => "Stop turn + subagents",
+        }
+    }
+}
+
+/// State of the Goal interrupt panel (distinct from the Legacy
+/// [`CancelTurnViewState`] — the two panels have different choices, labels,
+/// and Esc semantics and must never share a submission path).
+pub struct GoalInterruptViewState {
+    pub active_idx: usize,
+    pub choices: Vec<GoalInterruptChoice>,
+}
 pub struct CancelTurnViewState {
     pub active_idx: usize,
     pub running_count: usize,
@@ -835,6 +887,18 @@ pub fn cancel_turn_panel_height(screen_h: u16) -> u16 {
         .min(screen_h as u32 * 80 / 100) as u16;
     CANCEL_TURN_PANEL_HEIGHT.min(cap)
 }
+/// vpad(1) + title(1) + gap(1) + N choices + vpad(1) = N + 4.
+///
+/// The Goal interrupt panel offers 1–3 choices depending on context (no
+/// active turn / turn without subagents / turn with subagents); a fixed
+/// height would leave dead rows under the shorter choice lists.
+pub fn goal_interrupt_panel_height(choices: usize, screen_h: u16) -> u16 {
+    let need = 4 + choices.min(3) as u16;
+    let cap = (screen_h as u32 * 33 / 100)
+        .max(6)
+        .min(screen_h as u32 * 80 / 100) as u16;
+    need.min(cap)
+}
 pub fn render_cancel_turn_panel(
     buf: &mut Buffer,
     area: Rect,
@@ -881,6 +945,95 @@ pub fn render_cancel_turn_panel(
     );
     y += 2;
     for (i, choice) in CancelTurnChoice::ALL.iter().enumerate() {
+        if y >= area.y + area.height {
+            break;
+        }
+        let is_cursor = i == state.active_idx;
+        let row_bg = if is_cursor && focused {
+            theme.bg_visual
+        } else {
+            theme.bg_light
+        };
+        let row_rect = Rect {
+            x: content_x.saturating_sub(1),
+            y,
+            width: content_w as u16 + 2,
+            height: 1,
+        };
+        buf.set_style(row_rect, Style::default().bg(row_bg));
+        button_rects.push(row_rect);
+        let marker = if is_cursor {
+            crate::glyphs::filled_dot()
+        } else {
+            "\u{25CB}"
+        };
+        let num = (i + 1).to_string();
+        let num_style = Style::default().fg(theme.accent_user).bg(row_bg);
+        let marker_style = if is_cursor {
+            Style::default().fg(theme.accent_user).bg(row_bg)
+        } else {
+            Style::default().fg(theme.gray).bg(row_bg)
+        };
+        let label_style = Style::default()
+            .fg(theme.text_primary)
+            .bg(row_bg)
+            .add_modifier(if is_cursor {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
+        let line = Line::from(vec![
+            Span::styled(format!("{num} "), num_style),
+            Span::styled(format!("({marker}) "), marker_style),
+            Span::styled(choice.label(), label_style),
+        ]);
+        buf.set_line(content_x, y, &line, content_w as u16);
+        y += 1;
+    }
+    if !focused {
+        crate::render::color::blend_area(buf, area, Some((theme.bg_light, 0.66)), None);
+    }
+}
+/// Render the Goal interrupt panel. Unlike the Legacy cancel-turn panel this
+/// one always ASKS (no silent default), its choices cover
+/// {pause goal, stop turn, stop subagents} explicitly, and Esc dismisses
+/// without any effect.
+pub fn render_goal_interrupt_panel(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &GoalInterruptViewState,
+    focused: bool,
+    button_rects: &mut Vec<Rect>,
+) {
+    button_rects.clear();
+    let theme = Theme::current();
+    buf.set_style(area, Style::default().bg(theme.bg_light));
+    let accent_style = Style::default().fg(theme.warning);
+    for row in area.y..area.y + area.height {
+        if let Some(cell) = buf.cell_mut((area.x, row)) {
+            cell.set_symbol(crate::glyphs::accent_bar());
+            cell.set_style(accent_style);
+        }
+    }
+    let content_x = area.x + 3;
+    let content_w = area.width.saturating_sub(5) as usize;
+    let mut y = area.y + 1;
+    let title_style = Style::default()
+        .fg(theme.accent_user)
+        .add_modifier(Modifier::BOLD);
+    let title = if state.choices.len() == 1 {
+        "Goal is running (no active turn)."
+    } else {
+        "Goal is running. Interrupt how?"
+    };
+    buf.set_line(
+        content_x,
+        y,
+        &Line::from(Span::styled(title, title_style)),
+        content_w as u16,
+    );
+    y += 2;
+    for (i, choice) in state.choices.iter().enumerate() {
         if y >= area.y + area.height {
             break;
         }
@@ -1401,8 +1554,8 @@ mod palette_tests {
 #[cfg(test)]
 mod doc_picker_tip_tests {
     use super::{
-        ActiveModal, DOCS_USER_GUIDE_REL, fit_docs_ask_grow_tip, howto_list_modal,
-        render_doc_picker_overlay,
+        ActiveModal, DOCS_USER_GUIDE_REL, cancel_turn_panel_height, fit_docs_ask_grow_tip,
+        goal_interrupt_panel_height, howto_list_modal, render_doc_picker_overlay,
     };
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
@@ -1460,5 +1613,30 @@ mod doc_picker_tip_tests {
             all.contains("docs/user-guide") || all.contains("docs\\user-guide"),
             "missing docs path:\n{all}"
         );
+    }
+    #[test]
+    fn goal_interrupt_panel_height_follows_choice_count() {
+        // The panel must shrink to its content: 1 choice (no active turn) =
+        // 5 rows, 2 (turn without subagents) = 6, 3 (turn + subagents) = 7 —
+        // no dead rows under the shorter lists. Screen caps only apply on
+        // tiny terminals.
+        assert_eq!(
+            goal_interrupt_panel_height(0, 40),
+            4,
+            "degenerate: no choices"
+        );
+        assert_eq!(goal_interrupt_panel_height(1, 40), 5);
+        assert_eq!(goal_interrupt_panel_height(2, 40), 6);
+        assert_eq!(goal_interrupt_panel_height(3, 40), 7);
+        assert_eq!(
+            goal_interrupt_panel_height(9, 40),
+            7,
+            "choices are capped at 3 rows"
+        );
+        // Tiny screens: cap at 33%..80% like the legacy cancel panel.
+        assert_eq!(goal_interrupt_panel_height(3, 10), 6);
+        assert_eq!(goal_interrupt_panel_height(3, 6), 4);
+        // The legacy panel keeps its fixed 4-option height.
+        assert_eq!(cancel_turn_panel_height(40), 9);
     }
 }

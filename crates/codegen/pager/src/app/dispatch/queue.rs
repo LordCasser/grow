@@ -60,13 +60,7 @@ fn combine_queued_prompts_enabled() -> bool {
 /// later prompts behind the older ones (they join the local queue and drain in
 /// order), preserving FIFO.
 pub(super) fn immediate_server_send_eligible(agent: &AgentView) -> bool {
-    // `synthetic_running_prompt`: the shell runs a non-adoptable turn (Goal
-    // round) the pager deliberately does not adopt — `is_turn_running()` is
-    // false but the server IS busy, so a plain prompt must go to the server
-    // queue, never the local drain (which would stick on "Sending…").
-    let server_busy = agent.session.state.is_turn_running()
-        || agent.session.synthetic_running_prompt.is_some()
-        || !agent.shared_queue.is_empty();
+    let server_busy = agent.session.state.is_turn_running() || !agent.shared_queue.is_empty();
     server_busy
         && agent.session.session_id.is_some()
         && agent.session.pending_prompts.is_empty()
@@ -220,16 +214,6 @@ pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
 
     if !agent.session.state.is_idle() {
         log_blocked("turn_running", sid);
-        return QueueDrain::blocked();
-    }
-    // The shell is running a non-adoptable turn (Goal round) the pager
-    // deliberately did not adopt: draining locally would send the prompt
-    // into the shell's queue behind the running round and leave the pager
-    // stuck on "Sending…" (no promoting broadcast ever arrives). Park the
-    // rows; the `running_prompt_id == None` broadcast at round end clears
-    // the gate and drips them.
-    if agent.synthetic_turn_in_flight() {
-        log_blocked("synthetic_turn_running", sid);
         return QueueDrain::blocked();
     }
     // Goal verification protection (silent backstop): while the verifier
@@ -588,10 +572,20 @@ pub(in crate::app) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
 
 /// Whether [`apply_turn_start_shim`] renders its own user block (i.e.
 /// `display_block` is `Some`). When true the pager owns the block and must
-/// swallow the leader's user-echo; when false (bash, or a viewer with no local
-/// text) the echo is the only source and must render. Kept in sync with the
-/// shim's match via a `debug_assert!` there.
-pub(crate) fn shim_renders_own_user_block(kind: &str, text: Option<&str>) -> bool {
+/// swallow the leader's user-echo; when false (bash, a Goal round, or a viewer
+/// with no local text) the echo is the only source and must render. Kept in
+/// sync with the shim's match via a `debug_assert!` there.
+pub(crate) fn shim_renders_own_user_block(
+    kind: &str,
+    text: Option<&str>,
+    prompt_id: Option<&str>,
+) -> bool {
+    // Goal rounds are adopted as normal Running turns, but the goal directive
+    // is orchestrator text, not a user message — never paint it as a user
+    // bubble (the Goal chip/loop chrome carries the context).
+    if prompt_id.is_some_and(crate::app::acp_handler::is_goal_summary_prompt) {
+        return false;
+    }
     match kind {
         "bash" => false,
         _ => text.is_some(),
@@ -761,7 +755,7 @@ pub(crate) fn arm_send_now_and_paint(agent: &mut AgentView, id: &str, new_text: 
         .find(|e| e.id == id)
         .map(|e| (e.kind.clone(), e.text.clone()));
     if let Some((kind, text)) = row
-        && shim_renders_own_user_block(&kind, Some(&text))
+        && shim_renders_own_user_block(&kind, Some(&text), Some(id))
     {
         let edited = new_text.is_some_and(|t| t != text);
         push_send_now_user_block(agent, id, &kind, new_text.unwrap_or(&text), edited);
@@ -798,7 +792,13 @@ pub(crate) fn apply_turn_start_shim(
     // back to true even if this pane has sent prompts before (the flag is no
     // longer a one-way latch) — that drives `handle_prompt_complete` + the
     // viewer chrome correctly.
-    let adopted_from_other_client = !agent.is_self_originated_prompt(&prompt_id);
+    //
+    // Goal rounds are exempt: the shell injects `goal-summary-…` for THIS
+    // session (the pager is the only driver), not another client's turn, so
+    // the adopted round keeps driver semantics — notably the FIFO handoff to
+    // the next round's stashed adoption, which a viewer would discard.
+    let adopted_from_other_client = !agent.is_self_originated_prompt(&prompt_id)
+        && !crate::app::acp_handler::is_goal_summary_prompt(&prompt_id);
     // Sticky pin + still-armed send-now expect (not cleared on adopt — the
     // cancel rail may still need it). Either covers adopt-before-cancel.
     let skip_entry_top = agent
@@ -850,12 +850,16 @@ pub(crate) fn apply_turn_start_shim(
         }
         "cron" => (text.as_deref().map(RenderBlock::cron_prompt), false),
         _ if multi_segments.is_some() => (None, true),
+        // Goal rounds: adopted as normal Running turns, but the goal
+        // directive is orchestrator text, not a user message — no bubble.
+        _ if crate::app::acp_handler::is_goal_summary_prompt(&prompt_id) => (None, false),
         _ => (text.as_deref().map(RenderBlock::user_prompt), true),
     };
 
     debug_assert!(
         multi_segments.is_some()
-            || display_block.is_some() == shim_renders_own_user_block(kind, text.as_deref()),
+            || display_block.is_some()
+                == shim_renders_own_user_block(kind, text.as_deref(), Some(&prompt_id)),
         "shim_renders_own_user_block must mirror apply_turn_start_shim's display_block"
     );
 
@@ -1090,55 +1094,6 @@ mod tests {
             is_monitor: false,
             restored_from_replay: false,
         }
-    }
-
-    /// While the shell runs a non-adoptable turn (Goal round), the local
-    /// drain is blocked and the immediate server-send path opens: a plain
-    /// prompt goes to the server queue instead of sticking on "Sending…".
-    #[test]
-    fn synthetic_turn_in_flight_gates_drain_and_opens_immediate_send() {
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-
-        // Baseline: idle + empty shared queue → not immediate-eligible.
-        let agent = app.agents.get(&id).unwrap();
-        assert!(!immediate_server_send_eligible(agent));
-
-        // Shell reports a non-adoptable running prompt (Goal round).
-        {
-            let agent = app.agents.get_mut(&id).unwrap();
-            agent.note_synthetic_running_prompt("goal-summary-abc");
-        }
-        let agent = app.agents.get(&id).unwrap();
-        assert!(agent.synthetic_turn_in_flight());
-        assert!(
-            immediate_server_send_eligible(agent),
-            "server-busy (synthetic turn) must open the immediate-send path"
-        );
-
-        // The local drain is blocked while the flag is set.
-        enqueue_local(&mut app, id, "queued row");
-        let drain = maybe_drain_queue(app.agents.get_mut(&id).unwrap());
-        assert!(
-            drain.effects.is_empty(),
-            "drain must not fire while the shell runs a non-adoptable turn"
-        );
-        assert_eq!(
-            app.agents[&id].session.pending_prompts.len(),
-            1,
-            "the row stays parked for the round end"
-        );
-
-        // Shell reports no running prompt → flag clears → drain drips.
-        app.agents
-            .get_mut(&id)
-            .unwrap()
-            .clear_synthetic_running_prompt();
-        let drain = maybe_drain_queue(app.agents.get_mut(&id).unwrap());
-        assert!(
-            !drain.effects.is_empty(),
-            "drain must resume once the synthetic turn is over"
-        );
     }
 
     #[test]

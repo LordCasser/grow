@@ -408,6 +408,7 @@ impl ChildControl for ShellChildRuntime {
             cancel_subagents: true,
             kill_background_tasks: true,
             rewind_if_pristine: false,
+            pause_goal: false,
             trigger: None,
         });
         let _ = self.child_handle.cmd_tx.send(SessionCommand::Shutdown);

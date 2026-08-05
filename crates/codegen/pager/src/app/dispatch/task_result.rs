@@ -435,17 +435,17 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 }
                 Ok(PromptStatusWire::Queued { .. }) => {
                     // The server admitted the prompt but has NOT promoted it
-                    // — another turn (typically a non-adoptable Goal round
-                    // the pager chose not to adopt) is running, so the
-                    // promoting broadcast will not come until that turn
-                    // ends. A LOCALLY-DRAINED prompt must not stay on
-                    // "Sending…" for the round's whole duration: resolve the
-                    // submitting state and let the queue/changed re-merged
-                    // row represent the message; the future promoting
-                    // broadcast starts the turn via the turn-start shim
-                    // (which reuses the painted user block by text). The
-                    // pre-existing behaviour re-armed the 2s watchdog
-                    // forever, which is what made Goal rounds look hung.
+                    // — another turn is running and the promoting broadcast
+                    // has not come yet (a busy foreground turn, e.g. a Goal
+                    // round, or any turn the pager has not yet adopted). A
+                    // LOCALLY-DRAINED prompt must not stay on "Sending…" for
+                    // the turn's whole duration: resolve the submitting state
+                    // and let the queue/changed re-merged row represent the
+                    // message; the future promoting broadcast starts the turn
+                    // via the turn-start shim (which reuses the painted user
+                    // block by text). The pre-existing behaviour re-armed the
+                    // 2s watchdog forever, which is what made busy foreground
+                    // turns look hung.
                     if agent.session.state.is_turn_submitting() {
                         agent.session.state = crate::app::agent::AgentState::Idle;
                         agent.session.current_prompt_id = None;

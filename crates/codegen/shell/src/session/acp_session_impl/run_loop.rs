@@ -1224,6 +1224,7 @@ pub(super) async fn run_session(
                             cancel_subagents,
                             kill_background_tasks,
                             rewind_if_pristine,
+                            pause_goal,
                             trigger,
                         } => {
                             // Flush the actor-owned replay buffer before tearing
@@ -1258,15 +1259,15 @@ pub(super) async fn run_session(
                                 )
                                 .await;
 
-                            // Auto-pause active goal on Ctrl+C so timers stop
-                            // and the pager shows "paused" instead of "active".
-                            // Shared with the doom-loop and back-off paths via
-                            // `auto_pause_goal_if_active`.
-                            session
-                                .auto_pause_goal_if_active(
-                                    crate::session::goal_tracker::GoalPauseReason::User,
-                                )
-                                .await;
+                            // Auto-pause the active Goal ONLY on an explicit
+                            // user "Pause goal" intent (the Goal interrupt
+                            // panel's choice carries `pause_goal: true`). Every
+                            // other cancel — plain Esc/Ctrl+C outside Goal,
+                            // StopTurnOnly / StopTurnAndSubagents, subagent
+                            // teardown, lifecycle shutdown — leaves an active
+                            // Goal untouched (it stays Active and may be
+                            // continued by the next user input).
+                            session.maybe_auto_pause_goal_on_cancel(pause_goal).await;
 
                             // Manual compaction admitted during the cancelled
                             // turn owns the next foreground slot; otherwise

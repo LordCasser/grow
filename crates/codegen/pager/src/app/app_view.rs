@@ -3594,7 +3594,11 @@ impl AppView {
             }
             let spinner_frame_tick =
                 agent.scrollback.animation_tick() % crate::views::turn_status::SPINNER_DIVISOR == 0;
-            needs_redraw |= !agent.session.state.is_idle() && spinner_frame_tick;
+            // Same predicate as `tick_demand`: the goal chip / watcher cue /
+            // running-count chip all need repaints while the session may be
+            // Idle (goal stages run shell-side; bg tasks run under an idle
+            // turn). Gated to the spinner cadence like the other spinners.
+            needs_redraw |= Self::agent_surface_animating(agent) && spinner_frame_tick;
             needs_redraw |= agent
                 .mcp_init_progress
                 .as_ref()
@@ -3819,6 +3823,28 @@ impl AppView {
     pub fn needs_animation(&self) -> bool {
         self.tick_demand() != TickDemand::None
     }
+    /// Whether the active agent's always-visible status surfaces show live
+    /// time-based content that must keep advancing:
+    ///
+    /// - running-turn chrome (`!is_idle`),
+    /// - the idle "still running" watcher cue and the status-bar
+    ///   running-count chip (`watchers()` — live data, NOT the tasks pane's
+    ///   synced entries, which minimal mode never syncs),
+    /// - the goal chip's spinner + live elapsed clock
+    ///   (`GoalDisplayStatus::Active` — goal stages run shell-side while
+    ///   the pager session is Idle, so this must NOT derive from `is_idle`).
+    ///
+    /// Shared by [`AppView::tick`] (redraw gating) and [`AppView::tick_demand`]
+    /// (tick arming) so the two layers cannot drift: demand without a redraw
+    /// would spin the tick loop while the screen stays frozen.
+    fn agent_surface_animating(agent: &AgentView) -> bool {
+        !agent.session.state.is_idle()
+            || agent.watchers().total() > 0
+            || agent
+                .goal_state
+                .as_ref()
+                .is_some_and(|g| g.status == crate::app::agent::GoalDisplayStatus::Active)
+    }
     /// What tick cadence the current view state demands.
     ///
     /// [`TickDemand::Fast`] runs at the configured animation fps (default
@@ -3866,12 +3892,12 @@ impl AppView {
                 let Some(agent) = self.agents.get(&id) else {
                     return TickDemand::None;
                 };
-                let fast = agent.scrollback.needs_animation()
+                let fast = Self::agent_surface_animating(agent)
+                    || agent.scrollback.needs_animation()
                     || agent.todo.list_state.needs_tick()
                     || agent.todo.badge_needs_tick()
                     || agent.tasks.needs_tick()
                     || agent.acp_synced_generation != agent.session.available_commands_generation
-                    || !agent.session.state.is_idle()
                     || agent.session.loading_replay
                     || agent
                         .mcp_init_progress
@@ -3949,21 +3975,39 @@ impl AppView {
                 TickDemand::None
             }
             ActiveView::AgentDashboard => {
+                // Row classification is the dashboard's own single source of
+                // truth (`build_rows` renders Working/NeedsInput rows with a
+                // spinner icon / blinking bullet): a turn-idle agent with a
+                // running bg task / scheduled loop still classifies Working
+                // (`has_background_work`), and a pending `question_view`
+                // classifies NeedsInput. Subagent-only and active-workflow
+                // work are kept as explicit terms (the live dashboard does
+                // not surface subagent rows, and workflows are not part of
+                // `classify_top_level`).
                 let agents_need = self.agents.values().any(|agent| {
-                    !agent.session.state.is_idle()
-                        || !agent.permission_queue.is_empty()
-                        || agent.session.loading_replay
+                    crate::views::dashboard::row::classify_top_level(agent)
+                        != crate::views::dashboard::RowState::Idle
                         || agent
                             .subagent_sessions
                             .values()
                             .any(|info| !info.finished && info.workflow_run_id.is_none())
                         || agent.workflow_runs.iter().any(|run| run.is_active())
                 });
+                // Leader-roster sessions are not local agents; a Working /
+                // NeedsInput roster row still paints a spinner / blinking
+                // bullet driven by `spinner_tick`.
+                let roster_need = self.leader_roster.iter().any(|entry| {
+                    matches!(
+                        entry.activity,
+                        crate::app::roster::RosterActivity::Working
+                            | crate::app::roster::RosterActivity::NeedsInput
+                    )
+                });
                 let dash_search = self.dashboard.as_ref().is_some_and(|d| {
                     d.dispatch.file_search.context().is_some()
                         || d.peek_reply.file_search.context().is_some()
                 });
-                if agents_need || dash_search {
+                if agents_need || dash_search || roster_need {
                     TickDemand::Fast
                 } else {
                     TickDemand::None
@@ -3998,7 +4042,16 @@ impl AppView {
                 };
                 let has_perms = !agent.permission_queue.is_empty();
                 let elapsed = if parked { None } else { agent.turn_elapsed() };
-                let is_busy = agent.session.state.is_busy() && !parked;
+                // Goal stages (planning / verifying / inter-round gaps) run
+                // while the session is Idle but the goal stays Active — the
+                // tab-title spinner and OSC 9;4 progress must keep running so
+                // the "still working" chrome matches the status-bar goal chip
+                // (same Active predicate as `agent_surface_animating`).
+                let goal_stage_live = agent
+                    .goal_state
+                    .as_ref()
+                    .is_some_and(|g| g.status == crate::app::agent::GoalDisplayStatus::Active);
+                let is_busy = (agent.session.state.is_busy() || goal_stage_live) && !parked;
                 (name, model, activity, has_perms, elapsed, is_busy)
             } else {
                 (None, None, None, false, None, false)
@@ -4206,7 +4259,6 @@ pub(crate) mod tests {
             cwd: std::path::PathBuf::from("/tmp"),
             is_worktree: false,
             forked_from: None,
-            synthetic_running_prompt: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
             yolo_mode: false,
@@ -4290,6 +4342,244 @@ pub(crate) mod tests {
         // Back to idle: the tick demand must drop again (no 30fps leak).
         app.agents.get_mut(&background).unwrap().session.state = AgentState::Idle;
         assert_eq!(app.tick_demand(), TickDemand::None);
+    }
+    #[test]
+    fn tick_demand_fast_while_goal_active_on_idle_session() {
+        // Goal stages (planning / verifying / inter-round classifier gaps)
+        // run shell-side while the pager session is Idle, but the status-bar
+        // goal chip keeps its spinner + live elapsed clock for the whole
+        // Active goal — so Active must arm ticks independently of `is_idle`.
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.status = crate::app::agent::GoalDisplayStatus::Active;
+        app.agents.get_mut(&id).unwrap().goal_state = Some(goal);
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Fast,
+            "an Active goal on an Idle session must keep the tick loop alive"
+        );
+        // Paused goals freeze their chip (no spinner, no live clock): no
+        // demand of their own.
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .goal_state
+            .as_mut()
+            .unwrap()
+            .status = crate::app::agent::GoalDisplayStatus::UserPaused;
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::None,
+            "a paused goal must not keep ticks alive"
+        );
+    }
+    #[test]
+    fn tick_demand_fast_while_idle_with_running_bg_task() {
+        // A turn-idle agent with a running background task shows the
+        // "still running" watcher cue + the status-bar running-count chip.
+        // Demand must come from live `watchers()` data, not the tasks pane's
+        // synced entries (minimal mode never syncs them).
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
+        assert_eq!(app.tick_demand(), TickDemand::None);
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .session
+            .bg_tasks
+            .insert("bg-1".into(), running_bg_task("bg-1"));
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Fast,
+            "a running bg task under an Idle turn must keep ticks alive"
+        );
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .session
+            .bg_tasks
+            .remove("bg-1");
+        assert_eq!(app.tick_demand(), TickDemand::None);
+    }
+    #[test]
+    fn tick_demand_fast_while_dashboard_open_with_bg_work() {
+        // Dashboard rows classify a turn-idle agent with a running bg task
+        // as Working (spinner row + header chip); demand must follow the
+        // dashboard's own row classification.
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        app.active_view = ActiveView::AgentDashboard;
+        app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+        assert_eq!(app.tick_demand(), TickDemand::None);
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .session
+            .bg_tasks
+            .insert("bg-1".into(), running_bg_task("bg-1"));
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Fast,
+            "a Working dashboard row must keep the spinner animating"
+        );
+    }
+    #[test]
+    fn tick_demand_fast_while_dashboard_roster_working() {
+        // Leader-roster sessions are not local agents; their Working /
+        // NeedsInput rows (spinner icon / blinking bullet) must still arm
+        // ticks while the dashboard is open.
+        let mut app = test_app();
+        app.active_view = ActiveView::AgentDashboard;
+        app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+        assert_eq!(app.tick_demand(), TickDemand::None);
+        app.leader_roster = vec![crate::app::roster::RosterEntry {
+            session_id: "s1".into(),
+            title: None,
+            cwd: "/tmp".into(),
+            is_worktree: false,
+            model_id: None,
+            yolo: false,
+            activity: crate::app::roster::RosterActivity::Working,
+            resident: false,
+            last_change_unix_ms: 0,
+            origin: crate::app::roster::RosterOrigin::default(),
+        }];
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Fast,
+            "a Working roster row must keep the dashboard spinner animating"
+        );
+        app.leader_roster[0].activity = crate::app::roster::RosterActivity::Idle;
+        assert_eq!(app.tick_demand(), TickDemand::None);
+    }
+    #[test]
+    fn tick_redraws_while_goal_active_on_idle_session() {
+        // Second layer: demand alone would spin the tick loop while the
+        // screen stays frozen — `tick()` must request redraws for the goal
+        // chip's spinner + live clock at the spinner cadence.
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
+        app.contextual_hints.image_input = false; // no clipboard-tip noise
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.status = crate::app::agent::GoalDisplayStatus::Active;
+        app.agents.get_mut(&id).unwrap().goal_state = Some(goal);
+        let redraws = (0..8).filter(|_| app.tick()).count();
+        assert!(
+            redraws >= 1,
+            "an Active goal on an Idle session must drive redraws, got {redraws} in 8 ticks"
+        );
+        // Paused goal: the chip has no time-based content; tick must not
+        // redraw for it.
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .goal_state
+            .as_mut()
+            .unwrap()
+            .status = crate::app::agent::GoalDisplayStatus::UserPaused;
+        let redraws = (0..8).filter(|_| app.tick()).count();
+        assert_eq!(redraws, 0, "a paused goal must not drive redraws");
+    }
+    #[test]
+    fn tick_redraws_while_idle_watchers_running() {
+        // The idle "still running" cue + running-count chip pulse at the
+        // spinner cadence from live watchers data (minimal mode never syncs
+        // the tasks pane, so `tasks.tick()` cannot be the redraw source).
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
+        app.contextual_hints.image_input = false; // no clipboard-tip noise
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .session
+            .bg_tasks
+            .insert("bg-1".into(), running_bg_task("bg-1"));
+        let redraws = (0..8).filter(|_| app.tick()).count();
+        assert!(
+            redraws >= 1,
+            "a running bg task under an Idle turn must drive redraws, got {redraws} in 8 ticks"
+        );
+    }
+    #[test]
+    fn notifications_stay_busy_while_goal_active_on_idle_session() {
+        // Stage windows (verifying / planning / inter-round gaps): the
+        // session is Idle but the goal stays Active. The tab-title spinner
+        // and OSC 9;4 progress must keep running — previously `is_busy`
+        // followed `session.state` alone and killed both, which read as
+        // "the running indicator froze" while the TUI itself stayed live.
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::Idle;
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.status = crate::app::agent::GoalDisplayStatus::Active;
+        agent.goal_state = Some(goal);
+        app.notification_service = crate::notifications::NotificationService::new(
+            crate::notifications::NotificationConfig {
+                progress_bar: true,
+                ..Default::default()
+            },
+        );
+        app.update_notifications();
+        assert!(
+            app.notification_service.is_progress_active(),
+            "an Active goal must keep the OSC 9;4 progress alive while the session is Idle"
+        );
+        let title_esc = app.pending_notification_escapes.as_deref().unwrap_or("");
+        let spinner_chars = [
+            '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}',
+            '\u{2827}',
+        ];
+        assert!(
+            spinner_chars.iter().any(|c| title_esc.contains(*c)),
+            "the tab title must keep its spinner while the goal is Active, got: {title_esc:?}"
+        );
+        // Paused goal: the chrome goes quiet again (no spinner, no progress).
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .goal_state
+            .as_mut()
+            .unwrap()
+            .status = crate::app::agent::GoalDisplayStatus::UserPaused;
+        app.pending_notification_escapes = None;
+        app.update_notifications();
+        assert!(
+            !app.notification_service.is_progress_active(),
+            "a paused goal must let the OSC 9;4 progress clear"
+        );
+    }
+    /// A running background-task record for the live-data demand/redraw
+    /// tests (inserted directly into `session.bg_tasks`, deliberately
+    /// WITHOUT a `tasks.sync()` so the synced-entries path stays empty —
+    /// the minimal-mode freeze is exactly that gap).
+    fn running_bg_task(task_id: &str) -> crate::app::agent::BgTaskState {
+        crate::app::agent::BgTaskState {
+            task_id: task_id.into(),
+            tool_call_id: "tool-1".into(),
+            command: "sleep 5".into(),
+            description: None,
+            cwd: String::new(),
+            output_file: String::new(),
+            status: crate::app::agent::BgTaskStatus::Running,
+            start_time: std::time::SystemTime::now(),
+            end_time: None,
+            exit_code: None,
+            signal: None,
+            stdout: String::new(),
+            stdout_line_count: 0,
+            truncated: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            is_monitor: false,
+            restored_from_replay: false,
+        }
     }
     #[test]
     fn dashboard_x11_primary_provenance_bypasses_unrelated_clipboard_image() {
@@ -4447,7 +4737,6 @@ pub(crate) mod tests {
             cwd: std::path::PathBuf::from("/tmp"),
             is_worktree: false,
             forked_from: None,
-            synthetic_running_prompt: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
             yolo_mode: false,

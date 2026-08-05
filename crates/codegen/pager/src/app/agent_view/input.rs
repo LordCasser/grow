@@ -1012,6 +1012,18 @@ impl AgentView {
                 _ => InputOutcome::Unchanged,
             };
         }
+        if self.goal_interrupt_view.is_some() && self.active_pane != AgentPane::Scrollback {
+            return match ev {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    if key!('q', CONTROL).matches(key) {
+                        return InputOutcome::Unchanged;
+                    }
+                    self.handle_goal_interrupt_key(key)
+                }
+                Event::Mouse(mouse) => self.handle_goal_interrupt_mouse(mouse),
+                _ => InputOutcome::Unchanged,
+            };
+        }
         if self.question_view.is_some() && self.active_pane != AgentPane::Scrollback {
             return match ev {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {

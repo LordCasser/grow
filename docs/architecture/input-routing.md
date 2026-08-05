@@ -70,6 +70,45 @@ evaluator: a Continue verdict injects the next directive inside the same turn
 task, and its `completed` proposals are still scheduled as stages by the
 turn-end drain.
 
+### Goal rounds are normal turns to the pager
+
+A `GoalSummary` round is a full prompt turn: it carries a prompt id, runs
+through the prompt-turn machinery, and ends with a durable `TurnCompleted`.
+The pager therefore adopts it like any user turn — the round shows as a normal
+`TurnRunning` (status line, elapsed/token counters, Ctrl+C / Ctrl+Enter
+hints) alongside the Goal status chip, and input semantics are identical to a
+running normal turn:
+
+- **Enter** queues the message (server FIFO, visible row); the round keeps
+  running and the message runs at the next turn boundary.
+- **Send now** (Ctrl+Enter / double-Enter / queue-row send-now) under an
+  active Goal is foreground steering: the shell soft-preempts the current
+  sampling and the message is processed immediately, without cancelling the
+  round or pausing the Goal. Outside Goal it retains cancel-and-promote
+  semantics.
+- The round's durable terminal runs the ordinary first-wins finalizer (one
+  "Worked for X" marker); the next `GoalSummary` round is adopted in turn, so
+  a Goal reads as consecutive normal turns.
+- The goal directive itself is orchestrator text and is never painted as a
+  user bubble; the Goal chip/loop chrome carries that context.
+
+Verification stages are not turns: while a verifier/classifier stage runs the
+pager stays Idle with a "Verifying (n/m)" chip, and the verification window
+keeps its send protection (all send entries are rejected with a toast and the
+queue rows show a "⏳ verifying" cue). Known limitation: while the round waits
+on a tool (task-output wait) there is no in-flight sampling, so steering
+arrives at the next model boundary rather than instantly.
+
+Because a Goal round has no client `PromptResponse` rail, its handoff to the
+next round runs entirely on the durable TurnCompleted path: the pager adopts
+Goal rounds with **driver semantics** (`attached_as_viewer = false`) so
+`apply_terminal_outcome` consumes the stashed next round instead of
+discarding it like a passive viewer would. Ordering caveat: if the durable
+TurnCompleted arrives before the promoting broadcast (Idle at terminal time,
+no turn to finalize), the round is not adopted retroactively — the 30s
+Running-watchdog's prompt-status query covers that window via its Terminal
+answer, and the next round's promote re-adopts normally.
+
 Goal status and Behavior are orthogonal:
 
 - `set` selects Goal Behavior and changes the definition revision;

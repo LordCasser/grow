@@ -1600,6 +1600,14 @@ impl acp::Agent for MvpAgent {
                 .and_then(|m| m.get("rewindIfPristine"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            // Explicit user "Pause goal" intent from the Goal interrupt panel;
+            // absent for older clients and all programmatic cancels.
+            let pause_goal = args
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("pauseGoal"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let dispatch_lock = self.dispatch_lock(&args.session_id);
             let _dispatch_guard = dispatch_lock.lock().await;
             let _ = handle
@@ -1608,6 +1616,7 @@ impl acp::Agent for MvpAgent {
                     cancel_subagents,
                     kill_background_tasks: false,
                     rewind_if_pristine,
+                    pause_goal,
                     trigger: cancel_trigger,
                 });
         }
