@@ -550,6 +550,86 @@
         );
     }
 
+    /// Full user-scenario simulation of the Goal-round "Sending…" hang:
+    /// Goal Executing (Active goal + the shell running a non-adoptable Goal
+    /// round) → the user presses Enter on a plain prompt → the message must
+    /// go to the SERVER queue (no TurnSubmitting / "Sending…", the Goal
+    /// keeps executing) → the round ends (running == None) → the shell
+    /// promotes the queued message → the pager adopts it as a normal
+    /// Running turn via the turn-start shim.
+    #[test]
+    fn goal_round_plain_prompt_queues_then_promotes_at_round_end() {
+        use crate::app::actions::{Action, Effect};
+        use crate::app::dispatch::dispatch;
+
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+        // Goal Executing display state (Active + Executing, NOT verifying).
+        app.agents.get_mut(&id).unwrap().goal_state =
+            Some(crate::app::agent::GoalDisplayState::test_stub());
+
+        // The shell broadcasts the Goal round as running (non-adoptable).
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], Some("goal-summary-round-1")),
+            &mut app
+        ));
+        assert!(app.agents[&id].synthetic_turn_in_flight());
+
+        // The user presses Enter on "hello" while the Goal round runs.
+        let effects = dispatch(Action::SendPrompt("hello".into()), &mut app);
+        let hello_pid = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::SendPrompt { prompt_id, .. } => Some(prompt_id.clone()),
+                _ => None,
+            })
+            .expect("the prompt must be sent to the server queue");
+
+        let agent = &app.agents[&id];
+        assert!(
+            agent.session.state.is_idle(),
+            "no 'Sending…': the message must take the server queue, got {:?}",
+            agent.session.state
+        );
+        assert!(
+            agent.session.pending_prompts.is_empty(),
+            "no local drip-feed row"
+        );
+        assert_eq!(
+            agent.goal_state.as_ref().map(|g| g.status),
+            Some(crate::app::agent::GoalDisplayStatus::Active),
+            "the Goal must keep executing — nothing pauses or cancels it"
+        );
+        assert!(
+            app.shared_prompt_queue("sess-1")
+                .is_some_and(|q| q.iter().any(|e| e.id == hello_pid)),
+            "the queued row must be visible in the queue pane"
+        );
+
+        // The Goal round ends: the shell broadcasts running == None.
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[], None),
+            &mut app
+        ));
+        assert!(!app.agents[&id].synthetic_turn_in_flight());
+
+        // The shell promotes the queued message → the pager adopts it as a
+        // normal Running turn (turn-start shim).
+        assert!(handle_queue_changed(
+            &queue_changed_running("sess-1", &[&hello_pid], Some(&hello_pid)),
+            &mut app
+        ));
+        let agent = &app.agents[&id];
+        assert!(
+            agent.session.state.is_turn_running(),
+            "the promoted message must become a Running turn"
+        );
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some(hello_pid.as_str())
+        );
+    }
+
     /// Cron (`scheduler-fired-…`) is a synthetic id but is client-driven via
     /// `MvpAgent::prompt()` and DOES emit `prompt_complete`, so the queue-changed
     /// adoption must STILL fire for it (the exit exists, so it won't strand).

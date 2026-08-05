@@ -633,6 +633,11 @@ impl AgentView {
                     // 3) Idle / nothing to send → no-op (not send-like-Enter).
                     let text = self.prompt.text().trim().to_string();
                     let turn_running = self.session.state.is_turn_running();
+                    // A Goal round runs as a non-adoptable synthetic turn the
+                    // pager never adopts, so `is_turn_running()` is false
+                    // while the shell works. Send-now must still reach the
+                    // Goal as steering — treat the round as running here.
+                    let running_for_send_now = turn_running || self.synthetic_turn_in_flight();
                     if !text.is_empty() {
                         // Verification protection: same toast as every other
                         // send entry; the draft stays in the composer.
@@ -640,7 +645,7 @@ impl AgentView {
                             self.show_toast(crate::app::dispatch::GOAL_VERIFYING_TOAST);
                             return InputOutcome::Changed;
                         }
-                        if !turn_running {
+                        if !running_for_send_now {
                             return InputOutcome::Changed;
                         }
                         // Paste-then-immediate-send: an image probe is still

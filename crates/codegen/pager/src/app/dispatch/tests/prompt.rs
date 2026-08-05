@@ -4383,3 +4383,78 @@ fn plain_prompt_during_synthetic_turn_goes_to_server_queue() {
         "the prompt must be sent to the server queue: {effects:?}"
     );
 }
+
+/// Key-press level of the same scenario: Goal Executing (synthetic round in
+/// flight) + pressing Enter on "hello" — the full input → dispatch path must
+/// queue the message server-side without entering "Sending…".
+#[test]
+fn goal_executing_enter_queues_without_sending_state() {
+    use crate::app::agent::AgentId;
+    use crate::app::dispatch::dispatch;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        agent.note_synthetic_running_prompt("goal-summary-round-1");
+        agent.prompt.set_text("hello");
+    }
+
+    let outcome = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let crate::app::app_view::InputOutcome::Action(action) = outcome else {
+        panic!("Enter must dispatch the send, got {outcome:?}");
+    };
+    let _ = dispatch(action, &mut app);
+
+    let agent = &app.agents[&id];
+    assert!(
+        agent.session.state.is_idle(),
+        "no 'Sending…' on the key path: {:?}",
+        agent.session.state
+    );
+    assert!(agent.prompt.text().is_empty(), "composer consumed");
+}
+
+/// Send-now (Ctrl+Enter) during a Goal round must still reach the Goal as
+/// steering — the synthetic round is treated as running for send-now
+/// purposes, not a silent no-op (the pager never adopts the round, so
+/// `is_turn_running()` alone would wrongly short-circuit it).
+#[test]
+fn goal_executing_ctrl_enter_interjects_as_steering() {
+    use crate::app::actions::Effect;
+    use crate::app::agent::AgentId;
+    use crate::app::dispatch::dispatch;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        agent.note_synthetic_running_prompt("goal-summary-round-1");
+        agent.prompt.set_text("steer now");
+    }
+
+    let outcome = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+    let crate::app::app_view::InputOutcome::Action(action) = outcome else {
+        panic!("Ctrl+Enter must dispatch steering, got {outcome:?}");
+    };
+    let effects = dispatch(action, &mut app);
+
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendInterject { .. })),
+        "steering must reach the shell as an interjection: {effects:?}"
+    );
+}
