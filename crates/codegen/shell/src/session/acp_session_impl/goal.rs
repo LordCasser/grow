@@ -540,6 +540,12 @@ impl SessionActor {
         }
         self.goal_notify_sender()
             .emit_goal_updated(&mut self.goal_tracker.lock(), used, finished);
+        // Messages queued while the final report was running were captured in
+        // Goal mode. Completion exits Goal before FIFO promotion, so rebase
+        // those user-owned rows now or their stale mode would recreate a Goal
+        // from ordinary follow-up text.
+        self.retag_queued_goal_user_prompts(crate::session::behavior::PromptMode::Agent)
+            .await;
         self.behavior.lock().select_behavior(None);
         *self.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
         self.persist_behavior_state();

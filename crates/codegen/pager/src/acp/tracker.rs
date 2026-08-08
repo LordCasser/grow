@@ -4744,7 +4744,7 @@ mod tests {
         assert_eq!(
             tracker.activity(),
             Some(TurnActivity::Waiting(WaitingReason::task_output())),
-            "precondition: sendable wait is live"
+            "precondition: parkable wait is live"
         );
         tracker.handle_update(
             thought_chunk("resuming, let me check the output…"),

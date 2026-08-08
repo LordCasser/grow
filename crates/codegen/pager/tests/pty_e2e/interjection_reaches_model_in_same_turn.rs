@@ -52,7 +52,7 @@ async fn interjection_reaches_model_in_same_turn() {
     harness.inject_keys(CTRL_ENTER).expect("steer chord");
     turn_one.release();
 
-    // Cancel-and-send: message leaves the composer and commits as a scrollback
+    // Steering: the message leaves the composer and commits as a scrollback
     // user block (not just the draft line that also carries ❯).
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {

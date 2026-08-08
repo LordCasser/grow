@@ -377,8 +377,8 @@ pub(super) fn dispatch_accept_word_select_tip(app: &mut AppView) -> Vec<Effect> 
     )
 }
 
-/// After queuing a follow-up mid-turn, tip that empty Enter force-sends the top
-/// queued item. Gated by the per-tip `contextual_hints.send_now` gate (default
+/// After queuing a follow-up mid-turn, tip that empty Enter steers the top
+/// queued prompt. Gated by the per-tip `contextual_hints.send_now` gate (default
 /// ON). Seen-gated in-memory via `app.tip_seen_counts`.
 fn maybe_show_send_now_tip(app: &mut AppView) {
     if !app.contextual_hints.send_now {
@@ -819,7 +819,7 @@ pub(super) fn dispatch_send_prompt_inner(
 
         // If the user queues a follow-up while a turn is already running, surface
         // a short tip advertising send-now — plain Enter queues; Enter again on
-        // the emptied composer sends the queued message now (cancel-and-send).
+        // the emptied composer steers the queued prompt into the active turn.
         let queued_while_running = agent.session.state.is_turn_running();
 
         // Composer-recognized slash tokens at submit time: styles the
@@ -846,8 +846,9 @@ pub(super) fn dispatch_send_prompt_inner(
             "plain prompt send routing decision",
         );
 
-        // Parked + held occupancy → append; empty held → cancel-and-send.
-        let parked_sendable_wait = agent.is_parked_on_sendable_wait();
+        // Parked is presentation-only. This request still enters the shell's
+        // authoritative FIFO; explicit send-now/steer paths are separate.
+        let parked_wait = agent.is_parked_wait();
         if immediate_server_send {
             let session_id = agent
                 .session
@@ -895,7 +896,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 Some(&sid_str),
                 Some(serde_json::json!({ "kind": "prompt", "len": text.len() })),
             );
-            if queued_while_running && !parked_sendable_wait {
+            if queued_while_running && !parked_wait {
                 maybe_show_send_now_tip(app);
             }
             return vec![Effect::SendPrompt {
@@ -921,7 +922,7 @@ pub(super) fn dispatch_send_prompt_inner(
     }
 
     // Mid-turn local queue: advertise send-now via the ephemeral tip (skip during
-    // a sendable wait — the inline hint already says it).
+    // a parked wait — the inline hint already explains its queue semantics).
     if tip_send_now_after_queue {
         let inline_hint_shown = app
             .agents

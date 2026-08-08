@@ -255,8 +255,9 @@ impl SessionActor {
     /// intent (`pause_goal: true` from the Goal interrupt panel). Every other
     /// cancel — plain Esc/Ctrl+C outside Goal, StopTurnOnly /
     /// StopTurnAndSubagents, subagent teardown, lifecycle shutdown — leaves an
-    /// active Goal untouched: it stays Active and may be continued by the
-    /// next user input (see `handle_turn_end`).
+    /// active Goal untouched. The command loop wakes the idle arbiter after
+    /// foreground/FIFO settlement, so autonomous execution can resume without
+    /// waiting for another user input.
     pub(super) async fn maybe_auto_pause_goal_on_cancel(&self, pause_goal: bool) {
         if pause_goal {
             self.auto_pause_goal_if_active(crate::session::goal_tracker::GoalPauseReason::User)

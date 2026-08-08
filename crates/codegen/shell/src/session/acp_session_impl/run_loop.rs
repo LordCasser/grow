@@ -566,8 +566,24 @@ pub(super) async fn run_session(
                 if let Some(notification) = replay_buffer.flush() {
                     session.emit_buffered(notification).await;
                 }
+                // Capture ownership before `handle_completion` settles and
+                // removes the foreground. Goal degradation is based on the
+                // structured producer-stamped origin, never on the currently
+                // selected Behavior: a user turn may fail while a background
+                // Goal stage remains perfectly healthy.
+                let completed_origin = {
+                    let state = session.state.lock().await;
+                    state
+                        .foreground
+                        .regular()
+                        .filter(|task| task.prompt_id == prompt_id)
+                        .map(|task| task.origin.clone())
+                };
                 let (turn_succeeded, suppress_goal_continuation, infra_pause_message) =
-                    SessionActor::post_turn_goal_degradation_plan(&result);
+                    SessionActor::post_turn_goal_degradation_plan(
+                        &result,
+                        completed_origin.as_ref(),
+                    );
                 session.handle_completion(prompt_id, result).await;
                 // Drain any monitor events that were routed to the mid-turn buffer
                 // but arrived after the turn ended (race between is_turn_active and buffer push).
@@ -603,7 +619,6 @@ pub(super) async fn run_session(
                 }
                 // If no user prompt started, check for pending notifications
                 SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;
-                session.idle_arbiter.notify_one();
                 session.emit_session_idle_if_idle().await;
                 // Layer-3 LazinessDetector: spawn an idle-triggered
                 // classifier dispatch. The method is a no-op when the
@@ -1289,6 +1304,11 @@ pub(super) async fn run_session(
                             )
                             .await;
                         }
+                        // Cancellation settles the sole foreground owner. Once
+                        // FIFO/manual work has had first refusal, wake the same
+                        // idle arbiter used by normal completion so an Active
+                        // Goal cannot become dormant after Stop Turn Only.
+                        session.idle_arbiter.notify_one();
                     }
                     SessionCommand::CompactSession { user_context, respond_to } => {
                         session

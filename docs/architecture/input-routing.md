@@ -65,6 +65,13 @@ Goal is an exclusive visible Behavior but not an exclusive foreground owner.
 
 Goal continuation is an internal regular turn started by the idle hook, not a queue item or hidden control prompt. See [goal-continuation.md](./goal-continuation.md).
 
+Turn failure ownership follows the same structured-origin rule. A provider or
+tool-definition error in a user turn remains that user's terminal and cannot
+pause an otherwise healthy Goal planner/verifier. Only a
+`GoalContinuation`/`GoalFinalization` failure enters the foreground Goal
+degradation path; background stage failures are handled by their own lease and
+retry counters.
+
 ## Compaction
 
 Compaction is the only non-regular foreground owner. Manual and automatic compaction cannot overlap a regular turn or each other. While it owns foreground, user input may queue but cannot steer it. When compaction ends, the same FIFO-first idle arbiter resumes scheduling.
@@ -72,5 +79,10 @@ Compaction is the only non-regular foreground owner. Manual and automatic compac
 ## Recovery
 
 `TurnCompleted` is the durable lifecycle authority. Prompt response metadata is an idempotent secondary source. The pager watchdog may query shell prompt status when a submission appears stalled, but elapsed time alone never fabricates a terminal.
+
+Cancellation settles the same foreground owner and then follows FIFO-first
+idle admission. If no queued user/manual work claims the slot, an Active Goal
+is woken immediately; Stop Turn Only cannot leave it dormant until the next
+unrelated user message.
 
 An Active Goal reload keeps its v3 persistent phase/plan/revisions and settled token counters, clears transient stage leases, reconciles Goal Behavior, and is resumed by the idle hook. Incompatible or malformed Goal state is diagnosed, deleted, and followed by a cleared projection after replay rather than migrated through legacy routing rules.

@@ -112,7 +112,7 @@ async fn spinner_reappears_after_wait_resumes() {
             )
         });
     harness
-        .wait_for_text("send a message to interrupt", Duration::from_secs(30))
+        .wait_for_text("Enter queues", Duration::from_secs(30))
         .unwrap_or_else(|_| {
             panic!(
                 "parked interrupt cue never appeared; screen:\n{}",

@@ -13,7 +13,7 @@
             insert_running_task(agent, "t10", "sleep 10");
             insert_running_task(agent, "t15", "sleep 15");
             simulate_task_output_wait(agent, "t15");
-            assert!(agent.is_parked_on_sendable_wait());
+            assert!(agent.is_parked_wait());
             assert_eq!(count_turn_markers(agent), 0, "the park writes no row");
         }
 

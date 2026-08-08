@@ -122,6 +122,14 @@ impl PromptOrigin {
     pub fn is_synthetic(&self) -> bool {
         !matches!(self, Self::User)
     }
+    /// Whether this foreground turn is owned by the Goal runtime rather than
+    /// merely occurring while Goal Behavior is selected.
+    pub fn is_goal_internal(&self) -> bool {
+        matches!(
+            self,
+            Self::GoalContinuation { .. } | Self::GoalFinalization { .. }
+        )
+    }
     /// Synthetic wake work that a newer user prompt may replace.
     pub fn is_preemptible_wake(&self) -> bool {
         matches!(

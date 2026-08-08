@@ -2,24 +2,19 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// A `!` row queued mid-turn stays real bash under empty-Enter send-now:
-/// the row is promoted to run NOW as its own bash turn (silent cancel of the
-/// running turn — no "Turn cancelled by user" marker), never leaking to the
-/// model as prompt/interjection text and never rendering a "❯ !…" block.
+/// A `!` row queued mid-turn is not valid steering input. Empty Enter leaves
+/// it in FIFO without cancelling the regular turn; after that turn ends the
+/// row drains as real bash, never model prompt/interjection text.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 #[cfg(unix)]
 async fn bash_queued_mid_turn_drains_as_bash() {
     let content = ContentController::start().await.expect("start content");
-    content.set_chunk_delay(Some(Duration::from_millis(150)));
-    let step_one = {
-        let mut s = String::from("STEPONE");
-        for i in 0..150 {
-            s.push_str(&format!(" streaming{i}"));
-        }
-        s
-    };
-    let _turn_one = content.expect_agent_turn("running turn before queued bash send-now", step_one);
+    content.seed_llm_config().expect("seed mock LLM config");
+    let mut turn_one = content.expect_agent_turn_blocked(
+        "running turn before queued bash drain",
+        "STEPONE still owns the foreground.",
+    );
 
     let project = tempfile::tempdir().expect("create project dir");
     std::fs::create_dir_all(project.path().join(".git")).expect("create .git");
@@ -45,6 +40,9 @@ async fn bash_queued_mid_turn_drains_as_bash() {
     harness
         .wait_for_text("STEPONE", Duration::from_secs(30))
         .expect("turn 1 streaming");
+    tokio::time::timeout(Duration::from_secs(10), turn_one.wait_blocked())
+        .await
+        .expect("turn 1 reached terminal barrier");
 
     // `QBASH_%s_OK` keeps the output sentinel out of the queue-row text.
     harness
@@ -54,12 +52,32 @@ async fn bash_queued_mid_turn_drains_as_bash() {
         .wait_for_text("QBASH_%s_OK", Duration::from_secs(10))
         .expect("bash command visible as a queued row");
 
-    // Empty Enter is send-now (cancel-and-send): the shell silently cancels
-    // turn 1 and runs the bash row as its own next turn immediately.
-    harness.inject_keys(b"\r").expect("empty Enter send-now");
+    // Empty Enter can only steer prompt-like work. Bash remains queued until
+    // the current foreground owner reaches its real terminal.
+    assert!(
+        !harness.contains_text("Enter:send now"),
+        "non-prompt FIFO row must not advertise prompt steering\nscreen:\n{}",
+        harness.screen_contents()
+    );
+    harness
+        .inject_keys(b"\r")
+        .expect("empty Enter on queued bash");
+    harness.update(Duration::from_millis(500));
+    assert!(
+        !harness.contains_text("QBASH_MIDTURN_OK"),
+        "queued bash ran before its foreground predecessor completed\nscreen:\n{}",
+        harness.screen_contents()
+    );
+    assert!(
+        !harness.contains_text("Turn cancelled by user"),
+        "attempting to steer a bash row must not cancel the turn\nscreen:\n{}",
+        harness.screen_contents()
+    );
+
+    turn_one.release();
     harness
         .wait_for_text("QBASH_MIDTURN_OK", Duration::from_secs(30))
-        .expect("queued bash command executed now (send-now)");
+        .expect("queued bash command executed after FIFO promotion");
     harness
         .wait_for_text("Run (user)", Duration::from_secs(15))
         .expect("Run (user) chrome for the promoted bash turn");
@@ -72,13 +90,6 @@ async fn bash_queued_mid_turn_drains_as_bash() {
         "bash row must not render a user-prompt block\nscreen:\n{}",
         harness.screen_contents()
     );
-    // The send-now cancel of turn 1 is silent.
-    assert!(
-        !harness.contains_text("Turn cancelled by user"),
-        "send-now cancel must not render a cancelled marker\nscreen:\n{}",
-        harness.screen_contents()
-    );
-
     let users = all_user_message_blobs(&content);
     assert!(
         !users.iter().any(|u| u.contains("QBASH")),

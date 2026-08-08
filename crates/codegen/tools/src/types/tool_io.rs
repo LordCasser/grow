@@ -18,7 +18,9 @@ use crate::implementations::grow_build::plan_control::PlanControlInput;
 use crate::implementations::grow_build::read_file::ReadFileInput;
 use crate::implementations::grow_build::search_replace::SearchReplaceInput;
 use crate::implementations::grow_build::todo::TodoWriteInput;
-use crate::implementations::grow_build::update_goal::{UpdateGoalInput, UpdateGoalPlanInput};
+use crate::implementations::grow_build::update_goal::{
+    GetGoalInput, UpdateGoalInput, UpdateGoalPlanInput,
+};
 use crate::implementations::grow_build::web_fetch::WebFetchInput;
 use crate::implementations::grow_build::write::WriteInput;
 use crate::implementations::lsp::LspToolInput;
@@ -75,6 +77,7 @@ pub enum ToolInput {
     SchedulerCreate(crate::implementations::grow_build::scheduler::create::SchedulerCreateInput),
     SchedulerDelete(crate::implementations::grow_build::scheduler::delete::SchedulerDeleteInput),
     SchedulerList(crate::implementations::grow_build::scheduler::list::SchedulerListInput),
+    GetGoal(GetGoalInput),
     UpdateGoal(UpdateGoalInput),
     UpdateGoalPlan(UpdateGoalPlanInput),
     Workflow(crate::implementations::grow_build::workflow::WorkflowToolInput),

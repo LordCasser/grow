@@ -256,10 +256,10 @@ impl ActionRegistry {
         def.default_key.matches(event) || def.alt_keys.iter().any(|k| k.matches(event))
     }
 
-    /// True when the send-now (interject) chord should act or be advertised:
+    /// True when the steering chord should act or be advertised:
     /// turn running and there is something to send. `has_payload` is true for
     /// non-empty composer text, editing a queued row, or a visible queued
-    /// follow-up (empty-composer force-send from the prompt). Idle or no
+    /// follow-up (empty-composer queue-row steering from the prompt). Idle or no
     /// payload remains a no-op (not send-like-Enter).
     pub fn interjection_possible(turn_running: bool, has_payload: bool) -> bool {
         turn_running && has_payload

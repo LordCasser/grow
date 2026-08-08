@@ -23,6 +23,7 @@ const FINAL: &str = "REPARK_FINAL_ANSWER";
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn reparked_wait_stays_markerless() {
     let content = ContentController::start().await.expect("start content");
+    content.seed_llm_config().expect("seed mock LLM config");
     // Gates the background command both waits block on (released at the end).
     let park_flag = content.home().join("repark_flag");
     // Gates the id-extraction hold: created once the wait scripts are enqueued.
@@ -138,7 +139,7 @@ async fn reparked_wait_stays_markerless() {
         harness.update(Duration::from_millis(100));
         let screen = harness.screen_contents();
         screen.contains("1 command still running")
-            && screen.contains("send a message to interrupt")
+            && screen.contains("Enter queues")
             && !screen.contains("Worked for")
     });
     assert!(

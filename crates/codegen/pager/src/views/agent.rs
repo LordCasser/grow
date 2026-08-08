@@ -1651,8 +1651,8 @@ mod tests {
             "mid-turn must not mislabel Enter as send; got {labels:?}"
         );
         assert!(
-            labels.contains(&"send now"),
-            "mid-turn with composer text must advertise the send-now (interject) chord; got {labels:?}"
+            labels.contains(&"steer"),
+            "mid-turn with composer text must advertise the steering chord; got {labels:?}"
         );
     }
     /// Empty composer + mid-turn queue: bare Enter is send-now in both normal

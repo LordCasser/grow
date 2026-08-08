@@ -13,8 +13,6 @@ mod common;
 mod auto_wake_cancel_preserves_queued_user_prompt;
 #[path = "pty_e2e/bash_queued_mid_turn_drains_as_bash.rs"]
 mod bash_queued_mid_turn_drains_as_bash;
-#[path = "pty_e2e/cancel_discards_buffered_interjection.rs"]
-mod cancel_discards_buffered_interjection;
 #[path = "pty_e2e/cancel_then_resend_prompt_appears_once.rs"]
 mod cancel_then_resend_prompt_appears_once;
 #[path = "pty_e2e/ctrl_c_cancel_during_stream_recovers_cleanly.rs"]
@@ -49,7 +47,5 @@ mod removed_queued_prompt_never_sent;
 mod send_now_tip_after_mid_turn_queue;
 #[path = "pty_e2e/send_then_ctrlc_rewinds_to_composer_no_history_dup.rs"]
 mod send_then_ctrlc_rewinds_to_composer_no_history_dup;
-#[path = "pty_e2e/verify_bashq_claim2_force_interject.rs"]
-mod verify_bashq_claim2_force_interject;
 #[path = "pty_e2e/verify_bashq_claim3_edit_keeps_bash.rs"]
 mod verify_bashq_claim3_edit_keeps_bash;

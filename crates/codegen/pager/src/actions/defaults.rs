@@ -590,11 +590,10 @@ pub(super) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<Action
         // ── Prompt ───────────────────────────────────────────────────
         ActionDef {
             id: ActionId::InterjectPrompt,
-            // "send now" label: Enter queues a follow-up while a turn runs;
-            // this chord is cancel-and-send — stop the current turn and run
-            // the message as the next one ("send now").
-            label: "send now",
-            description: "Send now while running (cancels the current turn)",
+            // Plain Enter queues while a turn runs; this chord appends the
+            // message to that identified turn instead.
+            label: "steer",
+            description: "Steer the current turn",
             default_key: if in_apple_terminal {
                 key!('o', CONTROL)
             } else if in_vscode_family {
@@ -618,7 +617,7 @@ pub(super) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<Action
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Sends a message to the agent mid-turn without cancelling it (interject), so you can steer or add context while it keeps working.\nPlain Enter while a turn is running queues a follow-up for later; this chord merges composer text into the current turn instead.\nWith an empty composer, bare Enter (or this chord) force-sends the top queued follow-up from the prompt — no need to focus the queue pane. On the queue pane, this chord force-sends the selected row.\nReach for it to correct course without losing the turn's progress.",
+                "Sends a message to the agent mid-turn without cancelling it, so you can steer or add context while it keeps working.\nPlain Enter while a turn is running queues a follow-up for later; this chord merges composer text into the current turn instead.\nWith an empty composer, bare Enter (or this chord) steers the top queued prompt into the current turn — no need to focus the queue pane. On the queue pane, this chord steers the selected prompt row.\nReach for it to correct course without losing the turn's progress.",
             ),
         },
         // Prompt history has no key chord: `/history` opens the search panel;

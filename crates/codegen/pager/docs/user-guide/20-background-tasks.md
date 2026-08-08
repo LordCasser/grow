@@ -188,7 +188,7 @@ To toggle the prompt queue instead, press `Ctrl+;`.
 
 ## The Still-Running Status Line
 
-Whenever background work is still running while the agent looks idle — between turns, or while a turn is blocked on a user-interruptible wait — a persistent status line appears above the prompt:
+Whenever background work is still running while the agent looks idle — between turns, or while a turn is blocked on a wait — a persistent status line appears above the prompt:
 
 ```
 ◎ 1 command · 2 monitors · 1 loop · 1 subagent still running
@@ -196,13 +196,13 @@ Whenever background work is still running while the agent looks idle — between
 
 It counts running background commands, monitors, scheduled `/loop` tasks, and background subagents, and updates live as each finishes. Any of them can wake the agent for a new turn (commands and subagents on completion, monitors on events, loops on their timer), so the cue stays up until nothing is left. The running counts live only on this status line: completions land in the transcript as a single "Task completed" chip, and "Worked for" markers stay plain — the transcript never repeats or restates the running counts.
 
-While a turn is waiting on background work (blocked in a `get_task_output` or `wait_tasks` call), the status line adds a hint that typing takes over immediately:
+While a turn is waiting on background work (blocked in a `get_task_output` or `wait_tasks` call), the status line explains the same input contract used by every running turn:
 
 ```
-◎ 1 command still running · send a message to interrupt
+◎ 1 command still running · Enter queues · Ctrl+Enter steers
 ```
 
-The same hint appears as `◎ waiting · send a message to interrupt` when the agent is waiting on something with no live counter (a sleep, or work that already finished). Sending a message interrupts the wait and runs your message right away. The transcript keeps its usual shape throughout: one "Worked for" marker when the turn ends. When a completion wakes the agent and it replies, that reply gets its own "Worked for" marker; a wake the agent answers silently leaves no trace in the transcript — unless it fails, in which case a "Turn failed" line appears even for a silent wake, so a standing instruction never stops executing invisibly.
+The same hint appears as `◎ waiting · Enter queues · Ctrl+Enter steers` when the agent is waiting on something with no live counter (a sleep, or work that already finished). Enter appends a FIFO item; Ctrl+Enter steers the current turn without creating another terminal. An empty Enter with a queued row sends that row now. The transcript keeps its usual shape throughout: one "Worked for" marker when the turn ends. When a completion wakes the agent and it replies, that reply gets its own "Worked for" marker; a wake the agent answers silently leaves no trace in the transcript — unless it fails, in which case a "Turn failed" line appears even for a silent wake, so a standing instruction never stops executing invisibly.
 
 ---
 

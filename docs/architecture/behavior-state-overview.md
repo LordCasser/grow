@@ -79,8 +79,26 @@ Steer 是软中断采样并把补充消息注入同一个 user-visible turn。�
 - 普通补充消息属于当前 Goal 上下文，但不会自动修改 objective/plan revision；只有 `/goal edit` 修改 objective。
 - live tool bridge 缺少任一 Goal 工具时 fail closed 为 Paused，不允许 idle hook 自治；
 - Goal stage 与 Goal turn 创建的 subagent 在 producer 侧携带 `goal_id`，预算归属不读取事件到达时的当前状态。
+- Goal 故障归属同样读取 regular turn 的结构化 origin；仅仅“当前选中 Goal Behavior”不能把普通用户 turn 的 API 错误归因给 Goal。
 
 Goal 的详细状态机见 [goal-continuation.md](./goal-continuation.md)。
+
+### 4.1 中断与切换矩阵
+
+| 当前状态 | 用户动作 | 结果 |
+|---|---|---|
+| 任意 regular turn | Enter | 只进入 FIFO；不改变当前 Behavior |
+| 任意 regular turn | Ctrl+Enter / 双 Enter / prompt queue row “Send now” | 用 `expected_turn_id` steer 当前 turn；不产生新 terminal |
+| 任意 regular turn | Esc / Ctrl+C / Stop Turn Only | 只取消 foreground；Goal 仍 Active，idle arbiter 先提升 FIFO，再决定是否继续 Goal |
+| Active Goal | Goal interrupt panel 的 Pause | 取消 foreground、使 stage lease 失效并进入 Paused；Behavior 仍为 Goal |
+| Active/Paused/Blocked Goal | 切换到其他 Behavior | 拒绝；只有 verified completion 或 `/goal clear` 能离开 Goal |
+| Active/Paused/Blocked Goal | `/goal edit` | 推进 objective revision、清除旧验证证据、回到 Active/Planning；普通补充消息不做这些事 |
+| Plan 或运行中的 Deep Research | 第一次切换 | 进入 8 秒确认窗，不改变状态 |
+| Plan 或运行中的 Deep Research | 确认窗内再次选择同一目标 | 取消该 Behavior 拥有的工作，再应用目标 Behavior |
+| Normal / Clarify / static Workflow | Behavior 切换 | 更新后续 turn 的 Behavior；已开始的 turn 继续使用其捕获的 prompt mode/tool surface |
+| 任意 Behavior | 模型切换、后台 task 完成、synthetic wake | 不解释为 Behavior 切换，也不能确认一个 parked switch |
+
+regular turn 在开始时捕获 `PromptMode`。即使 picker 在它运行期间改变了 session Behavior，tool-definition snapshot、verbatim fork 与该 turn 后续采样仍使用捕获值；新 Behavior 只从下一 foreground owner 生效。这样不会出现 Normal turn 中途暴露 Goal 工具、或 Plan turn 中途丢失 Plan 工具的跨 turn 污染。
 
 ## 5. Pager 对账
 
@@ -102,6 +120,7 @@ Goal Planning/Verifying 只更新 Goal chip，不把 Pager session 伪装成 Run
 - Active Goal 即使 foreground idle，Goal chip 仍保持 tick；
 - watcher/bg task 即使 foreground idle，状态提示仍保持 tick；
 - ACP token firehose 每次只 drain 有界 batch，并在每个 batch 前优先领取已到期 animation deadline，所以 tick 延迟最多再等一个 ACP batch，而不是等流结束。
+- submission watchdog 与视图动画在同一 tick 都会推进；watchdog 产生 effect 时不能跳过 spinner/CTA/Goal chip 的 repaint。
 
 ## 7. 必须保持的不变量
 

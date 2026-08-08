@@ -98,6 +98,10 @@ Goal Behavior 中暴露三个模型工具：
 
 Goal 之外不暴露这些工具。
 
+无参数工具仍必须导出合法的 JSON Schema object 根；`get_goal` 的 wire
+input 是显式空对象 `{}`，不能用无约束 `serde_json::Value` 生成 `null`
+schema，否则 provider 会在采样前拒绝整个 turn。
+
 运行能力按 live tool bridge 判定，不能只看配置开关。只有三个工具同时存在时 Goal idle hook 才能 claim stage；运行中丢失任一工具会以 Infra 原因持久化为 Paused。session restore 同样先验证工具能力，再允许 Active Goal 进入 idle arbiter。
 
 会使当前执行上下文失效的控制（成功的 set/edit/enter/pause/clear）会取消当前 regular turn，但保留已经进入 interjection buffer 的用户补充；status/resume/budget 不取消。判断依据是控制前后的结构化 Goal/Behavior 状态，不是命令文本本身，因此被拒绝的 edit/set 不会误伤 turn。
@@ -111,6 +115,11 @@ Goal runtime 只通过 `drive_goal_on_idle` 启动工作：
 3. stage completion 通过 actor event 提交，只有当前 lease 可改变状态；
 4. 状态改变后唤醒 idle arbiter；
 5. regular turn 完成后先提升用户 FIFO，只有仍 idle 才调用 Goal hook。
+
+regular turn 的错误按 `PromptOrigin` 归属。普通用户补充即使在 Goal
+Behavior 中失败，也不能暂停 Goal；只有 `GoalContinuation` 和
+`GoalFinalization` 的错误进入 foreground Goal 降级。Stop Turn Only 结算
+foreground 后仍会唤醒 idle arbiter，使 Active Goal 在 FIFO 为空时继续。
 
 这个协议取代了 `GoalSummary`、`GoalControl`、`GoalClassifierNudge`、prompt-id 前缀、planner/classifier CAS latch、D1-D6 gate 和 synthetic placeholder cycle。
 
@@ -144,6 +153,9 @@ Goal 黑板没有 prompt-indexed 快照，因此只要 session 中还存在 Acti
 - 用户 FIFO 永远优先于 continuation/finalization；
 - candidate tool 调用永不等待 verifier；
 - complete 只能由 verifier Achieved 后的 finalization terminal 产生。
+- finalization 只有 `Completed + EndTurn` 才能生成 Complete receipt；refusal、cancel、max-turn 和 stationarity 都不是成功汇报；
+- finalization 完成离开 Goal 前，必须把期间排队的 Goal-mode 用户补充重标为 Normal，再允许 FIFO 提升；
+- 用户 turn 的 provider/tool schema 错误不得降级或暂停 Goal；
 - unfinished Goal 与 Goal Behavior 在重载后必须一致；
 - malformed/旧 architecture Goal 不能阻塞 session load，也不能在 replay 后留下幽灵 chip；
 - Goal-owned subagent token 在 reload 后保持单调，Complete receipt 的账单保持冻结；

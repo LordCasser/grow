@@ -382,7 +382,7 @@ impl AgentView {
             self.is_subagent_view,
             self.session.state.is_turn_running() && !self.renders_parked(),
             self.esc_would_cancel_turn(esc_owned_before_agent),
-            !self.visible_queue_is_empty(),
+            self.held_queue_top_sendable(),
             selected_is_user_prompt,
             selected_is_agent_message,
             crate::terminal::terminal_context().shift_enter_unavailable(),

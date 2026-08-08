@@ -2013,6 +2013,12 @@ impl SessionActor {
                 vec![],
                 vec![],
             ),
+            ToolInput::GetGoal(_) => (
+                "Goal: read status".to_string(),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
             ToolInput::Monitor(ref m) => (
                 format!("Start monitor: {}", m.description),
                 acp::ToolKind::Other,

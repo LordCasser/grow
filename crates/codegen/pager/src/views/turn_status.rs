@@ -5,7 +5,7 @@
 //! - Spinner (left, slowed to ~7.5fps)
 //! - Activity label (colored per activity type, truncates if needed)
 //! - Phase timer `Xs` (gray, never truncates)
-//! - Queued-send hint `· N queued — Enter to send now` (gray, sendable waits only)
+//! - Queued-send hint `· N queued — Enter to send now` (gray, parked waits only)
 //! - Fill space
 //! - Turn timer `Xm Ys` and optional token count `⇣Nk` (right-aligned, gray)
 //! - Cancel button `[stop]` (right-aligned, red on hover)
@@ -168,20 +168,10 @@ fn still_running_label(watchers: Watchers) -> Option<String> {
     ])
 }
 
-/// Whether the turn is blocked in a wait the shell aborts as soon as the
-/// user sends a message (`get_task_output` with `timeout_ms`, `wait_tasks`,
-/// `Await*`, and a foreground subagent await — mirrors the shell's blocking
-/// waits, whose send-now routing cancels the blocked turn and runs the new
-/// message next). Typing is actionable during these, which is what the
-/// parked-wait rendering (`AgentView::is_parked_on_sendable_wait` /
-/// `renders_parked`) builds on.
-///
-/// `Subagent` is included: the shell treats a blocked foreground subagent
-/// await like the other blocking waits, so Enter sends promptly and pre-wait
-/// rows read as held. `Model` waits stay excluded — the model is actively
-/// producing the turn, so a message typed there queues behind real work. Pure
-/// predicate over the resolved activity; no turn-lifecycle side effects.
-pub fn is_sendable_wait(activity: &Option<TurnActivity>) -> bool {
+/// Whether a blocked foreground wait uses the compact parked presentation.
+/// Input routing is deliberately not encoded here: Enter queues and explicit
+/// steering stays within the same foreground turn in every regular phase.
+pub fn is_parkable_wait(activity: &Option<TurnActivity>) -> bool {
     matches!(
         activity,
         Some(TurnActivity::Waiting(
@@ -211,7 +201,7 @@ pub struct TurnStatusArgs<'a> {
     pub is_bash_turn: bool,
     pub is_pending_user_input: bool,
     pub watchers: Watchers,
-    /// Parked on a sendable wait (`AgentView::renders_parked`).
+    /// Parked on a blocking wait (`AgentView::renders_parked`).
     pub parked: bool,
     /// Transparent right-side background so the row blends with the
     /// terminal's own background (minimal mode).
@@ -295,8 +285,8 @@ pub fn render_turn_status(
     // Idle or parked: persistent cue (not scrollback — it must never scroll
     // away). Lower priority than the starting-session and drain-blocked cues
     // above. Parked never falls through to the running-turn chrome
-    // (spinner/timers/[stop]) — the wait aborts the moment the user types,
-    // so that chrome would lie.
+    // (spinner/timers/[stop]). This changes presentation only; the underlying
+    // foreground remains Running and owns its single terminal.
     if state.is_idle() || parked {
         // Parked with held queued rows: the queued hint IS the input-semantics
         // story (Enter acts on the queue immediately), so it replaces the
@@ -306,7 +296,7 @@ pub fn render_turn_status(
         } else if held_queue > 0 {
             format!(" \u{00b7} {held_queue} queued")
         } else {
-            " \u{00b7} send a message to interrupt".to_string()
+            " \u{00b7} Enter queues \u{00b7} Ctrl+Enter steers".to_string()
         };
         let cue = match (still_running_label(watchers), parked) {
             (Some(label), true) => Some(format!("{label}{parked_suffix}")),
@@ -554,7 +544,7 @@ pub fn render_turn_status(
         // "Enter to send now" is advertised only when Enter would actually
         // send the top row (bash / client-expanded local rows refuse with a
         // toast — see `AgentView::held_queue_top_sendable`).
-        let suffix = if held_queue > 0 && is_sendable_wait(activity) {
+        let suffix = if held_queue > 0 && is_parkable_wait(activity) {
             if held_queue_top_sendable {
                 format!(" · {held_queue} queued — Enter to send now")
             } else {
@@ -856,13 +846,12 @@ mod tests {
 
     use super::*;
 
-    /// Sendable waits = exactly the wait reasons the shell aborts on a queued
-    /// user prompt (blocking task-output / wait_tasks / Await, and a blocked
-    /// foreground subagent await — all take the send-now path). Model waits —
-    /// where typing only queues behind the actively-streaming turn — and
-    /// non-wait activities keep the busy spinner.
+    /// Parkable waits are blocking task/subagent waits whose compact
+    /// presentation is clearer than active sampling chrome. Model waits and
+    /// non-wait activities keep the busy spinner. This predicate deliberately
+    /// says nothing about input routing.
     #[test]
-    fn sendable_wait_matches_shell_interruptible_waits() {
+    fn parkable_wait_matches_blocking_wait_presentation() {
         let task_wait = |waits| {
             Some(TurnActivity::Waiting(WaitingReason::TaskOutput {
                 task_ids: vec!["t-1".into()],
@@ -870,27 +859,26 @@ mod tests {
                 waits,
             }))
         };
-        assert!(is_sendable_wait(&task_wait(true)));
+        assert!(is_parkable_wait(&task_wait(true)));
         assert!(
-            !is_sendable_wait(&task_wait(false)),
+            !is_parkable_wait(&task_wait(false)),
             "instant polls are not blocking waits"
         );
-        assert!(is_sendable_wait(&Some(TurnActivity::Waiting(
+        assert!(is_parkable_wait(&Some(TurnActivity::Waiting(
             WaitingReason::TasksComplete
         ))));
-        assert!(is_sendable_wait(&Some(TurnActivity::Waiting(
+        assert!(is_parkable_wait(&Some(TurnActivity::Waiting(
             WaitingReason::Sleep
         ))));
-        assert!(!is_sendable_wait(&Some(TurnActivity::Waiting(
+        assert!(!is_parkable_wait(&Some(TurnActivity::Waiting(
             WaitingReason::Model
         ))));
         assert!(
-            is_sendable_wait(&Some(TurnActivity::Waiting(WaitingReason::Subagent))),
-            "the shell aborts a blocked foreground subagent await on send-now, \
-             so Enter during it must read as sendable"
+            is_parkable_wait(&Some(TurnActivity::Waiting(WaitingReason::Subagent))),
+            "a blocked foreground subagent await uses the same parked presentation"
         );
-        assert!(!is_sendable_wait(&Some(TurnActivity::Thinking)));
-        assert!(!is_sendable_wait(&None));
+        assert!(!is_parkable_wait(&Some(TurnActivity::Thinking)));
+        assert!(!is_parkable_wait(&None));
     }
 
     #[test]
@@ -1401,14 +1389,16 @@ mod tests {
 
     #[test]
     fn parked_with_watchers_renders_cue_not_running_chrome() {
-        // The wait aborts as soon as the user types, so busy chrome would lie.
+        // Parked chrome is compact, while the underlying foreground remains running.
         let text = render_parked_with_watchers(Watchers {
             commands: 2,
             ..Watchers::default()
         });
         assert!(
-            text.contains("2 commands still running \u{00b7} send a message to interrupt"),
-            "parked with bg work must render the interruptible still-running cue, got: {text:?}"
+            text.contains(
+                "2 commands still running \u{00b7} Enter queues \u{00b7} Ctrl+Enter steers"
+            ),
+            "parked with bg work must render the queue/steer contract, got: {text:?}"
         );
         assert!(
             !text.contains("Waiting") && !text.contains("[stop]"),
@@ -1420,8 +1410,8 @@ mod tests {
     fn parked_without_watchers_renders_waiting_cue() {
         let text = render_parked_with_watchers(Watchers::default());
         assert!(
-            text.contains("waiting \u{00b7} send a message to interrupt"),
-            "watcherless parked must render the waiting interrupt cue, got: {text:?}"
+            text.contains("waiting \u{00b7} Enter queues \u{00b7} Ctrl+Enter steers"),
+            "watcherless parked must render the waiting queue/steer cue, got: {text:?}"
         );
         assert!(
             !text.contains("[stop]"),
@@ -1448,8 +1438,8 @@ mod tests {
             "parked with a held row must advertise the queued hint, got: {text:?}"
         );
         assert!(
-            !text.contains("send a message to interrupt"),
-            "queued hint replaces the interrupt copy, got: {text:?}"
+            !text.contains("Ctrl+Enter steers"),
+            "queued hint replaces the generic routing copy, got: {text:?}"
         );
     }
 

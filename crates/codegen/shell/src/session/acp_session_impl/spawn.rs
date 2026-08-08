@@ -17,9 +17,22 @@ fn reconcile_goal_prompt_mode(
     }
 }
 
+/// Persistence and capability fallback are separate restore actions. Goal
+/// reconciliation may require writing repaired Behavior state, but must never
+/// be mistaken for evidence that the selected Behavior is unavailable.
+fn restored_behavior_actions(
+    goal_reconciled: bool,
+    selected_behavior_unavailable: bool,
+) -> (bool, bool) {
+    (
+        goal_reconciled || selected_behavior_unavailable,
+        selected_behavior_unavailable,
+    )
+}
+
 #[cfg(test)]
 mod goal_restore_reconciliation_tests {
-    use super::reconcile_goal_prompt_mode;
+    use super::{reconcile_goal_prompt_mode, restored_behavior_actions};
     use crate::session::behavior::PromptMode;
     use crate::session::goal_tracker::GoalStatus;
 
@@ -47,6 +60,16 @@ mod goal_restore_reconciliation_tests {
         assert_eq!(
             reconcile_goal_prompt_mode(Some(GoalStatus::Complete), PromptMode::Goal),
             PromptMode::Agent,
+        );
+    }
+
+    #[test]
+    fn repaired_goal_behavior_is_persisted_without_being_reset_to_normal() {
+        let (persist_repair, reset_to_normal) = restored_behavior_actions(true, false);
+        assert!(persist_repair);
+        assert!(
+            !reset_to_normal,
+            "repairing Normal -> Goal is not an unavailable-Behavior fallback"
         );
     }
 }
@@ -1028,23 +1051,24 @@ pub(crate) async fn spawn_session_actor(
             );
             e
         })?;
-    let mut behavior_normalized = goal_behavior_normalized
-        || match behavior.lock().behavior() {
-            Some(tool_types::BehaviorId::Plan) => agent
-                .tool_bridge()
-                .tool_for_kind(tools::types::tool::ToolKind::PlanControl)
-                .await
-                .is_none(),
-            Some(tool_types::BehaviorId::Workflow) => agent
-                .tool_bridge()
-                .tool_for_kind(tools::types::tool::ToolKind::Workflow)
-                .await
-                .is_none(),
-            Some(tool_types::BehaviorId::DeepResearch) => !background_workflows_enabled,
-            Some(tool_types::BehaviorId::Goal) => false,
-            Some(tool_types::BehaviorId::Clarify) | None => false,
-        };
-    if behavior_normalized {
+    let selected_behavior_unavailable = match behavior.lock().behavior() {
+        Some(tool_types::BehaviorId::Plan) => agent
+            .tool_bridge()
+            .tool_for_kind(tools::types::tool::ToolKind::PlanControl)
+            .await
+            .is_none(),
+        Some(tool_types::BehaviorId::Workflow) => agent
+            .tool_bridge()
+            .tool_for_kind(tools::types::tool::ToolKind::Workflow)
+            .await
+            .is_none(),
+        Some(tool_types::BehaviorId::DeepResearch) => !background_workflows_enabled,
+        Some(tool_types::BehaviorId::Goal) => false,
+        Some(tool_types::BehaviorId::Clarify) | None => false,
+    };
+    let (mut behavior_normalized, reset_unavailable_behavior) =
+        restored_behavior_actions(goal_behavior_normalized, selected_behavior_unavailable);
+    if reset_unavailable_behavior {
         behavior.lock().select_behavior(None);
         *current_prompt_mode.lock() = PromptMode::Agent;
         *turn_prompt_mode.lock() = PromptMode::Agent;

@@ -59,7 +59,20 @@ impl SessionActor {
     pub(super) async fn prepare_tool_definitions_inner(&self) -> Vec<ToolDefinition> {
         let bridge = self.agent.borrow().tool_bridge().clone();
         let mut defs = bridge.tool_definitions_builtins_only().await;
-        let goal_behavior = self.behavior.lock().behavior() == Some(tool_types::BehaviorId::Goal);
+        // A Behavior picker change may land while a regular turn is still
+        // running. Tool snapshots/forks must retain that turn's captured mode;
+        // otherwise a Normal turn can suddenly expose Goal tools (or lose Plan
+        // tools) midway through its identity. Outside a turn the selected
+        // Behavior remains the source of truth for session-info/compaction.
+        let tool_behavior = if self
+            .session_turn_active
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.turn_prompt_mode.lock().behavior()
+        } else {
+            self.behavior.lock().behavior()
+        };
+        let goal_behavior = tool_behavior == Some(tool_types::BehaviorId::Goal);
         if !goal_behavior {
             defs.retain(|definition| {
                 !matches!(
@@ -70,7 +83,7 @@ impl SessionActor {
                 )
             });
         }
-        let plan_active = self.behavior.lock().is_plan();
+        let plan_active = tool_behavior == Some(tool_types::BehaviorId::Plan);
         filter_cursor_tools_by_plan_mode(defs, plan_active)
     }
     pub(super) fn model_auth_facts(&self, model_id: &str) -> crate::agent::config::ModelAuthFacts {

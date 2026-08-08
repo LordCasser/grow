@@ -1,6 +1,6 @@
 //! PTY, flag-file driven like `endline_park_is_markerless`: the "queued
 //! message appears 2x" regression. A message queued mid-turn holds through
-//! the turn's sendable wait, then drains as its own turn — asserting it
+//! the turn's parked wait, then drains as its own turn — asserting it
 //! renders exactly once as a queue row and exactly once as a "❯ " block.
 #[allow(unused_imports)]
 use super::common::*;
@@ -89,7 +89,7 @@ async fn queued_message_renders_once_not_twice() {
         .wait_for_text(QUEUED_TEXT, Duration::from_secs(10))
         .expect("queued row visible");
 
-    // Tool call 3: block on the REAL task — the sendable wait the row holds
+    // Tool call 3: block on the REAL task — the parked wait the row holds
     // through.
     let wait_args = json!({
         "task_ids": [task_id],

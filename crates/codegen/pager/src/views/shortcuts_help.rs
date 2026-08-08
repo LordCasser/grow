@@ -3178,8 +3178,7 @@ mod tests {
     fn build_entries_surfaces_interject_ctrl_i_fallback() {
         let registry = ActionRegistry::defaults();
         let entries = build_entries(&all_contexts(), &registry, true);
-        // Action label is compact "send now" wording (interject under the hood).
-        assert_cheatsheet_row_has_key(&entries, "send now", "Ctrl+i");
+        assert_cheatsheet_row_has_key(&entries, "steer", "Ctrl+i");
     }
 
     #[test]

@@ -3568,6 +3568,7 @@ impl AppView {
                 agent.btw_state,
                 Some(crate::views::btw_overlay::BtwOverlayState::Loading { .. })
             ) && spinner_frame_tick;
+            needs_redraw |= agent.plugin_cta.phase.is_spinner() && spinner_frame_tick;
             needs_redraw |= matches!(
                 agent.active_modal.as_ref(),
                 Some(crate::views::modal::ActiveModal::SessionPicker {
@@ -4442,6 +4443,25 @@ pub(crate) mod tests {
             .status = crate::app::agent::GoalDisplayStatus::Paused;
         let redraws = (0..8).filter(|_| app.tick()).count();
         assert_eq!(redraws, 0, "a paused goal must not drive redraws");
+    }
+    #[test]
+    fn tick_redraws_while_idle_plugin_cta_spinner_is_visible() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
+        app.contextual_hints.image_input = false;
+        app.agents.get_mut(&id).unwrap().plugin_cta.phase =
+            crate::app::agent_view::CtaPhase::Installing {
+                plugin_relative_path: "plugins/example".into(),
+                name: "example".into(),
+            };
+
+        assert_eq!(app.tick_demand(), TickDemand::Fast);
+        let redraws = (0..8).filter(|_| app.tick()).count();
+        assert!(
+            redraws >= 1,
+            "a visible plugin install spinner must repaint, got {redraws} redraws in 8 ticks"
+        );
     }
     #[test]
     fn tick_redraws_while_idle_watchers_running() {
@@ -5869,9 +5889,9 @@ pub(crate) mod tests {
     /// Apple Terminal (interject = Ctrl+O), minimal mode: at idle the interject
     /// path would silently no-op, so Ctrl+O must open the transcript — this was
     /// the "Ctrl+O appears dead on Mac" report. With a running turn and text in
-    /// the composer the same key must send-now (cancel-and-send). With a running
-    /// turn, empty composer, and a queued follow-up it must force-send that row
-    /// (send-now).
+    /// the composer the same key must steer that turn. With a running turn,
+    /// empty composer, and a queued follow-up it must steer that row into the
+    /// same turn.
     #[test]
     fn minimal_ctrl_o_on_apple_terminal_transcript_at_idle_interject_with_payload() {
         let mut app = test_app_with_agent();

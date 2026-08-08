@@ -9,6 +9,15 @@ pub const GET_GOAL_TOOL_NAME: &str = "get_goal";
 pub const UPDATE_GOAL_PLAN_TOOL_NAME: &str = "update_goal_plan";
 pub use crate::slash_commands::UPDATE_GOAL_TOOL_NAME;
 
+/// Explicit empty-object input for `get_goal`.
+///
+/// `serde_json::Value` has no object-shaped root schema, which makes providers
+/// that validate function definitions reject the entire sampling request even
+/// though the tool itself takes no arguments.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetGoalInput {}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateGoalAction {
@@ -127,7 +136,7 @@ goal_metadata!(
 );
 
 impl tool_runtime::Tool for GetGoalTool {
-    type Args = serde_json::Value;
+    type Args = GetGoalInput;
     type Output = GoalView;
 
     fn id(&self) -> tool_protocol::ToolId {
@@ -148,7 +157,7 @@ impl tool_runtime::Tool for GetGoalTool {
     async fn run(
         &self,
         ctx: tool_runtime::ToolCallContext,
-        _input: serde_json::Value,
+        _input: GetGoalInput,
     ) -> Result<GoalView, tool_runtime::ToolError> {
         let sender = runtime_sender(&ctx).await?;
         let (respond_to, response) = tokio::sync::oneshot::channel();
@@ -159,6 +168,19 @@ impl tool_runtime::Tool for GetGoalTool {
             .await
             .map_err(|_| channel_error())?
             .map_err(|message| tool_runtime::ToolError::custom("goal_not_active", message))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GetGoalInput;
+
+    #[test]
+    fn get_goal_exports_an_empty_object_schema() {
+        let schema = crate::registry::types::generate_schema::<GetGoalInput>();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"], serde_json::json!({}));
+        assert_eq!(schema["required"], serde_json::json!([]));
     }
 }
 

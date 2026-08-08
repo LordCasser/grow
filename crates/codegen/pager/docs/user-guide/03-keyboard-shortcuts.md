@@ -183,21 +183,21 @@ While the agent is generating:
 
 - **Plain `Enter`** (with text in the composer) **queues** a follow-up for later. Queued follow-ups run after the current turn ends — and they deliberately **hold** while the agent is blocked waiting on background tasks or a subagent (a hint explains the hold and how to send one now).
 - **`Enter` again on the emptied composer** (double-Enter) sends the **top** queued follow-up now.
-- The **send now** chord is **cancel-and-send**: it stops the current turn (background tasks, subagents, and the rest of the queue keep running) and sends your message as the next turn, so it always appears at the bottom of the transcript:
-  - **Non-empty composer** → cancel and send that text now.
-  - **Empty composer** + a queued follow-up → send the **top** queued follow-up now (no need to focus the queue pane). On the queue pane, the same chord (or the **[Send now]** button) sends the **selected** row.
+- The **steer** chord appends input to the current regular turn without cancelling it or creating another terminal:
+  - **Non-empty composer** → steer the current turn with that text.
+  - **Empty composer** + a queued prompt follow-up → atomically move the **top** queued follow-up into the current turn (no need to focus the queue pane). On the queue pane, the same chord (or the **[Send now]** button) steers the **selected** prompt row. Bash and other non-prompt rows remain queued.
   - **Idle**, or **empty composer with nothing queued** → no-op for that key.
-- While the agent is **blocked waiting** (on task output or a subagent), plain `Enter` with text also delivers immediately — the shell cancels the blocked turn and runs your message next.
+- While the agent is **blocked waiting** (on task output or a subagent), plain `Enter` keeps the message in FIFO. Use the steer chord (or double-Enter after queueing a prompt row) to append it to the waiting turn.
 
 | Terminal | Primary | Alternates | Action |
 |----------|---------|------------|--------|
-| Default | `Ctrl+Enter` | `Ctrl+I` | Send now (cancels the current turn, runs your message next) |
-| Apple Terminal | `Ctrl+O` | `Ctrl+Enter`, `Ctrl+I` | Send now |
-| VS Code family (VS Code, Cursor, Windsurf, Zed) | **`Ctrl+L`** | *(none)* | Send now (`Ctrl+I` not used — Tab / host chat; plugins via `/plugins`) |
+| Default | `Ctrl+Enter` | `Ctrl+I` | Steer the current turn |
+| Apple Terminal | `Ctrl+O` | `Ctrl+Enter`, `Ctrl+I` | Steer the current turn |
+| VS Code family (VS Code, Cursor, Windsurf, Zed) | **`Ctrl+L`** | *(none)* | Steer (`Ctrl+I` not used — Tab / host chat; plugins via `/plugins`) |
 
-In `/multiline` mode, `Shift+Enter` (or `Alt+Enter`) sends while plain `Enter` inserts a newline — except on an **empty** composer mid-turn with a queued follow-up, where plain `Enter` still **send now**s the top row (same as normal mode). (`Ctrl+Enter` is send-now mid-turn when bound on non–VS Code family; it does not submit a new idle turn.)
+In `/multiline` mode, `Shift+Enter` (or `Alt+Enter`) sends while plain `Enter` inserts a newline — except on an **empty** composer mid-turn with a queued follow-up, where plain `Enter` still steers the top prompt row (same as normal mode). (`Ctrl+Enter` steers mid-turn when bound on non–VS Code family; it does not submit a new idle turn.)
 
-Send-now is intentionally interruptive — it reads as "stop what you're doing and take this". To hand the agent a note **without** stopping it, queue with plain `Enter`; the agent picks it up at the next turn boundary.
+Steering is a soft interruption: it targets the current turn identity and preserves its lifecycle. Queue with plain `Enter` when the note should wait for the next turn boundary.
 
 > **WezTerm**: These modified Enter keys need `enable_kitty_keyboard = true` in your WezTerm config. Full steps and a one-line workaround are in the [terminal support guide](21-terminal-support.md#problem-ctrlenter-doesnt-interject-in-wezterm).
 

@@ -2301,11 +2301,16 @@ pub(crate) async fn run(
 
 /// Advance all animation-driven state exactly once.
 fn advance_animation_tick(app: &mut AppView, tasks: &mut JoinSet<TaskResult>) -> (bool, bool) {
+    // UI animation is independent from the submission watchdog. A stalled
+    // prompt can produce effects on every tick; skipping `app.tick()` in that
+    // branch froze every other spinner while elapsed time kept advancing.
+    let mut needs_redraw = app.tick();
     if let Some(effs) = dispatch::poll_stalled_prompt_submissions(app) {
         let should_quit = process_effects(effs, tasks, app);
-        (should_quit, true)
+        needs_redraw = true;
+        (should_quit, needs_redraw)
     } else {
-        (false, app.tick())
+        (false, needs_redraw)
     }
 }
 

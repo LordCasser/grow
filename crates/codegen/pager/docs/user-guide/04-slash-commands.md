@@ -140,7 +140,7 @@ These commands modify only the current session. Persistent defaults remain in Se
 
 ### `/multiline`
 
-Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`.
+Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still steers the top queued prompt into the active turn. Alias: `/ml`.
 
 ### `/history`
 
@@ -252,7 +252,7 @@ Intervals are `Ns` (seconds, minimum 60), `Nm` (minutes), `Nh` (hours), or `Nd` 
 
 ### `/goal`
 
-Enter Goal Behavior, resume a paused goal, or manage a persistent objective. A bare `/goal` enters Goal Behavior and resumes a paused goal when one exists (except a budget-limited one — re-budget it first with `/goal budget`); otherwise the next non-empty message becomes the objective. `/goal set <objective>` explicitly creates or replaces it. Later ordinary messages add constraints or evidence and never silently replace the objective.
+Enter Goal Behavior or manage a persistent objective. A bare `/goal` selects Goal Behavior; use `/goal resume` to resume a paused goal (a budget-limited goal must be re-budgeted first). When no goal exists, the next non-empty message becomes the objective. `/goal set <objective>` explicitly creates it. Later ordinary messages add constraints or evidence and never silently replace the objective.
 
 Grow works across rounds and only marks the goal complete after an independent verifier returns `Achieved`. Missing verification, timeout, infrastructure failure, insufficient evidence, exhausted attempts, or exhausted budget pauses the goal; the Agent cannot self-report completion.
 

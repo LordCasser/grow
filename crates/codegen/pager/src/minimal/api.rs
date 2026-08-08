@@ -303,16 +303,9 @@ pub fn minimal_ctrl_o_opens_transcript(app: &AppView) -> bool {
     ) {
         return false;
     }
-    // Matches prompt-path send-now: non-empty composer text *or* a visible
-    // queued follow-up (empty-composer force-send of the top row). Exclude the
-    // in-flight shared-queue entry when it is the running turn (same rule as
-    // `AgentView::visible_queue_is_empty`).
-    let running = agent.session.current_prompt_id.as_deref();
-    let has_queued_follow_up = !agent.session.pending_prompts.is_empty()
-        || agent
-            .shared_queue
-            .iter()
-            .any(|e| Some(e.id.as_str()) != running);
+    // Matches prompt-path steering: non-empty composer text or a visible,
+    // prompt-like queued follow-up. Bash/control rows do not consume the key.
+    let has_queued_follow_up = agent.held_queue_top_sendable();
     let has_payload = !agent.prompt.text().trim().is_empty() || has_queued_follow_up;
     !crate::actions::ActionRegistry::interjection_possible(
         agent.session.state.is_turn_running(),

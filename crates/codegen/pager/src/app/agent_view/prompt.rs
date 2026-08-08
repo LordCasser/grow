@@ -611,11 +611,11 @@ impl AgentView {
                     if let Some(outcome) = self.interject_editing_queued_intercept() {
                         return outcome;
                     }
-                    // Mid-turn send-now (cancel-and-send):
-                    // 1) Non-empty composer → cancel the running turn and send
-                    //    that text as the next prompt.
-                    // 2) Empty composer + a visible follow-up in the queue →
-                    //    same as bare Enter: send the top row now.
+                    // Mid-turn steering:
+                    // 1) Non-empty composer → append that text to the active
+                    //    regular turn.
+                    // 2) Empty composer + a visible prompt follow-up in the
+                    //    queue → atomically move the top row into that turn.
                     // 3) Idle / nothing to send → no-op (not send-like-Enter).
                     let text = self.prompt.text().trim().to_string();
                     let turn_running = self.session.state.is_turn_running();

@@ -270,9 +270,7 @@ impl SessionActor {
                 });
             self.emit_turn_completed(prompt_id, &mapped, usage, cancel_trigger)
                 .await;
-            if goal_finalization
-                && matches!(mapped, Ok(reason) if reason != acp::StopReason::Cancelled)
-            {
+            if goal_finalization && Self::goal_finalization_terminal_succeeded(&result) {
                 self.finalize_goal_finalization_turn().await;
             }
         }
@@ -376,11 +374,23 @@ impl SessionActor {
         )
     }
 
+    /// A Goal completion receipt requires a real successful final report.
+    /// Refusal, cancellation, max-turn termination, and stationarity are all
+    /// terminal events, but none proves that the summarizing turn delivered
+    /// the report the verifier authorized.
+    pub(super) fn goal_finalization_terminal_succeeded(result: &PromptTurnResult) -> bool {
+        result.as_ref().ok().is_some_and(|ok| {
+            ok.stop_reason == acp::StopReason::EndTurn
+                && matches!(ok.completion_kind, PromptCompletionKind::Completed)
+        })
+    }
+
     /// `(turn_succeeded, suppress_goal_continuation, infra_pause_message)`.
     /// StationarityEnded is success but suppresses the next idle continuation.
     /// `infra_pause_message` is extracted before `handle_completion` consumes `result`.
     pub(super) fn post_turn_goal_degradation_plan(
         result: &PromptTurnResult,
+        origin: Option<&crate::session::PromptOrigin>,
     ) -> (bool, bool, Option<String>) {
         let suppress_goal_continuation = result.as_ref().ok().is_some_and(|ok| {
             matches!(
@@ -402,6 +412,7 @@ impl SessionActor {
         let infra_pause_message = result
             .as_ref()
             .err()
+            .filter(|_| origin.is_some_and(crate::session::PromptOrigin::is_goal_internal))
             .filter(|err| Self::is_infra_turn_error(err))
             .map(Self::format_turn_error_message);
         (

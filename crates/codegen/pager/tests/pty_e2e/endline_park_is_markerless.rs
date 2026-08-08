@@ -1,16 +1,17 @@
 //! PTY, fully flag-file driven: the model backgrounds a flag-gated command,
 //! the test extracts the runtime task id and enqueues a blocking
-//! `get_command_or_subagent_output` on it (park), then types mid-park
-//! (cancel-and-send). Asserts exactly ONE "Worked for" marker — the new
-//! turn's — with no park row and no "Turn cancelled by user" marker.
+//! `get_command_or_subagent_output` on it (park), then types mid-park.
+//! Plain Enter must keep that message in FIFO until the wait finishes; the
+//! park itself writes no transcript marker.
 #[allow(unused_imports)]
 use super::common::*;
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
-async fn endline_park_is_markerless() {
+async fn parked_enter_queues_until_wait_finishes() {
     let content = ContentController::start().await.expect("start content");
+    content.seed_llm_config().expect("seed mock LLM config");
     // Gates the background command the watching cue counts (released at the end).
     let park_flag = content.home().join("endline_park_flag");
     // Gates the id-extraction hold: created once the wait script is enqueued.
@@ -44,7 +45,7 @@ async fn endline_park_is_markerless() {
         id_hold_args,
     );
 
-    // Fallback for the cancel-and-sent prompt's turn: plain text ends it.
+    // Fallback for the post-wait continuation and queued prompt turns.
     content.set_response("ENDLINE_FINAL_ANSWER");
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -109,7 +110,7 @@ async fn endline_park_is_markerless() {
             )
         });
     harness
-        .wait_for_text("send a message to interrupt", Duration::from_secs(30))
+        .wait_for_text("Enter queues", Duration::from_secs(30))
         .unwrap_or_else(|_| {
             panic!(
                 "parked interrupt cue never appeared; screen:\n{}",
@@ -129,38 +130,50 @@ async fn endline_park_is_markerless() {
     harness.inject_keys(b"\r").expect("submit mid-park prompt");
 
     harness
-        .wait_for_text("ENDLINE_FINAL_ANSWER", Duration::from_secs(90))
+        .wait_for_text("1 queued — Enter to send now", Duration::from_secs(30))
         .unwrap_or_else(|_| {
             panic!(
-                "cancel-and-sent turn never settled; screen:\n{}",
+                "mid-park Enter did not remain in FIFO; screen:\n{}",
                 harness.screen_contents()
             )
         });
+    harness.update(Duration::from_secs(1));
+    assert!(
+        !harness.contains_text("ENDLINE_FINAL_ANSWER"),
+        "queued prompt ran before the blocking wait finished; screen:\n{}",
+        harness.screen_contents()
+    );
 
-    // Scroll to the transcript head so the whole journey is on one screen.
-    harness.inject_keys(b"\t").expect("focus scrollback (tab)");
-    harness.update(Duration::from_millis(300));
-    harness.inject_keys(b"g").expect("goto transcript top");
+    // Let the current turn finish. Only then may the queued prompt promote.
+    std::fs::write(&park_flag, b"done").expect("release flag");
+    harness
+        .wait_for_text("ENDLINE_FINAL_ANSWER", Duration::from_secs(90))
+        .unwrap_or_else(|_| {
+            panic!(
+                "post-wait/queued turns never settled; screen:\n{}",
+                harness.screen_contents()
+            )
+        });
+    harness
+        .wait_for_turn_idle(Duration::from_secs(90))
+        .expect("queued turn drains after the parked owner completes");
 
-    let single_marker = wait_until(Duration::from_secs(90), || {
+    // The full-screen renderer may discard the previous turn's off-screen
+    // rows when the FIFO owner starts, so assert the promoted row's terminal
+    // plus the absence of a synthetic cancellation marker. The earlier
+    // pre-release assertions prove the park itself produced no terminal.
+    let promoted_turn_settled = wait_until(Duration::from_secs(30), || {
         harness.update(Duration::from_millis(100));
         let screen = harness.screen_contents();
-        screen.matches("Worked for").count() == 1
+        screen.contains("Worked for")
             && !screen.contains("Turn cancelled by user")
-            && matches!(
-                (screen.find("hurry up please"), screen.find("Worked for")),
-                (Some(prompt), Some(fin)) if prompt < fin
-            )
+            && screen.contains("hurry up please")
     });
     assert!(
-        single_marker,
-        "expected the promoted prompt then ONE final marker (no park marker, \
-         no cancelled marker); screen:\n{}",
+        promoted_turn_settled,
+        "promoted FIFO row did not settle cleanly after the parked owner completed; screen:\n{}",
         harness.screen_contents()
     );
 
     write_cast_if_requested(&harness, "endline_park_is_markerless.cast");
-
-    // Release the flag-gated command so nothing outlives the harness teardown.
-    std::fs::write(&park_flag, b"done").expect("release flag");
 }

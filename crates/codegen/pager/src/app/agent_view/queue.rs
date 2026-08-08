@@ -49,6 +49,9 @@ impl AgentView {
             return None;
         }
         self.sync_queue_pane();
+        if !self.held_queue_top_sendable() {
+            return None;
+        }
         let ids = self.queue.entry_ids();
         let id = *ids.first()?;
         let outcome = self.force_interject_queue_row(id);
@@ -68,26 +71,14 @@ impl AgentView {
         Some(outcome)
     }
 
-    /// The turn is parked in a wait the shell aborts as soon as the user
-    /// sends anything (blocking `get_task_output` / `wait_tasks` / `Await*`,
-    /// or a blocked foreground subagent await — see
-    /// [`crate::views::turn_status::is_sendable_wait`]), and the goal loop is
-    /// inactive (the shell suppresses the abort during goal runs, so treating
-    /// the wait as user-interruptible would lie there).
-    ///
-    /// Gates Enter interjecting instead of queueing and the parked queue
-    /// drain. The stopped-session *rendering* additionally excludes subagent
-    /// waits — see [`Self::renders_parked`].
-    /// Purely view-derived — reading it has no turn-lifecycle side effects.
-    pub(crate) fn is_parked_on_sendable_wait(&self) -> bool {
-        crate::views::turn_status::is_sendable_wait(&self.resolve_turn_activity())
-            && !self
-                .goal_state
-                .as_ref()
-                .is_some_and(|g| matches!(g.status, crate::app::agent::GoalDisplayStatus::Active))
+    /// Whether the foreground is in a wait that can use the compact parked
+    /// presentation. This is display-only: Enter still queues, steering still
+    /// targets the same foreground turn, and Goal lifecycle is unaffected.
+    pub(crate) fn is_parked_wait(&self) -> bool {
+        crate::views::turn_status::is_parkable_wait(&self.resolve_turn_activity())
     }
 
-    /// The current wait is a foreground subagent await — sendable, but excluded
+    /// The current wait is a foreground subagent await — steerable, but excluded
     /// from the parked look (the parent is blocked, not completed; the
     /// subagent reports its own progress).
     pub(crate) fn is_waiting_on_subagent(&self) -> bool {
@@ -98,10 +89,9 @@ impl AgentView {
         )
     }
 
-    /// Visible held rows for the "N queued" hint. 0 outside sendable waits.
+    /// Visible held rows for the "N queued" hint. 0 outside parked waits.
     pub(crate) fn held_queue_count(&self) -> usize {
-        // Goal-gated via `is_parked_on_sendable_wait` (0 during a goal — shell exempts goal turns).
-        if !self.is_parked_on_sendable_wait() {
+        if !self.is_parked_wait() {
             return 0;
         }
         self.visible_held_queue_len()
@@ -120,18 +110,19 @@ impl AgentView {
 
     /// Whether bare Enter on the empty composer would actually send the TOP
     /// visible held row — the "Enter to send now" half of the inline hint.
-    /// Server rows always send now; a local top row only when prompt-like
-    /// (`force_interject_queue_row` refuses bash / client-expanded rows with
-    /// a toast, so advertising Enter for them would over-promise).
+    /// Only prompt-like rows can steer, regardless of whether they are already
+    /// server-authoritative or still local. Bash/client-expanded rows remain
+    /// FIFO work, so advertising Enter for them would over-promise.
     pub(crate) fn held_queue_top_sendable(&self) -> bool {
         let running = self.session.current_prompt_id.as_deref();
         // Merge order: server rows render (and send) first.
-        if self
+        if let Some(entry) = self
             .shared_queue
             .iter()
-            .any(|e| crate::views::queue_pane::visible_held_server_row(&e.id, running))
+            .find(|e| crate::views::queue_pane::visible_held_server_row(&e.id, running))
         {
-            return true;
+            return crate::views::queue_pane::kind_from_wire(&entry.kind)
+                == crate::app::agent::QueueEntryKind::Prompt;
         }
         self.session.pending_prompts.front().is_some_and(|p| {
             p.kind == crate::app::agent::QueueEntryKind::Prompt && p.wire_matches_display()
@@ -148,12 +139,12 @@ impl AgentView {
     }
 
     /// Whether the stopped-session look is active: the turn is parked in a
-    /// sendable wait that is not a foreground subagent await. Purely
+    /// parkable wait that is not a foreground subagent await. Purely
     /// view-derived — no transcript row is written for a park. Drives the
     /// idle keybar and the parked turn-status cue; flips back off (the
     /// running chrome returns) the moment the wait ends and the turn resumes.
     pub(crate) fn renders_parked(&self) -> bool {
-        self.is_parked_on_sendable_wait() && !self.is_waiting_on_subagent()
+        self.is_parked_wait() && !self.is_waiting_on_subagent()
     }
 
     /// Live counts for the turn-status watching cue; see
@@ -236,8 +227,17 @@ impl AgentView {
             row.as_ref().map(|r| r.origin),
             Some(crate::views::queue_pane::QueueRowOrigin::Server)
         );
+        // Steering is model input. Bash and client-expanded control rows keep
+        // their FIFO identity and execute only after the foreground owner
+        // completes; trying to "send now" must never degrade into cancellation.
+        if self.queue_row_prompt_like(id) != Some(true) {
+            self.show_toast("Can't send this now — it runs when the current turn ends");
+            return InputOutcome::Changed;
+        }
         if is_server {
-            // Server row: the agent promotes it to run next (`grow/queue/interject`); any kind may send now.
+            // Server row: ask the agent to atomically steer it via
+            // `grow/queue/interject`. Only prompt-like rows are consumed;
+            // non-prompt work is authoritatively left in FIFO.
             if let Some(row) = row.as_ref()
                 && let Some(server_id) = row.server_id.clone()
             {
@@ -258,11 +258,6 @@ impl AgentView {
                     new_text: None,
                 });
             }
-            return InputOutcome::Changed;
-        }
-        // Local rows: only plain prompts / raw skill rows can re-send (others would send display text, not payload).
-        if self.queue_row_prompt_like(id) != Some(true) {
-            self.show_toast("Can't send this now — it runs when the current turn ends");
             return InputOutcome::Changed;
         }
         if let Some(prompt) = self.remove_local_queue_row(id) {
@@ -501,7 +496,7 @@ impl AgentView {
 
 #[cfg(test)]
 mod queue_steering_tests {
-    use super::test_fixtures::running_agent_local_only;
+    use super::test_fixtures::{make_running_agent, running_agent_local_only};
     use super::*;
 
     #[test]
@@ -528,6 +523,27 @@ mod queue_steering_tests {
             Some(("queued-1".into(), 3))
         );
         assert!(agent.send_now_awaiting_confirm.is_none());
+    }
+
+    #[test]
+    fn server_bash_row_cannot_be_steered_or_advertised_as_sendable() {
+        let mut agent = make_running_agent();
+        agent.shared_queue[0].kind = "bash".into();
+        agent.sync_queue_pane();
+        let row = agent.queue.entry_ids()[0];
+
+        assert!(!agent.held_queue_top_sendable());
+        assert!(matches!(
+            agent.force_interject_queue_row(row),
+            InputOutcome::Changed
+        ));
+        assert_eq!(agent.shared_queue.len(), 1);
+        assert!(
+            agent
+                .toast
+                .as_ref()
+                .is_some_and(|(message, _)| message.contains("Can't send this now"))
+        );
     }
 }
 
