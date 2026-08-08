@@ -164,6 +164,27 @@ impl SessionActor {
         &self,
         request: RewindRequest,
     ) -> anyhow::Result<RewindResponse> {
+        // Goal state is a durable workflow blackboard, deliberately independent
+        // from prompt history and file rewind points. Without prompt-indexed
+        // Goal snapshots, rewinding either side would leave its plan or
+        // verification receipt describing state that no longer exists. Require
+        // an explicit clear instead of silently inventing partial rollback
+        // semantics. Internal cancel/pristine repair does not use this API.
+        if self.goal_tracker.lock().snapshot().is_some() {
+            return Ok(RewindResponse {
+                success: false,
+                target_prompt_index: request.target_prompt_index,
+                mode: request.mode,
+                reverted_files: vec![],
+                clean_files: vec![],
+                conflicts: vec![],
+                prompt_text: None,
+                error: Some(
+                    "Cannot rewind while Goal state exists. Run /goal clear first.".to_string(),
+                ),
+            });
+        }
+
         // Track revert for feedback signals
         self.signals_handle().mark_reverted();
 

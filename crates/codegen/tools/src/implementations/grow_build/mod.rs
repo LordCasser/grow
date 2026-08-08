@@ -49,7 +49,10 @@ pub use search_replace::SearchReplaceTool;
 pub use task::TaskTool;
 pub use task_output::{GetTerminalCommandOutputTool, TaskOutputTool, WaitTasksTool};
 pub use todo::TodoWriteTool;
-pub use update_goal::{UPDATE_GOAL_TOOL_NAME, UpdateGoalTool};
+pub use update_goal::{
+    GET_GOAL_TOOL_NAME, GetGoalTool, UPDATE_GOAL_PLAN_TOOL_NAME, UPDATE_GOAL_TOOL_NAME,
+    UpdateGoalPlanTool, UpdateGoalTool,
+};
 pub use web_fetch::{WebFetchClient, WebFetchConfig, WebFetchParams, WebFetchTool};
 pub use workflow::{WORKFLOW_TOOL_NAME, WorkflowTool};
 pub use write::{WriteInput, WriteTool};

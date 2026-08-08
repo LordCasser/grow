@@ -639,6 +639,8 @@ impl ToolRegistryBuilder {
         b.register::<grow_build::KillTaskTool>();
         b.register::<grow_build::KillTerminalCommandTool>();
         b.register::<grow_build::TodoWriteTool>();
+        b.register::<grow_build::GetGoalTool>();
+        b.register::<grow_build::UpdateGoalPlanTool>();
         b.register::<grow_build::UpdateGoalTool>();
         b.register::<grow_build::WorkflowTool>();
         b.register::<grow_build::TaskOutputTool>();

@@ -129,18 +129,16 @@ pub enum Action {
     SendSlashCommandPreservingDraft(String),
     /// Send a mid-turn interjection without canceling the running turn.
     /// Reserved for text that answers the running turn (plan-review comments,
-    /// permission follow-ups); user send-now takes [`Self::SendPromptNow`].
+    /// permission follow-ups); explicit user steering uses [`Self::SteerPrompt`].
     Interject {
         text: String,
         /// Pasted images riding along with the interjection. Empty for
         /// producers that carry plain text (plan-review comments, etc.).
         images: Vec<crate::prompt_images::PastedImage>,
     },
-    /// Cancel-and-send: cancel the running turn (background tasks and queued
-    /// rows survive shell-side) and run this text as the next prompt turn.
-    /// The send-now chord, empty-composer Enter on a queued local row, and
-    /// the deferred-paste re-issue produce this.
-    SendPromptNow {
+    /// Steer the active regular turn. The send-now chord, double Enter on the
+    /// just-queued row, and queue-row "Send now" all share this path.
+    SteerPrompt {
         text: String,
         /// Pasted images riding along with the prompt.
         images: Vec<crate::prompt_images::PastedImage>,
@@ -1496,17 +1494,6 @@ pub enum Effect {
         /// See [`Effect::SendPrompt::prompt_id`].
         prompt_id: String,
     },
-    /// Cancel-and-send: `session/prompt` stamped with `_meta.sendNow`, so the
-    /// shell cancels the running turn and runs this prompt next (background
-    /// tasks and the rest of the queue survive). Carries structured blocks so
-    /// pasted images ride along.
-    SendPromptNow {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
-        blocks: Vec<acp::ContentBlock>,
-        /// See [`Effect::SendPrompt::prompt_id`].
-        prompt_id: String,
-    },
     /// Toggle plan mode — fire-and-forget signal to the shell.
     TogglePlanMode { session_id: acp::SessionId },
     /// Remove a server-owned queued prompt: fire-and-forget
@@ -1555,6 +1542,7 @@ pub enum Effect {
     /// (the edit survives and drains; it is never silently lost).
     QueueInterject {
         session_id: acp::SessionId,
+        expected_turn_id: String,
         id: String,
         expected_version: u64,
         new_text: Option<String>,
@@ -1785,10 +1773,11 @@ pub enum Effect {
         session_id: acp::SessionId,
         auto: bool,
     },
-    /// Send a mid-turn interjection via grow/interject ext method.
+    /// Steer the active regular turn via `grow/steer`.
     SendInterject {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        expected_turn_id: String,
         text: String,
         /// Client-minted id echoed back on the `grow/session/interjection`
         /// broadcast so the originator can dedup its optimistic local block.
@@ -2042,12 +2031,10 @@ pub enum TaskResult {
         code_restored: bool,
         restore_summary: Option<String>,
         restore_degree: Option<workspace::session::git::RestoreDegree>,
-        /// The session's in-flight running prompt id (from the load response
-        /// `_meta["grow/runningPromptId"]`), present only when the session was
-        /// loaded MID-turn (another client is driving). The loader adopts it to
-        /// pass the live `session/update` gate without re-rendering the user
-        /// block (replay already rendered it).
-        running_prompt_id: Option<String>,
+        /// Structured regular foreground owner from the load response. The
+        /// loader adopts its opaque id without reconstructing lifecycle
+        /// semantics from the id spelling.
+        foreground: Option<prompt_queue::ForegroundSnapshot>,
         /// See [`TaskResult::SessionCreated::scheduler_background_loops`]. A
         /// resumed session re-spawns its actor, so the load response carries
         /// the value that spawn just pinned.
@@ -2150,13 +2137,6 @@ pub enum TaskResult {
     /// dispatch can requeue it locally (the producer already consumed the
     /// composer/queue row, so dropping it would silently lose the message —
     /// the same contract the removed `InterjectFailed` requeue had).
-    SendPromptNowFailed {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
-        prompt_id: String,
-        error: String,
-        blocks: Vec<acp::ContentBlock>,
-    },
     /// Cancel notification was sent (fire-and-forget).
     /// The real turn end comes via PromptResponse.
     CancelComplete,

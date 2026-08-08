@@ -146,6 +146,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub persisted_signals: Option<crate::session::signals::SessionSignals>,
     pub persisted_behavior: Option<crate::session::behavior::BehaviorSnapshot>,
     pub persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
+    pub persisted_goal_mode_rejected: bool,
     pub persisted_workflow_runs: Vec<
         crate::session::workflow::store::RestoredWorkflowRun,
     >,
@@ -259,8 +260,8 @@ pub(crate) struct PromptResponseMeta {
     /// (e.g. doom loop). `None` for normal completions and user cancels.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cancellation_category: Option<String>,
-    /// What triggered a cancelled turn's cancel (`"send_now"`, `"ctrl_c"`,
-    /// `"esc"`); surfaced as `cancelTrigger`. `None` for non-cancel completions.
+    /// What triggered a cancelled turn's cancel (`"ctrl_c"`, `"esc"`);
+    /// surfaced as `cancelTrigger`. `None` for non-cancel completions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cancel_trigger: Option<String>,
     /// Schema-validated `--json-schema` output. Delivered in `_meta` (not a

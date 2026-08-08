@@ -55,7 +55,8 @@ impl SessionActor {
             .iter()
             .filter_map(|notification| match &notification.source {
                 NotificationSource::BashTaskCompleted { task_id }
-                | NotificationSource::MonitorCompleted { task_id } => Some(task_id.clone()),
+                | NotificationSource::MonitorCompleted { task_id }
+                | NotificationSource::SubagentCompleted { task_id } => Some(task_id.clone()),
                 NotificationSource::MonitorEvent { .. } => None,
             })
             .collect();
@@ -70,7 +71,8 @@ impl SessionActor {
         for notification in notifications {
             let consume = match &notification.source {
                 NotificationSource::BashTaskCompleted { .. }
-                | NotificationSource::MonitorCompleted { .. } => true,
+                | NotificationSource::MonitorCompleted { .. }
+                | NotificationSource::SubagentCompleted { .. } => true,
                 NotificationSource::MonitorEvent { task_id } => {
                     deferred_ids.contains(task_id.as_str())
                 }
@@ -120,14 +122,14 @@ impl SessionActor {
         let may_combine;
         {
             let state = self.state.lock().await;
-            if state.running_task.is_some() || state.foreground_compact {
+            if !state.foreground.is_idle() {
                 let queue_depth = state.pending_inputs.len();
                 if queue_depth > 0 {
                     ::diagnostics::unified_log::debug(
                         "shell.prompt.start_blocked",
                         Some(self.session_info.id.0.as_ref()),
                         Some(serde_json::json!({
-                            "reason": if state.foreground_compact { "compaction_running" } else { "task_already_running" },
+                            "reason": if matches!(state.foreground, ForegroundState::Compaction) { "compaction_running" } else { "task_already_running" },
                             "queue_depth": queue_depth,
                         })),
                     );
@@ -166,10 +168,7 @@ impl SessionActor {
 
         let mut state = self.state.lock().await;
         // Re-check after the await gap.
-        if state.running_task.is_some()
-            || state.foreground_compact
-            || state.pending_inputs.is_empty()
-        {
+        if !state.foreground.is_idle() || state.pending_inputs.is_empty() {
             return;
         }
 
@@ -237,6 +236,7 @@ impl SessionActor {
             verbatim,
             json_schema,
             origin,
+            turn_kind,
             running_display,
         ) = {
             let Some(front) = state.pending_inputs.front_mut() else {
@@ -254,6 +254,7 @@ impl SessionActor {
                 front.verbatim,
                 front.json_schema.clone(),
                 front.origin.clone(),
+                front.turn_kind,
                 running_display,
             )
         };
@@ -285,6 +286,33 @@ impl SessionActor {
                 ),
             )
             .await;
+        let subagent_owner = match &origin {
+            super::PromptOrigin::GoalContinuation { goal_id, .. }
+            | super::PromptOrigin::GoalFinalization { goal_id, .. } => {
+                tools::implementations::grow_build::task::types::SubagentOwner::goal(goal_id)
+            }
+            super::PromptOrigin::User if prompt_mode == PromptMode::Goal => self
+                .goal_tracker
+                .lock()
+                .snapshot()
+                .filter(|goal| goal.status == crate::session::goal_tracker::GoalStatus::Active)
+                .map(|goal| {
+                    tools::implementations::grow_build::task::types::SubagentOwner::goal(
+                        &goal.goal_id,
+                    )
+                })
+                .unwrap_or_default(),
+            _ => tools::implementations::grow_build::task::types::SubagentOwner::Task,
+        };
+        self.agent
+            .borrow()
+            .tool_bridge()
+            .update_resource(
+                tools::implementations::grow_build::task::types::CurrentSubagentOwnerResource(
+                    subagent_owner,
+                ),
+            )
+            .await;
 
         tracing::debug!(
             target: "qtrace",
@@ -304,9 +332,11 @@ impl SessionActor {
         // before the user-message chunk can race in.
         self.broadcast_queue_changed_promoting(&state, running_display);
 
-        state.running_task = Some(AgentTask::new_prompt(
+        state.foreground = ForegroundState::RegularTurn(AgentTask::new_prompt(
             self.clone(),
             prompt_id,
+            origin,
+            turn_kind,
             prompt_blocks,
             prompt_mode,
             client_identifier,
@@ -333,24 +363,6 @@ impl SessionActor {
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
-        // Auto-wake notification turns are DROPPED both while the goal loop is
-        // active (a bg-task / monitor "completed" turn would pull a weak model
-        // off the goal continuation, e.g. relaunching a killed server) AND
-        // after the goal completes (the autonomous run is over — late dev-
-        // server completions should leave the session idle, not spawn fresh
-        // post-goal turns). Independently, completions whose source task
-        // originated during the goal turn are dropped regardless of status (see
-        // `split_goal_suppressed`). Dropped notifications are still marked
-        // reported below so nothing resurfaces later.
-        let suppress_all = self.goal_harness_enabled()
-            && matches!(
-                self.goal_tracker.lock().status(),
-                Some(
-                    crate::session::goal_tracker::GoalStatus::Active
-                        | crate::session::goal_tracker::GoalStatus::Complete
-                )
-            );
-
         let drained_task_ids: Vec<String>;
 
         let drained = {
@@ -383,14 +395,10 @@ impl SessionActor {
 
             let (to_surface, dropped) = {
                 let goal_turn_task_ids = self.goal_turn_task_ids.lock();
-                Self::split_goal_suppressed(suppress_all, &goal_turn_task_ids, notifications)
+                Self::split_goal_suppressed(&goal_turn_task_ids, notifications)
             };
             if dropped > 0 {
-                tracing::info!(
-                    dropped,
-                    suppress_all,
-                    "dropping suppressed pending notifications (goal active/complete or goal-turn origin)"
-                );
+                tracing::info!(dropped, "dropping notifications owned by Goal turns");
             }
 
             if to_surface.is_empty() {
@@ -462,18 +470,13 @@ impl SessionActor {
 
     /// Partition drained notifications into `(to_surface, dropped_count)`.
     ///
-    /// `suppress_all` mirrors the goal Active/Complete blanket gate (drop
-    /// everything); independently, notifications whose source task is in
-    /// `goal_turn_task_ids` are always dropped (see that field).
+    /// Only notifications whose source task is owned by a Goal turn are
+    /// suppressed. Goal state itself is not notification ownership: user or
+    /// watcher work may complete while a Goal stage runs in the background.
     pub(super) fn split_goal_suppressed(
-        suppress_all: bool,
         goal_turn_task_ids: &std::collections::HashSet<String>,
         notifications: Vec<PendingNotification>,
     ) -> (Vec<PendingNotification>, usize) {
-        if suppress_all {
-            let dropped = notifications.len();
-            return (Vec::new(), dropped);
-        }
         let mut dropped = 0usize;
         let to_surface = notifications
             .into_iter()
@@ -499,7 +502,8 @@ impl SessionActor {
             .filter_map(|notification| match &notification.source {
                 NotificationSource::MonitorCompleted { task_id } => Some(task_id.as_str()),
                 NotificationSource::MonitorEvent { .. }
-                | NotificationSource::BashTaskCompleted { .. } => None,
+                | NotificationSource::BashTaskCompleted { .. }
+                | NotificationSource::SubagentCompleted { .. } => None,
             })
             .collect();
         let mut monitor_events: Vec<MonitorEventNotification> = Vec::new();
@@ -531,7 +535,8 @@ impl SessionActor {
                     }
                 }
                 NotificationSource::MonitorCompleted { .. }
-                | NotificationSource::BashTaskCompleted { .. } => {
+                | NotificationSource::BashTaskCompleted { .. }
+                | NotificationSource::SubagentCompleted { .. } => {
                     sections.push(notification.prompt_blocks.clone());
                 }
             }
@@ -573,6 +578,7 @@ impl SessionActor {
 
         state.pending_inputs.push_back(InputItem {
             prompt_id: merged_prompt_id,
+            turn_kind: crate::session::TurnKind::Internal,
             prompt_blocks: merged_blocks,
             prompt_mode: crate::session::behavior::PromptMode::Agent,
             client_identifier: None,
@@ -585,7 +591,6 @@ impl SessionActor {
             persist_ack: None,
             parsed_prompt_tx: None,
             queue_meta: None,
-            send_now: false,
         });
 
         tracing::info!(
@@ -596,6 +601,7 @@ impl SessionActor {
                 NotificationSource::MonitorEvent { task_id } => format!("monitor:{task_id}"),
                 NotificationSource::MonitorCompleted { task_id } => format!("monitor-completed:{task_id}"),
                 NotificationSource::BashTaskCompleted { task_id } => format!("bash:{task_id}"),
+                NotificationSource::SubagentCompleted { task_id } => format!("subagent:{task_id}"),
             }).collect::<Vec<_>>().join(","),
             "Drained pending notifications into single batched turn"
         );

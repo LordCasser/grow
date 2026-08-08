@@ -25,10 +25,6 @@ mod ctrlc_after_activity_no_rewind_prompt_once;
 mod ctrlc_with_queued_prompt_no_dup;
 #[path = "pty_e2e/edit_interject_lone_queued_row_keeps_tui_alive.rs"]
 mod edit_interject_lone_queued_row_keeps_tui_alive;
-#[path = "pty_e2e/empty_enter_force_sends_top_queued.rs"]
-mod empty_enter_force_sends_top_queued;
-#[path = "pty_e2e/empty_enter_sends_top_not_last_of_two.rs"]
-mod empty_enter_sends_top_not_last_of_two;
 #[path = "pty_e2e/esc_cancels_running_turn_from_prompt_preserves_draft.rs"]
 mod esc_cancels_running_turn_from_prompt_preserves_draft;
 #[path = "pty_e2e/esc_cancels_running_turn_from_scrollback.rs"]
@@ -39,16 +35,10 @@ mod esc_esc_clears_idle_prompt_and_records_history;
 mod esc_esc_opens_rewind_picker_silent_first_press;
 #[path = "pty_e2e/esc_idle_empty_no_messages_is_swallowed_noop.rs"]
 mod esc_idle_empty_no_messages_is_swallowed_noop;
-#[path = "pty_e2e/interjection_reaches_model_ctrl_l_in_vscode_family.rs"]
-mod interjection_reaches_model_ctrl_l_in_vscode_family;
 #[path = "pty_e2e/interjection_reaches_model_in_same_turn.rs"]
 mod interjection_reaches_model_in_same_turn;
 #[path = "pty_e2e/mid_turn_slash_dropdown_esc_dismisses_not_cancel.rs"]
 mod mid_turn_slash_dropdown_esc_dismisses_not_cancel;
-#[path = "pty_e2e/minimal/minimal_ctrl_o_send_now_queued_apple_terminal.rs"]
-mod minimal_ctrl_o_send_now_queued_apple_terminal;
-#[path = "pty_e2e/queue_and_interjection_lifecycle.rs"]
-mod queue_and_interjection_lifecycle;
 #[path = "pty_e2e/queued_bash_promotion_renders_output_pty.rs"]
 mod queued_bash_promotion_renders_output_pty;
 #[path = "pty_e2e/queued_message_renders_once_not_twice.rs"]

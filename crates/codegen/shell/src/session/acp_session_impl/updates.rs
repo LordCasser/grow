@@ -462,17 +462,19 @@ impl SessionActor {
                 description,
                 resumed_from,
                 model,
+                goal_id,
                 ..
             } => {
                 if let Some(parent_id) = resumed_from {
                     debug_assert_ne!(parent_id, subagent_id, "subagent cannot resume itself");
                 }
-                {
-                    let goal_id = self
-                        .goal_tracker
+                let goal_owned = goal_id.as_deref().is_some_and(|owner_goal_id| {
+                    self.goal_tracker
                         .lock()
                         .snapshot()
-                        .map(|o| o.goal_id.clone());
+                        .is_some_and(|goal| goal.goal_id == owner_goal_id)
+                });
+                if goal_id.is_some() {
                     let mut records = self.subagent_token_records.lock();
                     let anchor = resumed_from
                         .as_deref()
@@ -495,20 +497,17 @@ impl SessionActor {
                     records.insert(
                         subagent_id.clone(),
                         SubagentTokenRecord {
-                            goal_id,
+                            goal_id: goal_id.clone(),
                             resume_anchor_cumulative: anchor,
+                            settled_cumulative: anchor,
                             last_cumulative_reported: anchor,
                             model: model.clone(),
                             finished: false,
                         },
                     );
                 }
-                if self.goal_harness_enabled() {
+                if self.goal_harness_enabled() && goal_owned {
                     let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-                    if !self.goal_runs_on_workflow_engine() {
-                        self.drain_goal_updates(current_tokens, DrainPurpose::MidTurn)
-                            .await;
-                    }
                     let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
                     let notify = self.goal_notify_sender();
                     notify.emit_goal_updated(
@@ -543,15 +542,10 @@ impl SessionActor {
                 tokens_used,
                 ..
             } => {
-                {
-                    let mut records = self.subagent_token_records.lock();
-                    if let Some(rec) = records.get_mut(subagent_id) {
-                        rec.last_cumulative_reported =
-                            rec.last_cumulative_reported.max(*tokens_used);
-                        rec.finished = true;
-                    }
-                }
-                {
+                let goal_tokens_settled = self
+                    .settle_goal_subagent_tokens(subagent_id, *tokens_used)
+                    .is_some();
+                if goal_tokens_settled {
                     let mut tracker = self.goal_tracker.lock();
                     if let Some(o) = tracker.snapshot_mut() {
                         o.live_subagent_tokens = 0;
@@ -561,7 +555,7 @@ impl SessionActor {
                         o.live_tokens_by_model.clear();
                     }
                 }
-                if self.goal_harness_enabled() && self.goal_tracker.lock().snapshot().is_some() {
+                if self.goal_harness_enabled() && goal_tokens_settled {
                     let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
                     let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
                     let notify = self.goal_notify_sender();
@@ -1151,15 +1145,28 @@ mod grow_event_id_stamping_tests {
                 let (persistence_tx, mut persistence_rx) =
                     tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
                 let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-                actor.goal_tracker.lock().create_goal(
-                    "completed-goal".into(),
-                    "done".into(),
-                    None,
-                    0,
-                    "now".into(),
-                    None,
-                );
-                actor.goal_tracker.lock().complete_verified();
+                {
+                    let mut tracker = actor.goal_tracker.lock();
+                    tracker.create_goal(
+                        "completed-goal".into(),
+                        "done".into(),
+                        None,
+                        0,
+                        "now".into(),
+                        None,
+                    );
+                    assert!(tracker.replace_plan(
+                        "- [x] done".into(),
+                        crate::session::goal_tracker::GoalPlanAuthor::Planner,
+                        None,
+                    ));
+                    assert!(tracker.candidate_complete("done".into()));
+                    let lease = tracker
+                        .claim_stage(crate::session::goal_tracker::GoalPhase::Verifying)
+                        .expect("verifier lease");
+                    assert!(tracker.verification_achieved(&lease));
+                    assert!(tracker.complete_verified());
+                }
 
                 let normal = actor
                     .request_behavior_change(acp::SessionModeId::new("normal"))
@@ -1255,6 +1262,10 @@ mod synthetic_prompt_behavior_tests {
                         actor
                             .handle_prompt(
                                 "subagent-completed-sa-1",
+                                crate::session::PromptOrigin::SubagentCompleted {
+                                    subagent_id: "sa-1".to_string(),
+                                },
+                                crate::session::TurnKind::Internal,
                                 vec![acp::ContentBlock::Text(acp::TextContent::new(
                                     "subagent sa-1 finished",
                                 ))],
@@ -1339,6 +1350,10 @@ mod synthetic_prompt_behavior_tests {
                         actor
                             .handle_prompt(
                                 "subagent-completed-sa-2",
+                                crate::session::PromptOrigin::SubagentCompleted {
+                                    subagent_id: "sa-2".to_string(),
+                                },
+                                crate::session::TurnKind::Internal,
                                 vec![acp::ContentBlock::Text(acp::TextContent::new(
                                     "subagent sa-2 finished",
                                 ))],

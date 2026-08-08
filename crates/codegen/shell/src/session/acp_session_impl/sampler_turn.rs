@@ -58,7 +58,18 @@ impl SessionActor {
     }
     pub(super) async fn prepare_tool_definitions_inner(&self) -> Vec<ToolDefinition> {
         let bridge = self.agent.borrow().tool_bridge().clone();
-        let defs = bridge.tool_definitions_builtins_only().await;
+        let mut defs = bridge.tool_definitions_builtins_only().await;
+        let goal_behavior = self.behavior.lock().behavior() == Some(tool_types::BehaviorId::Goal);
+        if !goal_behavior {
+            defs.retain(|definition| {
+                !matches!(
+                    definition.function.name.as_str(),
+                    tools::implementations::grow_build::GET_GOAL_TOOL_NAME
+                        | tools::implementations::grow_build::UPDATE_GOAL_PLAN_TOOL_NAME
+                        | tools::implementations::grow_build::UPDATE_GOAL_TOOL_NAME
+                )
+            });
+        }
         let plan_active = self.behavior.lock().is_plan();
         filter_cursor_tools_by_plan_mode(defs, plan_active)
     }
@@ -728,44 +739,27 @@ impl SessionActor {
         };
         let request_id = sampler::RequestId::random();
         let request_id_str = request_id.as_str().to_string();
-        let goal_control_generation = self.goal_control_generation();
         let collect = self
             .sampler_handle
             .submit_and_collect(request_id.clone(), request);
         tokio::pin!(collect);
-        let collected = if self.goal_loop_active() {
-            tokio::select! {
-                biased;
-                _ = super::tool_calls::wait_for_pending_interjection(
-                    &self.pending_interjections,
-                ) => {
-                    self.sampler_handle.cancel(request_id.clone());
-                    // Let the sampler publish its terminal cancellation before
-                    // starting the replacement request. This keeps per-request
-                    // stream ordering deterministic without cancelling the
-                    // Goal root task.
-                    let _ = collect.await;
-                    self.turn_stream_drained.lock().take();
-                    tracing::info!(
-                        sampler_request_id = request_id_str,
-                        "soft-preempted Goal sampling for user steering"
-                    );
-                    None
-                },
-                _ = self.wait_goal_control_change(goal_control_generation) => {
-                    self.sampler_handle.cancel(request_id.clone());
-                    let _ = collect.await;
-                    self.turn_stream_drained.lock().take();
-                    tracing::info!(
-                        sampler_request_id = request_id_str,
-                        "soft-preempted Goal sampling for a Goal definition change"
-                    );
-                    None
-                },
-                result = &mut collect => Some(result),
-            }
-        } else {
-            Some(collect.await)
+        let collected = tokio::select! {
+            biased;
+            _ = super::tool_calls::wait_for_pending_interjection(
+                &self.pending_interjections,
+            ) => {
+                self.sampler_handle.cancel(request_id.clone());
+                // Steering restarts sampling inside the same visible turn; it
+                // never creates a second foreground owner or terminal event.
+                let _ = collect.await;
+                self.turn_stream_drained.lock().take();
+                tracing::info!(
+                    sampler_request_id = request_id_str,
+                    "soft-preempted sampling for user steering"
+                );
+                None
+            },
+            result = &mut collect => Some(result),
         };
         let Some(collected) = collected else {
             return Ok(SamplerTurnOutcome::Steered);

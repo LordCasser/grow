@@ -93,18 +93,18 @@ fn prompt_request_meta_omits_screen_mode_when_unset() {
     let meta = prompt_request_meta("p-2", None);
     assert_eq!(meta, serde_json::json!({ "promptId": "p-2" }));
 }
-/// Text-only interjections must omit the `content` key entirely — the
-/// legacy `grow/interject` wire shape stays byte-identical.
+/// Text-only steering must omit the optional `content` key.
 #[test]
 fn interject_params_omit_content_when_no_blocks() {
     let sid = acp::SessionId::new("s1");
-    let params = build_interject_params(&sid, "steer", "i1", None);
+    let params = build_interject_params(&sid, "turn-1", "steer", "i1", None);
     let obj = params.as_object().unwrap();
     assert!(!obj.contains_key("content"), "content key must be absent");
     assert_eq!(obj["sessionId"], "s1");
+    assert_eq!(obj["expectedTurnId"], "turn-1");
     assert_eq!(obj["text"], "steer");
     assert_eq!(obj["interjectionId"], "i1");
-    assert_eq!(obj.len(), 3, "no extra keys on the legacy shape");
+    assert_eq!(obj.len(), 4);
 }
 #[test]
 fn picker_drops_local_with_missing_updated_at() {
@@ -291,6 +291,7 @@ fn interject_params_carry_content_when_blocks_present() {
         ))];
     let params = build_interject_params(
         &sid,
+        "turn-1",
         "look at [Image #1]",
         "i1",
         Some(blocks.as_slice()),
@@ -381,6 +382,29 @@ fn parse_session_load_restore_meta_rejects_unknown_degree() {
         });
     let (_, _, degree) = parse_session_load_restore_meta(meta.as_object());
     assert!(degree.is_none());
+}
+
+#[test]
+fn session_load_foreground_requires_structured_identity() {
+    let meta = serde_json::json!({
+        "grow/foreground": {
+            "promptId": "opaque-turn-id",
+            "origin": "goal_continuation",
+            "turnKind": "internal",
+            "turnStartMs": 42,
+        }
+    });
+    let foreground = parse_session_load_foreground(meta.as_object()).expect("foreground");
+    assert_eq!(foreground.prompt_id, "opaque-turn-id");
+    assert_eq!(foreground.origin, "goal_continuation");
+    assert_eq!(foreground.turn_kind, "internal");
+    assert_eq!(foreground.turn_start_ms, 42);
+}
+
+#[test]
+fn session_load_does_not_adopt_an_id_without_structured_foreground() {
+    let legacy = serde_json::json!({ "grow/runningPromptId": "opaque-turn-id" });
+    assert!(parse_session_load_foreground(legacy.as_object()).is_none());
 }
 /// Unknown keys return a descriptive error.
 #[tokio::test]

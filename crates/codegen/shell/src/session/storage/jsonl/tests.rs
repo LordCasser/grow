@@ -544,6 +544,7 @@ async fn test_subagent_notifications_round_trip() {
             model: None,
             resumed_from: None,
             workflow_run_id: None,
+            goal_id: None,
         },
         meta: None,
     };
@@ -662,6 +663,7 @@ async fn test_subagent_spawned_resumed_roundtrip() {
             model: None,
             resumed_from: Some("source-agent-id".to_string()),
             workflow_run_id: None,
+            goal_id: None,
         },
         meta: None,
     };
@@ -3537,4 +3539,83 @@ async fn load_session_without_updates_survives_merged_chat_line() {
             vec!["real turn"],
             "resume succeeds; only the merged record is dropped"
         );
+}
+
+#[tokio::test]
+async fn goal_state_roundtrips_through_light_session_load() {
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let mut tracker = crate::session::goal_tracker::GoalTracker::new();
+    tracker.create_goal(
+        "goal-1".into(),
+        "verify persistence".into(),
+        Some(10_000),
+        50,
+        "now".into(),
+        None,
+    );
+    adapter
+        .write_goal_mode_state(&info, tracker.snapshot().unwrap())
+        .await
+        .unwrap();
+
+    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    let goal = loaded.goal_mode_state.expect("Goal state should load");
+    assert!(!loaded.goal_mode_state_rejected);
+    assert_eq!(goal.goal_id, "goal-1");
+    assert_eq!(
+        goal.architecture_version,
+        crate::session::goal_tracker::GOAL_ARCHITECTURE_VERSION,
+    );
+}
+
+#[tokio::test]
+async fn malformed_goal_state_is_quarantined_without_bricking_session_load() {
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let path = adapter.goal_mode_state_file(&info);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"{broken").unwrap();
+
+    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    assert!(loaded.goal_mode_state.is_none());
+    assert!(loaded.goal_mode_state_rejected);
+    assert!(!path.exists(), "malformed Goal state must not be retried");
+}
+
+#[tokio::test]
+async fn session_copy_does_not_clone_goal_runtime_state() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source = create_test_info();
+    let target = Info {
+        id: acp::SessionId::new("goal-copy-target"),
+        cwd: "/test/fork".into(),
+    };
+    adapter.init_session(&source, default_model_id()).await.unwrap();
+    let mut tracker = crate::session::goal_tracker::GoalTracker::new();
+    tracker.create_goal(
+        "source-goal".into(),
+        "stay in the source session".into(),
+        None,
+        0,
+        "now".into(),
+        None,
+    );
+    adapter
+        .write_goal_mode_state(&source, tracker.snapshot().unwrap())
+        .await
+        .unwrap();
+
+    adapter
+        .copy_session_data(&source, &target, CopySessionOptions::default())
+        .await
+        .unwrap();
+    let loaded = adapter.load_session_without_updates(&target).await.unwrap();
+    assert!(loaded.goal_mode_state.is_none());
+    assert!(!loaded.goal_mode_state_rejected);
 }

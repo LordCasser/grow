@@ -1,59 +1,43 @@
 use super::*;
 use tools::implementations::grow_build::LoopFireMode;
 
-/// Queue marker for a Goal cycle scheduled by the command plane. The text is a
-/// placeholder only: the `GoalSummary` branch of `handle_prompt` replaces it
-/// with the real continuation directive rendered by
-/// `SessionActor::render_goal_continuation` (the same pure source as the
-/// turn-end continuation) before any model input is built. It must never
-/// reach the model; the branch ends the cycle without model work when the
-/// Goal is no longer active.
-pub(super) const GOAL_CYCLE_PLACEHOLDER: &str = "Continue the active Goal at its next safe cycle.";
+fn completed_goal_control_cancel_trigger(
+    control: Option<&'static str>,
+    before_goal: Option<(String, u64, crate::session::goal_tracker::GoalStatus)>,
+    after_goal: Option<(String, u64, crate::session::goal_tracker::GoalStatus)>,
+    behavior_changed: bool,
+) -> Option<&'static str> {
+    match control? {
+        "goal_set" => (before_goal.as_ref().map(|goal| &goal.0)
+            != after_goal.as_ref().map(|goal| &goal.0)
+            || behavior_changed)
+            .then_some("goal_set"),
+        "goal_edit" => before_goal
+            .zip(after_goal)
+            .is_some_and(|(before, after)| before.0 == after.0 && before.1 != after.1)
+            .then_some("goal_edit"),
+        "goal_enter" => behavior_changed.then_some("goal_enter"),
+        "goal_pause" => before_goal
+            .zip(after_goal)
+            .is_some_and(|(before, after)| {
+                before.2 == crate::session::goal_tracker::GoalStatus::Active
+                    && after.2 != crate::session::goal_tracker::GoalStatus::Active
+            })
+            .then_some("goal_pause"),
+        "goal_clear" => (before_goal.is_some() && after_goal.is_none() || behavior_changed)
+            .then_some("goal_clear"),
+        _ => None,
+    }
+}
 
 impl SessionActor {
-    /// Schedule one finite autonomous Goal cycle behind all already-admitted
-    /// user work. Control commands mutate Goal state synchronously and never
-    /// masquerade as hidden slash-command prompts.
-    async fn queue_goal_cycle(&self) {
-        let prompt_id = format!("goal-summary-{}", uuid::Uuid::now_v7());
-        let prompt_mode = *self.current_prompt_mode.lock();
-        let (respond_to, _) = tokio::sync::oneshot::channel();
-        let item = InputItem {
-            prompt_id,
-            prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
-                GOAL_CYCLE_PLACEHOLDER,
-            ))],
-            prompt_mode,
-            client_identifier: None,
-            screen_mode: None,
-            verbatim: true,
-            json_schema: None,
-            origin: crate::session::PromptOrigin::GoalSummary,
-            task_wake_fallback: None,
-            respond_to,
-            persist_ack: None,
-            parsed_prompt_tx: None,
-            queue_meta: None,
-            send_now: false,
-        };
-        let mut state = self.state.lock().await;
-        if !state.pending_inputs.iter().any(|input| {
-            matches!(
-                input.origin,
-                crate::session::PromptOrigin::GoalSummary
-                    | crate::session::PromptOrigin::GoalClassifierNudge
-            )
-        }) {
-            state.pending_inputs.push_back(item);
-        }
-    }
-
     async fn queue_host_command(&self, command: String) {
         let prompt_id = format!("host-command-{}", uuid::Uuid::now_v7());
         let prompt_mode = *self.current_prompt_mode.lock();
         let (respond_to, _) = tokio::sync::oneshot::channel();
         self.state.lock().await.pending_inputs.push_back(InputItem {
             prompt_id,
+            turn_kind: crate::session::TurnKind::Internal,
             prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(command))],
             prompt_mode,
             client_identifier: None,
@@ -66,7 +50,6 @@ impl SessionActor {
             persist_ack: None,
             parsed_prompt_tx: None,
             queue_meta: None,
-            send_now: false,
         });
     }
 
@@ -74,13 +57,13 @@ impl SessionActor {
     ///
     /// Only goal controls are allowed to mutate a session while a turn is in
     /// flight. Other host commands receive an explicit response instead of
-    /// being reclassified as model input. The returned flag asks the actor
-    /// loop to cancel the current turn. Only an explicit `/goal pause` may do
-    /// that; all other Goal controls mutate or steer the running goal in place.
+    /// being reclassified as model input. A successful control that invalidates
+    /// the running turn returns a structured cancellation trigger; read-only or
+    /// non-invalidating controls leave the turn running.
     pub(super) async fn execute_out_of_band_slash_command(
         self: &Arc<Self>,
         command: String,
-    ) -> Result<bool, String> {
+    ) -> Result<Option<&'static str>, String> {
         let command = command.trim().to_string();
         if !command.starts_with('/') {
             return Err("Grow commands must start with '/'.".to_string());
@@ -114,158 +97,65 @@ impl SessionActor {
             Ok(_) => return Err(format!("Unknown Grow command: {command}")),
         };
 
-        // Behavior selection is control-plane state, not model work. Commit it
-        // before deciding whether Goal execution needs a hidden turn so the
-        // client receives the authoritative CurrentModeUpdate immediately.
-        // The hidden turn may call the same transition again; that is an
-        // idempotent reconciliation, not a second state transition.
-        if matches!(
-            &action,
-            BuiltinAction::GoalSet { .. } | BuiltinAction::GoalEnter | BuiltinAction::GoalResume
-        ) {
-            use crate::session::behavior::BehaviorChangeOutcome;
-            match self
-                .request_behavior_change(acp::SessionModeId::new("goal"))
-                .await
-            {
-                BehaviorChangeOutcome::Applied => {}
-                BehaviorChangeOutcome::ConfirmationRequired { message, .. }
-                | BehaviorChangeOutcome::Rejected { message } => {
-                    self.send_host_turn_slash_command_output(&message).await;
-                    return Ok(false);
-                }
-            }
-        }
-
         match action {
-            BuiltinAction::GoalSet {
-                objective,
-                token_budget,
-            } => {
-                ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
-                    command: "goal".to_string(),
-                    args_provided: true,
-                });
-                let existing_status = self.goal_tracker.lock().status();
-                let revising = existing_status.is_some()
-                    && existing_status != Some(crate::session::goal_tracker::GoalStatus::Complete);
-                let active_reminder = if revising {
-                    let revised = self
-                        .goal_tracker
-                        .lock()
-                        .revise_goal(objective.clone(), token_budget);
-                    debug_assert!(revised);
-                    self.push_current_goal_context();
-                    let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-                    let (tokens_used, finished) = self.goal_tokens(current_tokens);
-                    self.goal_notify_sender().emit_goal_updated(
-                        &mut self.goal_tracker.lock(),
-                        tokens_used,
-                        finished,
-                    );
-                    if self.goal_tracker.lock().status()
-                        == Some(crate::session::goal_tracker::GoalStatus::Active)
-                    {
-                        Some(self.render_goal_start_reminder().await)
-                    } else {
-                        self.push_goal_control_notice(format!(
-                            "<system-reminder>The paused Goal objective was revised to: {objective}. Use this latest objective for finite paused interactions, but do not resume autonomous work.</system-reminder>"
-                        ));
-                        None
-                    }
-                } else {
-                    self.initialize_goal_runtime(&objective, token_budget).await;
-                    Some(self.render_goal_start_reminder().await)
+            action @ (BuiltinAction::GoalSet { .. }
+            | BuiltinAction::GoalEdit { .. }
+            | BuiltinAction::GoalEnter
+            | BuiltinAction::GoalStatus
+            | BuiltinAction::GoalPause
+            | BuiltinAction::GoalResume
+            | BuiltinAction::GoalClear
+            | BuiltinAction::GoalBudget { .. }) => {
+                let control = match &action {
+                    BuiltinAction::GoalSet { .. } => Some("goal_set"),
+                    BuiltinAction::GoalEdit { .. } => Some("goal_edit"),
+                    BuiltinAction::GoalEnter => Some("goal_enter"),
+                    BuiltinAction::GoalPause => Some("goal_pause"),
+                    BuiltinAction::GoalClear => Some("goal_clear"),
+                    BuiltinAction::GoalStatus
+                    | BuiltinAction::GoalResume
+                    | BuiltinAction::GoalBudget { .. } => None,
+                    _ => unreachable!("match arm accepts only Goal controls"),
                 };
-                if let Some(reminder) = active_reminder {
-                    // Goal controls are hidden control-plane state, not user
-                    // interjections. Flush at the next safe model boundary.
-                    self.push_goal_control_notice(reminder);
-                    self.queue_goal_cycle().await;
-                }
-                self.send_host_turn_slash_command_output(&format!(
-                    "User set current goal objective to: {objective}"
+                let before_goal = self
+                    .goal_tracker
+                    .lock()
+                    .snapshot()
+                    .map(|goal| (goal.goal_id.clone(), goal.objective_revision, goal.status));
+                let before_mode = *self.current_prompt_mode.lock();
+                ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
+                    command: "goal".to_string(),
+                    args_provided: action.args_provided(),
+                });
+                self.execute_builtin_slash_command(action)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let after_goal = self
+                    .goal_tracker
+                    .lock()
+                    .snapshot()
+                    .map(|goal| (goal.goal_id.clone(), goal.objective_revision, goal.status));
+                let behavior_changed = before_mode != *self.current_prompt_mode.lock();
+                Ok(completed_goal_control_cancel_trigger(
+                    control,
+                    before_goal,
+                    after_goal,
+                    behavior_changed,
                 ))
-                .await;
-                Ok(false)
-            }
-            BuiltinAction::GoalEnter | BuiltinAction::GoalResume => {
-                ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
-                    command: "goal".to_string(),
-                    args_provided: false,
-                });
-                match self.resume_goal().await {
-                    GoalResumeOutcome::Inference { reminder, user_msg } => {
-                        self.send_host_turn_slash_command_output(&user_msg).await;
-                        self.push_goal_control_notice(reminder);
-                        self.queue_goal_cycle().await;
-                    }
-                    GoalResumeOutcome::Message(message) => {
-                        self.send_host_turn_slash_command_output(&message).await;
-                    }
-                }
-                Ok(false)
-            }
-            BuiltinAction::GoalBudget { token_budget } => {
-                ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
-                    command: "goal".to_string(),
-                    args_provided: token_budget.is_some(),
-                });
-                let message = self.update_goal_token_budget(token_budget);
-                self.send_host_turn_slash_command_output(&message).await;
-                Ok(false)
-            }
-            action @ (BuiltinAction::GoalStatus | BuiltinAction::GoalPause) => {
-                let turn_running = self.state.lock().await.running_task.is_some();
-                let was_active = matches!(action, BuiltinAction::GoalPause)
-                    && self.goal_tracker.lock().status()
-                        == Some(crate::session::goal_tracker::GoalStatus::Active);
-                self.execute_builtin_slash_command(action)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let is_still_active = self.goal_tracker.lock().status()
-                    == Some(crate::session::goal_tracker::GoalStatus::Active);
-                if turn_running && was_active && !is_still_active {
-                    // Wake a planner wait before the actor aborts the enclosing
-                    // Goal turn. The planner transfers its JoinHandle to the
-                    // background continuation; the stale lease prevents a
-                    // paused Goal from publishing the late artifact.
-                    self.push_goal_control_notice(
-                        "The user paused the Goal. Stop autonomous foreground work; preserve background tasks and wait for an explicit /goal resume."
-                            .to_string(),
-                    );
-                    tokio::task::yield_now().await;
-                }
-                Ok(turn_running && was_active && !is_still_active)
-            }
-            action @ BuiltinAction::GoalClear => {
-                if self.goal_tracker.lock().status()
-                    == Some(crate::session::goal_tracker::GoalStatus::Active)
-                {
-                    self.send_host_turn_slash_command_output(
-                        "Pause the current goal before clearing it.",
-                    )
-                    .await;
-                    return Ok(false);
-                }
-                self.execute_builtin_slash_command(action)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                Ok(false)
             }
             other => {
                 ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
                     command: other.command_name().to_string(),
                     args_provided: other.args_provided(),
                 });
-                if self.state.lock().await.running_task.is_some() {
+                if self.state.lock().await.foreground.regular().is_some() {
                     Err(format!(
                         "/{} cannot run inside an active turn. It was not treated as model input.",
                         other.command_name()
                     ))
                 } else {
                     self.queue_host_command(command).await;
-                    Ok(false)
+                    Ok(None)
                 }
             }
         }
@@ -1078,14 +968,99 @@ impl SessionActor {
                 self.refresh_goal_harness_enabled().await;
                 ok_end_turn(0, None)
             }
-            // GoalSet is handled directly in handle_prompt (before this
-            // function is called) so the turn flows through to model inference
-            // instead of ending immediately.
-            BuiltinAction::GoalSet { .. } => {
-                unreachable!("GoalSet is intercepted in handle_prompt")
+            BuiltinAction::GoalSet {
+                objective,
+                token_budget,
+            } => {
+                use crate::session::behavior::BehaviorChangeOutcome;
+                use crate::session::goal_tracker::GoalStatus;
+                if self
+                    .goal_tracker
+                    .lock()
+                    .status()
+                    .is_some_and(|status| status != GoalStatus::Complete)
+                {
+                    self.send_host_turn_slash_command_output(
+                        "An unfinished Goal already exists. Use /goal edit <objective>, or /goal clear first.",
+                    )
+                    .await;
+                    return ok_end_turn(0, None);
+                }
+                match self
+                    .request_behavior_change(acp::SessionModeId::new("goal"))
+                    .await
+                {
+                    BehaviorChangeOutcome::Applied => {
+                        let message = self.setup_goal(&objective, token_budget).await;
+                        self.send_host_turn_slash_command_output(&message).await;
+                    }
+                    BehaviorChangeOutcome::ConfirmationRequired { message, .. }
+                    | BehaviorChangeOutcome::Rejected { message } => {
+                        self.send_host_turn_slash_command_output(&message).await;
+                    }
+                }
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::GoalEdit {
+                objective,
+                token_budget,
+            } => {
+                use crate::session::goal_tracker::GoalStatus;
+                if self
+                    .goal_tracker
+                    .lock()
+                    .status()
+                    .is_none_or(|status| status == GoalStatus::Complete)
+                {
+                    self.send_host_turn_slash_command_output(
+                        "No unfinished Goal can be edited. Use /goal set <objective>.",
+                    )
+                    .await;
+                    return ok_end_turn(0, None);
+                }
+                let revised = self
+                    .goal_tracker
+                    .lock()
+                    .revise_goal(objective.clone(), token_budget);
+                if revised {
+                    if let Some((_, cancel)) = self.goal_stage_cancel.lock().take() {
+                        cancel.cancel();
+                    }
+                    let current = self.chat_state_handle.get_total_tokens().await as i64;
+                    let (used, finished) = self.goal_tokens(current);
+                    self.goal_notify_sender().emit_goal_updated(
+                        &mut self.goal_tracker.lock(),
+                        used,
+                        finished,
+                    );
+                    self.idle_arbiter.notify_one();
+                    self.send_host_turn_slash_command_output(&format!(
+                        "Goal objective revised; background planning restarted.\nObjective: {objective}"
+                    ))
+                    .await;
+                }
+                ok_end_turn(0, None)
             }
             BuiltinAction::GoalEnter => {
-                unreachable!("GoalEnter is intercepted in handle_prompt")
+                use crate::session::behavior::BehaviorChangeOutcome;
+                let message = match self
+                    .request_behavior_change(acp::SessionModeId::new("goal"))
+                    .await
+                {
+                    BehaviorChangeOutcome::Applied => {
+                        if self.goal_tracker.lock().snapshot().is_some() {
+                            "Goal behavior selected. Use /goal status, /goal resume, or send additional context."
+                                .to_string()
+                        } else {
+                            "Goal behavior selected. Use /goal set <objective> to start."
+                                .to_string()
+                        }
+                    }
+                    BehaviorChangeOutcome::ConfirmationRequired { message, .. }
+                    | BehaviorChangeOutcome::Rejected { message } => message,
+                };
+                self.send_host_turn_slash_command_output(&message).await;
+                ok_end_turn(0, None)
             }
             BuiltinAction::DeepResearch { query } => {
                 use crate::session::behavior::BehaviorChangeOutcome;
@@ -1173,7 +1148,9 @@ impl SessionActor {
                     }
                 };
                 if changed {
-                    self.clear_pending_classifier_completions();
+                    if let Some((_, cancel)) = self.goal_stage_cancel.lock().take() {
+                        cancel.cancel();
+                    }
                     let (tokens_used, finished) = self.goal_tokens(current_tokens);
                     self.goal_notify_sender().emit_goal_updated(
                         &mut self.goal_tracker.lock(),
@@ -1184,35 +1161,37 @@ impl SessionActor {
                 self.send_host_turn_slash_command_output(msg).await;
                 ok_end_turn(0, None)
             }
-            // GoalResume is intercepted in handle_prompt (like GoalSet) so a
-            // successful resume flows through to inference — see `resume_goal`.
             BuiltinAction::GoalResume => {
-                unreachable!("GoalResume is intercepted in handle_prompt")
+                use crate::session::behavior::BehaviorChangeOutcome;
+                match self
+                    .request_behavior_change(acp::SessionModeId::new("goal"))
+                    .await
+                {
+                    BehaviorChangeOutcome::Applied => {
+                        let message = self.resume_goal().await;
+                        self.send_host_turn_slash_command_output(&message).await;
+                    }
+                    BehaviorChangeOutcome::ConfirmationRequired { message, .. }
+                    | BehaviorChangeOutcome::Rejected { message } => {
+                        self.send_host_turn_slash_command_output(&message).await;
+                    }
+                }
+                ok_end_turn(0, None)
             }
             BuiltinAction::GoalClear => {
-                let (respond_to, deleted) = tokio::sync::oneshot::channel();
-                if self
-                    .notifications
-                    .persistence_tx
-                    .send(PersistenceMsg::DeleteGoalModeState { respond_to })
-                    .is_err()
-                    || !matches!(deleted.await, Ok(Ok(())))
-                {
+                if self.delete_goal_state_durably().await.is_err() {
                     self.send_host_turn_slash_command_output(
                         "Could not durably clear the goal. The goal remains loaded; retry /goal clear.",
                     )
                     .await;
                     return ok_end_turn(0, None);
                 }
+                if let Some((_, cancel)) = self.goal_stage_cancel.lock().take() {
+                    cancel.cancel();
+                }
                 self.goal_tracker.lock().clear();
-                self.retire_goal_plan_scope().await;
-                self.goal_continuation_streak
-                    .store(0, std::sync::atomic::Ordering::Relaxed);
-                self.goal_blocked_streak
-                    .store(0, std::sync::atomic::Ordering::Relaxed);
                 self.goal_turn_task_ids.lock().clear();
                 self.subagent_token_records.lock().clear();
-                self.clear_pending_classifier_completions();
                 self.behavior.lock().select_behavior(None);
                 *self.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
                 self.retag_queued_goal_user_prompts(crate::session::behavior::PromptMode::Agent)
@@ -1227,12 +1206,72 @@ impl SessionActor {
                     .await;
                 ok_end_turn(0, None)
             }
-            // GoalBudget is handled directly in handle_prompt (before this
-            // function is called) so the mid-run re-budget is reported and
-            // persisted without ending the goal run.
-            BuiltinAction::GoalBudget { .. } => {
-                unreachable!("GoalBudget is intercepted in handle_prompt")
+            BuiltinAction::GoalBudget { token_budget } => {
+                let message = self.update_goal_token_budget(token_budget);
+                self.send_host_turn_slash_command_output(&message).await;
+                ok_end_turn(0, None)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod out_of_band_goal_control_tests {
+    use super::*;
+    use crate::session::goal_tracker::GoalStatus;
+
+    fn goal(id: &str, revision: u64, status: GoalStatus) -> Option<(String, u64, GoalStatus)> {
+        Some((id.to_string(), revision, status))
+    }
+
+    #[test]
+    fn only_successful_invalidating_goal_controls_cancel_the_foreground() {
+        assert_eq!(
+            completed_goal_control_cancel_trigger(
+                Some("goal_edit"),
+                goal("g", 1, GoalStatus::Active),
+                goal("g", 2, GoalStatus::Active),
+                false,
+            ),
+            Some("goal_edit")
+        );
+        assert_eq!(
+            completed_goal_control_cancel_trigger(
+                Some("goal_pause"),
+                goal("g", 2, GoalStatus::Active),
+                goal("g", 2, GoalStatus::Paused),
+                false,
+            ),
+            Some("goal_pause")
+        );
+        assert_eq!(
+            completed_goal_control_cancel_trigger(
+                Some("goal_clear"),
+                goal("g", 2, GoalStatus::Paused),
+                None,
+                true,
+            ),
+            Some("goal_clear")
+        );
+        assert_eq!(
+            completed_goal_control_cancel_trigger(
+                Some("goal_edit"),
+                goal("g", 2, GoalStatus::Active),
+                goal("g", 2, GoalStatus::Active),
+                false,
+            ),
+            None,
+            "a rejected edit must not cancel unrelated work"
+        );
+        assert_eq!(
+            completed_goal_control_cancel_trigger(
+                None,
+                goal("g", 2, GoalStatus::Paused),
+                goal("g", 2, GoalStatus::Active),
+                false,
+            ),
+            None,
+            "resume does not invalidate the running user turn"
+        );
     }
 }

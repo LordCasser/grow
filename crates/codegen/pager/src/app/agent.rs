@@ -9,7 +9,6 @@ use crate::scrollback::EntryId;
 use crate::scrollback::state::ScrollbackState;
 use acp_transport::AcpAgentTx;
 use agent_client_protocol as acp;
-use shell::extensions::notification::GoalClassifierVerdict;
 use shell::sampling::types::ReasoningEffort;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -300,106 +299,52 @@ pub struct ScheduledTaskInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalDisplayStatus {
     Active,
-    /// User-initiated pause (Ctrl+C, `/goal pause`).
-    UserPaused,
-    /// Classifier run cap reached; paused the goal automatically.
-    BackOffPaused,
-    /// Verifier flagged the same gaps with no progress before the cap;
-    /// paused the goal automatically. Distinct from `BackOffPaused` only
-    /// in its user-facing label.
-    NoProgressPaused,
-    /// Infrastructure turn failure paused the goal automatically.
-    InfraPaused,
-    Failed,
-    Interrupted,
-    /// The model determined the goal is blocked in this environment;
-    /// `pause_message` on [`GoalDisplayState`] carries the reason text.
+    Paused,
     Blocked,
     BudgetLimited,
     Complete,
 }
 impl GoalDisplayStatus {
-    /// Parse a status string from the `GoalUpdated` notification.
-    ///
-    /// Accepts the six paused variants; legacy `"paused"` is treated as
-    /// [`Self::UserPaused`] so a new pager keeps working against an old
-    /// shell.
-    ///
-    /// Any unknown string — the empty string, a future `*_paused` form,
-    /// or any other status this pager cannot interpret — falls through to
-    /// [`Self::UserPaused`]: an uninterpretable status renders as a
-    /// resumable paused goal (no spinner, no live timer) rather than a
-    /// self-driving `Active` one. Mirrors the shell's
-    /// `GoalStatus::from_wire_str` fail-safe; `Active` is matched
-    /// explicitly (only the canonical `"active"` token).
-    pub fn parse(s: &str) -> Self {
-        match s {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
             "active" => Self::Active,
-            "user_paused" => Self::UserPaused,
-            "back_off_paused" => Self::BackOffPaused,
-            "no_progress_paused" => Self::NoProgressPaused,
-            "infra_paused" => Self::InfraPaused,
-            "failed" => Self::Failed,
-            "interrupted" => Self::Interrupted,
+            "paused" => Self::Paused,
             "blocked" => Self::Blocked,
-            "paused" => Self::UserPaused,
             "budget_limited" => Self::BudgetLimited,
             "complete" => Self::Complete,
-            _ => Self::UserPaused,
-        }
+            _ => return None,
+        })
     }
-    /// Short user-facing label for the status chip, the modal status row,
-    /// and the modal paused-state hint line. Single source of truth so the
-    /// three displays cannot drift.
-    ///
-    /// Returns the empty string for non-paused variants — they render
-    /// through their own labels (e.g. `"Budget"`, `"Done"`) elsewhere.
+
     pub fn pause_label(&self) -> &'static str {
         match self {
-            Self::UserPaused => "Paused",
-            Self::BackOffPaused => "Paused (back-off)",
-            Self::NoProgressPaused => "Paused (no progress)",
-            Self::InfraPaused => "Paused (error)",
-            Self::Blocked => "Paused (verification blocked)",
-            Self::Active
-            | Self::Failed
-            | Self::Interrupted
-            | Self::BudgetLimited
-            | Self::Complete => "",
+            Self::Paused => "Paused",
+            Self::Blocked => "Blocked",
+            Self::Active | Self::BudgetLimited | Self::Complete => "",
         }
     }
-    /// True for any paused variant — cause-agnostic check used by the
-    /// modal to decide whether to append the `/goal resume` hint.
+
     pub fn is_paused(&self) -> bool {
-        match self {
-            Self::UserPaused
-            | Self::BackOffPaused
-            | Self::NoProgressPaused
-            | Self::InfraPaused
-            | Self::Blocked => true,
-            Self::Active
-            | Self::Failed
-            | Self::Interrupted
-            | Self::BudgetLimited
-            | Self::Complete => false,
-        }
+        matches!(self, Self::Paused | Self::Blocked)
     }
 }
 /// Parsed goal phase from `GoalUpdated` session notifications.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalDisplayPhase {
-    Idle,
     Planning,
     Executing,
+    Verifying,
+    Summarizing,
 }
 impl GoalDisplayPhase {
-    /// Parse a phase string from the `GoalUpdated` notification.
-    pub fn parse(s: &str) -> Self {
-        match s {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
             "planning" => Self::Planning,
             "executing" => Self::Executing,
-            _ => Self::Idle,
-        }
+            "verifying" => Self::Verifying,
+            "summarizing" => Self::Summarizing,
+            _ => return None,
+        })
     }
 }
 /// Display state for an active goal, populated from `GoalUpdated`
@@ -408,19 +353,15 @@ impl GoalDisplayPhase {
 pub struct GoalDisplayState {
     pub goal_id: String,
     pub objective: String,
+    pub objective_revision: u64,
     pub status: GoalDisplayStatus,
     pub phase: GoalDisplayPhase,
+    pub plan_revision: u64,
+    pub plan_markdown: String,
+    pub verifier_feedback: Option<String>,
     pub token_budget: Option<i64>,
     pub tokens_used: i64,
     pub elapsed_ms: u64,
-    /// Wire compat: always 0 in simplified model.
-    pub total_deliverables: u32,
-    /// Wire compat: always 0 in simplified model.
-    pub completed_deliverables: u32,
-    /// Wire compat: always None in simplified model.
-    pub current_deliverable_id: Option<u32>,
-    /// Wire compat: always None in simplified model.
-    pub current_deliverable_title: Option<String>,
     pub current_subagent_role: Option<String>,
     pub total_worker_rounds: u32,
     pub total_verify_rounds: u32,
@@ -441,36 +382,7 @@ pub struct GoalDisplayState {
     pub token_baseline: i64,
     /// Tokens from completed subagents (not in context_state.used).
     pub finished_subagent_tokens: i64,
-    /// Retained for wire backwards compat; always empty in the simplified model.
-    pub deliverables: Vec<()>,
     pub pause_message: Option<String>,
-    /// Number of classifier runs the shell has performed. `None` when
-    /// no run has happened yet.
-    pub classifier_runs_attempted: Option<u32>,
-    /// Hard cap on classifier runs for this goal. `None` when not
-    /// configured.
-    pub classifier_max_runs: Option<u32>,
-    /// Last verdict returned by the classifier, if any. Re-exported
-    /// from the shell wire type — there is no separate pager-local
-    /// enum (cf. `GoalDisplayStatus`) because the verdict is small,
-    /// stable, and only carries two variants.
-    pub last_classifier_verdict: Option<GoalClassifierVerdict>,
-    /// Filesystem path to the latest classifier-details artifact.
-    pub last_classifier_details_path: Option<String>,
-    /// Whether `last_classifier_details_path` exists on disk, resolved ONCE
-    /// on `GoalUpdated` receipt (not per render frame) so the modal never
-    /// runs a blocking `stat(2)` on the UI hot path. `false` when the path
-    /// is absent or missing.
-    pub last_classifier_details_exists: bool,
-    /// True while a classifier run is in flight. Derived from the
-    /// wire field `verifying_completion: Option<bool>` (mapped to
-    /// `bool` at the boundary so render code never has to
-    /// `.unwrap_or(false)`).
-    pub verifying_completion: bool,
-    /// True while the goal planner subagent is running. Derived from
-    /// the wire field `planning: Option<bool>` (mapped to `bool` at the
-    /// boundary, same convention as `verifying_completion`).
-    pub planning: bool,
     /// Wall-clock instant when this state was last updated from a GoalUpdated
     /// notification. Used to compute local elapsed delta between notifications
     /// so the pager can tick elapsed_ms at render frequency.
@@ -502,15 +414,15 @@ impl GoalDisplayState {
         Self {
             goal_id: "g-test".into(),
             objective: "test goal".into(),
+            objective_revision: 0,
             status: GoalDisplayStatus::Active,
             phase: GoalDisplayPhase::Executing,
+            plan_revision: 1,
+            plan_markdown: "- [ ] test".into(),
+            verifier_feedback: None,
             token_budget: None,
             tokens_used: 0,
             elapsed_ms: 0,
-            total_deliverables: 0,
-            completed_deliverables: 0,
-            current_deliverable_id: None,
-            current_deliverable_title: None,
             current_subagent_role: None,
             total_worker_rounds: 0,
             total_verify_rounds: 0,
@@ -524,15 +436,7 @@ impl GoalDisplayState {
             last_event_timestamp: None,
             token_baseline: 0,
             finished_subagent_tokens: 0,
-            deliverables: Vec::new(),
             pause_message: None,
-            classifier_runs_attempted: None,
-            classifier_max_runs: None,
-            last_classifier_verdict: None,
-            last_classifier_details_path: None,
-            last_classifier_details_exists: false,
-            verifying_completion: false,
-            planning: false,
             received_at: std::time::Instant::now(),
             elapsed_floor_ms: 0,
         }
@@ -861,7 +765,6 @@ impl AgentSession {
         self.tracker.finish_turn(scrollback);
         self.compact_held_prompt = None;
         self.tracker.set_session_cwd(&self.cwd);
-        self.tracker.expect_user_echo();
         self.state = AgentState::TurnRunning;
         self.in_flight_prompt = None;
     }
@@ -1226,149 +1129,60 @@ mod tests {
     fn goal_display_status_parse_known_values() {
         assert_eq!(
             GoalDisplayStatus::parse("active"),
-            GoalDisplayStatus::Active
+            Some(GoalDisplayStatus::Active)
         );
         assert_eq!(
-            GoalDisplayStatus::parse("user_paused"),
-            GoalDisplayStatus::UserPaused
-        );
-        assert_eq!(
-            GoalDisplayStatus::parse("doom_loop_paused"),
-            GoalDisplayStatus::UserPaused
-        );
-        assert_eq!(
-            GoalDisplayStatus::parse("back_off_paused"),
-            GoalDisplayStatus::BackOffPaused
-        );
-        assert_eq!(
-            GoalDisplayStatus::parse("no_progress_paused"),
-            GoalDisplayStatus::NoProgressPaused
-        );
-        assert_eq!(
-            GoalDisplayStatus::parse("infra_paused"),
-            GoalDisplayStatus::InfraPaused
-        );
-        assert_eq!(
-            GoalDisplayStatus::parse("failed"),
-            GoalDisplayStatus::Failed
-        );
-        assert_eq!(
-            GoalDisplayStatus::parse("interrupted"),
-            GoalDisplayStatus::Interrupted
+            GoalDisplayStatus::parse("paused"),
+            Some(GoalDisplayStatus::Paused)
         );
         assert_eq!(
             GoalDisplayStatus::parse("blocked"),
-            GoalDisplayStatus::Blocked
+            Some(GoalDisplayStatus::Blocked)
         );
         assert_eq!(
             GoalDisplayStatus::parse("budget_limited"),
-            GoalDisplayStatus::BudgetLimited
+            Some(GoalDisplayStatus::BudgetLimited)
         );
         assert_eq!(
             GoalDisplayStatus::parse("complete"),
-            GoalDisplayStatus::Complete
+            Some(GoalDisplayStatus::Complete)
         );
+        assert_eq!(GoalDisplayStatus::parse("user_paused"), None);
+        assert_eq!(GoalDisplayStatus::parse("unknown"), None);
     }
-    #[test]
-    fn goal_display_status_parse_legacy_paused_is_user_paused() {
-        assert_eq!(
-            GoalDisplayStatus::parse("paused"),
-            GoalDisplayStatus::UserPaused
-        );
-    }
-    #[test]
-    fn goal_display_status_parse_future_paused_fallback() {
-        assert_eq!(
-            GoalDisplayStatus::parse("error_paused"),
-            GoalDisplayStatus::UserPaused
-        );
-        assert_eq!(
-            GoalDisplayStatus::parse("foo_bar_paused"),
-            GoalDisplayStatus::UserPaused
-        );
-    }
-    #[test]
-    fn goal_display_status_parse_unknown_defaults_to_user_paused() {
-        assert_eq!(
-            GoalDisplayStatus::parse("unknown"),
-            GoalDisplayStatus::UserPaused
-        );
-        assert_eq!(GoalDisplayStatus::parse(""), GoalDisplayStatus::UserPaused);
-        assert_eq!(
-            GoalDisplayStatus::parse("ACTIVE"),
-            GoalDisplayStatus::UserPaused,
-        );
-        assert_eq!(
-            GoalDisplayStatus::parse("paused_eventually"),
-            GoalDisplayStatus::UserPaused
-        );
-        assert_eq!(
-            GoalDisplayStatus::parse("active"),
-            GoalDisplayStatus::Active
-        );
-    }
+
     #[test]
     fn pause_label_is_consistent_across_renderers() {
-        assert_eq!(GoalDisplayStatus::UserPaused.pause_label(), "Paused");
-        assert_eq!(
-            GoalDisplayStatus::BackOffPaused.pause_label(),
-            "Paused (back-off)"
-        );
-        assert_eq!(
-            GoalDisplayStatus::NoProgressPaused.pause_label(),
-            "Paused (no progress)"
-        );
-        assert_eq!(
-            GoalDisplayStatus::InfraPaused.pause_label(),
-            "Paused (error)"
-        );
-        assert_eq!(
-            GoalDisplayStatus::Blocked.pause_label(),
-            "Paused (verification blocked)"
-        );
+        assert_eq!(GoalDisplayStatus::Paused.pause_label(), "Paused");
+        assert_eq!(GoalDisplayStatus::Blocked.pause_label(), "Blocked");
         assert_eq!(GoalDisplayStatus::Active.pause_label(), "");
-        assert_eq!(GoalDisplayStatus::Failed.pause_label(), "");
-        assert_eq!(GoalDisplayStatus::Interrupted.pause_label(), "");
         assert_eq!(GoalDisplayStatus::BudgetLimited.pause_label(), "");
         assert_eq!(GoalDisplayStatus::Complete.pause_label(), "");
-    }
-    #[test]
-    fn is_paused_matches_only_paused_variants() {
-        assert!(GoalDisplayStatus::UserPaused.is_paused());
-        assert!(GoalDisplayStatus::BackOffPaused.is_paused());
-        assert!(GoalDisplayStatus::NoProgressPaused.is_paused());
-        assert!(GoalDisplayStatus::InfraPaused.is_paused());
+        assert!(GoalDisplayStatus::Paused.is_paused());
         assert!(GoalDisplayStatus::Blocked.is_paused());
         assert!(!GoalDisplayStatus::Active.is_paused());
-        assert!(!GoalDisplayStatus::Failed.is_paused());
-        assert!(!GoalDisplayStatus::Interrupted.is_paused());
         assert!(!GoalDisplayStatus::BudgetLimited.is_paused());
         assert!(!GoalDisplayStatus::Complete.is_paused());
     }
     #[test]
     fn goal_display_phase_parse_known_values() {
-        assert_eq!(GoalDisplayPhase::parse("idle"), GoalDisplayPhase::Idle);
         assert_eq!(
             GoalDisplayPhase::parse("planning"),
-            GoalDisplayPhase::Planning
+            Some(GoalDisplayPhase::Planning)
         );
         assert_eq!(
             GoalDisplayPhase::parse("executing"),
-            GoalDisplayPhase::Executing
+            Some(GoalDisplayPhase::Executing)
         );
         assert_eq!(
-            GoalDisplayPhase::parse("step_verifying"),
-            GoalDisplayPhase::Idle
+            GoalDisplayPhase::parse("verifying"),
+            Some(GoalDisplayPhase::Verifying)
         );
         assert_eq!(
-            GoalDisplayPhase::parse("final_verifying"),
-            GoalDisplayPhase::Idle
+            GoalDisplayPhase::parse("summarizing"),
+            Some(GoalDisplayPhase::Summarizing)
         );
-    }
-    #[test]
-    fn goal_display_phase_parse_unknown_defaults_to_idle() {
-        assert_eq!(GoalDisplayPhase::parse(""), GoalDisplayPhase::Idle);
-        assert_eq!(GoalDisplayPhase::parse("running"), GoalDisplayPhase::Idle);
+        assert_eq!(GoalDisplayPhase::parse("idle"), None);
     }
     #[test]
     fn enqueue_assigns_monotonic_ids() {

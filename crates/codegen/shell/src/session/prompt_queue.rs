@@ -55,7 +55,8 @@ mod tests {
                 combined_texts: None,
             }],
             running_prompt_id: None,
-
+            running_origin: None,
+            running_turn_kind: None,
             running_text: None,
             running_kind: None,
             running_combined_texts: None,
@@ -76,13 +77,16 @@ mod tests {
             session_id: "sess-1".to_string(),
             entries: Vec::new(),
             running_prompt_id: Some("prompt-running".to_string()),
-
+            running_origin: Some("user".to_string()),
+            running_turn_kind: Some("user".to_string()),
             running_text: None,
             running_kind: None,
             running_combined_texts: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["runningPromptId"], "prompt-running");
+        assert_eq!(json["runningOrigin"], "user");
+        assert_eq!(json["runningTurnKind"], "user");
         let round: QueueChanged = serde_json::from_value(json).unwrap();
         assert_eq!(round, payload);
     }

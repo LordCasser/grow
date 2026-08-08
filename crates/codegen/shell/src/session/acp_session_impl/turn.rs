@@ -3,6 +3,20 @@
 use super::*;
 use crate::session::behavior::BehaviorChangeOutcome;
 use tools::implementations::grow_build::LoopFireMode;
+
+pub(super) fn should_capture_implicit_goal_objective(
+    origin: &crate::session::PromptOrigin,
+    goal_behavior_selected: bool,
+    goal_exists: bool,
+    text: &str,
+) -> bool {
+    matches!(origin, crate::session::PromptOrigin::User)
+        && goal_behavior_selected
+        && !goal_exists
+        && !text.trim_start().starts_with('/')
+        && !text.trim().is_empty()
+}
+
 /// Synthetic tool the model calls to return its schema-constrained final answer
 /// on backends that can't constrain output natively (Messages API). Intercepted
 /// in the loop, never executed as a real tool.
@@ -127,11 +141,8 @@ enum UserEchoMode {
     /// monitor gutter, task pane) that no pane should render live.
     PersistOnly,
 }
-fn user_echo_mode(prompt_id: &str) -> UserEchoMode {
-    if prompt_id.starts_with(super::interjection::INTERJECT_FALLBACK_PROMPT_PREFIX) {
-        return UserEchoMode::PersistOnly;
-    }
-    match super::super::PromptOrigin::from_prompt_id(prompt_id) {
+fn user_echo_mode(origin: &super::super::PromptOrigin) -> UserEchoMode {
+    match origin {
         super::super::PromptOrigin::NotificationDrain => UserEchoMode::PersistOnly,
         _ => UserEchoMode::Broadcast,
     }
@@ -196,7 +207,7 @@ impl SessionActor {
         }
         user_images
     }
-    pub(super) fn persist_host_turn_user_echo(&self, text: &str, prompt_id: &str) {
+    pub(super) fn persist_host_turn_user_echo(&self, text: &str, _prompt_id: &str) {
         let text = text.trim();
         if text.is_empty() {
             return;
@@ -206,9 +217,7 @@ impl SessionActor {
             crate::session::storage::HOST_TURN_META_KEY.into(),
             serde_json::json!(true),
         );
-        if super::super::PromptOrigin::from_prompt_id(prompt_id).hide_user_echo_from_scrollback() {
-            chunk_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
-        }
+        chunk_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
         let update = acp::SessionUpdate::UserMessageChunk(
             acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
                 text.to_string(),
@@ -239,6 +248,8 @@ impl SessionActor {
     pub(super) async fn handle_prompt(
         self: &Arc<Self>,
         prompt_id: &str,
+        origin: super::super::PromptOrigin,
+        turn_kind: super::super::TurnKind,
         mut prompt_blocks: Vec<acp::ContentBlock>,
         prompt_mode: PromptMode,
         prompt_client_identifier: Option<String>,
@@ -266,7 +277,7 @@ impl SessionActor {
                 "block_count": prompt_blocks.len(),
             })),
         );
-        let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
+        let _turn_kind = turn_kind;
         if let Some(completion_id) = origin.completion_id() {
             // A deferred Goal task may finish after Goal already returned to
             // Normal, in which case the existing auto-wake path owns delivery.
@@ -335,72 +346,7 @@ impl SessionActor {
                 self.signals_handle().record_edit_and_retry();
             }
         }
-        // Goal planning is a finite Goal stage owned by the synthetic cycle,
-        // never by the slash-command actor handler. A missing plan is resolved
-        // before the implementer request is built. Steering may transfer the
-        // planner to the background; in that case this cycle ends cleanly and
-        // the foreground user prompt is promoted by the actor.
-        //
-        // Spawn admission must be open BEFORE the planner spawns: an earlier
-        // interactive cancel (`behavior_switch` / Ctrl+C with
-        // `cancel_subagents`) closes admission until the next turn opens it,
-        // and the generic `open_subagent_spawn_admission()` below runs after
-        // this planning branch. Without this, a freshly-set goal's first
-        // cycle fails the planner spawn (FailClosed → pause) instead of
-        // planning. Opening here is idempotent with the later call.
         self.open_subagent_spawn_admission();
-        if matches!(origin, super::super::PromptOrigin::GoalSummary) {
-            let planning_objective = {
-                let tracker = self.goal_tracker.lock();
-                tracker.snapshot().and_then(|goal| {
-                    (goal.status == crate::session::goal_tracker::GoalStatus::Active
-                        && goal.plan_file.is_none())
-                    .then(|| goal.objective.clone())
-                })
-            };
-            if let Some(objective) = planning_objective {
-                self.maybe_run_goal_planner(&objective).await;
-                let ready = {
-                    let tracker = self.goal_tracker.lock();
-                    tracker.snapshot().is_some_and(|goal| {
-                        goal.status == crate::session::goal_tracker::GoalStatus::Active
-                            && (!self.goal_planner_enabled || goal.plan_file.is_some())
-                    })
-                };
-                if !ready {
-                    return ok_end_turn(0, None);
-                }
-                prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
-                    self.render_goal_start_reminder().await,
-                ))];
-            } else if matches!(
-                prompt_blocks.as_slice(),
-                [acp::ContentBlock::Text(text)]
-                    if text.text == super::slash_exec::GOAL_CYCLE_PLACEHOLDER
-            ) {
-                // Command-plane cycle (`queue_goal_cycle`): the queued blocks
-                // are a placeholder. Render the real continuation directive
-                // here, in the turn task, from the same pure source as the
-                // turn-end continuation (`render_goal_continuation`). A Goal
-                // that is no longer active renders nothing — end the cycle
-                // without model work so the placeholder never reaches the
-                // model. Renders only; the turn-end drain stays the caller's
-                // job (`handle_turn_end`).
-                let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-                let Some(plan) = self.render_goal_continuation(current_tokens).await else {
-                    return ok_end_turn(0, None);
-                };
-                if let Some(rec) = plan.strategy_rec.as_deref() {
-                    self.consume_strategist_note(rec);
-                }
-                if let Some(pattern) = plan.stop_pattern {
-                    self.record_and_emit_premature_stop(pattern);
-                }
-                prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
-                    plan.directive,
-                ))];
-            }
-        }
 
         let original_prompt_text = prompt_blocks.iter().fold(String::new(), |mut acc, b| {
             if let acp::ContentBlock::Text(t) = b {
@@ -408,28 +354,18 @@ impl SessionActor {
             }
             acc
         });
-        let implicit_goal_set = self.behavior.lock().behavior()
-            == Some(tool_types::BehaviorId::Goal)
-            && self.goal_tracker.lock().snapshot().is_none()
-            && !original_prompt_text.trim_start().starts_with('/')
-            && !original_prompt_text.trim().is_empty();
-        let prompt_blocks = if implicit_goal_set {
-            let reminder = self.setup_goal(original_prompt_text.trim(), None).await;
-            let response = format!(
-                "User set current goal objective to: {}",
-                original_prompt_text.trim()
-            );
-            if self.goal_tracker.lock().status()
-                != Some(crate::session::goal_tracker::GoalStatus::Active)
-            {
-                self.send_host_turn_slash_command_output(&response).await;
-                return ok_end_turn(0, None);
-            }
-            self.send_slash_command_output(&response).await;
-            vec![acp::ContentBlock::Text(acp::TextContent::new(reminder))]
-        } else {
-            prompt_blocks
-        };
+        let implicit_goal_set = should_capture_implicit_goal_objective(
+            &origin,
+            self.behavior.lock().behavior() == Some(tool_types::BehaviorId::Goal),
+            self.goal_tracker.lock().snapshot().is_some(),
+            &original_prompt_text,
+        );
+        if implicit_goal_set {
+            self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+            let message = self.setup_goal(original_prompt_text.trim(), None).await;
+            self.send_host_turn_slash_command_output(&message).await;
+            return ok_end_turn(0, None);
+        }
         if self.behavior.lock().behavior() == Some(tool_types::BehaviorId::DeepResearch)
             && !original_prompt_text.trim_start().starts_with('/')
         {
@@ -491,8 +427,6 @@ impl SessionActor {
         ) {
             Ok(blocks) => blocks,
             Err(SlashCommandOutcome::Builtin(action)) => {
-                let text_block =
-                    |text: String| acp::ContentBlock::Text(acp::TextContent::new(text));
                 let slash_used = ::diagnostics::events::SlashCommandUsed {
                     command: action.command_name().to_string(),
                     args_provided: action.args_provided(),
@@ -503,150 +437,17 @@ impl SessionActor {
                     span.record("command_source", "builtin");
                 }
                 match action {
-                    BuiltinAction::GoalSet {
-                        objective,
-                        token_budget,
-                    } => {
-                        ::diagnostics::session_ctx::log_event(slash_used);
-                        use crate::session::behavior::BehaviorChangeOutcome;
-                        match self
-                            .request_behavior_change(acp::SessionModeId::new("goal"))
-                            .await
-                        {
-                            BehaviorChangeOutcome::Applied => {}
-                            BehaviorChangeOutcome::ConfirmationRequired { message, .. }
-                            | BehaviorChangeOutcome::Rejected { message } => {
-                                self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-                                self.send_host_turn_slash_command_output(&message).await;
-                                return ok_end_turn(0, None);
-                            }
-                        }
-                        let existing_status = self.goal_tracker.lock().status();
-                        let revising = existing_status.is_some()
-                            && existing_status
-                                != Some(crate::session::goal_tracker::GoalStatus::Complete);
-                        let response = format!("User set current goal objective to: {objective}");
-                        if revising {
-                            let revised = self
-                                .goal_tracker
-                                .lock()
-                                .revise_goal(objective, token_budget);
-                            debug_assert!(revised);
-                            self.push_current_goal_context();
-                            let current_tokens =
-                                self.chat_state_handle.get_total_tokens().await as i64;
-                            let (tokens_used, finished) = self.goal_tokens(current_tokens);
-                            self.goal_notify_sender().emit_goal_updated(
-                                &mut self.goal_tracker.lock(),
-                                tokens_used,
-                                finished,
-                            );
-                            if self.goal_tracker.lock().status()
-                                == Some(crate::session::goal_tracker::GoalStatus::Active)
-                            {
-                                match self.resume_goal().await {
-                                    GoalResumeOutcome::Inference { reminder, .. } => {
-                                        self.send_slash_command_output(&response).await;
-                                        vec![text_block(reminder)]
-                                    }
-                                    GoalResumeOutcome::Message(message) => {
-                                        self.send_host_turn_slash_command_output(&message).await;
-                                        return ok_end_turn(0, None);
-                                    }
-                                }
-                            } else {
-                                self.send_host_turn_slash_command_output(&response).await;
-                                return ok_end_turn(0, None);
-                            }
-                        } else {
-                            let reminder = self.setup_goal(&objective, token_budget).await;
-                            if self.goal_tracker.lock().status()
-                                != Some(crate::session::goal_tracker::GoalStatus::Active)
-                            {
-                                self.send_host_turn_slash_command_output(&response).await;
-                                return ok_end_turn(0, None);
-                            }
-                            self.send_slash_command_output(&response).await;
-                            vec![text_block(reminder)]
-                        }
-                    }
-                    BuiltinAction::GoalEnter => {
-                        ::diagnostics::session_ctx::log_event(slash_used);
-                        use crate::session::behavior::BehaviorChangeOutcome;
-                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-                        let outcome = self
-                            .request_behavior_change(acp::SessionModeId::new("goal"))
-                            .await;
-                        if matches!(&outcome, BehaviorChangeOutcome::Applied)
-                            && self.goal_tracker.lock().status().is_some_and(|status| {
-                                status.is_paused()
-                                    && status
-                                        != crate::session::goal_tracker::GoalStatus::BudgetLimited
-                            })
-                        {
-                            match self.resume_goal().await {
-                                GoalResumeOutcome::Inference { reminder, user_msg } => {
-                                    self.send_slash_command_output(&user_msg).await;
-                                    vec![text_block(reminder)]
-                                }
-                                GoalResumeOutcome::Message(message) => {
-                                    self.send_host_turn_slash_command_output(&message).await;
-                                    return ok_end_turn(0, None);
-                                }
-                            }
-                        } else {
-                            let message = match outcome {
-                                BehaviorChangeOutcome::Applied => if self
-                                    .goal_tracker
-                                    .lock()
-                                    .snapshot()
-                                    .is_some()
-                                {
-                                    "Goal behavior selected. The existing goal is ready to continue."
-                                } else {
-                                    "Goal behavior selected. Send a non-empty objective to start."
-                                }
-                                .to_string(),
-                                BehaviorChangeOutcome::ConfirmationRequired { message, .. }
-                                | BehaviorChangeOutcome::Rejected { message } => message,
-                            };
-                            self.send_host_turn_slash_command_output(&message).await;
-                            return ok_end_turn(0, None);
-                        }
-                    }
-                    BuiltinAction::GoalBudget { token_budget } => {
+                    action @ (BuiltinAction::GoalSet { .. }
+                    | BuiltinAction::GoalEdit { .. }
+                    | BuiltinAction::GoalEnter
+                    | BuiltinAction::GoalStatus
+                    | BuiltinAction::GoalPause
+                    | BuiltinAction::GoalResume
+                    | BuiltinAction::GoalClear
+                    | BuiltinAction::GoalBudget { .. }) => {
                         ::diagnostics::session_ctx::log_event(slash_used);
                         self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-                        let msg = self.update_goal_token_budget(token_budget);
-                        self.send_host_turn_slash_command_output(&msg).await;
-                        return ok_end_turn(0, None);
-                    }
-                    BuiltinAction::GoalResume => {
-                        ::diagnostics::session_ctx::log_event(slash_used);
-                        use crate::session::behavior::BehaviorChangeOutcome;
-                        match self
-                            .request_behavior_change(acp::SessionModeId::new("goal"))
-                            .await
-                        {
-                            BehaviorChangeOutcome::Applied => {}
-                            BehaviorChangeOutcome::ConfirmationRequired { message, .. }
-                            | BehaviorChangeOutcome::Rejected { message } => {
-                                self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-                                self.send_host_turn_slash_command_output(&message).await;
-                                return ok_end_turn(0, None);
-                            }
-                        }
-                        match self.resume_goal().await {
-                            GoalResumeOutcome::Inference { reminder, user_msg } => {
-                                self.send_slash_command_output(&user_msg).await;
-                                vec![text_block(reminder)]
-                            }
-                            GoalResumeOutcome::Message(msg) => {
-                                self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-                                self.send_host_turn_slash_command_output(&msg).await;
-                                return ok_end_turn(0, None);
-                            }
-                        }
+                        return self.execute_builtin_slash_command(action).await;
                     }
                     BuiltinAction::WorkflowLaunch { name, input } => {
                         self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
@@ -736,10 +537,7 @@ impl SessionActor {
         self.current_turn_number.set(turn_number);
         let yolo_mode = self.permissions.is_yolo_mode();
         let msg_count = self.chat_state_handle.get_conversation_len().await;
-        let redirect_kind = if matches!(
-            super::super::PromptOrigin::from_prompt_id(prompt_id),
-            super::super::PromptOrigin::User
-        ) {
+        let redirect_kind = if matches!(origin, super::super::PromptOrigin::User) {
             self.events.take_prior_redirect_kind()
         } else {
             None
@@ -771,14 +569,14 @@ impl SessionActor {
         });
         let current_prompt_index = self.chat_state_handle.get_prompt_index().await;
         ::diagnostics::session_ctx::begin_prompt_id();
-        let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
         let mut chunk_meta = serde_json::Map::new();
         chunk_meta.insert("modelId".into(), serde_json::json!(model_id));
         chunk_meta.insert(
             "promptIndex".into(),
             serde_json::json!(current_prompt_index),
         );
-        if origin.hide_user_echo_from_scrollback() || implicit_goal_set {
+        chunk_meta.insert("messageId".into(), serde_json::json!(prompt_id));
+        if origin.hide_user_echo_from_scrollback() {
             chunk_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
         }
         let user_chunk_meta = Some(chunk_meta);
@@ -797,11 +595,7 @@ impl SessionActor {
         self.file_state_tracker
             .begin_prompt(current_prompt_index)
             .await;
-        let echo_mode = if implicit_goal_set {
-            UserEchoMode::PersistOnly
-        } else {
-            user_echo_mode(prompt_id)
-        };
+        let echo_mode = user_echo_mode(&origin);
         for block in prompt_blocks.iter() {
             let update = acp::SessionUpdate::UserMessageChunk(
                 acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
@@ -983,61 +777,45 @@ impl SessionActor {
         };
         let prompt_text_for_hook = user_message.clone();
         {
-            let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
             if matches!(origin, super::super::PromptOrigin::User) {
                 self.maybe_inject_interrupt_reminder().await;
             }
-            let mut user_chat = if implicit_goal_set {
-                self.goal_directive_item(
+            let mut user_chat = match &origin {
+                super::super::PromptOrigin::TaskCompleted { .. } => {
+                    ConversationItem::task_completed(user_message)
+                }
+                super::super::PromptOrigin::SubagentCompleted { .. } => {
+                    ConversationItem::subagent_completed(user_message)
+                }
+                super::super::PromptOrigin::WorkflowCompleted { .. } => {
+                    ConversationItem::notification_drain(user_message)
+                }
+                super::super::PromptOrigin::NotificationDrain => {
+                    ConversationItem::notification_drain(user_message)
+                }
+                super::super::PromptOrigin::HostCommand => {
+                    ConversationItem::system_reminder(user_message)
+                }
+                super::super::PromptOrigin::GoalContinuation { .. }
+                | super::super::PromptOrigin::GoalFinalization { .. } => self.goal_directive_item(
                     user_message,
                     sampling_types::SyntheticReason::SystemReminder,
-                    sampling_types::GoalDirectiveKind::Autonomy,
-                )
-            } else {
-                match &origin {
-                    super::super::PromptOrigin::TaskCompleted { .. } => {
-                        ConversationItem::task_completed(user_message)
+                    sampling_types::GoalDirectiveKind::Continuation,
+                ),
+                super::super::PromptOrigin::SchedulerFired => {
+                    ConversationItem::scheduler_fired(user_message)
+                }
+                super::super::PromptOrigin::PlanResume => ConversationItem::user(user_message),
+                super::super::PromptOrigin::User => {
+                    let mut item = ConversationItem::user(user_message);
+                    if let Some(interrupt) = self
+                        .events
+                        .take_prior_interrupt_category()
+                        .and_then(crate::session::events::prior_turn_interrupt_from_cancellation)
+                    {
+                        item.set_prior_turn_interrupt(interrupt);
                     }
-                    super::super::PromptOrigin::SubagentCompleted { .. } => {
-                        ConversationItem::subagent_completed(user_message)
-                    }
-                    super::super::PromptOrigin::WorkflowCompleted { .. } => {
-                        ConversationItem::notification_drain(user_message)
-                    }
-                    super::super::PromptOrigin::NotificationDrain => {
-                        ConversationItem::notification_drain(user_message)
-                    }
-                    super::super::PromptOrigin::GoalSummary => self.goal_directive_item(
-                        user_message,
-                        sampling_types::SyntheticReason::GoalSummary,
-                        sampling_types::GoalDirectiveKind::Continuation,
-                    ),
-                    super::super::PromptOrigin::GoalControl => self.goal_directive_item(
-                        user_message,
-                        sampling_types::SyntheticReason::SystemReminder,
-                        sampling_types::GoalDirectiveKind::ControlNotice,
-                    ),
-                    super::super::PromptOrigin::HostCommand => {
-                        ConversationItem::system_reminder(user_message)
-                    }
-                    super::super::PromptOrigin::GoalClassifierNudge => {
-                        ConversationItem::goal_classifier_nudge(user_message)
-                    }
-                    super::super::PromptOrigin::SchedulerFired => {
-                        ConversationItem::scheduler_fired(user_message)
-                    }
-                    super::super::PromptOrigin::PlanResume => ConversationItem::user(user_message),
-                    super::super::PromptOrigin::User => {
-                        let mut item = ConversationItem::user(user_message);
-                        if let Some(interrupt) =
-                            self.events.take_prior_interrupt_category().and_then(
-                                crate::session::events::prior_turn_interrupt_from_cancellation,
-                            )
-                        {
-                            item.set_prior_turn_interrupt(interrupt);
-                        }
-                        item
-                    }
+                    item
                 }
             };
             user_chat.set_prompt_index(current_prompt_index);
@@ -1083,12 +861,7 @@ impl SessionActor {
                 self.chat_state_handle.push_user_message(user_chat);
             }
         }
-        if !implicit_goal_set
-            && !matches!(
-                origin,
-                super::super::PromptOrigin::GoalControl | super::super::PromptOrigin::HostCommand
-            )
-        {
+        if !matches!(origin, super::super::PromptOrigin::HostCommand) {
             self.dispatch_hook(
                 ::hooks::event::HookEventName::UserPromptSubmit,
                 ::hooks::event::HookPayload::UserPromptSubmit {
@@ -1114,7 +887,11 @@ impl SessionActor {
                     self.set_goal_loop_active_resource(goal_loop_active).await;
                 }
                 let round = self
-                    .process_conversation_turn_with_recovery(prompt_id, json_schema.clone())
+                    .process_conversation_turn_with_recovery(
+                        prompt_id,
+                        origin.clone(),
+                        json_schema.clone(),
+                    )
                     .await;
                 if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
                     break round;
@@ -1134,30 +911,12 @@ impl SessionActor {
                     .await;
                     break round;
                 }
-                let goal_active = laziness_injection_active(
-                    self.goal_harness_enabled(),
-                    self.goal_tracker.lock().status(),
-                );
-                if goal_active {
-                    // A foreground Goal prompt owns exactly one implementer
-                    // cycle. The actor-level turn-end hook schedules the next
-                    // continuation after this prompt reaches its durable
-                    // terminal; keeping the sampler inside a long-lived
-                    // `handle_prompt` loop makes pause, compact and queued user
-                    // work wait behind an artificial turn boundary.
-                    let decision = if self.goal_runs_on_workflow_engine() {
-                        self.run_goal_round_end().await
-                    } else {
-                        GoalRoundDecision::EndTurn
-                    };
-                    match decision {
-                        GoalRoundDecision::Continue(directive) => {
-                            self.inject_goal_continuation_message(directive).await;
-                            continue;
-                        }
-                        GoalRoundDecision::ResumeForeground => continue,
-                        GoalRoundDecision::EndTurn => break round,
-                    }
+                if matches!(
+                    origin,
+                    super::super::PromptOrigin::GoalContinuation { .. }
+                        | super::super::PromptOrigin::GoalFinalization { .. }
+                ) {
+                    break round;
                 }
                 match self
                     .run_stop_gate(prompt_id, stop_continuations_this_turn)
@@ -1669,34 +1428,8 @@ impl SessionActor {
             "injected mid-turn monitor events as hidden synthetic user message"
         );
     }
-    /// Per-turn hook called from the event-loop completion handler
-    /// after every turn finishes. Two terminal branches when the
-    /// goal is `Active` (`goal_active_now == true`):
-    ///
-    /// 1. **Success.** Reset `goal_continuation_streak` to 0, then run the
-    ///    mailbox-fast turn-end drain (B1: `completed: true` proposals are
-    ///    scheduled as background Goal stages — the drain never awaits
-    ///    verification model work) and queue the continuation reminder via
-    ///    `maybe_queue_goal_continuation` unless `suppress_goal_continuation`
-    ///    (stationarity silent EndTurn). The reminder is rendered against the
-    ///    pre-verification state; a stage that pauses/rejects the goal
-    ///    commits (or is lease-dropped) via the mailbox before the next
-    ///    turn's drain. `render_goal_continuation` also runs the
-    ///    stop-detector to select the nudge flavor (generic vs. bail-specific)
-    ///    and emit `Event::GoalPrematureStopDetected`.
-    /// 2. **Non-success.** Increment `goal_continuation_streak`. At
-    ///    [`GOAL_CONTINUATION_BACKOFF_THRESHOLD`] consecutive hits,
-    ///    reset the streak and auto-pause with
-    ///    `GoalPauseReason::BackOff`. No continuation is queued on this path: an
-    ///    infra-error / cancelled turn rarely carries a deliberate
-    ///    turn-final message, and stop-detection lives on the success
-    ///    path inside `maybe_queue_goal_continuation`.
-    ///
-    /// When the goal is not `Active` (`goal_active_now == false` —
-    /// the doom-loop / infra-error branches in the event loop ran
-    /// before this method and already transitioned the goal out of
-    /// Active), both branches are skipped: neither streak moves and the
-    /// existing pause cause is preserved.
+    /// Account Goal state at the regular turn boundary and wake the single
+    /// idle arbiter. Stage scheduling never happens inline with completion.
     pub(crate) async fn handle_turn_end(
         self: &std::sync::Arc<Self>,
         turn_succeeded: bool,
@@ -1706,63 +1439,15 @@ impl SessionActor {
             self.goal_harness_enabled(),
             self.goal_tracker.lock().status(),
         );
-        if turn_succeeded && goal_active_now {
-            self.goal_continuation_streak
-                .store(0, std::sync::atomic::Ordering::Relaxed);
-            if !suppress_goal_continuation {
-                // B1: the turn-end drain must stay mailbox-fast. A
-                // `completed: true` proposal schedules a background Goal
-                // stage instead of awaiting the verification model work
-                // inline, so `/goal pause`, `/compact`, user prompts and
-                // cancels are never queued behind minutes of verification.
-                //
-                // Cycle-boundary contract (verifier gate): while a
-                // verification stage is in flight the next implementer
-                // cycle must NOT be queued — the stage's mailbox commit
-                // decides the next cycle. `commit_verifier_stage` requeues
-                // on `NotAchieved` (still Active) and stays silent on
-                // Achieved / paused / blocked / lease-dropped, so a
-                // `completed: true` proposal never races the verdict that
-                // resolves it. The in-flight CAS is the authoritative
-                // signal: it covers both "this drain just scheduled the
-                // stage" and "a stage from an earlier turn is still
-                // running" (e.g. a user message started a turn while the
-                // stage ran — its turn-end must also stay silent).
-                let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-                self.drain_goal_updates(current_tokens, DrainPurpose::TurnEnd)
-                    .await;
-                if !self
-                    .goal_classifier_in_flight
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    self.maybe_queue_goal_continuation().await;
-                }
-            }
+        if !goal_active_now {
             return;
         }
-        if !turn_succeeded && goal_active_now {
-            let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-            if self.enforce_goal_token_budget(current_tokens).await {
-                return;
-            }
-            let streak = self
-                .goal_continuation_streak
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                + 1;
-            if streak >= GOAL_CONTINUATION_BACKOFF_THRESHOLD {
-                self.goal_continuation_streak
-                    .store(0, std::sync::atomic::Ordering::Relaxed);
-                self.auto_pause_goal_if_active(
-                    crate::session::goal_tracker::GoalPauseReason::BackOff,
-                )
-                .await;
-                self.send_slash_command_output(&format!(
-                    "Goal auto-paused after {GOAL_CONTINUATION_BACKOFF_THRESHOLD} consecutive \
-                     non-completing turns. The model is not making progress. \
-                     Use /goal resume to retry or /goal clear to abandon."
-                ))
-                .await;
-            }
+        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+        if !turn_succeeded {
+            let _ = self.enforce_goal_token_budget(current_tokens).await;
+        }
+        if !suppress_goal_continuation {
+            self.idle_arbiter.notify_one();
         }
     }
     /// Wraps `process_conversation_turn` with auto-recovery for agents that opt in.
@@ -1782,6 +1467,7 @@ impl SessionActor {
     pub(super) async fn process_conversation_turn_with_recovery(
         self: &Arc<Self>,
         req_id: &str,
+        origin: super::super::PromptOrigin,
         json_schema: Option<serde_json::Value>,
     ) -> Result<TurnOutcome, acp::Error> {
         let _ = self.compaction.auto_compact_suppressed.compare_exchange(
@@ -1794,19 +1480,23 @@ impl SessionActor {
         let completion_req = match agent_ref.completion_requirement() {
             Some(req) => req,
             None => {
-                return self.process_conversation_turn(req_id, json_schema).await;
+                return self
+                    .process_conversation_turn(req_id, &origin, json_schema)
+                    .await;
             }
         };
         let recovery = match &completion_req.recovery {
             Some(r) => r.clone(),
             None => {
-                return self.process_conversation_turn(req_id, json_schema).await;
+                return self
+                    .process_conversation_turn(req_id, &origin, json_schema)
+                    .await;
             }
         };
         let required_tool = completion_req.tool.clone();
         let recovery_prompt = completion_req.reminder.clone();
         let mut result = self
-            .process_conversation_turn(req_id, json_schema.clone())
+            .process_conversation_turn(req_id, &origin, json_schema.clone())
             .await;
         if matches!(
             result,
@@ -1867,7 +1557,7 @@ impl SessionActor {
             sleep(delay).await;
             let recovery_message = ConversationItem::auto_recovery(recovery_prompt.clone());
             self.chat_state_handle.push_user_message(recovery_message);
-            result = self.process_conversation_turn(req_id, None).await;
+            result = self.process_conversation_turn(req_id, &origin, None).await;
             if matches!(
                 result,
                 Ok(TurnOutcome::MaxTurnsReached { .. }) | Ok(TurnOutcome::StationarityEnded { .. })
@@ -2109,6 +1799,7 @@ impl SessionActor {
     async fn process_conversation_turn(
         self: &Arc<Self>,
         req_id: &str,
+        origin: &super::super::PromptOrigin,
         json_schema: Option<serde_json::Value>,
     ) -> Result<TurnOutcome, acp::Error> {
         let conv_turn_start = std::time::Instant::now();
@@ -2341,24 +2032,6 @@ impl SessionActor {
                 })),
             );
             let mut request = request;
-            let origin = super::super::PromptOrigin::from_prompt_id(req_id);
-            let current_item_is_autonomy = request.items.last().is_some_and(|item| {
-                matches!(
-                    item,
-                    ConversationItem::User(user)
-                        if user.goal_directive.as_ref().is_some_and(|tag| {
-                            tag.kind == sampling_types::GoalDirectiveKind::Autonomy
-                        })
-                )
-            });
-            let include_goal_autonomy = current_item_is_autonomy
-                || matches!(
-                    origin,
-                    super::super::PromptOrigin::GoalSummary
-                        | super::super::PromptOrigin::GoalClassifierNudge
-                        | super::super::PromptOrigin::GoalControl
-                );
-            request.items = self.project_goal_conversation(request.items, include_goal_autonomy);
             if structured_output_native {
                 request.json_schema = json_schema.clone();
             }
@@ -3076,13 +2749,14 @@ mod identical_tool_call_run_tests {
 #[cfg(test)]
 mod user_echo_broadcast_tests {
     use super::{UserEchoMode, user_echo_mode};
+    use crate::session::PromptOrigin;
     /// Notification-drain: persisted (rewind/fork count user-chunk runs as
     /// turn boundaries) but never broadcast live; the pager hides it via the
     /// `hideFromScrollback` chunk meta.
     #[test]
     fn notification_drain_turn_is_persist_only() {
         assert_eq!(
-            user_echo_mode("notifications-019e0000-0000-7000-8000-0000000000aa"),
+            user_echo_mode(&PromptOrigin::NotificationDrain),
             UserEchoMode::PersistOnly
         );
     }
@@ -3090,28 +2764,22 @@ mod user_echo_broadcast_tests {
     /// live so multi-client / dashboard viewers stay in sync.
     #[test]
     fn user_and_cron_turns_broadcast_live() {
-        assert_eq!(user_echo_mode("my-prompt"), UserEchoMode::Broadcast);
+        assert_eq!(user_echo_mode(&PromptOrigin::User), UserEchoMode::Broadcast);
         assert_eq!(
-            user_echo_mode("scheduler-fired-abc"),
+            user_echo_mode(&PromptOrigin::SchedulerFired),
             UserEchoMode::Broadcast
         );
         assert_eq!(
-            user_echo_mode("task-completed-bg-1"),
+            user_echo_mode(&PromptOrigin::TaskCompleted {
+                task_id: "bg-1".to_string(),
+            }),
             UserEchoMode::Broadcast
         );
         assert_eq!(
-            user_echo_mode("subagent-completed-xyz"),
+            user_echo_mode(&PromptOrigin::SubagentCompleted {
+                subagent_id: "xyz".to_string(),
+            }),
             UserEchoMode::Broadcast
-        );
-    }
-    /// Interject-fallback turns are persist-only: every pane already rendered
-    /// the text from the `grow/session/interjection` broadcast, so a live
-    /// echo would duplicate the block.
-    #[test]
-    fn interject_fallback_turn_is_persist_only() {
-        assert_eq!(
-            user_echo_mode("interject-fallback-019e24b7"),
-            UserEchoMode::PersistOnly
         );
     }
 }

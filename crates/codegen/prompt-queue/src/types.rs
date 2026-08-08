@@ -70,9 +70,28 @@ pub struct QueueChanged {
     /// Kind for the running prompt (`"prompt"` / `"bash"` / …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running_kind: Option<String>,
+    /// Structured lifecycle origin assigned by the shell producer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_origin: Option<String>,
+    /// User/internal/scheduled participation in the foreground lifecycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_turn_kind: Option<String>,
     /// Per-prompt display texts when the running turn was combined (len ≥ 2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running_combined_texts: Option<Vec<String>>,
+}
+
+/// Structured snapshot of the sole regular foreground owner.
+///
+/// This is shared by `session/load` consumers. The prompt id is correlation
+/// identity only; origin and lifecycle kind are always carried explicitly.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ForegroundSnapshot {
+    pub prompt_id: String,
+    pub origin: String,
+    pub turn_kind: String,
+    pub turn_start_ms: u64,
 }
 
 #[cfg(test)]
@@ -109,6 +128,8 @@ mod tests {
 
             running_text: None,
             running_kind: None,
+            running_origin: None,
+            running_turn_kind: None,
             running_combined_texts: None,
         };
         let json = serde_json::to_value(&original).unwrap();
@@ -140,6 +161,8 @@ mod tests {
 
             running_text: None,
             running_kind: None,
+            running_origin: None,
+            running_turn_kind: None,
             running_combined_texts: None,
         };
         let expected = serde_json::json!({
@@ -208,11 +231,31 @@ mod tests {
             running_prompt_id: Some("p0".into()),
             running_text: Some("a\n\nb".into()),
             running_kind: Some("prompt".into()),
+            running_origin: Some("user".into()),
+            running_turn_kind: Some("user".into()),
             running_combined_texts: Some(vec!["a".into(), "b".into()]),
         };
         let json = serde_json::to_value(&original).unwrap();
         assert_eq!(json["runningCombinedTexts"], serde_json::json!(["a", "b"]));
         let round: QueueChanged = serde_json::from_value(json).unwrap();
         assert_eq!(round, original);
+    }
+
+    #[test]
+    fn foreground_snapshot_round_trip_is_fully_structured() {
+        let original = ForegroundSnapshot {
+            prompt_id: "opaque-id".into(),
+            origin: "goal_continuation".into(),
+            turn_kind: "internal".into(),
+            turn_start_ms: 42,
+        };
+        let json = serde_json::to_value(&original).unwrap();
+        assert_eq!(json["promptId"], "opaque-id");
+        assert_eq!(json["origin"], "goal_continuation");
+        assert_eq!(json["turnKind"], "internal");
+        assert_eq!(
+            serde_json::from_value::<ForegroundSnapshot>(json).unwrap(),
+            original
+        );
     }
 }

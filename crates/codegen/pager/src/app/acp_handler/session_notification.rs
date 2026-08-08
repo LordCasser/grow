@@ -210,60 +210,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             if agent.session.loading_replay {
                 agent.replayed_terminal_prompts.insert(prompt_id);
                 false
-            } else if is_wake_prompt(&prompt_id) {
-                if agent.session.state.is_busy() {
-                    if agent.session.state.command_in_flight().is_some() {
-                        agent.session.tracker.snapshot_output_epoch();
-                    }
-                    let errored = matches!(stop_reason.as_str(), "error" | "rate_limit");
-                    if errored && agent.failed_wake_marker_for.as_deref() != Some(&*prompt_id) {
-                        agent.failed_wake_marker_for = Some(prompt_id.clone());
-                        agent.push_end_marker_block(
-                            crate::scrollback::blocks::SessionEvent::TurnFailed {
-                                error: agent_result
-                                    .clone()
-                                    .unwrap_or_else(|| "unknown error".to_string()),
-                                elapsed: None,
-                            },
-                            Vec::new(),
-                            Some(prompt_id.clone()),
-                        );
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    let cancel_trigger = session_notif
-                        .meta
-                        .as_ref()
-                        .and_then(|v| v.get("cancelTrigger"))
-                        .and_then(|v| v.as_str());
-                    finish_wake_turn(
-                        agent,
-                        &prompt_id,
-                        &stop_reason,
-                        agent_result.as_deref(),
-                        cancel_trigger,
-                    );
-                    true
-                }
-            } else if is_server_initiated_prompt(&prompt_id)
-                && !should_adopt_running_prompt(&prompt_id)
-            {
-                // Genuinely non-adoptable server-initiated turns (goal-control
-                // legacy / host-command / classifier-nudge / plan-resume —
-                // task-completed & co. took the wake arm above): a busy pager
-                // must not finalize a turn it never adopted, so the durable
-                // terminal is acknowledged without state surgery.
-                if agent.session.state.is_busy() {
-                    if agent.session.state.command_in_flight().is_some() {
-                        agent.session.tracker.snapshot_output_epoch();
-                    }
-                    false
-                } else {
-                    agent.session.tracker.finish_turn(&mut agent.scrollback);
-                    true
-                }
             } else {
                 let cancel_trigger = session_notif
                     .meta
@@ -431,32 +377,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 if let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) {
                     info.child_updates_replayed = true;
                 }
-            }
-            let prompt_to_inject = agent
-                .subagent_sessions
-                .get(&child_session_id)
-                .and_then(|info| info.prompt.as_deref())
-                .filter(|p| !p.trim().is_empty())
-                .filter(|p| {
-                    agent
-                        .subagent_views
-                        .get(&child_session_id)
-                        .is_some_and(|cv| {
-                            !crate::app::subagent::child_scrollback_already_shows_prompt(
-                                &cv.scrollback,
-                                p,
-                            )
-                        })
-                })
-                .map(str::to_owned);
-            if let (Some(prompt), Some(child_view)) = (
-                prompt_to_inject,
-                agent.subagent_views.get_mut(&child_session_id),
-            ) {
-                child_view
-                    .scrollback
-                    .push_block(RenderBlock::user_prompt(prompt));
-                child_view.session.tracker.expect_user_echo();
             }
             if workflow_run_id.is_none() {
                 let block = crate::scrollback::blocks::SubagentBlock::started(
@@ -685,16 +605,14 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             } else if is_stop_hook && !meta.is_replay && !agent.session.loading_replay {
                 let local_turn_active =
                     agent.session.state.is_turn_running() || agent.session.state.is_cancelling();
-                let batch_is_wake = batch_prompt_id.as_deref().is_some_and(is_wake_prompt);
                 let foreign_batch = batch_prompt_id.is_some()
                     && agent.session.current_prompt_id.is_some()
-                    && batch_prompt_id != agent.session.current_prompt_id
-                    && !batch_is_wake;
+                    && batch_prompt_id != agent.session.current_prompt_id;
                 if foreign_batch {
                     agent
                         .scrollback
                         .push_lifecycle_hooks(event_name, hook_entries);
-                } else if !batch_is_wake && local_turn_active {
+                } else if local_turn_active {
                     let stash_pid = batch_prompt_id
                         .clone()
                         .or_else(|| agent.session.current_prompt_id.clone());
@@ -897,15 +815,15 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         GrowSessionUpdate::GoalUpdated {
             goal_id,
             objective,
+            objective_revision,
             status,
             phase,
+            plan_revision,
+            plan_markdown,
+            verifier_feedback,
             token_budget,
             tokens_used,
             elapsed_ms,
-            total_deliverables,
-            completed_deliverables,
-            current_deliverable_id,
-            current_deliverable_title,
             current_subagent_role,
             total_worker_rounds,
             total_verify_rounds,
@@ -920,20 +838,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             last_event_detail,
             last_event_timestamp,
             pause_message,
-            classifier_runs_attempted,
-            classifier_max_runs,
-            last_classifier_verdict,
-            last_classifier_details_path,
-            verifying_completion,
-            planning,
-            ..
         } => {
-            let new_status = GoalDisplayStatus::parse(&status);
-            let just_completed = new_status == GoalDisplayStatus::Complete
-                && agent
-                    .goal_state
-                    .as_ref()
-                    .is_none_or(|g| g.status != GoalDisplayStatus::Complete);
             if status == "cleared" {
                 if let Some(g) = agent.goal_state.take() {
                     agent.last_cleared_goal_id = Some(g.goal_id);
@@ -943,6 +848,18 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             } else if agent.last_cleared_goal_id.as_deref() == Some(goal_id.as_str()) {
                 false
             } else {
+                let (Some(new_status), Some(new_phase)) = (
+                    GoalDisplayStatus::parse(&status),
+                    GoalDisplayPhase::parse(&phase),
+                ) else {
+                    tracing::warn!(status, phase, "ignored malformed GoalUpdated state");
+                    return false;
+                };
+                let just_completed = new_status == GoalDisplayStatus::Complete
+                    && agent
+                        .goal_state
+                        .as_ref()
+                        .is_none_or(|g| g.status != GoalDisplayStatus::Complete);
                 let elapsed_floor_ms = agent
                     .goal_state
                     .as_ref()
@@ -957,21 +874,18 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                         },
                     ));
                 }
-                let last_classifier_details_exists = last_classifier_details_path
-                    .as_deref()
-                    .is_some_and(|p| std::path::Path::new(p).exists());
                 agent.goal_state = Some(GoalDisplayState {
                     goal_id,
                     objective,
+                    objective_revision,
                     status: new_status,
-                    phase: GoalDisplayPhase::parse(&phase),
+                    phase: new_phase,
+                    plan_revision,
+                    plan_markdown,
+                    verifier_feedback,
                     token_budget,
                     tokens_used,
                     elapsed_ms,
-                    total_deliverables,
-                    completed_deliverables,
-                    current_deliverable_id,
-                    current_deliverable_title,
                     current_subagent_role,
                     total_worker_rounds,
                     total_verify_rounds,
@@ -985,15 +899,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     last_event_timestamp,
                     token_baseline,
                     finished_subagent_tokens,
-                    deliverables: Vec::new(),
                     pause_message,
-                    classifier_runs_attempted,
-                    classifier_max_runs,
-                    last_classifier_verdict,
-                    last_classifier_details_path,
-                    last_classifier_details_exists,
-                    verifying_completion: verifying_completion.unwrap_or(false),
-                    planning: planning.unwrap_or(false),
                     received_at: std::time::Instant::now(),
                     elapsed_floor_ms,
                 });

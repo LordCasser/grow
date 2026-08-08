@@ -168,7 +168,45 @@ impl SessionActor {
     }
 
     pub(super) async fn handle_completion(&self, prompt_id: String, result: PromptTurnResult) {
-        let became_idle = {
+        // Settle the exact foreground owner first. An internal Goal turn is
+        // intentionally absent from `pending_inputs`, so FIFO membership can
+        // never be used as the ownership test.
+        let (settled_input, broadcast_queue, goal_finalization) = {
+            let mut state = self.state.lock().await;
+            if state.running_prompt_id() != Some(prompt_id.as_str()) {
+                tracing::warn!("Received completion for unknown prompt: {prompt_id}");
+                ::diagnostics::unified_log::warn(
+                    "shell.turn.stale_completion_dropped",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "prompt_id": prompt_id,
+                        "running_prompt_id": state.running_prompt_id(),
+                    })),
+                );
+                return;
+            }
+            let task = state
+                .foreground
+                .take_regular()
+                .expect("running prompt id implies a regular foreground task");
+            let goal_finalization = matches!(
+                task.origin,
+                crate::session::PromptOrigin::GoalFinalization { .. }
+            );
+            let input = state
+                .pending_inputs
+                .front()
+                .is_some_and(|input| input.prompt_id == prompt_id)
+                .then(|| state.pending_inputs.pop_front())
+                .flatten();
+            let broadcast = input.as_ref().is_some_and(|item| item.queue_meta.is_some());
+            (input, broadcast, goal_finalization)
+        };
+
+        if let Some(input) = settled_input {
+            let _ = input.respond_to.send(result.clone());
+        }
+        {
             let mut current_prompt_id = self
                 .current_prompt_id
                 .lock()
@@ -176,89 +214,36 @@ impl SessionActor {
             if current_prompt_id.as_deref() == Some(prompt_id.as_str()) {
                 *current_prompt_id = None;
             }
-            current_prompt_id.is_none()
-        };
-        if became_idle {
-            self.flush_pending_system_reminders().await;
-            // Idle-gated: a stale completion must not clobber the promoted turn's resources.
-            self.agent
-                .borrow()
-                .tool_bridge()
-                .update_resource(
-                    tools::implementations::grow_build::task::types::CurrentPromptIdResource(
-                        String::new(),
-                    ),
-                )
-                .await;
-            // Goal turn is over — re-enable per-tool-call completion reminders.
-            self.set_goal_loop_active_resource(false).await;
         }
+        self.agent
+            .borrow()
+            .tool_bridge()
+            .update_resource(
+                tools::implementations::grow_build::task::types::CurrentPromptIdResource(
+                    String::new(),
+                ),
+            )
+            .await;
+        self.agent
+            .borrow()
+            .tool_bridge()
+            .update_resource(
+                tools::implementations::grow_build::task::types::CurrentSubagentOwnerResource::default(),
+            )
+            .await;
+        self.set_goal_loop_active_resource(false).await;
+        self.flush_pending_system_reminders().await;
 
-        let mut state = self.state.lock().await;
-        // True only when this completion matched the front prompt and dequeued
-        // it. The unknown-prompt branch below must NOT emit a terminal: a turn
-        // the Cancel path already finalized can leave a stale completion here.
-        let mut owned_completion = false;
-        let mut broadcast_queue = false;
-        if state
-            .pending_inputs
-            .front()
-            .is_some_and(|input| input.prompt_id == prompt_id)
-        {
-            let Some(input) = state.pending_inputs.pop_front() else {
-                return;
-            };
-            owned_completion = true;
-            let _ = input.respond_to.send(result.clone()).ok();
-            // The completed prompt left the queue; re-broadcast (below, after
-            // `running_task` clears so the wire's `running_prompt_id` doesn't
-            // advertise the finished turn) the authoritative queue.
-            broadcast_queue = input.queue_meta.is_some();
-        } else {
+        let emit_terminal = !matches!(
+            result,
+            Ok(PromptTurnOk {
+                completion_kind: PromptCompletionKind::RemovedFromQueue,
+                ..
+            })
+        );
+        if !emit_terminal {
             tracing::warn!("Received completion for unknown prompt: {prompt_id}");
-            ::diagnostics::unified_log::warn(
-                "shell.turn.stale_completion_dropped",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({
-                    "prompt_id": prompt_id,
-                    "running_prompt_id": state.running_prompt_id(),
-                })),
-            );
-        }
-        // Ownership-gated: a stale completion must not null the promoted turn's
-        // task, or `maybe_start_running_task` would double-spawn the prompt.
-        if state.running_prompt_id() == Some(prompt_id.as_str()) || owned_completion {
-            state.running_task = None;
-        }
-        if broadcast_queue {
-            self.broadcast_queue_changed(&state);
-        }
-        // Note: Auto-compact is now handled inline during process_conversation_turn,
-        // so we no longer need to queue it here after turn completion.
-
-        // Drop the state guard before the async emit so the persist/broadcast
-        // fork doesn't run under the state lock.
-        drop(state);
-
-        // Publish the lifecycle-authoritative terminal on the persisted +
-        // replayed `_grow/session/update` rail so a viewer that reattaches
-        // mid-turn finalizes from replay instead of stranding on "Waiting…".
-        // The caller flushed the replay buffer first, so this lands strictly
-        // after the turn's last `session/update` delta. Emit ONLY for a
-        // completion this handler owned (dequeued at the front): the
-        // unknown-prompt branch above is a stale completion for a turn the
-        // Cancel path already finalized, so emitting there would double-emit a
-        // terminal for the same prompt_id. A `RemovedFromQueue` result never
-        // started a turn, so it emits nothing either.
-        let emit_terminal = owned_completion
-            && !matches!(
-                result,
-                Ok(PromptTurnOk {
-                    completion_kind: PromptCompletionKind::RemovedFromQueue,
-                    ..
-                })
-            );
-        if emit_terminal {
+        } else {
             let mapped = result
                 .as_ref()
                 .map(|ok| ok.stop_reason)
@@ -285,6 +270,17 @@ impl SessionActor {
                 });
             self.emit_turn_completed(prompt_id, &mapped, usage, cancel_trigger)
                 .await;
+            if goal_finalization
+                && matches!(mapped, Ok(reason) if reason != acp::StopReason::Cancelled)
+            {
+                self.finalize_goal_finalization_turn().await;
+            }
+        }
+        // The terminal is durable before clients observe either a new running
+        // owner or an idle queue snapshot.
+        if broadcast_queue {
+            let state = self.state.lock().await;
+            self.broadcast_queue_changed(&state);
         }
     }
 
@@ -294,8 +290,7 @@ impl SessionActor {
     /// from the same source as PromptResponse (`prompt_complete_fields`), then
     /// persists + forwards via `send_grow_notification`.
     ///
-    /// `cancel_trigger` (when `Some`) rides the `_meta` as `cancelTrigger`;
-    /// `"send_now"` marks a cancel-and-send end (marker suppressed).
+    /// `cancel_trigger` (when `Some`) rides the `_meta` as `cancelTrigger`.
     pub(super) async fn emit_turn_completed(
         &self,
         prompt_id: String,
@@ -382,7 +377,7 @@ impl SessionActor {
     }
 
     /// `(turn_succeeded, suppress_goal_continuation, infra_pause_message)`.
-    /// StationarityEnded is success for the streak but skips GoalSummary re-queue.
+    /// StationarityEnded is success but suppresses the next idle continuation.
     /// `infra_pause_message` is extracted before `handle_completion` consumes `result`.
     pub(super) fn post_turn_goal_degradation_plan(
         result: &PromptTurnResult,

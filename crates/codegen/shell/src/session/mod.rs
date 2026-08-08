@@ -47,8 +47,10 @@ pub(crate) fn image_blocks(
         })
         .collect()
 }
-/// Describes who originated a prompt: the user, or the shell's auto-wake
-/// system reacting to a completed background task / subagent.
+/// Structured origin of a regular turn.
+///
+/// Producers assign this value explicitly. Opaque prompt ids are identities,
+/// not a second wire protocol for reconstructing lifecycle semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptOrigin {
     /// A normal user-initiated prompt.
@@ -71,27 +73,20 @@ pub enum PromptOrigin {
     /// or bash-task-completed notifications into a single turn while the
     /// user is idle.
     NotificationDrain,
-    /// Orchestrator-initiated summary turn. The goal orchestrator injects a
-    /// system reminder into context and then triggers a model turn so the
-    /// model can print a visible progress update.
-    GoalSummary,
-    /// Legacy Goal command-plane turn. No longer produced — the shell
-    /// GoalStage refactor removed `queue_goal_control_prompt`, and Goal work
-    /// now runs as `GoalSummary` cycles. Retained for wire/parse
-    /// compatibility: replayed or reattached `goal-control-*` prompt ids must
-    /// keep classifying as durable control turns (hidden user echo, no
-    /// UserPromptSubmit hook, control-plane mode, autonomy projection)
-    /// instead of collapsing into `User`.
-    GoalControl,
     /// Shell-owned slash command scheduled through the command plane. It may
     /// execute a finite prompt task for lifecycle consistency, but is never a
     /// user/model prompt and is hidden from conversation UI.
     HostCommand,
-    /// Verification-stage nudge injected after the verification stage
-    /// achieved — keep working" system-reminder body alongside the
-    /// path to the persisted details file. The variant name retains
-    /// the `Classifier` prefix for wire stability.
-    GoalClassifierNudge,
+    /// Idle-admitted implementer continuation for an active Goal.
+    GoalContinuation {
+        goal_id: String,
+        stage_id: u64,
+    },
+    /// Idle-admitted main-agent final report after verifier achievement.
+    GoalFinalization {
+        goal_id: String,
+        stage_id: u64,
+    },
     /// Scheduled task (`/loop`) prompt fired by the scheduler via the pager.
     SchedulerFired,
     /// Turn injected after a resumed plan-approval decision: the
@@ -100,47 +95,34 @@ pub enum PromptOrigin {
     /// typed it — kept out of prompt history — but it still runs a real turn.
     PlanResume,
 }
+
+/// Participation of a regular turn in the user-visible lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnKind {
+    User,
+    Internal,
+    Scheduled,
+}
 impl PromptOrigin {
-    /// Parse a prompt_id string into a `PromptOrigin`.
-    pub fn from_prompt_id(prompt_id: &str) -> Self {
-        if let Some(task_id) = prompt_id.strip_prefix("task-completed-") {
-            Self::TaskCompleted {
-                task_id: task_id.to_string(),
-            }
-        } else if let Some(subagent_id) = prompt_id.strip_prefix("subagent-completed-") {
-            Self::SubagentCompleted {
-                subagent_id: subagent_id.to_string(),
-            }
-        } else if let Some(completion_id) = prompt_id.strip_prefix("workflow-completed-") {
-            Self::WorkflowCompleted {
-                completion_id: completion_id.to_string(),
-            }
-        } else if prompt_id.starts_with("notifications-") {
-            Self::NotificationDrain
-        } else if prompt_id.starts_with("goal-summary-") {
-            Self::GoalSummary
-        } else if prompt_id.starts_with("goal-control-") {
-            Self::GoalControl
-        } else if prompt_id.starts_with("host-command-") {
-            Self::HostCommand
-        } else if prompt_id.starts_with("goal-classifier-nudge-") {
-            Self::GoalClassifierNudge
-        } else if prompt_id.starts_with("scheduler-fired-") {
-            Self::SchedulerFired
-        } else if prompt_id.starts_with("plan-resume-") {
-            Self::PlanResume
-        } else {
-            Self::User
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::TaskCompleted { .. } => "task_completed",
+            Self::SubagentCompleted { .. } => "subagent_completed",
+            Self::WorkflowCompleted { .. } => "workflow_completed",
+            Self::NotificationDrain => "notification_drain",
+            Self::HostCommand => "host_command",
+            Self::GoalContinuation { .. } => "goal_continuation",
+            Self::GoalFinalization { .. } => "goal_finalization",
+            Self::SchedulerFired => "scheduler_fired",
+            Self::PlanResume => "plan_resume",
         }
     }
     /// Returns `true` for auto-wake (synthetic) prompts.
     pub fn is_synthetic(&self) -> bool {
         !matches!(self, Self::User)
     }
-    /// Synthetic wake work that a newer user prompt may replace. Durable
-    /// control turns (`GoalControl`), scheduled work, and Plan resume turns
-    /// are commands with their own semantics and must never be swept merely
-    /// because a completion wake shares the queue.
+    /// Synthetic wake work that a newer user prompt may replace.
     pub fn is_preemptible_wake(&self) -> bool {
         matches!(
             self,
@@ -148,8 +130,6 @@ impl PromptOrigin {
                 | Self::SubagentCompleted { .. }
                 | Self::WorkflowCompleted { .. }
                 | Self::NotificationDrain
-                | Self::GoalSummary
-                | Self::GoalClassifierNudge
         )
     }
     /// Whether a `UserMessageChunk` echo for this origin must stay out of
@@ -165,10 +145,9 @@ impl PromptOrigin {
             | Self::SubagentCompleted { .. }
             | Self::WorkflowCompleted { .. }
             | Self::NotificationDrain
-            | Self::GoalSummary
-            | Self::GoalControl
             | Self::HostCommand
-            | Self::GoalClassifierNudge => true,
+            | Self::GoalContinuation { .. }
+            | Self::GoalFinalization { .. } => true,
         }
     }
     pub fn completion_id(&self) -> Option<&str> {
@@ -178,138 +157,54 @@ impl PromptOrigin {
             Self::WorkflowCompleted { completion_id } => Some(completion_id),
             Self::User
             | Self::NotificationDrain
-            | Self::GoalSummary
-            | Self::GoalControl
             | Self::HostCommand
-            | Self::GoalClassifierNudge
+            | Self::GoalContinuation { .. }
+            | Self::GoalFinalization { .. }
             | Self::SchedulerFired
             | Self::PlanResume => None,
         }
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::PromptOrigin;
-    #[test]
-    fn from_prompt_id_user() {
-        assert_eq!(
-            PromptOrigin::from_prompt_id("my-prompt"),
-            PromptOrigin::User
-        );
-        assert!(!PromptOrigin::from_prompt_id("my-prompt").is_synthetic());
+
+impl TurnKind {
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Internal => "internal",
+            Self::Scheduled => "scheduled",
+        }
     }
+}
+#[cfg(test)]
+mod turn_identity_tests {
+    use super::{PromptOrigin, TurnKind};
+
     #[test]
-    fn from_prompt_id_task_completed() {
-        let origin = PromptOrigin::from_prompt_id("task-completed-abc-123");
-        assert_eq!(
-            origin,
-            PromptOrigin::TaskCompleted {
-                task_id: "abc-123".into()
-            }
-        );
+    fn origin_and_kind_are_structured_independently_of_prompt_id() {
+        let origin = PromptOrigin::GoalContinuation {
+            goal_id: "g1".into(),
+            stage_id: 7,
+        };
+        assert_eq!(origin.wire_name(), "goal_continuation");
         assert!(origin.is_synthetic());
-        assert_eq!(origin.completion_id(), Some("abc-123"));
+        assert!(origin.hide_user_echo_from_scrollback());
+        assert_eq!(TurnKind::Internal.wire_name(), "internal");
     }
 
     #[test]
-    fn durable_synthetic_controls_are_not_preemptible_wakes() {
-        assert!(!PromptOrigin::GoalControl.is_preemptible_wake());
-        assert!(!PromptOrigin::SchedulerFired.is_preemptible_wake());
-        assert!(!PromptOrigin::PlanResume.is_preemptible_wake());
+    fn only_replaceable_wakes_are_preemptible() {
         assert!(PromptOrigin::NotificationDrain.is_preemptible_wake());
         assert!(
-            PromptOrigin::TaskCompleted {
-                task_id: "t".into()
+            !PromptOrigin::GoalContinuation {
+                goal_id: "g1".into(),
+                stage_id: 1,
             }
             .is_preemptible_wake()
         );
-    }
-    #[test]
-    fn from_prompt_id_subagent_completed() {
-        let origin = PromptOrigin::from_prompt_id("subagent-completed-xyz-789");
-        assert_eq!(
-            origin,
-            PromptOrigin::SubagentCompleted {
-                subagent_id: "xyz-789".into()
-            }
-        );
-        assert!(origin.is_synthetic());
-        assert_eq!(origin.completion_id(), Some("xyz-789"));
-    }
-    #[test]
-    fn from_prompt_id_notification_drain() {
-        let origin =
-            PromptOrigin::from_prompt_id("notifications-019e0000-0000-7000-8000-0000000000aa");
-        assert_eq!(origin, PromptOrigin::NotificationDrain);
-        assert!(origin.is_synthetic());
-        assert_eq!(origin.completion_id(), None);
-    }
-    #[test]
-    fn goal_summary_origin_from_prompt_id() {
-        let origin = PromptOrigin::from_prompt_id("goal-summary-019e2d3e");
-        assert!(matches!(origin, PromptOrigin::GoalSummary));
-        assert!(origin.is_synthetic());
-        assert_eq!(origin.completion_id(), None);
-    }
-    #[test]
-    fn goal_classifier_nudge_origin_from_prompt_id() {
-        let origin = PromptOrigin::from_prompt_id("goal-classifier-nudge-019e2d3e");
-        assert!(matches!(origin, PromptOrigin::GoalClassifierNudge));
-        assert!(origin.is_synthetic());
-        assert_eq!(origin.completion_id(), None);
-    }
-    #[test]
-    fn goal_classifier_nudge_origin_round_trips_through_from_prompt_id() {
-        let prompt_id = format!("goal-classifier-nudge-{}", uuid::Uuid::now_v7());
-        let origin = PromptOrigin::from_prompt_id(&prompt_id);
-        assert!(matches!(origin, PromptOrigin::GoalClassifierNudge));
-        assert!(origin.is_synthetic());
-    }
-    #[test]
-    fn scheduler_fired_origin_from_prompt_id() {
-        let origin = PromptOrigin::from_prompt_id("scheduler-fired-019e51a3-abcd-1234");
-        assert!(matches!(origin, PromptOrigin::SchedulerFired));
-        assert!(origin.is_synthetic());
-        assert_eq!(origin.completion_id(), None);
-    }
-    #[test]
-    fn plan_resume_origin_from_prompt_id() {
-        let origin = PromptOrigin::from_prompt_id("plan-resume-1730000000000");
-        assert!(matches!(origin, PromptOrigin::PlanResume));
-        assert!(origin.is_synthetic());
-        assert_eq!(origin.completion_id(), None);
-    }
-    #[test]
-    fn notification_drain_is_server_initiated() {
-        let prompt_id = "notifications-019e0000-0000-7000-8000-0000000000aa";
-        assert!(PromptOrigin::from_prompt_id(prompt_id).is_synthetic());
-    }
-    #[test]
-    fn hide_user_echo_from_scrollback_by_origin() {
-        assert!(!PromptOrigin::User.hide_user_echo_from_scrollback());
-        assert!(
-            !PromptOrigin::from_prompt_id("scheduler-fired-abc").hide_user_echo_from_scrollback()
-        );
-        assert!(!PromptOrigin::from_prompt_id("plan-resume-1").hide_user_echo_from_scrollback());
-        assert!(PromptOrigin::from_prompt_id("task-completed-t1").hide_user_echo_from_scrollback());
-        assert!(
-            PromptOrigin::from_prompt_id("subagent-completed-s1").hide_user_echo_from_scrollback()
-        );
-        assert!(
-            PromptOrigin::from_prompt_id("notifications-uuid").hide_user_echo_from_scrollback()
-        );
-        assert!(
-            PromptOrigin::from_prompt_id("workflow-completed-wf-1-9")
-                .hide_user_echo_from_scrollback()
-        );
-        assert!(PromptOrigin::from_prompt_id("goal-summary-1").hide_user_echo_from_scrollback());
-        assert!(PromptOrigin::from_prompt_id("goal-control-1").hide_user_echo_from_scrollback());
-        assert!(
-            PromptOrigin::from_prompt_id("goal-classifier-nudge-1")
-                .hide_user_echo_from_scrollback()
-        );
+        assert!(!PromptOrigin::SchedulerFired.is_preemptible_wake());
     }
 }
+
 /// Client-requested fs notification mode (was fsnotify::FsNotifyMode).
 /// Determines whether the session sends an initial file index to the client
 /// or just streams raw file events.
@@ -337,15 +232,7 @@ pub(crate) mod events;
 pub mod file_system;
 pub mod fork;
 pub(crate) mod fs_watch;
-pub(crate) mod goal_classifier;
-pub(crate) mod goal_evaluator;
-pub(crate) mod goal_next_step;
 pub(crate) mod goal_orchestrator;
-pub(crate) mod goal_planner;
-pub(crate) mod goal_role_tools;
-pub(crate) mod goal_stop_detector;
-pub(crate) mod goal_strategist;
-pub(crate) mod goal_summarizer;
 pub mod goal_tracker;
 pub mod helpers;
 pub(crate) mod image_describe;

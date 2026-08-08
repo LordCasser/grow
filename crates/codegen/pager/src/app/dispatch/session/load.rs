@@ -511,7 +511,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
     code_restored: bool,
     restore_summary: Option<String>,
     restore_degree: Option<workspace::session::git::RestoreDegree>,
-    running_prompt_id: Option<String>,
+    foreground: Option<crate::app::prompt_queue::ForegroundSnapshot>,
     scheduler_background_loops: Option<bool>,
 ) -> Vec<Effect> {
     tracing::info!(
@@ -570,6 +570,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             );
             agent.scrollback.push_block(RenderBlock::system(banner));
         }
+        let running_prompt_id = foreground.map(|snapshot| snapshot.prompt_id);
         let adopting = running_prompt_id
             .as_deref()
             .is_some_and(|pid| agent.should_adopt_running_prompt(pid));

@@ -254,7 +254,7 @@ impl AgentView {
                 }
                 let images = self.prompt.drain_images();
                 self.prompt.set_text("");
-                Some(Action::SendPromptNow { text, images })
+                Some(Action::SteerPrompt { text, images })
             }
         }
     }

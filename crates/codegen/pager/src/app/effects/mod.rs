@@ -11,7 +11,7 @@ use super::session_title_resolve::worktree_resume_failure_message;
 #[allow(unused_imports)]
 use super::{agent, dispatch};
 pub(super) use helpers::{
-    parse_session_load_running_prompt_id, parse_session_scheduler_background_loops,
+    parse_session_load_foreground, parse_session_scheduler_background_loops,
 };
 pub(crate) use helpers::{
     EffectMeta, SessionFlags, persist_permission_mode_and_notify, persist_setting,
@@ -38,7 +38,6 @@ pub(crate) fn execute(
     session_flags: &SessionFlags,
 ) -> (bool, EffectMeta) {
     let meta = EffectMeta;
-    let effect_is_send_now = matches!(effect, Effect::SendPromptNow { .. });
     match effect {
         Effect::RegisterActiveSession { session_id, cwd } => {
             crate::app::signal_handler::set_current_session_id(Some(session_id.clone()));
@@ -489,9 +488,7 @@ pub(crate) fn execute(
                             let (code_restored, restore_summary, restore_degree) = parse_session_load_restore_meta(
                                 resp.meta.as_ref(),
                             );
-                            let running_prompt_id = parse_session_load_running_prompt_id(
-                                resp.meta.as_ref(),
-                            );
+                            let foreground = parse_session_load_foreground(resp.meta.as_ref());
                             TaskResult::SessionLoaded {
                                 agent_id,
                                 session_id: acp_session_id,
@@ -499,7 +496,7 @@ pub(crate) fn execute(
                                 code_restored,
                                 restore_summary,
                                 restore_degree,
-                                running_prompt_id,
+                                foreground,
                                 scheduler_background_loops: parse_session_scheduler_background_loops(
                                     resp.meta.as_ref(),
                                 ),
@@ -766,9 +763,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SendPromptBlocks { agent_id, session_id, blocks, prompt_id }
-        | Effect::SendPromptNow { agent_id, session_id, blocks, prompt_id } => {
-            let send_now = effect_is_send_now;
+        Effect::SendPromptBlocks { agent_id, session_id, blocks, prompt_id } => {
             let tx = acp_tx.clone();
             let screen_mode = session_flags.screen_mode_label;
             tasks
@@ -778,18 +773,14 @@ pub(crate) fn execute(
                         Some(&session_id.0),
                         Some(
                             serde_json::json!({
-                        "kind": if send_now { "send_now" } else { "blocks" },
+                        "kind": "blocks",
                         "block_count": blocks.len(),
                         "prompt_id": prompt_id,
                     }),
                         ),
                     );
                     let send_start = std::time::Instant::now();
-                    let mut meta = prompt_request_meta(&prompt_id, screen_mode);
-                    if send_now && let Some(map) = meta.as_object_mut() {
-                        map.insert("sendNow".into(), serde_json::Value::Bool(true));
-                    }
-                    let requeue_blocks = send_now.then(|| blocks.clone());
+                    let meta = prompt_request_meta(&prompt_id, screen_mode);
                     let req = acp::PromptRequest::new(session_id.clone(), blocks)
                         .meta(meta.as_object().cloned());
                     let result = acp_send(req, &tx).await;
@@ -799,7 +790,7 @@ pub(crate) fn execute(
                         Some(&session_id.0),
                         Some(
                             serde_json::json!({
-                        "kind": if send_now { "send_now" } else { "blocks" },
+                        "kind": "blocks",
                         "elapsed_ms": send_elapsed_ms,
                         "ok": result.is_ok(),
                         "prompt_id": prompt_id,
@@ -807,15 +798,6 @@ pub(crate) fn execute(
                         ),
                     );
                     log_prompt_result(&session_id, &result);
-                    if let (Some(blocks), Err(e)) = (requeue_blocks, &result) {
-                        return TaskResult::SendPromptNowFailed {
-                            agent_id,
-                            session_id,
-                            prompt_id,
-                            error: format_acp_error(e),
-                            blocks,
-                        };
-                    }
                     let http_status = result
                         .as_ref()
                         .err()
@@ -1082,12 +1064,19 @@ pub(crate) fn execute(
                     TaskResult::CancelComplete
                 });
         }
-        Effect::QueueInterject { session_id, id, expected_version, new_text } => {
+        Effect::QueueInterject {
+            session_id,
+            expected_turn_id,
+            id,
+            expected_version,
+            new_text,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
                     let mut params = serde_json::json!({
                     "sessionId": session_id.0.to_string(),
+                    "expectedTurnId": expected_turn_id,
                     "id": id,
                     "expectedVersion": expected_version,
                 });
@@ -3015,6 +3004,7 @@ pub(crate) fn execute(
         Effect::SendInterject {
             agent_id,
             session_id,
+            expected_turn_id,
             text,
             interjection_id,
             blocks,
@@ -3024,12 +3014,13 @@ pub(crate) fn execute(
                 .spawn(async move {
                     let params = build_interject_params(
                         &session_id,
+                        &expected_turn_id,
                         &text,
                         &interjection_id,
                         blocks.as_deref(),
                     );
                     let request = acp::ExtRequest::new(
-                        "grow/interject",
+                        "grow/steer",
                         serde_json::value::to_raw_value(&params)
                             .expect("serialize interject params")
                             .into(),
@@ -3918,12 +3909,14 @@ fn prompt_request_meta(
 /// shape stays byte-identical. Extracted from the spawn for testability.
 fn build_interject_params(
     session_id: &acp::SessionId,
+    expected_turn_id: &str,
     text: &str,
     interjection_id: &str,
     blocks: Option<&[acp::ContentBlock]>,
 ) -> serde_json::Value {
     let mut params = serde_json::json!({
         "sessionId": session_id.0.to_string(),
+        "expectedTurnId": expected_turn_id,
         "text": text,
         "interjectionId": interjection_id,
     });

@@ -41,28 +41,13 @@ pub(crate) use permissions::{resolve_permission_queue_transition, respond_permis
 pub(crate) use prompt::dispatch_initial_prompt;
 pub(in crate::app) use prompt::{show_small_screen_tip, show_ssh_wrap_tip};
 pub(super) use queue::{
-    apply_turn_start_shim, arm_send_now_and_paint, maybe_drain_queue,
-    maybe_drain_queue_and_note_peek, note_peek_page_flip, shim_renders_own_user_block,
+    apply_turn_start_shim, maybe_drain_queue, maybe_drain_queue_and_note_peek, note_peek_page_flip,
 };
 pub(in crate::app) use rewind::{find_user_prompt_entry_for_shell_index, shell_prompt_index_at};
 pub(crate) use router::dispatch;
 pub(crate) use settings::ui::refresh_open_settings_modals;
 pub(crate) use status::commit_minimal_update_notice;
 pub(crate) use turn::poll_stalled_prompt_submissions;
-
-/// Toast shown when an immediate send is rejected because the Goal verifier
-/// is judging completion (send-now and plain-message paths share it).
-pub(super) const GOAL_VERIFYING_TOAST: &str = "Goal is verifying; please wait before sending.";
-
-/// Whether the session's Goal is currently running its verifier stage. While
-/// true, immediate sends are rejected so the user's new input never races
-/// the verdict (which is based on the pre-steering implementer output).
-pub(super) fn goal_is_verifying(agent: &crate::app::agent_view::AgentView) -> bool {
-    agent
-        .goal_state
-        .as_ref()
-        .is_some_and(|goal| goal.verifying_completion)
-}
 
 // Test-only consumers (cfg(test) mods elsewhere in the crate); a plain
 // re-export trips -D unused-imports in the lib build.

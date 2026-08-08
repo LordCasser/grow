@@ -1,0 +1,117 @@
+# Grow 会话、Turn 与 Behavior 架构
+
+本文描述重构后的权威管线。核心原则只有两个：前台执行只有一个 owner；所有新工作都从同一个 idle gate 进入。Goal 的 planner/verifier 是后台阶段，不是伪装成 turn 的第二套调度器。
+
+## 1. 权威状态
+
+Shell actor 是执行权威，Pager 只是按结构化通知绘制镜像。
+
+```rust
+enum ForegroundState {
+    Idle,
+    RegularTurn(AgentTask),
+    Compaction,
+}
+```
+
+`ForegroundState` 是唯一前台 owner。Goal planner/verifier、watcher 和后台 task 不占 foreground。`current_prompt_id` 等字段只用于关联或显示，不能反推忙闲状态。
+
+每个 regular turn 都显式携带：
+
+- `prompt_id`：turn/message 的稳定身份；
+- `PromptOrigin`：User、GoalContinuation、GoalFinalization、TaskCompleted 等来源；
+- `TurnKind`：User 或 Internal；
+- 一个 completion owner，只能提交一次 durable `TurnCompleted`。
+
+不再通过 prompt-id 前缀、trim 后的文本、零 token 或 Goal status 猜测 origin、owner 和终态。
+
+## 2. 统一调度
+
+```mermaid
+flowchart LR
+    U["用户输入"] -->|"Idle"| G["try_start_turn_if_idle"]
+    U -->|"Running + Enter"| Q["用户 FIFO"]
+    U -->|"Running + Ctrl+Enter / 双 Enter"| S["Steer 当前 regular turn"]
+    T["唯一 TurnCompleted"] --> A["Idle arbiter"]
+    A -->|"FIFO 非空"| G
+    A -->|"FIFO 空"| H["Goal on_idle"]
+    H --> P["Planning 后台阶段"]
+    H --> E["Executing continuation"]
+    H --> V["Verifying 后台阶段"]
+    H --> F["Summarizing regular turn"]
+```
+
+完成顺序固定：
+
+1. 核对并结算当前 `ForegroundState::RegularTurn` 的 exact owner；
+2. 持久化这个 turn 唯一的 `TurnCompleted`；
+3. 提升用户 FIFO；
+4. 仍然 idle 时才运行 Goal idle hook。
+
+因此用户消息与 Goal continuation 同时就绪时，用户永远先运行。Goal continuation 不进入用户 FIFO，也没有 synthetic prompt hot loop。
+
+## 3. 输入命令
+
+Shell 命令面只保留两个明确动作：
+
+- `QueuePrompt`：将普通 Enter 加入显式 FIFO；
+- `SteerQueuedPrompt { expected_turn_id, ... }`：把一个已排队的用户消息原子转入指定的当前 turn。
+
+Pager 语义：
+
+| 输入 | Idle | Regular turn 正在运行 |
+|---|---|---|
+| Enter | 启动/提交 turn | 加入 FIFO |
+| Ctrl+Enter | 无活动 turn，拒绝 | steer 同一个 turn |
+| 双 Enter | 不适用 | 将刚排队的首项原子转换为 steer |
+| queue row “Send now” | 不适用 | 调用同一个 steer 命令 |
+
+Steer 是软中断采样并把补充消息注入同一个 user-visible turn。它不创建第二个 terminal，不切换 Behavior，也不推进 Goal revision。`expected_turn_id` 让延迟到达的 UI 操作无法误伤后来的 turn。
+
+## 4. Behavior 与 Goal 的边界
+
+通用 `BehaviorController` 继续管理 Normal、Clarify、Plan、Workflow、DeepResearch 等协作模式。Goal 对用户仍是 `BehaviorId::Goal`，但其生命周期状态由独立 `GoalTracker` 管理。
+
+- `/goal` 与 Behavior picker 共用同一个同步 control-plane handler；
+- Goal 未完成且未 clear 时，拒绝切换到其他 Behavior；
+- pause 仍显示 Goal Behavior；complete 或 clear 后回到 Normal；
+- control handler 只改状态并返回，绝不运行模型、等待 stage 或排 hidden prompt；
+- 普通补充消息属于当前 Goal 上下文，但不会自动修改 objective/plan revision；只有 `/goal edit` 修改 objective。
+- live tool bridge 缺少任一 Goal 工具时 fail closed 为 Paused，不允许 idle hook 自治；
+- Goal stage 与 Goal turn 创建的 subagent 在 producer 侧携带 `goal_id`，预算归属不读取事件到达时的当前状态。
+
+Goal 的详细状态机见 [goal-continuation.md](./goal-continuation.md)。
+
+## 5. Pager 对账
+
+Pager 不再使用 `skip_next_user_echo`、文本 trim 匹配或 running-adoption stash。所有 optimistic user bubble 与 ACP echo 通过 `messageId` 对账：
+
+- 相同 `messageId` 只保留一个气泡；
+- echo 可补写 `promptIndex` 等服务端元数据；
+- 重放和乱序重复是幂等的；
+- `QueueChanged.runningPromptId/origin/turnKind` 只镜像 shell 已确认的 foreground。
+- session reload 通过 `grow/foreground = { promptId, origin, turnKind, turnStartMs }` 恢复 regular foreground；缺字段即视为没有可接管的 foreground，不再接受只含 prompt id 的旧协议。
+
+Goal Planning/Verifying 只更新 Goal chip，不把 Pager session 伪装成 Running，用户仍可提交或 steer 真正的 regular turn。
+
+## 6. 动画与忙状态
+
+动画 tick demand 统一由可观察的真实活动推导：foreground turn、Active Goal 后台阶段、watcher/bg task，以及视图自身动画。
+
+- parked 只改变展示，不能把仍在执行的 foreground 伪装为 idle；
+- Active Goal 即使 foreground idle，Goal chip 仍保持 tick；
+- watcher/bg task 即使 foreground idle，状态提示仍保持 tick；
+- ACP token firehose 每次只 drain 有界 batch，并在每个 batch 前优先领取已到期 animation deadline，所以 tick 延迟最多再等一个 ACP batch，而不是等流结束。
+
+## 7. 必须保持的不变量
+
+1. 同一时刻至多一个 foreground owner。
+2. planner/verifier 永远不占 foreground。
+3. 一个 regular turn 恰好一个 durable terminal。
+4. 用户 FIFO 总是在 Goal idle continuation 之前提升。
+5. steer 只修改当前 turn，不产生新 turn。
+6. identity、origin、kind 都来自结构化字段，不从文本或 ID 格式推断。
+7. Pager 每个 `messageId` 至多一个用户气泡。
+8. pause/clear 使相应 Goal stage lease 失效；异常退出不能永久卡住 latch。
+9. Goal 状态不能作为通知 ownership；只抑制明确归属于 Goal turn 的 task id。
+10. 成功改变 Goal 定义/生命周期的控制会取消旧上下文 turn，被拒绝的控制不会。

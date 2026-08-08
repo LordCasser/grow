@@ -335,11 +335,11 @@ fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
         "get_command_or_subagent_output",
     );
     match cmd_rx.try_recv().expect("expected synthetic Prompt") {
-        SessionCommand::Prompt { prompt_id, verbatim, .. } => {
+        SessionCommand::QueuePrompt { prompt_id, verbatim, .. } => {
             assert!(prompt_id.starts_with("subagent-completed-"));
             assert!(verbatim);
         }
-        _ => panic!("expected SessionCommand::Prompt"),
+        _ => panic!("expected SessionCommand::QueuePrompt"),
     }
     assert_eq!(reservations.snapshot(), vec!["sa-1".to_string()]);
 }

@@ -199,42 +199,6 @@ pub(crate) fn replay_inherited_updates(
         crate::memory_release::release_retained_memory_with("subagent-replay");
     }
 }
-/// Compare two strings after collapsing internal whitespace (no allocation).
-pub(crate) fn subagent_prompt_text_eq(a: &str, b: &str) -> bool {
-    let mut aw = a.split_whitespace();
-    let mut bw = b.split_whitespace();
-    loop {
-        match (aw.next(), bw.next()) {
-            (Some(x), Some(y)) if x == y => {}
-            (None, None) => return true,
-            _ => return false,
-        }
-    }
-}
-/// True when replay (or prior injection) already surfaced the subagent task prompt.
-pub(crate) fn child_scrollback_already_shows_prompt(
-    scrollback: &crate::scrollback::state::ScrollbackState,
-    prompt: &str,
-) -> bool {
-    if prompt.trim().is_empty() {
-        return false;
-    }
-    for i in 0..scrollback.len() {
-        let Some(entry) = scrollback.entry(i) else {
-            continue;
-        };
-        let block_text = match &entry.block {
-            crate::scrollback::block::RenderBlock::UserPrompt(b) => Some(b.text.as_str()),
-            _ => None,
-        };
-        if let Some(t) = block_text
-            && subagent_prompt_text_eq(t, prompt)
-        {
-            return true;
-        }
-    }
-    false
-}
 /// True when the child scrollback has no substantive replay content yet.
 fn subagent_child_needs_replay(child_view: &crate::app::agent_view::AgentView) -> bool {
     let len = child_view.scrollback.len();
@@ -592,35 +556,6 @@ mod tests {
             &NotificationMeta::default(),
             &mut view.scrollback,
         );
-    }
-    #[test]
-    fn child_scrollback_already_shows_prompt_matches_user_prompt() {
-        let mut view = make_min_child_view();
-        view.scrollback
-            .push_block(RenderBlock::user_prompt("  scan src/  \n"));
-        assert!(child_scrollback_already_shows_prompt(
-            &view.scrollback,
-            "scan src/"
-        ));
-    }
-    #[test]
-    fn child_scrollback_already_shows_prompt_false_when_absent() {
-        let view = make_min_child_view();
-        assert!(!child_scrollback_already_shows_prompt(
-            &view.scrollback,
-            "scan src/"
-        ));
-    }
-    #[test]
-    fn child_scrollback_already_shows_prompt_false_for_empty_needle() {
-        let mut view = make_min_child_view();
-        view.scrollback
-            .push_block(RenderBlock::user_prompt("anything"));
-        assert!(!child_scrollback_already_shows_prompt(&view.scrollback, ""));
-        assert!(!child_scrollback_already_shows_prompt(
-            &view.scrollback,
-            "   "
-        ));
     }
     #[test]
     fn subagent_child_needs_replay_empty_scrollback() {

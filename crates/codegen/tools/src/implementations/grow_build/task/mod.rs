@@ -21,7 +21,7 @@ pub use coordinator_state::{cap_completion_output, completion_summary};
 pub mod types;
 
 use self::backend::SubagentBackendResource;
-use self::types::CurrentPromptIdResource;
+use self::types::{CurrentPromptIdResource, CurrentSubagentOwnerResource};
 
 use self::types::*;
 use crate::types::output::ToolOutput;
@@ -132,6 +132,7 @@ impl tool_runtime::Tool for TaskTool {
             model_validator,
             parent_session_id,
             parent_prompt_id,
+            owner,
             foreground_wait,
         ) = {
             let res = resources.lock().await;
@@ -160,6 +161,10 @@ impl tool_runtime::Tool for TaskTool {
                 .get::<CurrentPromptIdResource>()
                 .map(|p| p.0.clone())
                 .filter(|prompt_id| !prompt_id.is_empty());
+            let owner = res
+                .get::<CurrentSubagentOwnerResource>()
+                .map(|owner| owner.0.clone())
+                .unwrap_or_default();
             let foreground_wait = res.get::<SubagentForegroundWait>().cloned();
 
             (
@@ -169,6 +174,7 @@ impl tool_runtime::Tool for TaskTool {
                 model_validator,
                 parent_session_id,
                 parent_prompt_id,
+                owner,
                 foreground_wait,
             )
         };
@@ -345,7 +351,7 @@ impl tool_runtime::Tool for TaskTool {
             surface_completion: true,
             await_to_completion: false,
             fork_context: false,
-            owner: SubagentOwner::Task,
+            owner,
             cancel_token: child_cancellation,
         };
 
@@ -687,6 +693,9 @@ mod tests {
         resources.insert(SubagentDepthCounter(0));
         resources.insert(SessionIdResource("parent-session".to_string()));
         resources.insert(CurrentPromptIdResource("prompt-123".to_string()));
+        resources.insert(CurrentSubagentOwnerResource(SubagentOwner::goal(
+            "goal-123",
+        )));
 
         let tool = TaskTool;
         let shared = resources.into_shared();
@@ -697,6 +706,7 @@ mod tests {
             assert_eq!(request.subagent_type, "explore");
             assert_eq!(request.parent_session_id, "parent-session");
             assert_eq!(request.parent_prompt_id.as_deref(), Some("prompt-123"));
+            assert_eq!(request.owner.goal_id(), Some("goal-123"));
             request
                 .respond_with(|request| SubagentResult {
                     success: true,

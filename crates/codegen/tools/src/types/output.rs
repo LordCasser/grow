@@ -523,6 +523,7 @@ pub enum ToolOutput {
     SchedulerDelete(crate::implementations::grow_build::scheduler::delete::SchedulerDeleteOutput),
     SchedulerList(crate::implementations::grow_build::scheduler::list::SchedulerListOutput),
     UpdateGoal(crate::implementations::grow_build::update_goal::UpdateGoalOutput),
+    GetGoal(crate::implementations::grow_build::update_goal::GoalView),
     Workflow(crate::implementations::grow_build::workflow::WorkflowToolOutput),
     /// Dynamic output for runtime-registered tools (MCP, test tools, etc.)
     Dynamic(DynamicOutput),
@@ -769,6 +770,7 @@ impl ToolOutput {
                 }
             }
             ToolOutput::UpdateGoal(o) => o.summary.clone(),
+            ToolOutput::GetGoal(o) => serde_json::to_string_pretty(o).unwrap_or_default(),
             ToolOutput::Workflow(o) => o.message.clone(),
             ToolOutput::Dynamic(v) => serde_json::to_string_pretty(&v.value).unwrap_or_default(),
             ToolOutput::Text(text) => text.text.clone(),

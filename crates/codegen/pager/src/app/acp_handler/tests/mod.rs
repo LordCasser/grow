@@ -355,152 +355,6 @@ pub(super) fn make_exit_plan_ext_with_tool_call_id(
         rx,
     )
 }
-pub(super) fn queue_changed_ext(session_id: &str, ids: &[&str]) -> acp::ExtNotification {
-    let entries: Vec<serde_json::Value> = ids
-        .iter()
-        .enumerate()
-        .map(|(i, id)| {
-            serde_json::json!({
-                    "id": id,
-                    "version": 0,
-                    "owner": "A",
-                    "kind": "prompt",
-                    "text": format!("text {id}"),
-                    "position": i,
-                })
-        })
-        .collect();
-    let params = serde_json::json!({ "sessionId": session_id, "entries": entries });
-    acp::ExtNotification::new(
-        "grow/queue/changed",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
-    )
-}
-/// Build a `grow/queue/changed` notification carrying `runningPromptId`.
-pub(super) fn queue_changed_running(
-    session_id: &str,
-    ids: &[&str],
-    running: Option<&str>,
-) -> acp::ExtNotification {
-    queue_changed_running_ex(session_id, ids, running, None, None, None)
-}
-/// Like [`queue_changed_running`], with optional running-turn display
-/// fields (`runningText` / `runningKind` / `runningCombinedTexts`).
-pub(super) fn queue_changed_running_ex(
-    session_id: &str,
-    ids: &[&str],
-    running: Option<&str>,
-    running_text: Option<&str>,
-    running_kind: Option<&str>,
-    running_combined_texts: Option<&[&str]>,
-) -> acp::ExtNotification {
-    let entries: Vec<serde_json::Value> = ids
-        .iter()
-        .enumerate()
-        .map(|(i, id)| {
-            serde_json::json!({
-                    "id": id,
-                    "version": 0,
-                    "kind": "prompt",
-                    "text": format!("text {id}"),
-                    "position": i,
-                })
-        })
-        .collect();
-    let mut params = serde_json::json!({ "sessionId": session_id, "entries": entries });
-    if let Some(r) = running {
-        params["runningPromptId"] = serde_json::Value::String(r.to_string());
-    }
-    if let Some(t) = running_text {
-        params["runningText"] = serde_json::Value::String(t.to_string());
-    }
-    if let Some(k) = running_kind {
-        params["runningKind"] = serde_json::Value::String(k.to_string());
-    }
-    if let Some(segs) = running_combined_texts {
-        params["runningCombinedTexts"] = serde_json::json!(segs);
-    }
-    acp::ExtNotification::new(
-        "grow/queue/changed",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
-    )
-}
-/// Fixture: p1 runs locally; promoted queued bash b1's adoption is stashed.
-pub(super) fn app_with_running_p1_and_stashed_b1() -> AppView {
-    let mut app = make_app_with_agent("sess-1");
-    {
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.session.current_prompt_id = Some("p1".to_string());
-        agent.session.state = AgentState::TurnRunning;
-        agent.note_self_originated_prompt("b1");
-    }
-    app.push_optimistic_prompt_echo("sess-1", "b1", "printf hi", "bash");
-    assert!(handle_queue_changed(
-            &queue_changed_running("sess-1", &[], Some("b1")),
-            &mut app
-        ));
-    assert!(app.pending_running_adoptions.contains_key(&AgentId(0)));
-    app
-}
-/// Drive a live Execute tool_call `session/update` through the full handler.
-pub(super) fn send_tool_call_update(
-    app: &mut AppView,
-    prompt_id: &str,
-    tool_id: &str,
-    event_id: Option<&str>,
-) {
-    let mut meta = serde_json::json!({ "promptId": prompt_id });
-    if let Some(eid) = event_id {
-        meta["eventId"] = serde_json::Value::String(eid.to_string());
-    }
-    let (tx, _rx) = tokio::sync::oneshot::channel();
-    handle(
-        AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
-            request: acp::SessionNotification::new(
-                    acp::SessionId::new("sess-1"),
-                    acp::SessionUpdate::ToolCall(
-                        acp::ToolCall::new(
-                                acp::ToolCallId::new(tool_id.to_owned()),
-                                format!("tool {tool_id}"),
-                            )
-                            .kind(acp::ToolKind::Execute)
-                            .status(acp::ToolCallStatus::Completed),
-                    ),
-                )
-                .meta(meta.as_object().cloned()),
-            response_tx: tx,
-        }),
-        app,
-    );
-}
-/// Dispatch an `Ok(EndTurn)` PromptResponse for `prompt_id`.
-pub(super) fn prompt_response(app: &mut AppView, prompt_id: &str) {
-    use crate::app::actions::{Action, TaskResult};
-    crate::app::dispatch::dispatch(
-        Action::TaskComplete(TaskResult::PromptResponse {
-            agent_id: AgentId(0),
-            result: Ok(
-                acp::PromptResponse::new(acp::StopReason::EndTurn)
-                    .meta(
-                        serde_json::json!({ "promptId": prompt_id })
-                            .as_object()
-                            .cloned(),
-                    ),
-            ),
-            http_status: None,
-            prompt_id: Some(prompt_id.to_string()),
-        }),
-        app,
-    );
-}
-pub(super) fn tool_call_block_count(agent: &AgentView) -> usize {
-    agent
-        .scrollback
-        .entries_in_range(0..agent.scrollback.len())
-        .iter()
-        .filter(|e| matches!(&e.block, RenderBlock::ToolCall(_)))
-        .count()
-}
 pub(super) fn make_inject_notif(payload: &serde_json::Value) -> acp::ExtNotification {
     let raw = serde_json::value::to_raw_value(payload).unwrap();
     acp::ExtNotification::new(
@@ -826,38 +680,6 @@ pub(super) fn make_token_notification_with_event(
 pub(super) fn insert_agent(app: &mut AppView, id: AgentId, session_id: Option<&str>) {
     app.agents.insert(id, make_agent(session_id));
 }
-/// Build a live `AgentMessageChunk` whose meta carries `promptId` plus a
-/// `turnStartMs` `start_ms_ago` milliseconds in the past — drives the viewer
-/// adoption path with a known authoritative turn start.
-pub(super) fn make_viewer_chunk_with_turn_start(
-    session_id: &str,
-    prompt_id: &str,
-    start_ms_ago: i64,
-) -> AcpClientMessage {
-    let (tx, _rx) = tokio::sync::oneshot::channel();
-    let turn_start_ms = chrono::Utc::now().timestamp_millis() - start_ms_ago;
-    let request = acp::SessionNotification::new(
-            acp::SessionId::new(session_id),
-            acp::SessionUpdate::AgentMessageChunk(
-                acp::ContentChunk::new(
-                    acp::ContentBlock::Text(acp::TextContent::new("driver chunk")),
-                ),
-            ),
-        )
-        .meta(
-            serde_json::json!({
-                "promptId": prompt_id,
-                "isReplay": false,
-                "turnStartMs": turn_start_ms,
-            })
-                .as_object()
-                .cloned(),
-        );
-    AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
-        request,
-        response_tx: tx,
-    })
-}
 /// Build a durable `TurnCompleted` update on the `grow/session/update` rail,
 /// optionally stamped `isReplay`. Built through the typed `SessionNotification`
 /// so the wire shape can't drift from what the dispatch parses.
@@ -882,157 +704,6 @@ pub(super) fn grow_turn_completed_notif(
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
-pub(super) fn grow_turn_completed_notif_with_result(
-    session_id: &str,
-    prompt_id: &str,
-    stop_reason: &str,
-    agent_result: &str,
-) -> acp::ExtNotification {
-    let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
-        update: GrowSessionUpdate::TurnCompleted {
-            prompt_id: prompt_id.into(),
-            stop_reason: stop_reason.into(),
-            agent_result: Some(agent_result.into()),
-            usage: None,
-        },
-        meta: Some(serde_json::json!({ "isReplay": false })),
-    };
-    acp::ExtNotification::new(
-        "grow/session/update",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
-    )
-}
-/// Live `TurnCompleted` stamped with `_meta.cancelTrigger` (send-now / ctrl_c).
-pub(super) fn grow_turn_completed_notif_with_cancel_trigger(
-    session_id: &str,
-    prompt_id: &str,
-    stop_reason: &str,
-    cancel_trigger: &str,
-) -> acp::ExtNotification {
-    let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
-        update: GrowSessionUpdate::TurnCompleted {
-            prompt_id: prompt_id.into(),
-            stop_reason: stop_reason.into(),
-            agent_result: None,
-            usage: None,
-        },
-        meta: Some(
-            serde_json::json!({
-                "isReplay": false,
-                "cancelTrigger": cancel_trigger,
-            }),
-        ),
-    };
-    acp::ExtNotification::new(
-        "grow/session/update",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
-    )
-}
-/// A live durable `TurnCompleted`, optionally stamped with the shell
-/// completion clock (`agentTimestampMs`) the wake marker's elapsed reads.
-pub(super) fn grow_wake_turn_completed_notif(
-    session_id: &str,
-    prompt_id: &str,
-    agent_timestamp_ms: Option<i64>,
-) -> acp::ExtNotification {
-    let mut meta = serde_json::json!({ "isReplay": false });
-    if let Some(ms) = agent_timestamp_ms {
-        meta["agentTimestampMs"] = ms.into();
-    }
-    let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
-        update: GrowSessionUpdate::TurnCompleted {
-            prompt_id: prompt_id.into(),
-            stop_reason: "end_turn".into(),
-            agent_result: None,
-            usage: None,
-        },
-        meta: Some(meta),
-    };
-    acp::ExtNotification::new(
-        "grow/session/update",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
-    )
-}
-/// Build a `HookExecution` update (one successful run) on the
-/// `grow/session/update` rail, optionally stamped `isReplay`.
-/// `prompt_id == None` models pre-attribution shells.
-pub(super) fn grow_hook_execution_notif_for_prompt(
-    session_id: &str,
-    event_name: &str,
-    prompt_id: Option<&str>,
-    is_replay: bool,
-) -> acp::ExtNotification {
-    use shell::extensions::notification::{HookRunEntryDto, HookRunStatusDto};
-    grow_hook_execution_notif_with_runs(
-        session_id,
-        event_name,
-        prompt_id,
-        is_replay,
-        vec![HookRunEntryDto {
-                name: "global/notify".into(),
-                status: HookRunStatusDto::Success { elapsed_ms: 12 },
-                output: None,
-            }],
-    )
-}
-pub(super) fn grow_hook_execution_notif_with_runs(
-    session_id: &str,
-    event_name: &str,
-    prompt_id: Option<&str>,
-    is_replay: bool,
-    runs: Vec<shell::extensions::notification::HookRunEntryDto>,
-) -> acp::ExtNotification {
-    let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
-        update: GrowSessionUpdate::HookExecution {
-            event_name: event_name.into(),
-            tool_name: None,
-            prompt_id: prompt_id.map(str::to_string),
-            runs,
-        },
-        meta: Some(serde_json::json!({ "isReplay": is_replay })),
-    };
-    acp::ExtNotification::new(
-        "grow/session/update",
-        serde_json::value::to_raw_value(&payload).unwrap().into(),
-    )
-}
-pub(super) fn grow_hook_execution_notif(
-    session_id: &str,
-    event_name: &str,
-    is_replay: bool,
-) -> acp::ExtNotification {
-    grow_hook_execution_notif_for_prompt(session_id, event_name, None, is_replay)
-}
-pub(super) fn count_lifecycle_blocks(
-    sb: &crate::scrollback::state::ScrollbackState,
-) -> usize {
-    use crate::scrollback::blocks::tool::ToolCallBlock;
-    (0..sb.len())
-        .filter(|i| {
-            matches!(
-                    sb.get(*i).map(|e| &e.block),
-                    Some(RenderBlock::ToolCall(ToolCallBlock::Lifecycle(_)))
-                )
-        })
-        .count()
-}
-/// Stop-hook groups on the last turn-terminal session-event marker, if any.
-pub(super) fn last_marker_stop_hook_groups(
-    sb: &crate::scrollback::state::ScrollbackState,
-) -> Option<usize> {
-    (0..sb.len())
-        .rev()
-        .find_map(|i| match sb.get(i).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(b)) if b.event.is_turn_terminal() => {
-                Some(b.stop_hooks.len())
-            }
-            _ => None,
-        })
-}
 /// Work-only status lines ("N … still running") pushed as system rows.
 /// Never pushed in production; tests assert emptiness.
 pub(super) fn work_status_lines(sb: &ScrollbackState) -> Vec<String> {
@@ -1044,18 +715,6 @@ pub(super) fn work_status_lines(sb: &ScrollbackState) -> Vec<String> {
             _ => None,
         })
         .collect()
-}
-/// Register two running background commands on the (idle) agent through
-/// the wire.
-pub(super) fn seed_two_bg_tasks(app: &mut AppView, session_id: &str) {
-    let _ = handle_ext_notification(
-        &make_task_backgrounded_notif(session_id, "tc-1", "task-1", "sleep 98"),
-        app,
-    );
-    let _ = handle_ext_notification(
-        &make_task_backgrounded_notif(session_id, "tc-2", "task-2", "sleep 99"),
-        app,
-    );
 }
 /// Build an `grow/session/interjection` ext-notification (no id).
 pub(super) fn interjection_ext(session_id: &str, text: &str) -> acp::ExtNotification {
@@ -1228,6 +887,7 @@ pub(super) fn test_subagent_spawned(
         role: None,
         model: None,
         resumed_from: None,
+        goal_id: None,
     }
 }
 pub(super) fn test_subagent_finished(child_sid: &str) -> GrowSessionUpdate {
@@ -1406,7 +1066,7 @@ pub(super) fn child_tool_line(child_sid: &str) -> String {
 pub(super) fn child_user_message_line(child_sid: &str, text: &str) -> String {
     let escaped = serde_json::to_string(text).unwrap();
     format!(
-            r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"user_message_chunk","content":{{"type":"text","text":{escaped}}}}}}}}}"#
+            r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"user_message_chunk","content":{{"type":"text","text":{escaped}}},"_meta":{{"messageId":"{child_sid}-initial"}}}}}}}}"#
         )
 }
 pub(super) fn write_subagent_meta_json(
@@ -1430,7 +1090,6 @@ pub(super) fn child_scrollback_matching_prompt_count(
     child_sid: &str,
     prompt: &str,
 ) -> usize {
-    use crate::app::subagent::subagent_prompt_text_eq;
     let child = agent.subagent_views.get(child_sid).expect("child subagent view");
     if prompt.trim().is_empty() {
         return 0;
@@ -1445,22 +1104,10 @@ pub(super) fn child_scrollback_matching_prompt_count(
                         RenderBlock::UserPrompt(b) => Some(b.text.as_str()),
                         _ => None,
                     };
-                    t.is_some_and(|s| subagent_prompt_text_eq(s, prompt))
+                    t == Some(prompt)
                 })
         })
         .count()
-}
-pub(super) fn child_tracker_expects_user_echo(
-    agent: &AgentView,
-    child_sid: &str,
-) -> bool {
-    agent
-        .subagent_views
-        .get(child_sid)
-        .expect("child subagent view")
-        .session
-        .tracker
-        .expects_user_echo()
 }
 pub(super) fn spawn_subagent_with_optional_updates(
     app: &mut AppView,
@@ -1478,56 +1125,6 @@ pub(super) fn spawn_subagent_with_optional_updates(
         ),
         app,
     );
-}
-/// A minimal `GoalUpdated` `update` object (the required wire fields) for
-/// `sess-A`; callers add optional fields before dispatching.
-pub(super) fn goal_update_value(
-    goal_id: &str,
-    status: &str,
-    elapsed_ms: u64,
-) -> serde_json::Value {
-    serde_json::json!({
-            "sessionUpdate": "goal_updated",
-            "goal_id": goal_id,
-            "objective": "obj",
-            "status": status,
-            "phase": "executing",
-            "tokens_used": 0,
-            "elapsed_ms": elapsed_ms,
-            "total_deliverables": 0,
-            "completed_deliverables": 0,
-            "total_worker_rounds": 0,
-            "total_verify_rounds": 0,
-            "token_baseline": 0,
-            "finished_subagent_tokens": 0,
-        })
-}
-/// Wrap an `update` object in the session envelope and run it through the
-/// real handler; returns whether the notification requested a redraw.
-pub(super) fn dispatch_goal_update(
-    app: &mut AppView,
-    update: serde_json::Value,
-) -> bool {
-    let raw_payload = serde_json::json!({ "sessionId": "sess-A", "update": update });
-    let raw = serde_json::value::to_raw_value(&raw_payload).unwrap();
-    let (tx, _rx) = tokio::sync::oneshot::channel();
-    handle(
-        AcpClientMessage::ExtNotification(acp_transport::AcpArgs {
-            request: acp::ExtNotification::new("grow/session_notification", raw.into()),
-            response_tx: tx,
-        }),
-        app,
-    )
-}
-/// Build + dispatch a `GoalUpdated` for `sess-A` with the given id /
-/// status / elapsed; returns whether the notification requested a redraw.
-pub(super) fn send_goal_update(
-    app: &mut AppView,
-    goal_id: &str,
-    status: &str,
-    elapsed_ms: u64,
-) -> bool {
-    dispatch_goal_update(app, goal_update_value(goal_id, status, elapsed_ms))
 }
 /// Build a minimal `RequestPermission` message that carries `session_id`
 /// and one `AllowOnce` option.
@@ -2040,7 +1637,6 @@ mod follow_ups;
 mod settings;
 mod announcements;
 mod scheduled_tasks;
-mod queue_and_adoption;
 mod plan_mode;
 mod reconnect;
 mod turn_completion;

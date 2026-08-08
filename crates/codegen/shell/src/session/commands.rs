@@ -15,7 +15,7 @@ pub struct CancellationContext {
     pub tool_name: Option<String>,
     pub reason: Option<String>,
     pub hook_name: Option<String>,
-    /// What triggered the cancel (`"send_now"`, `"esc"`, `"ctrl_c"`); surfaced
+    /// What triggered the cancel (`"esc"`, `"ctrl_c"`); surfaced
     /// as `cancelTrigger` on the `PromptResponse`/`TurnCompleted` `_meta`.
     /// `None` for graceful in-turn cancels and older clients.
     pub trigger: Option<String>,
@@ -113,13 +113,15 @@ pub enum NotificationSource {
     MonitorEvent { task_id: String },
     MonitorCompleted { task_id: String },
     BashTaskCompleted { task_id: String },
+    SubagentCompleted { task_id: String },
 }
 impl NotificationSource {
     pub fn task_id(&self) -> &str {
         match self {
             Self::MonitorEvent { task_id }
             | Self::MonitorCompleted { task_id }
-            | Self::BashTaskCompleted { task_id } => task_id,
+            | Self::BashTaskCompleted { task_id }
+            | Self::SubagentCompleted { task_id } => task_id,
         }
     }
 }
@@ -150,9 +152,13 @@ pub enum SessionCommand {
     /// reverse-request so the client re-shows approval chrome over a real live
     /// waiter. Fire-and-forget; the actor spawns the round-trip + decision.
     RestorePlanApproval,
-    Prompt {
+    QueuePrompt {
         prompt_id: String,
         prompt_blocks: Vec<acp::ContentBlock>,
+        /// Explicit producer-assigned origin; never inferred from `prompt_id`.
+        origin: crate::session::PromptOrigin,
+        /// Explicit lifecycle kind for this regular turn.
+        turn_kind: crate::session::TurnKind,
         /// Prompt mode parsed from request `_meta.mode`.
         prompt_mode: PromptMode,
         /// Optional client identifier from the prompt request meta (overrides session-level one)
@@ -164,10 +170,6 @@ pub enum SessionCommand {
         /// Skip `<user_query>` wrapping and large-prompt truncation.
         verbatim: bool,
         json_schema: Option<serde_json::Value>,
-        /// Cancel-and-send: cancel the running turn and run this prompt next.
-        /// Also derived server-side during an interruptible wait (see
-        /// [`SessionActor::queue_input`]).
-        send_now: bool,
         /// Actor-authoritative admission and deferred fallback for terminal task wakes.
         admission: Option<TaskWakeAdmission>,
         respond_to: oneshot::Sender<PromptTurnResult>,
@@ -194,12 +196,18 @@ pub enum SessionCommand {
         prompt_id: String,
         respond_to: oneshot::Sender<crate::session::prompt_queue::PromptStatus>,
     },
+    /// Snapshot the sole regular foreground owner for `session/load`.
+    /// Planner/verifier stages never appear here because they do not own the
+    /// foreground.
+    QueryForeground {
+        respond_to: oneshot::Sender<Option<prompt_queue::ForegroundSnapshot>>,
+    },
     /// System event (NOT a user input): a background task completed after its
-    /// Goal wait was displaced by user steering. The actor decides whether
-    /// this task is registered for deferred delivery; unrelated Goal
-    /// background noise remains suppressed.
+    /// Goal wait was displaced by user steering, or completed while the Goal
+    /// turn gate was active. The actor either satisfies the explicit deferred
+    /// wait or puts the completion through the ordinary idle drain.
     DeferredCompletionAvailable {
-        task_id: String,
+        source: NotificationSource,
         body: String,
     },
     SessionMode {
@@ -586,12 +594,12 @@ pub enum SessionCommand {
     ReleaseCombineEdit {
         id: String,
     },
-    /// Send a queued (not-yet-running) prompt now. During an active Goal the
-    /// actor atomically removes it from `pending_inputs` and pushes it into
-    /// `pending_interjections`, preserving the current turn. Other modes keep
-    /// cancel-and-promote semantics. Versioned + idempotent like
+    /// Atomically move a queued prompt into the current regular turn. The
+    /// current turn id is part of admission so a late UI action cannot steer
+    /// a replacement turn. Versioned + idempotent like
     /// [`RemoveQueuedPrompt`]; `grow/queue/changed` remains authoritative.
-    InterjectQueuedPrompt {
+    SteerQueuedPrompt {
+        expected_turn_id: String,
         id: String,
         expected_version: u64,
         owner: Option<String>,
@@ -699,11 +707,10 @@ pub enum SessionCommand {
         context_summary: String,
         respond_to: oneshot::Sender<Result<String, String>>,
     },
-    /// Inject a user message into the active turn without canceling it.
-    /// The text is queued in `pending_interjections` and drained at the
-    /// next safe point in `process_conversation_turn`.  Fire-and-forget:
-    /// no response channel needed since the command just pushes to a Mutex.
-    Interject {
+    /// Inject a user message into the identified active regular turn without
+    /// creating another terminal or changing Goal lifecycle.
+    SteerTurn {
+        expected_turn_id: String,
         text: String,
         /// Client-minted id echoed back on the broadcast
         /// `grow/session/interjection` so the originating pager can dedup its
@@ -712,16 +719,7 @@ pub enum SessionCommand {
         /// Pasted images riding along with the interjection. Empty from
         /// text-only / older clients.
         images: Vec<acp::ImageContent>,
-    },
-    /// System event (NOT a user input): trigger a model turn so the model
-    /// can print a visible goal progress summary.  The goal orchestrator
-    /// injects a system reminder into context (via `push_parent_reminder`)
-    /// *before* sending this command.  The session actor queues a short
-    /// synthetic prompt instructing the model to summarize the reminder, then
-    /// calls `maybe_start_running_task`.  Fire-and-forget.
-    GoalSummaryTurn {
-        /// Short instruction appended as a verbatim user message.
-        prompt_text: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
     },
     /// System event (NOT a user input): a workflow run completed and the
     /// actor queues a synthetic completion turn for the model.

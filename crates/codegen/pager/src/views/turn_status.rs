@@ -210,7 +210,6 @@ pub struct TurnStatusArgs<'a> {
     pub mcp_init_progress: Option<&'a McpInitProgress>,
     pub is_bash_turn: bool,
     pub is_pending_user_input: bool,
-    pub goal_verifying: bool,
     pub watchers: Watchers,
     /// Parked on a sendable wait (`AgentView::renders_parked`).
     pub parked: bool,
@@ -243,7 +242,6 @@ pub fn render_turn_status(
         mcp_init_progress,
         is_bash_turn,
         is_pending_user_input,
-        goal_verifying,
         watchers,
         parked,
         flat_background,
@@ -357,8 +355,7 @@ pub fn render_turn_status(
         );
 
     // ── Compute activity style and label ──
-    let (activity_style, label, is_tool) =
-        compute_activity(&theme, state, activity, is_bash_turn, goal_verifying);
+    let (activity_style, label, is_tool) = compute_activity(&theme, state, activity, is_bash_turn);
 
     // Early return for idle (shouldn't happen if should_show is respected, but be safe).
     if matches!(state, AgentState::Idle) {
@@ -652,7 +649,6 @@ fn compute_activity(
     state: &AgentState,
     activity: &Option<TurnActivity>,
     is_bash_turn: bool,
-    goal_verifying: bool,
 ) -> (Style, String, bool) {
     match (state, activity) {
         (AgentState::TurnSubmitting, _) => (
@@ -663,17 +659,6 @@ fn compute_activity(
         (AgentState::TurnCancelling | AgentState::CommandCancelling { .. }, _) => (
             Style::default().fg(theme.accent_error),
             "Cancelling…".to_string(),
-            false,
-        ),
-        // Goal-mode completion verification runs in-turn after the model
-        // stops streaming. The harness drives the skeptic panel (the model
-        // itself is idle), but the turn's last streaming activity can still
-        // read as `Responding`/`Thinking`; label the whole window
-        // "Verifying…" so the multi-minute panel isn't mislabelled as the
-        // model responding (or a hung "Waiting…").
-        (AgentState::TurnRunning, _) if goal_verifying => (
-            Style::default().fg(theme.text_secondary),
-            "Verifying…".to_string(),
             false,
         ),
         (AgentState::TurnRunning, Some(TurnActivity::Thinking)) => (
@@ -935,39 +920,6 @@ mod tests {
     }
 
     #[test]
-    fn activity_label_reads_verifying_while_goal_verifying_overriding_stale_activity() {
-        let theme = Theme::current();
-        // Running turn, no streaming activity, goal verifying → "Verifying…".
-        let (_, label, _) = compute_activity(&theme, &AgentState::TurnRunning, &None, false, true);
-        assert_eq!(label, "Verifying…");
-        // Same state without the verifying flag → generic "Waiting…".
-        let (_, label, _) = compute_activity(&theme, &AgentState::TurnRunning, &None, false, false);
-        assert_eq!(label, "Waiting…");
-        // During verification the model is idle but its last streaming
-        // activity (Responding/Thinking) can linger — the flag overrides it
-        // so the panel reads "Verifying…", not "Responding…" (the bug).
-        for activity in [TurnActivity::Responding, TurnActivity::Thinking] {
-            let (_, label, _) = compute_activity(
-                &theme,
-                &AgentState::TurnRunning,
-                &Some(activity),
-                false,
-                true,
-            );
-            assert_eq!(label, "Verifying…");
-        }
-        // Without the flag the streaming label stands.
-        let (_, label, _) = compute_activity(
-            &theme,
-            &AgentState::TurnRunning,
-            &Some(TurnActivity::Responding),
-            false,
-            false,
-        );
-        assert_eq!(label, "Responding…");
-    }
-
-    #[test]
     fn waiting_reason_renders_specific_label() {
         use crate::acp::tracker::WaitingReason;
         let theme = Theme::current();
@@ -992,7 +944,6 @@ mod tests {
                 &AgentState::TurnRunning,
                 &Some(TurnActivity::Waiting(reason.clone())),
                 false,
-                false,
             );
             assert_eq!(label, expected, "reason {reason:?}");
             assert!(!is_tool, "waiting is not a tool activity");
@@ -1004,7 +955,7 @@ mod tests {
         let theme = Theme::current();
         // A bash (non-inference) turn with no activity keeps its own "Running…"
         // label — the view leaves it as `None` rather than Waiting(Model).
-        let (_, label, _) = compute_activity(&theme, &AgentState::TurnRunning, &None, true, false);
+        let (_, label, _) = compute_activity(&theme, &AgentState::TurnRunning, &None, true);
         assert_eq!(label, "Running…");
     }
 
@@ -1179,7 +1130,6 @@ mod tests {
             mcp_init_progress: None,
             is_bash_turn: false,
             is_pending_user_input: false,
-            goal_verifying: false,
             watchers,
             parked: false,
             flat_background: false,

@@ -102,8 +102,6 @@ pub(super) struct TerminalMeta {
     /// model-incompatible / context-overflow; durable rail: `rate_limit`):
     /// suppress the TurnFailed marker and the error notification.
     pub skip_error_marker: bool,
-    /// Wire `cancelTrigger`; `"send_now"` suppresses the cancel marker.
-    pub cancel_trigger: Option<String>,
     /// Whether this signal may finalize from `TurnSubmitting`. The PR rail
     /// may (the driver's own RPC terminal is authoritative); the durable
     /// rail may not — a durable terminal during `TurnSubmitting` is Ignored
@@ -152,7 +150,7 @@ pub(super) fn finalize_turn_from_durable_terminal(
     prompt_id: &str,
     stop_reason: Option<&str>,
     agent_result: Option<&str>,
-    cancel_trigger: Option<&str>,
+    _cancel_trigger: Option<&str>,
 ) -> TerminalOutcome {
     let stop_reason = stop_reason.unwrap_or_default();
     let meta = TerminalMeta {
@@ -165,7 +163,6 @@ pub(super) fn finalize_turn_from_durable_terminal(
         was_cancelling: stop_reason == "cancelled",
         bash_turn: agent.bash_turn,
         skip_error_marker: stop_reason == "rate_limit",
-        cancel_trigger: cancel_trigger.map(str::to_string),
         accepts_submitting: false,
     };
     finalize_prompt_terminal(agent, Some(prompt_id), meta)
@@ -230,16 +227,7 @@ pub(super) fn finalize_prompt_terminal(
         .clone()
         .or_else(|| prompt_id.map(str::to_string));
 
-    // Wire meta wins; else the client-side expectation (older-shell
-    // fallback). Consumed at every viewer finalize so it can't go stale.
-    let expected_send_now = agent.expect_send_now_cancel.take();
-    let send_now_cancel = meta.was_cancelling
-        && match meta.cancel_trigger.as_deref() {
-            Some(trigger) => trigger == "send_now",
-            None => expected_send_now.is_some(),
-        };
-
-    let event = terminal_marker_event(&meta, send_now_cancel, elapsed_opt, elapsed);
+    let event = terminal_marker_event(&meta, elapsed_opt, elapsed);
     let notification = terminal_notification(&meta, elapsed_opt);
 
     agent.session.finish_turn(&mut agent.scrollback);
@@ -298,8 +286,7 @@ pub(super) fn finalize_prompt_terminal(
 /// - an RPC failure → `TurnFailed`, unless a dedicated UX already rendered
 ///   it (rate-limit / context-overflow / model-incompatible, or the durable
 ///   `rate_limit` stop reason);
-/// - a cancel → `TurnCancelled`, suppressed for a send-now cancel (the
-///   sender's new prompt is the next turn);
+/// - a cancel → `TurnCancelled`;
 /// - a bash turn → no marker (the execute block is the visual entry);
 /// - anything else → `TurnCompleted`.
 ///
@@ -308,7 +295,6 @@ pub(super) fn finalize_prompt_terminal(
 /// zero-anchored `elapsed`.
 fn terminal_marker_event(
     meta: &TerminalMeta,
-    send_now_cancel: bool,
     elapsed_opt: Option<Duration>,
     elapsed: Duration,
 ) -> Option<SessionEvent> {
@@ -322,9 +308,6 @@ fn terminal_marker_event(
         });
     }
     if meta.was_cancelling {
-        if send_now_cancel {
-            return None;
-        }
         return Some(SessionEvent::TurnCancelled { elapsed });
     }
     if meta.bash_turn || (!meta.pr_ok && meta.skip_error_marker) {
@@ -469,9 +452,7 @@ pub(super) fn apply_terminal_notifications(
     }
 }
 
-/// Map durable terminal finalization to redraw / adoption / notification
-/// effects. Runs only when the finalizer won — the queue/adoption handoff
-/// executes exactly once per finalized turn.
+/// Map durable terminal finalization to redraw and notification effects.
 pub(super) fn apply_terminal_outcome(
     outcome: TerminalOutcome,
     app: &mut AppView,
@@ -485,39 +466,18 @@ pub(super) fn apply_terminal_outcome(
     match apply {
         TerminalApply::Ignored => false,
         TerminalApply::ViewerFinalized => {
-            let pending_adoption = app.pending_running_adoptions.remove(&agent_id);
-            let had_adoption = pending_adoption.is_some();
-            let mut page_flip_entry = None;
+            let page_flip_entry;
             let mut queue_empty = true;
             if let Some(agent) = app.agents.get_mut(&agent_id) {
-                if let Some(pending) = pending_adoption {
-                    // A passive viewer does not own the queued prompt RPC and
-                    // must not adopt a handoff buffered under the turn it was
-                    // only observing. The next authoritative queue broadcast
-                    // will establish the viewer's new foreground if needed.
-                    if agent.attached_as_viewer {
-                        agent.discard_pending_adoption_updates(&pending.prompt_id);
-                    } else if agent.session.current_prompt_id.is_none()
-                        && agent.should_adopt_running_prompt(&pending.prompt_id)
-                    {
-                        page_flip_entry = super::dispatch::apply_turn_start_shim(
-                            agent,
-                            pending.prompt_id,
-                            pending.text,
-                            &pending.kind,
-                            pending.combined_texts,
-                        );
-                    } else {
-                        agent.discard_pending_adoption_updates(&pending.prompt_id);
-                    }
-                }
                 queue_empty = agent.session.pending_prompts.is_empty();
                 let drain = super::dispatch::maybe_drain_queue(agent);
                 app.pending_effects.extend(drain.effects);
-                page_flip_entry = page_flip_entry.or(drain.page_flip_entry);
+                page_flip_entry = drain.page_flip_entry;
+            } else {
+                page_flip_entry = None;
             }
             super::dispatch::note_peek_page_flip(app, agent_id, page_flip_entry);
-            apply_terminal_notifications(app, agent_id, notification, queue_empty && !had_adoption);
+            apply_terminal_notifications(app, agent_id, notification, queue_empty);
             let _ = is_active;
             true
         }

@@ -1931,9 +1931,6 @@ impl AgentView {
                 layout_cfg,
                 Some(layout.scrollback),
                 self.session.state.is_turn_running(),
-                self.goal_state
-                    .as_ref()
-                    .is_some_and(|g| g.verifying_completion),
             );
             let close_rect = agent::render_todo_chrome_with_close_label(
                 buf,
@@ -2080,10 +2077,6 @@ impl AgentView {
                         .is_some();
                 let is_pending_user_input =
                     !self.permission_queue.is_empty() || self.question_view.is_some();
-                let goal_verifying = self
-                    .goal_state
-                    .as_ref()
-                    .is_some_and(|g| g.verifying_completion);
                 let held_queue = self.held_queue_count();
                 let held_queue_top_sendable = self.held_queue_top_sendable();
                 let turn_output = turn_status::render_turn_status(
@@ -2106,7 +2099,6 @@ impl AgentView {
                         mcp_init_progress: self.mcp_init_progress.as_ref(),
                         is_bash_turn: self.bash_turn,
                         is_pending_user_input,
-                        goal_verifying,
                         watchers,
                         parked,
                         flat_background: false,
@@ -4150,8 +4142,7 @@ impl AgentView {
         if self.show_goal_detail
             && let Some(ref goal) = self.goal_state
         {
-            let todos = self.todo.todos();
-            let overlay_rect = crate::views::goal_detail::goal_detail_area(area, goal, todos);
+            let overlay_rect = crate::views::goal_detail::goal_detail_area(area, goal);
             let tick = self.tasks.tick_count() as usize;
             let active_subagent_tokens: u64 = self
                 .subagent_sessions
@@ -4163,7 +4154,6 @@ impl AgentView {
                 buf,
                 overlay_rect,
                 goal,
-                todos,
                 tick,
                 self.context_state.as_ref().map(|c| c.used),
                 active_subagent_tokens,

@@ -1,212 +1,76 @@
 # Input routing and foreground ownership
 
-Grow routes input by intent. Behavior changes model context and scheduling
-policy; it does not decide whether input is admitted.
+Grow routes input by intent. Behavior changes model context and scheduling policy; it does not own admission.
 
 ## State ownership
 
-The shell session actor owns the foreground slot and the authoritative user
-queue. Exactly one of the following may own the slot at a time:
+The shell session actor owns both the only foreground slot and the explicit FIFO:
 
-- a finite prompt turn;
-- a Goal planner/verifier stage;
-- an exclusive history operation such as manual compaction;
-- nobody (`Idle`).
+```text
+ForegroundState = Idle | RegularTurn(AgentTask) | Compaction
+```
 
-`current_prompt_id` is correlation metadata. It is never a second busy-state
-authority. Every foreground start has one prompt/operation identity and must
-produce exactly one actor-committed terminal. Worker completions with an old
-identity are stale and cannot clear or overwrite a newer foreground owner.
+Goal planner/verifier stages, watchers, and background tasks do not occupy this slot. Every regular turn has a structured origin/kind and exactly one durable `TurnCompleted`. A stale completion whose prompt id does not match the foreground owner cannot clear a newer turn.
 
-The pager mirrors, but does not predict, this state. Sending a prompt records a
-submission; it becomes running only after the shell reports the matching
-`running_prompt_id`. `PromptResponse` and durable `TurnCompleted` converge on
-one prompt-id-guarded finalizer. The first terminal wins; later copies may add
-metadata but cannot finish the turn, draw a second marker, adopt another turn,
-or drain the queue again.
+The pager mirrors shell state. It does not infer ownership from Goal status, prompt text, token count, or prompt-id prefixes.
 
 ## Input classes
 
-1. Plain Enter creates a user prompt in the shell-owned FIFO. Queue version,
-   owner, edit, reorder, remove, clear, and combine-on-promote semantics do not
-   depend on Behavior.
-2. Send now under an active Goal is foreground steering. The actor atomically
-   removes the corresponding queued row and transfers its payload to the
-   active turn inbox. Outside Goal it retains cancel-and-promote semantics.
-3. Leading-slash input is always a Grow command. Every shell-owned command
-   goes through the `grow/commands/execute` command plane — including while
-   idle — and command text is never re-queued as a user prompt. Local commands
-   stay local; commands that intentionally start model work create
-   command-origin work. Raw slash text is never a user message and unknown
-   commands are errors.
-4. Control commands change state synchronously and return a structured system
-   log. A command handler must never wait for an event handled by the same
-   actor mailbox. Planner, sampler, persistence completion, replay flush, and
-   compaction are actor effects, not inline command work.
+1. Plain Enter sends `QueuePrompt`. While idle the common gate may start it; while running it remains in the user FIFO.
+2. Ctrl+Enter sends a steer request for the current regular turn.
+3. Double Enter atomically converts the just-queued first row to steer.
+4. Queue-row “Send now” invokes the same steer request.
+5. Leading slash input is a Grow command and runs through the command plane. Control commands mutate state synchronously and never wait for model work or their own actor mailbox.
 
-## Goal lifecycle versus prompt turns
+A successful Goal control that invalidates the running context (set/edit/enter/pause/clear) ends that exact foreground turn through normal cancellation. Read-only or non-invalidating controls (status/resume/budget), and rejected mutations, leave it running.
 
-Goal is a scheduler across finite turns, not one root prompt turn. A Goal cycle
-contains an optional planning stage, one implementer turn, deterministic
-cycle-end gates, and an optional verifier/classifier stage. Goal continuation
-is scheduled only after explicit user work and pending manual compaction.
+Steering includes `expected_turn_id`. The shell accepts it only if the identified regular turn is still foreground, then moves the queued payload into that same turn's input buffer. It never creates a replacement turn or another terminal. Compaction and idle state are not steerable.
 
-### Goal stages
+## Idle admission
 
-Planning, verification, and classifier work are background Goal stages with
-lease-scoped proposals. The turn-end drain schedules `completed: true`
-verification proposals as stages instead of awaiting model work inline, and a
-stage completion commits through the actor mailbox (a `GoalStageCompleted`
-event) only while its Goal id, definition revision, autonomy generation, and
-stage id still match the current lease. A paused, revised, cleared, or
-completed Goal can receive late diagnostics but never late formal writes.
+All regular work shares one admission sequence:
 
-The non-workflow foreground path is a finite cycle: one implementer turn per
-prompt, verification scheduled as background stages by the turn-end drain, and
-the next continuation queued as a fresh `GoalSummary` prompt only after the
-current prompt reaches its durable terminal. The workflow-engine path
-(`background_workflows_enabled`) keeps `run_goal_round_end` as an in-turn
-evaluator: a Continue verdict injects the next directive inside the same turn
-task, and its `completed` proposals are still scheduled as stages by the
-turn-end drain.
+1. settle the exact foreground owner;
+2. persist its single terminal;
+3. promote the oldest user FIFO entry;
+4. only if still idle, run Goal `on_idle` work.
 
-### Goal rounds are normal turns to the pager
+Goal Executing/Summarizing rechecks foreground and FIFO while holding the same state lock before reserving a turn. This closes the race where a continuation and user input arrive together: the user wins.
 
-A `GoalSummary` round is a full prompt turn: it carries a prompt id, runs
-through the prompt-turn machinery, and ends with a durable `TurnCompleted`.
-The pager therefore adopts it like any user turn — the round shows as a normal
-`TurnRunning` (status line, elapsed/token counters, Ctrl+C / Ctrl+Enter
-hints) alongside the Goal status chip, and input semantics are identical to a
-running normal turn:
+Planning/Verifying may run concurrently as background stages because neither owns foreground. Their results commit only through a matching revisioned `StageLease`.
 
-- **Enter** queues the message (server FIFO, visible row); the round keeps
-  running and the message runs at the next turn boundary.
-- **Send now** (Ctrl+Enter / double-Enter / queue-row send-now) under an
-  active Goal is foreground steering: the shell soft-preempts the current
-  sampling and the message is processed immediately, without cancelling the
-  round or pausing the Goal. Outside Goal it retains cancel-and-promote
-  semantics.
-- The round's durable terminal runs the ordinary first-wins finalizer (one
-  "Worked for X" marker); the next `GoalSummary` round is adopted in turn, so
-  a Goal reads as consecutive normal turns.
-- The goal directive itself is orchestrator text and is never painted as a
-  user bubble; the Goal chip/loop chrome carries that context.
+Background completion delivery follows the same ownership rule. A completion that satisfies an explicitly displaced wait is delivered exactly once; otherwise it enters the idle notification drain. The drain suppresses only task ids stamped as Goal-owned and continues to surface unrelated user/watcher work even while Goal is Active or after its Complete receipt remains loaded.
 
-Verification stages are not turns: while a verifier/classifier stage runs the
-pager stays Idle with a "Verifying (n/m)" chip, and the verification window
-keeps its send protection (all send entries are rejected with a toast and the
-queue rows show a "⏳ verifying" cue). Known limitation: while the round waits
-on a tool (task-output wait) there is no in-flight sampling, so steering
-arrives at the next model boundary rather than instantly.
+## Message identity
 
-Because a Goal round has no client `PromptResponse` rail, its handoff to the
-next round runs entirely on the durable TurnCompleted path: the pager adopts
-Goal rounds with **driver semantics** (`attached_as_viewer = false`) so
-`apply_terminal_outcome` consumes the stashed next round instead of
-discarding it like a passive viewer would. Ordering caveat: if the durable
-TurnCompleted arrives before the promoting broadcast (Idle at terminal time,
-no turn to finalize), the round is not adopted retroactively — the 30s
-Running-watchdog's prompt-status query covers that window via its Terminal
-answer, and the next round's promote re-adopts normally.
+Each user submission has a stable `messageId` carried by the queue row, optimistic bubble, running notification, and ACP user-message echo. Pager reconciliation is keyed only by this identity:
 
-Goal status and Behavior are orthogonal:
+- an optimistic bubble followed by an echo stays one bubble;
+- replayed or duplicate echoes are idempotent;
+- the echo may backfill server fields such as `promptIndex`;
+- unrelated messages with identical or trim-equivalent text remain distinct.
 
-- `set` selects Goal Behavior and changes the definition revision;
-- `budget` changes only the resource constraint;
-- `pause` stops autonomy and invalidates the current autonomy generation;
-- `resume` changes lifecycle state immediately but never inserts a GoalControl
-  prompt ahead of already-queued user input;
-- `clear` and verifier-confirmed completion leave Goal Behavior;
-- completion returns to Normal while retaining a display-only receipt;
-- selecting a special Behavior after completion retires that receipt.
+No `skip_next_user_echo`, text matching, or adoption stash participates in routing.
 
-Selecting Goal with no objective makes the first ordinary text equivalent to
-hidden `/goal set <text>`.
+## Goal interaction
 
-### Paused Goal interaction
+Goal is an exclusive visible Behavior but not an exclusive foreground owner.
 
-Paused Goal never blocks prompt promotion. A paused user turn receives current
-Goal context plus a paused-interaction directive, but not the autonomy
-directive. It may answer, accept corrections, and perform explicitly requested
-bounded work. It cannot schedule another Goal cycle or complete the Goal. The
-turn ends normally and the Goal remains paused.
+- Active Planning/Verifying keeps the Goal chip active while the session may be idle or run a user turn;
+- ordinary messages add context without changing objective/plan revision;
+- `/goal edit` revises the objective and returns the Goal to Planning;
+- pause keeps Goal Behavior but stops autonomous admission;
+- complete or clear returns to Normal;
+- an unfinished Goal rejects switching to another Behavior.
 
-### Active Goal steering
-
-The active turn inbox distinguishes preemptive events from completion events:
-
-- user steering and Goal definition notices wake and cancel an in-flight Goal
-  sampler so the request can be rebuilt;
-- task completion does not interrupt a streaming reply and is drained at the
-  next safe boundary;
-- unsafe or side-effecting tools finish before either event is applied.
-
-A steering-displaced wait receives one legal tool result saying the wait moved
-to the background. The eventual payload is a hidden reminder, never a second
-result for the original call id. Wait reservations belong to a turn, so pause,
-cancel, shutdown, and background-task termination explicitly defer or consume
-them before the worker is aborted.
-
-## Goal scopes and leases
-
-Every Goal stage and formal write carries a lease consisting of Goal id,
-definition revision, autonomy generation, and stage id. Set, steering, pause,
-clear, or a newer foreground generation invalidates old leases. Planner files,
-verifier verdicts, Goal Plan updates, and completion decisions are proposals
-until the actor validates the lease.
-
-Goal-generated synthetic directives carry structured Goal metadata. Model
-requests, verifier transcripts, and compaction inputs share the same projection
-function:
-
-- Active Goal autonomy includes matching context and autonomy directives;
-- paused interaction includes matching context and paused directives;
-- Normal and other Behaviors exclude every Goal directive;
-- the completed receipt is never model context.
-
-Todo/Plan state is internally scoped to Session or a Goal. ACP still receives a
-full replacement `SessionUpdate::Plan`; scope is not added to the wire. Leaving
-Goal republishes the Session plan, so Goal todo state cannot leak into Normal or
-destroy a pre-Goal plan.
-
-Planner and verifier workers write only lease-specific staging artifacts. The
-actor validates and atomically publishes canonical artifacts. A paused,
-revised, cleared, or completed Goal can therefore receive late diagnostics but
-cannot receive late formal writes.
-
-Staging retention: the planner writes definition-owned drafts under
-`<session_dir>/goal/staging/`. Terminal Goal transitions (clear, verified
-completion, explicit behavior exit) remove that transient directory; the
-canonical `plan.md` and the immutable `plan.baseline.md` are retained as the
-audit record of what the Goal executed against. An old revision's stale
-staging draft is discarded at publish time when its lease no longer matches.
-
-Session restart migrates only architecture_version-1 Goals. A persisted Goal
-with an older `architecture_version` (other than a completed display-only
-receipt) is not resumable under the current orchestration; it is dropped at
-load and surfaced as a user-visible unified log entry so an upgrade restart
-explains why the Goal vanished.
+Goal continuation is an internal regular turn started by the idle hook, not a queue item or hidden control prompt. See [goal-continuation.md](./goal-continuation.md).
 
 ## Compaction
 
-Manual and automatic compaction share one ownership lease. Inline automatic
-compaction belongs to its running turn. Manual `/compact` is accepted through
-the command plane and runs immediately when idle or at the next safe boundary,
-ahead of queued prompts and Goal continuation. Conversation replacement never
-runs concurrently with a turn or another compaction.
-
-Compaction projects out inactive Goal directives before transcript extraction
-or summarization. It cannot fold a cleared/completed Goal instruction back into
-Normal history.
+Compaction is the only non-regular foreground owner. Manual and automatic compaction cannot overlap a regular turn or each other. While it owns foreground, user input may queue but cannot steer it. When compaction ends, the same FIFO-first idle arbiter resumes scheduling.
 
 ## Recovery
 
-The durable `TurnCompleted` update is the terminal lifecycle authority.
-PromptResponse carries ACP result metadata and is an idempotent second source.
+`TurnCompleted` is the durable lifecycle authority. Prompt response metadata is an idempotent secondary source. The pager watchdog may query shell prompt status when a submission appears stalled, but elapsed time alone never fabricates a terminal.
 
-A submitting prompt that receives no queue or terminal signal asks the shell
-for that prompt's authoritative status. Time alone never fabricates a
-terminal. The pager's watchdog polls `grow/queue/prompt_status` on bounded
-schedules — every 2s while the prompt stays in Submitting, every 30s while it
-stays in Running — and reconciles the displayed state with the shell's answer,
-clearing the watch marker only when the authoritative status resolves it.
+An Active Goal reload keeps its v3 persistent phase/plan/revisions and settled token counters, clears transient stage leases, reconciles Goal Behavior, and is resumed by the idle hook. Incompatible or malformed Goal state is diagnosed, deleted, and followed by a cleared projection after replay rather than migrated through legacy routing rules.

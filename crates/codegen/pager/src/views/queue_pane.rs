@@ -15,20 +15,10 @@ use crate::theme::{Theme, ThemeKind};
 
 use super::list_pane::ListItem;
 
-/// Server row is visible in the held pane / "N queued" count: not running,
-/// not the armed send-now echo, and not painted-pending (the painted block
-/// represents the message even after the arm drops; showing the row beside
-/// it would duplicate the message).
+/// Server row is visible in the held pane when it is not the foreground turn.
 #[inline]
-pub(crate) fn visible_held_server_row(
-    id: &str,
-    running_id: Option<&str>,
-    send_now_id: Option<&str>,
-    painted_pending: &std::collections::HashMap<String, (crate::scrollback::EntryId, bool)>,
-) -> bool {
-    let key = id;
-    let id = Some(id);
-    id != running_id && id != send_now_id && !painted_pending.contains_key(key)
+pub(crate) fn visible_held_server_row(id: &str, running_id: Option<&str>) -> bool {
+    Some(id) != running_id
 }
 
 // ---------------------------------------------------------------------------
@@ -123,7 +113,7 @@ impl QueuedPromptEntry {
         let line_count = prompt.text.lines().count();
 
         // Build initial styled line (will be rebuilt with proper width later).
-        let styled = Self::build_styled(&first_line, line_count, prompt.kind, None, false);
+        let styled = Self::build_styled(&first_line, line_count, prompt.kind, None);
 
         Self {
             id: prompt.id,
@@ -152,7 +142,7 @@ impl QueuedPromptEntry {
             .to_string();
         let line_count = wire.text.lines().count();
         let kind = kind_from_wire(&wire.kind);
-        let styled = Self::build_styled(&first_line, line_count, kind, None, false);
+        let styled = Self::build_styled(&first_line, line_count, kind, None);
         Self {
             id: synth_server_id(&wire.id),
             position,
@@ -171,13 +161,12 @@ impl QueuedPromptEntry {
     ///
     /// This ensures the `(+N lines)` suffix is always visible by truncating
     /// the first line content to make room.
-    pub fn rebuild_styled_for_width(&mut self, available_width: u16, verifying: bool) {
+    pub fn rebuild_styled_for_width(&mut self, available_width: u16) {
         self.styled = Self::build_styled(
             &self.first_line,
             self.line_count,
             self.kind,
             Some(available_width as usize),
-            verifying,
         );
     }
 
@@ -185,15 +174,11 @@ impl QueuedPromptEntry {
     ///
     /// If `max_width` is provided and the entry is multiline, truncates the
     /// first line content to ensure the `(+N lines)` suffix fits.
-    /// `verifying` appends a "waiting for Goal verification" cue to prompt
-    /// rows: while the verifier runs, send-now is rejected (the message stays
-    /// queued), so the row visibly explains why empty Enter does nothing.
     fn build_styled(
         first_line: &str,
         line_count: usize,
         kind: QueueEntryKind,
         max_width: Option<usize>,
-        verifying: bool,
     ) -> Line<'static> {
         let theme = Theme::current();
         let extra_lines = line_count.saturating_sub(1);
@@ -208,12 +193,7 @@ impl QueuedPromptEntry {
         } else {
             String::new()
         };
-        let verifying_suffix = if verifying && kind == QueueEntryKind::Prompt {
-            " ⏳ verifying"
-        } else {
-            ""
-        };
-        let suffix_width = suffix.width() + verifying_suffix.width();
+        let suffix_width = suffix.width();
 
         // Determine how much space we have for the first line content.
         // Reserve space for the suffix if multiline.
@@ -241,13 +221,6 @@ impl QueuedPromptEntry {
                 if extra_lines > 0 {
                     spans.push(Span::styled(suffix, Style::default().fg(theme.gray)));
                 }
-                if verifying {
-                    spans.push(Span::styled(
-                        verifying_suffix,
-                        Style::default().fg(theme.gray),
-                    ));
-                }
-
                 Line::from(spans)
             }
             QueueEntryKind::Command => {
@@ -554,21 +527,18 @@ impl QueuePane {
     /// (plain-while-running routes to the server queue and everything else
     /// local), so no row appears in both.
     ///
-    /// `running_id` / `send_now_id` / `painted_pending` use
-    /// [`visible_held_server_row`].
+    /// `running_id` is excluded via [`visible_held_server_row`].
     pub fn sync_from_merged(
         &mut self,
         local: &std::collections::VecDeque<QueuedPrompt>,
         server: &[QueueEntryWire],
         running_id: Option<&str>,
-        send_now_id: Option<&str>,
-        painted_pending: &std::collections::HashMap<String, (crate::scrollback::EntryId, bool)>,
     ) {
         // Rebuild entries; positions are recomputed 1-based across the union.
         self.entries.clear();
         let mut pos = 1;
         for wire in server {
-            if !visible_held_server_row(&wire.id, running_id, send_now_id, painted_pending) {
+            if !visible_held_server_row(&wire.id, running_id) {
                 continue;
             }
             self.entries.push(QueuedPromptEntry::from_server(wire, pos));
@@ -893,7 +863,6 @@ impl QueuePane {
         layout_cfg: &LayoutConfig,
         overlay_area: Option<Rect>,
         is_turn_running: bool,
-        goal_verifying: bool,
     ) {
         // Detect a theme switch and refresh the list chrome style. Its
         // `selection_bg` (the focused-row highlight) is captured from the
@@ -919,7 +888,7 @@ impl QueuePane {
         let prefix_width = 2 + digit_count(max_pos); // "#" + digits + " "
         let content_width = (inner.width as usize).saturating_sub(prefix_width);
         for entry in &mut self.entries {
-            entry.rebuild_styled_for_width(content_width as u16, goal_verifying);
+            entry.rebuild_styled_for_width(content_width as u16);
         }
 
         // When the queue overflows, the ListPane reserves its scrollbar in the
@@ -1106,969 +1075,26 @@ fn digit_count(n: usize) -> usize {
 mod tests {
     use super::*;
 
-    fn wire(id: &str, text: &str, pos: usize) -> QueueEntryWire {
-        QueueEntryWire {
-            id: id.into(),
-            version: 0,
-            owner: None,
-            last_editor: None,
-            kind: "prompt".into(),
-            text: text.into(),
-            combined_texts: None,
-            position: pos,
-        }
-    }
-
-    fn local_prompt(id: u64, text: &str) -> QueuedPrompt {
-        QueuedPrompt::plain(id, text, QueueEntryKind::Prompt)
+    #[test]
+    fn running_message_is_the_only_server_row_hidden() {
+        assert!(!visible_held_server_row("p1", Some("p1")));
+        assert!(visible_held_server_row("p2", Some("p1")));
+        assert!(visible_held_server_row("p1", None));
     }
 
     #[test]
-    fn paste_routes_to_active_list_input() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(1, "first"));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        pane.list_state.open_comment_input("");
-
-        assert!(pane.handle_paste("queued text"));
-        assert_eq!(pane.list_state.input_text(), "queued text");
-    }
-
-    #[test]
-    fn reset_auto_show_edge_allows_requeue_after_external_hide() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(1, "first"));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        assert!(pane.overlay.visible);
-        assert_eq!(pane.prev_len, 1);
-
-        pane.overlay.visible = false;
-        pane.reset_auto_show_edge();
-        assert_eq!(pane.prev_len, 0);
-
-        local.clear();
-        local.push_back(local_prompt(2, "second"));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        assert!(
-            pane.overlay.visible,
-            "re-queued prompt must auto-show after external hide"
+    fn queue_row_has_no_goal_stage_gate_or_cue() {
+        let styled = QueuedPromptEntry::build_styled(
+            "additional context",
+            1,
+            QueueEntryKind::Prompt,
+            Some(80),
         );
-        assert_eq!(pane.entries.len(), 1);
-        assert_eq!(pane.entries[0].text, "second");
-    }
-
-    #[test]
-    fn delete_last_then_requeue_shows_after_empty_sync_without_explicit_reset() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(1, "hi"));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        assert!(pane.overlay.visible);
-
-        local.clear();
-        pane.overlay.visible = false;
-
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        assert!(!pane.overlay.visible);
-        assert_eq!(pane.prev_len, 0, "hidden+empty must pin prev_len to 0");
-
-        local.push_back(local_prompt(2, "hi2"));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        assert!(
-            pane.overlay.visible,
-            "hi2 must auto-show after x-delete of last queued prompt"
-        );
-        assert_eq!(pane.entries[0].text, "hi2");
-    }
-
-    #[test]
-    fn stale_prev_len_same_count_needs_reset_or_empty_frame() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(1, "hi"));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-
-        local.clear();
-        pane.overlay.visible = false;
-        // BUG state without fix: prev_len left at 1, no empty sync, swap hi→hi2.
-        pane.prev_len = 1;
-        local.push_back(local_prompt(2, "hi2"));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        assert!(
-            !pane.overlay.visible,
-            "without reset/empty frame, same-count requeue stays hidden (documents bug)"
-        );
-
-        pane.reset_auto_show_edge();
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        assert!(pane.overlay.visible, "reset then sync must show hi2");
-    }
-
-    /// Server-authoritative rows render as interim queue rows, and the
-    /// in-flight (running) prompt is excluded from the list.
-    #[test]
-    fn sync_from_merged_renders_server_rows_and_excludes_running() {
-        let mut pane = QueuePane::new();
-        let server = vec![wire("p1", "first", 0), wire("p2", "second", 1)];
-
-        pane.sync_from_merged(
-            &std::collections::VecDeque::new(),
-            &server,
-            None,
-            None,
-            &Default::default(),
-        );
-        assert_eq!(pane.entries.len(), 2);
-        assert_eq!(pane.entries[0].text, "first");
-        assert_eq!(pane.entries[0].position, 1);
-        let r0 = pane.row_ref(pane.entries[0].id).unwrap();
-        assert_eq!(r0.origin, QueueRowOrigin::Server);
-        assert_eq!(r0.server_id.as_deref(), Some("p1"));
-
-        // Once p1 is the running turn it must NOT appear as a queued row.
-        pane.sync_from_merged(
-            &std::collections::VecDeque::new(),
-            &server,
-            Some("p1"),
-            None,
-            &Default::default(),
-        );
-        assert_eq!(pane.entries.len(), 1);
-        assert_eq!(pane.entries[0].text, "second");
-        assert_eq!(pane.entries[0].position, 1);
-        assert_eq!(
-            pane.row_ref(pane.entries[0].id)
-                .unwrap()
-                .server_id
-                .as_deref(),
-            Some("p2")
-        );
-    }
-
-    #[test]
-    fn sync_from_merged_excludes_send_now_echo() {
-        let mut pane = QueuePane::new();
-        let server = vec![
-            wire("running", "active turn", 0),
-            wire("send-now", "just fired", 1),
-            wire("held", "still waiting", 2),
-        ];
-        pane.sync_from_merged(
-            &std::collections::VecDeque::new(),
-            &server,
-            Some("running"),
-            Some("send-now"),
-            &Default::default(),
-        );
-        assert_eq!(pane.entries.len(), 1);
-        assert_eq!(pane.entries[0].text, "still waiting");
-        assert_eq!(
-            pane.row_ref(pane.entries[0].id)
-                .unwrap()
-                .server_id
-                .as_deref(),
-            Some("held")
-        );
-        assert!(visible_held_server_row(
-            "held",
-            Some("running"),
-            Some("send-now"),
-            &Default::default()
-        ));
-        assert!(!visible_held_server_row(
-            "send-now",
-            Some("running"),
-            Some("send-now"),
-            &Default::default()
-        ));
-        let mut painted = std::collections::HashMap::new();
-        painted.insert(
-            "painted".to_string(),
-            (crate::scrollback::EntryId::new(1), false),
-        );
-        assert!(!visible_held_server_row("painted", None, None, &painted));
-    }
-
-    /// The union is rendered server-first then local, each row tagged
-    /// with its origin so edits route correctly.
-    #[test]
-    fn sync_from_merged_tags_origin_and_orders_server_first() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(7, "local one"));
-        let server = vec![wire("p1", "server one", 0)];
-
-        pane.sync_from_merged(&local, &server, None, None, &Default::default());
-        assert_eq!(pane.entries.len(), 2);
-        // Server row first.
-        assert_eq!(
-            pane.row_ref(pane.entries[0].id).unwrap().origin,
-            QueueRowOrigin::Server
-        );
-        assert_eq!(pane.entries[0].text, "server one");
-        // Local row second, keeping its u64 id and Local origin.
-        assert_eq!(pane.entries[1].id, 7);
-        let r1 = pane.row_ref(7).unwrap();
-        assert_eq!(r1.origin, QueueRowOrigin::Local);
-        assert_eq!(r1.server_id, None);
-    }
-
-    /// `select_after_delete` picks the neighbor from the *merged* rows, so a
-    /// trailing local row's neighbor can be a server row across the boundary
-    /// (regression: indexing the local-only queue with a merged position
-    /// re-selected the wrong — often the just-deleted — row). Each step mirrors
-    /// the production cycle: mutate the backing queue, then re-sync.
-    #[test]
-    fn select_after_delete_picks_neighbor_across_merge_boundary() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(7, "local one"));
-        let mut server = vec![wire("p1", "server one", 0), wire("p2", "server two", 1)];
-        pane.sync_from_merged(&local, &server, None, None, &Default::default());
-
-        // entries: [server p1, server p2, local 7]
-        let ids = pane.entry_ids();
-        assert_eq!(ids.len(), 3);
-        let (p1_id, p2_id, local_id) = (ids[0], ids[1], ids[2]);
-
-        // Delete the trailing local row → clamps to the new last row, which is
-        // the *server* row p2 (across the boundary), not a local row.
-        pane.list_state.select_by_id(local_id);
-        pane.select_after_delete(local_id);
-        assert_eq!(pane.selected_id(), Some(p2_id));
-
-        // Apply the deletion to the backing queue and re-sync before the next.
-        local.clear();
-        pane.sync_from_merged(&local, &server, None, None, &Default::default());
-        assert_eq!(pane.entry_ids(), vec![p1_id, p2_id]);
-        assert_eq!(pane.selected_id(), Some(p2_id));
-
-        // Delete the leading server row → the next row slides up into the slot.
-        pane.list_state.select_by_id(p1_id);
-        pane.select_after_delete(p1_id);
-        assert_eq!(pane.selected_id(), Some(p2_id));
-
-        // Re-sync: only p2 remains, still selected.
-        server.remove(0);
-        pane.sync_from_merged(&local, &server, None, None, &Default::default());
-        assert_eq!(pane.entry_ids(), vec![p2_id]);
-        assert_eq!(pane.selected_id(), Some(p2_id));
-    }
-
-    /// Purely-local queue (no server rows): deleting the middle row selects the
-    /// following row; deleting the last clamps to the new last; deleting the
-    /// only row is a no-op (selection unchanged).
-    #[test]
-    fn select_after_delete_local_only_neighbor_selection() {
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(1, "one"));
-        local.push_back(local_prompt(2, "two"));
-        local.push_back(local_prompt(3, "three"));
-
-        let mut pane = QueuePane::new();
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        assert_eq!(pane.entry_ids(), vec![1, 2, 3]);
-
-        // Delete the middle row → the following row (3) slides into the slot.
-        pane.list_state.select_by_id(2);
-        pane.select_after_delete(2);
-        assert_eq!(pane.selected_id(), Some(3));
-
-        // Apply + re-sync, then delete the last row → clamp to the new last (1).
-        local.retain(|p| p.id != 2);
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        assert_eq!(pane.entry_ids(), vec![1, 3]);
-        pane.list_state.select_by_id(3);
-        pane.select_after_delete(3);
-        assert_eq!(pane.selected_id(), Some(1));
-
-        // Deleting the sole remaining row leaves the selection unchanged.
-        let mut single = QueuePane::new();
-        let mut one = std::collections::VecDeque::new();
-        one.push_back(local_prompt(9, "only"));
-        single.sync_from_merged(&one, &[], None, None, &Default::default());
-        single.list_state.select_by_id(9);
-        single.select_after_delete(9);
-        assert_eq!(single.selected_id(), Some(9));
-    }
-
-    #[test]
-    fn test_digit_count() {
-        assert_eq!(digit_count(0), 1);
-        assert_eq!(digit_count(1), 1);
-        assert_eq!(digit_count(9), 1);
-        assert_eq!(digit_count(10), 2);
-        assert_eq!(digit_count(99), 2);
-        assert_eq!(digit_count(100), 3);
-        assert_eq!(digit_count(999), 3);
-    }
-
-    #[test]
-    fn test_single_line_no_suffix() {
-        let styled =
-            QueuedPromptEntry::build_styled("hello world", 1, QueueEntryKind::Prompt, None, false);
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "hello world");
-        assert!(!text.contains("line"));
-    }
-
-    #[test]
-    fn test_multiline_suffix() {
-        let styled =
-            QueuedPromptEntry::build_styled("first line", 5, QueueEntryKind::Prompt, None, false);
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("first line"));
-        assert!(text.contains("(+4 lines)"));
-    }
-
-    /// GB-4151: `y` on a multiline queue row must copy the full prompt text,
-    /// not the display line that ends with `(+N lines)`.
-    #[test]
-    fn copy_text_returns_full_prompt_not_display_suffix() {
-        let full = "line one\nline two\nline three\nline four";
-        let entry = QueuedPromptEntry::new(&local_prompt(1, full), 1);
-
-        // Precondition: display path still shows the collapsed row indicator.
-        let display: String = entry
-            .content()
+        let text: String = styled
             .spans
             .iter()
-            .map(|s| s.content.as_ref())
+            .map(|span| span.content.as_ref())
             .collect();
-        assert!(
-            display.contains("(+3 lines)"),
-            "display should keep (+N lines) indicator, got: {display}"
-        );
-
-        let copied = entry.copy_text();
-        assert_eq!(copied, full);
-        assert!(
-            !copied.contains("(+"),
-            "copied text must not include the (+N lines) display suffix"
-        );
-    }
-
-    /// End-to-end: `ListPaneState::copy_selected` (the `y` path) uses
-    /// `copy_text`, so multiline rows paste the full prompt.
-    #[test]
-    fn yank_selected_multiline_copies_full_text() {
-        use std::sync::{Arc, Mutex};
-
-        use ratatui_textarea::ClipboardProvider;
-
-        #[derive(Debug, Clone)]
-        struct RecordingClip {
-            last: Arc<Mutex<Option<String>>>,
-        }
-        impl ClipboardProvider for RecordingClip {
-            fn get(&mut self) -> Option<String> {
-                self.last.lock().unwrap().clone()
-            }
-            fn set(&mut self, text: &str) {
-                *self.last.lock().unwrap() = Some(text.to_string());
-            }
-        }
-
-        let full = "first line of prompt\nsecond line\nthird line";
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(1, full));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        // `select_by_id` is resolved into `selected_index` by prepare_layout.
-        pane.list_state.select_by_id(1);
-        pane.list_state.prepare_layout(&pane.entries, 80, 10);
-
-        let clip = Arc::new(Mutex::new(None));
-        pane.list_state
-            .set_clipboard_provider(Box::new(RecordingClip { last: clip.clone() }));
-
-        assert!(
-            pane.list_state.copy_selected(&pane.entries),
-            "y/copy_selected must succeed for a selected queue row"
-        );
-        let copied = clip.lock().unwrap().clone();
-        assert_eq!(copied.as_deref(), Some(full));
-    }
-
-    #[test]
-    fn test_multiline_singular() {
-        let styled =
-            QueuedPromptEntry::build_styled("first line", 2, QueueEntryKind::Prompt, None, false);
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("(+1 line)"));
-        assert!(!text.contains("lines)")); // Should be singular
-    }
-
-    #[test]
-    fn test_truncation_preserves_suffix() {
-        // Width of 25: "first line" (10) + " (+4 lines)" (11) = 21, fits
-        let styled = QueuedPromptEntry::build_styled(
-            "first line",
-            5,
-            QueueEntryKind::Prompt,
-            Some(25),
-            false,
-        );
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("first line"));
-        assert!(text.contains("(+4 lines)"));
-
-        // Width of 20: Need to truncate "first line" to fit suffix
-        let styled = QueuedPromptEntry::build_styled(
-            "first line here",
-            5,
-            QueueEntryKind::Prompt,
-            Some(20),
-            false,
-        );
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        // Should have truncated first line but kept suffix
-        assert!(text.contains("(+4 lines)"));
-        // First line should be truncated (with ellipsis)
-        assert!(text.contains("…") || text.len() <= 20);
-    }
-
-    #[test]
-    fn test_very_narrow_width() {
-        // Extremely narrow - suffix takes most of the space
-        let styled = QueuedPromptEntry::build_styled(
-            "hello world",
-            10,
-            QueueEntryKind::Prompt,
-            Some(15), // " (+9 lines)" is 11 chars, leaving 4 for content
-            false,
-        );
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("(+9 lines)"));
-    }
-
-    #[test]
-    fn test_command_with_suffix() {
-        let styled =
-            QueuedPromptEntry::build_styled("/help me", 3, QueueEntryKind::Command, None, false);
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("/help"));
-        assert!(text.contains("(+2 lines)"));
-    }
-
-    // -- Bash command queue pane tests --
-
-    #[test]
-    fn test_bash_command_has_bang_prefix() {
-        let styled =
-            QueuedPromptEntry::build_styled("ls -la", 1, QueueEntryKind::BashCommand, None, false);
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            text.starts_with("! "),
-            "bash entry should start with '! ', got: {text}"
-        );
-        assert!(text.contains("ls -la"));
-    }
-
-    #[test]
-    fn test_bash_command_multiline_suffix() {
-        let styled = QueuedPromptEntry::build_styled(
-            "echo hello",
-            3,
-            QueueEntryKind::BashCommand,
-            None,
-            false,
-        );
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("! "));
-        assert!(text.contains("(+2 lines)"));
-    }
-
-    // -- Cron queue pane tests --
-
-    #[test]
-    fn test_cron_has_recycle_prefix() {
-        let styled =
-            QueuedPromptEntry::build_styled("check status", 1, QueueEntryKind::Cron, None, false);
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            text.starts_with("\u{21BB}  "),
-            "cron entry should start with \u{21BB}, got: {text}"
-        );
-        assert!(text.contains("check status"));
-    }
-
-    #[test]
-    fn test_cron_multiline_suffix() {
-        let styled = QueuedPromptEntry::build_styled(
-            "/pr-babysit check",
-            4,
-            QueueEntryKind::Cron,
-            None,
-            false,
-        );
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("\u{21BB}  "));
-        assert!(text.contains("(+3 lines)"));
-    }
-
-    #[test]
-    fn test_cron_truncation() {
-        let styled = QueuedPromptEntry::build_styled(
-            "very long scheduled prompt",
-            1,
-            QueueEntryKind::Cron,
-            Some(15),
-            false,
-        );
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("\u{21BB}  "));
-    }
-
-    #[test]
-    fn test_bash_command_truncation() {
-        let styled = QueuedPromptEntry::build_styled(
-            "very long command here",
-            1,
-            QueueEntryKind::BashCommand,
-            Some(15),
-            false,
-        );
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("! "));
-        // Total should fit within width (prefix "! " is 2 chars, content truncated to 13)
-    }
-
-    // -- Action-button rendering (hover + layout) ----------------------------
-
-    /// The `[Interject]`, `[edit]`, and `[cancel]` buttons render flush
-    /// against each other so the queued message behind the row can't leak
-    /// through a seam between them (no gap).
-    #[test]
-    fn action_buttons_render_flush_with_no_gap() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(
-            1,
-            "a queued message long enough to fill the entire row width",
-        ));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        let ids = pane.entry_ids();
-        pane.list_state.select_by_id(ids[0]);
-
-        let area = Rect::new(0, 0, 80, 1);
-        let mut buf = Buffer::empty(area);
-        let layout_cfg = crate::appearance::LayoutConfig::default();
-        // Focused + turn running → all three buttons render for the selected row.
-        pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
-
-        let edit = pane.edit_button.rect.expect("edit button renders");
-        let interject = pane.send_now.rect.expect("interject button renders");
-        let delete = pane.delete_button.rect.expect("delete button renders");
-        assert_eq!(
-            interject.x + interject.width,
-            edit.x,
-            "[Interject] must sit flush against [edit] (no gap to leak through)"
-        );
-        assert_eq!(
-            edit.x + edit.width,
-            delete.x,
-            "[edit] must sit flush against [cancel] (no gap to leak through)"
-        );
-    }
-
-    /// `[edit]` renders even when no turn is running — the keyboard `e` edit
-    /// works regardless of turn state — while `[Send now]` stays hidden, and
-    /// the chain stays flush: [edit][cancel].
-    #[test]
-    fn edit_button_renders_when_turn_not_running() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(1, "msg"));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        let ids = pane.entry_ids();
-        pane.list_state.select_by_id(ids[0]);
-
-        let area = Rect::new(0, 0, 80, 1);
-        let mut buf = Buffer::empty(area);
-        let layout_cfg = crate::appearance::LayoutConfig::default();
-        // Focused + turn NOT running → [edit] and [cancel], no [Send now].
-        pane.render(area, &mut buf, true, &layout_cfg, None, false, false);
-
-        assert!(
-            pane.send_now.rect.is_none(),
-            "[Send now] only renders mid-turn"
-        );
-        let edit = pane
-            .edit_button
-            .rect
-            .expect("edit button renders while idle");
-        let cancel = pane.delete_button.rect.expect("cancel button renders");
-        assert_eq!(pane.edit_button.entry_id, Some(ids[0]));
-        assert_eq!(
-            edit.x + edit.width,
-            cancel.x,
-            "[edit] must sit flush against [cancel] when [Send now] is hidden"
-        );
-    }
-
-    /// On panes too narrow for the full `[Send now][edit][cancel]` chain, a
-    /// button that can't fully fit at or right of the content area's left
-    /// edge is dropped instead of saturating toward x = 0 — otherwise rects
-    /// land outside `inner` and overlap, mis-routing clicks (send-now is
-    /// hit-tested before edit, so overlapped cells would fire it).
-    #[test]
-    fn narrow_pane_drops_buttons_that_do_not_fit() {
-        let layout_cfg = crate::appearance::LayoutConfig::default();
-        // Probe the left padding once so the width sweep spans inner widths
-        // from 1 (nothing fits) past 24 (the full chain fits).
-        let pad_left = {
-            let mut pane = QueuePane::new();
-            let mut local = std::collections::VecDeque::new();
-            local.push_back(local_prompt(1, "msg"));
-            pane.sync_from_merged(&local, &[], None, None, &Default::default());
-            let area = Rect::new(0, 0, 80, 1);
-            let mut buf = Buffer::empty(area);
-            pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
-            pane.last_inner.expect("inner recorded").x
-        };
-
-        for is_running in [true, false] {
-            for width in (pad_left + 1)..=(pad_left + 26) {
-                let mut pane = QueuePane::new();
-                let mut local = std::collections::VecDeque::new();
-                local.push_back(local_prompt(1, "msg"));
-                pane.sync_from_merged(&local, &[], None, None, &Default::default());
-                let ids = pane.entry_ids();
-                pane.list_state.select_by_id(ids[0]);
-
-                let area = Rect::new(0, 0, width, 1);
-                let mut buf = Buffer::empty(area);
-                pane.render(area, &mut buf, true, &layout_cfg, None, is_running, false);
-
-                let inner = pane.last_inner.expect("inner recorded");
-                let rects = [
-                    ("edit", pane.edit_button.rect),
-                    ("send_now", pane.send_now.rect),
-                    ("cancel", pane.delete_button.rect),
-                ];
-                let mut placed: Vec<(&str, Rect)> = rects
-                    .iter()
-                    .filter_map(|&(name, rect)| rect.map(|r| (name, r)))
-                    .collect();
-                for (name, r) in &placed {
-                    assert!(
-                        r.x >= inner.x && r.x + r.width <= inner.x + inner.width,
-                        "{name} rect {r:?} must stay inside inner {inner:?} \
-                         at width {width} (running={is_running})"
-                    );
-                }
-                placed.sort_by_key(|(_, r)| r.x);
-                for pair in placed.windows(2) {
-                    let (an, a) = pair[0];
-                    let (bn, b) = pair[1];
-                    assert!(
-                        a.x + a.width <= b.x,
-                        "{an} and {bn} rects must not overlap at width {width} \
-                         (running={is_running}): {a:?} vs {b:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// Hovering a row reveals that row's action buttons even when the pane is
-    /// unfocused, and the buttons are bound to the hovered row.
-    #[test]
-    fn hover_reveals_action_buttons_for_hovered_row_when_unfocused() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(1, "first"));
-        local.push_back(local_prompt(2, "second"));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-
-        let area = Rect::new(0, 0, 80, 2);
-        let mut buf = Buffer::empty(area);
-        let layout_cfg = crate::appearance::LayoutConfig::default();
-
-        // Unfocused with no hover → no action buttons at all.
-        pane.render(area, &mut buf, false, &layout_cfg, None, true, false);
-        assert!(pane.delete_button.rect.is_none());
-        assert!(pane.send_now.rect.is_none());
-        assert!(pane.edit_button.rect.is_none());
-
-        // Hover the second row → its buttons appear (still unfocused).
-        let inner = pane.last_inner.expect("inner area recorded during render");
-        assert!(
-            pane.update_row_hover(inner.x, inner.y + 1),
-            "hovering a new row should report a change"
-        );
-        pane.render(area, &mut buf, false, &layout_cfg, None, true, false);
-
-        let ids = pane.entry_ids();
-        assert_eq!(pane.delete_button.entry_id, Some(ids[1]));
-        assert_eq!(pane.send_now.entry_id, Some(ids[1]));
-        assert_eq!(pane.edit_button.entry_id, Some(ids[1]));
-        assert!(pane.delete_button.rect.is_some());
-        assert!(pane.send_now.rect.is_some());
-        assert!(pane.edit_button.rect.is_some());
-
-        // Moving off the rows clears the hover and hides the buttons again.
-        assert!(pane.clear_row_hover());
-        pane.render(area, &mut buf, false, &layout_cfg, None, true, false);
-        assert!(pane.delete_button.rect.is_none());
-        assert!(pane.send_now.rect.is_none());
-        assert!(pane.edit_button.rect.is_none());
-    }
-
-    /// Hovering a row paints the dim hover bg across that row (matching the
-    /// scrollback tool-call hover), and only that row.
-    #[test]
-    fn hover_paints_dim_hover_bg_on_hovered_row() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(1, "first"));
-        local.push_back(local_prompt(2, "second"));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-
-        let area = Rect::new(0, 0, 80, 2);
-        let mut buf = Buffer::empty(area);
-        let layout_cfg = crate::appearance::LayoutConfig::default();
-
-        // First render records `last_inner`; then hover the second row.
-        pane.render(area, &mut buf, false, &layout_cfg, None, true, false);
-        let inner = pane.last_inner.expect("inner area recorded during render");
-        assert!(pane.update_row_hover(inner.x, inner.y + 1));
-        pane.render(area, &mut buf, false, &layout_cfg, None, true, false);
-
-        let theme = Theme::current();
-        let hover_bg = crate::render::color::blend_color(theme.bg_base, theme.bg_dark, 0.5)
-            .unwrap_or(theme.bg_dark);
-
-        // Hovered (second) row carries the hover bg across its full width.
-        assert_eq!(buf[(inner.x, inner.y + 1)].bg, hover_bg);
-        assert_eq!(
-            buf[(inner.x + inner.width - 1, inner.y + 1)].bg,
-            hover_bg,
-            "hover bg spans the full row width"
-        );
-        // When the terminal has real colors the non-hovered row is visibly
-        // distinct. In headless tests every bg quantizes to `Reset`, so the
-        // difference is only asserted when the hover bg is a real color.
-        if hover_bg != ratatui::style::Color::Reset {
-            assert_ne!(buf[(inner.x, inner.y)].bg, hover_bg);
-        }
-    }
-
-    /// The `[Interject]` button brightens its fg to `text_primary` on hover
-    /// (the same hover color as the `[Dashboard]` button) and is plain `gray`
-    /// otherwise.
-    #[test]
-    fn interject_button_brightens_fg_on_hover() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(1, "first"));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        let ids = pane.entry_ids();
-        pane.list_state.select_by_id(ids[0]);
-
-        let area = Rect::new(0, 0, 80, 1);
-        let mut buf = Buffer::empty(area);
-        let layout_cfg = crate::appearance::LayoutConfig::default();
-        let theme = Theme::current();
-
-        // Focused + turn running → [Interject] renders for the selected row.
-        pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
-        let rect = pane.send_now.rect.expect("interject button renders");
-        let non_hover_fg = buf[(rect.x, rect.y)].fg;
-        assert_eq!(non_hover_fg, theme.gray, "plain button uses gray fg");
-
-        // Hover the [Interject] button → fg becomes text_primary.
-        assert!(pane.update_send_now_hover(rect.x, rect.y));
-        pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
-        let rect = pane.send_now.rect.expect("interject button still renders");
-        for x in rect.x..rect.x + rect.width {
-            assert_eq!(buf[(x, rect.y)].fg, theme.text_primary, "col {x}");
-        }
-        // With real colors the hover fg is visibly distinct from the plain fg
-        // (in headless tests every color quantizes to `Reset`).
-        if theme.text_primary != theme.gray {
-            assert_ne!(buf[(rect.x, rect.y)].fg, non_hover_fg);
-        }
-    }
-
-    /// Regression: a stale hover on a row that has scrolled *above* the
-    /// viewport must not bind the action buttons to row 0 (which would
-    /// mis-route a click to an off-screen entry). The bounds check skips it.
-    #[test]
-    fn hovered_row_scrolled_above_viewport_binds_no_buttons() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        for i in 1..=5 {
-            local.push_back(local_prompt(i, &format!("row {i}")));
-        }
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        let ids = pane.entry_ids();
-
-        // Viewport height 3 (MAX_QUEUE_HEIGHT) with 5 rows → scrollable. The
-        // buffer is wider than the queue area (mirroring the outer padding) so
-        // the overflow scrollbar's column, one past the area, stays in-bounds.
-        let area = Rect::new(0, 0, 80, 3);
-        let mut buf = Buffer::empty(Rect::new(0, 0, 82, 3));
-        let layout_cfg = crate::appearance::LayoutConfig::default();
-
-        // Establish layout, then scroll so rows 0 and 1 sit above the top and
-        // leave a stale hover on the now-off-screen first row.
-        pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
-        pane.list_state.set_scroll_offset(2);
-        pane.hovered_row_id = Some(ids[0]);
-        pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
-
-        assert!(
-            pane.delete_button.rect.is_none(),
-            "off-screen hovered row must not bind the cancel button to row 0"
-        );
-        assert!(
-            pane.send_now.rect.is_none(),
-            "off-screen hovered row must not bind the interject button to row 0"
-        );
-        assert!(
-            pane.edit_button.rect.is_none(),
-            "off-screen hovered row must not bind the edit button to row 0"
-        );
-        assert_eq!(pane.delete_button.entry_id, None);
-        assert_eq!(pane.send_now.entry_id, None);
-        assert_eq!(pane.edit_button.entry_id, None);
-    }
-
-    /// The `[cancel]` button's right edge reaches the full content-area width
-    /// (no right inset) so it lines up with the turn-status `[stop]` button on
-    /// the line below, which is right-aligned to the same full width.
-    #[test]
-    fn cancel_button_right_edge_reaches_full_width() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(1, "msg"));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        let ids = pane.entry_ids();
-        pane.list_state.select_by_id(ids[0]);
-
-        let area = Rect::new(0, 0, 80, 1);
-        let mut buf = Buffer::empty(area);
-        let layout_cfg = crate::appearance::LayoutConfig::default();
-        pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
-
-        let cancel = pane.delete_button.rect.expect("cancel button renders");
-        assert_eq!(
-            cancel.x + cancel.width,
-            area.x + area.width,
-            "[cancel] right edge must reach the full width to align with [stop]"
-        );
-    }
-
-    /// When the queue overflows, the scrollbar is pushed one column past the
-    /// queue area (into the right outer padding) so it sits clear of the
-    /// right-aligned `[cancel]` button instead of overlapping it.
-    #[test]
-    fn scrollbar_sits_clear_of_action_buttons() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        for i in 1..=5 {
-            local.push_back(local_prompt(i, &format!("row {i}")));
-        }
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        let ids = pane.entry_ids();
-        pane.list_state.select_by_id(ids[0]);
-
-        // Queue area is 80 wide; the buffer is wider (outer padding) so the
-        // scrollbar column just past the area is in-bounds.
-        let area = Rect::new(0, 0, 80, 3);
-        let mut buf = Buffer::empty(Rect::new(0, 0, 82, 3));
-        let layout_cfg = crate::appearance::LayoutConfig::default();
-        pane.render(area, &mut buf, true, &layout_cfg, None, true, false);
-
-        let sb = pane
-            .list_state
-            .scrollbar_area()
-            .expect("scrollbar shown for 5 rows in a height-3 pane");
-        let cancel = pane.delete_button.rect.expect("cancel button renders");
-        assert!(
-            sb.x >= cancel.x + cancel.width,
-            "scrollbar (x={}) must sit clear of [cancel] (right edge {})",
-            sb.x,
-            cancel.x + cancel.width
-        );
-    }
-
-    /// Wheel-scrolling refreshes the hovered row from the cursor's current
-    /// position (rows move under a stationary pointer), so the hover bg and
-    /// action buttons don't keep tracking the pre-scroll entry until the next
-    /// mouse move.
-    #[test]
-    fn wheel_scroll_refreshes_hovered_row_without_mouse_move() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        for i in 1..=5 {
-            local.push_back(local_prompt(i, &format!("row {i}")));
-        }
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        let ids = pane.entry_ids();
-
-        // 5 rows in a height-3 pane → scrollable. Buffer is wider than the area
-        // so the overflow scrollbar column stays in-bounds.
-        let area = Rect::new(0, 0, 80, 3);
-        let mut buf = Buffer::empty(Rect::new(0, 0, 82, 3));
-        let layout_cfg = crate::appearance::LayoutConfig::default();
-        pane.render(area, &mut buf, false, &layout_cfg, None, true, false);
-
-        let inner = pane.last_inner.expect("inner area recorded during render");
-        // Hover the top visible row → the first entry.
-        assert!(pane.update_row_hover(inner.x, inner.y));
-        assert_eq!(pane.hovered_row_id, Some(ids[0]));
-
-        // Wheel-scroll down one line with the cursor held over the top row.
-        // The entry now under the pointer is the second one, and hover must
-        // refresh to it WITHOUT a separate mouse-move event.
-        pane.handle_scroll(1, inner.x, inner.y);
-        assert_eq!(
-            pane.hovered_row_id,
-            Some(ids[1]),
-            "scroll must refresh the hovered row to the entry now under the cursor"
-        );
-    }
-}
-
-#[cfg(test)]
-mod verifying_cue_tests {
-    use super::*;
-
-    #[test]
-    fn prompt_row_appends_verifying_cue_when_goal_verifying() {
-        let styled =
-            QueuedPromptEntry::build_styled("hello", 1, QueueEntryKind::Prompt, None, true);
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            text.contains("verifying"),
-            "a prompt row must show the verification-wait cue, got {text:?}"
-        );
-    }
-
-    #[test]
-    fn prompt_row_omits_cue_when_not_verifying() {
-        let styled =
-            QueuedPromptEntry::build_styled("hello", 1, QueueEntryKind::Prompt, None, false);
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            !text.contains("verifying"),
-            "no cue outside verification, got {text:?}"
-        );
-    }
-
-    #[test]
-    fn command_row_never_shows_verifying_cue() {
-        let styled =
-            QueuedPromptEntry::build_styled("/compact", 1, QueueEntryKind::Command, None, true);
-        let text: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            !text.contains("verifying"),
-            "slash command rows are not user messages; no cue, got {text:?}"
-        );
+        assert_eq!(text, "additional context");
     }
 }

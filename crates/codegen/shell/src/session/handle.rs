@@ -220,8 +220,8 @@ impl SessionHandle {
         }
         rx.await.unwrap_or(Err("session actor died".to_string()))
     }
-    /// Returns `true` if the session has work in flight: a running turn or
-    /// queued inputs (`running_task.is_some() || !pending_inputs.is_empty()`).
+    /// Returns `true` if the session has foreground/queued work or an Active
+    /// Goal whose background stage/idle continuation must remain resident.
     ///
     /// Used by the leader's idle-unload decision on client disconnect.
     /// Falls back to `true` (conservative: keep the session resident, never

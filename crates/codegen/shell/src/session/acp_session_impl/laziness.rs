@@ -741,8 +741,11 @@ impl SessionActor {
             return;
         }
 
-        let names = self.resolve_goal_tool_names().await;
-        let nudge_text = build_laziness_nudge(category, &evidence, Some(&names.todo));
+        let nudge_text = build_laziness_nudge(
+            category,
+            &evidence,
+            Some(tools::implementations::grow_build::UPDATE_GOAL_PLAN_TOOL_NAME),
+        );
         if nudge_text.is_empty() {
             // Defensive — `evaluate_laziness` only returns Nudge for
             // stalled_* variants which all produce non-empty text.

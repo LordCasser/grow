@@ -89,6 +89,8 @@ pub mod user_prompt_meta {
 /// `UserMessageChunk` / `ContentChunk._meta` keys stamped by the shell and
 /// read by the pager (live and on replay).
 pub mod user_message_chunk_meta {
+    /// Stable user-message identity. This is the only echo reconciliation key.
+    pub const MESSAGE_ID: &str = "messageId";
     /// Prompt index for rewind / attribution.
     pub const PROMPT_INDEX: &str = "promptIndex";
     /// When true, the chunk must not become a scrollback user prompt

@@ -55,12 +55,13 @@ async fn queue_input_user_prompt_bumps_recap_epoch() {
                 .queue_input(
                     vec![],
                     "user-next".to_string(),
+                    crate::session::PromptOrigin::User,
+                    crate::session::TurnKind::User,
                     crate::session::behavior::PromptMode::Agent,
                     None,
                     None,
                     false,
                     None,
-                    false,
                     None,
                     respond_to,
                     None,
@@ -92,12 +93,15 @@ async fn queue_input_synthetic_does_not_bump_recap_epoch() {
                 .queue_input(
                     vec![],
                     "task-completed-bg-1".to_string(),
+                    crate::session::PromptOrigin::TaskCompleted {
+                        task_id: "bg-1".to_string(),
+                    },
+                    crate::session::TurnKind::Internal,
                     crate::session::behavior::PromptMode::Agent,
                     None,
                     None,
                     false,
                     None,
-                    false,
                     None,
                     respond_to,
                     None,
@@ -635,9 +639,15 @@ async fn recap_request_rides_parent_prompt_cache() {
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
             let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            // Register a real tool so the "recap sends the main turn's tools"
-            // assertion is non-vacuous.
-            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+            // Register an ordinary tool so the "recap sends the main turn's
+            // tools" assertion is non-vacuous. Goal tools are intentionally
+            // hidden outside Goal Behavior and therefore cannot serve as the
+            // fixture for a Normal turn.
+            *actor.agent.borrow_mut() =
+                test_agent_with_tools(vec![tools::registry::types::ToolConfig::for_tool::<
+                    tools::implementations::use_tool::UseTool,
+                >()])
+                .await;
 
             let server = MockInferenceServer::start().await.unwrap();
             server.set_response("You asked about the borrow checker.");

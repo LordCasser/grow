@@ -134,7 +134,7 @@ impl MvpAgent {
     /// The `activity` is supplied by the caller rather than read from
     /// `resident_activity` because at turn-start the actor may not have
     /// published `current_prompt_id` yet (it is set asynchronously once the
-    /// actor dequeues the `SessionCommand::Prompt`), so a natural read would
+    /// actor dequeues the `SessionCommand::QueuePrompt`), so a natural read would
     /// still observe `Idle`. The authoritative entry (cwd / worktree / model /
     /// yolo) is built by `resident_roster_entry`, so it never diverges from
     /// the polled entry; only the `activity` field is overridden.
@@ -384,15 +384,15 @@ impl MvpAgent {
     ///    slot. The parked plan-approval resume re-park is the one outstanding work with no
     ///    running turn, so it needs its own sync check (the same shared-`Arc`
     ///    idiom as `current_prompt_id`) rather than the async round-trip below.
-    /// 2. **Queue check (async):** when no turn is running, the actor is between
+    /// 2. **Actor check (async):** when no turn is running, the actor is between
     ///    turns and responsive, so we ask it whether `pending_inputs` is
-    ///    non-empty (a prompt queued at the turn boundary). This closes the
+    ///    non-empty or an Active Goal still owns autonomous work. This closes the
     ///    sub-tick window where `current_prompt_id` is momentarily `None` but a
     ///    queued input is about to be drained. On timeout we keep the session
     ///    resident (conservative).
     ///
     /// TODO(PR-4): once the aggregate `SessionActivity` signal exists, also
-    /// consult the autonomous background sources so a detached session is never
+    /// consult the remaining autonomous background sources so a detached session is never
     /// idle-unloaded (→ `Shutdown` → `KillOnDrop`) while they are live:
     /// `monitor_event_buffer`, pending scheduler fires,
     /// `ToolContext.background_tasks`, and background subagent sessions. Until

@@ -1941,6 +1941,7 @@ pub struct PersistedInfoLight {
     pub announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     /// Persisted goal mode orchestration state (None for sessions without goal mode)
     pub goal_mode_state: Option<crate::session::goal_tracker::GoalOrchestration>,
+    pub goal_mode_state_rejected: bool,
     pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
 }
 
@@ -2030,6 +2031,7 @@ pub(crate) async fn load_light(
         signals: persisted.signals,
         announcement_state: persisted.announcement_state,
         goal_mode_state: persisted.goal_mode_state,
+        goal_mode_state_rejected: persisted.goal_mode_state_rejected,
         workflow_runs: persisted.workflow_runs,
     };
 

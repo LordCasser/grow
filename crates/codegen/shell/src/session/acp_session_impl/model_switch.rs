@@ -114,7 +114,7 @@ impl SessionActor {
     ) -> Result<(), acp::Error> {
         {
             let state = self.state.lock().await;
-            if state.running_task.is_some() {
+            if state.foreground.regular().is_some() {
                 tracing::warn!(
                     session_id = %self.session_info.id.0,
                     new_agent_type = %definition.name,
@@ -198,15 +198,13 @@ impl SessionActor {
                     ),
                 )
                 .await;
-            if !self.goal_runs_on_workflow_engine() {
-                bridge
-                    .update_resource(
-                        tools::implementations::grow_build::update_goal::GoalUpdateHandle(
-                            self.goal_update_tx.clone(),
-                        ),
-                    )
-                    .await;
-            }
+            bridge
+                .update_resource(
+                    tools::implementations::grow_build::update_goal::GoalRuntimeHandle(
+                        self.goal_command_tx.clone(),
+                    ),
+                )
+                .await;
             if let Some(reservations) = self.tool_context.task_completion_reservations.clone() {
                 bridge.update_resource(reservations).await;
             }
@@ -275,6 +273,7 @@ impl SessionActor {
             });
         self.mcp_reminder_dirty
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.refresh_goal_harness_enabled().await;
         self.send_available_commands_update().await;
         tracing::info!(
             session_id = %self.session_info.id.0,

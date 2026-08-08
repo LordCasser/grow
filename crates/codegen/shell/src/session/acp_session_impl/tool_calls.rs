@@ -1741,12 +1741,13 @@ impl SessionActor {
         self.queue_input(
             prompt_blocks,
             prompt_id,
+            crate::session::PromptOrigin::PlanResume,
+            crate::session::TurnKind::Internal,
             mode,
             None,
             None,
             false,
             None,
-            false,
             None,
             respond_to,
             None,
@@ -1996,17 +1997,22 @@ impl SessionActor {
                 (title, acp::ToolKind::Other, vec![], vec![])
             }
             ToolInput::UpdateGoal(ref ug) => {
-                let title = if ug.completed == Some(true) {
-                    "Goal: marking complete".to_string()
-                } else if let Some(ref reason) = ug.blocked_reason {
-                    format!("Goal: blocked — {reason}")
-                } else if let Some(ref msg) = ug.message {
-                    format!("Goal: {msg}")
-                } else {
-                    "Goal: update".to_string()
+                let title = match ug.action {
+                    tools::implementations::grow_build::update_goal::UpdateGoalAction::CandidateComplete => {
+                        "Goal: requesting verification".to_string()
+                    }
+                    tools::implementations::grow_build::update_goal::UpdateGoalAction::Blocked => {
+                        format!("Goal: blocked — {}", ug.message)
+                    }
                 };
                 (title, acp::ToolKind::Other, vec![], vec![])
             }
+            ToolInput::UpdateGoalPlan(_) => (
+                "Goal: update plan".to_string(),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
             ToolInput::Monitor(ref m) => (
                 format!("Start monitor: {}", m.description),
                 acp::ToolKind::Other,
@@ -2158,7 +2164,7 @@ impl SessionActor {
         }
     }
     /// Drain all queued synthetic prompts (auto-wake task/subagent
-    /// completions, notification-drain batches, and goal-summary turns —
+    /// completions, notification-drain batches, and Goal continuation turns —
     /// every `PromptOrigin` variant where `is_synthetic()` returns
     /// `true`) from `pending_inputs`, and clear ALL
     /// `pending_notifications` unconditionally (every current

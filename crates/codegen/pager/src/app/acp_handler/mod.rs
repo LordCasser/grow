@@ -57,11 +57,6 @@ use routing::{
     mcp_target_agent, resolve_notif_agent, resolve_target_view,
 };
 
-use prompt_origin::finish_wake_turn;
-pub(crate) use prompt_origin::{
-    is_goal_summary_prompt, is_server_initiated_prompt, is_wake_prompt, should_adopt_running_prompt,
-};
-
 pub(crate) use subagent_activity::finalize_killed_subagent;
 use subagent_activity::{subagent_activity_label, sync_subagent_activity};
 
@@ -72,7 +67,6 @@ use session_notification::{
     drop_unexpected_replay, handle_session_notification,
 };
 
-pub(crate) use queue::PendingRunningAdoption;
 use queue::handle_queue_changed;
 
 use background::{
@@ -143,11 +137,6 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
             let affected = match find_session_match(app, &notif.request.session_id) {
                 Some(SessionMatch::Root(id)) => {
                     let is_active = is_matched_agent_active(app, id);
-                    // Read before the agent borrow below.
-                    let stashed_adoption_pid = app
-                        .pending_running_adoptions
-                        .get(&id)
-                        .map(|p| p.prompt_id.clone());
                     let agent = app
                         .agents
                         .get_mut(&id)
@@ -203,13 +192,9 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     // VIEW a turn ANOTHER client drives (a `/loop` cron, or a
                     // plain prompt typed in a different pane). Left sticky-false,
                     // the gate dropped those deltas and the pane rendered
-                    // nothing. A non-synthetic prompt id this client never
-                    // originated is another client's turn → view it; one it
+                    // nothing. A prompt id this client never originated is
+                    // another actor-owned turn → view it; one it
                     // originated is its own → drive it (strict gate).
-                    //
-                    // Server-initiated / auto-wake turns (synthetic prompt ids)
-                    // are excluded: they have no client finish path, so they
-                    // must not flip the role (see the adopt gate below).
                     //
                     // Only re-derive on a real, non-replay, non-duplicate delta
                     // that does NOT match the active turn.
@@ -217,7 +202,6 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         && !meta.is_replay
                         && let Some(notif_pid) = meta.prompt_id.as_deref()
                         && agent.session.current_prompt_id.as_deref() != Some(notif_pid)
-                        && !is_server_initiated_prompt(notif_pid)
                     {
                         agent.attached_as_viewer = !agent.is_self_originated_prompt(notif_pid);
                     }
@@ -281,45 +265,6 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         && let Some(notif_pid) = meta.prompt_id.as_ref()
                         && agent.session.current_prompt_id.as_ref() != Some(notif_pid)
                         && !agent.attached_as_viewer
-                        && stashed_adoption_pid.as_deref() == Some(notif_pid.as_str())
-                    {
-                        // FIFO handoff: the server already promoted this
-                        // prompt but its adoption waits on the previous turn's
-                        // PromptResponse — buffer for the shim's flush. Not
-                        // applied, so the reconnect cursor does not advance.
-                        if agent.pending_adoption_updates.len()
-                            < super::agent_view::MAX_PENDING_ADOPTION_UPDATES
-                        {
-                            tracing::debug!(
-                                target: "qtrace",
-                                pid = std::process::id(),
-                                event = "adoption_update_buffered",
-                                prompt_id = %notif_pid,
-                                "buffering session/update for the stashed pending adoption",
-                            );
-                            agent.pending_adoption_updates.push((
-                                notif_pid.clone(),
-                                notif.request.update,
-                                meta.clone(),
-                            ));
-                        } else {
-                            tracing::debug!(
-                                prompt_id = %notif_pid,
-                                "pending-adoption buffer full; dropping update (kept prefix)",
-                            );
-                        }
-                        false
-                    } else if !meta.is_replay
-                        && let Some(notif_pid) = meta.prompt_id.as_ref()
-                        && agent.session.current_prompt_id.as_ref() != Some(notif_pid)
-                        && !((agent.session.current_prompt_id.is_none()
-                            || agent
-                                .session
-                                .current_prompt_id
-                                .as_deref()
-                                .is_some_and(is_server_initiated_prompt))
-                            && is_server_initiated_prompt(notif_pid))
-                        && !agent.attached_as_viewer
                     {
                         tracing::debug!(
                             session_id = notif.request.session_id.0.as_ref(),
@@ -349,19 +294,9 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         // the same turn match and render — but ONLY for a viewer
                         // watching another client's turn.
                         //
-                        // Server-initiated / auto-wake turns (synthetic prompt
-                        // ids) are deliberately NOT adopted here: they have no
-                        // client finish path (no PromptResponse, no
-                        // prompt_complete), so occupying `current_prompt_id`
-                        // would strand the turn-status and make later turns'
-                        // PromptResponses get discarded. Their content still
-                        // renders — the drop gate above passes synthetic deltas
-                        // through when `current_prompt_id` is None/synthetic.
-                        //
-                        // (Cron `scheduler-fired-…` turns ARE client-driven and
-                        // have a `prompt_complete` exit; a viewer enters their
-                        // running chrome via the `queue/changed` shim adoption
-                        // in `handle_queue_changed`, not here.)
+                        // Prompt ids are opaque identities. If the shell emits
+                        // activity for an actor-owned regular turn, its durable
+                        // terminal provides the matching exit path.
                         if let Some(notif_pid) = meta.prompt_id.as_ref()
                             && agent.session.current_prompt_id.as_ref() != Some(notif_pid)
                             && agent.attached_as_viewer
@@ -463,22 +398,19 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         // skip the adopt block — so it would never flip to
                         // TurnRunning. Checking here on every applied live viewer
                         // delta closes that gap, independent of whether the load
-                        // response conveyed `runningPromptId`, of delta ordering,
-                        // and of whether a given delta carries a prompt id.
+                        // response carried a structured foreground snapshot, of
+                        // delta ordering, and of whether a given delta carries a
+                        // prompt id.
                         //
-                        // Do NOT call start_turn(): it resets the tracker and
-                        // arms `expect_user_echo()`, which would corrupt the
-                        // driver's live stream. We only flip state + stamp the
-                        // elapsed timer (monotonic: only on the Idle→TurnRunning
-                        // transition).
+                        // Do NOT call start_turn(): it resets the tracker. We
+                        // only flip state + stamp the elapsed timer.
                         //
                         // Enter TurnRunning only for an adoptable prompt — see
                         // `should_adopt_running_prompt` (true iff the turn has a
-                        // terminal `prompt_complete` exit). This is what lets a
-                        // viewer (and the dashboard's locally-tracked row, which
-                        // reads live turn state) show a running `/loop` session as
-                        // Working without stranding "Responding…" forever on an
-                        // exit-less auto-wake / server-initiated turn.
+                        // durable terminal exit). This lets a viewer (and the
+                        // dashboard's locally-tracked row) show every regular
+                        // foreground turn as Working without inventing a second
+                        // lifecycle for internal origins.
                         if agent.attached_as_viewer
                             && !meta.is_replay
                             && !agent.session.loading_replay
@@ -486,7 +418,10 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                                 .session
                                 .current_prompt_id
                                 .as_deref()
-                                .is_some_and(should_adopt_running_prompt)
+                                .is_some_and(|pid| {
+                                    !agent.replayed_terminal_prompts.contains(pid)
+                                        && !agent.is_rewound_prompt(pid)
+                                })
                             && !matches!(agent.session.state, AgentState::TurnRunning)
                         {
                             agent.session.state = AgentState::TurnRunning;

@@ -16,116 +16,17 @@ pub(crate) use tools::interjection::{InterjectionBuffer, drain_formatted, format
 /// Shell instantiation of the shared entry type: images are ACP content.
 pub(crate) type PendingInterjection = tools::interjection::PendingInterjection<acp::ImageContent>;
 
-/// Prompt-id prefix for interjections that missed their turn and were
-/// converted into standalone prompt turns (arrived while idle, or after the
-/// running turn's final drain). The prefix keeps the turn's user echo
-/// persist-only: every pane already rendered the text from the
-/// `grow/session/interjection` broadcast, so a live echo would duplicate it.
-pub(crate) const INTERJECT_FALLBACK_PROMPT_PREFIX: &str = "interject-fallback-";
-
 impl SessionActor {
-    /// Common mid-turn steering path shared by the direct `Interject`
-    /// command and the queue send-now (`InterjectQueuedPrompt`) path: bump
-    /// the Goal autonomy generation while the Goal is Active (invalidating
-    /// any in-flight verifier stage or planner result captured under the old
-    /// generation) and buffer the text for the turn loop's next safe
-    /// boundary. Callers own the broadcast / event / idle-fallback
-    /// differences (source `Direct` vs `Queue`, echo id, prompt fallback).
+    /// Common same-turn steering buffer shared by direct and queued input.
+    /// Goal planner/verifier leases are intentionally independent: ordinary
+    /// supplemental user input does not revise the Goal definition or plan.
     pub(super) fn queue_mid_turn_interjection(
         &self,
         text: String,
         attachments: Vec<acp::ImageContent>,
     ) {
-        if self.goal_tracker.lock().status()
-            == Some(crate::session::goal_tracker::GoalStatus::Active)
-        {
-            self.goal_tracker.lock().bump_autonomy_generation();
-        }
         self.pending_interjections
             .push(PendingInterjection { text, attachments });
-    }
-
-    /// Convert a stranded interjection into a queued prompt turn.
-    ///
-    /// An interjection is only merged into a *running* turn
-    /// (`drain_pending_interjections`); one that arrives while the session is
-    /// idle — or lands after the running turn's final drain — would otherwise
-    /// sit in `pending_interjections` forever and the user's message would be
-    /// silently lost (the pager already rendered it and said "Interjection
-    /// sent"). Queue it as its own prompt turn instead; the caller kicks
-    /// `maybe_start_running_task`.
-    ///
-    /// `front` puts the converted turn ahead of already-queued prompts —
-    /// send-now semantics: the user asked for "now", queued rows asked for
-    /// "later". Front placement is re-validated under the state lock: the
-    /// caller's "no turn running" check is unlocked, so a concurrent
-    /// promotion (MCP-init release, plan-approval resume) may have pinned a
-    /// running prompt at the front in the meantime — displacing it would
-    /// desync `handle_completion`'s front pop. In that case the item lands
-    /// right behind the running front.
-    pub(super) async fn queue_interjection_fallback_prompt(
-        &self,
-        text: String,
-        images: Vec<acp::ImageContent>,
-        front: bool,
-    ) {
-        let prompt_id = format!("{INTERJECT_FALLBACK_PROMPT_PREFIX}{}", uuid::Uuid::now_v7());
-        let mut prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
-        prompt_blocks.extend(images.into_iter().map(acp::ContentBlock::Image));
-        // Preserve the selected Behavior when an interjection becomes a new
-        // turn; it must not silently fall back to Normal.
-        let prompt_mode = *self.current_prompt_mode.lock();
-        let (respond_to, _) = tokio::sync::oneshot::channel();
-        // User message (skips queue_input); invalidate in-flight recap now.
-        self.cancel_pending_recap_for_new_prompt();
-        let item = InputItem {
-            prompt_id,
-            prompt_blocks,
-            prompt_mode,
-            client_identifier: None,
-            screen_mode: None,
-            verbatim: false,
-            json_schema: None,
-            origin: super::super::PromptOrigin::User,
-            task_wake_fallback: None,
-            respond_to,
-            persist_ack: None,
-            parsed_prompt_tx: None,
-            queue_meta: None,
-            // Send-now semantics (see doc): a later real send-now must not
-            // leapfrog this fallback in `queue_input`'s FIFO scan.
-            send_now: front,
-        };
-        let mut state = self.state.lock().await;
-        if front {
-            // Never displace a running front (see doc): insert after it when
-            // the front row is the in-flight turn's own item.
-            let insert_at = usize::from(matches!(
-                (state.pending_inputs.front(), state.running_prompt_id()),
-                (Some(front_item), Some(running)) if front_item.prompt_id == running
-            ));
-            state.pending_inputs.insert(insert_at, item);
-        } else {
-            state.pending_inputs.push_back(item);
-        }
-        tracing::info!("Converted stranded interjection into a queued prompt turn");
-    }
-
-    /// Flush interjections that missed the completed turn's final drain into
-    /// queued prompt turns (front of the queue, original order). Returns
-    /// whether anything was flushed; the caller kicks
-    /// `maybe_start_running_task`.
-    pub(super) async fn flush_stranded_interjections(&self) -> bool {
-        let stranded = self.pending_interjections.drain_all();
-        if stranded.is_empty() {
-            return false;
-        }
-        // Reversed push_fronts keep entry 0 front-most.
-        for entry in stranded.into_iter().rev() {
-            self.queue_interjection_fallback_prompt(entry.text, entry.attachments, true)
-                .await;
-        }
-        true
     }
     /// Normalize interjection images for injection (shared pipeline above);
     /// notices append to `wrapped` (TEXT side only). Returns the images to

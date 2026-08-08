@@ -228,10 +228,6 @@ pub struct AcpUpdateTracker {
     /// Updated on every thought chunk as `agentTimestampMs - streamStartMs`.
     /// Frozen when thinking ends (passed to `finish_running_with_time`).
     last_thinking_elapsed_ms: Option<i64>,
-    /// When true, the next UserMessageChunk will be silently ignored
-    /// because we already pushed the user prompt entry directly from
-    /// `dispatch_send_prompt`. Reset after one skip.
-    skip_next_user_echo: bool,
     /// When true, the next UserMessageChunk is a skill body that follows
     /// a skill metadata chunk. It should be silently absorbed so the
     /// raw skill instructions don't appear in scrollback.
@@ -265,9 +261,6 @@ pub struct AcpUpdateTracker {
     /// finish any in-flight thinking/agent-message entries so the next
     /// chunks create fresh ones instead of appending to stale entries.
     last_stream_start_ms: Option<i64>,
-    /// Monotonic count of live parent-agent updates that changed scrollback.
-    agent_output_epoch: u64,
-    epoch_at_last_finish: u64,
     /// Session project cwd for display-only redundant-`cd` stripping.
     /// Set from [`AgentSession::cwd`]; not used for execution.
     session_cwd: Option<PathBuf>,
@@ -375,19 +368,6 @@ impl Utf8Decoder {
 impl AcpUpdateTracker {
     pub fn new() -> Self {
         Self::default()
-    }
-    pub(crate) fn output_since_last_finish(&self) -> bool {
-        self.agent_output_epoch != self.epoch_at_last_finish
-    }
-    /// Mark all output so far as accounted for without finishing the turn —
-    /// for terminals that must be skipped while a client command owns the
-    /// screen (a full `finish_turn` would flush mid-command state such as
-    /// `pending_compaction`).
-    pub(crate) fn snapshot_output_epoch(&mut self) {
-        self.epoch_at_last_finish = self.agent_output_epoch;
-    }
-    fn bump_agent_output_epoch(&mut self) {
-        self.agent_output_epoch = self.agent_output_epoch.wrapping_add(1);
     }
     /// Record session cwd used when stripping redundant `cd` prefixes in chrome.
     /// No-op when the path is already stored (avoids cloning on every update).
@@ -791,13 +771,6 @@ impl AcpUpdateTracker {
             }
             self.last_stream_start_ms = Some(new_start);
         }
-        let is_agent_output = matches!(
-            &update,
-            acp::SessionUpdate::AgentMessageChunk(_)
-                | acp::SessionUpdate::AgentThoughtChunk(_)
-                | acp::SessionUpdate::ToolCall(_)
-                | acp::SessionUpdate::ToolCallUpdate(_)
-        );
         let changed = match update {
             acp::SessionUpdate::AgentMessageChunk(chunk) => {
                 self.blocking_waits.clear();
@@ -826,14 +799,10 @@ impl AcpUpdateTracker {
             acp::SessionUpdate::Plan(_) | acp::SessionUpdate::CurrentModeUpdate(_) => false,
             _ => false,
         };
-        if is_agent_output && changed && !meta.is_replay {
-            self.bump_agent_output_epoch();
-        }
         changed
     }
     /// Called when PromptResponse is received (turn complete).
     pub fn finish_turn(&mut self, scrollback: &mut ScrollbackState) {
-        self.epoch_at_last_finish = self.agent_output_epoch;
         self.finish_thinking(scrollback);
         if let Some(agent_id) = self.current_agent_msg.take() {
             scrollback.finish_running(agent_id);
@@ -895,25 +864,6 @@ impl AcpUpdateTracker {
             scrollback.set_last_running(true);
             self.current_thinking = Some(entry_id);
         }
-    }
-    /// Mark that the next UserMessageChunk should be silently dropped.
-    ///
-    /// Call this from `dispatch_send_prompt` after pushing the user entry
-    /// directly, so the ACP echo doesn't produce a duplicate.
-    pub fn expect_user_echo(&mut self) {
-        self.skip_next_user_echo = true;
-    }
-    /// Reset stale skip state when no local user block was rendered, so the
-    /// agent's user-message broadcast is the one source of the user echo
-    /// (e.g. the synthetic cron/bash adoption path) instead of being dropped.
-    pub fn clear_user_echo_skip(&mut self) {
-        self.skip_next_user_echo = false;
-        self.skip_next_skill_body = false;
-    }
-    /// Whether [`expect_user_echo`] is pending (subagent replay tests).
-    #[cfg(test)]
-    pub fn expects_user_echo(&self) -> bool {
-        self.skip_next_user_echo
     }
     /// Handle an agent message chunk (streaming text).
     fn handle_agent_chunk(
@@ -1229,9 +1179,7 @@ impl AcpUpdateTracker {
     }
     /// Handle a user message chunk (session replay or live followup).
     ///
-    /// If `skip_next_user_echo` is set, this is the ACP echo of a prompt
-    /// we already added to scrollback — drop it but still reset tracking
-    /// state so the agent's response creates fresh entries.
+    /// Optimistic and ACP echoes reconcile solely by `messageId`.
     fn handle_user_message(
         &mut self,
         chunk: acp::ContentChunk,
@@ -1255,8 +1203,23 @@ impl AcpUpdateTracker {
                 scrollback.finish_running(entry_id);
             }
         }
-        if self.skip_next_user_echo {
-            self.skip_next_user_echo = false;
+        let message_id = chunk
+            .meta
+            .as_ref()
+            .and_then(|m| m.get(user_message_chunk_meta::MESSAGE_ID))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        if let Some(existing_id) = message_id.as_deref().and_then(|message_id| {
+            (0..scrollback.len()).rev().find_map(|idx| {
+                let entry = scrollback.get(idx)?;
+                matches!(
+                    &entry.block,
+                    RenderBlock::UserPrompt(block)
+                        if block.message_id.as_deref() == Some(message_id)
+                )
+                .then_some(entry.id)
+            })
+        }) {
             if text.contains("<command-name>") {
                 self.skip_next_skill_body = true;
             }
@@ -1267,18 +1230,11 @@ impl AcpUpdateTracker {
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
             if let Some(pi) = prompt_index {
-                for idx in (0..scrollback.len()).rev() {
-                    if let Some(entry) = scrollback.get_mut(idx)
-                        && let RenderBlock::UserPrompt(ref mut block) = entry.block
-                    {
-                        if block.is_interjection {
-                            continue;
-                        }
-                        if block.prompt_index.is_none() {
-                            block.prompt_index = Some(pi);
-                        }
-                        break;
-                    }
+                if let Some(entry) = scrollback.get_by_id_mut(existing_id)
+                    && let RenderBlock::UserPrompt(ref mut block) = entry.block
+                    && block.prompt_index.is_none()
+                {
+                    block.prompt_index = Some(pi);
                 }
             }
             return false;
@@ -1292,9 +1248,9 @@ impl AcpUpdateTracker {
         if let Some(segments) = combined_display_texts_from_chunk(&chunk) {
             let mut last_id = None;
             for seg in &segments {
-                last_id = Some(scrollback.push_block(RenderBlock::UserPrompt(
-                    crate::scrollback::blocks::UserPromptBlock::new(seg.clone()),
-                )));
+                let mut block = crate::scrollback::blocks::UserPromptBlock::new(seg.clone());
+                block.message_id = message_id.clone();
+                last_id = Some(scrollback.push_block(RenderBlock::UserPrompt(block)));
             }
             if let (Some(pi), Some(id)) = (prompt_index, last_id)
                 && let Some(entry) = scrollback.get_by_id_mut(id)
@@ -1368,6 +1324,7 @@ impl AcpUpdateTracker {
                 crate::scrollback::blocks::UserPromptBlock::new(text)
             }
         };
+        block.message_id = message_id;
         block.prompt_index = prompt_index;
         let entry_id = scrollback.push_block(RenderBlock::UserPrompt(block));
         let ts_ms = meta.turn_start_ms.or(meta.agent_timestamp_ms);
@@ -1440,40 +1397,19 @@ fn extract_skill_header_command(text: &str) -> Option<String> {
 /// Type-driven (preferred):
 /// 1. `ContentChunk._meta.hideFromScrollback` stamped by the shell from
 ///    [`PromptOrigin::hide_user_echo_from_scrollback`]
-/// 2. `SessionNotification._meta.promptId` classified via
-///    [`PromptOrigin::from_prompt_id`]
-///
-/// Legacy fallback (pre-meta sessions only): bare auto-wake text that used to
-/// be gated by the system-reminder prefix. Cron is handled earlier by
-/// [`extract_cron_prompt_body`].
+/// Prompt ids and message text are deliberately not consulted: both are
+/// identities/content, not lifecycle protocols.
 fn user_message_hidden_from_scrollback(
     chunk: &acp::ContentChunk,
-    meta: &NotificationMeta,
-    text: &str,
+    _meta: &NotificationMeta,
+    _text: &str,
 ) -> bool {
-    if chunk
+    chunk
         .meta
         .as_ref()
         .and_then(|m| m.get(user_message_chunk_meta::HIDE_FROM_SCROLLBACK))
         .and_then(|v| v.as_bool())
         == Some(true)
-    {
-        return true;
-    }
-    if let Some(pid) = meta.prompt_id.as_deref()
-        && shell::session::PromptOrigin::from_prompt_id(pid).hide_user_echo_from_scrollback()
-    {
-        return true;
-    }
-    let t = text.trim_start();
-    t.starts_with("<system-reminder>")
-        || t.starts_with("<monitor-event")
-        || t.trim() == "---"
-        || t.lines().next().is_some_and(|first| {
-            first.starts_with(|c: char| c.is_ascii_digit())
-                && first.contains(" monitor events from ")
-                && first.contains(" (use ")
-        })
 }
 /// Extract the user's prompt from `<system-reminder>` cron framing.
 ///
@@ -2588,6 +2524,20 @@ mod tests {
             acp::TextContent::new(text.to_string()),
         )))
     }
+    fn user_message_with_id(text: &str, message_id: &str) -> acp::SessionUpdate {
+        acp::SessionUpdate::UserMessageChunk(
+            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+                text.to_string(),
+            )))
+            .meta(
+                serde_json::json!({
+                    (user_message_chunk_meta::MESSAGE_ID): message_id,
+                })
+                .as_object()
+                .cloned(),
+            ),
+        )
+    }
     #[test]
     fn streaming_agent_message() {
         let mut sb = ScrollbackState::new();
@@ -2598,56 +2548,36 @@ mod tests {
         assert!(tracker.current_agent_msg.is_some());
     }
     #[test]
-    fn agent_output_epoch_tracks_visible_live_output() {
-        crate::appearance::cache::set_show_thinking_blocks(true);
+    fn optimistic_user_bubble_reconciles_acp_echo_by_message_id() {
         let mut sb = ScrollbackState::new();
         let mut tracker = AcpUpdateTracker::new();
-        assert!(tracker.handle_update(user_message("prompt"), &meta(), &mut sb));
-        assert_eq!(tracker.agent_output_epoch, 0);
-        assert!(tracker.handle_update(agent_chunk("response"), &meta(), &mut sb));
-        assert_eq!(tracker.agent_output_epoch, 1);
-        let replay = NotificationMeta {
-            is_replay: true,
-            ..Default::default()
-        };
-        assert!(tracker.handle_update(agent_chunk(" replay"), &replay, &mut sb));
-        assert_eq!(tracker.agent_output_epoch, 1);
-        assert!(tracker.handle_update(thought_chunk("thinking"), &meta(), &mut sb));
-        assert_eq!(tracker.agent_output_epoch, 2);
-        assert!(tracker.handle_update(
-            tool_call("read-1", acp::ToolKind::Read, "read_file"),
-            &meta(),
-            &mut sb,
-        ));
-        assert_eq!(tracker.agent_output_epoch, 3);
-        assert!(tracker.handle_update(tool_update_completed("read-1"), &meta(), &mut sb));
-        assert_eq!(tracker.agent_output_epoch, 4);
+        let optimistic =
+            crate::scrollback::blocks::UserPromptBlock::new("hello").with_message_id("message-1");
+        sb.push_block(RenderBlock::UserPrompt(optimistic));
+
         assert!(!tracker.handle_update(
-            tool_call("todo-1", acp::ToolKind::Other, "TodoWrite"),
+            user_message_with_id("hello", "message-1"),
             &meta(),
             &mut sb,
         ));
-        assert_eq!(tracker.agent_output_epoch, 4);
+        assert_eq!(sb.len(), 1, "the ACP echo must reuse the optimistic bubble");
     }
     #[test]
-    fn output_since_last_finish_flips_per_turn() {
+    fn repeated_acp_echo_with_same_message_id_is_idempotent() {
         let mut sb = ScrollbackState::new();
         let mut tracker = AcpUpdateTracker::new();
-        tracker.finish_turn(&mut sb);
-        assert!(
-            !tracker.output_since_last_finish(),
-            "no output right after a finish"
-        );
-        assert!(tracker.handle_update(agent_chunk("wake reply"), &meta(), &mut sb));
-        assert!(
-            tracker.output_since_last_finish(),
-            "an agent message chunk flips the flag"
-        );
-        tracker.finish_turn(&mut sb);
-        assert!(
-            !tracker.output_since_last_finish(),
-            "the next finish snapshots the epoch again"
-        );
+
+        assert!(tracker.handle_update(
+            user_message_with_id("hello", "message-1"),
+            &meta(),
+            &mut sb,
+        ));
+        assert!(!tracker.handle_update(
+            user_message_with_id("hello", "message-1"),
+            &meta(),
+            &mut sb,
+        ));
+        assert_eq!(sb.len(), 1, "message identity must make replay idempotent");
     }
     #[test]
     fn streaming_thinking() {
@@ -2888,70 +2818,6 @@ mod tests {
             "user_message should reset current_thinking"
         );
     }
-    /// Regression test: exact real-world flow where send_prompt adds user entry
-    /// directly to scrollback (bypassing tracker), then tracker receives echo + response.
-    ///
-    /// This matches what actually happens in the app:
-    /// 1. send_prompt() pushes user entry + calls expect_user_echo()
-    /// 2. ACP echoes user_message_chunk → tracker skips it (no duplicate)
-    /// 3. ACP streams thought_chunk, agent_message_chunk
-    /// 4. User sends second prompt via send_prompt
-    /// 5. ACP echoes + streams second turn
-    ///
-    /// The critical invariant: exactly 1 user entry per turn, 2 separate agent messages.
-    #[test]
-    fn real_flow_two_turns_via_send_prompt() {
-        let mut sb = ScrollbackState::new();
-        let mut tracker = AcpUpdateTracker::new();
-        sb.push_block(RenderBlock::user_prompt("whats the date"));
-        tracker.expect_user_echo();
-        let modified = tracker.handle_update(user_message("whats the date"), &meta(), &mut sb);
-        assert!(!modified, "echo should be skipped, not modify scrollback");
-        assert_eq!(sb.len(), 1, "still just 1 entry (direct push only)");
-        tracker.handle_update(thought_chunk("thinking about date..."), &meta(), &mut sb);
-        tracker.handle_update(
-            agent_chunk("Today's date is February 8, 2026."),
-            &meta(),
-            &mut sb,
-        );
-        assert!(
-            tracker.current_agent_msg.is_some(),
-            "turn 1 agent msg should be tracked"
-        );
-        tracker.finish_turn(&mut sb);
-        sb.push_block(RenderBlock::user_prompt("whats the current weather"));
-        tracker.expect_user_echo();
-        let modified =
-            tracker.handle_update(user_message("whats the current weather"), &meta(), &mut sb);
-        assert!(!modified, "second echo should also be skipped");
-        assert!(
-            tracker.current_agent_msg.is_none(),
-            "echo should have reset current_agent_msg"
-        );
-        tracker.handle_update(thought_chunk("thinking about weather..."), &meta(), &mut sb);
-        tracker.handle_update(
-            agent_chunk("I don't have access to weather data."),
-            &meta(),
-            &mut sb,
-        );
-        let agent_msg_indices: Vec<usize> = (0..sb.len())
-            .filter(|&i| matches!(sb.get(i).unwrap().block, RenderBlock::AgentMessage(_)))
-            .collect();
-        assert_eq!(
-            agent_msg_indices.len(),
-            2,
-            "Should have exactly 2 separate agent message entries, got {}. Total entries: {}",
-            agent_msg_indices.len(),
-            sb.len(),
-        );
-        let user_count = (0..sb.len())
-            .filter(|&i| matches!(sb.get(i).unwrap().block, RenderBlock::UserPrompt(_)))
-            .count();
-        assert_eq!(
-            user_count, 2,
-            "exactly 2 user entries (no duplicates from echo)"
-        );
-    }
     /// Test: two turns where finish_turn() is called between them
     /// (simulating send_prompt calling finish_turn before new turn).
     /// No echo user_message_chunk — just direct scrollback manipulation + tracker.
@@ -2977,57 +2843,7 @@ mod tests {
             agent_msg_count,
         );
     }
-    /// Test: expect_user_echo skips exactly one echo, then allows normal flow.
-    #[test]
-    fn expect_user_echo_skips_one() {
-        let mut sb = ScrollbackState::new();
-        let mut tracker = AcpUpdateTracker::new();
-        sb.push_block(RenderBlock::user_prompt("hello"));
-        tracker.expect_user_echo();
-        assert!(!tracker.handle_update(user_message("hello"), &meta(), &mut sb));
-        assert_eq!(sb.len(), 1, "echo should not add a duplicate");
-        assert!(tracker.handle_update(user_message("world"), &meta(), &mut sb));
-        assert_eq!(sb.len(), 2, "second message should be added normally");
-    }
-    /// The echoed promptIndex belongs to the turn-starting prompt: an
-    /// interjection that lands between the local push and the echo (laggy
-    /// link) must not steal the backfilled index — the shell never numbers
-    /// interjections.
-    #[test]
-    fn echo_prompt_index_backfill_skips_interjections() {
-        let mut sb = ScrollbackState::new();
-        let mut tracker = AcpUpdateTracker::new();
-        let prompt_id = sb.push_block(RenderBlock::user_prompt("real prompt"));
-        tracker.expect_user_echo();
-        let ij_id = sb.push_block(RenderBlock::interjection_prompt("steer"));
-        let echo = acp::SessionUpdate::UserMessageChunk(
-            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
-                "real prompt".to_string(),
-            )))
-            .meta(serde_json::json!({ "promptIndex": 3 }).as_object().cloned()),
-        );
-        assert!(
-            !tracker.handle_update(echo, &meta(), &mut sb),
-            "echo is skipped"
-        );
-        let prompt_idx = sb.index_of_id(prompt_id).unwrap();
-        match &sb.get(prompt_idx).unwrap().block {
-            RenderBlock::UserPrompt(b) => assert_eq!(b.prompt_index, Some(3)),
-            other => panic!("expected UserPrompt, got {other:?}"),
-        }
-        let ij_idx = sb.index_of_id(ij_id).unwrap();
-        match &sb.get(ij_idx).unwrap().block {
-            RenderBlock::UserPrompt(b) => {
-                assert!(b.is_interjection);
-                assert_eq!(
-                    b.prompt_index, None,
-                    "interjection must not steal the echoed index"
-                );
-            }
-            other => panic!("expected UserPrompt, got {other:?}"),
-        }
-    }
-    /// Test: session replay (no expect_user_echo) still creates user entries.
+    /// Session replay creates user entries without any client-side adoption state.
     #[test]
     fn session_replay_creates_user_entries() {
         let mut sb = ScrollbackState::new();
@@ -3084,27 +2900,6 @@ mod tests {
         }
         assert!(!tracker.handle_update(user_message("Deploy instructions"), &meta(), &mut sb,));
         assert_eq!(sb.len(), 1);
-    }
-    /// Live execution: echo-skip + skill body skip work together.
-    #[test]
-    fn skill_echo_skips_both_chunks() {
-        let mut sb = ScrollbackState::new();
-        let mut tracker = AcpUpdateTracker::new();
-        sb.push_block(RenderBlock::skill_prompt("/implement fix bug"));
-        tracker.expect_user_echo();
-        let xml = "<command-name>implement</command-name>\n\
-                    <command-message>/implement</command-message>\n\
-                    <command-args>fix bug</command-args>";
-        assert!(!tracker.handle_update(user_message(xml), &meta(), &mut sb));
-        assert_eq!(sb.len(), 1, "echo should not add a duplicate");
-        assert!(!tracker.handle_update(
-            user_message("You are an orchestrator..."),
-            &meta(),
-            &mut sb,
-        ));
-        assert_eq!(sb.len(), 1, "skill body echo should be absorbed");
-        assert!(tracker.handle_update(user_message("follow-up question"), &meta(), &mut sb,));
-        assert_eq!(sb.len(), 2);
     }
     /// finish_turn clears stale skip_next_skill_body.
     #[test]
@@ -5686,78 +5481,6 @@ mod tests {
                 }))),
         ))
     }
-    /// Regression: is_bg_tool() detected on first InProgress defers the tool
-    /// before any scrollback entry is created.
-    #[test]
-    fn bg_tool_detected_at_first_update_defers_to_bg() {
-        let mut sb = ScrollbackState::new();
-        let mut tracker = AcpUpdateTracker::new();
-        tracker.handle_update(
-            tool_call("tc1", acp::ToolKind::Execute, "Execute `sleep 9999`"),
-            &meta(),
-            &mut sb,
-        );
-        assert_eq!(sb.len(), 1);
-        assert_eq!(tracker.pending_tools.len(), 1);
-        let output_epoch = tracker.agent_output_epoch;
-        let modified = tracker.handle_update(
-            tool_update_in_progress_bg("tc1", b"started"),
-            &meta(),
-            &mut sb,
-        );
-        assert!(
-            !modified,
-            "bg tool deferral should suppress further output streaming"
-        );
-        assert_eq!(
-            tracker.agent_output_epoch, output_epoch,
-            "deferral must not bump the epoch (it is not visible agent output)"
-        );
-        assert_eq!(sb.len(), 1, "real execute entry kept for demotion");
-        assert!(
-            !tracker.pending_tools.is_empty(),
-            "tool stays in pending_tools for demotion entry_id"
-        );
-        assert!(
-            tracker.bg_deferred_tools.contains_key("tc1"),
-            "tool should be added to bg_deferred_tools"
-        );
-        assert_eq!(
-            tracker.bg_deferred_tools.get("tc1").unwrap().as_deref(),
-            Some("long running task"),
-            "description should be extracted from raw_input"
-        );
-    }
-    /// Regression: a bg-tool deferral (here dropping the placeholder row) must
-    /// not bump `agent_output_epoch` — it is not visible agent output.
-    #[test]
-    fn bg_tool_deferral_does_not_bump_agent_output_epoch() {
-        let mut sb = ScrollbackState::new();
-        let mut tracker = AcpUpdateTracker::new();
-        tracker.handle_update(
-            tool_call("tc1", acp::ToolKind::Other, "run_terminal_command"),
-            &meta(),
-            &mut sb,
-        );
-        assert_eq!(sb.len(), 1);
-        let epoch = tracker.agent_output_epoch;
-        let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
-            acp::ToolCallId::new(Arc::from("tc1")),
-            acp::ToolCallUpdateFields::new()
-                .status(Some(acp::ToolCallStatus::InProgress))
-                .raw_input(Some(serde_json::json!({
-                    "is_background": true,
-                    "description": "long running task"
-                }))),
-        ));
-        assert!(!tracker.handle_update(update, &meta(), &mut sb));
-        assert_eq!(sb.len(), 0, "placeholder dropped on deferral");
-        assert!(tracker.bg_deferred_tools.contains_key("tc1"));
-        assert_eq!(
-            tracker.agent_output_epoch, epoch,
-            "deferral must not bump the epoch (it is not visible agent output)"
-        );
-    }
     /// Eager kind=Other title=`run_terminal_command` must not flash in the TUI.
     #[test]
     fn eager_execute_function_name_is_loading_placeholder_not_label() {
@@ -6179,15 +5902,10 @@ mod tests {
             .meta(Some(chunk_meta)),
         )
     }
-    fn meta_with_prompt_id(prompt_id: &str) -> NotificationMeta {
-        let mut m = meta();
-        m.prompt_id = Some(prompt_id.to_string());
-        m
-    }
-    /// Scrollback hide is type-driven: chunk meta `hideFromScrollback` or
-    /// notification `promptId` → [`PromptOrigin::hide_user_echo_from_scrollback`].
+    /// Scrollback hiding is an explicit chunk property. Prompt-id spelling is
+    /// identity only and never carries visibility semantics.
     #[test]
-    fn replay_hides_user_echo_by_origin_type() {
+    fn replay_hides_user_echo_only_by_explicit_chunk_meta() {
         let mut sb = ScrollbackState::new();
         let mut tracker = AcpUpdateTracker::new();
         let monitor_xml = "\
@@ -6204,67 +5922,18 @@ mod tests {
             ),
             "hideFromScrollback meta must suppress regardless of text shape"
         );
-        assert!(
-            !tracker.handle_update(
-                user_message("arbitrary model-only body"),
-                &meta_with_prompt_id("task-completed-bg-1"),
-                &mut sb,
-            ),
-            "task-completed origin must suppress via promptId"
-        );
-        assert!(
-            !tracker.handle_update(
-                user_message("drain body"),
-                &meta_with_prompt_id("notifications-019e0000"),
-                &mut sb,
-            ),
-            "notification-drain origin must suppress via promptId"
-        );
-        assert!(
-            tracker.handle_update(
-                user_message("please check the CI status"),
-                &meta_with_prompt_id("scheduler-fired-abc"),
-                &mut sb,
-            ),
-            "scheduler-fired must still render (cron path is separate)"
-        );
+        let mut identity_only = meta();
+        identity_only.prompt_id = Some("task-completed-bg-1".into());
+        assert!(tracker.handle_update(
+            user_message("arbitrary visible body"),
+            &identity_only,
+            &mut sb,
+        ));
         assert!(
             tracker.handle_update(user_message("please check the CI status"), &meta(), &mut sb),
             "real user text must still render"
         );
         assert_eq!(sb.len(), 2);
-        assert!(
-            !tracker.handle_update(user_message(monitor_xml), &meta(), &mut sb),
-            "legacy untyped monitor XML still suppressed"
-        );
-        assert!(
-            !tracker.handle_update(
-                user_message("<system-reminder>\nBackground task done.\n</system-reminder>"),
-                &meta(),
-                &mut sb,
-            ),
-            "legacy system-reminder still suppressed"
-        );
-        let batched = "2 monitor events from 1 monitor (use get_command_or_subagent_output \
-                       to identify each monitor):\n\n<monitor description=\"ticks\" \
-                       task_id=\"t-1\">\n[1] tick-1\n[2] tick-2\n</monitor>";
-        assert!(
-            !tracker.handle_update(user_message(batched), &meta(), &mut sb),
-            "legacy batched drain preamble still suppressed"
-        );
-        assert!(
-            !tracker.handle_update(user_message("---"), &meta(), &mut sb),
-            "legacy drain section separator still suppressed"
-        );
-        assert!(
-            tracker.handle_update(
-                user_message("what do these monitor events from my run mean (use plain words)?"),
-                &meta(),
-                &mut sb,
-            ),
-            "digit anchor: user text with both phrases but no leading count still renders"
-        );
-        assert_eq!(sb.len(), 3);
     }
     /// Helper: UserMessageChunk with `skillTokenRanges` in content-block meta.
     fn user_message_with_token_ranges(text: &str, ranges: serde_json::Value) -> acp::SessionUpdate {

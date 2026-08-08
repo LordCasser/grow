@@ -55,6 +55,8 @@ impl Drop for TurnActiveGuard {
 
 pub(crate) struct AgentTask {
     pub(crate) prompt_id: String,
+    pub(crate) origin: PromptOrigin,
+    pub(crate) turn_kind: crate::session::TurnKind,
     pub(crate) turn_start_ms: u64,
     pub(crate) handle: tokio::task::AbortHandle,
 }
@@ -63,6 +65,8 @@ impl AgentTask {
     pub(super) fn new_prompt(
         session: Arc<SessionActor>,
         prompt_id: String,
+        origin: PromptOrigin,
+        turn_kind: crate::session::TurnKind,
         input: Vec<ContentBlock>,
         prompt_mode: PromptMode,
         client_identifier: Option<String>,
@@ -76,6 +80,8 @@ impl AgentTask {
         let pid = prompt_id.clone();
         Self {
             prompt_id,
+            origin: origin.clone(),
+            turn_kind,
             turn_start_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -90,6 +96,8 @@ impl AgentTask {
                     verbatim,
                     json_schema,
                     pid,
+                    origin,
+                    turn_kind,
                     completion_tx,
                     persist_ack,
                     parsed_prompt_tx,
@@ -104,6 +112,10 @@ impl AgentTask {
         if !self.handle.is_finished() {
             self.handle.abort();
         }
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.handle.is_finished()
     }
 }
 
@@ -152,6 +164,8 @@ async fn run_task(
     verbatim: bool,
     json_schema: Option<serde_json::Value>,
     prompt_id: String,
+    origin: PromptOrigin,
+    turn_kind: crate::session::TurnKind,
     completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     persist_ack: Option<oneshot::Sender<()>>,
     parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
@@ -159,6 +173,8 @@ async fn run_task(
     let result = session
         .handle_prompt(
             &prompt_id,
+            origin,
+            turn_kind,
             input,
             prompt_mode,
             client_identifier,
@@ -211,44 +227,27 @@ impl SessionActor {
         }
     }
 
-    /// Cancel the running turn for a send-now prompt: Ctrl+C parity (kills the
-    /// turn's foreground command; background tasks, subagents, and the queue
-    /// survive). Flushes the replay buffer before teardown so streamed chunks
-    /// persist; the caller's `maybe_start_running_task` then promotes the prompt.
-    pub(super) async fn cancel_turn_for_send_now(
+    /// End only the foreground turn after a Goal control successfully pauses,
+    /// clears, revises, creates, or enters Goal state. Children owned by that
+    /// exact prompt are cancelled so stale Goal work cannot keep editing after
+    /// clear/edit; unrelated session children and background tasks survive.
+    pub(super) async fn cancel_turn_for_goal_control(
         &self,
+        trigger: &'static str,
         replay_buffer: &mut crate::agent::update_chunk_merge::ReplayBuffer,
     ) {
+        let parent_prompt_id = {
+            let state = self.state.lock().await;
+            let Some(turn) = state.foreground.regular() else {
+                return;
+            };
+            turn.prompt_id.clone()
+        };
+        self.cancel_subagents_for_prompt_id(&parent_prompt_id);
         if let Some(notification) = replay_buffer.flush() {
             self.emit_buffered(notification).await;
         }
-        self.pending_interjections.clear();
-        self.cancel_running_task(false, false, false, Some("send_now".to_string()))
-            .await;
-        // Re-enable notification drains: unlike Ctrl+C, a send-now means the user is re-engaged.
-        if let Some(gate) = &self.tool_context.task_wake_suppressed {
-            gate.set(false);
-        }
-        self.state.lock().await.notifications_suppressed = false;
-        ::diagnostics::unified_log::info(
-            "shell.task_wake.gate_cleared",
-            Some(self.session_info.id.0.as_ref()),
-            Some(serde_json::json!({ "reason": "send_now" })),
-        );
-    }
-
-    /// End only the foreground Goal turn after `/goal pause`. Background
-    /// tasks/subagents and their deferred completions survive; the distinct
-    /// trigger keeps this lifecycle transition separate from Normal send-now
-    /// marker and queue semantics.
-    pub(super) async fn cancel_turn_for_goal_pause(
-        &self,
-        replay_buffer: &mut crate::agent::update_chunk_merge::ReplayBuffer,
-    ) {
-        if let Some(notification) = replay_buffer.flush() {
-            self.emit_buffered(notification).await;
-        }
-        self.cancel_running_task(false, false, false, Some("goal_pause".to_string()))
+        self.cancel_running_task(false, false, false, Some(trigger.to_string()))
             .await;
     }
 
@@ -335,7 +334,7 @@ impl SessionActor {
             // attribution below; cleanup will take+abort again (idempotent).
             {
                 let state = self.state.lock().await;
-                if let Some(task) = state.running_task.as_ref() {
+                if let Some(task) = state.foreground.regular() {
                     task.abort();
                 }
             }
@@ -344,8 +343,7 @@ impl SessionActor {
             self.cancel_all_session_subagents();
         }
 
-        // Don't count send-now/rewound cancels — they'd skew the cancel-rate signal.
-        if !rewind_if_pristine && trigger.as_deref() != Some("send_now") {
+        if !rewind_if_pristine {
             self.signals_handle().record_cancellation();
         }
 
@@ -416,7 +414,7 @@ impl SessionActor {
             }
 
             let rewound_input = if rewind_if_pristine && state.rewindable {
-                if let Some(task) = state.running_task.take() {
+                if let Some(task) = state.foreground.take_regular() {
                     task.abort();
                 }
                 if let Some(gate) = &self.tool_context.task_wake_suppressed {
@@ -436,7 +434,7 @@ impl SessionActor {
             let running_task = if rewound_input.is_some() {
                 None
             } else {
-                state.running_task.take()
+                state.foreground.take_regular()
             };
 
             // Decide which queued inputs get resolved with `Cancelled` now vs.
@@ -550,6 +548,13 @@ impl SessionActor {
                 ),
             )
             .await;
+        self.agent
+            .borrow()
+            .tool_bridge()
+            .update_resource(
+                tools::implementations::grow_build::task::types::CurrentSubagentOwnerResource::default(),
+            )
+            .await;
         // Cancellation aborts the in-turn goal loop before its post-loop
         // cleanup runs, so clear the goal-loop flag here too.
         self.set_goal_loop_active_resource(false).await;
@@ -569,16 +574,9 @@ impl SessionActor {
             );
             // Mark the next real user prompt as following a mid-turn abort so
             // replay/analytics/the model can see the user stopped this turn.
-            // Send-now is a silent cancel-and-send — the user is continuing,
-            // not aborting — so it must not arm the interrupt category or the
-            // "[Request interrupted]" reminder for its own continuation turn
-            // (mirrors the cancel-rate skip above).
-            let send_now = trigger.as_deref() == Some("send_now");
-            if !send_now {
-                self.events.set_prior_interrupt_category(
-                    crate::session::events::CancellationCategory::MidTurnAbort,
-                );
-            }
+            self.events.set_prior_interrupt_category(
+                crate::session::events::CancellationCategory::MidTurnAbort,
+            );
             // Arm a one-shot `<system-reminder>` for the next real user turn,
             // but only when the abort leaves the model with NO other signal:
             // the partial assistant text is discarded out-of-band, so the only
@@ -589,7 +587,7 @@ impl SessionActor {
             // skip the reminder to avoid a duplicate signal. Gating on the
             // actual dangling state (not `had_active_tool`) covers the
             // permission-prompt and partial-parallel-call cases too.
-            if !send_now && !self.chat_state_handle.has_dangling_tool_calls().await {
+            if !self.chat_state_handle.has_dangling_tool_calls().await {
                 self.events.set_pending_interrupt_reminder();
             }
             // Shared `redirect_kind` for the data pipeline: the next user turn's

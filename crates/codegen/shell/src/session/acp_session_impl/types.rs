@@ -193,58 +193,6 @@ pub(crate) enum NoNudgeReason {
     FeatureDisabled,
 }
 
-/// Distinguishes turn-end drains from mid-turn drains. Turn-end is the
-/// safe boundary to SCHEDULE the verification stage (no model
-/// inference in flight); mid-turn `update_goal(completed: true)` calls
-/// are deferred so the verifier-skeptic subagents never race the
-/// parent's sampler. The stage itself runs as a background task and
-/// commits via `SessionEvent::GoalStageCompleted` — the drain never
-/// awaits it (B1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DrainPurpose {
-    /// End-of-turn drain. Verification-eligible completions schedule the
-    /// verification stage (if enabled, Active, and not already in flight).
-    /// Deferred completions from prior mid-turn drains are processed
-    /// FIFO ahead of the regular channel.
-    TurnEnd,
-    /// Mid-turn drain (e.g. on `SubagentSpawned`). Verification-
-    /// eligible completions are deferred to
-    /// `pending_classifier_completions` for processing at the next
-    /// turn-end.
-    MidTurn,
-}
-
-/// Origin of a drain entry. `Pending` entries had their acks resolved
-/// at defer time; `Channel` entries still carry a live oneshot.
-pub(crate) enum DrainSource {
-    Pending(tools::implementations::grow_build::update_goal::UpdateGoalInput),
-    Channel(tools::implementations::grow_build::update_goal::UpdateGoalEnvelope),
-}
-
-/// Reason a NotAchieved verdict was synthesized without invoking the
-/// sampler. Used by `account_not_achieved_without_sampler` to label
-/// the synthetic details file and (in future variants) emit distinct
-/// diagnostics.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum NotAchievedSyntheticReason {
-    /// Guard 3 — a second `update_goal(completed: true)` arrived while
-    /// a classifier was already running for this goal.
-    ConcurrentInFlight,
-}
-
-/// Decision for one in-turn goal round (see
-/// [`SessionActor::run_goal_round_end`]): keep the turn alive and run another
-/// round with `directive` injected, or end the turn because the goal resolved
-/// (achieved / paused / blocked) or this isn't a goal turn.
-pub(crate) enum GoalRoundDecision {
-    Continue(String),
-    /// A user steering event or deferred completion arrived while an
-    /// evaluator/verifier was running. Discard that autonomous decision and
-    /// return to the main-agent sampling loop.
-    ResumeForeground,
-    EndTurn,
-}
-
 /// Decision from the turn-end stop gate: allow the turn to end, or keep the
 /// agent working by injecting `feedback` as a synthetic user message.
 #[derive(Debug)]

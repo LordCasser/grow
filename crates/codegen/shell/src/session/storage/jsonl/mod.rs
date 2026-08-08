@@ -642,6 +642,65 @@ impl JsonlStorageAdapter {
             }
         }
     }
+
+    /// Goal state is optional, but a present unreadable snapshot must not be
+    /// retried forever. Atomic writes make a malformed file an invalid state,
+    /// not an observable in-progress write, so quarantine it by deletion and
+    /// let Behavior/Goal reconciliation retire any stale UI projection.
+    fn read_goal_mode_state_sync(
+        &self,
+        info: &Info,
+    ) -> io::Result<(
+        Option<crate::session::goal_tracker::GoalOrchestration>,
+        bool,
+    )> {
+        let path = self.goal_mode_state_file(info);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((None, false)),
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %info.id,
+                    path = %path.display(),
+                    %error,
+                    "failed reading Goal state"
+                );
+                return Ok((None, true));
+            }
+        };
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            tracing::warn!(
+                session_id = %info.id,
+                path = %path.display(),
+                "discarding empty Goal state"
+            );
+            let _ = std::fs::remove_file(path);
+            return Ok((None, true));
+        }
+        let parsed = serde_json::from_slice(&bytes);
+        match parsed {
+            Ok(state) => Ok((Some(state), false)),
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %info.id,
+                    path = %path.display(),
+                    %error,
+                    "discarding malformed Goal state"
+                );
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(delete_error) if delete_error.kind() == io::ErrorKind::NotFound => {}
+                    Err(delete_error) => tracing::warn!(
+                        session_id = %info.id,
+                        path = %path.display(),
+                        error = %delete_error,
+                        "failed deleting malformed Goal state"
+                    ),
+                }
+                Ok((None, true))
+            }
+        }
+    }
     fn load_workflow_runs_sync(
         &self,
         info: &Info,
@@ -1647,10 +1706,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             .read_optional_json_sync::<crate::session::announcement_state::AnnouncementState>(
                 &self.announcement_state_file(info),
             )?;
-        let goal_mode_state = self
-            .read_optional_json_sync::<crate::session::goal_tracker::GoalOrchestration>(
-                &self.goal_mode_state_file(info),
-            )?;
+        let (goal_mode_state, goal_mode_state_rejected) = self.read_goal_mode_state_sync(info)?;
         let workflow_runs = self.load_workflow_runs_sync(info)?;
         let rewind_points = self.read_jsonl::<RewindPoint>(self.rewind_points_file(info))?;
         let result = PersistedData {
@@ -1663,6 +1719,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             signals,
             announcement_state,
             goal_mode_state,
+            goal_mode_state_rejected,
             workflow_runs,
         };
         tracing::info!(
@@ -1701,10 +1758,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             .read_optional_json_sync::<crate::session::announcement_state::AnnouncementState>(
                 &self.announcement_state_file(info),
             )?;
-        let goal_mode_state = self
-            .read_optional_json_sync::<crate::session::goal_tracker::GoalOrchestration>(
-                &self.goal_mode_state_file(info),
-            )?;
+        let (goal_mode_state, goal_mode_state_rejected) = self.read_goal_mode_state_sync(info)?;
         let workflow_runs = self.load_workflow_runs_sync(info)?;
         let result = super::PersistedDataLight {
             summary,
@@ -1714,6 +1768,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             signals,
             announcement_state,
             goal_mode_state,
+            goal_mode_state_rejected,
             workflow_runs,
         };
         tracing::info!(

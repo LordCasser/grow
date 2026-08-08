@@ -1,26 +1,5 @@
 use super::*;
 
-/// A server-authoritative running prompt that drained into the running slot
-/// while the previous turn was still finishing locally (FIFO handoff
-/// race). Stashed on [`AppView::pending_running_adoptions`] and consumed by the
-/// `PromptResponse` handler after `finish_turn` clears `current_prompt_id`.
-#[derive(Debug, Clone)]
-pub(crate) struct PendingRunningAdoption {
-    /// The `prompt_id` the leader reported as `running_prompt_id`.
-    pub prompt_id: String,
-    /// The queued prompt's text (for the turn-start shim's user block), if the
-    /// pager knew about the prompt. `None` for prompts queued by other clients.
-    pub text: Option<String>,
-    /// Combined-turn display segments (len ≥ 2); shim paints one bubble each.
-    pub combined_texts: Option<Vec<String>>,
-    /// The adopted entry's `kind` (`"prompt"`/`"bash"`/`"verification"`/…),
-    /// which selects the turn-start shim's display block + focus flag.
-    pub kind: String,
-    /// Set when a `running=None` broadcast spares this stash (one-shot: the
-    /// next `running=None` tears it down).
-    pub turn_ended: bool,
-}
-
 pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(changed) =
         serde_json::from_str::<crate::app::prompt_queue::QueueChanged>(notif.params.get())
@@ -52,11 +31,18 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                 .and_then(|e| e.combined_texts.clone())
                 .filter(|v| v.len() >= 2)
         });
-    let running_kind: String = changed
+    let queue_kind: String = changed
         .running_kind
         .clone()
         .or_else(|| running_entry.as_ref().map(|e| e.kind.clone()))
         .unwrap_or_else(|| "prompt".to_string());
+    let running_kind = match changed.running_origin.as_deref() {
+        Some("scheduler_fired") => "cron".to_string(),
+        Some("user") | Some("plan_resume") => queue_kind,
+        Some(_) => "internal".to_string(),
+        None => queue_kind,
+    };
+    let running_turn_kind = changed.running_turn_kind.clone();
 
     // Resolve the owning agent before the queue is replaced.
     let sid = acp::SessionId::new(session_id.clone());
@@ -90,7 +76,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
         "received grow/queue/changed broadcast",
     );
 
-    let rekeyed_echo_ids = app.apply_queue_changed(changed);
+    app.apply_queue_changed(changed);
 
     // Mirror the reconciled shared queue into the owning agent so the queue
     // pane can render the union of local + server rows without needing
@@ -100,41 +86,8 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
             .shared_prompt_queue(&session_id)
             .cloned()
             .unwrap_or_default();
-        // Stashed adoption: its painted block is about to be consumed.
-        let stashed_pid = app
-            .pending_running_adoptions
-            .get(&aid)
-            .map(|p| p.prompt_id.clone());
         if let Some(agent) = app.agents.get_mut(&aid) {
             agent.shared_queue = snapshot;
-            // A re-keyed echo's id is dead everywhere (only its content
-            // matched the broadcast): drop it from the optimistic set and
-            // any send-now parked on it — the row is visible under its new
-            // id, so a fresh Enter sends it normally. A painted send-now
-            // block moves to the new id (the message still runs there).
-            for (old_id, new_id) in &rekeyed_echo_ids {
-                agent.note_queue_echo_rekeyed(old_id, new_id);
-            }
-
-            // A painted-pending prompt the broadcast no longer lists — and
-            // is neither running nor a stashed adoption — was removed and
-            // will never adopt: retire its block. Unconfirmed optimistic ids
-            // are exempt (their RPC is in flight; absence is expected).
-            let removed_painted: Vec<String> = agent
-                .send_now_painted_blocks
-                .keys()
-                .filter(|pid| {
-                    running_prompt_id.as_deref() != Some(pid.as_str())
-                        && stashed_pid.as_deref() != Some(pid.as_str())
-                        && !raw_entries.iter().any(|(eid, _)| eid == *pid)
-                        && !agent.optimistic_queue_ids.contains(*pid)
-                })
-                .cloned()
-                .collect();
-            for pid in &removed_painted {
-                agent.retire_send_now_painted_block(pid);
-            }
-
             // Cleanup hook: if the user is editing a server-origin row and
             // that row is no longer in the broadcast (started draining,
             // removed by another client, etc.), exit editing mode so the
@@ -164,10 +117,9 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
             agent.resolve_send_now_awaiting_confirm(&raw_entries, running_prompt_id.as_deref())
         });
         if let Some((id, expected_version)) = fire {
-            if let Some(agent) = app.agents.get_mut(&aid) {
-                // Same arming contract as `dispatch_queue_interject_shared`.
-                super::super::dispatch::arm_send_now_and_paint(agent, &id, None);
-            }
+            let Some(expected_turn_id) = running_prompt_id.clone() else {
+                return true;
+            };
             crate::unified_log::info(
                 "prompt.queue_send_now_confirmed",
                 Some(&session_id),
@@ -176,6 +128,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
             app.pending_effects
                 .push(crate::app::actions::Effect::QueueInterject {
                     session_id: sid.clone(),
+                    expected_turn_id,
                     id,
                     expected_version,
                     new_text: None,
@@ -183,60 +136,11 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
         }
     }
 
-    // Adoption / turn-start correlation.
-    //
-    // Single-client idle path stays inert: the pager sets `current_prompt_id`
-    // locally at `start_turn`, so when the confirming broadcast arrives with
-    // `running_prompt_id == current_prompt_id`, the `Some(c) if c == pid` arm
-    // makes this a no-op.
+    // The structured foreground snapshot is authoritative. Prompt ids are
+    // identities only; origin and visibility come from the explicit fields.
     match (running_prompt_id, agent_id) {
-        // No turn running on the server — drop any stale pending adoption.
-        // Exception (`turn_ended`, one-shot): a turn ending inside the handoff
-        // window must leave the stash for the previous turn's PromptResponse,
-        // regardless of buffer occupancy — this ext broadcast can overtake the
-        // turn's `session/update`s (separate, reorderable channels).
-        (None, Some(aid)) => {
-            let retain = app
-                .pending_running_adoptions
-                .get(&aid)
-                .is_some_and(|p| !p.turn_ended);
-            if retain {
-                if let Some(p) = app.pending_running_adoptions.get_mut(&aid) {
-                    p.turn_ended = true;
-                }
-            } else if let Some(p) = app.pending_running_adoptions.remove(&aid)
-                && let Some(agent) = app.agents.get_mut(&aid)
-            {
-                agent.discard_pending_adoption_updates(&p.prompt_id);
-            }
-        }
-        // Non-adoptable running prompt (see `AgentView::should_adopt_running_prompt`):
-        // either an actor-run synthetic turn with no `prompt_complete` /
-        // `PromptResponse` exit (nothing would ever call `finish_turn`), or a turn
-        // whose durable `TurnCompleted` already arrived in THIS load's replay
-        // (terminal-in-replay — it already ended). Adopting either via
-        // `apply_turn_start_shim` would `start_turn()` → `AgentState::TurnRunning`
-        // and strand the pager on "Responding…"/"Waiting…" forever. The agent-aware
-        // check is load-bearing here: `replayed_terminal_prompts` stays populated
-        // after a load, so a later `queue/changed` re-reporting the already-ended
-        // `running_prompt_id` must NOT re-adopt the turn the `SessionLoaded` /
-        // reconnect adoption already correctly skipped. Skip the turn-start
-        // adoption; a live synthetic turn's streaming content still renders via the
-        // live-delta path in `handle` WITHOUT calling `start_turn`.
-        (Some(pid), Some(aid))
-            if app
-                .agents
-                .get(&aid)
-                .is_some_and(|a| !a.should_adopt_running_prompt(&pid)) =>
-        {
-            tracing::debug!(
-                target: "qtrace",
-                pid = std::process::id(),
-                prompt_id = %pid,
-                "queue/changed: skipping turn-start adoption for non-adoptable running \
-                 prompt (synthetic turn with no prompt_complete exit, or terminal-in-replay)",
-            );
-        }
+        (None, _) => {}
+        (Some(_), Some(_)) if running_turn_kind.is_none() => {}
         (Some(pid), Some(aid)) => {
             let current = app
                 .agents
@@ -264,9 +168,10 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                         super::super::dispatch::note_peek_page_flip(app, aid, page_flip_entry);
                     }
                 }
-                // Nothing running locally: adopt now + run the turn-start shim
-                // (render the queued prompt's user block, set `TurnRunning`).
-                None => {
+                // A different local id is a stale snapshot or a cross-channel
+                // handoff. Adopt the authoritative foreground immediately;
+                // terminals remain keyed by their own turn id.
+                None | Some(_) => {
                     let page_flip_entry = app.agents.get_mut(&aid).and_then(|agent| {
                         super::super::dispatch::apply_turn_start_shim(
                             agent,
@@ -277,83 +182,6 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                         )
                     });
                     super::super::dispatch::note_peek_page_flip(app, aid, page_flip_entry);
-                }
-                // A different prompt is still finishing locally (FIFO handoff
-                // race — the next broadcast can arrive before the previous
-                // turn's `PromptResponse`). Stash it; the `PromptResponse`
-                // handler adopts it after `finish_turn` clears
-                // `current_prompt_id`. Never corrupt the in-flight turn.
-                Some(_) => {
-                    // The leader emits this prompt's user-echo (no `promptId`,
-                    // so the gate can't drop it) right after this broadcast but
-                    // before the previous turn's `PromptResponse` runs the
-                    // deferred shim. Arm the echo-skip now so it doesn't render
-                    // a duplicate user block — but ONLY when THIS client will
-                    // actually paint that block via the deferred shim.
-                    //
-                    // The deferred shim is run exclusively by the `PromptResponse`
-                    // handler, which fires only for the client that DROVE the
-                    // currently-finishing turn (`!attached_as_viewer`). A viewer
-                    // of that turn ends it via `prompt_complete`, which clears
-                    // (and removes) the stash without ever running the shim — so
-                    // on a viewer the echo is the ONLY source of the user block
-                    // and must not be swallowed.
-                    //
-                    // Key the guard on driver-vs-viewer of the *current* turn,
-                    // NOT on who originated the draining prompt: a client can be
-                    // `attached_as_viewer` on another client's turn yet
-                    // immediate-send (self-originate) a queued prompt of its own.
-                    // That client still won't run the shim, so an
-                    // `is_self_originated`-based guard would wrongly swallow the
-                    // echo and drop the block. Symmetric
-                    // hazard: a driver adopting ANOTHER client's drained prompt
-                    // DOES run the shim, so it must swallow the echo — which an
-                    // origination-based guard would miss, double-rendering.
-                    let drives_current_turn =
-                        app.agents.get(&aid).is_some_and(|a| !a.attached_as_viewer);
-                    let will_render_own_block = drives_current_turn
-                        && super::super::dispatch::shim_renders_own_user_block(
-                            &running_kind,
-                            running_text.as_deref(),
-                            Some(&pid),
-                        );
-                    if will_render_own_block && let Some(agent) = app.agents.get_mut(&aid) {
-                        agent.session.tracker.expect_user_echo();
-                    }
-                    tracing::debug!(
-                        target: "qtrace",
-                        pid = std::process::id(),
-                        event = "adoption_stashed",
-                        prompt_id = %pid,
-                        "stashing running-prompt adoption (FIFO handoff race)",
-                    );
-                    // A rebroadcast for the SAME running prompt (every queue
-                    // edit/no-op rebroadcasts) must not clobber the stash: the
-                    // first broadcast consumed the drained row from the mirror,
-                    // so this pass re-derives `text: None` and the deferred
-                    // shim would render no user block (and the echo-skip armed
-                    // above already swallowed the shell's echo).
-                    if app
-                        .pending_running_adoptions
-                        .get(&aid)
-                        .is_some_and(|p| p.prompt_id == pid)
-                    {
-                        return true;
-                    }
-                    // A newer running prompt supersedes any earlier stash.
-                    if let Some(prev) = app.pending_running_adoptions.insert(
-                        aid,
-                        PendingRunningAdoption {
-                            prompt_id: pid.clone(),
-                            text: running_text,
-                            combined_texts: running_combined,
-                            kind: running_kind,
-                            turn_ended: false,
-                        },
-                    ) && let Some(agent) = app.agents.get_mut(&aid)
-                    {
-                        agent.discard_pending_adoption_updates(&prev.prompt_id);
-                    }
                 }
             }
         }

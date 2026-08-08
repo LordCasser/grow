@@ -3,8 +3,8 @@
 use super::ctx::with_active_agent;
 use super::interject;
 use super::queue::{
-    apply_turn_start_shim, drain_prompt_state_to_last_queued, immediate_server_send_eligible,
-    maybe_drain_queue, note_peek_page_flip, push_server_queue_echo, retire_optimistic_echo,
+    drain_prompt_state_to_last_queued, immediate_server_send_eligible, maybe_drain_queue,
+    note_peek_page_flip, push_server_queue_echo, retire_optimistic_echo,
 };
 use super::router::dispatch;
 use super::session::fork::open_project_question;
@@ -791,17 +791,6 @@ pub(super) fn dispatch_send_prompt_inner(
         // `grow/queue/changed`. We render an optimistic echo into the shared
         // queue keyed by `prompt_id`; the broadcast reconciles it by id.
         //
-        // Goal verification protection for plain user messages: while the
-        // verifier judges completion, a plain prompt must NOT be sent (it
-        // would race the verdict with the user's new input). Reject with a
-        // toast and keep the composer text intact — bash commands, slash
-        // commands (incl. `/goal pause`) and skill invocations above are not
-        // affected.
-        if crate::app::dispatch::goal_is_verifying(agent) {
-            app.show_toast(crate::app::dispatch::GOAL_VERIFYING_TOAST);
-            return vec![];
-        }
-        //
         // The IDLE case is unchanged (falls through to the local path below,
         // which drains instantly and renders the user block) — preserving the
         // byte-for-byte idle experience. Image/skill/editing/non-running cases
@@ -859,25 +848,6 @@ pub(super) fn dispatch_send_prompt_inner(
 
         // Parked + held occupancy → append; empty held → cancel-and-send.
         let parked_sendable_wait = agent.is_parked_on_sendable_wait();
-        let hold_behind_existing_queue = parked_sendable_wait && agent.has_held_user_queue();
-
-        // Images can't ride immediate server-send; empty-held park still send-nows.
-        if !immediate_server_send
-            && immediate_server_send_eligible(agent)
-            && !agent.prompt.images.is_empty()
-            && parked_sendable_wait
-            && !hold_behind_existing_queue
-        {
-            let images = agent.prompt.drain_images();
-            if consume_input {
-                agent.prompt.set_text("");
-            }
-            // A new prompt is taking the wheel (same contract as the
-            // immediate-send branch below).
-            agent.clear_follow_ups();
-            return interject::dispatch_send_prompt_now(app, text, images);
-        }
-
         if immediate_server_send {
             let session_id = agent
                 .session
@@ -890,10 +860,6 @@ pub(super) fn dispatch_send_prompt_inner(
             // `running_prompt_id` adoption + turn-start shim), the ACP gate must
             // treat its deltas as ours, not adopt them as another client's turn.
             agent.note_self_originated_prompt(&prompt_id);
-
-            if parked_sendable_wait && !hold_behind_existing_queue {
-                agent.arm_send_now_expectation(prompt_id.clone());
-            }
 
             if consume_input {
                 // Plain prompt: no images to drain. Clear textarea + record
@@ -1146,12 +1112,6 @@ pub(super) fn handle_prompt_response(
     _http_status: Option<u16>,
     prompt_id: Option<String>,
 ) -> Vec<Effect> {
-    // A server-authoritative queued prompt may have drained into
-    // the running slot while this turn was still finishing (the leader's
-    // `running_prompt_id` broadcast can arrive before this
-    // `PromptResponse`). Take any stashed adoption now; it is applied
-    // after `finish_turn` clears `current_prompt_id` below.
-    let pending_adoption = app.pending_running_adoptions.remove(&agent_id);
     // The `agent` borrow lasts only through the pid gate and the shared
     // finalizer; the app-level tail (notifications, adoption handoff, queue
     // drain, suggestion fetch) re-borrows per step.
@@ -1201,43 +1161,10 @@ pub(super) fn handle_prompt_response(
                 || agent.session.current_prompt_id.as_deref() == Some(response_pid))
         {
             crate::app::turn_completion::merge_finalized_pr_meta(agent, &result);
-            if let Some(p) = pending_adoption {
-                // The finalized turn's own response spent the turn's only
-                // exit: consume (discard), never restore. A newer turn's
-                // stash stays for its own terminal.
-                if p.prompt_id == response_pid {
-                    agent.discard_pending_adoption_updates(&p.prompt_id);
-                } else {
-                    app.pending_running_adoptions.insert(agent_id, p);
-                }
-            }
             return vec![];
         }
-        if (agent.session.current_prompt_id.is_none()
-            || agent
-                .session
-                .current_prompt_id
-                .as_deref()
-                .is_some_and(crate::app::acp_handler::is_server_initiated_prompt))
-            && crate::app::acp_handler::is_server_initiated_prompt(response_pid)
         {
-            // Server-initiated turn (auto-wake) — adopt.
-            agent.session.current_prompt_id = Some(response_pid.to_string());
-        } else {
-            // Not the running turn: this response (Ok rewound/stale,
-            // or Err from a queued/removed prompt) must not touch the
-            // active turn. Restore the adoption we popped above so a
-            // genuinely-draining next prompt can still be adopted by
-            // the real running turn's PromptResponse — unless it is the
-            // stashed turn's own response: that spent the turn's only
-            // exit, so consume (discard), never restore.
-            if let Some(p) = pending_adoption {
-                if p.prompt_id == response_pid {
-                    agent.discard_pending_adoption_updates(&p.prompt_id);
-                } else {
-                    app.pending_running_adoptions.insert(agent_id, p);
-                }
-            }
+            // Not the running turn: this response must not touch the active turn.
             // Server-authoritative queue lifecycle: this prompt's RPC
             // resolved without becoming the running turn (removed,
             // cancelled, rewound). Retire its optimistic echo so a
@@ -1255,7 +1182,6 @@ pub(super) fn handle_prompt_response(
             }
             // Resolved-without-running never adopts; explicit for the
             // session-less arm (no note_queue_echo_retired above).
-            agent.retire_send_now_painted_block(response_pid);
             return vec![];
         }
     }
@@ -1266,15 +1192,6 @@ pub(super) fn handle_prompt_response(
         );
     // Send-now cancel: suppress the "Turn cancelled by user" marker (the new
     // prompt follows right under the partial). Wire `cancelTrigger` wins, else
-    // the client-side expectation; the expectation itself is consumed by the
-    // shared finalizer at every turn end (no stale flag).
-    let wire_cancel_trigger = result.as_ref().ok().and_then(|pr| {
-        pr.meta
-            .as_ref()?
-            .get("cancelTrigger")?
-            .as_str()
-            .map(str::to_string)
-    });
     let rate_limited = agent.session.rate_limited;
     let model_incompatible = agent.session.model_incompatible;
     // The RetryState handler already pushed the actionable context-overflow
@@ -1286,13 +1203,6 @@ pub(super) fn handle_prompt_response(
         let sid = agent.session.session_id.as_ref().map(|s| s.0.as_ref());
         let elapsed_ms = elapsed.map(|d| d.as_millis() as u64).unwrap_or(0);
         let ok = result.is_ok();
-        // Read-only mirror of the finalizer's decision (the finalizer
-        // consumes `expect_send_now_cancel`).
-        let send_now_cancel = was_cancelling
-            && match wire_cancel_trigger.as_deref() {
-                Some(trigger) => trigger == "send_now",
-                None => agent.expect_send_now_cancel.is_some(),
-            };
         crate::unified_log::info(
             "turn.complete",
             sid,
@@ -1300,7 +1210,6 @@ pub(super) fn handle_prompt_response(
                 "elapsed_ms": elapsed_ms,
                 "ok": ok,
                 "was_cancelling": was_cancelling,
-                "send_now_cancel": send_now_cancel,
             })),
         );
     }
@@ -1318,7 +1227,6 @@ pub(super) fn handle_prompt_response(
         was_cancelling,
         shared_queue_len = agent.shared_queue.len(),
         pending_len = agent.session.pending_prompts.len(),
-        has_pending_adoption = pending_adoption.is_some(),
         session = agent.session.session_id.as_ref().map(|s| s.0.as_ref()).unwrap_or(""),
         "turn ended; client returning to idle",
     );
@@ -1326,9 +1234,7 @@ pub(super) fn handle_prompt_response(
     // The terminal part converges on the shared first-wins finalizer
     // (turn_completion): it finishes the turn, pushes the marker, runs the
     // full teardown, records the winner, and consumes
-    // `expect_send_now_cancel`. `response_pid == None` (older shells without
-    // promptId meta) attributes the response to the running turn, matching
-    // the legacy behavior.
+    // promptId metadata attributes the response to its exact foreground owner.
     let was_bash_turn = agent.bash_turn;
     let outcome = crate::app::turn_completion::finalize_prompt_terminal(
         agent,
@@ -1339,7 +1245,6 @@ pub(super) fn handle_prompt_response(
             was_cancelling,
             bash_turn: was_bash_turn,
             skip_error_marker: rate_limited || model_incompatible || context_overflow,
-            cancel_trigger: wire_cancel_trigger,
             accepts_submitting: true,
         },
     );
@@ -1360,17 +1265,10 @@ pub(super) fn handle_prompt_response(
         tracing::error!(agent = ?agent_id, error = %err, "Prompt failed");
     }
 
-    // TurnComplete suppressed when queue is non-empty (badge fires only
-    // after the final queued turn); AgentError always fires. A stashed
-    // server-authoritative adoption means the next turn is about to start,
-    // so treat the queue as non-empty too (suppress the TurnComplete
-    // notification / idle escapes), mirroring the local non-empty-queue
-    // behavior.
-    let queue_empty = pending_adoption.is_none()
-        && app
-            .agents
-            .get(&agent_id)
-            .is_some_and(|agent| agent.session.pending_prompts.is_empty());
+    let queue_empty = app
+        .agents
+        .get(&agent_id)
+        .is_some_and(|agent| agent.session.pending_prompts.is_empty());
     crate::app::turn_completion::apply_terminal_notifications(
         app,
         agent_id,
@@ -1383,35 +1281,8 @@ pub(super) fn handle_prompt_response(
     // `maybe_drain_queue` keeps the idle-only and editing-front
     // guards so we do not send from under the user.
     if app.reconnect_pending {
-        if let Some(p) = pending_adoption
-            && let Some(agent) = app.agents.get_mut(&agent_id)
-        {
-            agent.discard_pending_adoption_updates(&p.prompt_id);
-        }
         return vec![];
     }
-
-    // FIFO handoff: if a server-authoritative prompt drained
-    // into the running slot during this turn's teardown, adopt it
-    // now (finish_turn cleared current_prompt_id) and run the
-    // turn-start shim. This sets `TurnRunning`, so the
-    // `maybe_drain_queue` below no-ops rather than draining a local
-    // prompt — the leader owns the drain order.
-    let adopted_page_flip = if let Some(p) = pending_adoption
-        && let Some(agent) = app.agents.get_mut(&agent_id)
-        && agent.session.current_prompt_id.is_none()
-    {
-        if response_pid.as_deref() != Some(p.prompt_id.as_str())
-            && agent.should_adopt_running_prompt(&p.prompt_id)
-        {
-            apply_turn_start_shim(agent, p.prompt_id, p.text, &p.kind, p.combined_texts)
-        } else {
-            agent.discard_pending_adoption_updates(&p.prompt_id);
-            None
-        }
-    } else {
-        None
-    };
 
     let drain = {
         let Some(agent) = app.agents.get_mut(&agent_id) else {
@@ -1419,7 +1290,7 @@ pub(super) fn handle_prompt_response(
         };
         maybe_drain_queue(agent)
     };
-    let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);
+    let page_flip_entry = drain.page_flip_entry;
     let mut effects = drain.effects;
 
     // Predicted-next-prompt (tab autocomplete): fetch a fresh suggestion

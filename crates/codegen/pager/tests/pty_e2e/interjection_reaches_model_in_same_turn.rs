@@ -2,24 +2,22 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// 19. **Send-now chord delivers the composer text as its own next turn.**
-/// (Historical name: the chord used to interject into the SAME turn.)
-/// Ctrl+Enter with text mid-stream is cancel-and-send: the running turn is
-/// cancelled silently and the text runs as the next turn — a standard
-/// `<user_query>` prompt with no interjection preamble, rendered as a "❯ "
-/// user block via the turn-start adoption.
+/// Ctrl+Enter steers the current regular turn. The sampler may start another
+/// request so the model can consume the new user message, but the pager keeps
+/// one foreground identity and the shell emits only that turn's terminal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn interjection_reaches_model_in_same_turn() {
     let content = ContentController::start().await.expect("start content");
+    content.seed_llm_config().expect("seed mock LLM config");
     // Gate turn 1's terminal event so the typed text + chord provably land
     // mid-turn regardless of suite load. Chunk delay widens the mid-stream
     // window under remote CI load (same shape as cancel_discards_*).
     let mut turn_one = content
-        .expect_agent_turn_blocked("running turn before send-now", slow_turn_text("TURNONE"));
+        .expect_agent_turn_blocked("running turn before steering", slow_turn_text("TURNONE"));
     content.set_chunk_delay(Some(Duration::from_millis(100)));
     let _turn_two =
-        content.expect_agent_turn("sent-now message", "TURNTWO reply to the sent-now message.");
+        content.expect_agent_turn("steered message", "TURNTWO reply to the steered message.");
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut harness =
@@ -41,7 +39,7 @@ async fn interjection_reaches_model_in_same_turn() {
     // Still mid-stream (hold gates completion) — not "Worked for".
     assert!(
         !harness.contains_text("Worked for"),
-        "turn must still be open before send-now\nscreen:\n{}",
+        "turn must still be open before steering\nscreen:\n{}",
         harness.screen_contents()
     );
 
@@ -51,7 +49,7 @@ async fn interjection_reaches_model_in_same_turn() {
     harness
         .wait_for_text("please also check the logs", Duration::from_secs(5))
         .expect("draft visible in composer");
-    harness.inject_keys(CTRL_ENTER).expect("send-now chord");
+    harness.inject_keys(CTRL_ENTER).expect("steer chord");
     turn_one.release();
 
     // Cancel-and-send: message leaves the composer and commits as a scrollback
@@ -66,19 +64,19 @@ async fn interjection_reaches_model_in_same_turn() {
         }
         if Instant::now() >= deadline {
             panic!(
-                "send-now did not commit draft to scrollback\nscreen:\n{}",
+                "steering did not commit draft to scrollback\nscreen:\n{}",
                 harness.screen_contents()
             );
         }
     }
     harness
         .wait_for_text("TURNTWO", Duration::from_secs(40))
-        .expect("sent-now message ran as the next turn");
+        .expect("steered message reached the next sampling cycle");
 
-    // The send-now cancel of turn 1 is silent.
+    // Steering never cancels the foreground turn.
     assert!(
         !harness.contains_text("Turn cancelled by user"),
-        "send-now cancel must not render a cancelled marker\nscreen:\n{}",
+        "steering must not render a cancelled marker\nscreen:\n{}",
         harness.screen_contents()
     );
 
@@ -86,14 +84,14 @@ async fn interjection_reaches_model_in_same_turn() {
     let sent = users
         .iter()
         .find(|u| u.contains("please also check the logs"))
-        .unwrap_or_else(|| panic!("sent-now message never reached the wire: {users:#?}"));
+        .unwrap_or_else(|| panic!("steered message never reached the wire: {users:#?}"));
     assert!(
-        !sent.contains(INTERJECTION_WIRE_PREFIX),
-        "send-now must not use the interjection preamble: {sent}"
+        sent.contains(INTERJECTION_WIRE_PREFIX),
+        "same-turn steering must use the interjection envelope: {sent}"
     );
     assert!(
         sent.contains("<user_query>"),
-        "send-now must arrive as a standard user_query prompt: {sent}"
+        "steering must retain the user_query envelope: {sent}"
     );
 
     assert!(

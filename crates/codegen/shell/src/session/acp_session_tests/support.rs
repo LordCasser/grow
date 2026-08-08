@@ -16,15 +16,6 @@ pub(crate) const PLAN_SEED_TODOS_PHRASE: &str =
 pub(crate) async fn test_agent_default() -> agent::Agent {
     test_agent_with_tools(vec![]).await
 }
-/// Like [`test_agent_default`] but registers the `update_goal` tool so
-/// `command_availability().goal` is satisfied and `/goal …` slash commands
-/// resolve to their builtins when a turn is driven through `handle_prompt`.
-#[cfg(test)]
-pub(crate) async fn test_agent_with_goal_tool() -> agent::Agent {
-    use tools::implementations::grow_build::update_goal::UpdateGoalTool;
-    use tools::registry::types::ToolConfig;
-    test_agent_with_tools(vec![ToolConfig::for_tool::<UpdateGoalTool>()]).await
-}
 /// Grow-build agent with the real `TodoWriteTool` (id `todo_write`, kind
 /// `Plan`) registered, so `tool_for_kind(ToolKind::Plan)` resolves through the
 /// live toolset instead of the literal fallback.
@@ -160,7 +151,8 @@ pub(crate) async fn create_test_actor_ex(
     tool_context.task_wake_suppressed =
         Some(tools::reminders::task_completion::TaskWakeSuppressed::default());
     let state = TokioMutex::new(State {
-        running_task: None,
+        foreground: ForegroundState::Idle,
+        pending_manual_compact: None,
         pending_inputs: VecDeque::new(),
         combine_edit_holds: std::collections::HashSet::new(),
         pending_notifications: Vec::new(),
@@ -168,8 +160,6 @@ pub(crate) async fn create_test_actor_ex(
         rewindable: false,
         nudges_used_this_session: 0,
         recent_terminals: VecDeque::new(),
-        foreground_compact: false,
-        pending_manual_compact: None,
     });
     let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
@@ -195,6 +185,7 @@ pub(crate) async fn create_test_actor_ex(
         tokio_util::sync::CancellationToken::new(),
     );
     chat_state_handle.record_token_usage(total_tokens);
+    let (goal_command_tx, goal_command_rx) = tokio::sync::mpsc::unbounded_channel();
     let actor = SessionActor {
         session_info: SessionInfo {
             id: acp::SessionId::new("test-actor"),
@@ -271,14 +262,11 @@ pub(crate) async fn create_test_actor_ex(
         pending_interjections: InterjectionBuffer::new(),
         completion_delivery: Default::default(),
         pending_system_reminders: Mutex::new(Vec::new()),
-        goal_control_generation: std::sync::atomic::AtomicU64::new(0),
-        goal_planner_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        goal_control_notify: Arc::new(tokio::sync::Notify::new()),
-        goal_plan_scope: parking_lot::Mutex::new(None),
         idle_flush_timeout: None,
         dream_check_timeout: None,
         last_idle_flush_conversation_len: std::sync::atomic::AtomicUsize::new(0),
         event_tx,
+        idle_arbiter: Arc::new(tokio::sync::Notify::new()),
         buffering_settings: None,
         client_identifier: None,
         origin_client: None,
@@ -301,32 +289,15 @@ pub(crate) async fn create_test_actor_ex(
         goal_enabled: false,
         background_workflows_enabled: false,
         goal_harness_enabled: std::sync::atomic::AtomicBool::new(false),
-        goal_harness_availability_reconciled: std::sync::atomic::AtomicBool::new(false),
         goal_tracker: Arc::new(parking_lot::Mutex::new(
-            crate::session::goal_tracker::GoalTracker::new(std::path::PathBuf::from(
-                "/tmp/test-session",
-            )),
+            crate::session::goal_tracker::GoalTracker::new(),
         )),
+        goal_stage_cancel: parking_lot::Mutex::new(None),
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
-        goal_continuation_streak: std::sync::atomic::AtomicU32::new(0),
-        goal_blocked_streak: std::sync::atomic::AtomicU32::new(0),
-        goal_update_rx: std::cell::RefCell::new(None),
-        goal_update_tx: tokio::sync::mpsc::unbounded_channel().0,
+        goal_command_rx: std::cell::RefCell::new(Some(goal_command_rx)),
+        goal_command_tx,
         workflow_manager: crate::session::workflow::manager::WorkflowManager::test_bundle().0,
         workflow_launch_tx: tokio::sync::mpsc::unbounded_channel().0,
-        goal_classifier_enabled: false,
-        goal_planner_enabled: false,
-        goal_summary_enabled: false,
-        goal_verifier_skeptic_count: 1,
-        goal_role_models: Default::default(),
-        goal_use_current_model_only: false,
-        goal_classifier_max_runs: crate::session::goal_classifier::GOAL_CLASSIFIER_MAX_RUNS_DEFAULT,
-        goal_strategist_every: 5,
-        goal_reverify_after: crate::session::acp_session::GOAL_REVERIFY_AFTER_DEFAULT,
-        goal_plan_reconciled: std::sync::atomic::AtomicBool::new(false),
-        pending_classifier_completions: parking_lot::Mutex::new(std::collections::VecDeque::new()),
-        goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
-        goal_stage_seq: std::sync::atomic::AtomicU64::new(0),
         managed_mcp_handle: Default::default(),
         initial_client_mcp_servers: vec![],
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -412,6 +383,7 @@ pub(crate) fn user_item_with_rx(
     let text = format!("text for {id}");
     let item = InputItem {
         prompt_id: id.to_string(),
+        turn_kind: crate::session::TurnKind::User,
         prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(text.clone()))],
         prompt_mode: PromptMode::Agent,
         client_identifier: Some(owner.to_string()),
@@ -432,7 +404,6 @@ pub(crate) fn user_item_with_rx(
             text,
             combined_texts: None,
         }),
-        send_now: false,
     };
     (item, rx)
 }
@@ -451,6 +422,11 @@ pub(crate) fn input_with_origin_rx(
     let verbatim = origin.is_synthetic();
     let item = InputItem {
         prompt_id: prompt_id.to_string(),
+        turn_kind: if origin.is_synthetic() {
+            crate::session::TurnKind::Internal
+        } else {
+            crate::session::TurnKind::User
+        },
         prompt_blocks: vec![],
         prompt_mode: PromptMode::Agent,
         client_identifier: None,
@@ -463,17 +439,17 @@ pub(crate) fn input_with_origin_rx(
         persist_ack: None,
         parsed_prompt_tx: None,
         queue_meta: None,
-        send_now: false,
     };
     (item, rx)
 }
-/// A running-turn `AgentTask` stub: a 60s sleeper that keeps the turn "in
-/// flight" until aborted. Assign to `state.running_task`; requires a
-/// `LocalSet` (`spawn_local`).
+/// A regular foreground `AgentTask` stub: a 60s sleeper that keeps the turn
+/// in flight until aborted. Requires a `LocalSet` (`spawn_local`).
 #[cfg(test)]
 pub(crate) fn running_task_stub(prompt_id: &str) -> AgentTask {
     AgentTask {
         prompt_id: prompt_id.to_string(),
+        origin: crate::session::PromptOrigin::User,
+        turn_kind: crate::session::TurnKind::User,
         turn_start_ms: 0,
         handle: tokio::task::spawn_local(async {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;

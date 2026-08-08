@@ -79,8 +79,6 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                     "current_prompt_id": agent.session.current_prompt_id,
                 })),
             );
-            // Explicit user cancel supersedes any pending send-now expectation (its marker renders).
-            agent.clear_send_now_expectation();
             return vec![Effect::CancelTurn {
                 session_id,
                 // Replay the exact original intent (pause_goal AND
@@ -311,7 +309,6 @@ pub(super) fn do_cancel_turn_with_pause(
         let Some(session_id) = agent.session.session_id.clone() else {
             return vec![];
         };
-        agent.clear_send_now_expectation();
         return vec![Effect::CancelTurn {
             session_id,
             cancel_subagents,
@@ -402,9 +399,6 @@ pub(super) fn do_cancel_turn_with_pause(
     let Some(session_id) = agent.session.session_id.clone() else {
         return vec![];
     };
-
-    // Explicit user cancel supersedes any pending send-now expectation (its marker renders).
-    agent.clear_send_now_expectation();
 
     // Server-authoritative queue: the agent owns the drain. On an interactive
     // cancel we only tear down the running turn and let the agent promote the

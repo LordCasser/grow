@@ -438,6 +438,7 @@ impl acp::Agent for MvpAgent {
                         persisted_signals: None,
                         persisted_behavior: None,
                         persisted_goal_mode: None,
+                        persisted_goal_mode_rejected: false,
                         persisted_workflow_runs: Vec::new(),
                         persisted_announcement_state: None,
                         session_meta: arguments.meta.as_ref(),
@@ -679,6 +680,7 @@ impl acp::Agent for MvpAgent {
             signals: persisted_signals,
             announcement_state: persisted_announcement_state,
             goal_mode_state: _persisted_goal_mode,
+            goal_mode_state_rejected: persisted_goal_mode_rejected,
             workflow_runs: persisted_workflow_runs,
         } = persistence_info;
         let configured_models = self.models_manager.models();
@@ -962,6 +964,7 @@ impl acp::Agent for MvpAgent {
                         persisted_signals,
                         persisted_behavior,
                         persisted_goal_mode: _persisted_goal_mode,
+                        persisted_goal_mode_rejected,
                         persisted_workflow_runs,
                         persisted_announcement_state,
                         session_meta: request_meta.as_ref(),
@@ -1152,17 +1155,23 @@ impl acp::Agent for MvpAgent {
         if let Some(info) = code_restore_info {
             response_meta_map.insert("codeRestore".to_string(), info);
         }
-        if let Some(running_prompt_id) = self
+        let foreground_tx = self
             .sessions
             .borrow()
             .get(&session_id)
-            .and_then(|h| h.current_prompt_id.lock().ok().and_then(|g| g.clone()))
-        {
-            response_meta_map
-                .insert(
-                    "grow/runningPromptId".to_string(),
-                    serde_json::json!(running_prompt_id),
+            .map(|handle| handle.cmd_tx.clone());
+        if let Some(foreground_tx) = foreground_tx {
+            let (respond_to, response) = tokio::sync::oneshot::channel();
+            if foreground_tx
+                .send(SessionCommand::QueryForeground { respond_to })
+                .is_ok()
+                && let Ok(Some(foreground)) = response.await
+            {
+                response_meta_map.insert(
+                    "grow/foreground".to_string(),
+                    serde_json::to_value(foreground).expect("foreground snapshot serializes"),
                 );
+            }
         }
         let model_state = self.model_state(Some(&session_id));
         self.insert_session_config_meta(
@@ -1366,12 +1375,6 @@ impl acp::Agent for MvpAgent {
             .and_then(|m| m.get("verbatim"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let send_now = arguments
-            .meta
-            .as_ref()
-            .and_then(|m| m.get("sendNow"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
         let (tx, rx) = oneshot::channel();
         let prompt_client_identifier = arguments
             .meta
@@ -1398,15 +1401,16 @@ impl acp::Agent for MvpAgent {
         }
         handle
             .cmd_tx
-            .send(SessionCommand::Prompt {
+            .send(SessionCommand::QueuePrompt {
                 prompt_id: prompt_id.clone(),
                 prompt_blocks: arguments.prompt.clone(),
+                origin: crate::session::PromptOrigin::User,
+                turn_kind: crate::session::TurnKind::User,
                 prompt_mode,
                 client_identifier: prompt_client_identifier,
                 screen_mode: prompt_screen_mode,
                 verbatim,
                 json_schema,
-                send_now,
                 admission: None,
                 respond_to: tx,
                 persist_ack: None,
@@ -1732,7 +1736,7 @@ impl acp::Agent for MvpAgent {
                     Ok(serde_json::json!({"ok": true})),
                 )
             }
-            "grow/interject" => crate::extensions::interject::handle(self, &args).await,
+            "grow/steer" => crate::extensions::interject::handle(self, &args).await,
             "grow/btw" => {
                 crate::extensions::feedback::handle(self, &args).await
             }

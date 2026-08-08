@@ -323,7 +323,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             code_restored,
             restore_summary,
             restore_degree,
-            running_prompt_id,
+            foreground,
             scheduler_background_loops,
         } => handle_session_loaded(
             app,
@@ -333,7 +333,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             code_restored,
             restore_summary,
             restore_degree,
-            running_prompt_id,
+            foreground,
             scheduler_background_loops,
         ),
         TaskResult::SessionTitleFromDisk { agent_id, title } => {
@@ -536,7 +536,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent.shared_queue.retain(|e| e.id != prompt_id);
                 agent.note_queue_echo_retired(&prompt_id);
-                agent.retire_send_now_painted_block(&prompt_id);
                 let target = tools::types::SessionMode::from_id(mode_id.0.as_ref());
                 agent.behavior_switch_confirm =
                     Some(crate::app::agent_view::BehaviorSwitchConfirm {
@@ -546,53 +545,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 if !agent.behavior_switch_warning_pending {
                     agent.show_behavior_switch_warning(&message);
                 }
-            }
-            vec![]
-        }
-        TaskResult::SendPromptNowFailed {
-            agent_id,
-            session_id,
-            prompt_id,
-            error,
-            blocks,
-        } => {
-            let sid = session_id.0.to_string();
-            super::queue::retire_optimistic_echo(
-                &mut app.optimistic_prompt_echoes,
-                &mut app.shared_prompt_queues,
-                &sid,
-                &prompt_id,
-            );
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent.shared_queue.retain(|e| e.id != prompt_id);
-                agent.note_queue_echo_retired(&prompt_id);
-                if agent.expect_send_now_cancel.as_deref() == Some(prompt_id.as_str())
-                    || agent.follow_without_jump_prompt_id.as_deref() == Some(prompt_id.as_str())
-                {
-                    agent.clear_send_now_expectation();
-                }
-                agent.retire_send_now_painted_block(&prompt_id);
-                let text = blocks
-                    .iter()
-                    .find_map(|b| match b {
-                        acp::ContentBlock::Text(t) => Some(t.text.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-                let id = agent.session.next_queue_id;
-                agent.session.next_queue_id += 1;
-                agent
-                    .session
-                    .pending_prompts
-                    .push_front(crate::app::agent::QueuedPrompt {
-                        wire_blocks: Some(blocks),
-                        ..crate::app::agent::QueuedPrompt::plain(
-                            id,
-                            &text,
-                            crate::app::agent::QueueEntryKind::Prompt,
-                        )
-                    });
-                agent.show_toast(&format!("Send now failed — requeued: {error}"));
             }
             vec![]
         }

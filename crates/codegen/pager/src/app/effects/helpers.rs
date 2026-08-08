@@ -134,20 +134,16 @@ pub(super) fn parse_session_load_restore_meta(
         .and_then(|v| serde_json::from_value(v).ok());
     (code_restored, restore_summary, restore_degree)
 }
-/// CANONICAL wire parser for `LoadSessionResponse._meta["grow/runningPromptId"]`.
-///
-/// Returns the session's in-flight running prompt id when the session was
-/// loaded MID-turn (some other client is driving), otherwise `None`. The
-/// loader adopts this id so subsequent live `session/update` deltas pass the
-/// `current_prompt_id` gate (see `app/acp_handler.rs`). `pub(super)` for the
-/// reconnect re-init in `event_loop.rs`, which reads the same response meta.
-pub(crate) fn parse_session_load_running_prompt_id(
+/// Canonical parser for the structured regular foreground snapshot carried by
+/// `session/load`. Missing or malformed snapshots are idle; prompt ids are
+/// never inspected to recover origin or lifecycle kind.
+pub(crate) fn parse_session_load_foreground(
     resp_meta: Option<&acp::Meta>,
-) -> Option<String> {
+) -> Option<crate::app::prompt_queue::ForegroundSnapshot> {
     resp_meta
-        .and_then(|m| m.get("grow/runningPromptId"))
-        .and_then(|v| v.as_str())
-        .map(String::from)
+        .and_then(|m| m.get("grow/foreground"))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
 }
 /// CANONICAL wire parser for the `session/new` / `session/load` response
 /// `_meta[SCHEDULER_BACKGROUND_LOOPS_META_KEY]`.

@@ -12,6 +12,7 @@ async fn queued_message_renders_once_not_twice() {
     const QUEUED_TEXT: &str = "queued exactly once probe";
 
     let content = ContentController::start().await.expect("start content");
+    content.seed_llm_config().expect("seed mock LLM config");
     let park_flag = content.home().join("qonce_park_flag");
     let id_ready_flag = content.home().join("qonce_id_ready_flag");
 

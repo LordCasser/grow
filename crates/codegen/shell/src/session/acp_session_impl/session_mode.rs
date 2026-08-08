@@ -136,9 +136,24 @@ impl SessionActor {
             }
             return BehaviorChangeOutcome::Applied;
         }
-        if mode == SessionMode::Goal && (!self.goal_enabled || !self.goal_classifier_enabled) {
-            let message = "Goal behavior requires goal orchestration and an independent verifier."
-                .to_string();
+        let unfinished_goal = self
+            .goal_tracker
+            .lock()
+            .status()
+            .is_some_and(|status| status != crate::session::goal_tracker::GoalStatus::Complete);
+        if unfinished_goal && target_behavior != Some(tool_types::BehaviorId::Goal) {
+            let message =
+                "Goal behavior is exclusive until the Goal completes or is cleared.".to_string();
+            self.enqueue_current_mode_update_with_behavior_change(
+                acp::SessionModeId::new(
+                    session_mode_from_prompt_mode(previous_prompt_mode).as_id(),
+                ),
+                serde_json::json!({ "status": "rejected", "message": message }),
+            );
+            return BehaviorChangeOutcome::Rejected { message };
+        }
+        if mode == SessionMode::Goal && !self.goal_enabled {
+            let message = "Goal behavior is unavailable in this session.".to_string();
             self.enqueue_current_mode_update_with_behavior_change(
                 acp::SessionModeId::new(
                     session_mode_from_prompt_mode(previous_prompt_mode).as_id(),
@@ -231,9 +246,6 @@ impl SessionActor {
             }
         }
 
-        let goal_active = current_behavior == Some(tool_types::BehaviorId::Goal)
-            && self.goal_tracker.lock().status()
-                == Some(crate::session::goal_tracker::GoalStatus::Active);
         let deep_research_active = if current_behavior == Some(tool_types::BehaviorId::DeepResearch)
         {
             match owned_deep_research_run.as_deref() {
@@ -248,7 +260,7 @@ impl SessionActor {
         } else {
             false
         };
-        let interrupts_work = self.behavior.lock().is_plan() || goal_active || deep_research_active;
+        let interrupts_work = self.behavior.lock().is_plan() || deep_research_active;
         if interrupts_work {
             const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(8);
             if !self
@@ -292,32 +304,12 @@ impl SessionActor {
                     .await;
                 self.behavior.lock().finish_plan();
             }
-            if goal_active {
-                use crate::session::goal_tracker::GoalPauseReason;
-                // Preserve steering that arrived just before the confirmed
-                // switch. It can no longer enter the cancelled Goal turn, so
-                // convert it to queued user work; the target-mode retag below
-                // makes it run under the Behavior the user selected.
-                self.flush_stranded_interjections().await;
-                self.cancel_running_task(true, false, false, Some("behavior_switch".to_string()))
-                    .await;
-                let changed = self.goal_tracker.lock().pause(GoalPauseReason::User);
-                if changed {
-                    let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-                    let (tokens_used, finished) = self.goal_tokens(current_tokens);
-                    self.goal_notify_sender().emit_goal_updated(
-                        &mut self.goal_tracker.lock(),
-                        tokens_used,
-                        finished,
-                    );
-                }
-            }
             if deep_research_active && let Some(run_id) = owned_deep_research_run.as_deref() {
                 self.cancel_deep_research_with_report(run_id).await;
             }
         }
 
-        if mode == SessionMode::Plan && self.state.lock().await.running_task.is_some() {
+        if mode == SessionMode::Plan && self.state.lock().await.foreground.regular().is_some() {
             self.cancel_running_task(true, false, false, Some("behavior_switch".to_string()))
                 .await;
         }
@@ -331,16 +323,7 @@ impl SessionActor {
             && self.goal_tracker.lock().status()
                 == Some(crate::session::goal_tracker::GoalStatus::Complete);
         if clear_completed_goal {
-            let (respond_to, deleted) = tokio::sync::oneshot::channel();
-            if self
-                .notifications
-                .persistence_tx
-                .send(
-                    crate::session::persistence::PersistenceMsg::DeleteGoalModeState { respond_to },
-                )
-                .is_err()
-                || !matches!(deleted.await, Ok(Ok(())))
-            {
+            if self.delete_goal_state_durably().await.is_err() {
                 let message = format!(
                     "Could not durably retire the completed Goal; {} Behavior was not changed.",
                     mode.display_label()
@@ -354,26 +337,10 @@ impl SessionActor {
                 return BehaviorChangeOutcome::Rejected { message };
             }
             self.goal_tracker.lock().clear();
-            self.retire_goal_plan_scope().await;
-            self.goal_continuation_streak
-                .store(0, std::sync::atomic::Ordering::Relaxed);
-            self.goal_blocked_streak
-                .store(0, std::sync::atomic::Ordering::Relaxed);
             self.goal_turn_task_ids.lock().clear();
             self.subagent_token_records.lock().clear();
-            self.clear_pending_classifier_completions();
             self.send_grow_notification(crate::session::goal_orchestrator::build_goal_cleared())
                 .await;
-        }
-        if target_behavior == Some(tool_types::BehaviorId::Goal)
-            && self.goal_tracker.lock().snapshot().is_some()
-        {
-            self.enter_goal_plan_scope().await;
-        } else if current_behavior == Some(tool_types::BehaviorId::Goal)
-            && target_behavior != Some(tool_types::BehaviorId::Goal)
-            && self.goal_tracker.lock().snapshot().is_some()
-        {
-            self.deactivate_goal_plan_scope().await;
         }
         *self.current_prompt_mode.lock() = prompt_mode;
         self.behavior.lock().select_behavior(prompt_mode.behavior());

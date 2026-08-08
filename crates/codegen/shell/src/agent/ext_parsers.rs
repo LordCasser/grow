@@ -47,6 +47,10 @@ pub(super) fn parse_queue_edit_command(
         "grow/queue/clear" => Some(SessionCommand::ClearQueue { owner }),
         "grow/queue/interject" => {
             let id = params.get("id").and_then(|v| v.as_str())?.to_string();
+            let expected_turn_id = params
+                .get("expectedTurnId")
+                .and_then(|v| v.as_str())?
+                .to_string();
             // The client supplies the version it last saw; the handler acts
             // only on an exact match (stale = benign no-op + rebroadcast).
             let expected_version = params
@@ -61,8 +65,9 @@ pub(super) fn parse_queue_edit_command(
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.trim().is_empty())
                 .map(str::to_string);
-            Some(SessionCommand::InterjectQueuedPrompt {
+            Some(SessionCommand::SteerQueuedPrompt {
                 id,
+                expected_turn_id,
                 expected_version,
                 owner,
                 new_text,
@@ -196,63 +201,79 @@ mod tests {
             .is_none()
         );
 
-        // interject: id + expectedVersion + owner (mirrors remove).
+        // Steer atomically moves one queued row into the active turn. The
+        // expected turn id prevents a late UI action from steering a newer
+        // foreground turn.
         let p = serde_json::json!({
-            "sessionId": "s1", "id": "p10", "expectedVersion": 2
+            "sessionId": "s1", "id": "p10", "expectedTurnId": "turn-1", "expectedVersion": 2
         });
         match parse_queue_edit_command("grow/queue/interject", &p, Some("grow-tui".into())) {
-            Some(SessionCommand::InterjectQueuedPrompt {
+            Some(SessionCommand::SteerQueuedPrompt {
                 id,
+                expected_turn_id,
                 expected_version,
                 owner,
                 new_text,
             }) => {
                 assert_eq!(id, "p10");
+                assert_eq!(expected_turn_id, "turn-1");
                 assert_eq!(expected_version, 2);
                 assert_eq!(owner.as_deref(), Some("grow-tui"));
                 assert_eq!(new_text, None, "newText absent → None");
             }
-            _ => panic!("expected InterjectQueuedPrompt"),
+            _ => panic!("expected SteerQueuedPrompt"),
         }
 
-        // interject with newText (client-edited row) carries the override.
+        // Steer with newText (client-edited row) carries the override.
         let p = serde_json::json!({
-            "sessionId": "s1", "id": "p10", "expectedVersion": 2, "newText": "edited"
+            "sessionId": "s1", "id": "p10", "expectedTurnId": "turn-1", "expectedVersion": 2, "newText": "edited"
         });
         match parse_queue_edit_command("grow/queue/interject", &p, None) {
-            Some(SessionCommand::InterjectQueuedPrompt { new_text, .. }) => {
+            Some(SessionCommand::SteerQueuedPrompt { new_text, .. }) => {
                 assert_eq!(new_text.as_deref(), Some("edited"));
             }
-            _ => panic!("expected InterjectQueuedPrompt"),
+            _ => panic!("expected SteerQueuedPrompt"),
         }
 
         // Blank newText is dropped → degrades to the stored queue text.
         let p = serde_json::json!({
-            "sessionId": "s1", "id": "p10", "expectedVersion": 2, "newText": "   "
+            "sessionId": "s1", "id": "p10", "expectedTurnId": "turn-1", "expectedVersion": 2, "newText": "   "
         });
         match parse_queue_edit_command("grow/queue/interject", &p, None) {
-            Some(SessionCommand::InterjectQueuedPrompt { new_text, .. }) => {
+            Some(SessionCommand::SteerQueuedPrompt { new_text, .. }) => {
                 assert_eq!(new_text, None, "blank override must be dropped");
             }
-            _ => panic!("expected InterjectQueuedPrompt"),
+            _ => panic!("expected SteerQueuedPrompt"),
         }
 
-        // interject without expectedVersion defaults to 0.
+        // Steer without expectedVersion defaults to 0.
         match parse_queue_edit_command(
             "grow/queue/interject",
-            &serde_json::json!({ "sessionId": "s1", "id": "p11" }),
+            &serde_json::json!({ "sessionId": "s1", "id": "p11", "expectedTurnId": "turn-1" }),
             None,
         ) {
-            Some(SessionCommand::InterjectQueuedPrompt {
+            Some(SessionCommand::SteerQueuedPrompt {
                 expected_version, ..
             }) => assert_eq!(expected_version, 0),
-            _ => panic!("expected InterjectQueuedPrompt"),
+            _ => panic!("expected SteerQueuedPrompt"),
         }
 
-        // interject without id → None (can't target an entry).
+        // Steer without id or without the expected foreground owner → None.
         assert!(
-            parse_queue_edit_command("grow/queue/interject", &serde_json::json!({}), None)
-                .is_none()
+            parse_queue_edit_command(
+                "grow/queue/interject",
+                &serde_json::json!({ "expectedTurnId": "turn-1" }),
+                None
+            )
+            .is_none()
+        );
+        assert!(
+            parse_queue_edit_command(
+                "grow/queue/interject",
+                &serde_json::json!({ "id": "p11" }),
+                None
+            )
+            .is_none()
         );
 
         // unknown method → None.

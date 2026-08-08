@@ -561,13 +561,6 @@ pub struct AppView {
     /// the id (or it starts running). Never persisted.
     pub optimistic_prompt_echoes:
         std::collections::HashMap<String, Vec<crate::app::prompt_queue::QueueEntryWire>>,
-    /// Server-authoritative running prompts that drained into the running slot
-    /// while the previous turn was still finishing locally (handoff race).
-    /// Keyed by `AgentId`. Consumed by the `PromptResponse` handler after
-    /// `finish_turn` clears `current_prompt_id`, which then adopts the prompt
-    /// and runs the turn-start shim. Never persisted.
-    pub(crate) pending_running_adoptions:
-        std::collections::HashMap<AgentId, crate::app::acp_handler::PendingRunningAdoption>,
     /// Whether the session picker groups entries by repo name with
     /// non-selectable headers. Gated by `GROW_SESSION_PICKER_GROUPED` env var
     /// or remote settings `session_picker_grouped`; defaults to `false`.
@@ -999,7 +992,6 @@ impl AppView {
             dashboard_sessions_loading: false,
             shared_prompt_queues: std::collections::HashMap::new(),
             optimistic_prompt_echoes: std::collections::HashMap::new(),
-            pending_running_adoptions: std::collections::HashMap::new(),
             session_picker_grouped: false,
             scheduler_background_loops_seed: true,
             cancel_rewind_enabled: true,
@@ -1186,14 +1178,7 @@ impl AppView {
     /// authoritative: it fully replaces the previously-known queue for that
     /// session. An empty list clears the entry.
     ///
-    /// Returns `(old_id, new_id)` for echoes retired via the kind+text
-    /// fallback (re-keyed: the old id never appears in any broadcast). The
-    /// caller routes these through `AgentView::note_queue_echo_rekeyed` so
-    /// per-agent state moves with the message instead of leaking.
-    pub fn apply_queue_changed(
-        &mut self,
-        changed: crate::app::prompt_queue::QueueChanged,
-    ) -> Vec<(String, String)> {
+    pub fn apply_queue_changed(&mut self, changed: crate::app::prompt_queue::QueueChanged) {
         let crate::app::prompt_queue::QueueChanged {
             session_id,
             mut entries,
@@ -1201,37 +1186,13 @@ impl AppView {
             running_text: _,
             running_kind: _,
             running_combined_texts: _,
+            ..
         } = changed;
-        let mut rekeyed_echo_ids: Vec<(String, String)> = Vec::new();
-        let running_row: Option<(String, String)> = running_prompt_id.as_ref().and_then(|pid| {
-            self.shared_prompt_queues
-                .get(&session_id)
-                .and_then(|q| q.iter().find(|e| &e.id == pid))
-                .map(|e| (e.kind.clone(), e.text.clone()))
-        });
         if let Some(opt) = self.optimistic_prompt_echoes.get_mut(&session_id) {
             opt.retain(|e| {
                 let id_matches_running = running_prompt_id.as_deref() == Some(e.id.as_str());
                 let id_matches_entry = entries.iter().any(|x| x.id == e.id);
-                let content_match_id = running_row
-                    .as_ref()
-                    .filter(|(kind, text)| *kind == e.kind && *text == e.text)
-                    .and_then(|_| running_prompt_id.clone())
-                    .or_else(|| {
-                        entries
-                            .iter()
-                            .find(|x| x.kind == e.kind && x.text == e.text)
-                            .map(|x| x.id.clone())
-                    });
-                let retired = id_matches_running || id_matches_entry || content_match_id.is_some();
-                if retired
-                    && !id_matches_running
-                    && !id_matches_entry
-                    && let Some(new_id) = content_match_id
-                {
-                    rekeyed_echo_ids.push((e.id.clone(), new_id));
-                }
-                !retired
+                !id_matches_running && !id_matches_entry
             });
             for e in opt.iter() {
                 if !entries.iter().any(|x| x.id == e.id) {
@@ -1249,7 +1210,6 @@ impl AppView {
         } else {
             self.shared_prompt_queues.insert(session_id, entries);
         }
-        rekeyed_echo_ids
     }
     /// Push an optimistic echo row for a server-authoritative prompt the pager
     /// just sent (a plain prompt or agent-bound kind typed while a turn is
@@ -4051,7 +4011,7 @@ impl AppView {
                     .goal_state
                     .as_ref()
                     .is_some_and(|g| g.status == crate::app::agent::GoalDisplayStatus::Active);
-                let is_busy = (agent.session.state.is_busy() || goal_stage_live) && !parked;
+                let is_busy = agent.session.state.is_busy() || goal_stage_live;
                 (name, model, activity, has_perms, elapsed, is_busy)
             } else {
                 (None, None, None, false, None, false)
@@ -4230,7 +4190,6 @@ pub(crate) mod tests {
             dashboard_sessions_loading: false,
             shared_prompt_queues: std::collections::HashMap::new(),
             optimistic_prompt_echoes: std::collections::HashMap::new(),
-            pending_running_adoptions: std::collections::HashMap::new(),
             session_picker_grouped: false,
             scheduler_background_loops_seed: true,
             cancel_rewind_enabled: true,
@@ -4368,7 +4327,7 @@ pub(crate) mod tests {
             .goal_state
             .as_mut()
             .unwrap()
-            .status = crate::app::agent::GoalDisplayStatus::UserPaused;
+            .status = crate::app::agent::GoalDisplayStatus::Paused;
         assert_eq!(
             app.tick_demand(),
             TickDemand::None,
@@ -4480,7 +4439,7 @@ pub(crate) mod tests {
             .goal_state
             .as_mut()
             .unwrap()
-            .status = crate::app::agent::GoalDisplayStatus::UserPaused;
+            .status = crate::app::agent::GoalDisplayStatus::Paused;
         let redraws = (0..8).filter(|_| app.tick()).count();
         assert_eq!(redraws, 0, "a paused goal must not drive redraws");
     }
@@ -4546,7 +4505,7 @@ pub(crate) mod tests {
             .goal_state
             .as_mut()
             .unwrap()
-            .status = crate::app::agent::GoalDisplayStatus::UserPaused;
+            .status = crate::app::agent::GoalDisplayStatus::Paused;
         app.pending_notification_escapes = None;
         app.update_notifications();
         assert!(
@@ -5931,8 +5890,8 @@ pub(crate) mod tests {
         }
         let out = app.handle_input(&key_event(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(
-            matches!(out, InputOutcome::Action(Action::SendPromptNow { ref text, .. }) if text == "steer it"),
-            "running Apple-Terminal Ctrl+O with payload must send-now, got {out:?}"
+            matches!(out, InputOutcome::Action(Action::SteerPrompt { ref text, .. }) if text == "steer it"),
+            "running Apple-Terminal Ctrl+O with payload must steer, got {out:?}"
         );
         {
             let agent = app.agents.get_mut(&id).unwrap();
@@ -5943,14 +5902,14 @@ pub(crate) mod tests {
         assert!(
             matches!(
                 out,
-                InputOutcome::Action(Action::SendPromptNow { ref text, .. })
+                InputOutcome::Action(Action::SteerPrompt { ref text, .. })
                     if text == "queued follow-up"
             ),
-            "running + empty + queue: Apple-Terminal Ctrl+O must send-now, got {out:?}"
+            "running + empty + queue: Apple-Terminal Ctrl+O must steer, got {out:?}"
         );
         assert!(
             app.agents[&id].session.pending_prompts.is_empty(),
-            "queued row must be consumed by prompt-path send-now"
+            "queued row must be consumed by prompt-path steering"
         );
     }
     fn assert_background_routing_for_mode(

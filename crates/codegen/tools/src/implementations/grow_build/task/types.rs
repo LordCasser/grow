@@ -31,12 +31,21 @@ use crate::register_resource;
 pub enum SubagentOwner {
     #[default]
     Task,
+    Goal {
+        goal_id: String,
+    },
     Workflow {
         run_id: String,
     },
 }
 
 impl SubagentOwner {
+    pub fn goal(goal_id: impl Into<String>) -> Self {
+        Self::Goal {
+            goal_id: goal_id.into(),
+        }
+    }
+
     pub fn workflow(run_id: impl Into<String>) -> Self {
         Self::Workflow {
             run_id: run_id.into(),
@@ -45,8 +54,15 @@ impl SubagentOwner {
 
     pub fn workflow_run_id(&self) -> Option<&str> {
         match self {
-            Self::Task => None,
+            Self::Task | Self::Goal { .. } => None,
             Self::Workflow { run_id } => Some(run_id),
+        }
+    }
+
+    pub fn goal_id(&self) -> Option<&str> {
+        match self {
+            Self::Goal { goal_id } => Some(goal_id),
+            Self::Task | Self::Workflow { .. } => None,
         }
     }
 
@@ -979,6 +995,18 @@ register_resource!(
     "grow_build",
     "CurrentPromptIdResource",
     CurrentPromptIdResource
+);
+
+/// Producer-stamped ownership for TaskTool children launched by the current
+/// turn. Delayed lifecycle events carry this value instead of consulting the
+/// Goal that happens to be current when they arrive.
+#[derive(Debug, Clone, Default)]
+pub struct CurrentSubagentOwnerResource(pub SubagentOwner);
+
+register_resource!(
+    "grow_build",
+    "CurrentSubagentOwnerResource",
+    CurrentSubagentOwnerResource
 );
 
 /// True while a `/goal` loop is active. Set by shell at turn start.

@@ -564,13 +564,6 @@ impl AgentView {
                     {
                         if matches!(self.prompt_mode, PromptMode::Normal)
                             && self.prompt.text().trim().is_empty()
-                            && crate::app::dispatch::goal_is_verifying(self)
-                        {
-                            self.show_toast(crate::app::dispatch::GOAL_VERIFYING_TOAST);
-                            return InputOutcome::Changed;
-                        }
-                        if matches!(self.prompt_mode, PromptMode::Normal)
-                            && self.prompt.text().trim().is_empty()
                             && self.session.state.is_turn_running()
                             && let Some(outcome) = self.try_send_now_queued_from_prompt()
                         {
@@ -604,13 +597,6 @@ impl AgentView {
                     // insert the newline, not fire a queued follow-up.
                     if matches!(self.prompt_mode, PromptMode::Normal)
                         && self.prompt.text().trim().is_empty()
-                        && crate::app::dispatch::goal_is_verifying(self)
-                    {
-                        self.show_toast(crate::app::dispatch::GOAL_VERIFYING_TOAST);
-                        return InputOutcome::Changed;
-                    }
-                    if matches!(self.prompt_mode, PromptMode::Normal)
-                        && self.prompt.text().trim().is_empty()
                         && self.session.state.is_turn_running()
                         && let Some(outcome) = self.try_send_now_queued_from_prompt()
                     {
@@ -634,12 +620,6 @@ impl AgentView {
                     let text = self.prompt.text().trim().to_string();
                     let turn_running = self.session.state.is_turn_running();
                     if !text.is_empty() {
-                        // Verification protection: same toast as every other
-                        // send entry; the draft stays in the composer.
-                        if crate::app::dispatch::goal_is_verifying(self) {
-                            self.show_toast(crate::app::dispatch::GOAL_VERIFYING_TOAST);
-                            return InputOutcome::Changed;
-                        }
                         if !turn_running {
                             return InputOutcome::Changed;
                         }
@@ -653,13 +633,7 @@ impl AgentView {
                         // Drain images BEFORE set_text("") wipes the chip elements.
                         let images = self.prompt.drain_images();
                         self.prompt.set_text("");
-                        return InputOutcome::Action(Action::SendPromptNow { text, images });
-                    }
-                    // Verification protection (empty composer): the top-row
-                    // send-now would be rejected anyway — say why.
-                    if crate::app::dispatch::goal_is_verifying(self) {
-                        self.show_toast(crate::app::dispatch::GOAL_VERIFYING_TOAST);
-                        return InputOutcome::Changed;
+                        return InputOutcome::Action(Action::SteerPrompt { text, images });
                     }
                     if turn_running && let Some(outcome) = self.try_send_now_queued_from_prompt() {
                         return outcome;

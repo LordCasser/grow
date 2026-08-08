@@ -24,6 +24,9 @@ use super::actions::{Action, Effect, TaskResult};
 use super::app_view::{ActiveView, AppView, InputOutcome, PasteProvenance, TrustState};
 use super::{PagerArgs, PagerTerminal, acp_handler, dispatch, effects};
 
+/// Maximum ACP messages processed before loop deadlines are checked again.
+const ACP_DRAIN_BATCH_MAX: usize = 32;
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct TimedInputEvent {
     pub(super) event: Event,
@@ -88,10 +91,8 @@ struct ReinitOutcome {
 struct AgentLoadOutcome {
     agent_id: super::agent::AgentId,
     success: bool,
-    /// `grow/runningPromptId` from the reload response: the turn another
-    /// client is driving mid-reconnect, adopted at finalize (mirrors the
-    /// `SessionLoaded` adoption in `dispatch.rs`).
-    running_prompt_id: Option<String>,
+    /// Structured regular foreground owner from the reload response.
+    foreground: Option<crate::app::prompt_queue::ForegroundSnapshot>,
     /// `grow/schedulerBackgroundLoops` from the reload response. A reconnect
     /// re-spawns the session actor, which re-pins the fire mode, so the
     /// pre-reconnect value can be stale — adopt the reloaded one or `/loop`
@@ -162,13 +163,20 @@ fn plan_reconnect_load(
 ///   on a healthy active tab — the drain (`dispatch_drain_queue`) only ever
 ///   touches the active agent, so a background failure has no bearing on it.
 ///
-/// `loads` maps each reloaded agent to `(success, running_prompt_id)`; an agent
+/// `loads` maps each reloaded agent to `(success, foreground)`; an agent
 /// in `pending_agent_ids` but absent from `loads` is treated as failed
 /// (mirrors the `unwrap_or((false, _))` at the finalize site).
 fn reconnect_restore_outcome(
     init_ok: bool,
     pending_agent_ids: &[super::agent::AgentId],
-    loads: &std::collections::HashMap<super::agent::AgentId, (bool, Option<String>, Option<bool>)>,
+    loads: &std::collections::HashMap<
+        super::agent::AgentId,
+        (
+            bool,
+            Option<crate::app::prompt_queue::ForegroundSnapshot>,
+            Option<bool>,
+        ),
+    >,
     active_agent_id: Option<super::agent::AgentId>,
 ) -> (bool, bool) {
     let load_ok =
@@ -1477,8 +1485,6 @@ pub(crate) async fn run(
     // case batched (draws stay cadence-throttled regardless), small enough that
     // loop-top work (suspends, deadline re-derivation) never waits on an
     // unbounded drain during a token firehose.
-    const ACP_DRAIN_BATCH_MAX: usize = 32;
-
     let mut reconnect_reinit: Option<ReconnectReinit> = None;
     let mut reconnect_abort_handle: Option<tokio::task::AbortHandle> = None;
     // Highest `Connected` generation already handled. Starts at 0 — the
@@ -1678,6 +1684,19 @@ pub(crate) async fn run(
             // keys), and cancel/quit must stay above the firehose regardless.
             msg = acp_rx.recv(), if input_rx.is_empty() => {
                 let Some(msg) = msg else { break };
+                // A continuously-ready ACP stream must not outrank an expired
+                // animation deadline. Check once before every bounded batch.
+                if take_due_animation_tick(&mut animation_tick_at, Instant::now()) {
+                    let (should_quit, needs_draw) =
+                        advance_animation_tick(&mut app, &mut tasks);
+                    if should_quit {
+                        break;
+                    }
+                    if needs_draw {
+                        presenter.request(false);
+                    }
+                    schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                }
                 let mut state_changed = acp_handler::handle(msg, &mut app);
                 if !app.pending_effects.is_empty() {
                     let effs = std::mem::take(&mut app.pending_effects);
@@ -1846,13 +1865,12 @@ pub(crate) async fn run(
 
             _ = animation_tick => {
                 animation_tick_at = None;
-                let reconciled = dispatch::poll_stalled_prompt_submissions(&mut app);
-                if let Some(effs) = reconciled {
-                    if process_effects(effs, &mut tasks, &mut app) {
-                        break;
-                    }
-                    presenter.request(false);
-                } else if app.tick() {
+                let (should_quit, needs_draw) =
+                    advance_animation_tick(&mut app, &mut tasks);
+                if should_quit {
+                    break;
+                }
+                if needs_draw {
                     presenter.request(false);
                 }
                 // Keep ticking as long as there are running animations
@@ -2057,8 +2075,6 @@ pub(crate) async fn run(
                             agent.session.auto_mode =
                                 plan.meta["autoMode"].as_bool().unwrap_or(false);
                             agent.begin_session_reload(generation);
-                            // The reload adoption supersedes a pre-disconnect stash.
-                            app.pending_running_adoptions.remove(&id);
                             reload_agent_ids.push(id);
                             load_plans.push((id, plan));
                         }
@@ -2116,8 +2132,8 @@ pub(crate) async fn run(
                                             loads.push(AgentLoadOutcome {
                                                 agent_id,
                                                 success: true,
-                                                running_prompt_id:
-                                                    effects::parse_session_load_running_prompt_id(
+                                                foreground:
+                                                    effects::parse_session_load_foreground(
                                                         resp.meta.as_ref(),
                                                     ),
                                                 scheduler_background_loops:
@@ -2133,7 +2149,7 @@ pub(crate) async fn run(
                                             loads.push(AgentLoadOutcome {
                                                 agent_id,
                                                 success: false,
-                                                running_prompt_id: None,
+                                                foreground: None,
                                                 scheduler_background_loops: None,
                                             });
                                         }
@@ -2213,7 +2229,7 @@ pub(crate) async fn run(
                     .map(|l| {
                         (
                             l.agent_id,
-                            (l.success, l.running_prompt_id, l.scheduler_background_loops),
+                            (l.success, l.foreground, l.scheduler_background_loops),
                         )
                     })
                     .collect();
@@ -2231,7 +2247,7 @@ pub(crate) async fn run(
                 );
                 restore_dashboard_peek_before_reload(&mut app.dashboard, &mut app.agents);
                 for id in &pending.agent_ids {
-                    let (ok, running_prompt_id, scheduler_background_loops) =
+                    let (ok, foreground, scheduler_background_loops) =
                         loads.remove(id).unwrap_or((false, None, None));
                     if let Some(agent) = app.agents.get_mut(id) {
                         // The reloaded actor re-pinned the fire mode; a failed
@@ -2242,7 +2258,7 @@ pub(crate) async fn run(
                         agent.finalize_reload_and_maybe_adopt(
                             pending.generation,
                             ok,
-                            running_prompt_id,
+                            foreground.map(|snapshot| snapshot.prompt_id),
                         );
                     }
                 }
@@ -2281,6 +2297,28 @@ pub(crate) async fn run(
     app.notification_service.shutdown();
 
     Ok(make_run_result(&app))
+}
+
+/// Advance all animation-driven state exactly once.
+fn advance_animation_tick(app: &mut AppView, tasks: &mut JoinSet<TaskResult>) -> (bool, bool) {
+    if let Some(effs) = dispatch::poll_stalled_prompt_submissions(app) {
+        let should_quit = process_effects(effs, tasks, app);
+        (should_quit, true)
+    } else {
+        (false, app.tick())
+    }
+}
+
+/// Atomically claim an expired animation deadline. The ACP arm calls this
+/// before every bounded drain, so a continuously-ready stream cannot starve
+/// animation indefinitely.
+fn take_due_animation_tick(tick_at: &mut Option<Instant>, now: Instant) -> bool {
+    if tick_at.is_some_and(|deadline| now >= deadline) {
+        *tick_at = None;
+        true
+    } else {
+        false
+    }
 }
 
 /// Load `UiConfig` from the shell's layered config at startup.
@@ -3042,6 +3080,26 @@ fn process_effects(
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyEventState};
+
+    #[test]
+    fn token_firehose_rechecks_expired_animation_within_one_acp_batch() {
+        let start = Instant::now();
+        let mut deadline = Some(start + Duration::from_millis(1));
+        let mut messages_before_tick = 0;
+
+        // Model an ACP channel that is ready forever. The event loop calls the
+        // helper once per bounded batch before consuming that batch.
+        for batch in 0..3 {
+            let now = start + Duration::from_millis(batch as u64);
+            if take_due_animation_tick(&mut deadline, now) {
+                break;
+            }
+            messages_before_tick += ACP_DRAIN_BATCH_MAX;
+        }
+
+        assert_eq!(messages_before_tick, ACP_DRAIN_BATCH_MAX);
+        assert!(deadline.is_none());
+    }
 
     #[test]
     fn tty_suspend_arm_stops_same_batch_before_later_ownership_changes() {

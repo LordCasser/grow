@@ -1,1066 +1,46 @@
-//! Goal-orchestration concern for `SessionActor`.
+//! Goal runtime. Stages are background work; only implementer and final
+//! reporting turns may own the foreground.
 
+use super::prompt_queue::RunningPromptDisplay;
 use super::*;
+use tools::implementations::grow_build::task::backend::{ChannelBackend, SubagentBackend};
+use tools::implementations::grow_build::task::types::{
+    SubagentOwner, SubagentRequest, SubagentRuntimeOverrides,
+};
 
-impl SessionActor {
-    async fn finish_goal_behavior_after_verified_achievement(&self) {
-        self.retire_goal_plan_scope().await;
-        if self.behavior.lock().behavior() != Some(tool_types::BehaviorId::Goal) {
-            return;
-        }
-        self.behavior.lock().select_behavior(None);
-        *self.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
-        self.retag_queued_goal_user_prompts(crate::session::behavior::PromptMode::Agent)
-            .await;
-        self.persist_behavior_state();
-        self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
-            tools::types::SessionMode::Default.as_id(),
-        ));
-    }
-}
-
-/// Per-role toolset capability requirement for the parent-side gate.
-///
-/// Each role needs a different minimum toolset to do its job; a configured
-/// harness `agent_type` whose role toolset lacks the capability fails open to
-/// the current model + session harness rather than spawning an unusable
-/// verifier.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum RoleCapability {
-    /// Skeptic: reads + greps code to corroborate diff hunks.
-    Skeptic,
-    /// Strategist: reads + greps + runs commands while investigating traces.
-    Strategist,
-}
-
-impl RoleCapability {
-    /// `true` when `summary`'s toolset satisfies this role's minimum
-    /// capability, keyed on the `can_*` flags (`can_search` for grep,
-    /// `can_execute` for terminal/bash).
-    fn is_satisfied(
-        self,
-        summary: &tools::implementations::grow_build::task::types::SubagentTypeSummary,
-    ) -> bool {
-        match self {
-            Self::Skeptic => summary.can_read && summary.can_search,
-            Self::Strategist => summary.can_read && summary.can_search && summary.can_execute,
-        }
-    }
-}
-
-/// Panel-scoped memoization for `resolve_goal_role_override`:
-/// at most one `describe_subagent_type` coordinator round-trip per distinct
-/// `agent_type`, so a multi-index skeptic panel sharing one agent_type costs
-/// one round-trip instead of N. A single planner/strategist resolve uses a
-/// fresh (empty) cache — no cross-call sharing needed.
-#[derive(Default)]
-pub(crate) struct PanelResolveCache {
-    /// harness `agent_type` → describe outcome (the coordinator round-trip
-    /// result for the role's `general-purpose` toolset on that harness).
-    describe: std::collections::HashMap<
-        String,
-        tools::implementations::grow_build::task::types::SubagentDescribeOutcome,
-    >,
-}
-
-/// Build a role's prompt tool names from its resolved spawn override (
-/// option (a)). A committed explicit pair draws its names from the SAME
-/// `describe_subagent_type` summary cached during the gate (no second
-/// round-trip); every other case (inherit, fail-open, or a missing summary)
-/// falls back to the parent-toolset `inherit` names so the prompt always
-/// renders fully.
-fn role_tool_names_from(
-    override_: &crate::session::goal_planner::RoleSpawnOverride,
-    cache: &PanelResolveCache,
-    inherit: &crate::session::goal_role_tools::RoleToolNames,
-) -> crate::session::goal_role_tools::RoleToolNames {
-    use tools::implementations::grow_build::task::types::SubagentDescribeOutcome;
-    // `override_.agent_type` is the committed harness; the cache is keyed on it.
-    match override_.agent_type.as_deref() {
-        Some(harness) => match cache.describe.get(harness) {
-            Some(SubagentDescribeOutcome::Ok(summary)) => {
-                crate::session::goal_role_tools::RoleToolNames::from_summary(summary)
-            }
-            _ => inherit.clone(),
-        },
-        None => inherit.clone(),
-    }
-}
-
-/// How [`SessionActor::record_verdict_on_orchestration`] updates the
-/// orchestration's `last_classifier_gaps`. A real `NotAchieved` panel result
-/// stamps fresh curated gaps (`Set`), a verdict that resolves them clears
-/// (`Clear`), and a synthetic verdict that ran no panel leaves any stored
-/// real gaps replaying into the continuation directive (`Preserve`).
-pub(crate) enum GapsUpdate<'a> {
-    Set(&'a str),
-    Clear,
-    Preserve,
-}
-
-/// Lease + attempt payload for one scheduled verification stage. The drain
-/// (mailbox) builds it and hands it to
-/// [`SessionActor::schedule_goal_verifier_stage`], which runs the model
-/// work off the mailbox.
-struct GoalVerifierStageSpec {
-    attempt: u32,
-    policy: GoalClassifierPolicy,
-    ack_tx: Option<
-        tokio::sync::oneshot::Sender<
-            tools::implementations::grow_build::update_goal::UpdateGoalAck,
-        >,
-    >,
-    goal_id: String,
-    definition_revision: u64,
-    autonomy_generation: u64,
-    foreground_generation: u64,
+#[derive(serde::Deserialize)]
+struct VerifierResponse {
+    verdict: String,
+    #[serde(default)]
+    feedback: String,
+    #[serde(default)]
+    fingerprint: String,
 }
 
 impl SessionActor {
-    async fn evaluate_goal_round(
-        &self,
-    ) -> Result<crate::session::goal_evaluator::GoalEvaluatorVerdict, String> {
-        use crate::session::goal_evaluator::{
-            GOAL_EVALUATOR_TIMEOUT, bounded_goal_transcript, build_goal_evaluator_request,
-            parse_goal_evaluator_verdict,
-        };
-        let (objective, plan_file) = {
-            let tracker = self.goal_tracker.lock();
-            let snapshot = tracker
-                .snapshot()
-                .ok_or_else(|| "goal state disappeared before evaluation".to_string())?;
-            (snapshot.objective.clone(), snapshot.plan_file.clone())
-        };
-        let transcript = bounded_goal_transcript(
-            &self.project_goal_conversation(self.chat_state_handle.get_conversation().await, true),
-        );
-        let plan = match plan_file {
-            Some(path) => tokio::fs::read_to_string(path)
-                .await
-                .ok()
-                .map(|text| tools::util::truncate_str(&text, 16 * 1024).to_owned()),
-            None => None,
-        };
-        let active_model = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|config| config.model)
-            .filter(|model| !model.is_empty())
-            .unwrap_or_else(|| self.models_manager.current_model_id().0.to_string());
-        let session_id = self.session_info.id.to_string();
-        let mut last_error = String::new();
-        for attempt in 0..2 {
-            let requested_model = if attempt == 0 {
-                active_model.as_str()
-            } else {
-                active_model.as_str()
-            };
-            let (client, model) = if requested_model == active_model {
-                match self.prepare_chat_completion(false).await {
-                    Ok(client) => (client, active_model.clone()),
-                    Err(error) => {
-                        last_error = format!("could not prepare evaluator client: {error}");
-                        continue;
-                    }
-                }
-            } else {
-                let active_config = self.reconstruct_full_config().await;
-                match self.resolve_aux_sampler_config(requested_model).await {
-                    Some(mut config) => {
-                        crate::agent::config::stamp_session_local_sampler_fields(
-                            &mut config,
-                            &active_config,
-                            Some(self.max_retries),
-                        );
-                        let model = config.model.clone();
-                        match sampler::SamplingClient::new(config) {
-                            Ok(client) => (client, model),
-                            Err(error) => {
-                                last_error = format!("could not prepare small evaluator: {error}");
-                                continue;
-                            }
-                        }
-                    }
-                    None => {
-                        last_error =
-                            format!("small evaluator model `{requested_model}` unavailable");
-                        continue;
-                    }
-                }
-            };
-            let request = build_goal_evaluator_request(
-                &objective,
-                &transcript,
-                plan.as_deref(),
-                model.clone(),
-                &session_id,
-            );
-            let response = match tokio::time::timeout(
-                GOAL_EVALUATOR_TIMEOUT,
-                client.conversation_collect(request),
-            )
-            .await
-            {
-                Ok(Ok(response)) => response,
-                Ok(Err(error)) => {
-                    let _ = self
-                        .chat_state_handle
-                        .mark_usage_incomplete(true, true)
-                        .await;
-                    last_error = format!("goal evaluator request failed: {error}");
-                    continue;
-                }
-                Err(_) => {
-                    let _ = self
-                        .chat_state_handle
-                        .mark_usage_incomplete(true, true)
-                        .await;
-                    last_error = format!(
-                        "goal evaluator timed out after {}s",
-                        GOAL_EVALUATOR_TIMEOUT.as_secs()
-                    );
-                    continue;
-                }
-            };
-            if response.usage.is_none() {
-                let _ = self
-                    .chat_state_handle
-                    .mark_usage_incomplete(true, true)
-                    .await;
-                last_error = "goal evaluator response omitted usage accounting".to_string();
-                continue;
-            }
-            match parse_goal_evaluator_verdict(&response.assistant_text()) {
-                Ok(verdict) => return Ok(verdict),
-                Err(error) => last_error = error.to_string(),
-            }
-        }
-        Err(last_error)
-    }
-
-    fn record_goal_round_progress(&self, detail: &str, failed: bool) {
-        let detail = tools::util::truncate_str(detail.trim(), 500).to_owned();
-        let mut tracker = self.goal_tracker.lock();
-        let round = tracker.snapshot_mut().map(|snapshot| {
-            snapshot.total_worker_rounds = snapshot.total_worker_rounds.saturating_add(1);
-            snapshot.total_worker_rounds
-        });
-        let mut entry = crate::session::goal_tracker::GoalHistoryEntry::now(
-            if failed {
-                crate::session::goal_tracker::GoalEvent::WorkerFailed
-            } else {
-                crate::session::goal_tracker::GoalEvent::WorkerCompleted
-            },
-            (!detail.is_empty()).then_some(detail),
-        );
-        entry.round = round;
-        tracker.append_history(entry);
-    }
-
-    /// Workflow-path verification: spawn_local verification task + select
-    /// over user steering / foreground completion / goal-control change,
-    /// with a displaced-result background continuation. This shape is the
-    /// model the mailbox turn-end drain mirrors for non-workflow sessions —
-    /// except that drain's stage completion commits via
-    /// `SessionEvent::GoalStageCompleted` under a captured lease instead of
-    /// this function's in-task `goal_foreground_changed` checks.
-    async fn verify_goal_candidate(self: &std::sync::Arc<Self>, foreground_generation: u64) {
-        use crate::session::goal_classifier::GoalClassifierOutcome;
-        let policy = self.resolve_goal_classifier_policy();
-        if !policy.enabled {
-            self.auto_pause_goal_if_active_with_message(
-                crate::session::goal_tracker::GoalPauseReason::Infra,
-                "Goal verification is unavailable. Resume after enabling the verifier.".to_string(),
-            )
-            .await;
-            return;
-        }
-        let (attempts, already_verifying) =
-            self.goal_tracker
-                .lock()
-                .snapshot()
-                .map_or((0, false), |snapshot| {
-                    (
-                        snapshot.classifier_runs_attempted,
-                        snapshot.verifying_in_flight,
-                    )
-                });
-        if already_verifying {
-            return;
-        }
-        if attempts >= policy.max_runs {
-            self.auto_pause_for_classifier_cap(attempts, "", "").await;
-            return;
-        }
-        let Some(definition_key) = self.goal_tracker.lock().definition_key() else {
-            return;
-        };
-        let autonomy_generation = self
-            .goal_tracker
-            .lock()
-            .autonomy_generation()
-            .unwrap_or_default();
-        let Some(attempt) = self.reserve_classifier_attempt_slot(&policy) else {
-            return;
-        };
-        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-        self.emit_goal_verifying(current_tokens);
-        let actor = std::sync::Arc::clone(self);
-        let latch_goal_id = definition_key.0.clone();
-        let latch_revision = definition_key.1;
-        let mut verification_task = tokio::task::spawn_local(async move {
-            let _latch = TrackerDropGuard::new(&actor.goal_tracker, move |tracker| {
-                if tracker.definition_is_current(&latch_goal_id, latch_revision)
-                    && let Some(snapshot) = tracker.snapshot_mut()
-                {
-                    snapshot.verifying_in_flight = false;
-                }
-            });
-            actor.run_verification_stage_for_drain(attempt).await
-        });
-        let background_definition = definition_key.clone();
-        enum VerificationWait {
-            Displaced(&'static str),
-            Finished(Result<GoalClassifierOutcome, tokio::task::JoinError>),
-        }
-        let wait = tokio::select! {
-            biased;
-            _ = super::tool_calls::wait_for_pending_interjection(
-                &self.pending_interjections,
-            ) => VerificationWait::Displaced("user steering"),
-            _ = self
-                .completion_delivery
-                .wait_generation_change(foreground_generation) => {
-                VerificationWait::Displaced("a foreground completion")
-            },
-            result = &mut verification_task => VerificationWait::Finished(result),
-        };
-        let outcome = match wait {
-            VerificationWait::Displaced(displaced_by) => {
-                let actor = std::sync::Arc::clone(self);
-                tokio::task::spawn_local(async move {
-                    let outcome = verification_task.await;
-                    if actor
-                        .goal_tracker
-                        .lock()
-                        .definition_is_current(&background_definition.0, background_definition.1)
-                        && actor.goal_tracker.lock().autonomy_generation()
-                            == Some(autonomy_generation)
-                    {
-                        actor.goal_tracker.lock().rollback_classifier_attempt();
-                        if actor.goal_tracker.lock().status()
-                            == Some(crate::session::goal_tracker::GoalStatus::Active)
-                        {
-                            let body = match outcome {
-                                Ok(outcome) => format!(
-                                    "A Goal verification stage displaced by {displaced_by} has finished. Its verdict was not committed because foreground context changed. Re-evaluate against the latest foreground information before pausing or completing the Goal. Diagnostic result: {outcome:?}"
-                                ),
-                                Err(error) => format!(
-                                    "A Goal verification stage displaced by {displaced_by} failed in its background continuation ({error}). Re-evaluate the Goal against the latest foreground information."
-                                ),
-                            };
-                            let body = tools::util::truncate_str(&body, 8 * 1024).to_owned();
-                            actor.completion_delivery.queue_ready(
-                                format!(
-                                    "goal-verifier:{}:{}:{attempt}",
-                                    background_definition.0, background_definition.1,
-                                ),
-                                body,
-                            );
-                            let _ = actor.event_tx.send(SessionEvent::ForegroundWake);
-                        }
-                    }
-                });
-                return;
-            }
-            VerificationWait::Finished(result) => match result {
-                Ok(outcome) => outcome,
-                Err(error) => GoalClassifierOutcome::VerificationUnavailable {
-                    reason: crate::session::events::GoalVerificationUnavailableReason::SamplerError,
-                    details_path: format!("verifier task failed: {error}"),
-                },
-            },
-        };
-        let tracker = self.goal_tracker.lock();
-        let stale = !tracker.definition_is_current(&definition_key.0, definition_key.1);
-        let autonomy_stale = tracker.autonomy_generation() != Some(autonomy_generation);
-        let inactive = tracker.status() != Some(crate::session::goal_tracker::GoalStatus::Active);
-        drop(tracker);
-        if stale || autonomy_stale || inactive {
-            return;
-        }
-        if self.goal_foreground_changed(foreground_generation) {
-            return;
-        }
-        if let GoalClassifierOutcome::VerificationUnavailable { reason, .. } = outcome {
-            self.goal_tracker.lock().rollback_classifier_attempt();
-            self.auto_pause_goal_if_active_with_message(
-                crate::session::goal_tracker::GoalPauseReason::Infra,
-                format!(
-                    "Goal verification infrastructure failed ({}). Resume with /goal to retry.",
-                    reason.as_const_str()
-                ),
-            )
-            .await;
-            return;
-        }
-        let notify = self.goal_notify_sender();
-        self.apply_classifier_outcome(&policy, attempt, outcome, &notify, foreground_generation)
-            .await;
-    }
-
-    fn reserve_classifier_attempt_slot(&self, policy: &GoalClassifierPolicy) -> Option<u32> {
-        let mut tracker = self.goal_tracker.lock();
-        let snapshot = tracker.snapshot_mut()?;
-        snapshot.classifier_runs_attempted = snapshot.classifier_runs_attempted.saturating_add(1);
-        snapshot.classifier_max_runs = Some(policy.max_runs);
-        snapshot.rounds_since_verify = 0;
-        Some(snapshot.classifier_runs_attempted)
-    }
-
-    async fn apply_classifier_outcome(
+    pub(super) async fn initialize_goal_runtime(
         self: &std::sync::Arc<Self>,
-        policy: &GoalClassifierPolicy,
-        attempt: u32,
-        outcome: crate::session::goal_classifier::GoalClassifierOutcome,
-        notify: &crate::session::goal_orchestrator::GoalNotifySender,
-        foreground_generation: u64,
+        objective: &str,
+        token_budget: Option<i64>,
     ) {
-        use crate::session::goal_classifier::GoalClassifierOutcome;
-        use crate::session::goal_tracker::GoalClassifierVerdict;
-        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-        let (tokens_used, finished) = self.goal_tokens(current_tokens);
-        if self.goal_foreground_changed(foreground_generation) {
-            return;
+        if let Some((_, cancel)) = self.goal_stage_cancel.lock().take() {
+            cancel.cancel();
         }
-        match outcome {
-            GoalClassifierOutcome::Achieved { details_path } => {
-                {
-                    let mut tracker = self.goal_tracker.lock();
-                    Self::record_verdict_on_orchestration(
-                        &mut tracker,
-                        GoalClassifierVerdict::Achieved,
-                        Some(&details_path),
-                        GapsUpdate::Clear,
-                    );
-                    tracker.reset_strategist_state();
-                    tracker.complete_verified();
-                    notify.emit_goal_updated(&mut tracker, tokens_used, finished);
-                }
-                self.finish_goal_behavior_after_verified_achievement().await;
-                self.maybe_run_goal_summarizer(attempt);
-            }
-            GoalClassifierOutcome::NotAchieved {
-                details_path,
-                gaps_summary,
-                pause_summary,
-                gap_fingerprint,
-            } => {
-                {
-                    let mut tracker = self.goal_tracker.lock();
-                    Self::record_verdict_on_orchestration(
-                        &mut tracker,
-                        GoalClassifierVerdict::NotAchieved,
-                        Some(&details_path),
-                        GapsUpdate::Set(&gaps_summary),
-                    );
-                    tracker.record_not_achieved_streak();
-                }
-                if attempt >= policy.max_runs {
-                    if self.goal_foreground_changed(foreground_generation) {
-                        return;
-                    }
-                    self.auto_pause_for_classifier_cap(attempt, &details_path, &pause_summary)
-                        .await;
-                    return;
-                }
-                let stalled = !gap_fingerprint.is_empty()
-                    && self
-                        .goal_tracker
-                        .lock()
-                        .record_classifier_stall(&gap_fingerprint);
-                if stalled {
-                    if self.goal_foreground_changed(foreground_generation) {
-                        return;
-                    }
-                    self.auto_pause_for_classifier_stall(&details_path, &pause_summary)
-                        .await;
-                    return;
-                }
-                let every = self.goal_strategist_every;
-                let claimed =
-                    self.goal_tracker
-                        .lock()
-                        .claim_strategist_fire(|consecutive, last| {
-                            crate::session::goal_strategist::strategist_should_fire(
-                                consecutive,
-                                last,
-                                every,
-                            )
-                        });
-                if let Some(consecutive) = claimed {
-                    self.maybe_run_goal_strategist(attempt, consecutive);
-                }
-                if self.goal_foreground_changed(foreground_generation) {
-                    return;
-                }
-                notify.emit_goal_updated(&mut self.goal_tracker.lock(), tokens_used, finished);
-            }
-            GoalClassifierOutcome::Blocked {
-                details_path,
-                pause_summary,
-            } => {
-                if self.goal_foreground_changed(foreground_generation) {
-                    return;
-                }
-                {
-                    let mut tracker = self.goal_tracker.lock();
-                    Self::record_verdict_on_orchestration(
-                        &mut tracker,
-                        GoalClassifierVerdict::NotAchieved,
-                        Some(&details_path),
-                        GapsUpdate::Clear,
-                    );
-                    tracker.rollback_classifier_attempt();
-                    tracker.reset_classifier_stall();
-                    tracker.reset_strategist_state();
-                }
-                self.auto_pause_for_classifier_blocked(&details_path, &pause_summary)
-                    .await;
-            }
-            GoalClassifierOutcome::VerificationUnavailable { .. } => {
-                unreachable!("infra outcomes are handled fail-closed before apply")
-            }
-        }
-    }
-
-    pub(super) fn record_verdict_on_orchestration(
-        tracker: &mut crate::session::goal_tracker::GoalTracker,
-        verdict: crate::session::goal_tracker::GoalClassifierVerdict,
-        details_path: Option<&str>,
-        gaps: GapsUpdate<'_>,
-    ) {
-        if let Some(o) = tracker.snapshot_mut() {
-            o.last_classifier_verdict = Some(verdict);
-            if let Some(p) = details_path {
-                o.last_classifier_details_path = Some(p.to_string());
-            }
-            match gaps {
-                GapsUpdate::Set(g) => o.last_classifier_gaps = Some(g.to_string()),
-                GapsUpdate::Clear => o.last_classifier_gaps = None,
-                GapsUpdate::Preserve => {}
-            }
-            o.last_classifier_at = Some(chrono::Utc::now().to_rfc3339());
-        }
-    }
-
-    pub(super) fn resolve_goal_classifier_policy(&self) -> GoalClassifierPolicy {
-        let bonus = self
-            .goal_tracker
-            .lock()
-            .snapshot()
-            .map_or(0, |o| o.strategist_cap_bonus);
-        GoalClassifierPolicy {
-            enabled: self.goal_classifier_enabled,
-            max_runs: self.goal_classifier_max_runs.saturating_add(bonus),
-        }
-    }
-
-    fn emit_goal_verifying(&self, current_tokens: i64) {
-        if !self.goal_harness_enabled() {
-            return;
-        }
-        let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
-        let update = {
-            let mut tracker = self.goal_tracker.lock();
-            tracker.account_elapsed();
-            let Some(o) = tracker.snapshot_mut() else {
-                return;
-            };
-            o.verifying_in_flight = true;
-            crate::session::goal_orchestrator::build_goal_updated(o, tokens_used, finished_marginal)
-        };
-        self.goal_notify_sender().send_update(update);
-    }
-
-    pub(super) fn emit_goal_planning(&self, current_tokens: i64) {
-        if !self.goal_harness_enabled() {
-            return;
-        }
-        let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
-        let update = {
-            let mut tracker = self.goal_tracker.lock();
-            tracker.account_elapsed();
-            let Some(o) = tracker.snapshot_mut() else {
-                return;
-            };
-            o.planning_in_flight = true;
-            crate::session::goal_orchestrator::build_goal_updated(o, tokens_used, finished_marginal)
-        };
-        self.goal_notify_sender().send_update(update);
-    }
-
-    async fn auto_pause_for_classifier_cap(
-        &self,
-        attempt: u32,
-        details_path: &str,
-        pause_summary: &str,
-    ) {
-        self.events
-            .emit(crate::session::events::Event::GoalClassifierCapReached { attempt });
-        let msg = format_goal_pause_message(
-            &format!("Goal classifier rejected completion {attempt} times — goal auto-paused."),
-            pause_summary,
-            details_path,
-        );
-        self.auto_pause_goal_if_active_with_message(
-            crate::session::goal_tracker::GoalPauseReason::BackOff,
-            msg,
-        )
-        .await;
-    }
-
-    async fn auto_pause_for_classifier_stall(&self, details_path: &str, pause_summary: &str) {
-        let msg = format_goal_pause_message(
-            "Goal verification flagged the same gaps with no progress across \
-             consecutive attempts — goal auto-paused.",
-            pause_summary,
-            details_path,
-        );
-        self.auto_pause_goal_if_active_with_message(
-            crate::session::goal_tracker::GoalPauseReason::NoProgress,
-            msg,
-        )
-        .await;
-    }
-
-    async fn auto_pause_for_classifier_blocked(&self, details_path: &str, pause_summary: &str) {
-        let msg = format_goal_pause_message(
-            "Goal verification found no model-fixable path — paused for your decision.",
-            pause_summary,
-            details_path,
-        );
-        self.auto_pause_goal_if_active_with_message(
-            crate::session::goal_tracker::GoalPauseReason::Verification,
-            msg,
-        )
-        .await;
-    }
-
-    pub(super) async fn run_verification_stage_for_drain(
-        &self,
-        attempt: u32,
-    ) -> crate::session::goal_classifier::GoalClassifierOutcome {
-        use crate::session::events::GoalVerificationUnavailableReason;
-        use crate::session::goal_classifier::{
-            ChannelSpawner, GoalClassifierOutcome, VerificationStageInputs, run_verification_stage,
-        };
-
-        let (
-            objective,
-            verifier_id,
-            baseline_commit,
-            plan_file,
-            plan_baseline_file,
-            goal_created_at,
-            prior_skeptic0,
-            prior_gaps,
-            first_final_response,
-            scratch_dir_ready,
-            definition_key,
-        ) = {
-            let tracker = self.goal_tracker.lock();
-            let Some(o) = tracker.snapshot() else {
-                return GoalClassifierOutcome::VerificationUnavailable {
-                    reason: GoalVerificationUnavailableReason::GoalNotActiveAtResolve,
-                    details_path: String::new(),
-                };
-            };
-            (
-                o.objective.clone(),
-                o.verifier_id.clone(),
-                o.changes_baseline_commit.clone(),
-                o.plan_file.clone(),
-                o.plan_baseline_file.clone(),
-                crate::session::goal_classifier::evidence::parse_created_at_to_unix(&o.created_at),
-                o.skeptic0_session_id.clone(),
-                o.last_classifier_gaps.clone(),
-                o.first_final_response.clone(),
-                o.scratch_dir_ready,
-                (o.goal_id.clone(), o.definition_revision),
-            )
-        };
-
-        let (final_response, anchor_to_persist) = {
-            let current = {
-                let items = self.project_goal_conversation(
-                    self.chat_state_handle.get_conversation().await,
-                    true,
-                );
-                crate::session::goal_classifier::evidence::extract_final_response(&items)
-                    .unwrap_or_default()
-            };
-            let composed =
-                crate::session::goal_classifier::evidence::compose_verifier_final_response(
-                    first_final_response.as_deref(),
-                    current,
-                );
-            (composed.to_send, composed.to_persist)
-        };
-
-        let model_id = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|c| c.model)
-            .unwrap_or_default();
-
-        let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {
-            tracing::warn!("verification stage: no subagent coordinator channel; failing closed");
-            return GoalClassifierOutcome::VerificationUnavailable {
-                reason: GoalVerificationUnavailableReason::SamplerError,
-                details_path: String::new(),
-            };
-        };
-        let parent_prompt_id = self
-            .current_prompt_id
-            .lock()
-            .expect("current_prompt_id mutex poisoned")
-            .clone();
-
-        let n = self.goal_verifier_skeptic_count.clamp(
-            crate::session::goal_classifier::GOAL_VERIFIER_SKEPTIC_MIN,
-            crate::session::goal_classifier::GOAL_VERIFIER_SKEPTIC_MAX,
-        );
-        let inherit_tool_names = self.resolve_inherit_role_tool_names().await;
-        let (skeptic_overrides, skeptic_tool_names): (
-            Vec<crate::session::goal_planner::RoleSpawnOverride>,
-            Vec<crate::session::goal_role_tools::RoleToolNames>,
-        ) = if self.goal_use_current_model_only {
-            (
-                vec![crate::session::goal_planner::RoleSpawnOverride::default(); n as usize],
-                vec![inherit_tool_names.clone(); n as usize],
-            )
-        } else {
-            let assignment = {
-                let mut tracker = self.goal_tracker.lock();
-                match tracker.snapshot_mut().filter(|o| {
-                    o.goal_id == definition_key.0 && o.definition_revision == definition_key.1
-                }) {
-                    Some(o) => {
-                        let expanded = crate::session::goal_classifier::expand_skeptic_assignment(
-                            &o.skeptic_model_assignment,
-                            &self.goal_role_models.skeptic_pool,
-                            n as usize,
-                        );
-                        o.skeptic_model_assignment = expanded.clone();
-                        expanded
-                    }
-                    None => Vec::new(),
-                }
-            };
-            let available_models = self.models_manager.models();
-            let mut cache = PanelResolveCache::default();
-            let mut overrides = Vec::with_capacity(n as usize);
-            for idx in 0..n {
-                let ov = match assignment.get(idx as usize) {
-                    Some(pair) => {
-                        self.resolve_goal_role_override(
-                            "skeptic",
-                            Some(idx),
-                            pair,
-                            RoleCapability::Skeptic,
-                            &event_tx,
-                            &available_models,
-                            &mut cache,
-                        )
-                        .await
-                    }
-                    None => crate::session::goal_planner::RoleSpawnOverride::default(),
-                };
-                overrides.push(ov);
-            }
-            let tool_names = overrides
-                .iter()
-                .map(|ov| role_tool_names_from(ov, &cache, &inherit_tool_names))
-                .collect();
-            (overrides, tool_names)
-        };
-
-        let spawner: std::sync::Arc<dyn crate::session::goal_classifier::GoalClassifierSpawner> =
-            std::sync::Arc::new(ChannelSpawner {
-                event_tx,
-                foreground_wait: Some(crate::tools::tool_context::subagent_foreground_wait(
-                    self.tool_context.blocking_wait_depth.clone(),
-                )),
-                parent_session_id: self.session_id_string(),
-                parent_prompt_id,
-                cwd: Some(self.tool_context.cwd.as_str().to_owned()),
-                skeptic_overrides,
-            });
-
-        let implementer_scratch =
-            crate::session::goal_tracker::implementer_scratch_dir(&verifier_id);
-
-        let inputs = VerificationStageInputs {
-            objective: &objective,
-            final_response: &final_response,
-            baseline_commit: baseline_commit.as_deref(),
-            workspace_root: self.tool_context.cwd.as_path(),
-            verifier_id: &verifier_id,
-            attempt,
-            model_id: &model_id,
-            goal_created_at,
-            plan_file: plan_file.as_deref(),
-            plan_baseline_file: plan_baseline_file.as_deref(),
-            implementer_scratch_dir: implementer_scratch.as_path(),
-            scratch_dir_ready,
-            skeptic_count: self.goal_verifier_skeptic_count,
-            prior_skeptic0_session_id: prior_skeptic0.as_deref(),
-            prior_gaps: prior_gaps.as_deref(),
-            tool_names: &skeptic_tool_names,
-            inherit_tool_names: &inherit_tool_names,
-        };
-
-        let result = run_verification_stage(spawner, inputs).await;
-        if result.panel_ran {
-            let mut tracker = self.goal_tracker.lock();
-            if tracker.definition_is_current(&definition_key.0, definition_key.1)
-                && let Some(o) = tracker.snapshot_mut()
-            {
-                o.skeptic0_session_id = result.skeptic0_session_id;
-                if let Some(anchor) = anchor_to_persist {
-                    o.first_final_response = Some(anchor);
-                }
-            }
-        }
-        result.outcome
-    }
-
-    pub(crate) async fn resolve_goal_single_role_override(
-        &self,
-        role: &'static str,
-        choice: &crate::agent::config::GoalRoleModelChoice,
-        capability: RoleCapability,
-        event_tx: &tokio::sync::mpsc::UnboundedSender<
-            tools::implementations::grow_build::task::types::SubagentEvent,
-        >,
-    ) -> (
-        crate::session::goal_planner::RoleSpawnOverride,
-        crate::session::goal_role_tools::RoleToolNames,
-        crate::session::goal_role_tools::RoleToolNames,
-    ) {
-        let inherit = self.resolve_inherit_role_tool_names().await;
-        let crate::agent::config::GoalRoleModelChoice::Explicit(pair) = choice else {
-            return (
-                crate::session::goal_planner::RoleSpawnOverride::default(),
-                inherit.clone(),
-                inherit,
-            );
-        };
-        let available_models = self.models_manager.models();
-        let mut cache = PanelResolveCache::default();
-        let override_ = self
-            .resolve_goal_role_override(
-                role,
-                None,
-                pair,
-                capability,
-                event_tx,
-                &available_models,
-                &mut cache,
-            )
-            .await;
-        let tool_names = role_tool_names_from(&override_, &cache, &inherit);
-        (override_, tool_names, inherit)
-    }
-
-    pub(crate) async fn resolve_goal_role_override(
-        &self,
-        role: &'static str,
-        skeptic_idx: Option<u32>,
-        pair: &crate::util::config::GoalRoleModel,
-        capability: RoleCapability,
-        event_tx: &tokio::sync::mpsc::UnboundedSender<
-            tools::implementations::grow_build::task::types::SubagentEvent,
-        >,
-        available_models: &indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
-        cache: &mut PanelResolveCache,
-    ) -> crate::session::goal_planner::RoleSpawnOverride {
-        use crate::session::events::{Event, GoalRoleModelFailOpenReason as Reason};
-        use crate::session::goal_planner::RoleSpawnOverride;
-        use tools::implementations::grow_build::task::backend::{ChannelBackend, SubagentBackend};
-        use tools::implementations::grow_build::task::types::SubagentDescribeOutcome;
-
-        let fail_open = |reason: Reason| {
-            self.emit_event(Event::GoalRoleModelFailOpen {
-                role,
-                skeptic_idx,
-                reason: reason.as_const_str(),
-            });
-            RoleSpawnOverride::default()
-        };
-
-        let Some(entry) = crate::agent::config::find_model_by_id(available_models, &pair.model)
-        else {
-            return fail_open(Reason::ModelUnknown);
-        };
-        if !entry.info.user_selectable {
-            return fail_open(Reason::ModelUnauthorized);
-        }
-        if agent::config::is_strict_harness_agent_type(&pair.agent_type)
-            && !crate::agent::subagent::subagent_harness_flavor_is_representable(&pair.agent_type)
-        {
-            return fail_open(Reason::HarnessFlavorUnsupported);
-        }
-        if !cache.describe.contains_key(&pair.agent_type) {
-            let backend = ChannelBackend::new(event_tx.clone());
-            let parent_session_id = self.session_id_string();
-            let outcome = backend
-                .describe_subagent_type(
-                    crate::session::goal_planner::GOAL_ROLE_SUBAGENT_TYPE,
-                    Some(&pair.agent_type),
-                    &parent_session_id,
-                )
-                .await;
-            if matches!(outcome, SubagentDescribeOutcome::Unavailable) {
-                return fail_open(Reason::ToolsetUnavailable);
-            }
-            cache.describe.insert(pair.agent_type.clone(), outcome);
-        }
-        let summary = match cache.describe.get(&pair.agent_type) {
-            Some(SubagentDescribeOutcome::Ok(summary)) => summary,
-            Some(SubagentDescribeOutcome::Unknown { .. }) => {
-                return fail_open(Reason::ToolsetUnknown);
-            }
-            Some(SubagentDescribeOutcome::Disabled) => return fail_open(Reason::ToolsetDisabled),
-            Some(SubagentDescribeOutcome::Unavailable) => {
-                return fail_open(Reason::ToolsetUnavailable);
-            }
-            _ => return fail_open(Reason::ToolsetUnavailable),
-        };
-        if !capability.is_satisfied(summary) {
-            return fail_open(Reason::ToolsetIncapable);
-        }
-
-        self.emit_event(Event::GoalRoleModelResolved {
-            role,
-            skeptic_idx,
-            model_id: pair.model.clone(),
-            agent_type: pair.agent_type.clone(),
-            source: "remote",
-        });
-        RoleSpawnOverride {
-            model: Some(pair.model.clone()),
-            agent_type: Some(pair.agent_type.clone()),
-        }
-    }
-
-    pub(super) async fn resolve_goal_tool_names(&self) -> GoalToolNames {
-        use tools::types::tool::ToolKind;
-        let bridge = self.agent.borrow().tool_bridge().clone();
-        GoalToolNames {
-            goal: bridge
-                .tool_for_kind(ToolKind::GoalUpdate)
-                .await
-                .unwrap_or_else(|| "update_goal".into()),
-            task: bridge
-                .tool_for_kind(ToolKind::Task)
-                .await
-                .unwrap_or_else(|| "spawn_subagent".into()),
-            todo: bridge
-                .tool_for_kind(ToolKind::Plan)
-                .await
-                .unwrap_or_else(|| "todo_write".into()),
-        }
-    }
-
-    pub(crate) async fn resolve_inherit_role_tool_names(
-        &self,
-    ) -> crate::session::goal_role_tools::RoleToolNames {
-        use tools::types::tool::ToolKind;
-        let bridge = self.agent.borrow().tool_bridge().clone();
-        crate::session::goal_role_tools::RoleToolNames::from_parent(
-            bridge.tool_for_kind(ToolKind::Read).await,
-            bridge.tool_for_kind(ToolKind::ListDir).await,
-            bridge.tool_for_kind(ToolKind::Search).await,
-            bridge.tool_for_kind(ToolKind::Write).await,
-            bridge.tool_for_kind(ToolKind::Edit).await,
-            bridge.tool_for_kind(ToolKind::Execute).await,
-            bridge.tool_for_kind(ToolKind::WebFetch).await,
-        )
-    }
-
-    /// Commit Goal control state without starting planner or implementer model
-    /// work. Slash commands may call this on the actor mailbox safely; the
-    /// finite Goal cycle is scheduled separately.
-    pub(super) async fn initialize_goal_runtime(&self, objective: &str, token_budget: Option<i64>) {
-        self.enter_goal_plan_scope().await;
-        let goal_id = uuid::Uuid::new_v4().to_string();
-        let created_at = chrono::Utc::now().to_rfc3339();
         let token_baseline = self.chat_state_handle.get_total_tokens().await as i64;
-        let baseline_commit =
-            crate::session::goal_classifier::capture_git_baseline(self.tool_context.cwd.as_path())
-                .await;
         self.goal_tracker.lock().create_goal(
-            goal_id,
-            objective.to_owned(),
+            uuid::Uuid::now_v7().to_string(),
+            objective.to_string(),
             token_budget,
             token_baseline,
-            created_at,
-            baseline_commit,
+            chrono::Utc::now().to_rfc3339(),
+            None,
         );
-        self.push_current_goal_context();
         self.goal_turn_task_ids.lock().clear();
-        self.clear_pending_classifier_completions();
-        self.goal_continuation_streak
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.goal_blocked_streak
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-
-        let (tokens_used, finished_marginal) = self.goal_tokens(token_baseline);
-        self.goal_notify_sender().emit_goal_updated(
-            &mut self.goal_tracker.lock(),
-            tokens_used,
-            finished_marginal,
-        );
-    }
-
-    pub(super) async fn render_goal_start_reminder(&self) -> String {
-        let names = self.resolve_goal_tool_names().await;
-        let planner_enabled = self.goal_planner_enabled;
-        let body = {
-            let tracker = self.goal_tracker.lock();
-            let o = tracker
-                .snapshot()
-                .expect("an initialized Goal must have an orchestration snapshot");
-            let plan_path = goal_reminder_plan_path(planner_enabled, o);
-            let scratch_dir = crate::session::goal_tracker::implementer_scratch_dir(&o.verifier_id);
-            let scratch = scratch_dir.to_string_lossy();
-            if self.goal_runs_on_workflow_engine() {
-                render_goal_rules(
-                    &o.objective,
-                    &names,
-                    "",
-                    "",
-                    plan_path,
-                    &scratch,
-                    o.scratch_dir_ready,
-                )
-            } else {
-                render_goal_rules_foreground(
-                    &o.objective,
-                    &names,
-                    "",
-                    "",
-                    plan_path,
-                    &scratch,
-                    o.scratch_dir_ready,
-                )
-            }
-        };
-        format!("<system-reminder>\n{body}\nStart now.\n</system-reminder>\n\n")
+        self.subagent_token_records.lock().clear();
+        let (used, finished) = self.goal_tokens(token_baseline);
+        self.goal_notify_sender()
+            .emit_goal_updated(&mut self.goal_tracker.lock(), used, finished);
+        self.idle_arbiter.notify_one();
     }
 
     pub(super) async fn setup_goal(
@@ -1069,680 +49,48 @@ impl SessionActor {
         token_budget: Option<i64>,
     ) -> String {
         self.initialize_goal_runtime(objective, token_budget).await;
-
-        // Planning is model work and this method runs inside a prompt task,
-        // never inline in the actor mailbox. If `/goal set` revises the
-        // definition while planning is in flight, the stale result is
-        // discarded and planning is retried for the latest definition before
-        // the implementer starts. A no-op/failure under the same definition
-        // terminates the loop, so disabled or unavailable planners cannot
-        // spin.
-        let mut planned_definition = self.goal_tracker.lock().definition_key();
-        let mut planning_objective = objective.to_owned();
-        loop {
-            self.maybe_run_goal_planner(&planning_objective).await;
-            let retry = {
-                let tracker = self.goal_tracker.lock();
-                let Some(snapshot) = tracker.snapshot() else {
-                    break;
-                };
-                let current_definition = (snapshot.goal_id.clone(), snapshot.definition_revision);
-                (snapshot.status == crate::session::goal_tracker::GoalStatus::Active
-                    && snapshot.plan_file.is_none()
-                    && Some(current_definition.clone()) != planned_definition)
-                    .then_some((current_definition, snapshot.objective.clone()))
-            };
-            let Some((definition, latest_objective)) = retry else {
-                break;
-            };
-            planned_definition = Some(definition);
-            planning_objective = latest_objective;
-        }
-
         self.render_goal_start_reminder().await
     }
 
-    pub(super) async fn resume_goal(self: &std::sync::Arc<Self>) -> GoalResumeOutcome {
-        use crate::session::goal_tracker::GoalStatus;
-        enum ResumeTransition {
-            Resumed {
-                previous_status: GoalStatus,
-                previous_pause_message: Option<String>,
-            },
-            Nudge,
-            AlreadyComplete,
-            BudgetLimited,
-            NoGoal,
-        }
-        let transition = {
+    pub(super) async fn render_goal_start_reminder(&self) -> String {
+        let Some(goal) = self.goal_tracker.lock().snapshot().cloned() else {
+            return "No Goal is active.".to_string();
+        };
+        format!(
+            "Goal accepted. Planning runs in the background and does not block user turns.\nObjective: {}\nUse get_goal to read the current Markdown plan.",
+            goal.objective
+        )
+    }
+
+    pub(super) async fn resume_goal(self: &std::sync::Arc<Self>) -> String {
+        let outcome = {
             let mut tracker = self.goal_tracker.lock();
             match tracker.status() {
-                Some(
-                    GoalStatus::UserPaused
-                    | GoalStatus::BackOffPaused
-                    | GoalStatus::NoProgressPaused
-                    | GoalStatus::InfraPaused
-                    | GoalStatus::Blocked,
-                ) => {
-                    let previous_status = tracker.status().unwrap();
-                    let previous_pause_message =
-                        tracker.snapshot().and_then(|o| o.pause_message.clone());
-                    tracker.resume();
-                    ResumeTransition::Resumed {
-                        previous_status,
-                        previous_pause_message,
-                    }
+                None => return "No goal is currently set.".into(),
+                Some(crate::session::goal_tracker::GoalStatus::Complete) => {
+                    return "Goal is already complete.".into();
                 }
-                Some(GoalStatus::Active) => ResumeTransition::Nudge,
-                Some(GoalStatus::Complete) => ResumeTransition::AlreadyComplete,
-                Some(GoalStatus::BudgetLimited) => ResumeTransition::BudgetLimited,
-                None => ResumeTransition::NoGoal,
+                Some(crate::session::goal_tracker::GoalStatus::BudgetLimited) => {
+                    return "Goal is budget-limited. Set a new budget before resuming.".into();
+                }
+                Some(crate::session::goal_tracker::GoalStatus::Active) => false,
+                Some(_) => tracker.resume(),
             }
         };
-        let was_resumed = matches!(transition, ResumeTransition::Resumed { .. });
-        if was_resumed {
-            let tracker = self.goal_tracker.lock();
-            self.goal_notify_sender().persist_goal_state(&tracker);
-        }
-        let (user_msg, previous_status, previous_pause_message) = match transition {
-            ResumeTransition::Resumed {
-                previous_status,
-                previous_pause_message,
-            } => (
-                "User resumed current goal.",
-                previous_status,
-                previous_pause_message,
-            ),
-            ResumeTransition::Nudge => (
-                "User refreshed current goal context.",
-                GoalStatus::Active,
-                None,
-            ),
-            ResumeTransition::AlreadyComplete => {
-                return GoalResumeOutcome::Message(
-                    "Goal is already complete. Use /goal <objective> to start a new one."
-                        .to_string(),
-                );
-            }
-            ResumeTransition::BudgetLimited => {
-                return GoalResumeOutcome::Message(
-                    "Goal is budget-limited. Use /goal budget <tokens>, then /goal resume."
-                        .to_string(),
-                );
-            }
-            ResumeTransition::NoGoal => {
-                return GoalResumeOutcome::Message(
-                    "No goal set. Use /goal <objective> to start one.".to_string(),
-                );
-            }
-        };
-
-        self.goal_continuation_streak
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.goal_blocked_streak
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-
-        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-        let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
-
-        {
-            let notify = self.goal_notify_sender();
-            notify.emit_goal_updated(
+        if outcome {
+            let current = self.chat_state_handle.get_total_tokens().await as i64;
+            let (used, finished) = self.goal_tokens(current);
+            self.goal_notify_sender().emit_goal_updated(
                 &mut self.goal_tracker.lock(),
-                tokens_used,
-                finished_marginal,
+                used,
+                finished,
             );
         }
-
-        let names = self.resolve_goal_tool_names().await;
-
-        let block_recap = match (previous_status, previous_pause_message.as_deref()) {
-            (GoalStatus::Blocked, Some(msg)) => format!(
-                "Previous state: Blocked.\n\
-                 Previous block reason: {msg}\n\
-                 Re-evaluate whether the blocker has been addressed. If yes, continue \
-                 working. If no, you may block again with an updated reason.\n\
-                 \n"
-            ),
-            (GoalStatus::InfraPaused, Some(msg)) => format!(
-                "Previous state: Paused (infrastructure error).\n\
-                 Previous error: {msg}\n\
-                 The prior turn failed due to infrastructure. Retry when the error \
-                 condition is resolved.\n\
-                 \n"
-            ),
-            (GoalStatus::InfraPaused, None) => "Previous state: Paused (infrastructure error).\n\
-                 The prior turn failed due to infrastructure. Retry when the error \
-                 condition is resolved.\n\
-                 \n"
-            .to_string(),
-            _ => String::new(),
-        };
-
-        let planner_enabled = self.goal_planner_enabled;
-        let reminder = {
-            let mut tracker = self.goal_tracker.lock();
-            tracker.account_elapsed();
-            tracker.snapshot().map(|o| {
-                let elapsed = crate::session::goal_orchestrator::format_elapsed(o.elapsed_ms);
-                let goal_state = format!(
-                    "<goal-state>\nStatus: Active\nTokens: {tokens} | Elapsed: \
-                     {elapsed}\n</goal-state>\n\n",
-                    tokens = tokens_used,
-                );
-                let plan_path = goal_reminder_plan_path(planner_enabled, o);
-                let scratch_dir =
-                    crate::session::goal_tracker::implementer_scratch_dir(&o.verifier_id);
-                let scratch = scratch_dir.to_string_lossy();
-                let body = if self.goal_runs_on_workflow_engine() {
-                    render_goal_rules(
-                        &o.objective,
-                        &names,
-                        &block_recap,
-                        &goal_state,
-                        plan_path,
-                        &scratch,
-                        o.scratch_dir_ready,
-                    )
-                } else {
-                    render_goal_rules_foreground(
-                        &o.objective,
-                        &names,
-                        &block_recap,
-                        &goal_state,
-                        plan_path,
-                        &scratch,
-                        o.scratch_dir_ready,
-                    )
-                };
-                format!("<system-reminder>\n{body}\nContinue working now.\n</system-reminder>")
-            })
-        };
-        let Some(reminder) = reminder else {
-            return GoalResumeOutcome::Message("Goal state is missing.".to_string());
-        };
-        GoalResumeOutcome::Inference {
-            reminder,
-            user_msg: user_msg.to_string(),
-        }
-    }
-
-    pub(super) async fn prune_prior_goal_continuation_directives(&self) {
-        use sampling_types::conversation::SyntheticReason;
-
-        fn is_goal_continuation_directive(item: &ConversationItem) -> bool {
-            matches!(
-                item,
-                ConversationItem::User(u)
-                    if u.synthetic_reason == Some(SyntheticReason::GoalSummary)
-            ) && item.text_content().contains(GOAL_CONTINUATION_SENTINEL)
-        }
-        let conv = self.chat_state_handle.get_conversation().await;
-        if !conv.iter().any(is_goal_continuation_directive) {
-            return;
-        }
-        let kept: Vec<ConversationItem> = conv
-            .into_iter()
-            .filter(|item| !is_goal_continuation_directive(item))
-            .collect();
-        self.chat_state_handle.replace_conversation(kept);
-    }
-
-    pub(super) async fn enforce_goal_token_budget(&self, current_tokens: i64) -> bool {
-        let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
-        let Some(budget) = self.goal_tracker.lock().token_budget() else {
-            return false;
-        };
-        if tokens_used < budget {
-            return false;
-        }
-        self.goal_tracker.lock().budget_limit();
-        self.clear_pending_classifier_completions();
-        let notify = self.goal_notify_sender();
-        notify.emit_goal_updated(
-            &mut self.goal_tracker.lock(),
-            tokens_used,
-            finished_marginal,
-        );
-        self.send_slash_command_output(&format!(
-            "Goal token budget reached ({tokens_used} of {budget} tokens) — goal \
-             paused. Use /goal budget <tokens>, then /goal resume to continue."
-        ))
-        .await;
-        true
-    }
-
-    /// Pure continuation computation for an Active goal: stop-detector,
-    /// token budget, directive rendering, and strategy-rec / stop-pattern
-    /// consumption. Safe to call on the mailbox — it reads chat/tool state
-    /// and emits updates, but NEVER drains goal updates and never runs model
-    /// work. The turn-end drain is the caller's job (`handle_turn_end`),
-    /// and verification itself runs in background Goal stages whose
-    /// completions commit via the mailbox.
-    pub(super) async fn render_goal_continuation(
-        &self,
-        current_tokens: i64,
-    ) -> Option<GoalContinuationPlan> {
-        let foreground = !self.goal_runs_on_workflow_engine();
-
-        let goal_active = laziness_injection_active(
-            self.goal_harness_enabled(),
-            self.goal_tracker.lock().status(),
-        );
-        if !goal_active {
-            return None;
-        }
-
-        let stop_pattern = match self.assistant_text_signals_premature_stop().await {
-            Some(pattern) if self.has_pending_goal_todos().await => Some(pattern),
-            _ => None,
-        };
-
-        let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
-
-        if self.enforce_goal_token_budget(current_tokens).await {
-            return None;
-        }
-
-        {
-            let notify = self.goal_notify_sender();
-            notify.emit_goal_updated(
-                &mut self.goal_tracker.lock(),
-                tokens_used,
-                finished_marginal,
-            );
-        }
-
-        let names = self.resolve_goal_tool_names().await;
-        let todo_tool = &names.todo;
-        let goal_tool = names.goal.as_str();
-
-        let planner_enabled = self.goal_planner_enabled;
-        let (
-            objective,
-            elapsed,
-            plan_pointer,
-            verifier_gaps,
-            strategist_note,
-            strategy_rec,
-            plan_path,
-            scratch_dir,
-            scratch_ready,
-            rounds_since_verify,
-            refuted,
-        ) = {
-            let mut tracker = self.goal_tracker.lock();
-            tracker.account_elapsed();
-            let o = tracker.snapshot_mut()?;
-            o.rounds_since_verify = o.rounds_since_verify.saturating_add(1);
-            let rounds_since_verify = o.rounds_since_verify;
-            let refuted = o.consecutive_not_achieved >= 1;
-            let elapsed = crate::session::goal_orchestrator::format_elapsed(o.elapsed_ms);
-            let scratch_dir = crate::session::goal_tracker::implementer_scratch_dir(&o.verifier_id)
-                .to_string_lossy()
-                .into_owned();
-            let plan_path = goal_reminder_plan_path(planner_enabled, o).map(Path::to_path_buf);
-            let plan_pointer = plan_path
-                .as_deref()
-                .map(|p| format!("Plan: {}\n\n", p.display()))
-                .unwrap_or_default();
-            let verifier_gaps = o
-                .last_classifier_gaps
-                .as_deref()
-                .map(|gaps| {
-                    if foreground {
-                        render_verifier_gaps_block_foreground(gaps, goal_tool)
-                    } else {
-                        render_verifier_gaps_block(gaps)
-                    }
-                })
-                .unwrap_or_default();
-            let strategy_rec = o.last_strategy_recommendation.clone();
-            let strategist_note = strategy_rec
-                .as_deref()
-                .map(|rec| {
-                    render_strategist_note(
-                        rec,
-                        plan_path.as_deref(),
-                        o.last_strategy_path.as_deref(),
-                    )
-                })
-                .unwrap_or_default();
-            (
-                o.objective.clone(),
-                elapsed,
-                plan_pointer,
-                verifier_gaps,
-                strategist_note,
-                strategy_rec,
-                plan_path,
-                scratch_dir,
-                o.scratch_dir_ready,
-                rounds_since_verify,
-                refuted,
-            )
-        };
-        let next_step = resolve_goal_next_step(plan_path.as_deref())
-            .unwrap_or_else(|| format!("Check your `{todo_tool}` list for next steps."));
-        let tokens = u64::try_from(tokens_used).unwrap_or(0);
-        let bail_preface = if stop_pattern.is_some() {
-            GOAL_CONTINUATION_BAIL_PREFACE
+        self.idle_arbiter.notify_one();
+        if outcome {
+            "Goal resumed. Background stages and idle continuation will continue.".into()
         } else {
-            ""
-        };
-        let reverify_block = if foreground {
-            render_goal_reverify_block_foreground(
-                rounds_since_verify,
-                refuted,
-                self.goal_reverify_after,
-                goal_tool,
-            )
-        } else {
-            render_goal_reverify_block(rounds_since_verify, refuted, self.goal_reverify_after)
-        };
-        let directive = if foreground {
-            render_goal_continuation_directive_foreground(
-                &objective,
-                tokens,
-                &elapsed,
-                bail_preface,
-                &plan_pointer,
-                &verifier_gaps,
-                &strategist_note,
-                &reverify_block,
-                &next_step,
-                todo_tool,
-                goal_tool,
-                &scratch_dir,
-                scratch_ready,
-            )
-        } else {
-            render_goal_continuation_directive(
-                &objective,
-                tokens,
-                &elapsed,
-                bail_preface,
-                &plan_pointer,
-                &verifier_gaps,
-                &strategist_note,
-                &reverify_block,
-                &next_step,
-                todo_tool,
-                &scratch_dir,
-                scratch_ready,
-            )
-        };
-        Some(GoalContinuationPlan {
-            directive,
-            stop_pattern,
-            strategy_rec,
-        })
-    }
-
-    /// Thin wrapper over [`Self::render_goal_continuation`] kept for the
-    /// workflow-engine path (`run_goal_round_end` runs inside the turn task
-    /// and never drains — the workflow engine owns its own round
-    /// evaluation, so this wrapper's behavior there is unchanged) and for
-    /// tests. The mailbox turn-end path drains explicitly in
-    /// `handle_turn_end` and renders via [`Self::render_goal_continuation`].
-    pub(super) async fn prepare_goal_continuation(
-        &self,
-        current_tokens: i64,
-    ) -> Option<GoalContinuationPlan> {
-        self.render_goal_continuation(current_tokens).await
-    }
-
-    pub(super) fn record_and_emit_premature_stop(&self, pattern: &'static str) {
-        self.goal_tracker.lock().append_history(
-            crate::session::goal_tracker::GoalHistoryEntry::now(
-                crate::session::goal_tracker::GoalEvent::PrematureStopDetected,
-                Some(pattern.to_owned()),
-            ),
-        );
-        self.emit_event(crate::session::events::Event::GoalPrematureStopDetected { pattern });
-    }
-
-    pub(super) fn consume_strategist_note(&self, delivered_rec: &str) {
-        if let Some(o) = self.goal_tracker.lock().snapshot_mut()
-            && o.last_strategy_recommendation.as_deref() == Some(delivered_rec)
-        {
-            o.last_strategy_recommendation = None;
-            o.last_strategy_path = None;
-        }
-    }
-
-    /// Workflow-engine round evaluation. Runs inside the turn task (never
-    /// the mailbox), so it may await evaluator/verifier model work inline —
-    /// unlike the non-workflow turn-end path (`handle_turn_end`), which
-    /// drains mailbox-fast and schedules verification as background Goal
-    /// stages. This function's behavior is intentionally unchanged by the
-    /// B1 stage refactor; it stays the workflow engine's own loop.
-    pub(super) async fn run_goal_round_end(self: &std::sync::Arc<Self>) -> GoalRoundDecision {
-        use crate::session::goal_evaluator::GoalEvaluatorDecision;
-        if !laziness_injection_active(
-            self.goal_harness_enabled(),
-            self.goal_tracker.lock().status(),
-        ) {
-            return GoalRoundDecision::EndTurn;
-        }
-        let Some(definition_key) = self.goal_tracker.lock().definition_key() else {
-            return GoalRoundDecision::EndTurn;
-        };
-        let foreground_generation = self.completion_delivery.generation();
-        let evaluator = self.evaluate_goal_round();
-        tokio::pin!(evaluator);
-        let evaluated = tokio::select! {
-            biased;
-            _ = super::tool_calls::wait_for_pending_interjection(
-                &self.pending_interjections,
-            ) => return GoalRoundDecision::ResumeForeground,
-            _ = self.completion_delivery.wait_generation_change(foreground_generation) => {
-                return GoalRoundDecision::ResumeForeground;
-            },
-            verdict = &mut evaluator => verdict,
-        };
-        let verdict = match evaluated {
-            Ok(verdict) => verdict,
-            Err(error) => {
-                if !self
-                    .goal_tracker
-                    .lock()
-                    .definition_is_current(&definition_key.0, definition_key.1)
-                {
-                    return self
-                        .prepare_goal_continuation(
-                            self.chat_state_handle.get_total_tokens().await as i64,
-                        )
-                        .await
-                        .map_or(GoalRoundDecision::EndTurn, |plan| {
-                            GoalRoundDecision::Continue(plan.directive)
-                        });
-                }
-                if self.goal_foreground_changed(foreground_generation) {
-                    return GoalRoundDecision::ResumeForeground;
-                }
-                self.record_goal_round_progress(&error, true);
-                self.auto_pause_goal_if_active_with_message(
-                    crate::session::goal_tracker::GoalPauseReason::Infra,
-                    format!(
-                        "Goal evaluation failed after a bounded retry: {error}. \
-                         The goal was paused rather than treated as complete. \
-                         Use /goal resume to retry."
-                    ),
-                )
-                .await;
-                return GoalRoundDecision::EndTurn;
-            }
-        };
-        if self.goal_foreground_changed(foreground_generation) {
-            return GoalRoundDecision::ResumeForeground;
-        }
-        if !self
-            .goal_tracker
-            .lock()
-            .definition_is_current(&definition_key.0, definition_key.1)
-        {
-            return self
-                .prepare_goal_continuation(self.chat_state_handle.get_total_tokens().await as i64)
-                .await
-                .map_or(GoalRoundDecision::EndTurn, |plan| {
-                    GoalRoundDecision::Continue(plan.directive)
-                });
-        }
-        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-        if self.enforce_goal_token_budget(current_tokens).await {
-            return GoalRoundDecision::EndTurn;
-        }
-        match verdict.decision {
-            GoalEvaluatorDecision::Continue => {
-                {
-                    let mut tracker = self.goal_tracker.lock();
-                    tracker.reset_evaluator_blocker();
-                    self.goal_notify_sender().persist_goal_state(&tracker);
-                }
-                self.record_goal_round_progress(&verdict.evidence, false);
-            }
-            GoalEvaluatorDecision::CandidateComplete => {
-                {
-                    let mut tracker = self.goal_tracker.lock();
-                    tracker.reset_evaluator_blocker();
-                    self.goal_notify_sender().persist_goal_state(&tracker);
-                }
-                self.record_goal_round_progress(&verdict.evidence, false);
-                self.verify_goal_candidate(foreground_generation).await;
-                if self.goal_foreground_changed(foreground_generation) {
-                    return GoalRoundDecision::ResumeForeground;
-                }
-            }
-            GoalEvaluatorDecision::Blocked => {
-                self.record_goal_round_progress(&verdict.evidence, false);
-                let streak = {
-                    let mut tracker = self.goal_tracker.lock();
-                    let streak = tracker.record_evaluator_blocker(verdict.blocker_key.trim());
-                    self.goal_notify_sender().persist_goal_state(&tracker);
-                    streak
-                };
-                if streak >= 3
-                    && !self.goal_foreground_changed(foreground_generation)
-                    && self
-                        .auto_pause_goal_if_active_with_message(
-                            crate::session::goal_tracker::GoalPauseReason::Verification,
-                            format!(
-                                "{}\nNext user action: {}",
-                                verdict.evidence, verdict.next_step
-                            ),
-                        )
-                        .await
-                {
-                    self.send_slash_command_output(&format!(
-                        "Goal paused — verification blocked.\nReason: {}\n\n{}\n\n\
-                         Type /goal resume after addressing it.",
-                        verdict.evidence, verdict.next_step
-                    ))
-                    .await;
-                }
-            }
-        }
-        if self.goal_tracker.lock().status()
-            != Some(crate::session::goal_tracker::GoalStatus::Active)
-        {
-            return GoalRoundDecision::EndTurn;
-        }
-        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-        let Some(mut plan) = self.prepare_goal_continuation(current_tokens).await else {
-            return GoalRoundDecision::EndTurn;
-        };
-        plan.directive.push_str("\nEvaluator next step: ");
-        plan.directive.push_str(verdict.next_step.trim());
-        plan.directive.push('\n');
-        if let Some(rec) = plan.strategy_rec.as_deref() {
-            self.consume_strategist_note(rec);
-        }
-        if let Some(pattern) = plan.stop_pattern {
-            self.record_and_emit_premature_stop(pattern);
-        }
-        GoalRoundDecision::Continue(plan.directive)
-    }
-
-    /// Autonomous Goal decisions are valid only against the exact foreground
-    /// event generation they started with. Steering is observable in its
-    /// inbox; deferred completions additionally carry a monotonic generation
-    /// so a ready-and-drained race cannot make an old verdict appear current.
-    fn goal_foreground_changed(&self, generation: u64) -> bool {
-        !self.pending_interjections.is_empty()
-            || self.completion_delivery.has_ready()
-            || self.completion_delivery.generation() != generation
-    }
-
-    pub(super) async fn inject_goal_continuation_message(&self, directive: String) {
-        self.prune_prior_goal_continuation_directives().await;
-        self.chat_state_handle
-            .push_user_message(self.goal_directive_item(
-                directive,
-                sampling_types::SyntheticReason::GoalSummary,
-                sampling_types::GoalDirectiveKind::Continuation,
-            ));
-    }
-
-    pub(super) async fn maybe_queue_goal_continuation(&self) {
-        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-        // Renders only — the caller (`handle_turn_end`) has already run the
-        // mailbox-fast turn-end drain and scheduled any verification stages.
-        let Some(plan) = self.render_goal_continuation(current_tokens).await else {
-            return;
-        };
-        {
-            let state = self.state.lock().await;
-            if state.pending_inputs.iter().any(|i| {
-                matches!(
-                    i.origin,
-                    super::super::PromptOrigin::GoalSummary
-                        | super::super::PromptOrigin::GoalClassifierNudge,
-                )
-            }) {
-                return;
-            }
-        }
-        self.prune_prior_goal_continuation_directives().await;
-
-        let prompt_id = format!("goal-summary-{}", uuid::Uuid::now_v7());
-        let (respond_to, _) = tokio::sync::oneshot::channel();
-        {
-            let mut state = self.state.lock().await;
-            if state.pending_inputs.iter().any(|i| {
-                matches!(
-                    i.origin,
-                    super::super::PromptOrigin::GoalSummary
-                        | super::super::PromptOrigin::GoalClassifierNudge,
-                )
-            }) {
-                tracing::debug!("continuation reminder already pending; skipping duplicate");
-                return;
-            }
-            state.pending_inputs.push_back(InputItem {
-                prompt_id,
-                prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
-                    plan.directive,
-                ))],
-                prompt_mode: crate::session::behavior::PromptMode::Agent,
-                client_identifier: None,
-                screen_mode: None,
-                verbatim: true,
-                json_schema: None,
-                origin: super::super::PromptOrigin::GoalSummary,
-                task_wake_fallback: None,
-                respond_to,
-                persist_ack: None,
-                parsed_prompt_tx: None,
-                queue_meta: None,
-                send_now: false,
-            });
-        }
-        if let Some(rec) = plan.strategy_rec.as_deref() {
-            self.consume_strategist_note(rec);
-        }
-        if let Some(pattern) = plan.stop_pattern {
-            self.record_and_emit_premature_stop(pattern);
+            "Goal is already active.".into()
         }
     }
 
@@ -1750,7 +98,8 @@ impl SessionActor {
         &self,
         reason: crate::session::goal_tracker::GoalPauseReason,
     ) {
-        let _ = self.auto_pause_goal_if_active_inner(reason, None).await;
+        self.auto_pause_goal_if_active_with_message(reason, reason.history_detail().to_string())
+            .await;
     }
 
     pub(crate) async fn auto_pause_goal_if_active_with_message(
@@ -1758,1185 +107,528 @@ impl SessionActor {
         reason: crate::session::goal_tracker::GoalPauseReason,
         message: String,
     ) -> bool {
-        self.auto_pause_goal_if_active_inner(reason, Some(message))
-            .await
-    }
-
-    async fn auto_pause_goal_if_active_inner(
-        &self,
-        reason: crate::session::goal_tracker::GoalPauseReason,
-        message: Option<String>,
-    ) -> bool {
-        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-        {
-            let mut tracker = self.goal_tracker.lock();
-            if tracker.status() != Some(crate::session::goal_tracker::GoalStatus::Active) {
-                return false;
-            }
-            match message {
-                Some(msg) => tracker.pause_with_message(reason, msg),
-                None => tracker.pause(reason),
-            };
+        let changed = self.goal_tracker.lock().pause_with_message(reason, message);
+        if !changed {
+            return false;
         }
-        self.clear_pending_classifier_completions();
-        let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
-        let notify = self.goal_notify_sender();
-        notify.emit_goal_updated(
-            &mut self.goal_tracker.lock(),
-            tokens_used,
-            finished_marginal,
-        );
-        self.emit_event(crate::session::events::Event::GoalAutoPaused {
-            reason: reason.into(),
-        });
+        if let Some((_, cancel)) = self.goal_stage_cancel.lock().take() {
+            cancel.cancel();
+        }
+        let current = self.chat_state_handle.get_total_tokens().await as i64;
+        let (used, finished) = self.goal_tokens(current);
+        self.goal_notify_sender()
+            .emit_goal_updated(&mut self.goal_tracker.lock(), used, finished);
         true
     }
 
-    async fn assistant_text_signals_premature_stop(&self) -> Option<&'static str> {
-        let text = self.chat_state_handle.get_last_assistant_text().await?;
-        crate::session::goal_stop_detector::matched_stop_pattern(&text)
-    }
-
-    async fn has_pending_goal_todos(&self) -> bool {
-        use crate::tools::todo::{TodoState, TodoStatus};
-        use tools::types::resources::State;
-        let bridge = self.tool_bridge_handle();
-        match bridge.read_resource::<State<TodoState>>().await {
-            Some(state) => state.0.todo_items_with_ids().any(|(_id, item)| {
-                matches!(item.status, TodoStatus::Pending | TodoStatus::InProgress)
-            }),
-            None => {
-                tracing::warn!(
-                    "goal stop-detector: TodoState resource missing; failing OPEN \
-                     so the bail-text safety net still queues the continuation",
-                );
-                true
-            }
+    pub(super) async fn enforce_goal_token_budget(&self, current_tokens: i64) -> bool {
+        let used = self.goal_tokens_used(current_tokens);
+        let exhausted = self
+            .goal_tracker
+            .lock()
+            .token_budget()
+            .is_some_and(|budget| used >= budget);
+        if !exhausted {
+            return false;
         }
-    }
-}
-
-impl SessionActor {
-    /// Turn-end / mid-turn drain of `update_goal` envelopes. Must stay
-    /// mailbox-fast: the non-model parts (progress, blocked_reason counting,
-    /// cap/NonActive/BlockSeen rejections, MidTurn deferral) run inline;
-    /// a `completed: true` proposal with a valid lease and a free in-flight
-    /// slot is scheduled as a background Goal stage instead of awaiting the
-    /// verification model work (B1).
-    pub(super) async fn drain_goal_updates(
-        self: &std::sync::Arc<Self>,
-        current_tokens: i64,
-        purpose: DrainPurpose,
-    ) {
-        self.drain_goal_updates_with_extra(current_tokens, purpose, Vec::new())
-            .await;
-    }
-
-    pub(super) async fn drain_goal_updates_with_extra(
-        self: &std::sync::Arc<Self>,
-        current_tokens: i64,
-        purpose: DrainPurpose,
-        extra: Vec<tools::implementations::grow_build::update_goal::UpdateGoalEnvelope>,
-    ) {
-        use tools::implementations::grow_build::update_goal::{RejectReason, UpdateGoalAck};
-        if !self.goal_harness_enabled() {
-            let reject = || UpdateGoalAck::Rejected {
-                reason: RejectReason::HarnessDisabled,
-                detail: "Goal mode is not active for this session (no /goal run in \
-                         progress); update_goal has no effect."
-                    .to_string(),
-            };
-            for (_input, ack_tx) in extra {
-                send_ack(ack_tx, reject());
+        let changed = self.goal_tracker.lock().budget_limit();
+        if changed {
+            if let Some((_, cancel)) = self.goal_stage_cancel.lock().take() {
+                cancel.cancel();
             }
-            if let Some(rx) = self.goal_update_rx.borrow_mut().as_mut() {
-                while let Ok((_input, ack_tx)) = rx.try_recv() {
-                    send_ack(ack_tx, reject());
-                }
-            }
-            return;
-        }
-        let mut cmds: Vec<DrainSource> = match purpose {
-            DrainPurpose::TurnEnd => self
-                .pending_classifier_completions
-                .lock()
-                .drain(..)
-                .map(DrainSource::Pending)
-                .collect(),
-            DrainPurpose::MidTurn => Vec::new(),
-        };
-        cmds.extend(extra.into_iter().map(DrainSource::Channel));
-        {
-            let mut rx_slot = self.goal_update_rx.borrow_mut();
-            if let Some(rx) = rx_slot.as_mut() {
-                cmds.extend(std::iter::from_fn(|| rx.try_recv().ok()).map(DrainSource::Channel));
-            }
-        }
-        let notify = self.goal_notify_sender();
-        let mut block_seen = false;
-        let mut cap_dropped: u32 = 0;
-        let mut auto_paused_mid_drain = false;
-        for source in cmds {
-            let (cmd, ack_tx) = source.into_parts();
-            if auto_paused_mid_drain {
-                cap_dropped = cap_dropped.saturating_add(1);
-                try_send_ack(
-                    ack_tx,
-                    UpdateGoalAck::Rejected {
-                        reason: RejectReason::DroppedAfterPauseInDrain,
-                        detail: "Goal auto-paused during verification; this completion was \
-                                 dropped without further verification"
-                            .to_string(),
-                    },
-                );
-                drop(cmd);
-                continue;
-            }
-            if block_seen {
-                try_send_ack(
-                    ack_tx,
-                    UpdateGoalAck::Rejected {
-                        reason: RejectReason::BlockSeenInDrain,
-                        detail: "Goal just transitioned to Blocked by a prior update in this drain"
-                            .to_string(),
-                    },
-                );
-                continue;
-            }
-            if let Some(reason) = cmd.blocked_reason {
-                let streak = self
-                    .goal_blocked_streak
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    + 1;
-                if streak < 3 {
-                    tracing::info!(
-                        streak,
-                        "blocked attempt rejected — model must try {}/3 before blocking",
-                        streak,
-                    );
-                    try_send_ack(
-                        ack_tx,
-                        UpdateGoalAck::Accepted {
-                            summary: format!(
-                                "Blocked attempt {streak}/3 recorded. The harness needs \
-                                 3 consecutive blocked attempts before pausing the goal — \
-                                 continue retrying or refining the approach."
-                            ),
-                        },
-                    );
-                    continue;
-                }
-                let detail = cmd.message;
-                let chat_text = format_blocked_chat_notification(&reason, detail.as_deref());
-                let success_summary = format!("Goal blocked: {reason}.");
-                let pause_msg = match detail {
-                    Some(d) => format!("{reason}\n{d}"),
-                    None => reason,
-                };
-                let applied = self
-                    .auto_pause_goal_if_active_with_message(
-                        crate::session::goal_tracker::GoalPauseReason::Verification,
-                        pause_msg,
-                    )
-                    .await;
-                if applied {
-                    self.send_slash_command_output(&chat_text).await;
-                    block_seen = true;
-                    try_send_ack(
-                        ack_tx,
-                        UpdateGoalAck::Accepted {
-                            summary: success_summary,
-                        },
-                    );
-                } else {
-                    try_send_ack(
-                        ack_tx,
-                        UpdateGoalAck::Rejected {
-                            reason: RejectReason::BlockedAgainstNonActive,
-                            detail: "Goal is not Active; blocked_reason ignored".to_string(),
-                        },
-                    );
-                }
-                continue;
-            }
-            if cmd.completed != Some(true) {
-                let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
-                let mut tracker = self.goal_tracker.lock();
-                notify.emit_goal_updated(&mut tracker, tokens_used, finished_marginal);
-                drop(tracker);
-                let summary = cmd
-                    .message
-                    .clone()
-                    .map(|m| format!("{m}."))
-                    .unwrap_or_else(|| "Goal updated.".to_string());
-                try_send_ack(ack_tx, UpdateGoalAck::Accepted { summary });
-                continue;
-            }
-
-            self.goal_blocked_streak
-                .store(0, std::sync::atomic::Ordering::Relaxed);
-
-            let policy = self.resolve_goal_classifier_policy();
-
-            if !policy.enabled {
-                self.auto_pause_goal_if_active_with_message(
-                    crate::session::goal_tracker::GoalPauseReason::Infra,
-                    "Independent goal verification is disabled; completion cannot be accepted."
-                        .to_string(),
-                )
-                .await;
-                try_send_ack(
-                    ack_tx,
-                    UpdateGoalAck::VerificationUnavailable {
-                        reason: "verifier disabled by policy".to_string(),
-                    },
-                );
-                continue;
-            }
-
-            let non_active_meta: Option<(u32, bool)> = {
-                let tracker = self.goal_tracker.lock();
-                match tracker.snapshot() {
-                    Some(o) if o.status == crate::session::goal_tracker::GoalStatus::Active => None,
-                    Some(o) => Some((
-                        o.classifier_runs_attempted,
-                        o.status == crate::session::goal_tracker::GoalStatus::BackOffPaused
-                            && o.classifier_max_runs
-                                .is_some_and(|cap| o.classifier_runs_attempted >= cap),
-                    )),
-                    None => Some((0, false)),
-                }
-            };
-            if let Some((attempts_seen, post_cap)) = non_active_meta {
-                tracing::debug!(
-                    "completed: true against non-Active goal; dropping classifier fire"
-                );
-                if post_cap {
-                    self.events.emit(
-                        crate::session::events::Event::GoalClassifierDroppedAfterCap {
-                            attempts_seen,
-                        },
-                    );
-                    try_send_ack(
-                        ack_tx,
-                        UpdateGoalAck::Rejected {
-                            reason: RejectReason::PostCap,
-                            detail: format!(
-                                "Classifier cap already reached ({attempts_seen} attempts); goal \
-                                 is BackOff-paused. Do not call update_goal again until the user \
-                                 resumes."
-                            ),
-                        },
-                    );
-                } else {
-                    self.events.emit(
-                        crate::session::events::Event::GoalVerificationUnavailable {
-                            reason: crate::session::events::GoalVerificationUnavailableReason::GoalNotActiveAtResolve
-                                .as_const_str(),
-                            attempt: attempts_seen,
-                            latency_ms: 0,
-                        },
-                    );
-                    try_send_ack(
-                        ack_tx,
-                        UpdateGoalAck::Rejected {
-                            reason: RejectReason::NonActive,
-                            detail: "Goal is not Active; cannot mark complete".to_string(),
-                        },
-                    );
-                }
-                continue;
-            }
-
-            if matches!(purpose, DrainPurpose::MidTurn) {
-                let pending_depth = {
-                    let mut q = self.pending_classifier_completions.lock();
-                    if q.len() >= GOAL_CLASSIFIER_PENDING_QUEUE_CAP {
-                        q.pop_front();
-                        self.events.emit(
-                            crate::session::events::Event::GoalClassifierFailClosed {
-                                reason:
-                                    crate::session::events::GoalClassifierFailClosedReason::PendingQueueFull
-                                        .as_const_str(),
-                                attempt: 0,
-                            },
-                        );
-                    }
-                    q.push_back(cmd);
-                    u32::try_from(q.len()).unwrap_or(u32::MAX)
-                };
-                self.events.emit(
-                    crate::session::events::Event::GoalClassifierMidTurnDeferred { pending_depth },
-                );
-                try_send_ack(ack_tx, UpdateGoalAck::DeferredToTurnEnd { pending_depth });
-                continue;
-            }
-
-            if self
-                .goal_classifier_in_flight
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst,
-                )
-                .is_err()
-            {
-                self.events
-                    .emit(crate::session::events::Event::GoalClassifierFailClosed {
-                    reason:
-                        crate::session::events::GoalClassifierFailClosedReason::ConcurrentInFlight
-                            .as_const_str(),
-                    attempt: 0,
-                });
-                let synthetic_info = self
-                    .account_not_achieved_without_sampler(
-                        &policy,
-                        NotAchievedSyntheticReason::ConcurrentInFlight,
-                    )
-                    .await;
-                if let Some((attempt, details_path, cap_reached)) = synthetic_info {
-                    if cap_reached {
-                        if self.cap_just_reached() {
-                            auto_paused_mid_drain = true;
-                        }
-                        try_send_ack(
-                            ack_tx,
-                            UpdateGoalAck::ClassifierCapReached {
-                                details_path,
-                                attempt,
-                            },
-                        );
-                    } else {
-                        try_send_ack(
-                            ack_tx,
-                            UpdateGoalAck::ClassifierConcurrentInFlight {
-                                details_path,
-                                attempt,
-                                max_runs: policy.max_runs,
-                            },
-                        );
-                    }
-                } else {
-                    try_send_ack(
-                        ack_tx,
-                        UpdateGoalAck::Rejected {
-                            reason: RejectReason::InFlightOrchestrationVanished,
-                            detail: "Goal orchestration vanished during in-flight short-circuit"
-                                .to_string(),
-                        },
-                    );
-                }
-                continue;
-            }
-            // The in-flight CAS stays SET until the mailbox commits this
-            // stage's completion (`handle_goal_stage_completed`): it
-            // serializes verification stages exactly like the old inline
-            // run did — a concurrent `completed: true` proposal is routed
-            // through the synthetic ConcurrentInFlight accounting above.
-            let fire_started = std::time::Instant::now();
-            let Some(definition_key) = self.goal_tracker.lock().definition_key() else {
-                self.goal_classifier_in_flight
-                    .store(false, std::sync::atomic::Ordering::SeqCst);
-                try_send_ack(
-                    ack_tx,
-                    UpdateGoalAck::Rejected {
-                        reason: RejectReason::OrchestrationVanished,
-                        detail: "Goal orchestration vanished before classifier could start"
-                            .to_string(),
-                    },
-                );
-                continue;
-            };
-
-            let Some(attempt) = self.reserve_classifier_attempt_slot(&policy) else {
-                self.goal_classifier_in_flight
-                    .store(false, std::sync::atomic::Ordering::SeqCst);
-                self.events
-                    .emit(crate::session::events::Event::GoalVerificationUnavailable {
-                    reason:
-                        crate::session::events::GoalVerificationUnavailableReason::GoalNotActiveAtResolve
-                            .as_const_str(),
-                    attempt: 0,
-                    latency_ms: fire_started.elapsed().as_millis() as u64,
-                });
-                try_send_ack(
-                    ack_tx,
-                    UpdateGoalAck::Rejected {
-                        reason: RejectReason::OrchestrationVanished,
-                        detail: "Goal orchestration vanished before classifier could start"
-                            .to_string(),
-                    },
-                );
-                continue;
-            };
-
-            self.emit_goal_verifying(current_tokens);
-
-            // Schedule the verification stage as a background task. The
-            // drain (mailbox) NEVER awaits model work: the stage reports its
-            // outcome via `SessionEvent::GoalStageCompleted` and the mailbox
-            // commits (or lease-drops) it there. The ack travels with the
-            // stage and is resolved at commit time — the `update_goal` tool
-            // contract is unchanged, only the resolution point moved.
-            let autonomy_generation = self
-                .goal_tracker
-                .lock()
-                .autonomy_generation()
-                .unwrap_or_default();
-            let foreground_generation = self.completion_delivery.generation();
-            self.schedule_goal_verifier_stage(GoalVerifierStageSpec {
-                attempt,
-                policy,
-                ack_tx,
-                goal_id: definition_key.0,
-                definition_revision: definition_key.1,
-                autonomy_generation,
-                foreground_generation,
-            });
-        }
-        if cap_dropped > 0 {
-            self.events.emit(
-                crate::session::events::Event::GoalClassifierPendingQueueCleared {
-                    dropped: cap_dropped,
-                },
+            let (used, finished) = self.goal_tokens(current_tokens);
+            self.goal_notify_sender().emit_goal_updated(
+                &mut self.goal_tracker.lock(),
+                used,
+                finished,
             );
         }
+        changed
     }
 
-    fn cap_just_reached(&self) -> bool {
-        let tracker = self.goal_tracker.lock();
-        tracker.snapshot().is_some_and(|o| {
-            o.status == crate::session::goal_tracker::GoalStatus::BackOffPaused
-                && o.classifier_max_runs
-                    .is_some_and(|cap| o.classifier_runs_attempted >= cap)
-        })
+    pub(super) fn render_goal_continuation(&self, _current_tokens: i64) -> Option<String> {
+        let goal = self.goal_tracker.lock().snapshot()?.clone();
+        if goal.status != crate::session::goal_tracker::GoalStatus::Active
+            || goal.phase != crate::session::goal_tracker::GoalPhase::Executing
+        {
+            return None;
+        }
+        let feedback = goal
+            .verifier_feedback
+            .as_deref()
+            .map(|feedback| format!("\nLatest verifier feedback:\n{feedback}\n"))
+            .unwrap_or_default();
+        Some(format!(
+            "Continue the active Goal using the latest blackboard. User messages may arrive and must be handled normally.\n\nObjective (rev {}):\n{}\n\nPlan (rev {}):\n{}{}\nWhen the work is genuinely complete, call update_goal with action=candidate_complete; do not merely stop.",
+            goal.objective_revision,
+            goal.objective,
+            goal.plan.revision,
+            goal.plan.markdown,
+            feedback,
+        ))
     }
 
-    pub(crate) fn clear_pending_classifier_completions(&self) {
-        self.pending_classifier_completions.lock().clear();
+    async fn run_goal_subagent(
+        &self,
+        goal_id: &str,
+        prompt: String,
+        description: &str,
+        role: &str,
+        cancel_token: tokio_util::sync::CancellationToken,
+        fork_context: bool,
+    ) -> Result<String, String> {
+        let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {
+            return Err("subagent coordinator unavailable".into());
+        };
+        let request = SubagentRequest {
+            id: uuid::Uuid::now_v7().to_string(),
+            prompt,
+            description: description.to_string(),
+            subagent_type: "general-purpose".to_string(),
+            parent_session_id: self.session_id_string(),
+            parent_prompt_id: None,
+            resume_from: None,
+            cwd: Some(self.tool_context.cwd.as_str().to_owned()),
+            runtime_overrides: SubagentRuntimeOverrides::default(),
+            run_in_background: false,
+            surface_completion: false,
+            await_to_completion: false,
+            fork_context,
+            owner: SubagentOwner::goal(goal_id),
+            cancel_token,
+        };
+        let result = ChannelBackend::new(event_tx)
+            .spawn(request)
+            .await
+            .map_err(|error| error.to_string())?;
+        if result.success {
+            Ok(result.output.to_string())
+        } else {
+            Err(result.error.unwrap_or_else(|| format!("{role} failed")))
+        }
     }
 
-    /// Spawn the verification stage for a `completed: true` proposal.
-    /// Runs entirely off the mailbox; completion arrives via
-    /// `SessionEvent::GoalStageCompleted`. The TrackerDropGuards live inside
-    /// the task so a dropped stage (session teardown) refunds the reserved
-    /// attempt and clears `verifying_in_flight` exactly like the old inline
-    /// run did. The rollback decision for a stale completion is the mailbox
-    /// commit's job, so the guard is disarmed before the event is sent.
-    fn schedule_goal_verifier_stage(self: &std::sync::Arc<Self>, spec: GoalVerifierStageSpec) {
-        use crate::session::goal_tracker::GoalStatus;
-        let GoalVerifierStageSpec {
-            attempt,
-            policy,
-            ack_tx,
-            goal_id,
-            definition_revision,
-            autonomy_generation,
-            foreground_generation,
-        } = spec;
-        let stage_id = self
-            .goal_stage_seq
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    fn spawn_planner_stage(self: &std::sync::Arc<Self>) {
+        let (lease, objective) = {
+            let mut tracker = self.goal_tracker.lock();
+            let Some(lease) =
+                tracker.claim_stage(crate::session::goal_tracker::GoalPhase::Planning)
+            else {
+                return;
+            };
+            let objective = tracker
+                .snapshot()
+                .map(|goal| goal.objective.clone())
+                .unwrap_or_default();
+            if let Some(goal) = tracker.snapshot_mut() {
+                goal.history
+                    .push(crate::session::goal_tracker::GoalHistoryEntry::new(
+                        crate::session::goal_tracker::GoalEvent::PlanningStarted,
+                        None,
+                    ));
+            }
+            (lease, objective)
+        };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        *self.goal_stage_cancel.lock() = Some((lease.clone(), cancel.clone()));
         let actor = std::sync::Arc::clone(self);
         tokio::task::spawn_local(async move {
-            let started = std::time::Instant::now();
-            let slot_goal_id = goal_id.clone();
-            let slot_revision = definition_revision;
-            let mut slot_guard = TrackerDropGuard::new(&actor.goal_tracker, move |t| {
-                if t.definition_is_current(&slot_goal_id, slot_revision)
-                    && !matches!(
-                        t.status(),
-                        Some(
-                            GoalStatus::BackOffPaused
-                                | GoalStatus::NoProgressPaused
-                                | GoalStatus::Blocked
-                        ),
-                    )
-                {
-                    t.rollback_classifier_attempt();
-                }
-            });
-            let outcome = {
-                let latch_goal_id = goal_id.clone();
-                let latch_revision = definition_revision;
-                let _verifying_latch = TrackerDropGuard::new(&actor.goal_tracker, move |t| {
-                    if t.definition_is_current(&latch_goal_id, latch_revision)
-                        && let Some(o) = t.snapshot_mut()
-                    {
-                        o.verifying_in_flight = false;
-                    }
-                });
-                // Poll INSIDE `catch_unwind` (a bare `catch_unwind(async …)`
-                // would only guard the closure body, not the future's polls)
-                // so a panicking stage still surfaces a fail-closed outcome
-                // (and its ack) instead of silently wedging the in-flight
-                // CAS for the rest of the session.
-                let mut stage = std::pin::pin!(actor.run_verification_stage_for_drain(attempt));
-                std::future::poll_fn(|cx| {
-                    let poll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        stage.as_mut().poll(cx)
-                    }));
-                    match poll {
-                        Ok(std::task::Poll::Ready(outcome)) => {
-                            std::task::Poll::Ready(Ok::<_, ()>(outcome))
-                        }
-                        Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
-                        Err(_) => std::task::Poll::Ready(Err(())),
-                    }
-                })
-                .await
-                .unwrap_or_else(|()| {
-                    crate::session::goal_classifier::GoalClassifierOutcome::VerificationUnavailable {
-                        reason: crate::session::events::GoalVerificationUnavailableReason::SamplerError,
-                        details_path: format!("verifier stage task panicked (stage {stage_id})"),
-                    }
-                })
-            };
-            slot_guard.disarm();
-            let latency_ms = started.elapsed().as_millis() as u64;
-            let completion = SessionEvent::GoalStageCompleted(
-                crate::session::replay_events::GoalStageCompletion {
-                    stage_id,
-                    goal_id: goal_id.clone(),
-                    definition_revision,
-                    autonomy_generation,
-                    foreground_generation,
-                    kind: crate::session::replay_events::GoalStageKind::Verifier {
-                        attempt,
-                        max_runs: policy.max_runs,
-                        latency_ms,
-                        outcome: Ok(outcome),
-                        ack: ack_tx,
-                    },
-                },
+            let prompt = format!(
+                "Create the durable Markdown blackboard for this Goal. Inspect the workspace as needed. Return ONLY the complete Markdown plan, including acceptance criteria, concrete tasks, and verification steps. Do not write plan.md.\n\nOBJECTIVE:\n{objective}"
             );
-            if actor.event_tx.send(completion).is_err() {
-                // The actor's event channel closed (session teardown): the
-                // mailbox will never commit this stage, so release the
-                // in-flight CAS and refund the reserved attempt locally —
-                // purely defensive, the actor is terminating anyway, but it
-                // keeps the tracker consistent for any surviving observers.
-                actor
-                    .goal_classifier_in_flight
-                    .store(false, std::sync::atomic::Ordering::SeqCst);
-                actor.rollback_stage_attempt_if_owed(&goal_id, definition_revision);
-            }
+            let outcome = actor
+                .run_goal_subagent(
+                    &lease.goal_id,
+                    prompt,
+                    "Goal planner",
+                    "planner",
+                    cancel,
+                    true,
+                )
+                .await
+                .and_then(|markdown| {
+                    (!markdown.trim().is_empty())
+                        .then_some(markdown)
+                        .ok_or_else(|| "planner returned an empty blackboard".to_string())
+                });
+            let _ = actor.event_tx.send(SessionEvent::GoalStageCompleted(
+                crate::session::replay_events::GoalStageCompletion {
+                    lease,
+                    kind: crate::session::replay_events::GoalStageKind::Planner(outcome),
+                },
+            ));
         });
     }
 
-    /// Mailbox-side commit for a finished background Goal stage. Validates
-    /// the lease captured at schedule time; a stale completion (goal paused /
-    /// cleared / revised, or foreground context changed) is dropped with
-    /// diagnostics and its model work is simply discarded.
+    fn spawn_verifier_stage(self: &std::sync::Arc<Self>) {
+        let (lease, goal) = {
+            let mut tracker = self.goal_tracker.lock();
+            let Some(lease) =
+                tracker.claim_stage(crate::session::goal_tracker::GoalPhase::Verifying)
+            else {
+                return;
+            };
+            let Some(goal) = tracker.snapshot().cloned() else {
+                return;
+            };
+            (lease, goal)
+        };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        *self.goal_stage_cancel.lock() = Some((lease.clone(), cancel.clone()));
+        let actor = std::sync::Arc::clone(self);
+        tokio::task::spawn_local(async move {
+            let prompt = format!(
+                "Independently verify the Goal against the current workspace evidence. Do not trust the candidate claim. Return ONLY JSON: {{\"verdict\":\"achieved|not_achieved|blocked\",\"feedback\":\"actionable evidence/gaps\",\"fingerprint\":\"stable normalized gap key\"}}. Use blocked only when the same work cannot be completed in this environment.\n\nOBJECTIVE (rev {}):\n{}\n\nPLAN (rev {}):\n{}\n\nCANDIDATE SUMMARY:\n{}",
+                goal.objective_revision,
+                goal.objective,
+                goal.plan.revision,
+                goal.plan.markdown,
+                goal.candidate_summary.as_deref().unwrap_or_default(),
+            );
+            let outcome = actor
+                .run_goal_subagent(
+                    &lease.goal_id,
+                    prompt,
+                    "Goal verifier",
+                    "verifier",
+                    cancel,
+                    false,
+                )
+                .await
+                .and_then(|raw| {
+                    let mut body = raw.trim();
+                    if let Some(stripped) = body.strip_prefix("```json") {
+                        body = stripped.trim();
+                    }
+                    if let Some(stripped) = body.strip_suffix("```") {
+                        body = stripped.trim();
+                    }
+                    let parsed: VerifierResponse =
+                        serde_json::from_str(body).map_err(|error| error.to_string())?;
+                    match parsed.verdict.as_str() {
+                        "achieved" => {
+                            Ok(crate::session::replay_events::GoalVerifierOutcome::Achieved)
+                        }
+                        "not_achieved" => Ok(
+                            crate::session::replay_events::GoalVerifierOutcome::NotAchieved {
+                                fingerprint: if parsed.fingerprint.trim().is_empty() {
+                                    parsed.feedback.to_lowercase()
+                                } else {
+                                    parsed.fingerprint
+                                },
+                                feedback: parsed.feedback,
+                            },
+                        ),
+                        "blocked" => Ok(
+                            crate::session::replay_events::GoalVerifierOutcome::Blocked {
+                                message: parsed.feedback,
+                            },
+                        ),
+                        other => Err(format!("unknown verifier verdict: {other}")),
+                    }
+                });
+            let _ = actor.event_tx.send(SessionEvent::GoalStageCompleted(
+                crate::session::replay_events::GoalStageCompletion {
+                    lease,
+                    kind: crate::session::replay_events::GoalStageKind::Verifier(outcome),
+                },
+            ));
+        });
+    }
+
     pub(super) async fn handle_goal_stage_completed(
         self: &std::sync::Arc<Self>,
         completion: crate::session::replay_events::GoalStageCompletion,
     ) {
-        use crate::session::replay_events::GoalStageKind;
-        let crate::session::replay_events::GoalStageCompletion {
-            stage_id,
-            goal_id,
-            definition_revision,
-            autonomy_generation,
-            foreground_generation,
-            kind,
-        } = completion;
-        match kind {
-            GoalStageKind::Verifier {
-                attempt,
-                max_runs,
-                latency_ms,
-                outcome,
-                ack,
-            } => {
-                self.commit_verifier_stage(
-                    stage_id,
-                    &goal_id,
-                    definition_revision,
-                    autonomy_generation,
-                    foreground_generation,
-                    attempt,
-                    max_runs,
-                    latency_ms,
-                    outcome,
-                    ack,
-                )
-                .await;
-            }
-            GoalStageKind::Strategist {
-                attempt,
-                consecutive_failures,
-                outcome,
-            } => {
-                self.commit_strategist_stage(
-                    stage_id,
-                    &goal_id,
-                    definition_revision,
-                    autonomy_generation,
-                    attempt,
-                    consecutive_failures,
-                    outcome,
-                );
-            }
-            GoalStageKind::Summarizer { attempt, outcome } => {
-                self.commit_summarizer_stage(
-                    stage_id,
-                    &goal_id,
-                    definition_revision,
-                    autonomy_generation,
-                    attempt,
-                    outcome,
-                )
-                .await;
+        use crate::session::goal_tracker::GoalPhase;
+        use crate::session::replay_events::{GoalStageKind, GoalVerifierOutcome};
+        {
+            let mut running = self.goal_stage_cancel.lock();
+            if running
+                .as_ref()
+                .is_some_and(|(lease, _)| lease == &completion.lease)
+            {
+                running.take();
             }
         }
-    }
-
-    /// Commit a finished verification stage. Lease (definition revision +
-    /// autonomy generation + Active status + unchanged foreground) must
-    /// still hold; otherwise the outcome is dropped, the reserved attempt is
-    /// refunded per the old slot-guard rule, and the tool ack is resolved as
-    /// `Rejected(StatusChangedDuringClassifier)` — preserving the
-    /// `update_goal` ack contract.
-    async fn commit_verifier_stage(
-        self: &std::sync::Arc<Self>,
-        stage_id: u64,
-        goal_id: &str,
-        definition_revision: u64,
-        autonomy_generation: u64,
-        foreground_generation: u64,
-        attempt: u32,
-        max_runs: u32,
-        latency_ms: u64,
-        outcome: Result<crate::session::goal_classifier::GoalClassifierOutcome, String>,
-        ack_tx: Option<
-            tokio::sync::oneshot::Sender<
-                tools::implementations::grow_build::update_goal::UpdateGoalAck,
-            >,
-        >,
-    ) {
-        use crate::session::events::GoalVerificationUnavailableReason;
-        use crate::session::goal_classifier::GoalClassifierOutcome;
-        use crate::session::goal_tracker::GoalStatus;
-        use tools::implementations::grow_build::update_goal::{RejectReason, UpdateGoalAck};
-
-        // The stage's model work is done: release the in-flight CAS so the
-        // next `completed: true` proposal may start its own stage.
-        self.goal_classifier_in_flight
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(error) => GoalClassifierOutcome::VerificationUnavailable {
-                reason: GoalVerificationUnavailableReason::SamplerError,
-                details_path: format!("verifier stage failed: {error}"),
-            },
+        let applied = match completion.kind {
+            GoalStageKind::Planner(Ok(markdown)) => self
+                .goal_tracker
+                .lock()
+                .apply_planner_result(&completion.lease, markdown),
+            GoalStageKind::Planner(Err(message)) => self
+                .goal_tracker
+                .lock()
+                .planner_failed(&completion.lease, message),
+            GoalStageKind::Verifier(Ok(GoalVerifierOutcome::Achieved)) => self
+                .goal_tracker
+                .lock()
+                .verification_achieved(&completion.lease),
+            GoalStageKind::Verifier(Ok(GoalVerifierOutcome::NotAchieved {
+                feedback,
+                fingerprint,
+            })) => self.goal_tracker.lock().verification_not_achieved(
+                &completion.lease,
+                feedback,
+                fingerprint,
+            ),
+            GoalStageKind::Verifier(Ok(GoalVerifierOutcome::Blocked { message })) => self
+                .goal_tracker
+                .lock()
+                .verification_blocked(&completion.lease, message),
+            GoalStageKind::Verifier(Err(message)) => {
+                let current = self
+                    .goal_tracker
+                    .lock()
+                    .lease_is_current(&completion.lease, GoalPhase::Verifying);
+                if current {
+                    self.goal_tracker.lock().pause_with_message(
+                        crate::session::goal_tracker::GoalPauseReason::Infra,
+                        format!("Verification unavailable: {message}"),
+                    )
+                } else {
+                    false
+                }
+            }
         };
-
-        let (definition_stale, status_stale, generation_stale) = {
-            let tracker = self.goal_tracker.lock();
-            (
-                !tracker.definition_is_current(goal_id, definition_revision),
-                tracker.status() != Some(GoalStatus::Active),
-                tracker.autonomy_generation() != Some(autonomy_generation),
-            )
-        };
-        let foreground_stale = self.goal_foreground_changed(foreground_generation);
-        if definition_stale || status_stale || generation_stale || foreground_stale {
-            tracing::info!(
-                stage_id,
-                goal_id,
-                definition_revision,
-                autonomy_generation,
-                definition_stale,
-                status_stale,
-                generation_stale,
-                foreground_stale,
-                "goal verifier stage completion dropped: lease no longer current",
-            );
-            // Mirrors the old inline drain's slot guard: refund the reserved
-            // classifier attempt when the goal still owns the same definition
-            // and is not in a paused family (a revised goal keeps the
-            // attempt; a paused one gets it back).
-            self.rollback_stage_attempt_if_owed(goal_id, definition_revision);
-            self.events
-                .emit(crate::session::events::Event::GoalVerificationUnavailable {
-                    reason: GoalVerificationUnavailableReason::GoalNotActiveAtResolve
-                        .as_const_str(),
-                    attempt,
-                    latency_ms,
-                });
-            let detail = if definition_stale {
-                "Goal definition changed during classifier run".to_string()
-            } else if status_stale {
-                "Goal transitioned to non-Active during classifier run".to_string()
-            } else {
-                "Goal context changed during classifier run (steering or a deferred completion)"
-                    .to_string()
-            };
-            try_send_ack(
-                ack_tx,
-                UpdateGoalAck::Rejected {
-                    reason: RejectReason::StatusChangedDuringClassifier,
-                    detail,
-                },
-            );
-            return;
-        }
-
-        let policy = GoalClassifierPolicy {
-            enabled: true,
-            max_runs,
-        };
-        let notify = self.goal_notify_sender();
-        let ack = self
-            .apply_classifier_outcome_foreground(&policy, attempt, outcome, &notify)
-            .await;
-        let requeue_cycle = matches!(&ack, UpdateGoalAck::ClassifierNotAchieved { .. })
-            && self.goal_tracker.lock().status() == Some(GoalStatus::Active);
-        try_send_ack(ack_tx, ack);
-        if requeue_cycle {
-            // Cycle-boundary contract (verifier gate): the stage rejected the
-            // completion but the Goal is still Active — schedule the next
-            // finite implementer cycle with the fresh gaps/next-step rendered
-            // from the post-verification state. Achieved, paused, blocked and
-            // lease-dropped outcomes never reach here: they either completed
-            // the Goal or left it non-Active, and `handle_turn_end` suppresses
-            // the continuation while the stage is in flight, so exactly one
-            // requeue happens per resolved verification.
-            self.maybe_queue_goal_continuation().await;
-        }
-    }
-
-    /// Refund the classifier attempt a stage reserved when its completion
-    /// is discarded. Mirrors the old inline drain's slot-guard condition.
-    fn rollback_stage_attempt_if_owed(&self, goal_id: &str, definition_revision: u64) {
-        use crate::session::goal_tracker::GoalStatus;
-        let mut tracker = self.goal_tracker.lock();
-        if tracker.definition_is_current(goal_id, definition_revision)
-            && !matches!(
-                tracker.status(),
-                Some(
-                    GoalStatus::BackOffPaused | GoalStatus::NoProgressPaused | GoalStatus::Blocked
-                ),
-            )
-        {
-            tracker.rollback_classifier_attempt();
-        }
-    }
-
-    /// Commit a finished strategist stage (fail-OPEN). The recommendation is
-    /// recorded only while the lease (definition revision + autonomy
-    /// generation) still holds; a stale completion keeps the claimed cap
-    /// bonus (mirroring the old disarm-on-stale), while a current-lease
-    /// completion that delivered no restructure revokes it (mirroring the
-    /// old guard drop).
-    fn commit_strategist_stage(
-        self: &std::sync::Arc<Self>,
-        stage_id: u64,
-        goal_id: &str,
-        definition_revision: u64,
-        autonomy_generation: u64,
-        _attempt: u32,
-        _consecutive_failures: u32,
-        outcome: Result<crate::session::goal_strategist::GoalStrategistOutcome, String>,
-    ) {
-        let lease_ok = {
-            let tracker = self.goal_tracker.lock();
-            tracker.definition_is_current(goal_id, definition_revision)
-                && tracker.autonomy_generation() == Some(autonomy_generation)
-        };
-        if !lease_ok {
-            tracing::info!(
-                stage_id,
-                goal_id,
-                definition_revision,
-                "goal strategist: discarded stale result after goal change",
-            );
-            return;
-        }
-        if let Ok(crate::session::goal_strategist::GoalStrategistOutcome::Advised {
-            strategy_file,
-            recommendation,
-            ..
-        }) = outcome
-        {
-            self.goal_tracker.lock().record_strategy_recommendation(
-                strategy_file.to_string_lossy().into_owned(),
-                recommendation,
-            );
-            return;
-        }
-        // Fail-OPEN: no restructure delivered (FailOpen / task failure) —
-        // give the cap bonus claimed at schedule time back.
-        self.goal_tracker.lock().revoke_strategist_cap_bonus();
-    }
-
-    /// Commit a finished summarizer stage (fail-OPEN). The closing summary
-    /// is surfaced only while the lease (definition revision + autonomy
-    /// generation) still holds.
-    async fn commit_summarizer_stage(
-        self: &std::sync::Arc<Self>,
-        stage_id: u64,
-        goal_id: &str,
-        definition_revision: u64,
-        autonomy_generation: u64,
-        _attempt: u32,
-        outcome: Result<crate::session::goal_summarizer::GoalSummarizerOutcome, String>,
-    ) {
-        let lease_ok = {
-            let tracker = self.goal_tracker.lock();
-            tracker.definition_is_current(goal_id, definition_revision)
-                && tracker.autonomy_generation() == Some(autonomy_generation)
-        };
-        if !lease_ok {
-            tracing::info!(
-                stage_id,
-                goal_id,
-                definition_revision,
-                "goal summarizer: discarded stale result after goal change",
-            );
-            return;
-        }
-        if let Ok(crate::session::goal_summarizer::GoalSummarizerOutcome::Summarized {
-            summary,
-            ..
-        }) = outcome
-        {
-            // Bump the stream start so the summary chunk carries a fresh
-            // `streamStartMs`; without it the client appends this closing
-            // message to the model's last turn message instead of a new
-            // block.
-            self.chat_state_handle
-                .record_stream_start(chrono::Utc::now().timestamp_millis());
-            self.send_slash_command_output(&summary).await;
-        }
-    }
-
-    async fn account_not_achieved_without_sampler(
-        &self,
-        policy: &GoalClassifierPolicy,
-        reason: NotAchievedSyntheticReason,
-    ) -> Option<(u32, String, bool)> {
-        use crate::session::goal_classifier::format_details_path;
-        use crate::session::goal_tracker::GoalClassifierVerdict;
-
-        let (attempt, verifier_id) = {
-            let mut tracker = self.goal_tracker.lock();
-            let o = tracker.snapshot_mut()?;
-            o.classifier_runs_attempted = o.classifier_runs_attempted.saturating_add(1);
-            o.classifier_max_runs = Some(policy.max_runs);
-            (o.classifier_runs_attempted, o.verifier_id.clone())
-        };
-        let details_path = format_details_path(&verifier_id, attempt);
-        let body = reason.details_body(attempt, policy.max_runs);
-        let wrote_details =
-            if crate::session::goal_tracker::ensure_goal_scratch_root(&verifier_id).is_ok() {
-                tokio::fs::write(&details_path, body).await.is_ok()
-            } else {
-                false
-            };
-        let details_ptr: Option<&str> = wrote_details.then_some(details_path.as_str());
-
-        let gaps_summary = reason.gaps_summary();
-        {
-            let mut tracker = self.goal_tracker.lock();
-            Self::record_verdict_on_orchestration(
-                &mut tracker,
-                GoalClassifierVerdict::NotAchieved,
-                details_ptr,
-                GapsUpdate::Preserve,
-            );
-            tracker.record_not_achieved_streak();
-        }
-
-        let cap_reached = attempt >= policy.max_runs;
-        if cap_reached {
-            let pause_summary = format!(
-                "{}:\n{gaps_summary}",
-                crate::session::goal_classifier::PAUSE_GROUP_FIXABLE,
-            );
-            self.auto_pause_for_classifier_cap(attempt, details_ptr.unwrap_or(""), &pause_summary)
-                .await;
-        } else {
-            let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-            let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
-            let notify = self.goal_notify_sender();
-            notify.emit_goal_updated(
+        if applied {
+            let current = self.chat_state_handle.get_total_tokens().await as i64;
+            let (used, finished) = self.goal_tokens(current);
+            self.goal_notify_sender().emit_goal_updated(
                 &mut self.goal_tracker.lock(),
-                tokens_used,
-                finished_marginal,
+                used,
+                finished,
             );
+            self.idle_arbiter.notify_one();
         }
-        Some((attempt, details_ptr.unwrap_or("").to_owned(), cap_reached))
     }
 
-    /// Pure-state commit of a classifier outcome, producing the tool ack.
-    /// The model work it used to inline (summarizer / strategist subagents)
-    /// now runs as background Goal stages scheduled by this function — the
-    /// mailbox never awaits model work here.
-    async fn apply_classifier_outcome_foreground(
+    pub(super) async fn drive_goal_on_idle(
+        self: std::sync::Arc<Self>,
+        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+    ) {
+        if !self.goal_harness_enabled() {
+            return;
+        }
+        let phase = {
+            let tracker = self.goal_tracker.lock();
+            if tracker.status() != Some(crate::session::goal_tracker::GoalStatus::Active) {
+                return;
+            }
+            tracker.phase()
+        };
+        match phase {
+            Some(crate::session::goal_tracker::GoalPhase::Planning) => {
+                self.spawn_planner_stage();
+            }
+            Some(crate::session::goal_tracker::GoalPhase::Verifying) => {
+                self.spawn_verifier_stage();
+            }
+            Some(crate::session::goal_tracker::GoalPhase::Executing) => {
+                {
+                    let state = self.state.lock().await;
+                    if !state.foreground.is_idle() || !state.pending_inputs.is_empty() {
+                        return;
+                    }
+                }
+                let current = self.chat_state_handle.get_total_tokens().await as i64;
+                if self.enforce_goal_token_budget(current).await {
+                    return;
+                }
+                let Some(directive) = self.render_goal_continuation(current) else {
+                    return;
+                };
+                self.start_goal_internal_turn(directive, false, completion_tx)
+                    .await;
+            }
+            Some(crate::session::goal_tracker::GoalPhase::Summarizing) => {
+                {
+                    let state = self.state.lock().await;
+                    if !state.foreground.is_idle() || !state.pending_inputs.is_empty() {
+                        return;
+                    }
+                }
+                let Some(goal) = self.goal_tracker.lock().snapshot().cloned() else {
+                    return;
+                };
+                let directive = format!(
+                    "Produce the final user-facing Goal report now. Summarize concrete changes, verification evidence, and any caveats. Do not invoke a separate summarizer.\n\nObjective:\n{}\n\nVerified candidate:\n{}",
+                    goal.objective,
+                    goal.candidate_summary.as_deref().unwrap_or_default(),
+                );
+                self.start_goal_internal_turn(directive, true, completion_tx)
+                    .await;
+            }
+            None => {}
+        }
+    }
+
+    async fn start_goal_internal_turn(
         self: &std::sync::Arc<Self>,
-        policy: &GoalClassifierPolicy,
-        attempt: u32,
-        outcome: crate::session::goal_classifier::GoalClassifierOutcome,
-        notify: &crate::session::goal_orchestrator::GoalNotifySender,
-    ) -> tools::implementations::grow_build::update_goal::UpdateGoalAck {
-        use crate::session::goal_classifier::GoalClassifierOutcome;
-        use crate::session::goal_tracker::GoalClassifierVerdict;
-        use tools::implementations::grow_build::update_goal::UpdateGoalAck;
+        directive: String,
+        finalization: bool,
+        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+    ) {
+        let mut state = self.state.lock().await;
+        if !state.foreground.is_idle() || !state.pending_inputs.is_empty() {
+            return;
+        }
+        let (goal_id, stage_id) = {
+            let mut tracker = self.goal_tracker.lock();
+            let Some(goal_id) = tracker.snapshot().map(|goal| goal.goal_id.clone()) else {
+                return;
+            };
+            if !finalization && !tracker.worker_started() {
+                return;
+            }
+            let stage_id = tracker
+                .snapshot()
+                .map(|goal| goal.total_worker_rounds as u64 + u64::from(finalization))
+                .unwrap_or_default();
+            (goal_id, stage_id)
+        };
+        let prompt_id = uuid::Uuid::now_v7().to_string();
+        let origin = if finalization {
+            crate::session::PromptOrigin::GoalFinalization { goal_id, stage_id }
+        } else {
+            crate::session::PromptOrigin::GoalContinuation { goal_id, stage_id }
+        };
+        *self
+            .current_prompt_id
+            .lock()
+            .expect("current_prompt_id mutex poisoned") = Some(prompt_id.clone());
+        let display = RunningPromptDisplay {
+            id: prompt_id.clone(),
+            text: String::new(),
+            kind: if finalization {
+                "goal_finalization"
+            } else {
+                "goal_continuation"
+            }
+            .into(),
+            origin: origin.wire_name().into(),
+            turn_kind: crate::session::TurnKind::Internal.wire_name().into(),
+            combined_texts: None,
+        };
+        self.broadcast_queue_changed_promoting(&state, display);
+        state.foreground = ForegroundState::RegularTurn(AgentTask::new_prompt(
+            self.clone(),
+            prompt_id,
+            origin,
+            crate::session::TurnKind::Internal,
+            vec![acp::ContentBlock::Text(acp::TextContent::new(directive))],
+            crate::session::behavior::PromptMode::Agent,
+            None,
+            None,
+            true,
+            None,
+            completion_tx,
+            None,
+            None,
+        ));
+    }
+
+    pub(super) async fn finalize_goal_finalization_turn(&self) {
+        // Charge the final reporting turn while the Goal is still Active.
+        // Completion freezes the receipt so later Normal turns cannot inflate
+        // its persisted token total on reload.
+        self.settle_live_goal_subagent_tokens();
+        let current = self.chat_state_handle.get_total_tokens().await as i64;
+        let (used, finished) = self.goal_tokens(current);
+        if !self.goal_tracker.lock().complete_verified() {
+            return;
+        }
+        self.goal_notify_sender()
+            .emit_goal_updated(&mut self.goal_tracker.lock(), used, finished);
+        self.behavior.lock().select_behavior(None);
+        *self.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
+        self.persist_behavior_state();
+        self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
+            tools::types::SessionMode::Default.as_id(),
+        ));
+    }
+
+    pub(crate) async fn handle_goal_command(
+        &self,
+        command: tools::implementations::grow_build::update_goal::GoalCommand,
+    ) {
+        use crate::session::goal_tracker::{GoalPauseReason, GoalPlanAuthor};
+        use tools::implementations::grow_build::update_goal::{
+            GoalCommand, GoalView, UpdateGoalAction,
+        };
 
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
-        let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
-        match outcome {
-            GoalClassifierOutcome::Achieved { details_path } => {
-                self.prune_subagent_records_for_active_goal();
-                self.clear_pending_classifier_completions();
-                let details_path = {
-                    let mut tracker = self.goal_tracker.lock();
-                    Self::record_verdict_on_orchestration(
-                        &mut tracker,
-                        GoalClassifierVerdict::Achieved,
-                        Some(details_path.as_str()),
-                        GapsUpdate::Clear,
-                    );
-                    tracker.reset_strategist_state();
-                    tracker.complete_verified();
-                    let details_path = tracker
-                        .snapshot()
-                        .and_then(|o| o.last_classifier_details_path.clone())
-                        .unwrap_or(details_path);
-                    notify.emit_goal_updated(&mut tracker, tokens_used, finished_marginal);
-                    details_path
-                };
-                self.finish_goal_behavior_after_verified_achievement().await;
-                self.maybe_run_goal_summarizer(attempt);
-                UpdateGoalAck::ClassifierAchieved { details_path }
+        match command {
+            GoalCommand::Get { respond_to } => {
+                let used = self.goal_tokens_used(current_tokens);
+                let response = self
+                    .goal_tracker
+                    .lock()
+                    .snapshot()
+                    .map(|goal| GoalView {
+                        goal_id: goal.goal_id.clone(),
+                        objective: goal.objective.clone(),
+                        objective_revision: goal.objective_revision,
+                        status: format!("{:?}", goal.status).to_ascii_lowercase(),
+                        phase: format!("{:?}", goal.phase).to_ascii_lowercase(),
+                        token_budget: goal.token_budget,
+                        tokens_used: used,
+                        plan_revision: goal.plan.revision,
+                        plan_markdown: goal.plan.markdown.clone(),
+                        verifier_feedback: goal.verifier_feedback.clone(),
+                    })
+                    .ok_or_else(|| "No Goal is set.".to_string());
+                let _ = respond_to.send(response);
+                return;
             }
-            GoalClassifierOutcome::NotAchieved {
-                details_path,
-                gaps_summary,
-                pause_summary,
-                gap_fingerprint,
-            } => {
-                {
-                    let mut tracker = self.goal_tracker.lock();
-                    Self::record_verdict_on_orchestration(
-                        &mut tracker,
-                        GoalClassifierVerdict::NotAchieved,
-                        Some(details_path.as_str()),
-                        GapsUpdate::Set(gaps_summary.as_str()),
-                    );
-                    tracker.record_not_achieved_streak();
-                }
-                if attempt >= policy.max_runs {
-                    self.auto_pause_for_classifier_cap(attempt, &details_path, &pause_summary)
-                        .await;
-                    return UpdateGoalAck::ClassifierCapReached {
-                        details_path,
-                        attempt,
-                    };
-                }
-                let stalled = !gap_fingerprint.is_empty()
-                    && self
-                        .goal_tracker
-                        .lock()
-                        .record_classifier_stall(&gap_fingerprint);
-                if stalled {
-                    self.auto_pause_for_classifier_stall(&details_path, &pause_summary)
-                        .await;
-                    return UpdateGoalAck::ClassifierStalled {
-                        details_path,
-                        attempt,
-                    };
-                }
-                let every = self.goal_strategist_every;
-                let claimed =
-                    self.goal_tracker
-                        .lock()
-                        .claim_strategist_fire(|consecutive, last_fired| {
-                            crate::session::goal_strategist::strategist_should_fire(
-                                consecutive,
-                                last_fired,
-                                every,
-                            )
-                        });
-                if let Some(consecutive_not_achieved) = claimed {
-                    self.maybe_run_goal_strategist(attempt, consecutive_not_achieved);
-                }
-                notify.emit_goal_updated(
-                    &mut self.goal_tracker.lock(),
-                    tokens_used,
-                    finished_marginal,
+            GoalCommand::ReplacePlan { input, respond_to } => {
+                let changed = self.goal_tracker.lock().replace_plan(
+                    input.markdown,
+                    GoalPlanAuthor::Agent,
+                    input.reason,
                 );
-                UpdateGoalAck::ClassifierNotAchieved {
-                    details_path,
-                    attempt,
-                    max_runs: policy.max_runs,
+                let response = changed
+                    .then(|| "Goal plan replaced; stale stage results will be ignored.".to_string())
+                    .ok_or_else(|| {
+                        "The Goal is not active or the Markdown plan is empty.".to_string()
+                    });
+                let _ = respond_to.send(response);
+                if !changed {
+                    return;
                 }
             }
-            GoalClassifierOutcome::Blocked {
-                details_path,
-                pause_summary,
-            } => {
-                {
-                    let mut tracker = self.goal_tracker.lock();
-                    Self::record_verdict_on_orchestration(
-                        &mut tracker,
-                        GoalClassifierVerdict::NotAchieved,
-                        Some(details_path.as_str()),
-                        GapsUpdate::Clear,
-                    );
-                    tracker.rollback_classifier_attempt();
-                    tracker.reset_classifier_stall();
-                    tracker.reset_strategist_state();
+            GoalCommand::Update { input, respond_to } => {
+                let message = input.message.trim().to_string();
+                if message.is_empty() {
+                    let _ = respond_to.send(Err("A non-empty message is required.".into()));
+                    return;
                 }
-                self.auto_pause_for_classifier_blocked(&details_path, &pause_summary)
-                    .await;
-                UpdateGoalAck::ClassifierBlocked { details_path }
-            }
-            GoalClassifierOutcome::VerificationUnavailable {
-                reason,
-                details_path: _,
-            } => {
-                tracing::warn!(
-                    ?reason,
-                    "goal verification infrastructure failed; pausing fail-closed",
-                );
-                self.auto_pause_goal_if_active_with_message(
-                    crate::session::goal_tracker::GoalPauseReason::Infra,
-                    format!(
-                        "Independent goal verification failed ({}); completion was not accepted.",
-                        reason.as_const_str()
+                let (changed, summary) = match input.action {
+                    UpdateGoalAction::CandidateComplete => (
+                        self.goal_tracker.lock().candidate_complete(message),
+                        "Completion candidate accepted; independent verification will run in the background."
+                            .to_string(),
                     ),
-                )
-                .await;
-                UpdateGoalAck::VerificationUnavailable {
-                    reason: reason.as_const_str().to_string(),
+                    UpdateGoalAction::Blocked => (
+                        self.goal_tracker
+                            .lock()
+                            .pause_with_message(GoalPauseReason::Verification, message.clone()),
+                        format!("Goal blocked: {message}"),
+                    ),
+                };
+                let response = changed.then_some(summary).ok_or_else(|| {
+                    "The Goal is not in a phase that accepts this update.".to_string()
+                });
+                let _ = respond_to.send(response);
+                if !changed {
+                    return;
                 }
             }
         }
-    }
-}
 
-#[cfg(test)]
-mod role_capability_tests {
-    use super::RoleCapability;
-    use tools::implementations::grow_build::task::types::SubagentTypeSummary;
-
-    fn summary(can_read: bool, can_search: bool, can_execute: bool) -> SubagentTypeSummary {
-        SubagentTypeSummary {
-            can_read,
-            can_search,
-            can_execute,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn skeptic_requires_read_and_search() {
-        assert!(RoleCapability::Skeptic.is_satisfied(&summary(true, true, false)));
-        assert!(!RoleCapability::Skeptic.is_satisfied(&summary(true, false, false)));
-        assert!(!RoleCapability::Skeptic.is_satisfied(&summary(false, true, false)));
-    }
-
-    #[test]
-    fn strategist_requires_read_search_execute() {
-        assert!(RoleCapability::Strategist.is_satisfied(&summary(true, true, true)));
-        assert!(!RoleCapability::Strategist.is_satisfied(&summary(true, true, false)));
-        assert!(!RoleCapability::Strategist.is_satisfied(&summary(true, false, true)));
-    }
-}
-
-#[cfg(test)]
-mod role_tool_names_tests {
-    use super::{PanelResolveCache, role_tool_names_from};
-    use crate::session::goal_planner::RoleSpawnOverride;
-    use crate::session::goal_role_tools::RoleToolNames;
-    use tools::implementations::grow_build::task::types::{
-        SubagentDescribeOutcome, SubagentTypeSummary,
-    };
-    use tools::types::tool::ToolKind;
-
-    /// A named summary (distinct from the inherit/default names) so the
-    /// from_summary-vs-inherit dispatch is unambiguous.
-    fn cursor_summary() -> SubagentTypeSummary {
-        let mut s = SubagentTypeSummary {
-            can_read: true,
-            can_search: true,
-            ..Default::default()
-        };
-        s.tool_names.insert(ToolKind::Read, "cursor_read".into());
-        s.tool_names.insert(ToolKind::Search, "cursor_grep".into());
-        s
-    }
-
-    /// A distinguishable parent-inherit names value (not the literal defaults).
-    fn inherit_names() -> RoleToolNames {
-        RoleToolNames::from_parent(
-            Some("parent_read".into()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-    }
-
-    #[test]
-    fn committed_explicit_draws_from_the_cached_describe_summary() {
-        let mut cache = PanelResolveCache::default();
-        cache.describe.insert(
-            "cursor-type".into(),
-            SubagentDescribeOutcome::Ok(cursor_summary()),
-        );
-        let ov = RoleSpawnOverride {
-            model: Some("m".into()),
-            agent_type: Some("cursor-type".into()),
-        };
-        let tn = role_tool_names_from(&ov, &cache, &inherit_names());
-        assert_eq!(tn.read, "cursor_read", "explicit pair uses its own toolset");
-        assert_eq!(tn.search, "cursor_grep");
-        assert!(
-            tn.toolset_tools.contains("cursor_read"),
-            "explicit path enumerates {{TOOLSET_TOOLS}}",
-        );
-    }
-
-    #[test]
-    fn inherit_override_uses_parent_names() {
-        let tn = role_tool_names_from(
-            &RoleSpawnOverride::default(),
-            &PanelResolveCache::default(),
-            &inherit_names(),
-        );
-        assert_eq!(tn.read, "parent_read", "inherit uses the parent toolset");
-        assert_eq!(tn.toolset_tools, "", "inherit carries no toolset block");
-    }
-
-    #[test]
-    fn explicit_but_summary_absent_or_unavailable_falls_back_to_inherit() {
-        // (a) agent_type set but no cache entry (never described).
-        let ov = RoleSpawnOverride {
-            model: Some("m".into()),
-            agent_type: Some("missing".into()),
-        };
-        let tn = role_tool_names_from(&ov, &PanelResolveCache::default(), &inherit_names());
-        assert_eq!(tn.read, "parent_read", "absent summary ⇒ inherit");
-
-        // (b) agent_type set but the describe round-trip failed open
-        // (`Unavailable`) ⇒ inherit, never a partial/broken summary.
-        let mut cache = PanelResolveCache::default();
-        cache
-            .describe
-            .insert("x".into(), SubagentDescribeOutcome::Unavailable);
-        let ov = RoleSpawnOverride {
-            model: Some("m".into()),
-            agent_type: Some("x".into()),
-        };
-        let tn = role_tool_names_from(&ov, &cache, &inherit_names());
-        assert_eq!(tn.read, "parent_read", "fail-open describe ⇒ inherit");
+        let (used, finished) = self.goal_tokens(current_tokens);
+        self.goal_notify_sender()
+            .emit_goal_updated(&mut self.goal_tracker.lock(), used, finished);
+        self.idle_arbiter.notify_one();
     }
 }

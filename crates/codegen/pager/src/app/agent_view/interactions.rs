@@ -1199,10 +1199,6 @@ impl AgentView {
     pub(crate) fn submit_question_answers_for_test(&mut self, skipped: bool) -> InputOutcome {
         self.submit_question_answers(skipped)
     }
-    #[cfg(test)]
-    pub(crate) fn handle_question_key_for_test(&mut self, key: &KeyEvent) -> InputOutcome {
-        self.handle_question_key(key)
-    }
     fn submit_question_answers(&mut self, skipped: bool) -> InputOutcome {
         use tools::implementations::grow_build::ask_user_question::AskUserQuestionExtResponse;
         self.swap_question_freeform();

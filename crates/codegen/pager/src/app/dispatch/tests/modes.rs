@@ -228,49 +228,6 @@ fn slash_plan_with_args_not_in_plan_enters_and_sends_prompt() {
     assert_eq!(app.agents[&id].plan_mode_pending, Some(true));
 }
 
-/// The `SendPrompt → SetModeThenPrompt` rewrap must forward the desc-space
-/// token ranges, and the drained echo must style them — a silent
-/// `Vec::new()` regression in the rewrap (or its handler) would otherwise
-/// compile clean and only surface as plain styling on the `/plan <desc>`
-/// path.
-#[test]
-fn slash_plan_desc_forwards_skill_token_ranges() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    super::prompt::register_pr_workflow_skill(&mut app, id);
-
-    let effects = dispatch(
-        Action::SendPrompt("/plan great /pr-workflow go".into()),
-        &mut app,
-    );
-
-    assert_eq!(effects.len(), 1, "expected 1 effect, got: {effects:?}");
-    match &effects[0] {
-        Effect::SetModeThenPrompt {
-            mode_id,
-            text,
-            skill_token_ranges,
-            ..
-        } => {
-            assert_eq!(&*mode_id.0, "plan");
-            assert_eq!(text, "great /pr-workflow go");
-            assert_eq!(
-                skill_token_ranges,
-                &vec![6..18],
-                "offsets recomputed against the stripped desc"
-            );
-        }
-        other => panic!("expected SetModeThenPrompt, got {other:?}"),
-    }
-    // The drained echo block carries the same desc-space ranges.
-    match &app.agents[&id].scrollback.get(0).unwrap().block {
-        RenderBlock::UserPrompt(b) => {
-            assert_eq!(b.skill_token_ranges, vec![6..18]);
-        }
-        other => panic!("expected UserPrompt, got {other:?}"),
-    }
-}
-
 #[test]
 fn slash_plan_with_args_already_in_plan_sends_prompt_after_idempotent_transition() {
     let mut app = test_app_with_agent();

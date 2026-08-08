@@ -1868,7 +1868,7 @@ fn cancel_never_overtakes_in_flight_prompt_intake() {
                             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                         }
                     }
-                    SessionCommand::Prompt { .. } => driver_order.borrow_mut().push("prompt"),
+                    SessionCommand::QueuePrompt { .. } => driver_order.borrow_mut().push("prompt"),
                     SessionCommand::Cancel { .. } => driver_order.borrow_mut().push("cancel"),
                     _ => {}
                 }

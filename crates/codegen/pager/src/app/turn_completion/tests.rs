@@ -370,58 +370,6 @@ fn workless_marker_renders_legacy_text() {
     assert_eq!(block.event.message(), "Worked for 2.0s");
 }
 
-// ── Send-now cancel marker suppression (viewer finalize rail) ────────
-
-/// A viewer finalizing a `send_now`-stamped `cancelled` terminal pushes no marker.
-#[test]
-fn viewer_finalize_suppresses_send_now_cancel_marker() {
-    let mut agent = running_viewer("p1");
-    let outcome = finalize_turn_from_durable_terminal(
-        &mut agent,
-        "s1",
-        "p1",
-        Some("cancelled"),
-        None,
-        Some("send_now"),
-    );
-    assert!(matches!(outcome.apply, TerminalApply::ViewerFinalized));
-    assert!(agent.session.state.is_idle(), "the turn still finishes");
-    assert!(
-        last_session_event(&agent.scrollback).is_none(),
-        "a send-now cancel pushes no marker on a viewer"
-    );
-
-    // A non-send-now trigger keeps the marker even with a local expectation armed (wire is authoritative).
-    let mut agent = running_viewer("p1");
-    agent.expect_send_now_cancel = Some("p-mine".into());
-    let _ = finalize_turn_from_durable_terminal(
-        &mut agent,
-        "s1",
-        "p1",
-        Some("cancelled"),
-        None,
-        Some("ctrl_c"),
-    );
-    assert!(matches!(
-        last_session_event(&agent.scrollback),
-        Some(SessionEvent::TurnCancelled { .. })
-    ));
-
-    // Older shell (no meta): the armed expectation is the fallback.
-    let mut agent = running_viewer("p1");
-    agent.expect_send_now_cancel = Some("p-mine".into());
-    let _ =
-        finalize_turn_from_durable_terminal(&mut agent, "s1", "p1", Some("cancelled"), None, None);
-    assert!(
-        last_session_event(&agent.scrollback).is_none(),
-        "the armed expectation suppresses the marker without wire meta"
-    );
-    assert!(
-        agent.expect_send_now_cancel.is_none(),
-        "the expectation is consumed on the viewer finalize"
-    );
-}
-
 /// The turn-end marker takes no fold path — a park has no row to fold into.
 #[test]
 fn turn_end_after_park_pushes_single_marker() {

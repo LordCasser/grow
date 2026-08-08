@@ -704,6 +704,8 @@ pub struct PersistedData {
     pub announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     /// Persisted goal mode orchestration state (None for sessions without goal mode)
     pub goal_mode_state: Option<crate::session::goal_tracker::GoalOrchestration>,
+    /// A Goal file existed but could not be read or decoded and was rejected.
+    pub goal_mode_state_rejected: bool,
     pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
 }
 
@@ -722,6 +724,8 @@ pub struct PersistedDataLight {
     pub announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     /// Persisted goal mode orchestration state (None for sessions without goal mode)
     pub goal_mode_state: Option<crate::session::goal_tracker::GoalOrchestration>,
+    /// A Goal file existed but could not be read or decoded and was rejected.
+    pub goal_mode_state_rejected: bool,
     pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
 }
 

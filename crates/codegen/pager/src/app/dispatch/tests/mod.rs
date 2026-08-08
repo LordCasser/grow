@@ -5,7 +5,6 @@ mod jump;
 mod modes;
 mod notes;
 mod permissions;
-mod prompt;
 mod rewind;
 mod router;
 mod session;
@@ -14,6 +13,7 @@ mod status;
 mod task_result;
 mod transcript;
 mod turn;
+mod turn_pipeline;
 use super::cta::{
     CTA_MCP_ABSENT_MAX_ATTEMPTS, CTA_MCP_POLL_MAX_ATTEMPTS, cta_impression_plugin_name,
     cta_install_error_category, cta_install_relative_path, plugin_cta_phase_for,
@@ -32,10 +32,6 @@ use super::dashboard::{
 };
 use super::modes::{YOLO_ON_UNDER_PLAN_TOAST, permission_mode_toast};
 use super::permissions::drain_permission_queue;
-use super::prompt::{
-    dispatch_doctor, dispatch_send_prompt, dispatch_send_prompt_inner,
-    input_can_trigger_project_picker,
-};
 use super::session::fork::build_child_fork_marker;
 use super::session::lifecycle::{dispatch_new_session_inner, drain_startup_actions, finish_trust};
 use super::session::load::reanchor_grouped_selection;
@@ -174,7 +170,6 @@ fn test_app() -> AppView {
         dashboard_sessions_loading: false,
         shared_prompt_queues: std::collections::HashMap::new(),
         optimistic_prompt_echoes: std::collections::HashMap::new(),
-        pending_running_adoptions: std::collections::HashMap::new(),
         session_picker_grouped: false,
         scheduler_background_loops_seed: true,
         cancel_rewind_enabled: true,
@@ -249,18 +244,6 @@ fn mark_agent_nonempty(app: &mut AppView, id: AgentId) {
     if let Some(a) = app.agents.get_mut(&id) {
         a.generated_session_title = Some(format!("Session {}", id.0));
     }
-}
-/// Push a plain prompt directly onto the LOCAL drip-feed queue
-/// (`pending_prompts`), bypassing the server-authoritative
-/// immediate-send routing. Used by tests that exercise the local
-/// `maybe_drain_queue` / editing / `DrainQueue` machinery, which is still
-/// the path for image/skill/bash/editing prompts and idle drains.
-pub(super) fn enqueue_local(app: &mut AppView, id: AgentId, text: &str) {
-    app.agents
-        .get_mut(&id)
-        .unwrap()
-        .session
-        .enqueue_prompt(text.to_string());
 }
 fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::SubagentInfo {
     crate::app::subagent::SubagentInfo {
@@ -362,14 +345,6 @@ fn cta_mcp_server(
         plugin_name: plugin.map(str::to_string),
         is_managed_gateway: false,
     }
-}
-pub(super) fn end_turn() -> Action {
-    Action::TaskComplete(TaskResult::PromptResponse {
-        agent_id: AgentId(0),
-        result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
-        http_status: None,
-        prompt_id: None,
-    })
 }
 /// Extract text from the last system message in an agent's scrollback.
 pub(super) fn last_system_text(app: &AppView, id: AgentId) -> String {

@@ -116,7 +116,7 @@
                 code_restored: false,
                 restore_summary: None,
                 restore_degree: None,
-                running_prompt_id: None,
+                foreground: None,
                 scheduler_background_loops: Some(true),
             }),
             &mut app,

@@ -267,7 +267,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         name: "goal",
         description: "[behavior] Set, manage, or check an autonomous goal",
         argument_hint: Some(
-            "set <objective> [--budget <tokens>] | budget <tokens> | status | pause | resume | clear",
+            "set <objective> [--budget <tokens>] | edit <objective> [--budget <tokens>] | budget <tokens> | status | pause | resume | clear",
         ),
         aliases: &[],
         gate: BuiltinGate::Goal,
@@ -294,6 +294,19 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
                         } else {
                             let (objective, token_budget) = parse_goal_budget(rest);
                             BuiltinAction::GoalSet {
+                                objective,
+                                token_budget,
+                            }
+                        }
+                    } else if lower.starts_with("edit")
+                        && (trimmed.len() == 4 || trimmed[4..].starts_with(char::is_whitespace))
+                    {
+                        let rest = trimmed[4..].trim_start();
+                        if rest.trim().is_empty() {
+                            BuiltinAction::GoalEnter
+                        } else {
+                            let (objective, token_budget) = parse_goal_budget(rest);
+                            BuiltinAction::GoalEdit {
                                 objective,
                                 token_budget,
                             }
@@ -876,6 +889,10 @@ pub(super) enum BuiltinAction {
         objective: String,
         token_budget: Option<i64>,
     },
+    GoalEdit {
+        objective: String,
+        token_budget: Option<i64>,
+    },
     GoalEnter,
     GoalStatus,
     GoalPause,
@@ -921,6 +938,7 @@ impl BuiltinAction {
             BuiltinAction::MemoryBrowse => "memory",
             BuiltinAction::MemoryToggle { .. } => "memory",
             BuiltinAction::GoalSet { .. }
+            | BuiltinAction::GoalEdit { .. }
             | BuiltinAction::GoalEnter
             | BuiltinAction::GoalStatus
             | BuiltinAction::GoalPause
@@ -955,7 +973,7 @@ impl BuiltinAction {
             BuiltinAction::PluginsUpdate { name } => name.is_some(),
             BuiltinAction::MemoryBrowse => false,
             BuiltinAction::MemoryToggle { .. } => true,
-            BuiltinAction::GoalSet { .. } => true,
+            BuiltinAction::GoalSet { .. } | BuiltinAction::GoalEdit { .. } => true,
             BuiltinAction::GoalEnter
             | BuiltinAction::GoalStatus
             | BuiltinAction::GoalPause
@@ -2878,14 +2896,14 @@ mod tests {
     #[test]
     fn goal_tracker_status_with_no_goal_returns_none() {
         use crate::session::goal_tracker::GoalTracker;
-        let tracker = GoalTracker::new(std::path::PathBuf::from("/tmp/test"));
+        let tracker = GoalTracker::new();
         assert!(tracker.snapshot().is_none());
         assert!(tracker.status().is_none());
     }
     #[test]
     fn goal_tracker_create_sets_active() {
         use crate::session::goal_tracker::{GoalStatus, GoalTracker};
-        let mut tracker = GoalTracker::new(std::path::PathBuf::from("/tmp/test"));
+        let mut tracker = GoalTracker::new();
         tracker.create_goal("g1".into(), "obj".into(), None, 0, "now".into(), None);
         assert_eq!(tracker.status(), Some(GoalStatus::Active));
         assert_eq!(tracker.objective(), Some("obj"));
@@ -2893,17 +2911,17 @@ mod tests {
     #[test]
     fn goal_tracker_pause_only_when_active() {
         use crate::session::goal_tracker::{GoalPauseReason, GoalStatus, GoalTracker};
-        let mut tracker = GoalTracker::new(std::path::PathBuf::from("/tmp/test"));
+        let mut tracker = GoalTracker::new();
         assert!(!tracker.pause(GoalPauseReason::User));
         tracker.create_goal("g1".into(), "obj".into(), None, 0, "now".into(), None);
         assert!(tracker.pause(GoalPauseReason::User));
-        assert_eq!(tracker.status(), Some(GoalStatus::UserPaused));
+        assert_eq!(tracker.status(), Some(GoalStatus::Paused));
         assert!(!tracker.pause(GoalPauseReason::User));
     }
     #[test]
     fn goal_tracker_resume_only_when_paused() {
         use crate::session::goal_tracker::{GoalPauseReason, GoalStatus, GoalTracker};
-        let mut tracker = GoalTracker::new(std::path::PathBuf::from("/tmp/test"));
+        let mut tracker = GoalTracker::new();
         tracker.create_goal("g1".into(), "obj".into(), None, 0, "now".into(), None);
         assert!(!tracker.resume());
         tracker.pause(GoalPauseReason::User);
@@ -2913,7 +2931,7 @@ mod tests {
     #[test]
     fn goal_tracker_clear_removes_orchestration() {
         use crate::session::goal_tracker::GoalTracker;
-        let mut tracker = GoalTracker::new(std::path::PathBuf::from("/tmp/test"));
+        let mut tracker = GoalTracker::new();
         tracker.create_goal("g1".into(), "obj".into(), None, 0, "now".into(), None);
         assert!(tracker.snapshot().is_some());
         tracker.clear();
@@ -2922,7 +2940,7 @@ mod tests {
     #[test]
     fn goal_tracker_create_replaces_existing() {
         use crate::session::goal_tracker::GoalTracker;
-        let mut tracker = GoalTracker::new(std::path::PathBuf::from("/tmp/test"));
+        let mut tracker = GoalTracker::new();
         tracker.create_goal("g1".into(), "first".into(), None, 0, "now".into(), None);
         tracker.create_goal("g2".into(), "second".into(), None, 0, "now".into(), None);
         assert_eq!(tracker.objective(), Some("second"));
@@ -2930,7 +2948,7 @@ mod tests {
     #[test]
     fn goal_tracker_account_elapsed_flushes_delta() {
         use crate::session::goal_tracker::GoalTracker;
-        let mut tracker = GoalTracker::new(std::path::PathBuf::from("/tmp/test"));
+        let mut tracker = GoalTracker::new();
         tracker.create_goal("g1".into(), "obj".into(), None, 0, "now".into(), None);
         let before = tracker.snapshot().unwrap().elapsed_ms;
         assert_eq!(before, 0);

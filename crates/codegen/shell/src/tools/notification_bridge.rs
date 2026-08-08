@@ -390,7 +390,15 @@ async fn handle_notification(
                 let _ = config
                     .session_cmd_tx
                     .send(SessionCommand::DeferredCompletionAvailable {
-                        task_id: task_id.clone(),
+                        source: if is_monitor {
+                            NotificationSource::MonitorCompleted {
+                                task_id: task_id.clone(),
+                            }
+                        } else {
+                            NotificationSource::BashTaskCompleted {
+                                task_id: task_id.clone(),
+                            }
+                        },
                         body,
                     });
                 tracing::info!(
@@ -428,15 +436,18 @@ async fn handle_notification(
                 );
                 let enqueued = config
                     .session_cmd_tx
-                    .send(SessionCommand::Prompt {
+                    .send(SessionCommand::QueuePrompt {
                         prompt_id: prompt_id.clone(),
                         prompt_blocks,
+                        origin: crate::session::PromptOrigin::TaskCompleted {
+                            task_id: task_id.clone(),
+                        },
+                        turn_kind: crate::session::TurnKind::Internal,
                         prompt_mode: crate::session::behavior::PromptMode::Agent,
                         client_identifier: None,
                         screen_mode: None,
                         verbatim: true,
                         json_schema: None,
-                        send_now: false,
                         admission: Some(crate::session::commands::TaskWakeAdmission {
                             respond_to: admission_tx,
                             fallback: crate::session::commands::TaskWakeFallback {
@@ -761,7 +772,7 @@ mod tests {
             _ = &mut notification => panic!("notification completed before requesting admission"),
             command = cmd_rx.recv() => command.expect("expected task-wake prompt"),
         };
-        let SessionCommand::Prompt { admission, .. } = &mut command else {
+        let SessionCommand::QueuePrompt { admission, .. } = &mut command else {
             panic!("expected task-wake prompt");
         };
         admission
@@ -865,7 +876,7 @@ mod tests {
             .await;
         let command = cmd_rx.try_recv().expect("expected Prompt");
         match command {
-            SessionCommand::Prompt {
+            SessionCommand::QueuePrompt {
                 prompt_id,
                 prompt_blocks,
                 verbatim,
@@ -925,8 +936,8 @@ mod tests {
         .await;
         assert!(matches!(
             cmd_rx.try_recv(),
-            Ok(SessionCommand::DeferredCompletionAvailable { task_id, .. })
-                if task_id == "bg-goal"
+            Ok(SessionCommand::DeferredCompletionAvailable { source, .. })
+                if source.task_id() == "bg-goal"
         ));
         match cmd_rx
             .try_recv()
@@ -980,7 +991,7 @@ mod tests {
         .await;
         assert!(matches!(
             cmd_rx.try_recv(),
-            Ok(SessionCommand::Prompt { .. })
+            Ok(SessionCommand::QueuePrompt { .. })
         ));
         assert!(matches!(
             cmd_rx.try_recv(),
@@ -1025,7 +1036,7 @@ mod tests {
         .await;
         assert!(matches!(
             cmd_rx.recv().await,
-            Some(SessionCommand::Prompt { .. })
+            Some(SessionCommand::QueuePrompt { .. })
         ));
         assert_eq!(
             task_completed_will_wake(&mut gateway_rx),
@@ -1053,7 +1064,7 @@ mod tests {
         );
         assert!(matches!(
             cmd_rx.try_recv(),
-            Ok(SessionCommand::Prompt { .. })
+            Ok(SessionCommand::QueuePrompt { .. })
         ));
         assert!(matches!(
             cmd_rx.try_recv(),
@@ -1092,7 +1103,7 @@ mod tests {
         tokio::pin!(notification);
         tokio::select! {
             _ = &mut notification => panic!("admission should still be waiting"),
-            command = cmd_rx.recv() => assert!(matches!(command, Some(SessionCommand::Prompt { .. }))),
+            command = cmd_rx.recv() => assert!(matches!(command, Some(SessionCommand::QueuePrompt { .. }))),
         }
         tokio::time::advance(TASK_WAKE_ADMISSION_TIMEOUT + std::time::Duration::from_millis(1))
             .await;
@@ -1139,7 +1150,7 @@ mod tests {
             .await;
         tokio::task::yield_now().await;
         notification.await;
-        let SessionCommand::Prompt {
+        let SessionCommand::QueuePrompt {
             admission: Some(admission),
             respond_to,
             ..
@@ -1218,8 +1229,8 @@ mod tests {
         .await;
         assert!(matches!(
             cmd_rx.try_recv(),
-            Ok(SessionCommand::DeferredCompletionAvailable { task_id, .. })
-                if task_id == "bg-disabled-goal"
+            Ok(SessionCommand::DeferredCompletionAvailable { source, .. })
+                if source.task_id() == "bg-disabled-goal"
         ));
         match cmd_rx
             .try_recv()
@@ -1261,7 +1272,7 @@ mod tests {
         .await;
         let cmd = cmd_rx.try_recv().expect("expected Prompt auto-wake");
         match cmd {
-            SessionCommand::Prompt {
+            SessionCommand::QueuePrompt {
                 prompt_id,
                 prompt_blocks,
                 verbatim,
@@ -1324,7 +1335,7 @@ mod tests {
         .await;
         assert!(matches!(
             cmd_rx.try_recv(),
-            Ok(SessionCommand::Prompt { .. })
+            Ok(SessionCommand::QueuePrompt { .. })
         ));
         assert!(matches!(
             cmd_rx.try_recv(),
@@ -1423,8 +1434,8 @@ mod tests {
         .await;
         assert!(matches!(
             cmd_rx.try_recv(),
-            Ok(SessionCommand::DeferredCompletionAvailable { task_id, .. })
-                if task_id == "mon-goal"
+            Ok(SessionCommand::DeferredCompletionAvailable { source, .. })
+                if source.task_id() == "mon-goal"
         ));
         match cmd_rx
             .try_recv()
@@ -1921,7 +1932,7 @@ mod tests {
         handle_notification_with_admission(&config, notification, &mut offsets, &mut cmd_rx, true)
             .await;
         let cmd = cmd_rx.try_recv().unwrap();
-        if let SessionCommand::Prompt { prompt_id, .. } = cmd {
+        if let SessionCommand::QueuePrompt { prompt_id, .. } = cmd {
             assert_eq!(prompt_id, "task-completed-unique-id-789");
         } else {
             panic!("expected Prompt");
@@ -1956,7 +1967,7 @@ mod tests {
     fn auto_wake_prompt_text(cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>) -> String {
         let cmd = cmd_rx.try_recv().expect("expected Prompt");
         match cmd {
-            SessionCommand::Prompt { prompt_blocks, .. } => match &prompt_blocks[0] {
+            SessionCommand::QueuePrompt { prompt_blocks, .. } => match &prompt_blocks[0] {
                 acp::ContentBlock::Text(t) => t.text.clone(),
                 _ => panic!("expected text block"),
             },

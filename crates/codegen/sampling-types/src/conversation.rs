@@ -107,14 +107,6 @@ pub enum SyntheticReason {
     /// Idle-gated notification drain: batched monitor events and/or bash
     /// task completions drained when the session is idle.  Wakes the agent.
     NotificationDrain,
-    /// Goal orchestrator summary turn.  The goal system triggers a model
-    /// turn so it can print visible progress.  Wakes the agent.
-    GoalSummary,
-    /// Goal-achievement classifier nudge injected after the classifier
-    /// rejects an `update_goal(completed: true)` attempt. Wakes the
-    /// agent with a "not yet achieved — keep working" reminder pointing
-    /// at the persisted details file.
-    GoalClassifierNudge,
     /// Scheduled task (`/loop`) prompt fired by the scheduler.  Wakes the
     /// agent.
     SchedulerFired,
@@ -177,16 +169,11 @@ impl SyntheticReason {
     /// items persisted before [`UserItem::prompt_index`] existed. Exhaustive
     /// match — adding a variant forces an explicit decision here.
     ///
-    /// `GoalSummary` is deliberately `false`: the same reason tags both the
-    /// legacy goal-continuation *turn* (index-consuming) and the in-turn goal
-    /// directive (mid-turn). Counting it would over-truncate the common
-    /// in-turn case; marker-carrying items don't rely on this predicate.
     pub fn starts_prompt_turn(&self) -> bool {
         match self {
             Self::TaskCompleted
             | Self::SubagentCompleted
             | Self::NotificationDrain
-            | Self::GoalClassifierNudge
             | Self::SchedulerFired => true,
             Self::CompactionMeta
             | Self::SystemReminder
@@ -195,7 +182,6 @@ impl SyntheticReason {
             | Self::AutoRecovery
             | Self::TruncationContinue
             | Self::Interjection
-            | Self::GoalSummary
             | Self::StopHookFeedback
             | Self::WorkingDirectorySwitch
             | Self::Unknown => false,
@@ -1169,38 +1155,6 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::NotificationDrain),
-            goal_directive: None,
-            cwd_generation: None,
-            prior_turn_interrupt: None,
-            prompt_index: None,
-        })
-    }
-
-    /// Goal orchestrator summary turn.
-    pub fn goal_summary(content: impl Into<String>) -> Self {
-        Self::User(UserItem {
-            content: vec![ContentPart::Text {
-                text: Arc::<str>::from(content.into()),
-            }],
-            synthetic_reason: Some(SyntheticReason::GoalSummary),
-            goal_directive: None,
-            cwd_generation: None,
-            prior_turn_interrupt: None,
-            prompt_index: None,
-        })
-    }
-
-    /// Goal-achievement classifier nudge injected after the classifier
-    /// rejects an `update_goal(completed: true)` attempt. Tagged
-    /// distinctly from `goal_summary` so trace tooling can tell the two
-    /// synthetic user turns apart even though the wire role/tag is the
-    /// same `<system-reminder>` shape.
-    pub fn goal_classifier_nudge(content: impl Into<String>) -> Self {
-        Self::User(UserItem {
-            content: vec![ContentPart::Text {
-                text: Arc::<str>::from(content.into()),
-            }],
-            synthetic_reason: Some(SyntheticReason::GoalClassifierNudge),
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,

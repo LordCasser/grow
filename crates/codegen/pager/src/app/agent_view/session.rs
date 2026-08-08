@@ -101,7 +101,6 @@ impl AgentView {
             replayed_terminal_prompts: HashSet::new(),
             finalized_prompt: None,
             finalized_pr_meta: None,
-            failed_wake_marker_for: None,
             active_pane: ActivePane::Prompt,
             prompt_mode: PromptMode::Normal,
             prompt_input_mode: PromptInputMode::Normal,
@@ -310,11 +309,8 @@ impl AgentView {
             paste_probe_in_flight: 0,
             deferred_send: None,
             prompt_status_query_for: None,
-            expect_send_now_cancel: None,
             optimistic_queue_ids: std::collections::HashSet::new(),
             send_now_awaiting_confirm: None,
-            send_now_painted_blocks: std::collections::HashMap::new(),
-            follow_without_jump_prompt_id: None,
             plugin_cta: PluginCtaState::default(),
             follow_ups: None,
             follow_up_shown_prompt_id: None,
@@ -324,7 +320,6 @@ impl AgentView {
             follow_up_next_gen: 0,
             follow_up_pending: HashMap::new(),
             follow_up_pending_order: VecDeque::new(),
-            pending_adoption_updates: Vec::new(),
         };
         let mode = if crate::appearance::cache::load_simple_mode() {
             InputMode::Simple
@@ -390,10 +385,8 @@ impl AgentView {
         // the reload, and its in-flight guard would otherwise block
         // re-querying the prompt's authoritative status forever.
         self.prompt_status_query_for = None;
-        self.clear_send_now_expectation();
         self.optimistic_queue_ids.clear();
         self.send_now_awaiting_confirm = None;
-        self.send_now_painted_blocks.clear();
         self.workflow_blocks.clear();
         self.workflow_run_revisions.clear();
         self.cleared_workflow_runs.clear();
@@ -427,7 +420,6 @@ impl AgentView {
         }
         self.session.model_switch_pending = false;
         self.agent_switch_pending = None;
-        self.pending_adoption_updates.clear();
         let fresh = self.scrollback.fresh_continuation();
         self.session_reload = Some(SessionReload {
             generation,
@@ -478,22 +470,15 @@ impl AgentView {
         // once a newer turn owns the slot.
         self.finalized_prompt = None;
         self.finalized_pr_meta = None;
-        if self
-            .expect_send_now_cancel
-            .as_deref()
-            .is_some_and(|id| Some(id) != starting_prompt_id)
-        {
-            self.expect_send_now_cancel = None;
-        }
+        let _ = starting_prompt_id;
         self.session.start_turn(&mut self.scrollback);
     }
     /// Adopt the in-flight turn another client is driving, conveyed by the
-    /// `session/load` response meta (`grow/runningPromptId`): enter
+    /// structured `session/load` foreground snapshot: enter
     /// TurnRunning and match subsequent live deltas. No user-prompt block is
     /// pushed — the turn's prompt and prior chunks arrived via the replay.
     pub(crate) fn adopt_running_prompt(&mut self, prompt_id: String) {
         self.start_turn_boundary(Some(&prompt_id));
-        self.session.tracker.clear_user_echo_skip();
         self.session.current_prompt_id = Some(prompt_id.clone());
         self.turn_started_at = Some(Instant::now());
         self.scrollback.enable_follow_with_preserve();
@@ -538,18 +523,13 @@ impl AgentView {
             None => false,
         }
     }
-    /// Whether a running prompt reported on a `session/load` (resume /
-    /// reconnect) is adoptable by THIS agent: the pure synthetic-turn guard
-    /// ([`acp_handler::should_adopt_running_prompt`]) AND not terminal-in-replay.
+    /// Whether a running turn reported on load is still live for this view.
     /// A turn whose durable `TurnCompleted` already arrived in this load's replay
     /// (recorded in [`Self::replayed_terminal_prompts`]) has ended; adopting it
     /// would re-strand the viewer on "Waiting…".
     ///
-    /// [`acp_handler::should_adopt_running_prompt`]: crate::app::acp_handler::should_adopt_running_prompt
     pub(crate) fn should_adopt_running_prompt(&self, prompt_id: &str) -> bool {
-        crate::app::acp_handler::should_adopt_running_prompt(prompt_id)
-            && !self.replayed_terminal_prompts.contains(prompt_id)
-            && !self.is_rewound_prompt(prompt_id)
+        !self.replayed_terminal_prompts.contains(prompt_id) && !self.is_rewound_prompt(prompt_id)
     }
 
     /// Finalize a reconnect-reload window and, iff the running prompt is
@@ -557,8 +537,8 @@ impl AgentView {
     ///
     /// Adoption is gated by [`Self::should_adopt_running_prompt`] and ordered
     /// AFTER finalize so the finalize side effect (force-idle + window resolve)
-    /// always runs even when adoption is skipped for a synthetic / non-adoptable
-    /// / terminal-in-replay running id. The reconnect loop in `event_loop.rs`
+    /// always runs even when adoption is skipped for a terminal-in-replay or
+    /// otherwise non-adoptable running id. The reconnect loop in `event_loop.rs`
     /// calls this per agent.
     pub(crate) fn finalize_reload_and_maybe_adopt(
         &mut self,
@@ -647,7 +627,6 @@ impl AgentView {
         }
         self.session.loading_replay = false;
         self.session.prompt_history_loading = false;
-        self.session.tracker.clear_user_echo_skip();
         self.session.finish_turn(&mut self.scrollback);
         self.scrollback.finish_all_running();
         if let Some(id) = self.pending_recap_entry.take() {

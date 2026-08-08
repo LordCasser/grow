@@ -317,6 +317,8 @@ async fn run_user_turn(
         std::time::Duration::from_secs(30),
         actor.handle_prompt(
             prompt_id,
+            crate::session::PromptOrigin::User,
+            crate::session::TurnKind::User,
             vec![acp::ContentBlock::Text(acp::TextContent::new(
                 "write a long answer",
             ))],

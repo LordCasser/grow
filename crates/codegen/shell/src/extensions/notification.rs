@@ -1,17 +1,6 @@
 use agent_client_protocol as acp;
 use tools::types::TaskSnapshot;
 
-pub use crate::session::goal_tracker::GoalClassifierVerdict;
-
-/// Retained for wire backwards compatibility; always empty in the
-/// simplified goal model (no deliverables).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct GoalDeliverableInfo {
-    pub id: u32,
-    pub title: String,
-    pub status: String,
-}
-
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkflowPhaseInfo {
     pub title: String,
@@ -627,7 +616,7 @@ pub enum SessionUpdate {
     ///
     /// Sent on the PARENT session's notification channel so the client
     /// knows this `child_session_id` is a subagent and can route its events.
-    /// Emitted BEFORE dispatching `SessionCommand::Prompt` to the child,
+    /// Emitted BEFORE dispatching `SessionCommand::QueuePrompt` to the child,
     /// preventing a race where child events arrive before the client has
     /// the session ID mapping.
     SubagentSpawned {
@@ -667,6 +656,10 @@ pub enum SessionUpdate {
         resumed_from: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_run_id: Option<String>,
+        /// Goal that owned this child at request creation. This is stamped by
+        /// the producer; consumers must not infer it from current Goal state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal_id: Option<String>,
     },
     /// Periodic progress update for a running subagent.
     ///
@@ -890,29 +883,21 @@ pub enum SessionUpdate {
     GoalUpdated {
         goal_id: String,
         objective: String,
-        /// `"active"`, `"user_paused"`, `"back_off_paused"`,
-        /// `"no_progress_paused"`, `"infra_paused"`, `"blocked"`,
-        /// `"budget_limited"`, `"complete"`, `"cleared"`.
-        /// Legacy `"doom_loop_paused"` is accepted by pagers as user-paused.
+        objective_revision: u64,
+        /// `"active"`, `"paused"`, `"blocked"`, `"budget_limited"`,
+        /// `"complete"`, or the one-shot removal signal `"cleared"`.
         status: String,
-        /// `"idle"`, `"planning"`, `"executing"`
+        /// `"planning"`, `"executing"`, `"verifying"`, `"summarizing"`.
         phase: String,
+        plan_revision: u64,
+        plan_markdown: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verifier_feedback: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         token_budget: Option<i64>,
         #[serde(default)]
         tokens_used: i64,
         elapsed_ms: u64,
-        total_deliverables: u32,
-        completed_deliverables: u32,
-        /// Wire compat: always `None` in the simplified goal model.
-        /// Retained for cross-version compatibility with older pagers.
-        #[serde(
-            rename = "current_deliverable_idx",
-            skip_serializing_if = "Option::is_none"
-        )]
-        current_deliverable_id: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        current_deliverable_title: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         current_subagent_role: Option<String>,
         total_worker_rounds: u32,
@@ -949,47 +934,9 @@ pub enum SessionUpdate {
         last_event_detail: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         last_event_timestamp: Option<String>,
-        /// Wire compat: always empty in the simplified goal model.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        deliverables: Vec<GoalDeliverableInfo>,
-        /// Human-readable explanation set when the goal entered a paused
-        /// state with a meaningful reason (today only `"blocked"`).
-        /// Rendered by the pager under the status row in the goal modal.
-        /// Invariant: `Some` iff `status` is a paused-variant string AND
-        /// the underlying pause was created via the message-carrying
-        /// path. The shell clears this on every transition out of a
-        /// paused state (resume / complete / budget_limit); the pager
-        /// also gates rendering on `is_paused()` as a defence in depth.
+        /// Human-readable explanation for paused or blocked state.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pause_message: Option<String>,
-        /// Number of times the goal-achievement classifier has run for
-        /// this goal. `None` when no classifier run has occurred yet
-        /// (matches the `total_worker_rounds`-style convention of
-        /// suppressing the field when the counter is zero so old pagers
-        /// don't see a stray zero).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        classifier_runs_attempted: Option<u32>,
-        /// Hard cap on classifier runs for this goal. `None` when not
-        /// configured.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        classifier_max_runs: Option<u32>,
-        /// Last aggregate verdict returned by the verification stage, if any.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_classifier_verdict: Option<GoalClassifierVerdict>,
-        /// Filesystem path to the most recent verification-stage details artifact.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_classifier_details_path: Option<String>,
-        /// `Some(true)` while a classifier run is in flight. Set only by
-        /// the dedicated "verifying" notification path — `build_goal_updated`
-        /// always emits `None` because this flag is not persisted state.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        verifying_completion: Option<bool>,
-        /// `Some(true)` while the goal planner subagent is running. Set
-        /// only by the dedicated "planning" notification path —
-        /// `build_goal_updated` always emits `None` because this flag is
-        /// not persisted state.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        planning: Option<bool>,
     },
     /// A blocking reverse-request (permission / `ask_user_question` /
     /// plan-approval) is now **pending** on the agent, keyed by `tool_call_id`
@@ -1511,6 +1458,7 @@ mod tests {
             model: None,
             resumed_from: None,
             workflow_run_id: None,
+            goal_id: None,
         })
         .unwrap();
         let progress = serde_json::to_value(SessionUpdate::SubagentProgress {
@@ -1856,257 +1804,66 @@ mod tests {
         }
     }
 
-    /// Helper: `GoalUpdated` with all optional fields populated.
-    fn make_goal_updated_full() -> SessionUpdate {
+    fn goal_update() -> SessionUpdate {
         SessionUpdate::GoalUpdated {
             goal_id: "g-1".into(),
             objective: "Build widget".into(),
+            objective_revision: 2,
             status: "active".into(),
-            phase: "executing".into(),
+            phase: "verifying".into(),
+            plan_revision: 4,
+            plan_markdown: "- [x] implement\n- [ ] verify".into(),
+            verifier_feedback: Some("Run the integration suite".into()),
             token_budget: Some(100_000),
             tokens_used: 25_000,
-            elapsed_ms: 5000,
-            total_deliverables: 3,
-            completed_deliverables: 1,
-            current_deliverable_id: Some(2),
-            current_deliverable_title: Some("Core logic".into()),
-            current_subagent_role: Some("worker".into()),
+            elapsed_ms: 5_000,
+            current_subagent_role: Some("verifier".into()),
             total_worker_rounds: 4,
             total_verify_rounds: 2,
-            live_subagent_tokens: Some(10_000),
-            live_tokens_by_model: vec![("grow-4".into(), 6_000), ("grow-3".into(), 4_000)],
+            token_baseline: 0,
+            finished_subagent_tokens: 10_000,
+            live_subagent_tokens: Some(2_000),
+            live_tokens_by_model: vec![("grow-4".into(), 2_000)],
             live_context_pct: Some(35),
             live_turn_count: Some(3),
             live_tool_call_count: Some(8),
-            last_event: Some("worker_completed".into()),
-            last_event_detail: Some("Core logic".into()),
+            last_event: Some("verification_rejected".into()),
+            last_event_detail: Some("Run the integration suite".into()),
             last_event_timestamp: Some("2026-01-01T00:05:00Z".into()),
-            token_baseline: 0,
-            finished_subagent_tokens: 0,
-            deliverables: vec![],
             pause_message: None,
-            classifier_runs_attempted: Some(2),
-            classifier_max_runs: Some(3),
-            last_classifier_verdict: Some(GoalClassifierVerdict::NotAchieved),
-            last_classifier_details_path: Some("/tmp/details.md".into()),
-            verifying_completion: Some(true),
-            planning: Some(true),
-        }
-    }
-
-    /// Helper: `GoalUpdated` with all optional fields `None` / zeroed.
-    fn make_goal_updated_minimal() -> SessionUpdate {
-        SessionUpdate::GoalUpdated {
-            goal_id: "g-min".into(),
-            objective: "Test".into(),
-            status: "active".into(),
-            phase: "idle".into(),
-            token_budget: None,
-            tokens_used: 0,
-            elapsed_ms: 0,
-            total_deliverables: 0,
-            completed_deliverables: 0,
-            current_deliverable_id: None,
-            current_deliverable_title: None,
-            current_subagent_role: None,
-            total_worker_rounds: 0,
-            total_verify_rounds: 0,
-            live_subagent_tokens: None,
-            live_tokens_by_model: Vec::new(),
-            live_context_pct: None,
-            live_turn_count: None,
-            live_tool_call_count: None,
-            last_event: None,
-            last_event_detail: None,
-            last_event_timestamp: None,
-            token_baseline: 0,
-            finished_subagent_tokens: 0,
-            deliverables: vec![],
-            pause_message: None,
-            classifier_runs_attempted: None,
-            classifier_max_runs: None,
-            last_classifier_verdict: None,
-            last_classifier_details_path: None,
-            verifying_completion: None,
-            planning: None,
         }
     }
 
     #[test]
-    fn goal_updated_serializes_snake_case_tag() {
-        let update = make_goal_updated_full();
+    fn goal_updated_v2_round_trips_with_structured_state() {
+        let update = goal_update();
         let json = serde_json::to_value(&update).unwrap();
         assert_eq!(json["sessionUpdate"], "goal_updated");
-        assert_eq!(json["goal_id"], "g-1");
-        assert_eq!(json["status"], "active");
-        assert_eq!(json["phase"], "executing");
-        assert_eq!(json["token_budget"], 100_000);
-        assert_eq!(json["tokens_used"], 25_000);
-        assert_eq!(json["total_deliverables"], 3);
-        assert_eq!(json["completed_deliverables"], 1);
-        assert_eq!(json["current_deliverable_idx"], 2);
-        assert_eq!(json["total_worker_rounds"], 4);
-        assert_eq!(json["total_verify_rounds"], 2);
-        assert_eq!(json["live_subagent_tokens"], 10_000);
-        assert_eq!(json["live_tokens_by_model"][0][0], "grow-4");
-        assert_eq!(json["live_tokens_by_model"][0][1], 6_000);
-        assert_eq!(json["live_context_pct"], 35);
-        assert_eq!(json["last_event"], "worker_completed");
-        assert_eq!(json["classifier_runs_attempted"], 2);
-        assert_eq!(json["classifier_max_runs"], 3);
-        assert_eq!(json["last_classifier_verdict"], "not_achieved");
-        assert_eq!(json["last_classifier_details_path"], "/tmp/details.md");
-        assert_eq!(json["verifying_completion"], true);
-        assert_eq!(json["planning"], true);
+        assert_eq!(json["objective_revision"], 2);
+        assert_eq!(json["phase"], "verifying");
+        assert_eq!(json["plan_revision"], 4);
+        assert_eq!(json["plan_markdown"], "- [x] implement\n- [ ] verify");
+        assert_eq!(json["verifier_feedback"], "Run the integration suite");
+        assert_eq!(
+            serde_json::from_value::<SessionUpdate>(json).unwrap(),
+            update
+        );
     }
 
     #[test]
-    fn goal_updated_roundtrips_through_json() {
-        let update = make_goal_updated_minimal();
-        let json_str = serde_json::to_string(&update).unwrap();
-        let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(update, parsed);
-
-        // Also roundtrip the full variant.
-        let full = make_goal_updated_full();
-        let json_str = serde_json::to_string(&full).unwrap();
-        let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(full, parsed);
-    }
-
-    #[test]
-    fn goal_updated_optional_fields_skipped_when_none() {
-        let json = serde_json::to_value(make_goal_updated_minimal()).unwrap();
-        assert!(json.get("token_budget").is_none());
-        assert!(json.get("current_deliverable_idx").is_none());
-        assert!(json.get("current_deliverable_title").is_none());
-        assert!(json.get("current_subagent_role").is_none());
-        assert!(json.get("live_subagent_tokens").is_none());
-        assert!(json.get("live_tokens_by_model").is_none());
-        assert!(json.get("live_context_pct").is_none());
-        assert!(json.get("live_turn_count").is_none());
-        assert!(json.get("live_tool_call_count").is_none());
-        assert!(json.get("last_event").is_none());
-        assert!(json.get("last_event_detail").is_none());
-        assert!(json.get("last_event_timestamp").is_none());
-        assert!(json.get("classifier_runs_attempted").is_none());
-        assert!(json.get("classifier_max_runs").is_none());
-        assert!(json.get("last_classifier_verdict").is_none());
-        assert!(json.get("last_classifier_details_path").is_none());
-        assert!(json.get("verifying_completion").is_none());
-        assert!(json.get("planning").is_none());
-    }
-
-    #[test]
-    fn goal_updated_payload_missing_new_fields_deserializes_to_none() {
-        // Wire round-trip: an older shell that predates the
-        // classifier / planning fields will omit them all. Each must
-        // deserialize to `None` so the pager keeps working.
-        let json = r#"{
+    fn goal_updated_v2_requires_the_blackboard_contract() {
+        let obsolete = serde_json::json!({
             "sessionUpdate": "goal_updated",
             "goal_id": "g-old",
-            "objective": "test",
+            "objective": "legacy",
             "status": "active",
             "phase": "idle",
             "tokens_used": 0,
             "elapsed_ms": 0,
-            "total_deliverables": 0,
-            "completed_deliverables": 0,
             "total_worker_rounds": 0,
             "total_verify_rounds": 0
-        }"#;
-        let update: SessionUpdate = serde_json::from_str(json).unwrap();
-        match update {
-            SessionUpdate::GoalUpdated {
-                classifier_runs_attempted,
-                classifier_max_runs,
-                last_classifier_verdict,
-                last_classifier_details_path,
-                verifying_completion,
-                planning,
-                ..
-            } => {
-                assert_eq!(classifier_runs_attempted, None);
-                assert_eq!(classifier_max_runs, None);
-                assert_eq!(last_classifier_verdict, None);
-                assert_eq!(last_classifier_details_path, None);
-                assert_eq!(verifying_completion, None);
-                assert_eq!(planning, None);
-            }
-            other => panic!("expected GoalUpdated, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn goal_updated_payload_with_new_fields_round_trips() {
-        // Wire round-trip: a payload that carries every classifier
-        // field round-trips through serialize → deserialize without
-        // mutation.
-        let update = make_goal_updated_full();
-        let json_str = serde_json::to_string(&update).unwrap();
-        let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(update, parsed);
-
-        match parsed {
-            SessionUpdate::GoalUpdated {
-                classifier_runs_attempted,
-                classifier_max_runs,
-                last_classifier_verdict,
-                last_classifier_details_path,
-                verifying_completion,
-                planning,
-                ..
-            } => {
-                assert_eq!(classifier_runs_attempted, Some(2));
-                assert_eq!(classifier_max_runs, Some(3));
-                assert_eq!(
-                    last_classifier_verdict,
-                    Some(GoalClassifierVerdict::NotAchieved)
-                );
-                assert_eq!(
-                    last_classifier_details_path.as_deref(),
-                    Some("/tmp/details.md")
-                );
-                assert_eq!(verifying_completion, Some(true));
-                assert_eq!(planning, Some(true));
-            }
-            other => panic!("expected GoalUpdated, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn goal_updated_backward_compat_without_optional_fields() {
-        let json = r#"{
-            "sessionUpdate": "goal_updated",
-            "goal_id": "g-bc",
-            "objective": "test",
-            "status": "active",
-            "phase": "idle",
-            "tokens_used": 0,
-            "elapsed_ms": 0,
-            "total_deliverables": 0,
-            "completed_deliverables": 0,
-            "total_worker_rounds": 0,
-            "total_verify_rounds": 0
-        }"#;
-        let update: SessionUpdate = serde_json::from_str(json).unwrap();
-        match update {
-            SessionUpdate::GoalUpdated {
-                goal_id,
-                token_budget,
-                current_deliverable_id,
-                live_subagent_tokens,
-                last_event,
-                ..
-            } => {
-                assert_eq!(goal_id, "g-bc");
-                assert_eq!(token_budget, None);
-                assert_eq!(current_deliverable_id, None);
-                assert_eq!(live_subagent_tokens, None);
-                assert_eq!(last_event, None);
-            }
-            other => panic!("expected GoalUpdated, got {other:?}"),
-        }
+        });
+        assert!(serde_json::from_value::<SessionUpdate>(obsolete).is_err());
     }
 
     // ── ModelChanged (leader-mode multi-client model switch fan-out) ──

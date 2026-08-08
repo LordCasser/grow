@@ -531,59 +531,6 @@
                 "task prompt must appear exactly once in child scrollback"
             );
             assert_eq!(child_scrollback_tool_call_count(agent, child_sid), 1);
-            assert!(
-                !child_tracker_expects_user_echo(agent, child_sid),
-                "replay path must not set expect_user_echo when injection is skipped"
-            );
-        });
-    }
-
-    /// Live spawn: meta prompt without updates.jsonl still injects the task once.
-    #[test]
-    fn subagent_spawn_live_injects_meta_prompt_once_without_updates() {
-        with_replay_disk_home(|home| {
-            let parent_sid = "sess-parent";
-            let child_sid = "child-live-prompt";
-            let task = "explore handlers only";
-            write_subagent_meta_json(home, parent_sid, child_sid, task);
-
-            let mut app = make_app_with_agent(parent_sid);
-            spawn_subagent_with_optional_updates(&mut app, child_sid, None);
-
-            let agent = app.agents.get(&AgentId(0)).unwrap();
-            assert_eq!(
-                child_scrollback_matching_prompt_count(agent, child_sid, task),
-                1,
-                "live spawn must inject meta prompt when updates.jsonl is absent"
-            );
-            assert_eq!(child_scrollback_tool_call_count(agent, child_sid), 0);
-            assert!(
-                child_tracker_expects_user_echo(agent, child_sid),
-                "live spawn must set expect_user_echo after injecting meta prompt"
-            );
-        });
-    }
-
-    #[test]
-    fn subagent_spawn_skips_injection_for_whitespace_only_meta_prompt() {
-        with_replay_disk_home(|home| {
-            let parent_sid = "sess-parent";
-            let child_sid = "child-empty-meta";
-            write_subagent_meta_json(home, parent_sid, child_sid, "   ");
-
-            let mut app = make_app_with_agent(parent_sid);
-            spawn_subagent_with_optional_updates(&mut app, child_sid, None);
-
-            let agent = app.agents.get(&AgentId(0)).unwrap();
-            assert_eq!(
-                child_scrollback_matching_prompt_count(agent, child_sid, "   "),
-                0,
-                "whitespace-only meta prompt must not inject a user block"
-            );
-            assert!(
-                !child_tracker_expects_user_echo(agent, child_sid),
-                "whitespace-only meta prompt must not set expect_user_echo"
-            );
         });
     }
 
@@ -866,4 +813,3 @@
             "ext notification routed to a non-active agent must not request a redraw"
         );
     }
-

@@ -1,4 +1,4 @@
-//! `grow/interject` extension handler.
+//! `grow/steer` extension handler.
 //!
 //! Queues a mid-turn interjection into the active session's pending
 //! interjection buffer.  The session actor drains it at the next safe
@@ -14,6 +14,7 @@ use crate::session::SessionCommand;
 #[serde(rename_all = "camelCase")]
 struct InterjectRequest {
     session_id: String,
+    expected_turn_id: String,
     text: String,
     #[serde(default)]
     interjection_id: Option<String>,
@@ -37,7 +38,7 @@ fn split_content(content: Vec<acp::ContentBlock>) -> (Option<String>, Vec<acp::I
     (text_override, crate::session::image_blocks(content))
 }
 
-/// Handle `grow/interject` — queue a mid-turn user interjection.
+/// Handle `grow/steer` — append input to one identified regular turn.
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req: InterjectRequest = parse_params(args)?;
     let sid: acp::SessionId = req.session_id.clone().into();
@@ -51,11 +52,21 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     };
 
     let (text_override, images) = split_content(req.content);
-    let _ = session.cmd_tx.send(SessionCommand::Interject {
-        text: text_override.unwrap_or(req.text),
-        id: req.interjection_id,
-        images,
-    });
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    session
+        .cmd_tx
+        .send(SessionCommand::SteerTurn {
+            expected_turn_id: req.expected_turn_id,
+            text: text_override.unwrap_or(req.text),
+            id: req.interjection_id,
+            images,
+            respond_to,
+        })
+        .map_err(|_| acp::Error::internal_error().data("session command channel closed"))?;
+    response
+        .await
+        .map_err(|_| acp::Error::internal_error().data("session failed to acknowledge steer"))?
+        .map_err(|message| acp::Error::invalid_params().data(message))?;
 
     super::to_ext_response(Ok(serde_json::json!({
         "status": "queued",
@@ -72,6 +83,7 @@ mod tests {
     fn parse_without_content_is_legacy_text_only() {
         let req: InterjectRequest = serde_json::from_value(serde_json::json!({
             "sessionId": "s1",
+            "expectedTurnId": "t1",
             "text": "steer left",
             "interjectionId": "i1",
         }))
@@ -90,6 +102,7 @@ mod tests {
     fn parse_with_content_extracts_images_and_prefers_block_text() {
         let req: InterjectRequest = serde_json::from_value(serde_json::json!({
             "sessionId": "s1",
+            "expectedTurnId": "t1",
             "text": "look at [Image #1: /tmp/x.png]",
             "content": [
                 { "type": "text", "text": "look at [Image #1]" },

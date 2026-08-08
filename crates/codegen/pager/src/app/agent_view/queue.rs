@@ -87,32 +87,6 @@ impl AgentView {
                 .is_some_and(|g| matches!(g.status, crate::app::agent::GoalDisplayStatus::Active))
     }
 
-    /// Whether an explicit send-now dispatched right now will actually cancel
-    /// the running turn shell-side (`cancel_running_turn = send_now &&
-    /// turn_running && !goal_active`) — the arming predicate for
-    /// [`Self::expect_send_now_cancel`]. During an active goal the shell only
-    /// promotes the prompt (no cancel), so arming would leave a stale
-    /// expectation that suppresses a later real cancel's marker.
-    pub(crate) fn expects_send_now_cancel(&self) -> bool {
-        self.session.state.is_turn_running()
-            && !self
-                .goal_state
-                .as_ref()
-                .is_some_and(|g| matches!(g.status, crate::app::agent::GoalDisplayStatus::Active))
-    }
-
-    /// Arm cancel-marker + no-entry-top pin. Gate with [`Self::expects_send_now_cancel`].
-    pub(crate) fn arm_send_now_expectation(&mut self, prompt_id: String) {
-        self.follow_without_jump_prompt_id = Some(prompt_id.clone());
-        self.expect_send_now_cancel = Some(prompt_id);
-    }
-
-    /// Clear cancel-marker + no-entry-top pin (failure / interactive cancel / reload).
-    pub(crate) fn clear_send_now_expectation(&mut self) {
-        self.expect_send_now_cancel = None;
-        self.follow_without_jump_prompt_id = None;
-    }
-
     /// The current wait is a foreground subagent await — sendable, but excluded
     /// from the parked look (the parent is blocked, not completed; the
     /// subagent reports its own progress).
@@ -136,42 +110,12 @@ impl AgentView {
     /// Pane-visible held rows (excludes running + send-now echo).
     pub(crate) fn visible_held_queue_len(&self) -> usize {
         let running = self.session.current_prompt_id.as_deref();
-        let send_now = self.expect_send_now_cancel.as_deref();
         let server = self
             .shared_queue
             .iter()
-            .filter(|e| {
-                crate::views::queue_pane::visible_held_server_row(
-                    &e.id,
-                    running,
-                    send_now,
-                    &self.send_now_painted_blocks,
-                )
-            })
+            .filter(|e| crate::views::queue_pane::visible_held_server_row(&e.id, running))
             .count();
         server + self.session.pending_prompts.len()
-    }
-
-    /// Shell-style held occupancy (includes send-now echo; unlike pane count).
-    pub(crate) fn has_held_user_queue(&self) -> bool {
-        let running = self.session.current_prompt_id.as_deref();
-        // An armed send-now counts as occupancy only until its own turn adopts:
-        // once the armed id IS the running turn, nothing is held behind it (the
-        // arm lingers only for cancel-marker suppression). Excluding the running
-        // id here matches the `shared_queue` filter below.
-        if self
-            .expect_send_now_cancel
-            .as_deref()
-            .is_some_and(|arm| Some(arm) != running)
-        {
-            return true;
-        }
-        if !self.session.pending_prompts.is_empty() {
-            return true;
-        }
-        self.shared_queue
-            .iter()
-            .any(|e| Some(e.id.as_str()) != running)
     }
 
     /// Whether bare Enter on the empty composer would actually send the TOP
@@ -181,16 +125,12 @@ impl AgentView {
     /// a toast, so advertising Enter for them would over-promise).
     pub(crate) fn held_queue_top_sendable(&self) -> bool {
         let running = self.session.current_prompt_id.as_deref();
-        let send_now = self.expect_send_now_cancel.as_deref();
         // Merge order: server rows render (and send) first.
-        if self.shared_queue.iter().any(|e| {
-            crate::views::queue_pane::visible_held_server_row(
-                &e.id,
-                running,
-                send_now,
-                &self.send_now_painted_blocks,
-            )
-        }) {
+        if self
+            .shared_queue
+            .iter()
+            .any(|e| crate::views::queue_pane::visible_held_server_row(&e.id, running))
+        {
             return true;
         }
         self.session.pending_prompts.front().is_some_and(|p| {
@@ -204,8 +144,6 @@ impl AgentView {
             &self.session.pending_prompts,
             &self.shared_queue,
             self.session.current_prompt_id.as_deref(),
-            self.expect_send_now_cancel.as_deref(),
-            &self.send_now_painted_blocks,
         );
     }
 
@@ -287,16 +225,8 @@ impl AgentView {
         Some(kind_from_wire(&wire.kind) == QueueEntryKind::Prompt)
     }
 
-    /// Send one merged-queue row now (cancel-and-send), by selection id. The
-    /// shell cancels the running turn and runs this row as the next turn.
+    /// Atomically steer one merged-queue row into the active turn.
     pub(in crate::app) fn force_interject_queue_row(&mut self, id: u64) -> InputOutcome {
-        // Verification protection: the row is NOT lost — it stays queued and
-        // drains once the Goal accepts new input, so the specific toast beats
-        // the generic "No turn running" (which is what non-goal idle shows).
-        if crate::app::dispatch::goal_is_verifying(self) {
-            self.show_toast(crate::app::dispatch::GOAL_VERIFYING_TOAST);
-            return InputOutcome::Changed;
-        }
         if !self.session.state.is_turn_running() {
             self.show_toast("No turn running — prompt will send when ready");
             return InputOutcome::Changed;
@@ -336,7 +266,7 @@ impl AgentView {
             return InputOutcome::Changed;
         }
         if let Some(prompt) = self.remove_local_queue_row(id) {
-            return InputOutcome::Action(Action::SendPromptNow {
+            return InputOutcome::Action(Action::SteerPrompt {
                 text: prompt.text,
                 images: prompt.images,
             });
@@ -385,71 +315,6 @@ impl AgentView {
         if self.send_now_awaiting_confirm.as_deref() == Some(prompt_id) {
             self.send_now_awaiting_confirm = None;
         }
-        // Retired ids never adopt — drop the painted block with the id.
-        // (Re-keys route through `note_queue_echo_rekeyed` instead.)
-        self.retire_send_now_painted_block(prompt_id);
-    }
-
-    /// Re-key: `old_id` is dead but the message lives on under `new_id` —
-    /// move (never retire) its painted block so the new adoption reuses it.
-    pub(crate) fn note_queue_echo_rekeyed(&mut self, old_id: &str, new_id: &str) {
-        self.optimistic_queue_ids.remove(old_id);
-        if self.send_now_awaiting_confirm.as_deref() == Some(old_id) {
-            self.send_now_awaiting_confirm = None;
-        }
-        if let Some(entry) = self.send_now_painted_blocks.remove(old_id) {
-            match self.send_now_painted_blocks.entry(new_id.to_string()) {
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(entry);
-                }
-                // Re-key collision (identical texts): remove the losing
-                // block instead of orphaning it.
-                std::collections::hash_map::Entry::Occupied(_) => {
-                    self.scrollback.remove_entry(entry.0);
-                }
-            }
-        }
-    }
-
-    /// Remove the optimistic block for a send-now'd prompt that will never
-    /// run (send failure, removal) — a leftover would duplicate on requeue.
-    pub(crate) fn retire_send_now_painted_block(&mut self, prompt_id: &str) {
-        if let Some((id, _)) = self.send_now_painted_blocks.remove(prompt_id) {
-            self.scrollback.remove_entry(id);
-        }
-    }
-
-    /// Apply the updates buffered for `prompt_id`; other pids' entries are dropped.
-    pub(crate) fn flush_pending_adoption_updates(&mut self, prompt_id: &str) {
-        if self.pending_adoption_updates.is_empty() {
-            return;
-        }
-        for (pid, update, mut meta) in std::mem::take(&mut self.pending_adoption_updates) {
-            if pid == prompt_id {
-                // Forward-only: the Grow rail shares this cursor and may have
-                // applied later events during the buffering window — assigning
-                // a buffered (older) id would re-deliver those on reconnect.
-                let cur_seq = self
-                    .last_seen_event_id
-                    .as_deref()
-                    .and_then(|s| s.rsplit('-').next())
-                    .and_then(|c| c.parse::<u64>().ok());
-                if let (Some(seq), Some(id)) = (meta.event_seq, meta.event_id.take())
-                    && cur_seq.is_none_or(|cur| seq > cur)
-                {
-                    self.last_seen_event_id = Some(id);
-                }
-                self.session
-                    .handle_update(update, &meta, &mut self.scrollback);
-            }
-        }
-    }
-
-    /// Drop buffered updates for `prompt_id`; the un-advanced cursor lets a
-    /// reconnect replay re-deliver them.
-    pub(crate) fn discard_pending_adoption_updates(&mut self, prompt_id: &str) {
-        self.pending_adoption_updates
-            .retain(|(pid, _, _)| pid != prompt_id);
     }
 
     /// Toggle queue pane visibility (shared by Ctrl-; shortcut and badge click).
@@ -595,7 +460,6 @@ impl AgentView {
     fn server_queue_reordered(&self, selection_id: u64, up: bool) -> Option<Vec<String>> {
         let server_id = self.queue.row_ref(selection_id)?.server_id?;
         let running = self.session.current_prompt_id.as_deref();
-        let send_now = self.expect_send_now_cancel.as_deref();
         let all_ids: Vec<String> = self
             .shared_queue
             .iter()
@@ -604,14 +468,7 @@ impl AgentView {
             .collect();
         let mut swappable: Vec<String> = all_ids
             .iter()
-            .filter(|id| {
-                crate::views::queue_pane::visible_held_server_row(
-                    id,
-                    running,
-                    send_now,
-                    &self.send_now_painted_blocks,
-                )
-            })
+            .filter(|id| crate::views::queue_pane::visible_held_server_row(id, running))
             .cloned()
             .collect();
         let pos = swappable.iter().position(|x| x == &server_id)?;
@@ -629,12 +486,7 @@ impl AgentView {
         let ordered: Vec<String> = all_ids
             .into_iter()
             .map(|id| {
-                if crate::views::queue_pane::visible_held_server_row(
-                    &id,
-                    running,
-                    send_now,
-                    &self.send_now_painted_blocks,
-                ) {
+                if crate::views::queue_pane::visible_held_server_row(&id, running) {
                     swap_iter
                         .next()
                         .expect("swappable count matches visible slots")
@@ -648,927 +500,34 @@ impl AgentView {
 }
 
 #[cfg(test)]
-mod queue_edit_routing_tests {
-    use super::test_fixtures::{
-        force_interject_key, make_running_agent, non_vscode_registry, running_agent_local_only,
-        test_pasted_image, vscode_family_registry, vscode_interject_key,
-    };
+mod queue_steering_tests {
+    use super::test_fixtures::running_agent_local_only;
     use super::*;
-    use crate::app::actions::Action;
-    use crate::app::agent::AgentState;
-    use crate::app::app_view::InputOutcome;
-    use crate::app::prompt_queue::QueueEntryWire;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-    fn delete_key() -> KeyEvent {
-        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)
-    }
 
     #[test]
-    fn delete_routes_server_to_action_and_local_to_mutation() {
-        let mut agent = make_running_agent();
-        let registry = ActionRegistry::defaults();
-
-        let ids = agent.queue.entry_ids();
-        assert_eq!(ids.len(), 2);
-        // Server row is rendered first (documented merge order).
-        agent.queue.list_state.select_by_id(ids[0]);
-
-        let outcome = agent.handle_queue_key(&delete_key(), &registry);
-        match outcome {
-            InputOutcome::Action(Action::QueueRemoveShared {
-                id,
-                expected_version,
-            }) => {
-                assert_eq!(id, "p1");
-                assert_eq!(expected_version, 2);
-            }
-            other => panic!("expected QueueRemoveShared action, got {other:?}"),
-        }
-        assert_eq!(agent.session.pending_prompts.len(), 1);
-        assert!(agent.shared_queue.is_empty());
-        assert!(agent.queue.overlay.visible);
-        assert!(agent.queue.overlay.focused);
-
-        agent.queue.list_state.select_by_id(ids[1]);
-        let outcome = agent.handle_queue_key(&delete_key(), &registry);
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert!(agent.session.pending_prompts.is_empty());
-        assert!(!agent.queue.overlay.visible);
-        assert!(!agent.queue.overlay.focused);
-    }
-
-    fn server_wire(id: &str, position: usize) -> QueueEntryWire {
-        QueueEntryWire {
-            id: id.into(),
-            version: 1,
-            owner: None,
-            last_editor: None,
-            kind: "prompt".into(),
-            text: format!("server {id}"),
-            combined_texts: None,
-            position,
-        }
-    }
-
-    /// `visible_queue_is_empty` reflects the *merged* pane view, excluding the
-    /// in-flight turn — the invariant the three pane-hide sites depend on.
-    #[test]
-    fn visible_queue_is_empty_reflects_merged_view_minus_running() {
-        let mut agent = make_running_agent();
-        // 1 non-running server row + 1 local row → not empty.
-        assert!(!agent.visible_queue_is_empty());
-
-        // Drop the server row; the lone local row keeps it non-empty.
-        agent.shared_queue.clear();
-        assert!(!agent.visible_queue_is_empty());
-
-        // Both queues empty → empty.
-        agent.session.pending_prompts.clear();
-        assert!(agent.visible_queue_is_empty());
-
-        // A queued (non-running) server row → not empty.
-        agent.shared_queue = vec![server_wire("p1", 0)];
-        agent.session.current_prompt_id = None;
-        assert!(!agent.visible_queue_is_empty());
-
-        // The only server row IS the running turn → counts as empty.
-        agent.session.current_prompt_id = Some("p1".to_string());
-        assert!(agent.visible_queue_is_empty());
-
-        // Running row plus a second queued server row → not empty again.
-        agent.shared_queue.push(server_wire("p2", 1));
-        assert!(!agent.visible_queue_is_empty());
-    }
-
-    /// Keyboard-deleting the last *local* row while a server row remains keeps
-    /// the pane open and focused (regression: it previously force-hid the pane
-    /// and stranded the server rows).
-    #[test]
-    fn delete_last_local_row_keeps_pane_open_when_server_remains() {
-        let mut agent = make_running_agent();
-        agent.active_pane = AgentPane::Queue;
-        let registry = ActionRegistry::defaults();
-
-        let ids = agent.queue.entry_ids();
-        // ids[1] is the only local row.
-        agent.queue.list_state.select_by_id(ids[1]);
-        let outcome = agent.handle_queue_key(&delete_key(), &registry);
-        assert!(matches!(outcome, InputOutcome::Changed));
-
-        assert!(agent.session.pending_prompts.is_empty());
-        assert_eq!(agent.shared_queue.len(), 1);
-        assert!(agent.queue.overlay.visible);
-        assert!(agent.queue.overlay.focused);
-        assert_eq!(agent.active_pane, AgentPane::Queue);
-        // Through the handler: selection lands on the surviving server
-        // row (ids[0]) across the merge boundary, not back at the top.
-        assert_eq!(agent.queue.selected_id(), Some(ids[0]));
-    }
-
-    /// Deleting down to a truly-empty merged view hides the pane. The lone
-    /// server row is the in-flight turn, so it does not count as a visible row.
-    #[test]
-    fn delete_to_empty_hides_pane_excluding_running_server_row() {
-        let mut agent = make_running_agent();
-        agent.active_pane = AgentPane::Queue;
-        // Make the lone server row the in-flight turn (excluded from the view).
-        agent.session.current_prompt_id = Some("p1".to_string());
-        agent.queue.sync_from_merged(
-            &agent.session.pending_prompts,
-            &agent.shared_queue,
-            agent.session.current_prompt_id.as_deref(),
-            agent.expect_send_now_cancel.as_deref(),
-            &agent.send_now_painted_blocks,
-        );
-        agent.queue.overlay.visible = true;
-        agent.queue.overlay.focused = true;
-
-        let registry = non_vscode_registry();
-        let ids = agent.queue.entry_ids();
-        // Only the local row is a visible queued row (running p1 excluded).
-        assert_eq!(ids.len(), 1);
-        agent.queue.list_state.select_by_id(ids[0]);
-        let outcome = agent.handle_queue_key(&delete_key(), &registry);
-        assert!(matches!(outcome, InputOutcome::Changed));
-
-        assert!(agent.session.pending_prompts.is_empty());
-        assert!(agent.visible_queue_is_empty());
-        assert!(!agent.queue.overlay.visible);
-        assert!(!agent.queue.overlay.focused);
-        assert_eq!(agent.active_pane, AgentPane::Scrollback);
-    }
-
-    /// Keyboard force-interject of the last local row keeps the pane open when
-    /// a server row remains (mirrors the delete path's visibility treatment).
-    #[test]
-    fn force_interject_last_local_row_keeps_pane_open_when_server_remains() {
-        let mut agent = make_running_agent();
-        agent.active_pane = AgentPane::Queue;
-        let registry = non_vscode_registry();
-
-        let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[1]);
-        let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
-        match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
-                assert_eq!(text, "local one")
-            }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
-        }
-        assert!(agent.session.pending_prompts.is_empty());
-        assert_eq!(agent.shared_queue.len(), 1);
-        assert!(agent.queue.overlay.visible);
-        assert!(agent.queue.overlay.focused);
-        assert_eq!(agent.active_pane, AgentPane::Queue);
-    }
-
-    /// Hide via the keyboard delete path (site 1) with a *literally empty*
-    /// `shared_queue` and no running prompt: emptying the local queue empties
-    /// the merged view → pane hides and focus returns to scrollback.
-    #[test]
-    fn delete_last_local_row_hides_pane_when_shared_queue_empty() {
+    fn local_queue_row_becomes_same_turn_steering() {
         let mut agent = running_agent_local_only();
-        let registry = ActionRegistry::defaults();
-        let ids = agent.queue.entry_ids();
-        assert_eq!(ids.len(), 1);
-        agent.queue.list_state.select_by_id(ids[0]);
-        let outcome = agent.handle_queue_key(&delete_key(), &registry);
-        assert!(matches!(outcome, InputOutcome::Changed));
-
-        assert!(agent.session.pending_prompts.is_empty());
-        assert!(agent.shared_queue.is_empty());
-        assert!(!agent.queue.overlay.visible);
-        assert!(!agent.queue.overlay.focused);
-        assert_eq!(agent.active_pane, AgentPane::Scrollback);
-    }
-
-    #[test]
-    fn delete_last_then_requeue_auto_shows_pane() {
-        let mut agent = running_agent_local_only();
-        let registry = ActionRegistry::defaults();
-        // Prime prev_len via sync (mirrors a rendered frame with one row).
-        agent.queue.sync_from_merged(
-            &agent.session.pending_prompts,
-            &agent.shared_queue,
-            agent.session.current_prompt_id.as_deref(),
-            agent.expect_send_now_cancel.as_deref(),
-            &agent.send_now_painted_blocks,
-        );
-        assert!(agent.queue.overlay.visible);
-
-        let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[0]);
-        let _ = agent.handle_queue_key(&delete_key(), &registry);
-        assert!(!agent.queue.overlay.visible);
-
-        agent.session.enqueue_prompt("replacement".into());
-        agent.queue.sync_from_merged(
-            &agent.session.pending_prompts,
-            &agent.shared_queue,
-            agent.session.current_prompt_id.as_deref(),
-            agent.expect_send_now_cancel.as_deref(),
-            &agent.send_now_painted_blocks,
-        );
-        assert!(
-            agent.queue.overlay.visible,
-            "new queued prompt must be visible after delete+requeue"
-        );
-        assert_eq!(agent.queue.entry_ids().len(), 1);
-    }
-
-    /// Hide via the keyboard force-interject path (site 2): with no server rows
-    /// left, interjecting the last local row empties the merged view → hide.
-    #[test]
-    fn force_interject_last_local_row_hides_pane_when_shared_queue_empty() {
-        let mut agent = running_agent_local_only();
-        let registry = non_vscode_registry();
-        let ids = agent.queue.entry_ids();
-        assert_eq!(ids.len(), 1);
-        agent.queue.list_state.select_by_id(ids[0]);
-        let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
-        match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
-                assert_eq!(text, "local one")
-            }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
-        }
-        assert!(agent.session.pending_prompts.is_empty());
-        assert!(!agent.queue.overlay.visible);
-        assert!(!agent.queue.overlay.focused);
-        assert_eq!(agent.active_pane, AgentPane::Scrollback);
-    }
-
-    /// Interjecting a Server-origin row routes to `Action::QueueInterjectShared`
-    /// (the agent atomically removes it + merges it into the running turn); a
-    /// Local-origin row is removed from the client-owned queue and re-sent via
-    /// `Action::SendPromptNow` (asserted below).
-    #[test]
-    fn force_interject_routes_server_to_action_and_local_to_interject() {
-        let mut agent = make_running_agent();
-        let registry = non_vscode_registry();
-        // Stored image must ride the action (regression: silent drop).
-        agent.session.pending_prompts[0]
-            .images
-            .push(test_pasted_image());
-
-        let ids = agent.queue.entry_ids();
-        assert_eq!(ids.len(), 2);
-        // Server row first (documented merge order).
-        agent.queue.list_state.select_by_id(ids[0]);
-        let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
-        match outcome {
-            InputOutcome::Action(Action::QueueInterjectShared {
-                id,
-                expected_version,
-                new_text: None,
-            }) => {
-                assert_eq!(id, "p1");
-                assert_eq!(expected_version, 2);
-            }
-            other => panic!("expected QueueInterjectShared action, got {other:?}"),
-        }
-        // Server interject does NOT mutate the local queue.
-        assert_eq!(agent.session.pending_prompts.len(), 1);
-
-        // The local row interjects its text (and stored images) directly.
-        agent.queue.list_state.select_by_id(ids[1]);
-        let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
-        match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, images }) => {
-                assert_eq!(text, "local one");
-                assert_eq!(images.len(), 1, "row image must ride the interject");
-            }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
-        }
-        // Local interject removed it from the client-owned queue.
-        assert!(agent.session.pending_prompts.is_empty());
-    }
-
-    /// A running agent whose only queued row is a local bash command.
-    fn running_agent_with_local_bash(command: &str) -> AgentView {
-        let mut agent = running_agent_local_only();
-        agent.session.pending_prompts.clear();
-        agent.session.enqueue_bash_command(command.into());
-        agent.queue.sync_from_merged(
-            &agent.session.pending_prompts,
-            &agent.shared_queue,
-            agent.session.current_prompt_id.as_deref(),
-            agent.expect_send_now_cancel.as_deref(),
-            &agent.send_now_painted_blocks,
-        );
-        agent
-    }
-
-    /// Force-sending a local bash row is a guarded no-op.
-    #[test]
-    fn force_interject_local_bash_row_keeps_it_queued() {
-        let mut agent = running_agent_with_local_bash("ls -la");
-        let registry = non_vscode_registry();
-
-        let ids = agent.queue.entry_ids();
-        assert_eq!(ids.len(), 1);
-        agent.queue.list_state.select_by_id(ids[0]);
-        let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "bash force-send must be a guarded no-op, got {outcome:?}"
-        );
-        assert_eq!(agent.session.pending_prompts.len(), 1, "row must stay");
-        assert!(agent.toast.is_some(), "guard must explain itself");
-    }
-
-    /// A server bash row can send now (promoted to run as its own turn).
-    #[test]
-    fn force_interject_server_bash_row_promotes_via_queue_interject() {
-        let mut agent = make_running_agent();
-        agent.shared_queue[0].kind = "bash".into();
-        agent.queue.sync_from_merged(
-            &agent.session.pending_prompts,
-            &agent.shared_queue,
-            agent.session.current_prompt_id.as_deref(),
-            agent.expect_send_now_cancel.as_deref(),
-            &agent.send_now_painted_blocks,
-        );
-        let registry = non_vscode_registry();
-
-        let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[0]);
-        let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
-        match outcome {
-            InputOutcome::Action(Action::QueueInterjectShared { id, .. }) => {
-                assert_eq!(id, "p1");
-            }
-            other => panic!("expected QueueInterjectShared for server bash row, got {other:?}"),
-        }
-    }
-
-    /// Empty-Enter send-now must not convert a bash top row into an interjection.
-    #[test]
-    fn enter_empty_from_prompt_does_not_convert_bash_top_row() {
-        let mut agent = running_agent_with_local_bash("git status");
-        agent.active_pane = AgentPane::Prompt;
-        agent.queue.overlay.focused = false;
-        agent.prompt.set_text("");
-
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let outcome = agent.handle_prompt_key_for_test(&enter);
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "empty Enter on a bash top row must not interject, got {outcome:?}"
-        );
-        assert_eq!(
-            agent.session.pending_prompts.len(),
-            1,
-            "bash row must stay queued"
-        );
-    }
-
-    /// A running agent whose only queued row is a local skill-injected row
-    /// (kind Prompt + wire_blocks), mirroring the `InjectSkill` enqueue.
-    fn running_agent_with_local_skill(display: &str, wire: &str) -> AgentView {
-        use agent_client_protocol as acp;
-        let mut agent = running_agent_local_only();
-        agent.session.pending_prompts.clear();
-        let id = agent.session.next_queue_id;
-        agent.session.next_queue_id += 1;
-        agent
-            .session
-            .pending_prompts
-            .push_back(crate::app::agent::QueuedPrompt {
-                wire_blocks: Some(vec![acp::ContentBlock::Text(acp::TextContent::new(wire))]),
-                display_as_skill: true,
-                ..crate::app::agent::QueuedPrompt::plain(
-                    id,
-                    display,
-                    crate::app::agent::QueueEntryKind::Prompt,
-                )
-            });
-        agent.queue.sync_from_merged(
-            &agent.session.pending_prompts,
-            &agent.shared_queue,
-            agent.session.current_prompt_id.as_deref(),
-            agent.expect_send_now_cancel.as_deref(),
-            &agent.send_now_painted_blocks,
-        );
-        agent
-    }
-
-    /// Force-sending a raw skill row (wire payload == display text, the ACP
-    /// skill-command shape) interjects its slash text — the shell expands it
-    /// at the interjection drain.
-    #[test]
-    fn force_interject_local_raw_skill_row_interjects_text() {
-        let mut agent = running_agent_with_local_skill("/find-session", "/find-session");
-        let registry = non_vscode_registry();
-
-        let ids = agent.queue.entry_ids();
-        assert_eq!(ids.len(), 1);
-        agent.queue.list_state.select_by_id(ids[0]);
-        let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
-        match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
-                assert_eq!(text, "/find-session")
-            }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
-        }
-        assert!(
-            agent.session.pending_prompts.is_empty(),
-            "row must leave the queue"
-        );
-    }
-
-    /// A client-expanded row (wire payload != display
-    /// text) stays queued — interjecting it would send the display text,
-    /// not the payload.
-    #[test]
-    fn force_interject_local_expanded_row_keeps_it_queued() {
-        let mut agent =
-            running_agent_with_local_skill("/loop check status", "<expanded loop instructions>");
-        let registry = non_vscode_registry();
-
-        let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[0]);
-        let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "expanded-payload force-send must be a guarded no-op, got {outcome:?}"
-        );
-        assert_eq!(agent.session.pending_prompts.len(), 1, "row must stay");
-        assert!(agent.toast.is_some(), "guard must explain itself");
-    }
-
-    /// The reported bug: empty-Enter send-now on a queued raw skill row
-    /// (`/find-session` queued as a mid-turn follow-up) must interject it
-    /// instead of toasting "Can't send this mid-turn".
-    #[test]
-    fn enter_empty_from_prompt_sends_raw_skill_top_row() {
-        let mut agent = running_agent_with_local_skill("/find-session", "/find-session");
-        agent.active_pane = AgentPane::Prompt;
-        agent.queue.overlay.focused = false;
-        agent.prompt.set_text("");
-
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let outcome = agent.handle_prompt_key_for_test(&enter);
-        match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
-                assert_eq!(text, "/find-session")
-            }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
-        }
-        assert!(agent.session.pending_prompts.is_empty());
-    }
-
-    /// Composer interject carries pasted images on the action — no
-    /// "not supported" toast, and the composer image list is drained.
-    #[test]
-    fn interject_key_normal_mode_carries_composer_images() {
-        let mut agent = make_running_agent();
-        agent.prompt.set_text("look at this");
-        let len = agent.prompt.textarea().text().len();
-        agent.prompt.textarea.set_cursor(len);
-        agent.prompt.insert_image(test_pasted_image()).unwrap();
-
-        let outcome = agent.handle_prompt_key_for_test(&force_interject_key());
-        match outcome {
-            InputOutcome::Action(Action::SendPromptNow { images, .. }) => {
-                assert_eq!(images.len(), 1);
-            }
-            other => panic!("expected SendPromptNow with images, got {other:?}"),
-        }
-        assert!(agent.prompt.images.is_empty());
-        assert!(agent.toast.is_none(), "no drop toast expected");
-        assert_eq!(agent.prompt.text(), "");
-    }
-
-    /// Force-interject with no turn running is a guarded no-op (toast only) — it
-    /// must never emit a server interject for an idle session.
-    #[test]
-    fn force_interject_noop_when_idle() {
-        let mut agent = make_running_agent();
-        agent.session.state = AgentState::Idle;
-        let registry = non_vscode_registry();
-
-        let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[0]);
-        let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "idle force-interject must be a no-op, got {outcome:?}"
-        );
-        // Nothing left the queue.
-        assert_eq!(agent.shared_queue.len(), 1);
-        assert_eq!(agent.session.pending_prompts.len(), 1);
-    }
-
-    /// Reordering a Server row emits `Action::QueueReorderShared` with the
-    /// swapped server id order.
-    #[test]
-    fn swap_up_routes_server_reorder() {
-        let mut agent = make_running_agent();
-        // Two server rows so a swap is possible.
-        agent.shared_queue = vec![
-            QueueEntryWire {
-                id: "p1".into(),
-                version: 0,
-                owner: None,
-                last_editor: None,
-                kind: "prompt".into(),
-                text: "first".into(),
-                position: 0,
-                combined_texts: None,
-            },
-            QueueEntryWire {
-                id: "p2".into(),
-                version: 0,
-                owner: None,
-                last_editor: None,
-                kind: "prompt".into(),
-                text: "second".into(),
-                position: 1,
-                combined_texts: None,
-            },
-        ];
-        agent.session.pending_prompts.clear();
-        agent.queue.sync_from_merged(
-            &agent.session.pending_prompts,
-            &agent.shared_queue,
-            None,
-            None,
-            &agent.send_now_painted_blocks,
-        );
-        agent.queue.overlay.visible = true;
-        agent.queue.overlay.focused = true;
-        let registry = ActionRegistry::defaults();
-
-        // Select the second server row and swap it up.
-        let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[1]);
-        let outcome = agent.handle_queue_key(
-            &KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT),
-            &registry,
-        );
-        match outcome {
-            InputOutcome::Action(Action::QueueReorderShared { ordered_ids }) => {
-                assert_eq!(ordered_ids, vec!["p2".to_string(), "p1".to_string()]);
-            }
-            other => panic!("expected QueueReorderShared action, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn server_reorder_keeps_send_now_echo_in_ordered_ids() {
-        let mut agent = make_running_agent();
-        agent.session.current_prompt_id = Some("running".into());
-        agent.expect_send_now_cancel = Some("send-now".into());
-        agent.shared_queue = vec![
-            server_wire("send-now", 0),
-            server_wire("held-1", 1),
-            server_wire("held-2", 2),
-        ];
-        agent.session.pending_prompts.clear();
+        let running_id = agent.session.current_prompt_id.clone();
         agent.sync_queue_pane();
-        let ids = agent.queue.entry_ids();
-        assert_eq!(ids.len(), 2, "pane hides the send-now echo");
-        assert!(
-            agent.server_queue_reordered(ids[0], true).is_none(),
-            "SwapUp on first visible held must not demote send-now"
-        );
-        agent.queue.list_state.select_by_id(ids[1]);
-        let ordered = agent
-            .server_queue_reordered(ids[1], true)
-            .expect("swap up among held rows");
-        assert_eq!(
-            ordered,
-            vec![
-                "send-now".to_string(),
-                "held-2".to_string(),
-                "held-1".to_string(),
-            ],
-            "send-now must stay front-most among queueable server rows"
-        );
+        let row = agent.queue.entry_ids()[0];
+        let outcome = agent.force_interject_queue_row(row);
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::SteerPrompt { .. })
+        ));
+        assert_eq!(agent.session.current_prompt_id, running_id);
     }
 
-    /// Normal-mode interject: the InterjectPrompt arm owns the composer
-    /// clear — the text came from the composer, so it is cleared at the
-    /// call site (dispatch never touches the composer).
     #[test]
-    fn interject_key_normal_mode_clears_composer_at_handler() {
-        let mut agent = make_running_agent();
-        agent.prompt.set_text("hello there");
-
-        let outcome = agent.handle_prompt_key_for_test(&force_interject_key());
-        match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
-                assert_eq!(text, "hello there")
-            }
-            other => panic!("expected Interject, got {other:?}"),
-        }
-        assert_eq!(agent.prompt.text(), "");
-    }
-
-    /// Idle interject key: with no running turn there's nothing to interject
-    /// into — the key is a no-op (does not send like Enter).
-    #[test]
-    fn interject_key_when_idle_is_noop() {
-        let mut agent = make_running_agent();
-        agent.session.state = AgentState::Idle;
-        agent.prompt.set_text("hello there");
-
-        let outcome = agent.handle_prompt_key_for_test(&force_interject_key());
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "idle interject must be a no-op, got {outcome:?}"
-        );
-        assert_eq!(agent.prompt.text(), "hello there");
-    }
-
-    /// Running turn but empty composer and empty queue: interject key is a no-op.
-    #[test]
-    fn interject_key_when_running_empty_is_noop() {
-        let mut agent = make_running_agent();
-        // make_running_agent seeds a local queued row — clear it so this test
-        // only covers the empty-composer + empty-queue no-op.
-        agent.session.pending_prompts.clear();
-        agent.shared_queue.clear();
-        agent.queue.sync_from_merged(
-            &agent.session.pending_prompts,
-            &[],
-            None,
-            None,
-            &Default::default(),
-        );
-        agent.prompt.set_text("   ");
-
-        let outcome = agent.handle_prompt_key_for_test(&force_interject_key());
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "empty interject must be a no-op, got {outcome:?}"
-        );
-    }
-
-    /// Empty composer + mid-turn queue: send-now from the *prompt* force-sends
-    /// the top queued follow-up (no need to focus the queue pane) and keeps
-    /// Prompt focus even when the pane hides.
-    #[test]
-    fn interject_key_from_prompt_force_sends_top_queued_when_empty() {
+    fn optimistic_row_converts_to_steer_only_after_confirmation() {
         let mut agent = running_agent_local_only();
-        agent.active_pane = AgentPane::Prompt;
-        agent.queue.overlay.focused = false;
-        agent.prompt.set_text("");
-
-        let outcome = agent.handle_prompt_key_for_test(&force_interject_key());
-        match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
-                assert_eq!(text, "local one");
-            }
-            other => panic!("expected Interject of queued follow-up, got {other:?}"),
-        }
-        assert!(
-            agent.session.pending_prompts.is_empty(),
-            "queued row must be consumed"
-        );
+        agent.optimistic_queue_ids.insert("queued-1".into());
+        agent.send_now_awaiting_confirm = Some("queued-1".into());
         assert_eq!(
-            agent.active_pane,
-            AgentPane::Prompt,
-            "prompt-path send-now must not steal focus to scrollback"
+            agent.resolve_send_now_awaiting_confirm(&[("queued-1".into(), 3)], Some("running")),
+            Some(("queued-1".into(), 3))
         );
-    }
-
-    /// Bare Enter on an empty prompt mid-turn force-sends the top queued row
-    /// (same path as the interject chord with an empty composer).
-    #[test]
-    fn enter_empty_from_prompt_force_sends_top_queued() {
-        let mut agent = running_agent_local_only();
-        agent.active_pane = AgentPane::Prompt;
-        agent.queue.overlay.focused = false;
-        agent.prompt.set_text("");
-
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let outcome = agent.handle_prompt_key_for_test(&enter);
-        match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
-                assert_eq!(text, "local one");
-            }
-            other => panic!("expected Interject of top queued follow-up, got {other:?}"),
-        }
-        assert!(
-            agent.session.pending_prompts.is_empty(),
-            "queued row must be consumed"
-        );
-        assert_eq!(
-            agent.active_pane,
-            AgentPane::Prompt,
-            "empty-Enter send-now must not steal focus to scrollback"
-        );
-    }
-
-    /// Multiline mode: empty bare Enter still send-nows (does not insert a
-    /// blank line). Enter-with-text remains newline-only in multiline.
-    #[test]
-    fn multiline_enter_empty_from_prompt_force_sends_top_queued() {
-        let mut agent = running_agent_local_only();
-        agent.multiline_mode = true;
-        agent.active_pane = AgentPane::Prompt;
-        agent.queue.overlay.focused = false;
-        agent.prompt.set_text("");
-
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let outcome = agent.handle_prompt_key_for_test(&enter);
-        match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
-                assert_eq!(text, "local one");
-            }
-            other => panic!("multiline empty Enter must send-now top queued row, got {other:?}"),
-        }
-        assert!(
-            agent.session.pending_prompts.is_empty(),
-            "queued row must be consumed"
-        );
-        assert_eq!(
-            agent.prompt.text(),
-            "",
-            "send-now must not leave a blank line in the composer"
-        );
-    }
-
-    /// Multiline + non-empty composer: bare Enter still inserts a newline
-    /// (does not queue/send), even mid-turn with a queue present.
-    #[test]
-    fn multiline_enter_with_text_inserts_newline_not_send_now() {
-        let mut agent = running_agent_local_only();
-        agent.multiline_mode = true;
-        agent.active_pane = AgentPane::Prompt;
-        agent.queue.overlay.focused = false;
-        agent.prompt.set_text("draft line");
-
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let outcome = agent.handle_prompt_key_for_test(&enter);
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "multiline Enter with text must insert newline, got {outcome:?}"
-        );
-        assert!(
-            agent.prompt.text().contains('\n'),
-            "expected newline insertion, got {:?}",
-            agent.prompt.text()
-        );
-        assert_eq!(
-            agent.session.pending_prompts.len(),
-            1,
-            "queued follow-up must remain (text Enter is not send-now)"
-        );
-    }
-
-    /// When the composer has text, that wins over a queued follow-up.
-    #[test]
-    fn interject_key_composer_text_wins_over_queued_follow_up() {
-        let mut agent = running_agent_local_only();
-        agent.active_pane = AgentPane::Prompt;
-        agent.prompt.set_text("composer wins");
-
-        let outcome = agent.handle_prompt_key_for_test(&force_interject_key());
-        match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
-                assert_eq!(text, "composer wins");
-            }
-            other => panic!("expected composer Interject, got {other:?}"),
-        }
-        assert_eq!(
-            agent.session.pending_prompts.len(),
-            1,
-            "queue must stay when composer text is interjected"
-        );
-    }
-
-    /// Prompt-path send-now always takes the top visible row (merge order),
-    /// even if a later row is selected in the queue pane.
-    #[test]
-    fn interject_key_from_prompt_ignores_selection_sends_top() {
-        let mut agent = make_running_agent();
-        agent.active_pane = AgentPane::Prompt;
-        agent.queue.overlay.focused = false;
-        agent.prompt.set_text("");
-        // Select the local row (last in merge order); top is server.
-        let ids = agent.queue.entry_ids();
-        assert!(ids.len() >= 2);
-        agent.queue.list_state.select_by_id(*ids.last().unwrap());
-
-        let outcome = agent.handle_prompt_key_for_test(&force_interject_key());
-        match outcome {
-            InputOutcome::Action(Action::QueueInterjectShared { id, .. }) => {
-                assert_eq!(
-                    id, "p1",
-                    "prompt-path must send top (server), not selected local"
-                );
-            }
-            other => panic!("expected QueueInterjectShared of top server row, got {other:?}"),
-        }
-    }
-
-    /// Bare Enter empty with multi-row queue also sends the top row, not the
-    /// last or selected one.
-    #[test]
-    fn enter_empty_from_prompt_sends_top_not_last() {
-        let mut agent = make_running_agent();
-        agent.active_pane = AgentPane::Prompt;
-        agent.queue.overlay.focused = false;
-        agent.prompt.set_text("");
-
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let outcome = agent.handle_prompt_key_for_test(&enter);
-        match outcome {
-            InputOutcome::Action(Action::QueueInterjectShared { id, .. }) => {
-                assert_eq!(id, "p1", "empty Enter must send top (server) row");
-            }
-            other => panic!("expected QueueInterjectShared of top server row, got {other:?}"),
-        }
-    }
-
-    /// Backslash continuation mid-turn must only insert the newline — it must
-    /// NOT be mistaken for an empty composer and force-send a queued follow-up.
-    /// `try_send()` returns `None` in both the empty and continuation cases, so
-    /// the send-now path is guarded on an actually-empty composer.
-    #[test]
-    fn enter_backslash_continuation_does_not_force_send_queued() {
-        let mut agent = running_agent_local_only();
-        agent.active_pane = AgentPane::Prompt;
-        agent.queue.overlay.focused = false;
-        // Trailing backslash with the cursor at end (insert_str advances it).
-        agent.prompt.set_text("");
-        agent.prompt.textarea.insert_str("wip\\");
-
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let outcome = agent.handle_prompt_key_for_test(&enter);
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "backslash continuation must insert a newline, not fire send-now; got {outcome:?}"
-        );
-        assert_eq!(
-            agent.prompt.text(),
-            "wip\n",
-            "the backslash must be replaced with a newline (continuation applied)"
-        );
-        assert_eq!(
-            agent.session.pending_prompts.len(),
-            1,
-            "queued follow-up must remain (continuation is not send-now)"
-        );
-    }
-
-    /// VS Code family: Ctrl+L interjects when running + nonempty (pinned registry).
-    #[test]
-    fn vscode_ctrl_l_interjects_when_running_nonempty() {
-        let mut agent = make_running_agent();
-        agent.prompt.set_text("steer please");
-        let registry = vscode_family_registry();
-        let outcome =
-            agent.handle_prompt_key_with_registry_for_test(&vscode_interject_key(), &registry);
-        match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
-                assert_eq!(text, "steer please")
-            }
-            other => panic!("expected Interject, got {other:?}"),
-        }
-    }
-
-    /// VS Code family: idle Ctrl+L is a no-op (not send, not extensions).
-    #[test]
-    fn vscode_ctrl_l_idle_is_noop() {
-        let mut agent = make_running_agent();
-        agent.session.state = AgentState::Idle;
-        agent.prompt.set_text("draft");
-        let registry = vscode_family_registry();
-        let outcome =
-            agent.handle_prompt_key_with_registry_for_test(&vscode_interject_key(), &registry);
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "idle VS Ctrl+L must be a no-op, got {outcome:?}"
-        );
-        assert_eq!(agent.prompt.text(), "draft");
-    }
-
-    /// VS Code family queue force-interject uses Ctrl+L (not Ctrl+Enter).
-    #[test]
-    fn vscode_ctrl_l_force_interjects_queue_row() {
-        let mut agent = make_running_agent();
-        agent.active_pane = AgentPane::Queue;
-        let registry = vscode_family_registry();
-        let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[1]);
-        let outcome = agent.handle_queue_key(&vscode_interject_key(), &registry);
-        match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
-                assert_eq!(text, "local one")
-            }
-            other => panic!("expected Interject, got {other:?}"),
-        }
-        // Ctrl+Enter must not force-interject on VS family (no alt).
-        let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
-        assert!(
-            !matches!(outcome, InputOutcome::Action(Action::Interject { .. })),
-            "Ctrl+Enter must not be VS force-interject, got {outcome:?}"
-        );
+        assert!(agent.send_now_awaiting_confirm.is_none());
     }
 }
 

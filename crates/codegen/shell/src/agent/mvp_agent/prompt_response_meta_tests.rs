@@ -110,12 +110,12 @@ fn usage_object_lands_on_meta() {
 
 #[test]
 fn cancel_trigger_lands_as_camelcase_meta_key() {
-    // A send-now cancelled turn's PromptResponse `_meta` carries `cancelTrigger: "send_now"`.
+    // An explicitly cancelled turn carries its trigger in PromptResponse `_meta`.
     let meta = build_prompt_response_meta(PromptResponseMetaArgs {
-        cancel_trigger: Some("send_now".to_string()),
+        cancel_trigger: Some("ctrl_c".to_string()),
         ..args("s", "p", 0, "m")
     });
-    assert_eq!(meta["cancelTrigger"], "send_now");
+    assert_eq!(meta["cancelTrigger"], "ctrl_c");
 
     // Absent for non-cancel completions — the key must not appear.
     let none = build_prompt_response_meta(args("s", "p", 0, "m"));

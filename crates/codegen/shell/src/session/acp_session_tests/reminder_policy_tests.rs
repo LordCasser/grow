@@ -135,7 +135,7 @@ fn laziness_injection_active_predicate_matrix() {
         (true, None, false),
         (true, Some(GoalStatus::Active), true),
         (true, Some(GoalStatus::Complete), false),
-        (true, Some(GoalStatus::UserPaused), false),
+        (true, Some(GoalStatus::Paused), false),
     ] {
         assert_eq!(
             laziness_injection_active(goal_harness_enabled, goal_status),
@@ -202,9 +202,7 @@ fn todo_gate_active_predicate_matrix() {
     }
     for status in [
         GoalStatus::Complete,
-        GoalStatus::UserPaused,
-        GoalStatus::BackOffPaused,
-        GoalStatus::InfraPaused,
+        GoalStatus::Paused,
         GoalStatus::Blocked,
         GoalStatus::BudgetLimited,
     ] {

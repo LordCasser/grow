@@ -327,6 +327,7 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
                     .pending_inputs
                     .push_back(InputItem {
                         prompt_id: "user-real-prompt".to_string(),
+                        turn_kind: crate::session::TurnKind::User,
                         prompt_blocks: vec![],
                         prompt_mode: crate::session::behavior::PromptMode::Agent,
                         client_identifier: None,
@@ -339,7 +340,6 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
                         persist_ack: None,
                         parsed_prompt_tx: None,
                         queue_meta: None,
-                        send_now: false,
                     });
             });
             SessionActor::maybe_fire_laziness_check(actor.clone()).await;
@@ -485,7 +485,7 @@ async fn emit_laziness_abort_writes_each_reason_with_the_correct_const() {
 #[tokio::test(flavor = "current_thread")]
 async fn user_input_generation_bumped_only_on_real_prompts() {
     // Sanity: the field starts at 0, and bumping it (which the
-    // production code does in the `SessionCommand::Prompt` handler
+    // production code does in the `SessionCommand::QueuePrompt` handler
     // when `!origin.is_synthetic()`) increments it monotonically.
     let local = tokio::task::LocalSet::new();
     local

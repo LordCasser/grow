@@ -583,6 +583,7 @@ pub(crate) async fn run_shell_child(
             model: Some(effective_model_id.0.to_string()),
             resumed_from: request.resume_from.clone(),
             workflow_run_id: request.owner.workflow_run_id().map(str::to_string),
+            goal_id: request.owner.goal_id().map(str::to_string),
         },
         ctx.parent_cmd_tx.as_ref(),
     );
@@ -939,6 +940,7 @@ pub(crate) async fn run_shell_child(
         None,
         None,
         None,
+        false,
         Vec::new(),
         None,
         if verbatim_mirror_fork {
@@ -1066,9 +1068,11 @@ pub(crate) async fn run_shell_child(
     let (prompt_tx, prompt_rx) = oneshot::channel();
     let prompt_text = task_prompt_text;
     let child_prompt_id = uuid::Uuid::now_v7().to_string();
-    let _ = child_handle.cmd_tx.send(SessionCommand::Prompt {
+    let _ = child_handle.cmd_tx.send(SessionCommand::QueuePrompt {
         prompt_id: child_prompt_id.clone(),
         prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(prompt_text))],
+        origin: crate::session::PromptOrigin::User,
+        turn_kind: crate::session::TurnKind::Internal,
         // Behaviors belong to the user-facing primary Agent. Delegated Agents
         // receive an explicit role/task and never inherit the parent's mode.
         prompt_mode: crate::session::behavior::PromptMode::Agent,
@@ -1076,7 +1080,6 @@ pub(crate) async fn run_shell_child(
         screen_mode: None,
         verbatim: true,
         json_schema: request.runtime_overrides.output_schema.clone(),
-        send_now: false,
         admission: None,
         respond_to: prompt_tx,
         persist_ack: None,

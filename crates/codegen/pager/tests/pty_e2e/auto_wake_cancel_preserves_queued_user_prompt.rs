@@ -46,6 +46,7 @@ const HOLD_SLEEP_SECS: &str = "15";
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn auto_wake_cancel_preserves_queued_user_prompt() {
     let content = ContentController::start().await.expect("start content");
+    content.seed_llm_config().expect("seed mock LLM config");
 
     // Turn 1: the model backgrounds a sleep via run_terminal_command, then the
     // follow-up turn settles to plain text so the agent goes idle while the
@@ -255,6 +256,7 @@ fn unified_log_diagnostics(content: &ContentController) -> String {
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn cancel_before_task_completion_defers_auto_wake_until_user_prompt() {
     let content = ContentController::start().await.expect("start content");
+    content.seed_llm_config().expect("seed mock LLM config");
 
     let bg_done_flag = content.home().join("post_cancel_bg_done");
     let bg_command = format!(
@@ -267,48 +269,19 @@ async fn cancel_before_task_completion_defers_auto_wake_until_user_prompt() {
         "is_background": true
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_bg_after_cancel",
-            "run_terminal_command",
-            &bg_args,
-        )),
+    let _background_turn = expect_tool_turn(
+        &content,
+        "call_bg_after_cancel",
+        "run_terminal_command",
+        bg_args,
     );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_bg_after_cancel",
-            "run_terminal_command",
-            &bg_args,
-        )),
-    );
-
-    let hold_started_flag = content.home().join("post_cancel_hold_started");
-    let hold_command = format!(
-        ": > {}; while true; do /bin/sleep 0.2; done",
-        hold_started_flag.display()
-    );
-    let hold_args = json!({
-        "command": hold_command,
-        "description": "ordinary turn hold"
-    })
-    .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_hold_after_bg",
-            "run_terminal_command",
-            &hold_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_hold_after_bg",
-            "run_terminal_command",
-            &hold_args,
-        )),
+    // Hold the ordinary turn at the model terminal boundary. The previous
+    // version used a long foreground shell command, which the terminal tool
+    // legitimately promoted to a background task after its timeout and made
+    // the Ctrl+C timing dependent on tool policy rather than turn ownership.
+    let mut ordinary_turn = content.expect_agent_turn_blocked(
+        "ordinary turn before cancel",
+        "ORDINARY_TURN_WILL_BE_CANCELLED",
     );
     content.set_response(UNWANTED_AUTO_WAKE_SENTINEL);
 
@@ -342,20 +315,20 @@ async fn cancel_before_task_completion_defers_auto_wake_until_user_prompt() {
             dump_non_system_messages(&content.request_bodies())
         )
     });
-    let follow_up_started = poll_for(Duration::from_secs(15), || {
-        hold_started_flag.exists().then_some(())
-    })
-    .is_some();
-    assert!(
-        follow_up_started,
-        "foreground hold never started\n--- non-system messages ---\n{}",
-        dump_non_system_messages(&content.request_bodies())
-    );
+    tokio::time::timeout(Duration::from_secs(30), ordinary_turn.wait_blocked())
+        .await
+        .expect("ordinary turn reached completion barrier");
 
     harness.inject_keys(keys::CTRL_C).expect("press ctrl+c");
+    ordinary_turn.release();
     harness
         .wait_for_text("Turn cancelled by user", Duration::from_secs(15))
-        .expect("ordinary turn cancelled");
+        .unwrap_or_else(|error| {
+            panic!(
+                "ordinary turn cancelled: {error}\n--- unified diagnostics ---\n{}",
+                unified_log_diagnostics(&content)
+            )
+        });
     harness
         .wait_for_turn_idle(Duration::from_secs(15))
         .expect("cancelled turn idle");

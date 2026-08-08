@@ -15,6 +15,7 @@ const CANCEL_HINT: &str = "Esc:cancel";
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn spinner_reappears_after_wait_resumes() {
     let content = ContentController::start().await.expect("start content");
+    content.seed_llm_config().expect("seed mock LLM config");
     let park_flag = content.home().join("spinner_park_flag");
     let id_ready_flag = content.home().join("spinner_id_ready_flag");
 

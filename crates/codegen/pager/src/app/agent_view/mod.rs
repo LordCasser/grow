@@ -783,7 +783,6 @@ pub struct AgentView {
     /// Wake prompt id whose failure marker already rendered — a re-delivered
     /// errored wake terminal must not stack a second "Turn failed" row (the
     /// output-epoch dedupe only covers chatty closes; failures bypass it).
-    pub(crate) failed_wake_marker_for: Option<String>,
     pub active_pane: AgentPane,
     /// Current mode of the prompt widget (normal vs editing a queued prompt).
     pub prompt_mode: PromptMode,
@@ -1423,25 +1422,6 @@ pub struct AgentView {
     /// Prompt-id currently being reconciled by the submission watchdog. This
     /// prevents the animation tick from issuing duplicate status RPCs.
     pub(crate) prompt_status_query_for: Option<String>,
-    /// Send-now cancel expectation: the client-minted id of a cancel-and-send
-    /// prompt this client dispatched into a running turn (send-now chord /
-    /// queue-row "Send now" / a plain prompt sent into a held blocking wait,
-    /// which the shell auto-routes onto send-now). The running turn's imminent
-    /// cancel is the silent half of cancel-and-send, so the turn-end rails
-    /// suppress the "Turn cancelled by user …" marker.
-    ///
-    /// A wire `_meta.cancelTrigger` on the turn end is
-    /// trusted over this flag (`"send_now"` suppresses, anything else
-    /// renders). Consumed at every driver turn end. Kept across the matching
-    /// send-now prompt's turn start (so the outgoing turn's cancel
-    /// PromptResponse can still suppress the marker when it races behind the
-    /// adopt), but cleared on a non-matching turn start / interactive cancel /
-    /// replay-window entry, so a stale expectation can never eat a later real
-    /// Ctrl+C marker.
-    pub(crate) expect_send_now_cancel: Option<String>,
-    /// Send-now promote: skip `scroll_to_entry_top` on next matching adoption.
-    /// Survives cancel-rail `take()` of [`Self::expect_send_now_cancel`].
-    pub(crate) follow_without_jump_prompt_id: Option<String>,
     /// Ids of THIS client's server-queue rows that are still optimistic
     /// echoes — the `session/prompt` RPC is in flight and no
     /// `grow/queue/changed` broadcast has confirmed the row yet. Inserted by
@@ -1457,12 +1437,6 @@ pub struct AgentView {
     /// Parked here and fired from the confirming `grow/queue/changed`
     /// broadcast with the row's authoritative version.
     pub(crate) send_now_awaiting_confirm: Option<String>,
-    /// User blocks painted at send-now dispatch, keyed by prompt id; the
-    /// turn-start adoption consumes an entry to reuse its block. The flag
-    /// marks an edit-interject override (fresher than the mirror text the
-    /// adoption captures). Cleared on session reload.
-    pub(crate) send_now_painted_blocks:
-        std::collections::HashMap<String, (crate::scrollback::EntryId, bool)>,
     /// Cached official-marketplace candidates for the plugin CTA, populated on
     /// session start independently of the Extensions modal.
     pub plugin_cta: PluginCtaState,
@@ -1515,14 +1489,6 @@ pub struct AgentView {
     /// Insertion order of `follow_up_pending` keys, so an overflow evicts ONLY
     /// the OLDEST buffered entry (never the whole map).
     pub(crate) follow_up_pending_order: VecDeque<String>,
-    /// Live `session/update`s buffered for the stashed pending running
-    /// adoption: in the FIFO handoff window an instant turn emits its whole
-    /// stream before the previous turn's PromptResponse applies the adoption.
-    pub(crate) pending_adoption_updates: Vec<(
-        String,
-        agent_client_protocol::SessionUpdate,
-        crate::acp::meta::NotificationMeta,
-    )>,
 }
 /// Cap on [`AgentView::self_originated_prompt_ids`]. Only recent ids matter (a
 /// stale post-rewind chunk arrives right after its turn ends), so a small
@@ -1535,10 +1501,6 @@ const REWOUND_PROMPT_ID_CAP: usize = 64;
 /// is tiny), so a small bounded map is plenty; an overflow evicts the oldest
 /// buffered entry (FIFO) rather than the whole map.
 const MAX_PENDING_FOLLOW_UPS: usize = 16;
-/// Cap on [`AgentView::pending_adoption_updates`]. Overflow drops the NEWEST
-/// entry (unlike the follow-up buffer's oldest-first eviction): a coherent
-/// prefix (user echo + tool-call start) renders sanely, a headless tail would not.
-pub(crate) const MAX_PENDING_ADOPTION_UPDATES: usize = 128;
 /// Outcome of [`AgentView::dashboard_answer_question`] — tells the
 /// dashboard dispatcher whether the whole ask form was submitted (close
 /// the peek), the form advanced to the next question (keep the peek open
@@ -2099,7 +2061,6 @@ fn collect_citation_links(
 pub(crate) mod test_fixtures {
     use super::{AgentPane, AgentView};
     use crate::acp::model_state::ModelState;
-    use crate::actions::ActionRegistry;
     use crate::app::agent::{AgentId, AgentSession, AgentState};
     use crate::app::prompt_queue::QueueEntryWire;
     use crate::scrollback::state::ScrollbackState;
@@ -2227,37 +2188,6 @@ pub(crate) mod test_fixtures {
                 Some(TurnActivity::Waiting(WaitingReason::TasksComplete))
             ),
             "expected TasksComplete wait, got {activity:?}"
-        );
-    }
-    /// Drive the agent's tracker into a foreground-subagent wait via the real
-    /// update path: a pending `task` tool call (no `run_in_background`)
-    /// registers a blocking [`WaitingReason::Subagent`]
-    /// (`crate::acp::tracker`). The shell aborts that await the moment the
-    /// user sends (send-now), so it must read as a sendable/parked wait.
-    pub fn simulate_subagent_wait(agent: &mut AgentView) {
-        confirm_submitted_turn(agent);
-        use crate::acp::meta::NotificationMeta;
-        use crate::acp::tracker::{TurnActivity, WaitingReason};
-        use std::sync::Arc;
-        let meta = NotificationMeta::default();
-        agent.session.handle_update(
-            acp::SessionUpdate::ToolCall(
-                acp::ToolCall::new(acp::ToolCallId::new(Arc::from("task-tc-1")), "task")
-                    .kind(acp::ToolKind::Other)
-                    .status(acp::ToolCallStatus::Pending)
-                    .content(vec![])
-                    .locations(vec![]),
-            ),
-            &meta,
-            &mut agent.scrollback,
-        );
-        let activity = agent.resolve_turn_activity();
-        assert!(
-            matches!(
-                activity,
-                Some(TurnActivity::Waiting(WaitingReason::Subagent))
-            ),
-            "expected Subagent wait, got {activity:?}"
         );
     }
     /// A minimal running (foreground) subagent registry row, so tests can
@@ -2425,8 +2355,6 @@ pub(crate) mod test_fixtures {
             &agent.session.pending_prompts,
             &agent.shared_queue,
             agent.session.current_prompt_id.as_deref(),
-            agent.expect_send_now_cancel.as_deref(),
-            &agent.send_now_painted_blocks,
         );
         agent.queue.overlay.visible = true;
         agent.queue.overlay.focused = true;
@@ -2472,22 +2400,6 @@ pub(crate) mod test_fixtures {
             },
             ScrollbackState::new(),
         )
-    }
-    /// Interject chord for non–VS Code family tests (`Ctrl+Enter`).
-    pub fn force_interject_key() -> KeyEvent {
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
-    }
-    /// Interject chord for VS Code family tests (`Ctrl+L`).
-    pub fn vscode_interject_key() -> KeyEvent {
-        KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)
-    }
-    /// Host-independent registry for queue/prompt interject tests (Ctrl+Enter).
-    pub fn non_vscode_registry() -> ActionRegistry {
-        ActionRegistry::non_vscode_for_test()
-    }
-    /// Host-independent VS family registry (Ctrl+L interject, OpenExtensions Null).
-    pub fn vscode_family_registry() -> ActionRegistry {
-        ActionRegistry::vscode_family_for_test()
     }
     #[test]
     fn apply_follow_ups_renders_chips_for_a_response() {
@@ -2776,47 +2688,32 @@ pub(crate) mod test_fixtures {
         assert!(agent.workflow_run_revisions.is_empty());
         assert!(agent.cleared_workflow_runs.is_empty());
     }
-    /// Drives the production `finalize_reload_and_maybe_adopt` that the
-    /// `event_loop.rs` reconnect loop also calls (so a future reorder of the
-    /// finalize-before-adopt gate fails here). A synthetic non-scheduler running
-    /// id leaves the agent `Idle` (reload still finalized), while a `/loop` or
-    /// user id IS adopted.
+    /// A load response reports an actor-owned regular foreground turn. Prompt
+    /// id spelling is identity only: every reported live id is adoptable, and
+    /// a durable terminal observed during replay is the sole rejection gate.
     #[test]
-    fn reconnect_reload_adopts_only_for_prompt_with_completion_exit() {
-        let mut synthetic = make_agent();
-        synthetic.begin_session_reload(1);
+    fn reconnect_reload_adopts_live_id_and_rejects_terminal_in_replay() {
+        let mut live = make_agent();
+        live.begin_session_reload(1);
         assert!(
-            synthetic.finalize_reload_and_maybe_adopt(
-                1,
-                true,
-                Some("task-completed-abc-123".into())
-            ),
-            "the reload must finalize even when adoption is skipped"
+            live.finalize_reload_and_maybe_adopt(1, true, Some("task-completed-abc-123".into())),
+            "the reload must finalize and adopt the actor-owned turn"
         );
-        assert!(synthetic.session_reload.is_none());
-        assert!(synthetic.session.current_prompt_id.is_none());
-        assert!(
-            synthetic.session.state.is_idle(),
-            "a synthetic non-scheduler running id must not strand the viewer in TurnRunning"
-        );
-        let mut cron = make_agent();
-        cron.begin_session_reload(1);
-        assert!(cron.finalize_reload_and_maybe_adopt(
-            1,
-            true,
-            Some("scheduler-fired-019e51a3-abcd-1234".into()),
-        ));
+        assert!(live.session_reload.is_none());
         assert_eq!(
-            cron.session.current_prompt_id.as_deref(),
-            Some("scheduler-fired-019e51a3-abcd-1234"),
-            "a /loop fire has a prompt_complete exit, so it is adopted on reconnect"
+            live.session.current_prompt_id.as_deref(),
+            Some("task-completed-abc-123")
         );
-        assert!(cron.session.state.is_turn_running());
-        let mut user = make_agent();
-        user.begin_session_reload(1);
-        assert!(user.finalize_reload_and_maybe_adopt(1, true, Some("p-user".into())));
-        assert_eq!(user.session.current_prompt_id.as_deref(), Some("p-user"));
-        assert!(user.session.state.is_turn_running());
+        assert!(live.session.state.is_turn_running());
+
+        let mut completed = make_agent();
+        completed.begin_session_reload(1);
+        completed
+            .replayed_terminal_prompts
+            .insert("turn-done".into());
+        assert!(completed.finalize_reload_and_maybe_adopt(1, true, Some("turn-done".into())));
+        assert!(completed.session.current_prompt_id.is_none());
+        assert!(completed.session.state.is_idle());
     }
     /// Resolving a reload window purges iff a heavy transient dropped: the
     /// stash (success + full replay), or the staged partial replay (failure /
@@ -3228,23 +3125,12 @@ pub(crate) mod test_fixtures {
         agent.active_pane = AgentPane::Queue;
         agent.shared_queue.clear();
         agent.session.current_prompt_id = None;
-        agent.queue.sync_from_merged(
-            &agent.session.pending_prompts,
-            &agent.shared_queue,
-            None,
-            None,
-            &agent.send_now_painted_blocks,
-        );
+        agent
+            .queue
+            .sync_from_merged(&agent.session.pending_prompts, &agent.shared_queue, None);
         agent.queue.overlay.visible = true;
         agent.queue.overlay.focused = true;
         agent
-    }
-    /// Test image record attached to queued-prompt rows in the carry tests.
-    pub fn test_pasted_image() -> crate::prompt_images::PastedImage {
-        crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
-            data: vec![1, 2, 3],
-            mime_type: "image/png".into(),
-        })
     }
 }
 /// Build a minimal [`AgentView`] for tests with an explicit session identity, so

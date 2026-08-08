@@ -1697,6 +1697,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         model: None,
         resumed_from: Some("prev-agent-id".into()),
         workflow_run_id: None,
+        goal_id: None,
     };
     let json = serde_json::to_value(&notification).unwrap();
     assert_eq!(json["resumed_from"], "prev-agent-id");
@@ -1718,6 +1719,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         model: None,
         resumed_from: None,
         workflow_run_id: None,
+        goal_id: None,
     };
     let json = serde_json::to_value(&fresh).unwrap();
     assert!(json.get("resumed_from").is_none());

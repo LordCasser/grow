@@ -492,7 +492,9 @@ pub(crate) fn present_child_completion(
         );
         if let Some(cmd_tx) = completion_data.parent_cmd_tx.as_ref() {
             let _ = cmd_tx.send(SessionCommand::DeferredCompletionAvailable {
-                task_id: request.id.clone(),
+                source: crate::session::commands::NotificationSource::SubagentCompleted {
+                    task_id: request.id.clone(),
+                },
                 body,
             });
         }
@@ -1746,15 +1748,18 @@ fn inject_subagent_completed_prompt(
     let (respond_to, _completion_rx) = tokio::sync::oneshot::channel();
     let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(wrapped))];
     if cmd_tx
-        .send(SessionCommand::Prompt {
+        .send(SessionCommand::QueuePrompt {
             prompt_id: prompt_id.clone(),
             prompt_blocks,
+            origin: crate::session::PromptOrigin::SubagentCompleted {
+                subagent_id: subagent_id.to_string(),
+            },
+            turn_kind: crate::session::TurnKind::Internal,
             prompt_mode: crate::session::behavior::PromptMode::Agent,
             client_identifier: None,
             screen_mode: None,
             verbatim: true,
             json_schema: None,
-            send_now: false,
             admission: None,
             respond_to,
             persist_ack: None,

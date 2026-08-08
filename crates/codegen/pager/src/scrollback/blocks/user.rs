@@ -81,6 +81,8 @@ fn token_styled_line(
 /// Block displaying a user's prompt.
 #[derive(Debug, Clone)]
 pub struct UserPromptBlock {
+    /// Stable wire identity used to reconcile optimistic and ACP-rendered echoes.
+    pub message_id: Option<String>,
     /// The user's input text.
     pub text: String,
     /// Whether this was a bash command (! prefix).
@@ -103,6 +105,7 @@ impl UserPromptBlock {
     /// Create a new user prompt block.
     pub fn new(text: impl Into<String>) -> Self {
         Self {
+            message_id: None,
             text: text.into(),
             is_bash: false,
             is_cron: false,
@@ -120,6 +123,7 @@ impl UserPromptBlock {
     /// Create a new bash command prompt block.
     pub fn bash(text: impl Into<String>) -> Self {
         Self {
+            message_id: None,
             text: text.into(),
             is_bash: true,
             is_cron: false,
@@ -144,6 +148,7 @@ impl UserPromptBlock {
             Vec::new()
         };
         Self {
+            message_id: None,
             text,
             is_bash: false,
             is_cron: false,
@@ -160,6 +165,7 @@ impl UserPromptBlock {
         let text = text.into();
         let skill_token_ranges = sanitize_token_ranges(&text, ranges);
         Self {
+            message_id: None,
             text,
             is_bash: false,
             is_cron: false,
@@ -172,6 +178,7 @@ impl UserPromptBlock {
     /// Create a scheduled (cron) prompt block.
     pub fn cron(text: impl Into<String>) -> Self {
         Self {
+            message_id: None,
             text: text.into(),
             is_bash: false,
             is_cron: true,
@@ -185,6 +192,7 @@ impl UserPromptBlock {
     /// rendering; never receives a shell prompt index).
     pub fn interjection(text: impl Into<String>) -> Self {
         Self {
+            message_id: None,
             text: text.into(),
             is_bash: false,
             is_cron: false,
@@ -192,6 +200,11 @@ impl UserPromptBlock {
             prompt_index: None,
             skill_token_ranges: Vec::new(),
         }
+    }
+
+    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
+        self.message_id = Some(message_id.into());
+        self
     }
 
     /// Elevated band behind user-prompt rows so turns are scannable in a long
